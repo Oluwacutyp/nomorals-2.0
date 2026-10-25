@@ -41,6 +41,7 @@ from .base import (
 )
 from .cadence import status as _cadence_status
 from .embeddings import Embedder
+from .failures import record_failure
 from .scopes import normalize_scope, record_matches_scope, scope_tag
 from .vector_backends import VectorBackend, select_vector_backend
 
@@ -102,7 +103,8 @@ class CoreBlocks:
             if row is None:
                 return ""
             return str(row[0] if not hasattr(row, "keys") else row["text"])
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("memory.core_get", exc)
             return ""
 
     def all(self) -> dict[str, str]:
@@ -117,7 +119,8 @@ class CoreBlocks:
                 else:
                     out[str(r[0])] = str(r[1])
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("memory.core_all", exc)
             return {}
 
     def exists(self, name: str) -> bool:
@@ -154,7 +157,8 @@ class CoreBlocks:
                 "DELETE FROM memory_core_blocks WHERE name = ?",
                 ((name or "").strip().lower(),))
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("memory.core_clear", exc)
             return False
 
     def _write(self, name: str, text: str, mode: str) -> dict[str, Any]:
@@ -239,7 +243,8 @@ def _is_private(record: MemoryRecord) -> bool:
     """Prompt 11: the owner-marked privacy flag lives in metadata."""
     try:
         return bool((record.metadata or {}).get("private"))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("memory.is_private", exc)
         return False
 
 
@@ -390,8 +395,8 @@ class MemoryManager:
                 {"at": time.time(), "lane": lane, "reason": str(reason)[:300]}
             )
             del self._health_events[:-50]
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("memory.note_health_event", exc)
 
     def _ensure_trust_columns(self) -> None:
         """Make sure ``memories`` has the trust/session_id columns.
@@ -406,8 +411,8 @@ class MemoryManager:
                     self.db.execute(
                         f"ALTER TABLE memories ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
                     )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("memory.ensure_trust_columns", exc)
 
     # ── write path ───────────────────────────────────────────────────────────
     def remember(
@@ -771,8 +776,8 @@ class MemoryManager:
                     if origin and rec_session and rec_session != origin.strip():
                         record.score *= 0.5
                         adjustments.append("cross_session_downrank:x0.5")
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("memory.recall_trust_downrank", exc)
             if explain:
                 lanes = []
                 if record.id in semantic_ranks:
@@ -939,7 +944,8 @@ class MemoryManager:
             self.update(old_record_id, metadata=old_md)
             self.stats["superseded"] = self.stats.get("superseded", 0) + 1
             return new_id
-        except Exception:
+        except Exception as exc:
+            record_failure("memory.supersede", exc)
             return ""
 
     def supersession_chain(self, record_id: str) -> list[MemoryRecord]:
@@ -966,7 +972,8 @@ class MemoryManager:
                 nxt = (rec.metadata or {}).get("superseded_by")
                 rec = self.get(nxt) if nxt else None
             return chain
-        except Exception:
+        except Exception as exc:
+            record_failure("memory.supersession_chain", exc)
             return []
 
     def forget(self, record_id: str) -> int:
@@ -1159,7 +1166,8 @@ class MemoryManager:
             if isinstance(md, str):
                 md = json.loads(md or "{}")
             return dict(md or {})
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("memory.metadata_dict", exc)
             return {}
 
     def consolidate_additive(
@@ -1260,7 +1268,8 @@ class MemoryManager:
             report["problems"].append("record count unreadable")
         try:
             report["by_kind"] = self.counts_by_kind()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("memory.health_by_kind", exc)
             report["by_kind"] = {}
         try:
             report["vectors"] = self.semantic.count()
@@ -1270,12 +1279,14 @@ class MemoryManager:
             report["problems"].append(f"vector backend unreadable: {exc}")
         try:
             report["fts_documents"] = self.fts.count()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("memory.health_fts_documents", exc)
             report["fts_documents"] = -1
         try:
             report["embedder"] = self.embedder.stats_snapshot()
             report["embedder_dims"] = int(self.embedder.dimensions)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("memory.health_embedder", exc)
             report["embedder"] = {}
             report["embedder_dims"] = -1
 
@@ -1351,7 +1362,8 @@ class MemoryManager:
         # the cadence never deletes, so this is safe to run hands-off.
         try:
             report["consolidation_cadence"] = _cadence_status(self)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("memory.health_cadence", exc)
             report["consolidation_cadence"] = {}
         report["degraded_recalls"] = len(self._health_events)
         report["recent_events"] = list(self._health_events[-10:])
