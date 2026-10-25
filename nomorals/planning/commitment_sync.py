@@ -37,7 +37,9 @@ Rules (same discipline as the graph itself):
 * **Stdlib only, duck-typed.** ``graph``, ``ledger`` and
   ``commitment`` are accepted as duck-typed objects — no imports from
   sibling packages — so this module cannot create an import cycle or
-  a layering violation.  Only the standard library is imported.
+  a layering violation.  Only the standard library is imported, plus
+  the planning failure ledger for tracing (same package; the ledger
+  itself imports only stdlib and core, so no cycle).
 """
 
 from __future__ import annotations
@@ -45,6 +47,8 @@ from __future__ import annotations
 import json
 import time
 from typing import Any
+
+from .failures import record_failure
 
 __all__ = [
     "sync_commitment_to_graph",
@@ -174,8 +178,8 @@ def _persist_attrs(graph: Any, node: Any, attrs: dict[str, Any]) -> Any | None:
                 fresh = get(node_id)
                 if fresh is not None:
                     return fresh
-    except Exception:  # noqa: BLE001 — fall through to in-place mutate
-        pass
+    except Exception as exc:  # noqa: BLE001 — fall through to in-place mutate
+        record_failure("commitment_sync.persist_attrs_primary", exc)
     # Fallback: mutate the node object in place (stub graphs).
     try:
         if isinstance(_field(node, "attrs", None), dict):
