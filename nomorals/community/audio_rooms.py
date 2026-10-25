@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from .failures import record_failure
+
 _log = logging.getLogger(__name__)
 
 # ── storage ────────────────────────────────────────────────────────────────
@@ -47,8 +49,8 @@ def _default_dir() -> Path:
     d = Path.home() / ".devon" / "community" / "audio_rooms"
     try:
         d.mkdir(parents=True, exist_ok=True)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("audio_rooms.default_dir", exc)
     return d
 
 
@@ -295,7 +297,8 @@ class RoomStore:
         try:
             self._dir = Path(data_dir) if data_dir else _default_dir()
             self._dir.mkdir(parents=True, exist_ok=True)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("audio_rooms.store_init", exc)
             # tempfile.gettempdir() honours TMPDIR/TEMP/TMP on every OS;
             # a hardcoded "/tmp" is C:\\tmp on Windows (often unwritable).
             self._dir = Path(tempfile.gettempdir()) / "devon_audio_rooms"
@@ -312,14 +315,15 @@ class RoomStore:
             raw = self._index_path().read_text(encoding="utf-8")
             ids = json.loads(raw)
             return [str(i) for i in ids] if isinstance(ids, list) else []
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("audio_rooms.load_index", exc)
             return []
 
     def _save_index(self, ids: list[str]) -> None:
         try:
             self._index_path().write_text(json.dumps(ids), encoding="utf-8")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("audio_rooms.save_index", exc)
 
     def put(self, room: Room) -> bool:
         try:
@@ -332,14 +336,16 @@ class RoomStore:
                 ids.append(room.room_id)
                 self._save_index(ids)
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("audio_rooms.put", exc)
             return False
 
     def get(self, room_id: str) -> Room | None:
         try:
             raw = self._path(room_id).read_text(encoding="utf-8")
             return Room.from_dict(json.loads(raw))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("audio_rooms.get", exc)
             return None
 
     def list(self, community_id: str = "", live_only: bool = True) -> list[Room]:
@@ -354,8 +360,8 @@ class RoomStore:
                 if live_only and room.state != "live":
                     continue
                 rooms.append(room)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("audio_rooms.list", exc)
         rooms.sort(key=lambda r: r.created_at or 0.0, reverse=True)
         return rooms
 
@@ -365,7 +371,8 @@ class RoomStore:
             ids = [i for i in self._load_index() if i != room_id]
             self._save_index(ids)
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("audio_rooms.remove", exc)
             return False
 
 
@@ -404,7 +411,8 @@ def _platform_mute(platform: Any, room: Room, user_id: str, muted: bool) -> bool
         if callable(fn):
             return bool(fn(room, user_id, muted))
         return True  # default seam: state tracked locally, platform best-effort
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("audio_rooms.platform_mute", exc)
         return False
 
 
@@ -432,7 +440,8 @@ def _community_exists(community_id: str, group_store: Any = None) -> bool:
             from .groups import GroupStore
             group_store = GroupStore()
         return group_store.get(community_id or "") is not None
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("audio_rooms.community_exists", exc)
         return False
 
 
@@ -525,7 +534,8 @@ def due_starts(now: float | None = None,
                 _save(st, room)
                 due.append(room)
         return due
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("audio_rooms.due_starts", exc)
         return []
 
 
@@ -533,15 +543,16 @@ def get_room(room_id: str, store: RoomStore | None = None,
              data_dir: Any = None) -> Room | None:
     try:
         return (store or RoomStore(data_dir=data_dir)).get(room_id or "")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("audio_rooms.get_room", exc)
         return None
 
 
 def _save(st: RoomStore, room: Room) -> None:
     try:
         st.put(room)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("audio_rooms.save", exc)
 
 
 def join_room(room_id: str, user_id: str, name: str,
@@ -707,7 +718,8 @@ def _expire_hands(room: Room, now: float | None = None) -> int:
             if not p.hand_raised_at or (now - p.hand_raised_at) < room.hand_raise_expiry
         ]
         return before - len(room.hand_raise_queue)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("audio_rooms.expire_hands", exc)
         return 0
 
 
@@ -1018,7 +1030,8 @@ def _vtt_ts(ts: float) -> str:
         t = time.gmtime(max(0.0, ts))
         ms = int((ts % 1) * 1000)
         return time.strftime("%H:%M:%S", t) + f".{ms:03d}"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("audio_rooms.vtt_ts", exc)
         return "00:00:00.000"
 
 
@@ -1180,7 +1193,8 @@ def _fmt_naira(kobo: int) -> str:
         if n % 100 == 0:
             return f"₦{n // 100:,}"
         return f"₦{n / 100:,.2f}"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("audio_rooms.fmt_naira", exc)
         return "₦0"
 
 
@@ -1333,7 +1347,8 @@ def render_room(room: Room) -> str:
             lines.append(f"   📝 transcript: {room.transcript[:120]}…")
         lines.append(f"   `{room.room_id}`")
         return "\n".join(lines)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("audio_rooms.render_room", exc)
         return "room card failed to render"
 
 
