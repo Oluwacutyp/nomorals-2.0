@@ -35,6 +35,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
+from .failures import record_failure
 
 _log = logging.getLogger("nomorals.audio.pipeline")
 
@@ -66,19 +67,19 @@ def detect_profile(context: Any = None) -> str:
         prof = (getattr(settings, "profile", "") or "").strip().lower()
         if prof:
             return prof
-    except Exception:  # noqa: BLE001 - best effort
-        pass
+    except Exception as exc:  # noqa: BLE001 - best effort
+        record_failure("pipeline.detect_profile.settings", exc)
     try:
         if os.environ.get("PREFIX", "").startswith("/data/data/com.termux"):
             return "termux"
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("pipeline.detect_profile.termux_env", exc)
     try:
         if os.environ.get("NM_PROFILE", "").strip().lower() in (
                 "termux", "laptop", "workstation", "pc"):
             return os.environ["NM_PROFILE"].strip().lower()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("pipeline.detect_profile.nm_profile", exc)
     return "pc"
 
 
@@ -130,7 +131,8 @@ class EngineRegistry:
                 if cand in avail:
                     return cand
             return None
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("pipeline.pick_stt", exc)
             return None
 
     # -- TTS -----------------------------------------------------------------
@@ -146,7 +148,8 @@ class EngineRegistry:
             if (audience or "private").lower() == "public":
                 cands = [c for c in cands if c not in _NONCOMMERCIAL]
             return cands
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("pipeline.tts_candidates", exc)
             return []
 
     def pick_tts(self, audience: str = "private",
@@ -157,7 +160,8 @@ class EngineRegistry:
                 if cand in avail:
                     return cand
             return None
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("pipeline.pick_tts", exc)
             return None
 
     def describe(self) -> dict[str, Any]:
@@ -181,8 +185,8 @@ def _default_keyterm_db() -> str:
     d = Path.home() / ".nomorals" / "audio"
     try:
         d.mkdir(parents=True, exist_ok=True)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("pipeline.default_keyterm_db.mkdir", exc)
     return str(d / "keyterms.db")
 
 
@@ -224,7 +228,8 @@ class KeytermStore:
                     (term, kind, (lang or "").lower(), time.time()))
                 self._db.commit()
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("pipeline.keyterm_add", exc)
             return False
 
     def remove(self, term: str) -> bool:
@@ -237,7 +242,8 @@ class KeytermStore:
                     "DELETE FROM keyterms WHERE lower(term)=lower(?)", (term,))
                 self._db.commit()
             return cur.rowcount > 0
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("pipeline.keyterm_remove", exc)
             return False
 
     def list(self, kind: str = "", lang: str = "") -> list[dict[str, Any]]:
@@ -255,7 +261,8 @@ class KeytermStore:
             q += " ORDER BY added"
             rows = self._db.execute(q, params).fetchall()
             return [dict(r) for r in rows]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("pipeline.keyterm_list", exc)
             return []
 
     # -- prompting ------------------------------------------------------------
@@ -281,7 +288,8 @@ class KeytermStore:
                 if words:
                     bits.append(f"{labels.get(kind, kind)}: {', '.join(words)}")
             return ". ".join(bits) + "." if bits else ""
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("pipeline.keyterm_prompt", exc)
             return ""
 
 
@@ -315,7 +323,8 @@ def _stage_transcribe(audio: str, **kw: Any) -> dict[str, Any]:
             # Use faster-whisper directly so we can inject initial_prompt.
             try:
                 from ..media_edit.captions import _extract_wav  # type: ignore
-            except Exception:
+            except Exception as exc:
+                record_failure("pipeline.transcribe_extract_import", exc)
                 _extract_wav = None  # noqa: F841
             prompt = keyterms.initial_prompt(language) if keyterms else ""
             try:
@@ -325,7 +334,8 @@ def _stage_transcribe(audio: str, **kw: Any) -> dict[str, Any]:
                 if _extract_wav is not None:
                     try:
                         wav = str(_extract_wav(Path(src)))
-                    except Exception:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001
+                        record_failure("pipeline.transcribe_extract_wav", exc)
                         wav = src
                 kwargs: dict[str, Any] = dict(
                     language=language or None, vad_filter=True,
@@ -432,7 +442,8 @@ def diarize_real(audio: str, words: Sequence[Any] | None = None, *,
                 if "max_speakers" in sig.parameters and max_speakers:
                     call_kw["max_speakers"] = int(max_speakers)
                 diar = pipeline(audio, **call_kw)
-            except Exception:
+            except Exception as exc:
+                record_failure("pipeline.diarize_kwargs_fallback", exc)
                 diar = pipeline(audio)
         else:
             diar = pipeline(audio)
@@ -507,7 +518,8 @@ def group_turns(words: Sequence[Any],
         if cur is not None:
             turns.append(cur)
         return turns
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("pipeline.group_turns", exc)
         return []
 
 
@@ -536,7 +548,8 @@ def transcript_to_srt(turns: Sequence[dict[str, Any]]) -> str:
             out.append(f"[{t.get('speaker', 'A')}] {t.get('text', '')}".strip())
             out.append("")
         return "\n".join(out).strip() + "\n"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("pipeline.srt", exc)
         return ""
 
 
@@ -551,7 +564,8 @@ def transcript_to_vtt(turns: Sequence[dict[str, Any]]) -> str:
                        "</v>".strip())
             out.append("")
         return "\n".join(out).strip() + "\n"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("pipeline.vtt", exc)
         return ""
 
 
@@ -567,7 +581,8 @@ def meeting_minutes(turns: Sequence[dict[str, Any]], *,
             lines.append(f"**[{t.get('speaker', 'A')}]** "
                          f"`{int(m):02d}:{sec:04.1f}` — {t.get('text', '')}")
         return "\n".join(lines).strip() + "\n"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("pipeline.minutes", exc)
         return ""
 
 
@@ -776,7 +791,8 @@ class PipelineConfig:
                 keyterms=bool(d.get("keyterms", True)),
                 workdir=str(d.get("workdir") or tempfile.gettempdir()),
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("pipeline.config_from_dict", exc)
             return cls()
 
 
@@ -802,7 +818,8 @@ class VoicePipeline:
                 return False
             self._stages[name] = fn
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("pipeline.register_stage", exc)
             return False
 
     def stage_names(self) -> list[str]:
@@ -823,8 +840,8 @@ class VoicePipeline:
             workdir = Path(cfg.workdir or tempfile.gettempdir())
             try:
                 workdir.mkdir(parents=True, exist_ok=True)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("pipeline.run_workdir_mkdir", exc)
 
             cur = str(p)
             stage_results: dict[str, Any] = {}
@@ -919,7 +936,8 @@ def _pipeline_synthesizer(pipeline: VoicePipeline, cfg: PipelineConfig,
             engine_registry=pipeline.registry,
             workdir=cfg.workdir or tempfile.gettempdir())
         return r.get("audio") if r.get("ok") else None
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("pipeline.pipeline_synthesizer", exc)
         return None
 
 
@@ -985,7 +1003,8 @@ def _turns_for(audio: str, lang: str = "en") -> list[dict[str, Any]] | None:
         from ..media_edit.captions import Word
         ws = [Word.from_dict(w) if isinstance(w, dict) else w for w in words]
         return group_turns(ws, speakers)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("pipeline.turns_for", exc)
         return None
 
 
