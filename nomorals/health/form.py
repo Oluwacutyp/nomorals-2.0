@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .coach import guard_coaching
+from .failures import record_failure
 from .training import (
     Exercise,
     TrainingCoach,
@@ -891,7 +892,8 @@ def mobility_for(analysis: FormAnalysis) -> list[Exercise]:
                 seen.add(ex.key)
                 out.append(ex)
         return out
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("form.mobility_for", exc)
         return []
 
 
@@ -905,7 +907,8 @@ def augment_today_workout(coach: TrainingCoach,
     """
     try:
         workout = coach.today(None)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("form.augment_today", exc)
         workout = None
     if workout is None:
         workout = Workout(date="", kind="general", exercises=[])
@@ -924,7 +927,8 @@ def augment_today_workout(coach: TrainingCoach,
         _log.warning("augment_today_workout failed", exc_info=True)
         try:
             return coach.today(None)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("form.augment_fallback", exc)
             return Workout(date="", kind="general", exercises=[])
 
 
@@ -983,7 +987,8 @@ class FormStore:
                 return None
             return _analysis_from_dict(json.loads(
                 row["analysis_json"]))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("form.store_get", exc)
             return None
 
     def latest(self, exercise: str = "") -> FormAnalysis | None:
@@ -1002,7 +1007,8 @@ class FormStore:
                 return None
             return _analysis_from_dict(json.loads(
                 row["analysis_json"]))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("form.store_latest", exc)
             return None
 
 
