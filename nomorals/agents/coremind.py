@@ -59,6 +59,7 @@ from typing import Any, Callable
 from ..core.ids import new_short_id
 from ..storage import router_telemetry
 from ..storage.db import release_thread_connection
+from .failures import record_failure
 
 _log = logging.getLogger("nomorals.coremind")
 
@@ -522,7 +523,8 @@ def _owner_intent_model_check(text: str, context: Any = None) -> bool:
         )
         return getattr(response, "ok", False) and "yes" in (
             getattr(response, "text", "") or "").lower()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("coremind.owner_check", exc)
         return False
 
 
@@ -1375,7 +1377,8 @@ class CoreMind:
             self.state_dir = Path(context.settings.resolve("data/coremind"))
             self.state_dir.mkdir(parents=True, exist_ok=True)
             self.state_file = self.state_dir / "state.json"
-        except Exception:  # noqa: BLE001 - state is best-effort
+        except Exception as exc:  # noqa: BLE001 - state is best-effort
+            record_failure("coremind.state_dir_setup", exc)
             self.state_dir = None
             self.state_file = None
         self._state = self._load_state()
@@ -1520,7 +1523,8 @@ class CoreMind:
     def _tune(self) -> Any:
         try:
             return self.context.extras.get("tune")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("coremind.tune", exc)
             return None
 
     def _research_workers(self) -> int:
@@ -1664,8 +1668,8 @@ class CoreMind:
         try:
             self._route_log.append({"kind": intent.kind, "route": intent.route or ""})
             del self._route_log[:-20]
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("coremind.route_log", exc)
 
     def record_plan_error(self, error: str, route: str = "") -> None:
         """Persist the latest plan failure (with timestamp) for ``nm mind``.
@@ -1794,7 +1798,8 @@ class CoreMind:
         if self.runtime is not None:
             try:
                 return bool(self.runtime._is_operator(message))
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("coremind.is_owner_dm", exc)
                 return False
         return self._dm_kind(message)
 
@@ -1803,7 +1808,8 @@ class CoreMind:
             from ..social.chat import ChatKind
 
             return message.chat.kind == ChatKind.DM
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("coremind.dm_kind", exc)
             kind = str(getattr(getattr(message, "chat", None), "kind", "")).lower()
             return kind in ("dm", "kind.dm", "chatkind.dm", "private", "direct")
 
@@ -1813,7 +1819,8 @@ class CoreMind:
         try:
             room = self.runtime._game_engine().live(chat_key)
             return getattr(room, "game", None)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("coremind.live_game", exc)
             return None
 
     def _question_for(self, intent: Intent) -> str:
@@ -2206,8 +2213,8 @@ class CoreMind:
                 is_feature_disabled as _is_disabled)
             if _is_disabled(chat_key, "music"):
                 return _disabled_reply("music")
-        except Exception:  # noqa: BLE001 - gate is advisory; never eat chat
-            pass
+        except Exception as exc:  # noqa: BLE001 - gate is advisory; never eat chat
+            record_failure("coremind.music_gate", exc)
         try:
             reply = self.runtime._control_play(query, chat_key=chat_key)
         except Exception as exc:  # noqa: BLE001
@@ -2245,7 +2252,8 @@ class CoreMind:
     def _browser_session_dir(self) -> str:
         try:
             return self.context.settings.resolve("data/browser/sessions")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("coremind.browser_session_dir", exc)
             return ""
 
     @staticmethod
@@ -2316,7 +2324,8 @@ class CoreMind:
                 from .notifier import Notifier
 
                 notifier = Notifier(self.context, self.runtime.gateway)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("coremind.directives_notifier", exc)
                 notifier = None
         return DirectivesAgent(self.context, notifier=notifier)
 
@@ -2409,7 +2418,8 @@ class CoreMind:
         if action == "edit":
             try:
                 src_media = message.first_media()
-            except Exception:  # noqa: BLE001 - best-effort
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                record_failure("coremind.edit_src_media", exc)
                 src_media = None
             if src_media is None or src_media.kind != "image":
                 return ("🖼️ attach the image you want edited, then say:\n"
@@ -2834,7 +2844,8 @@ class CoreMind:
                 "economy": intent.target or "balance"}.get(intent.action, intent.target)
         try:
             player = self.runtime._game_player(message)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("coremind.game_player", exc)
             player = None
         return self.runtime._control_game(tail, chat_key, player=player, kind="dm") or \
             "the games organ had nothing to say."
