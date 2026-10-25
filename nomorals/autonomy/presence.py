@@ -41,6 +41,7 @@ from ..core.logging_setup import get_logger
 from .. import organs as _organs
 from . import patterns as _patterns
 from . import weakness as _weakness
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -165,8 +166,8 @@ def note_trigger(db: Any, trigger_sig: str,
     )
     try:
         db.commit()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("presence.note_trigger_commit", exc)
 
 
 def last_trigger(db: Any) -> dict[str, Any]:
@@ -201,8 +202,8 @@ def _nudge_due(db: Any, key: str, cooldown: float = NUDGE_COOLDOWN,
     )
     try:
         db.commit()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("presence.nudge_due_commit", exc)
     return True
 
 
@@ -262,7 +263,8 @@ def interruptibility(db: Any, tz_offset: float = 0.0,
         if t["hour"] in quiet:
             score = min(score, 0.05)
             reasons.append(f"quiet hour ({t['hour']:02d}:00)")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("presence.interruptibility_quiet_hours", exc)
         quiet = []
 
     # Recently active → highly interruptible (they're right here).
@@ -318,8 +320,8 @@ def queue_candidate(db: Any, kind: str, title: str, detail: str = "",
     )
     try:
         db.commit()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("presence.queue_candidate_commit", exc)
     cid = cur.lastrowid if cur is not None else 0
     _log.info("presence candidate #%s [%s/%s]: %s", cid, priority, kind,
               title)
@@ -371,8 +373,8 @@ def drop_candidate(db: Any, candidate_id: int) -> bool:
         "WHERE id = ? AND status = 'queued'", (int(candidate_id),))
     try:
         db.commit()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("presence.drop_candidate_commit", exc)
     return bool(cur.rowcount)
 
 
@@ -409,7 +411,8 @@ def serendipity_score(db: Any, kind: str, title: str,
         else:
             overlap = 0.0
         novelty = 1.0 - overlap
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("presence.serendipity_novelty", exc)
         novelty = 0.7
     # Relevance: ties to real current interests.
     try:
@@ -502,8 +505,8 @@ def record_surface_feedback(db: Any, surface_id: int,
         (weight, kind))
     try:
         db.commit()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("presence.record_feedback_commit", exc)
     _log.info("surface #%s %s → kind '%s' weight %.2f", surface_id,
               reaction, kind, weight)
     return {"ok": True, "kind": kind, "weight": round(weight, 2)}
@@ -539,7 +542,8 @@ def sense(db: Any, tz_offset: float = 0.0) -> dict[str, Any]:
             anticipation = []
     try:
         interrupt = interruptibility(db, tz_offset)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("presence.sense_interruptibility", exc)
         interrupt = {"score": 0.5, "interruptible": True}
     return {
         "time": now,
@@ -601,8 +605,8 @@ def surface(db: Any, kind: str, title: str, detail: str = "",
     )
     try:
         db.commit()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("presence.surface_commit", exc)
     surface_id = cur.lastrowid if cur is not None else 0
     _log.info("presence surface #%s [%s/%s]: %s", surface_id, priority,
               kind, title)
@@ -717,8 +721,8 @@ def heartbeat(db: Any, context: Any = None,
                       "interruptibility": int_score},
                 source="nomorals.autonomy.presence",
             ))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("presence.heartbeat_publish", exc)
 
         _ledger(db, "heartbeat", f"hb-{int(ctx['ts'])}",
                 f"heartbeat: {len(did['noticed'])} noticed, "
@@ -829,8 +833,8 @@ def _maybe_surface(db: Any, ctx: dict[str, Any],
                 "WHERE id = ?", (best["candidate_id"],))
             try:
                 db.commit()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("presence.maybe_surface_commit", exc)
         return best["title"]
     return None
 
@@ -855,8 +859,8 @@ def mark_surface(db: Any, surface_id: int, status: str) -> bool:
     )
     try:
         db.commit()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("presence.mark_surface_commit", exc)
     return bool(cur.rowcount)
 
 
@@ -923,8 +927,8 @@ def digest(db: Any, tz_offset: float = 0.0,
              text[:500]),
         )
         db.commit()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("presence.digest_audit_commit", exc)
     return text
 
 
