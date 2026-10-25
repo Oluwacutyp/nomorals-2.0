@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..storage.db import Database
+from .failures import record_failure
 
 __all__ = ["Achievement", "ACHIEVEMENTS", "ACHIEVEMENT_UNLOCKS",
            "UNLOCK_SOURCE", "unlock_achievement", "get_achievements",
@@ -205,8 +206,8 @@ def _ensure_unlocks_table(db: Any) -> None:
             "CREATE INDEX IF NOT EXISTS idx_progression_unlocks_player "
             "ON progression_unlocks(player_key)"
         )
-    except Exception:  # noqa: BLE001 - defensive: no unlocks, no crash
-        pass
+    except Exception as exc:  # noqa: BLE001 - defensive: no unlocks, no crash
+        record_failure("achievements.ensure_unlocks_table", exc)
 
 
 def _persist_unlocks(db: Any, player_key: str, achievement_id: str) -> None:
@@ -223,8 +224,8 @@ def _persist_unlocks(db: Any, player_key: str, achievement_id: str) -> None:
                 "(player_key, unlock_id, unlocked_at) VALUES (?, ?, ?)",
                 (player_key, grant, now),
             )
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("achievements.persist_unlocks", exc)
 
 
 def get_unlocks(db: Any, player_key: str) -> list[str]:
@@ -237,7 +238,8 @@ def get_unlocks(db: Any, player_key: str) -> list[str]:
             (player_key,),
         )
         return [row[0] for row in cursor.fetchall()]
-    except Exception:  # noqa: BLE001 - missing table etc: no unlocks
+    except Exception as exc:  # noqa: BLE001 - missing table etc: no unlocks
+        record_failure("achievements.get_unlocks", exc)
         return []
 
 
@@ -251,7 +253,8 @@ def has_unlock(db: Any, player_key: str, unlock_id: str) -> bool:
             (player_key, unlock_id),
         )
         return cursor.fetchone() is not None
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("achievements.has_unlock", exc)
         return False
 
 
@@ -270,8 +273,8 @@ def progression_capabilities(db: Any, player_key: str) -> set[str]:
                 cap = grant.split("unlock:capability:", 1)[1].strip()
                 if cap:
                     caps.add(cap)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("achievements.progression_capabilities", exc)
     return caps
 
 
@@ -292,20 +295,21 @@ def unlock_achievement(db: Database, player_key: str, achievement_id: str) -> bo
         # INSERT OR IGNORE inserts exactly one row on a new unlock and
         # zero when the player already has it — no timestamp guessing.
         new = cursor.rowcount > 0
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("achievements.unlock_achievement_insert", exc)
         return False
     if new:
         # achievements unlock titles — check what this one earned
         try:
             from .titles import TitleStore
             TitleStore(db).check_unlocks(player_key)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("achievements.unlock_titles_check", exc)
         # achievements unlock progression grants (commands / capabilities)
         try:
             _persist_unlocks(db, player_key, achievement_id)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("achievements.unlock_persist_call", exc)
     return new
 
 
@@ -479,8 +483,8 @@ def _ensure_rarity_tables(db: Any) -> None:
             "achievement_id TEXT NOT NULL, "
             "unlocked_at REAL NOT NULL DEFAULT 0, "
             "PRIMARY KEY (player_key, achievement_id))")
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("achievements.ensure_rarity_tables", exc)
 
 
 def live_rarity(db: Any, achievement_id: str) -> tuple[str, float]:
@@ -562,8 +566,8 @@ def _ensure_progress_table(db: Any) -> None:
             "progress INTEGER NOT NULL DEFAULT 0, "
             "updated_at REAL NOT NULL DEFAULT 0, "
             "PRIMARY KEY (player_key, achievement_id))")
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("achievements.ensure_progress_table", exc)
 
 
 def track_progress(db: Any, player_key: str, achievement_id: str,
@@ -593,7 +597,8 @@ def track_progress(db: Any, player_key: str, achievement_id: str,
             "progress = excluded.progress, "
             "updated_at = excluded.updated_at",
             (player_key, achievement_id, progress, time.time()))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("achievements.track_progress", exc)
         return 0, goal, False
     newly = False
     if progress >= goal:
@@ -614,7 +619,8 @@ def get_progress(db: Any, player_key: str,
             "WHERE player_key = ? AND achievement_id = ?",
             (player_key, achievement_id))
         return int((row or {}).get("progress") or 0), goal_unit[0]
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("achievements.get_progress", exc)
         return 0, goal_unit[0]
 
 
@@ -672,8 +678,8 @@ def repeatable_check(db: Any, player_key: str, achievement_id: str,
                 "updated_at = excluded.updated_at",
                 (player_key, f"{achievement_id}:rep", tier, time.time()))
             return tier
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("achievements.repeatable_check", exc)
     return 0
 
 
@@ -689,14 +695,16 @@ def achievement_anniversaries(db: Any, player_key: str,
         rows = db.query(
             "SELECT achievement_id, unlocked_at FROM achievements "
             "WHERE player_key = ?", (player_key,)) or []
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("achievements.anniversaries_query", exc)
         return out
     now = time.time()
     catalog = _achievement_map()
     for r in rows:
         try:
             unlocked = float(r.get("unlocked_at") or 0)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("achievements.anniversaries_row_parse", exc)
             continue
         if not unlocked:
             continue
@@ -730,8 +738,8 @@ def _ensure_showcase_table(db: Any) -> None:
             "slot INTEGER NOT NULL, "
             "achievement_id TEXT NOT NULL, "
             "PRIMARY KEY (player_key, slot))")
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("achievements.ensure_showcase_table", exc)
 
 
 def set_showcase(db: Any, player_key: str,
@@ -758,7 +766,8 @@ def set_showcase(db: Any, player_key: str,
                 "INSERT INTO achievement_showcase "
                 "(player_key, slot, achievement_id) VALUES (?, ?, ?)",
                 (player_key, slot, aid))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("achievements.set_showcase", exc)
         return False, "couldn't save your showcase."
     names = ", ".join(catalog[i].name for i in ids)
     return True, f"📌 showcase set: {names}"
@@ -772,7 +781,8 @@ def get_showcase(db: Any, player_key: str) -> list[dict[str, Any]]:
             "SELECT achievement_id FROM achievement_showcase "
             "WHERE player_key = ? ORDER BY slot ASC",
             (player_key,)) or []
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("achievements.get_showcase", exc)
         return []
     out = []
     for r in rows:
