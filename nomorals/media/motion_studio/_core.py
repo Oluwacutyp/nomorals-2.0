@@ -51,6 +51,7 @@ def _require_pil() -> None:
 from ...core.logging_setup import get_logger
 from ...core.profiles import get_profile_kind
 from ...media_edit.videos import MediaEditError, ffmpeg_path, run_ffmpeg, video_probe
+from ..failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -365,7 +366,8 @@ def record_ledger(entry: dict) -> None:
         archived = False
         try:
             archived = _ensure_archive()
-        except Exception:  # noqa: BLE001 - fall back to window-only below
+        except Exception as exc:  # noqa: BLE001 - fall back to window-only below
+            record_failure("motion_studio._core.record_ledger", exc)
             archived = False
         if archived:
             LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
