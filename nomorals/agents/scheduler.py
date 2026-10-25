@@ -98,6 +98,7 @@ from ..scheduler.recurrence import (
     parse_rrule as _rec_parse_rrule,
 )
 from .autonomy_ledger import record_ledger
+from .failures import record_failure
 from .notifier import Notifier
 
 _log = get_logger(__name__)
@@ -270,8 +271,8 @@ def _parse_depends(raw: Any) -> list[str]:
             parsed = json.loads(text)
             if isinstance(parsed, list):
                 return [str(x).strip() for x in parsed if str(x).strip()]
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as exc:
+            record_failure("scheduler.parse_depends_json", exc)
     if "," in text:
         return [p.strip() for p in text.split(",") if p.strip()]
     return [text]
@@ -636,8 +637,8 @@ def _profile_name(context: Any) -> str:
         prof = getattr(getattr(context, "settings", None), "profile", "")
         if prof:
             return str(prof).strip().lower()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        record_failure("scheduler.profile_name", exc)
     return "workstation"
 
 
@@ -742,7 +743,8 @@ class Scheduler:
         try:
             stale = self.db.query(
                 "SELECT id, name FROM schedule_jobs WHERE routine < 0")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("scheduler.routine_column_select", exc)
             return
         for row in stale or []:
             try:
@@ -837,8 +839,8 @@ class Scheduler:
         try:
             if int(row.get("heavy") or 0):
                 return True
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as exc:
+            record_failure("scheduler.is_heavy_flag", exc)
         try:
             weight = float(row.get("weight") or 0.0)
         except (TypeError, ValueError):
@@ -989,7 +991,8 @@ class Scheduler:
             rows = self.db.query(
                 "SELECT * FROM schedule_jobs ORDER BY COALESCE(next_run, 0) ASC"
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("scheduler.list_jobs", exc)
             return []
         jobs = []
         for row in rows:
@@ -1344,7 +1347,8 @@ class Scheduler:
                 "ORDER BY next_run ASC",
                 (now,),
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("scheduler.catch_up_query", exc)
             return []
         results = []
         for row in rows:
@@ -1396,7 +1400,8 @@ class Scheduler:
                 "AND next_run <= ? ORDER BY next_run ASC",
                 (now,),
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("scheduler.tick_query", exc)
             return []
         defer_heavy, pressure_reasons = self._pressure_gate()
         results: list[dict[str, Any]] = []
@@ -1498,8 +1503,8 @@ class Scheduler:
         try:
             from ..core.error_system import heartbeat
             heartbeat("scheduler", self._tick_errors == _tick_start_errors)
-        except Exception:  # noqa: BLE001 - telemetry never breaks the tick
-            pass
+        except Exception as exc:  # noqa: BLE001 - telemetry never breaks the tick
+            record_failure("scheduler.tick_heartbeat", exc)
         return results
 
     def _skip_overlap(self, row: dict[str, Any], now: float) -> None:
@@ -1576,7 +1581,8 @@ class Scheduler:
             try:
                 job_ids = [r["job_id"] for r in self.db.query(
                     "SELECT DISTINCT job_id FROM schedule_runs")]
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("scheduler.prune_job_ids", exc)
                 return 0
         deleted = 0
         for job_id in job_ids:
@@ -1604,7 +1610,8 @@ class Scheduler:
                 "ORDER BY started_at DESC LIMIT ?",
                 (row["id"], max(1, int(limit))),
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("scheduler.recent_runs", exc)
             return []
         return [
             {
@@ -1872,7 +1879,8 @@ class Scheduler:
                         output_kind="scheduled",
                         output_meta={"job": job_name, "ok": ok},
                     )
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                record_failure("scheduler.execute_notify", exc)
                 _log.debug("scheduler notification failed")
         return {
             "id": job_id, "name": job_name, "ok": ok,
@@ -2119,14 +2127,14 @@ class Scheduler:
                 }
             try:
                 out["delivery"]["queue"] = self.notifier.queue_depth()
-            except Exception:  # noqa: BLE001 - queue depth is best-effort
-                pass
+            except Exception as exc:  # noqa: BLE001 - queue depth is best-effort
+                record_failure("scheduler.health_queue_depth", exc)
             out["delivery"]["live_owner_channels"] = self._live_owner_channels()
             try:
                 out["delivery"]["termux_fallback"] = bool(
                     self.notifier.termux_fallback_available())
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                record_failure("scheduler.health_termux_fallback", exc)
             # execution depth: what is running now, what pressure deferred,
             # and the last few executions across all jobs.
             try:
@@ -2202,7 +2210,8 @@ class Scheduler:
                         and plat.strip().lower() not in live):
                     live.append(plat.strip().lower())
             return sorted(live)
-        except Exception:  # noqa: BLE001 - best-effort
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            record_failure("scheduler.live_owner_channels", exc)
             return []
 
     def _loop(self) -> None:
