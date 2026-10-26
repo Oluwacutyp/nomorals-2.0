@@ -43,6 +43,7 @@ from typing import Any
 
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 from .itinerary import Flight, parse_confirmation
 
 _log = get_logger("nomorals.travel.groups")
@@ -618,7 +619,8 @@ class GroupTripStore:
             rows = self._db.execute(
                 "SELECT * FROM expenses WHERE trip_id = ?"
                 " ORDER BY created_at", (trip_id,)).fetchall()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("groups.list_expenses", exc)
             return []
         return [self._expense_from_row(r) for r in rows]
 
