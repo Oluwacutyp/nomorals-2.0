@@ -490,6 +490,184 @@ class RuntimeSystemMixin:
                 "bind|lookup|release|list | rotate on [strategy] | schedule "
                 "on [min] | ssh start <name> <host> <user>")
 
+    def _control_toolhub(self, tail: str, chat_key: str = "") -> str:
+        """Tool hub: /toolhub | /toolhub proxy [run] | /toolhub bin [digits] | /toolhub help.
+
+        (Named toolhub because /hub is already the media hub — see
+        control.py. The card itself still says "Devon Hub".)
+
+        Buttons for every screen are derived by the adapter from the
+        reply text (header markers) / the toolhub origin — this method
+        returns text and sends the proxy file; it never builds a
+        keyboard itself. Gating is the existing grant: ``toolhub`` is
+        not a public kind, so non-owners are denied before dispatch.
+        """
+        from ...social.chat.hub import (bin_usage_text, format_bin_result,
+                                        hub_help_text, hub_text, lookup_bin,
+                                        proxy_intro_text)
+
+        parts = (tail or "").split(None, 1)
+        verb = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        if verb == "help":
+            return hub_help_text()
+        if verb == "bin":
+            if not rest:
+                return bin_usage_text()
+            return format_bin_result(lookup_bin(rest))
+        if verb == "proxy":
+            # Stack: /toolhub proxy IS the tool screen (intro + Refresh +
+            # Back); only "run" executes the flow.
+            if not rest:
+                return proxy_intro_text()
+            if rest == "run":
+                return self._hub_proxy_flow(chat_key)
+            return ("unknown proxy action — /toolhub proxy for the tool "
+                    "screen, /toolhub proxy run to refresh")
+        if verb:
+            return ("usage: /toolhub | /toolhub proxy [run] | /toolhub bin <digits> "
+                    "| /toolhub help")
+        return hub_text(proxy_line=self._hub_proxy_line())
+
+    def _hub_home(self) -> Any:
+        """Devon's home dir (cooldown store lives under it)."""
+        from pathlib import Path
+
+        home = getattr(getattr(self.context, "settings", None),
+                       "home", "") or "~/.nomorals"
+        return Path(os.path.expanduser(home))
+
+    def _hub_proxy_line(self) -> str | None:
+        """Live pool state for the hub card (best-effort; None →
+        the card says the pool is unknown instead of a stale
+        number)."""
+        try:
+            from ...tools.proxylab import ProxyLab
+
+            st = ProxyLab(self.context).status()
+            total = int(st.get("working_total", 0))
+            fresh = int(st.get("fresh_24h", 0))
+            if total <= 0:
+                return "empty — tap Proxy to refresh"
+            return f"{total} working ({fresh} fresh <24h)"
+        except Exception as exc:  # noqa: BLE001 - best-effort card state
+            record_failure("runtime_system._hub_proxy_line", exc)
+            return None
+
+    def _hub_proxy_flow(self, chat_key: str) -> str:
+        """Proxy screen: cooldown → live progress → file → summary.
+
+        Cooldown is checked FIRST (no wasted scrape on a cooled-down
+        user). Progress edits are best-effort: if the progress
+        message or adapter edit fails, the flow continues and the
+        summary still returns — progress never blocks results.
+        """
+        from ...social.chat.hub import (PROXY_COOLDOWN_S, CooldownStore,
+                                        proxy_intro_text)
+        from ...social.chat.progress import ProgressReporter
+        from ...tools.proxylab import ProxyLab
+
+        store = CooldownStore(self._hub_home() / "hub" / "cooldowns.json")
+        left = store.remaining(chat_key, "proxy", PROXY_COOLDOWN_S)
+        if left > 0:
+            return ("🌐 Proxy lab\n\n"
+                    f"⏳ cooling down — try again in "
+                    f"{CooldownStore.remaining_text(left)}.\n"
+                    "(one generation per hour per chat)")
+        store.mark(chat_key, "proxy")
+
+        chat = self._ref_from_key(chat_key)
+        progress: ProgressReporter | None = None
+        try:
+            sent = self.gateway.send(chat.platform, chat,
+                                     proxy_intro_text())
+            message_id = getattr(sent, "message_id", None)
+            if message_id:
+                adapter = self.gateway._adapter_for(chat.platform)
+
+                def _emit(text: str, _a=adapter, _c=chat,
+                          _m=message_id) -> None:
+                    _a.edit_progress(_c, _m, text)
+
+                progress = ProgressReporter(_emit)
+        except Exception as exc:  # noqa: BLE001 - progress best-effort
+            record_failure("runtime_system._hub_proxy_flow", exc)
+            progress = None
+
+        lab = ProxyLab(self.context)
+        try:
+            if progress is not None:
+                progress.milestone("🌐 Proxy lab — scraping free lists…")
+
+            def _on_source(name: str, added: int, err: str) -> None:
+                if progress is None:
+                    return
+                if err:
+                    progress.milestone(
+                        f"🌐 Proxy lab — {name} failed ({err[:60]})")
+                else:
+                    progress.milestone(
+                        f"🌐 Proxy lab — scraped {name}: "
+                        f"{added} candidates")
+
+            def _on_test(done: int, total: int, _p: Any) -> None:
+                if progress is not None:
+                    progress.count(done, total, "🌐 Proxy lab — testing")
+
+            report = lab.refresh(on_scrape_source=_on_source,
+                                 on_test_progress=_on_test)
+        except Exception as exc:  # noqa: BLE001 - named, not swallowed
+            if progress is not None:
+                progress.finish(f"🌐 Proxy lab — failed: {exc}")
+            return f"🌐 Proxy lab — refresh failed: {exc}"
+
+        file_out = lab.active_file()
+        if not file_out.get("written"):
+            if progress is not None:
+                progress.finish("🌐 Proxy lab — no working proxies")
+            return ("🌐 Proxy lab — no working proxies right now\n"
+                    f"({file_out.get('note', 'refresh found nothing alive')})\n"
+                    "Free proxies rot fast — try again later.")
+        sent = False
+        try:
+            result = self.gateway.send_file(
+                chat.platform, chat, file_out["path"],
+                caption=f"{file_out['count']} working proxies "
+                        "(fastest first)")
+            sent = bool(getattr(result, "ok", False))
+        except Exception as exc:  # noqa: BLE001 - console adapter
+            record_failure("runtime_system._hub_proxy_flow", exc)
+            sent = False
+        if progress is not None:
+            progress.finish("🌐 Proxy lab — ✅ done")
+
+        schemes = ", ".join(
+            f"{s}×{n}" for s, n in
+            sorted((report.get("by_scheme") or {}).items()))
+        countries: list[str] = []
+        for item in report.get("best") or []:
+            code = item.get("country")
+            if code and code not in countries:
+                countries.append(code)
+            if len(countries) >= 5:
+                break
+        lines = [
+            f"🌐 Proxy lab — {file_out['count']} working proxies",
+            f"tested: {report.get('tested', '?')} candidates",
+        ]
+        if schemes:
+            lines.append(f"protocols: {schemes}")
+        if countries:
+            lines.append(f"countries: {', '.join(countries)}")
+        lines.append("Free proxies rot fast — expect tens of minutes "
+                     "of life; refresh when they die.")
+        if sent:
+            lines.append("File sent above ☝️")
+        else:
+            lines.append(f"file: {file_out['path']} "
+                         "(plain chat — no file sending on this adapter)")
+        return "\n".join(lines)
+
     def _control_macro(self, tail: str, chat_key: str) -> str:
         parts = (tail or "").split(None, 1)
         if not parts or parts[0].lower() in {"list", ""}:

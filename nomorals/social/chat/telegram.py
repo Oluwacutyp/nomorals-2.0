@@ -2125,6 +2125,13 @@ class TelegramBotAdapter(ChatAdapter):
         # buttons only attach when this is True — a chat reply never
         # inherits Retry for an old command.
         self._last_inbound_was_command: dict[str, bool] = {}
+        # Screen-stack navigation: chat_id → (tapped message_id,
+        # callback command, recorded_at). Set by _handle_callback;
+        # send() consumes it once: the reply to a hub button tap
+        # EDITS the tapped message into the new screen instead of
+        # printing a new message. Single-use + 5-minute expiry, so a
+        # stale tap can never redirect a later unrelated send.
+        self._nav_edit: dict[str, tuple[str, str, float]] = {}
         # Progress-edit throttle (edit-in-place ~1/3s, only on change).
         from .progress_throttle import ProgressThrottler
         self._progress = ProgressThrottler()
@@ -2603,6 +2610,14 @@ class TelegramBotAdapter(ChatAdapter):
         # the owner last typed.
         self._last_inbound_was_command[chat_id] = True
         self._last_command[chat_id] = _cb_text
+        # Screen-stack navigation (hub): remember the tapped message
+        # so send() can EDIT it into the new screen instead of
+        # printing a new message. The marker is single-use (consumed
+        # by the first send after this callback) and expires after
+        # 5 minutes — it never redirects an unrelated later send.
+        _tapped = msg.get("message_id", "")
+        if _tapped != "" and _tapped is not None:
+            self._nav_edit[chat_id] = (str(_tapped), _cb_text, time.time())
         message = ChatMessage(
             chat=ChatRef(platform=self.name, chat_id=chat_id, kind=kind,
                          title=_title, peer=who),
@@ -2833,6 +2848,53 @@ class TelegramBotAdapter(ChatAdapter):
             _log.debug("telegram-bot: edit_progress failed: %s", exc)
             return None
 
+    def edit_message(self, chat: ChatRef, message_id: str, text: str,
+                     *, origin_command: str = "",
+                     buttons: list[list[tuple[str, str]]] | None = None,
+                     ) -> dict[str, Any] | None:
+        """Replace a message's text + inline keyboard in place.
+
+        BotFather-style screen navigation: tapping a hub button edits
+        the tapped message into the new screen (new buttons included)
+        instead of printing a new message. Buttons are derived exactly
+        like send() derives them (explicit buttons win; personal first
+        on the personal bot, else adaptive content patterns). Returns
+        the API result, or None on ANY failure — including "message
+        is not modified" — so the caller falls back to a normal send.
+        Never raises.
+        """
+        from .adaptive_buttons import adaptive_buttons_for
+        from .tgbot_buttons import personal_buttons_for
+
+        if buttons is not None:
+            resolved = buttons
+        elif origin_command and self.owner_only:
+            resolved = (personal_buttons_for(text, origin_command)
+                        or adaptive_buttons_for(origin_command=origin_command,
+                                                text=text))
+        else:
+            resolved = adaptive_buttons_for(origin_command=origin_command,
+                                            text=text)
+        params: dict[str, Any] = {
+            "chat_id": int(chat.chat_id),
+            "message_id": int(message_id),
+            "text": (text or "")[:for_platform("telegram-bot").max_text],
+        }
+        if resolved:
+            keyboard = []
+            for row in resolved:
+                krow = []
+                for label, data in row:
+                    krow.append({"text": label,
+                                 "callback_data": self._sign_callback(data)})
+                keyboard.append(krow)
+            params["reply_markup"] = {"inline_keyboard": keyboard}
+        try:
+            return self._api("editMessageText", **params)
+        except Exception as exc:  # noqa: BLE001 - edit is best-effort
+            _log.debug("telegram-bot: edit_message failed: %s", exc)
+            return None
+
     def send(self, chat: ChatRef, text: str, *, reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
              reply_keyboard: list[list[str]] | None = None,
@@ -2850,6 +2912,39 @@ class TelegramBotAdapter(ChatAdapter):
 
                 text = strip_html(text)
             return self.send_long(chat, text, reply_to=reply_to)
+        # ── screen-stack navigation edit (hub button taps) ──
+        # The reply to a hub button tap EDITS the tapped message into
+        # the new screen instead of printing a new message. The marker
+        # is consumed by the FIRST send after the callback no matter
+        # what follows, so it can never redirect an unrelated send;
+        # the edit itself requires all of: marker unexpired, origin
+        # still that callback, single-chunk plain text, hub screen.
+        # Any miss — including an edit failure such as "message is
+        # not modified" — falls through to the normal send below.
+        # Note the proxy-run case: the flow's first send is the intro
+        # text, which consumes the marker (tapped message becomes the
+        # intro, or the edit fails as not-modified and the progress
+        # message goes out new); the file + summary then arrive as
+        # new messages, as before. Pure navigation taps (hub ↔ tool
+        # ↔ result ↔ help, Back included) always edit.
+        _nav = self._nav_edit.pop(chat.chat_id, None)
+        if (_nav is not None and not reply_keyboard and not parse_mode
+                and time.time() - _nav[2] < 300):
+            _tapped_id, _nav_cmd, _ = _nav
+            _fresh = (self._last_command.get(chat.chat_id, "")
+                      if self._last_inbound_was_command.get(chat.chat_id)
+                      else "")
+            if _fresh == _nav_cmd:
+                from .hub import is_hub_screen
+
+                if (len(_chunk_text(text, self.MAX_TEXT)) == 1
+                        and is_hub_screen(text)):
+                    _edited = self.edit_message(chat, _tapped_id, text,
+                                                origin_command=_fresh,
+                                                buttons=buttons)
+                    if _edited is not None:
+                        return SendResult(ok=True, platform=self.name,
+                                          message_id=_tapped_id)
         started = time.perf_counter()
         last_id = ""
         try:

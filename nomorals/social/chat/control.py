@@ -443,6 +443,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "whois": (1, 3),         # /whois <domain>
     "ports": (0, 1),         # /ports — what is listening here
     "proxy": (0, 8),         # /proxy status|scrape|test|health|pool|pick|affinity|rotate on|set <url>|ssh <…>
+    "toolhub": (0, 2),       # /toolhub | /toolhub proxy [run] | /toolhub bin [digits] | /toolhub help — button tool hub (owner-only; NOT /hub, which is the media hub)
     "workspace": (0, 4),     # /workspace [status|scale <n>|up|down|pause|resume|add|remove]
     "gen": (2, None),        # /gen <kind> <name> [json config]
     "osint": (1, None),      # /osint <target> | campaign <seeds> | graph <verb>…
@@ -2058,6 +2059,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/proxy status|list|test|set <url>|clear | scrape|refresh|health|pool [scheme]|pick [udp] [country=XX] | affinity bind|lookup|release|list | discover [seeds] | sources | schedule on [min] | rotate on | ssh start <n> <host> <user>",
               "example": "/proxy health",
               "related": "/scan /osint"},
+    "toolhub": {"what": "button tool hub — fresh tested proxies as a file, BIN lookup; per-screen inline buttons with Back navigation (owner-only).",
+            "usage": "/toolhub | /toolhub proxy [run] | /toolhub bin <digits> | /toolhub help",
+            "example": "/toolhub proxy",
+            "related": "/proxy /help"},
     "gen": {"what": "generate a validated automation script of a kind and save it "
                     "to her workspace — the script is syntax-checked before it "
                     "lands. Kinds: backup, cron_sh, dedupe_lines, git_autopush, "
@@ -2693,7 +2698,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["tts", "speak", "stt", "voice", "look", "image", "lens",
       "vision", "voices", "clonevoice", "sing"]),
     ("tools & automation",
-     ["schedule", "db", "artifact", "api", "proxy", "workspace", "record", "macro", "file",
+     ["schedule", "db", "artifact", "api", "proxy", "toolhub", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "desk", "apk", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "notion", "gcal", "trello", "exness", "stripe",

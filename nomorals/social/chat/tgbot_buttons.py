@@ -94,6 +94,31 @@ def buttons_for_text(text: str) -> Keyboard | None:
     """
     t = text or ""
 
+    # ── Devon Hub screens — per-screen, dynamic keyboards ──
+    # Matched on the screen's OPENING header (startswith): the hub
+    # card MENTIONS every tool, so `in` matching would hand it a tool
+    # screen's keyboard. Help is checked before the hub card (both
+    # open with the hub header). Tool vs result is told apart by the
+    # body's own markers: a result reports counts/failures, a tool
+    # screen invites the action ("Tap Refresh", "Paste a BIN").
+    from .hub import (BIN_HEADER, HUB_HEADER, PROXY_HEADER,
+                      keyboard_for_screen)
+    if t.startswith(HUB_HEADER + " — help"):
+        return keyboard_for_screen("help")
+    if t.startswith(HUB_HEADER):
+        return keyboard_for_screen("hub")
+    if t.startswith(PROXY_HEADER):
+        if "⏳ cooling down" in t:
+            return keyboard_for_screen("proxy_cooldown")
+        if ("working proxies" in t or "no working proxies" in t
+                or "refresh failed" in t):
+            return keyboard_for_screen("proxy_result")
+        return keyboard_for_screen("proxy")
+    if t.startswith(BIN_HEADER):
+        if "Paste a BIN" in t:
+            return keyboard_for_screen("bin")
+        return keyboard_for_screen("bin_result")
+
     # ── confirm-flow prompt (CONFIRMABLE commands: quit/forget) ──
     # handle_control's confirm gate writes "⚠️ confirm: /<kind> …"; the
     # buttons deliver "/<kind> confirm" / "/<kind> cancel", which the
@@ -256,6 +281,31 @@ def personal_buttons_for(text: str, last_command: str = "") -> Keyboard | None:
         if row:
             rows.append(row)
         return rows or None
+
+    # ── /toolhub — per-screen keyboards (origin + reply-text markers) ──
+    # The origin tells the screen; the reply text refines it (the
+    # cooldown notice is still a `toolhub proxy run` origin). Back walks
+    # exactly one level up the stack: result → tool → hub. Every
+    # payload is a real routable toolhub subcommand. Unknown subs get
+    # None (the usage line they produce carries no keyboard).
+    if kind == "toolhub":
+        from .hub import keyboard_for_screen
+
+        if not rest:
+            return keyboard_for_screen("hub")
+        if rest == "help":
+            return keyboard_for_screen("help")
+        if rest == "proxy":
+            return keyboard_for_screen("proxy")
+        if rest == "proxy run":
+            if "⏳ cooling down" in (text or ""):
+                return keyboard_for_screen("proxy_cooldown")
+            return keyboard_for_screen("proxy_result")
+        if rest == "bin":
+            return keyboard_for_screen("bin")
+        if rest.startswith("bin "):
+            return keyboard_for_screen("bin_result")
+        return None
 
     # ── /power — controls (Power On carries NO key by design) ──
     if kind == "power":

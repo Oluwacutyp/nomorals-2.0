@@ -3349,6 +3349,15 @@ class PartnerRuntime(
         # hot-start (which needs an argument). Checked before
         # parse_control, which would error on the missing argument.
         if text.strip() == "/start":
+            # Personal bot (owner-only surface): the hub card, whose
+            # inline buttons the adapter derives from the card's
+            # header (gated path) / the hub origin (personal path).
+            # Everywhere else the public menu stays — the gated bot
+            # never shows owner-only tools to anyone.
+            _platform = (chat_key or "").partition(":")[0].strip().lower()
+            if _platform == "telegram-personal":
+                from ...social.chat.hub import hub_text
+                return hub_text()
             return public_menu_text()
 
         # Natural phrasing for the representation review: "/how did I do"
@@ -4575,6 +4584,8 @@ class PartnerRuntime(
             return self._control_ports(command.tail or arg)
         if kind == "proxy":
             return self._control_proxy(command.tail or arg)
+        if kind == "toolhub":
+            return self._control_toolhub(command.tail or arg, chat_key)
         if kind == "workspace":
             return self._control_workspace(command.tail or arg)
         if kind == "gen":

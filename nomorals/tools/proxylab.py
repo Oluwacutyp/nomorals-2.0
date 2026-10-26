@@ -713,7 +713,12 @@ class ProxyScraper:
     # -- driver -------------------------------------------------------------
     def scrape(self, schemes: str = "http,https,socks4,socks5",
                *, sources: list[tuple[str, str, str]] | None = None,
-               limit: int = 2000) -> dict[str, Any]:
+               limit: int = 2000,
+               on_source: Callable[[str, int, str], None] | None = None,
+               ) -> dict[str, Any]:
+        """Scrape free lists. ``on_source`` (optional) fires per
+        consumed source result with ``(name, added, error)`` — the
+        hook live progress uses for real per-source milestones."""
         wanted = [s.strip().lower() for s in schemes.split(",") if s.strip()]
         wanted = [s for s in wanted if s in SCHEMES] or list(SCHEMES)
         pool = sources or self.sources
@@ -753,6 +758,8 @@ class ProxyScraper:
             for name, proxies, error in pool_ex.map(_one, picked):
                 if error:
                     errors[name] = error
+                    if on_source is not None:
+                        on_source(name, 0, error)
                     continue
                 added = 0
                 for p in proxies:
@@ -771,6 +778,8 @@ class ProxyScraper:
                     seen[p.key] = p
                     added += 1
                 by_source[name] = added
+                if on_source is not None:
+                    on_source(name, added, "")
         return {
             "proxies": list(seen.values()),
             "total": len(seen),
@@ -1123,12 +1132,40 @@ class ProxyTester:
             record_failure("ProxyTester._maybe_country", e)
 
     def test_many(self, proxies: list[Proxy], *,
-                  limit: int = 150) -> list[Proxy]:
-        """Concurrent testing.  Returns the SAME proxy objects, mutated."""
+                  limit: int = 150,
+                  on_done: Callable[[int, int, Any], None] | None = None,
+                  ) -> list[Proxy]:
+        """Concurrent testing.  Returns the SAME proxy objects, mutated.
+
+        ``on_done`` (optional) fires after EACH candidate finishes
+        with ``(done_count, total, proxy)`` — the hook live progress
+        (e.g. the hub proxy flow) uses to show real per-candidate
+        counts. It is never called for candidates that never ran.
+        Thread-safe: the counter advances under a lock.
+        """
+        import threading
+
         targets = list(proxies)[:max(1, int(limit))]
+        total = len(targets)
+        if on_done is None:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=self.max_workers) as pool:
+                list(pool.map(self.test_one, targets))
+            return targets
+        state = {"done": 0}
+        lock = threading.Lock()
+
+        def _one(p: Proxy) -> Proxy:
+            out = self.test_one(p)
+            with lock:
+                state["done"] += 1
+                done = state["done"]
+            on_done(done, total, out)
+            return out
+
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=self.max_workers) as pool:
-            list(pool.map(self.test_one, targets))
+            list(pool.map(_one, targets))
         return targets
 
 
@@ -1610,14 +1647,22 @@ class ProxyLab:
 
     def refresh(self, schemes: str = "http,https,socks4,socks5",
                 limit: int = 150, *, detect_country: bool = True,
-                scrape_if_empty: bool = True) -> dict[str, Any]:
+                scrape_if_empty: bool = True,
+                on_test_progress: Callable[[int, int, Any], None] | None = None,
+                on_scrape_source: Callable[[str, int, str], None] | None = None,
+                ) -> dict[str, Any]:
         """The full cycle: candidates (stored or freshly scraped) → test →
-        store the working pool → summary."""
+        store the working pool → summary. The ``on_*`` callbacks are
+        optional live-progress hooks (see ``test_many`` / ``scrape``);
+        existing callers pass none and see no behavior change."""
         candidates = self.store.load_candidates()
         scraped = 0
         errors: dict[str, str] = {}
         if not candidates and scrape_if_empty:
-            report = self.scrape(schemes, limit=limit * 3)
+            scrape_kwargs: dict[str, Any] = {"limit": limit * 3}
+            if on_scrape_source is not None:
+                scrape_kwargs["on_source"] = on_scrape_source
+            report = self.scrape(schemes, **scrape_kwargs)
             candidates = report["proxies"]
             scraped = report["total"]
             errors = report.get("errors", {})
@@ -1646,7 +1691,13 @@ class ProxyLab:
         ranked_in = rank_proxies(candidates)  # fastest-known first
         tester = self.tester()
         tester.detect_country = bool(detect_country)
-        tested = tester.test_many(ranked_in, limit=limit)
+        # Callbacks ride only when given: tester-like stubs (yield
+        # tests) implement the old test_many() signature, and an
+        # unexpected keyword would break them.
+        test_kwargs: dict[str, Any] = {"limit": limit}
+        if on_test_progress is not None:
+            test_kwargs["on_done"] = on_test_progress
+        tested = tester.test_many(ranked_in, **test_kwargs)
         # the round's real results feed the per-source yield tracker:
         # live rate + EWMA per source; three dead rounds (or an EWMA
         # collapse) quarantine the source for 24h.
