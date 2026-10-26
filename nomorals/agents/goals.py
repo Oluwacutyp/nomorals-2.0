@@ -27,6 +27,7 @@ from typing import Any, Optional
 
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -587,7 +588,8 @@ class GoalSystem:
             if delta < 0:
                 return f"overdue by {_fmt_span(-delta)} (was {when})"
             return f"due in {_fmt_span(delta)} ({when})"
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("goals.deadline_text", exc)
             return "deadline set"
 
     # ── estimates (phase 9: planning.estimates) ─────────────────────────
@@ -823,7 +825,8 @@ class GoalSystem:
             return None
         try:
             return mgr.get_by_linked("goal", goal_id)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("goals.linked_room", exc)
             return None
 
     def _rooms_auto_create(self) -> bool:
