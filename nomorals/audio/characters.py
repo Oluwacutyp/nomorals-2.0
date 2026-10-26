@@ -44,6 +44,7 @@ from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
 from ..core.tool_render import describe_exc
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -168,7 +169,8 @@ class Character:
             self.facts.append(text)
             self.facts = self.facts[-30:]
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            record_failure("characters.pin_fact", exc)
             return False
 
     def set_relationship(self, name: str, how: str) -> None:
@@ -177,15 +179,15 @@ class Character:
             name, how = (name or "").strip(), (how or "").strip()[:300]
             if name and how:
                 self.relationships[name] = how
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("characters.set_relationship", exc)
 
     def set_mood(self, mood: str) -> None:
         """Shift the character's current state — colors every reply."""
         try:
             self.mood = (mood or "").strip()[:200]
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("characters.set_mood", exc)
 
     def knows_up_to(self) -> int:
         return self.knowledge_cutoff
