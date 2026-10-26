@@ -48,6 +48,7 @@ from typing import Any
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..storage.kv import KVStore
+from .failures import record_failure
 from .features import feature_enabled
 from .notifier import Notifier, _in_quiet_hours_now
 
@@ -739,8 +740,8 @@ def ensure_research_job(context: Any) -> dict[str, Any]:
     for j in have:  # stale interval -> replace
         try:
             sched.remove(j["id"])
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            record_failure("research_loop.ensure_research_job", exc)
     job = sched.add(RESEARCH_LOOP_JOB, f"every {hours:g}h", "tool",
                     {"tool": "research_loop", "args": {"action": "tick"}})
     _log.info("scheduled research loop job: every %.2gh", hours)
