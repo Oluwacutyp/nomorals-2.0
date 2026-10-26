@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from .contracts import DISCLAIMER, information_only_check
+from .failures import record_failure
 from .research import LegalResearch, research_citations
 
 __all__ = [
@@ -911,7 +912,8 @@ def bill_answer(
                              purpose="legal_aid")
     except ValueError:
         raise  # unknown category is a caller bug — surface it
-    except Exception:  # noqa: BLE001 — billing must never break answers
+    except Exception as exc:  # noqa: BLE001 — billing must never break answers
+        record_failure("aid.bill_answer", exc)
         return 0
 
 
