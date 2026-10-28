@@ -586,10 +586,10 @@ class NutritionStore:
             return []
 
     def log_water(self, ml: int, day: str = "") -> int:
-        """Log water intake (ml). Returns today's total ml."""
+        """Log water intake (ml). Returns today's total ml (-1 if not logged)."""
         try:
             if self._db is None:
-                return 0
+                return -1
             day = day or time.strftime("%Y-%m-%d")
             self._db.execute(
                 "INSERT INTO water (day, ml, created_at) VALUES (?,?,?)",
@@ -597,7 +597,7 @@ class NutritionStore:
             self._db.commit()
             return self.water_on(day)
         except Exception:  # noqa: BLE001
-            return 0
+            return -1
 
     def water_on(self, day: str) -> int:
         try:
@@ -679,6 +679,8 @@ def log_water(ml: int, store: NutritionStore | None = None,
     try:
         store = store or NutritionStore()
         total = store.log_water(ml, day=day or time.strftime("%Y-%m-%d"))
+        if total < 0:
+            return "couldn't log water right now."
         target = MACRO_TARGETS["water_ml"]
         return (f"💧 +{ml}ml water — {total}/{target}ml today.")
     except Exception:  # noqa: BLE001
