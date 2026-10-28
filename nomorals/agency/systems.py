@@ -603,8 +603,15 @@ class ActiveSystems:
                 f"{getattr(report, 'gaps_resolved', 0)} gaps resolved, "
                 f"{getattr(report, 'findings', 0)} findings",
                 source="agency:research")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001 - per-trigger failure
+            # A failed fallback tick must NOT be recorded as a noted
+            # trigger + useful turn (tail-1 convert): the organ did
+            # not handle anything, so the trigger blocks like every
+            # other per-trigger failure in this module.
+            self.store.advance(it.id, next_review_at=now + 3600,
+                               blocker=f"research trigger fallback tick "
+                                       f"failed: {exc}")
+            return WorkResult(useful=False, work_key=f"research:{it.id}")
         self.store.advance(it.id, next_review_at=now + 3600,
                             evidence="research trigger noted; organ tick "
                                      "handles execution (no per-trigger "
@@ -651,8 +658,14 @@ class ActiveSystems:
                 f"wisdom tick (fallback for trigger {it.dedupe_key}): "
                 f"ingested {report.get('ingested')}",
                 source="agency:wisdom")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001 - per-trigger failure
+            # Same tail-1 convert as the research fallback: a failed
+            # fallback tick blocks, it is never recorded as noted +
+            # useful.
+            self.store.advance(it.id, next_review_at=now + 3600,
+                               blocker=f"wisdom trigger fallback tick "
+                                       f"failed: {exc}")
+            return WorkResult(useful=False, work_key=f"wisdom:{it.id}")
         self.store.advance(it.id, next_review_at=now + 3600,
                             evidence="wisdom trigger noted; organ tick "
                                      "handles execution (no per-item "
