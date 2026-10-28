@@ -624,11 +624,13 @@ def epub_to_audiobook(epub_path: str, voice_cast: dict[str, str] | None = None,
             duration_s=_audio_duration(Path(mastered)),
             disclosure=disclosure, target_stores=stores,
             created_at=time.time())
+        saved = True
         if store is not None:
             try:
-                store.save(book)
-            except Exception:  # noqa: BLE001
-                pass
+                saved = bool(store.save(book))
+            except Exception as exc:  # noqa: BLE001
+                assert isinstance(exc, Exception)
+                saved = False
         lufs_tgt = tgt.get("lufs", -16.0)
         note = (f"{len(rendered)} chapters, {book.duration_s / 3600:.1f}h, "
                 f"mastered to {lufs_tgt} LUFS ({stores[0]} target), "
@@ -643,6 +645,13 @@ def epub_to_audiobook(epub_path: str, voice_cast: dict[str, str] | None = None,
         if blocked:
             note += (" — skipped: " + "; ".join(
                 f"{b['store']} ({b['reason'][:60]}…)" for b in blocked))
+        if not saved:
+            # The audio IS ready (ok True stands), but the history row is
+            # lost: /audiobook status would deny this book and check by id
+            # could not find it. Say so and give the durable reference
+            # instead of a clean success story.
+            note += (f" — not saved to history (status/check won't list "
+                     f"it); master file: {mastered}")
         return {"ok": True, "audiobook": book, "note": note,
                 "compliance": compliance if compliance.get("ok") else None,
                 "pacing": pacing if pacing.get("ok") else None,
