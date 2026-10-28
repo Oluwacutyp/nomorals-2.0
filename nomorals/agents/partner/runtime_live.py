@@ -665,6 +665,7 @@ class RuntimeLiveMixin:
     def _status_note(status: str) -> str:
         return {
             "notified": "delivered",
+            "notified-unlogged": "delivered but not journaled — /research ideas will not show it",
             "pending": "valuable but over the daily cap — queued (see /research ideas)",
             "skipped": "below the quality bar — logged, not delivered",
         }.get(status, "stored")

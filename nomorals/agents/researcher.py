@@ -450,6 +450,7 @@ class ResearchAgent:
             delivered = 0
 
         rid = new_id()
+        journaled = True
         if self.db is not None:
             try:
                 with self.db.transaction():
@@ -462,8 +463,9 @@ class ResearchAgent:
                          delivered, time.time(),
                          scores["total"], json.dumps(scores, ensure_ascii=False), status),
                     )
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                assert isinstance(exc, Exception)
+                journaled = False
         if status == "notified":
             self.notifier.publish(
                 "research",
@@ -472,7 +474,7 @@ class ResearchAgent:
                 alert_hints={"notice": True,
                              "subject": f"research {dom}/{topic[:60]}"},
             )
-        if (status == "notified" and self._auto_apply_enabled()
+        if (status == "notified" and journaled and self._auto_apply_enabled()
                 and dom == "tech" and scores["total"] >= self._auto_apply_threshold()
                 and is_code_actionable(suggestion)):
             self._apply_in_background(
@@ -480,7 +482,10 @@ class ResearchAgent:
                 self._apply_filename(rid),
             )
         return {"ok": True, "domain": dom, "researcher": researcher.name, "topic": topic,
-                "suggestion": suggestion, "score": scores["total"], "status": status,
+                "suggestion": suggestion, "score": scores["total"],
+                "status": ("notified-unlogged"
+                           if status == "notified" and not journaled
+                           else status),
                 "seconds": round(time.time() - started, 1)}
 
     # ── wave 85: the reasoning layer in the research loop ──────────────────
@@ -630,13 +635,21 @@ class ResearchAgent:
                      f"/research ideas shows the ids.")
         return None, "\n".join(lines)
 
-    def _set_status(self, rid: str, status: str) -> None:
+    def _set_status(self, rid: str, status: str) -> bool:
+        """Write a proposal status row; True when the row was updated.
+
+        Callers that report the transition to the owner MUST check the
+        return: reporting "approved"/"denied" on a failed write is a false
+        confirmation — the row still carries the old status.
+        """
         if self.db is None:
-            return
+            return False
         try:
             self.db.execute("UPDATE research_log SET status = ? WHERE id = ?", (status, rid))
-        except Exception:  # noqa: BLE001
-            pass
+            return True
+        except Exception as exc:  # noqa: BLE001
+            assert isinstance(exc, Exception)
+            return False
 
     def approve(self, ref: str) -> str:
         """Approve a proposal; tech + code-actionable proposals start applying."""
@@ -645,7 +658,8 @@ class ResearchAgent:
             return err
         if row.get("status") in {"applied", "applying"}:
             return f"already {'applied' if row['status'] == 'applied' else 'applying'}: {row['topic'][:60]}"
-        self._set_status(row["id"], "approved")
+        if not self._set_status(row["id"], "approved"):
+            return "couldn't update proposal status — try again"
         if row.get("domain") == "tech" and is_code_actionable(row.get("suggestion", "")):
             self._apply_in_background(
                 row["id"],
@@ -660,7 +674,8 @@ class ResearchAgent:
         row, err = self.resolve_proposal_detailed(ref)
         if row is None:
             return err
-        self._set_status(row["id"], "denied")
+        if not self._set_status(row["id"], "denied"):
+            return "couldn't update proposal status — try again"
         return f"denied: {row['topic'][:70]}"
 
     def _apply_filename(self, rid: str) -> str:
