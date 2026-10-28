@@ -321,6 +321,16 @@ def verify_citations(result: ResearchResult,
                             if any(ev.doc_id == c.doc_id for ev in verified)]
         return result
     except Exception:  # noqa: BLE001
+        # Tail-3 convert: a failed verification must NOT ship the
+        # unfiltered evidence list. research() trusts result.evidence
+        # as the filtered list and composes claims from it under a
+        # verified-corpus header without checking flags, so returning
+        # the unfiltered list on failure fabricates claims — the one
+        # outcome this module promises never to produce. Clearing
+        # both lists makes research() fall through to _unknown, exactly
+        # as when verification filters everything out. Never raises.
+        result.evidence = []
+        result.citations = []
         return result
 
 
