@@ -1198,8 +1198,13 @@ class DevonAgent:
                 ))
             else:
                 parts.append("live games: none")
-        except Exception:  # noqa: BLE001 - no chats table yet
-            pass
+        except Exception as exc:  # noqa: BLE001 - surface DB failures
+            # Convert (tail-21): the old fall-through returned
+            # "no chats recorded" on ANY db failure when no gateway was
+            # wired — a false empty indistinguishable from a fresh DB.
+            # The gateway block above already surfaces its failures;
+            # this one now does the same.
+            parts.append(f"chat stats failed: {describe_exc(exc)}")
         return "\n".join(parts) if parts else "no chats recorded"
 
     def _tool_models(self, args: dict[str, Any]) -> str:
