@@ -430,7 +430,11 @@ def fan_out_compare(
     errors_lock = threading.Lock()
     try:
         srcs = [str(s) for s in (sources or [])]
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # Tail-8 convert: a coercion failure used to vanish into an
+        # empty ok=True run (0 sources, 0 errors). Record it like every
+        # other failure in this function; never raises is preserved.
+        errors.append(f"sources: {exc}")
         srcs = []
     results: list[Any] = [None] * len(srcs)
 
@@ -577,7 +581,15 @@ def render_comparison_table(table: list[dict[str, Any]]) -> str:
                                             for h in headers[1:]]) + " |")
         return "\n".join(lines)
     except Exception:  # noqa: BLE001
-        return ""
+        # Tail-8 convert: "" is the documented value for an EMPTY table
+        # (early return above), so returning it here made a render
+        # failure indistinguishable from empty — and inside
+        # synthesize_comparison it paired with a success summary. The
+        # sibling renderer below uses an explicit notice; this does the
+        # same. Constant text on purpose: no exception detail leaks
+        # into user-facing output. Stays E104-counted by design (broad
+        # handler, no exception-value use); see tail-3 precedent.
+        return "comparison table render failed"
 
 
 def compare(goal: str,
