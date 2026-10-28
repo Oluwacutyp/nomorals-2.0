@@ -204,11 +204,11 @@ class EstimateStore:
         try:
             items = segments.items() if isinstance(segments, dict) else (segments or [])
             for item in items:
-                name, minutes = item[0], item[1]
-                name = str(name or "part").strip()[:40] or "part"
                 try:
+                    name, minutes = item[0], item[1]
+                    name = str(name or "part").strip()[:40] or "part"
                     minutes = max(0.0, float(minutes))
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, IndexError):
                     continue
                 out.append((name, minutes))
         except Exception:  # noqa: BLE001
