@@ -409,7 +409,14 @@ class ProfileStore:
             from .voice_notes import normalize_voice_language
             lang = normalize_voice_language(language)
         except Exception:  # noqa: BLE001 — voice_notes import problems
-            lang = "en"
+            # Parent convert (tail-19): preserve the requested language.
+            # Substituting the "en" default for an explicit non-English
+            # request stored a wrong-language STT transcript under an
+            # "en" label, indistinguishable from a legitimate English
+            # intro. A backend that rejects an unnormalized code lands
+            # in the honest empty-transcript path below; never raises
+            # is preserved, and no-arg callers still get "en".
+            lang = language or "en"
         try:
             import shutil
             ext = os.path.splitext(audio_path)[1].lower()
