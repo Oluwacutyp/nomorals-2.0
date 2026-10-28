@@ -329,8 +329,15 @@ class CanaryRollout:
                 "UPDATE canary_runs SET status=?, decision=?, "
                 "decision_detail=?, decided_at=? WHERE id=?",
                 (status, decision, json.dumps(detail), time.time(), run.id))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            assert isinstance(exc, Exception)
+            # The decision was NOT recorded: returning the success dict
+            # would tell settle_canaries (and the owner) the run was
+            # promoted/reverted while the row still says "running" — and
+            # settle would then re-promote on every pass. Fail honestly;
+            # settle skips non-ok outcomes and retries next time.
+            return {"ok": False,
+                    "error": "couldn't record canary decision — try again"}
         _log.info("canary %s for %s: %s %s", run.id, skill_name, decision,
                   detail)
         return {"ok": True, "decision": decision, "run_id": run.id,

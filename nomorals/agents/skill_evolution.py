@@ -773,6 +773,12 @@ class SkillEvolutionLoop:
                 outcome = rollout.evaluate(run.skill_name)
             except Exception:  # noqa: BLE001
                 continue
+            if not outcome.get("ok"):
+                # A non-decision outcome (record failure, or the run
+                # vanishing between history and evaluate) must never
+                # reach the promote/revert branches — the old code fell
+                # through to revert and marked the edit regressed.
+                continue
             if outcome.get("decision") == "waiting":
                 continue
             if outcome.get("decision") == "inconclusive":
