@@ -515,8 +515,18 @@ def weekly_content(
                 try:
                     schedule_post(scheduler, q, draft.id, win_ts,
                                   platforms=list(platforms))
-                except Exception:  # noqa: BLE001 - scheduler optional
-                    q.schedule(draft.id, win_ts)
+                except Exception as exc:  # noqa: BLE001 - scheduler optional
+                    # schedule_post queues the draft BEFORE touching the
+                    # scheduler, so a scheduler-side failure (e.g. no
+                    # schedule_once) leaves the draft already scheduled:
+                    # a blind re-schedule raises on the scheduled ->
+                    # scheduled transition and the outer handler would
+                    # report a scheduled draft as failed/unscheduled.
+                    _log.debug("schedule_post failed (%s); "
+                               "checking queue state", exc)
+                    current = q.get(draft.id)
+                    if current is None or current.status != "scheduled":
+                        q.schedule(draft.id, win_ts)
             else:
                 q.schedule(draft.id, win_ts)
             d.scheduled_for = win_ts
