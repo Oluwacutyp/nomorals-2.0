@@ -196,8 +196,6 @@ def ops_alerts(context: Any, *, force: bool = False,
             if last and now - last < COOLDOWN_SECONDS:
                 cooled.append(key)
                 continue
-        if db is not None:
-            _kv_set(db, f"opsalert:{key}", now)
         try:
             # Formatting F5: the finding publishes as a presentation
             # Doc (its structured facts as rows) under the exact
@@ -221,9 +219,15 @@ def ops_alerts(context: Any, *, force: bool = False,
             }.get(f["kind"], {"notice": True})
             notify(context, "ops", f["title"], body_text(doc), doc=doc,
                    alert_subject=f["key"], alert_hints=_hints)
-        except Exception:  # noqa: BLE001 - alerting must never raise
-            pass
-        sent.append(f)
+        except Exception as exc:  # noqa: BLE001 - alerting must never raise
+            assert isinstance(exc, Exception)
+        else:
+            # Only a successful page earns the cooldown marker and the
+            # "sent" claim: on failure the next tick must retry instead
+            # of suppressing the finding for 6h while reporting it sent.
+            if db is not None:
+                _kv_set(db, f"opsalert:{key}", now)
+            sent.append(f)
     pending = 0
     try:
         pending = len(Notifier(context).pending())
