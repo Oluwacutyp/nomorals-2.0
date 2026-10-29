@@ -210,8 +210,11 @@ class CostTracker:
 
     def spent_since(
         self, since: float, *, client: str = "default"
-    ) -> int:
-        """Kobo spent since a timestamp. Never raises."""
+    ) -> int | None:
+        """Kobo spent since a timestamp. Never raises.
+
+        None when the cost ledger can't be read.
+        """
         try:
             row = self._db.execute(
                 """SELECT COALESCE(SUM(cost_kobo), 0) AS t FROM wa_costs
@@ -219,11 +222,15 @@ class CostTracker:
                 (since, client or "default"),
             ).fetchone()
             return int(row["t"] or 0)
-        except Exception:  # noqa: BLE001
-            return 0
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("spent_since failed", exc_info=True)
+            return None
 
-    def spent_week(self, *, client: str = "default") -> int:
-        """Kobo spent in the rolling 7 days. Never raises."""
+    def spent_week(self, *, client: str = "default") -> int | None:
+        """Kobo spent in the rolling 7 days. Never raises.
+
+        None when the cost ledger can't be read.
+        """
         return self.spent_since(self._now() - 7 * 86400, client=client)
 
     def project_monthly(self, *, client: str = "default") -> dict[str, object]:
@@ -237,6 +244,10 @@ class CostTracker:
         """
         try:
             spent_7d = self.spent_week(client=client)
+            if spent_7d is None:
+                return {"spent_7d_kobo": 0, "projected_30d_kobo": 0,
+                        "budget_monthly_kobo": 0, "on_track": True,
+                        "summary": "projection unavailable"}
             projected = int(spent_7d / 7 * 30)
             budget = self.get_budget(client)
             budget_monthly = int((budget or {}).get("amount_kobo") or 0) * 433 // 100
@@ -257,8 +268,11 @@ class CostTracker:
                     "budget_monthly_kobo": 0, "on_track": True,
                     "summary": "projection unavailable"}
 
-    def message_count(self, *, client: str = "default") -> int:
-        """Messages sent in the rolling 7 days. Never raises."""
+    def message_count(self, *, client: str = "default") -> int | None:
+        """Messages sent in the rolling 7 days. Never raises.
+
+        None when the cost ledger can't be read.
+        """
         try:
             row = self._db.execute(
                 """SELECT COUNT(*) AS n FROM wa_costs
@@ -266,8 +280,9 @@ class CostTracker:
                 (self._now() - 7 * 86400, client or "default"),
             ).fetchone()
             return int(row["n"] or 0)
-        except Exception:  # noqa: BLE001
-            return 0
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("message_count failed", exc_info=True)
+            return None
 
     # ── budgets ──
 
@@ -317,6 +332,16 @@ class CostTracker:
         try:
             budget = self.get_budget(client)
             spent = self.spent_week(client=client)
+            if spent is None:
+                _log.debug(
+                    "check_budget: spend data unavailable for %r", client)
+                if budget is None:
+                    return True, 0, 0
+                amount_unknown = int(budget["amount_kobo"] or 0)
+                return (
+                    (False if budget["hard"] else True),
+                    0, amount_unknown,
+                )
             if budget is None:
                 return True, spent, 0
             amount = int(budget["amount_kobo"] or 0)
@@ -336,6 +361,11 @@ class CostTracker:
             if amount <= 0:
                 return ""
             spent = self.spent_week(client=client)
+            if spent is None:
+                return (
+                    "⚠️ WhatsApp spend data unavailable — "
+                    "the cost ledger couldn't be read."
+                )
             if spent >= amount * BUDGET_WARN_FRACTION:
                 return (
                     f"⚠️ WhatsApp budget {naira(spent)} of {naira(amount)} "
@@ -351,6 +381,11 @@ class CostTracker:
         """'Devon spent ₦1,240 on WhatsApp this week.' Never raises."""
         spent = self.spent_week(client=client)
         n = self.message_count(client=client)
+        if spent is None or n is None:
+            return (
+                "💸 WhatsApp spend data unavailable — "
+                "the cost ledger couldn't be read."
+            )
         return (
             f"💸 Devon spent {naira(spent)} on WhatsApp this week "
             f"({n} message{'s' if n != 1 else ''})."
@@ -366,6 +401,12 @@ class CostTracker:
         Never raises.
         """
         spent = self.spent_week(client=client)
+        if spent is None:
+            return (
+                "WhatsApp spend data unavailable — the cost ledger "
+                "couldn't be read, so there's no honest "
+                "return-on-spend figure."
+            )
         roi = (recovered_kobo / spent) if spent > 0 else 0.0
         line = (
             f"Devon spent {naira(spent)} on WhatsApp this week "
