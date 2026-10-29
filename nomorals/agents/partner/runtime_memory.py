@@ -1004,7 +1004,9 @@ class RuntimeMemoryMixin:
         /trip calendar <id>    sync to Google Calendar (confirmation-gated)
         /trip docs <id>        vault docs for a trip
         """
-        from ...travel.itinerary import ItineraryBuilder, added_message
+        from ...travel.itinerary import (ItineraryBuilder,
+                                         ItineraryStoreError,
+                                         added_message)
         builder = getattr(self, "_trip_builder", None)
         if builder is None:
             builder = ItineraryBuilder()
@@ -1012,6 +1014,9 @@ class RuntimeMemoryMixin:
         rest = (tail or "").strip()
         if not rest:
             trips = builder.list_trips()
+            if trips is None:
+                return ("trips unavailable right now — the trip store "
+                        "couldn't be read; try again in a moment.")
             if not trips:
                 return ("no trips yet — forward a booking confirmation "
                         "(email, PDF, screenshot) and I'll build the "
@@ -1037,7 +1042,11 @@ class RuntimeMemoryMixin:
             if gcal is None:
                 return ("Google Calendar isn't connected — connect it first, "
                         "then /trip calendar <id>.")
-            created = builder.to_calendar(tid, gcal, confirmed=False)
+            try:
+                created = builder.to_calendar(tid, gcal, confirmed=False)
+            except ItineraryStoreError:
+                return ("trips unavailable right now — the trip store "
+                        "couldn't be read; try again in a moment.")
             if not created:
                 return (f"nothing to sync for {tid} — no dated segments, or "
                         "the trip doesn't exist.")
@@ -1045,11 +1054,19 @@ class RuntimeMemoryMixin:
                     "approve the calendar checkpoint to create them.")
         if low.startswith("docs "):
             tid = rest[5:].strip()
-            docs = builder.vault_docs(tid)
+            try:
+                docs = builder.vault_docs(tid)
+            except ItineraryStoreError:
+                return ("trips unavailable right now — the trip store "
+                        "couldn't be read; try again in a moment.")
             if not docs:
                 return f"no docs for {tid}."
             return f"📎 {tid} vault:\n" + "\n".join(f"  • {d}" for d in docs)
-        trip = builder.get_trip(rest.split()[0])
+        try:
+            trip = builder.get_trip(rest.split()[0])
+        except ItineraryStoreError:
+            return ("trips unavailable right now — the trip store "
+                    "couldn't be read; try again in a moment.")
         if trip is None:
             return ("usage: /trip <id> | /trip add <text> | "
                     "/trip calendar <id> | /trip docs <id>")

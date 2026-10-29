@@ -41,8 +41,14 @@ from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
 
+
+class ItineraryStoreError(RuntimeError):
+    """The trip store could not be read (distinct from a missing trip)."""
+
+
 __all__ = [
     "Flight", "HotelStay", "CarRental", "Trip",
+    "ItineraryStoreError",
     "parse_confirmation", "ItineraryBuilder",
     "confirmation_hook", "TRIP_VAULT_DIR",
     "AIRLINE_CODES", "airline_for_flight_number",
@@ -492,17 +498,20 @@ class ItineraryBuilder:
             if not row:
                 return None
             return self._from_row(trip_id, row["data_json"])
-        except Exception:  # noqa: BLE001
-            return None
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("trip read failed", exc_info=True)
+            raise ItineraryStoreError(
+                f"trip store read failed for {trip_id!r}") from exc
 
-    def list_trips(self) -> list[Trip]:
+    def list_trips(self) -> list[Trip] | None:
         try:
             rows = self._db.execute(
                 "SELECT id, data_json FROM trips ORDER BY created_at DESC"
             ).fetchall()
             return [self._from_row(r["id"], r["data_json"]) for r in rows]
-        except Exception:  # noqa: BLE001
-            return []
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("trip list failed", exc_info=True)
+            return None
 
     def _from_row(self, trip_id: str, data_json: str) -> Trip:
         d = json.loads(data_json or "{}")
@@ -585,7 +594,10 @@ class ItineraryBuilder:
         ``exclude_id`` skips the trip the booking just landed in.
         """
         import datetime as _dt
-        trips = [t for t in self.list_trips() if t.id != exclude_id]
+        listed = self.list_trips()
+        if listed is None:
+            return None
+        trips = [t for t in listed if t.id != exclude_id]
         pnr = (parsed.get("pnr") or "").upper()
         if pnr:
             for trip in trips:
@@ -686,7 +698,11 @@ class ItineraryBuilder:
     # ── trip intelligence wrappers ────────────────────────────────────
 
     def timeline(self, trip_id: str) -> str:
-        trip = self.get_trip(trip_id)
+        try:
+            trip = self.get_trip(trip_id)
+        except ItineraryStoreError:
+            return ("trip store unavailable right now — "
+                    "try again in a moment.")
         if trip is None:
             return "no such trip."
         events = trip_timeline(trip)
@@ -716,7 +732,11 @@ class ItineraryBuilder:
             return ""
 
     def packing(self, trip_id: str) -> str:
-        trip = self.get_trip(trip_id)
+        try:
+            trip = self.get_trip(trip_id)
+        except ItineraryStoreError:
+            return ("trip store unavailable right now — "
+                    "try again in a moment.")
         if trip is None:
             return "no such trip."
         items = packing_list(trip)
@@ -789,7 +809,11 @@ class ItineraryBuilder:
                 budget_kobo: int | None = None,
                 programs: list | None = None) -> str:
         # #75: cost summary first when a total is known.
-        trip = self.get_trip(trip_id)
+        try:
+            trip = self.get_trip(trip_id)
+        except ItineraryStoreError:
+            return ("trip store unavailable right now — "
+                    "try again in a moment.")
         if trip is None:
             return "no such trip."
         status = trip_status(trip)
