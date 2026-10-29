@@ -290,8 +290,9 @@ def client_spend_report(client_id: str, *, db_path: str = "") -> str:
     try:
         tracker = CostTracker(db_path=db_path)
         return tracker.weekly_spend(client=client_id)
-    except Exception:  # noqa: BLE001
-        return f"💸 no spend data for {client_id}."
+    except Exception as exc:  # noqa: BLE001
+        assert isinstance(exc, Exception)
+        return f"💸 spend data unavailable for {client_id}."
 
 
 # ── client analytics (the B2B product surface) ──────────────────────────────
