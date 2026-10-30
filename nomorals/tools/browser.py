@@ -1380,11 +1380,19 @@ class RenderedBrowserSession:
         else:
             px = int(pixels or 800) * (-1 if d == "up" else 1)
             js = f"() => window.scrollBy(0, {px})"
+        # Split guards: the evaluate IS the scroll (its failure is
+        # reported, never dressed as success); the settle wait is
+        # best-effort only — the page already moved.
         try:
             tab.evaluate(js)
+        except Exception as exc:  # noqa: BLE001 - scroll is best-effort
+            return {"engine": "rendered", "url": getattr(tab, "url", ""),
+                    "scrolled": d, "ok": False,
+                    "error": classify(exc).message}
+        try:
             tab.wait_for_load_state("load", timeout=3000)
-        except Exception:  # noqa: BLE001 - scroll is best-effort
-            pass
+        except Exception as exc:  # noqa: BLE001 - settle wait is best-effort
+            _log.debug("scroll settle wait failed: %s", exc)
         return {"engine": "rendered", "url": getattr(tab, "url", ""), "scrolled": d}
 
     def hover(self, target: str = "", **_: Any) -> dict[str, Any]:
