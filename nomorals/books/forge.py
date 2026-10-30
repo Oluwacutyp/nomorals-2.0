@@ -20,6 +20,7 @@ from typing import Any
 
 from ..llm.brain import Brain, brain_for
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 from .model import (STATUS_BUILT, STATUS_SENT, STATUS_WRITTEN, Book, BookError,
                     count_words, slugify)
 from . import outline as outline_mod
@@ -335,6 +336,13 @@ def infer_chapter_count(topic: str, context: Any = None,
 class BookForge:
     def __init__(self, context: Any) -> None:
         self.context = context
+        #: Book directories skipped by the most recent list_books() call
+        #: because their book.json existed but could not be read/parsed.
+        #: Companion surface for list_books' unchanged list return: a
+        #: consumer that just called list_books() on this instance reads
+        #: the count here, so an empty list can be rendered honestly
+        #: ("no readable books — N unreadable") instead of as absence.
+        self.last_list_unreadable: int = 0
 
     # ── paths ─────────────────────────────────────────────────────────────
     def _workspace(self) -> Path:
@@ -384,6 +392,7 @@ class BookForge:
 
     def list_books(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
+        self.last_list_unreadable = 0
         for d in sorted(self.books_dir().iterdir()):
             jf = d / "book.json"
             if not jf.exists():
@@ -392,7 +401,11 @@ class BookForge:
                 import json
 
                 book = Book.from_dict(json.loads(jf.read_text(encoding="utf-8")))
-            except Exception:  # noqa: BLE001 - a corrupt book must not hide the rest
+            except Exception as exc:  # noqa: BLE001 - a corrupt book must not hide the rest
+                self.last_list_unreadable += 1
+                _log.warning(
+                    "list_books: skipping unreadable book at %s: %s", d, exc)
+                record_failure("forge.list_books", exc)
                 continue
             out.append({
                 "slug": book.slug,

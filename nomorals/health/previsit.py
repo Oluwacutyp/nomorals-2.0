@@ -669,7 +669,8 @@ def summarize_visit(notes: str, *,
         try:
             tl = HealthTimeline()
             own = True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("visit recap timeline open failed: %s", exc)
             tl = None
     try:
         if tl is not None:
@@ -692,8 +693,7 @@ def format_recap(recap: VisitRecap) -> str:
         for d in recap.doctor_said:
             lines.append(f"  • \"{d}\"")
     else:
-        lines.append("(no doctor statements picked out — your full notes "
-                     "are saved below)")
+        lines.append("(no doctor statements picked out from your notes)")
     if recap.meds_reported:
         lines.append("meds mentioned (as you reported — this is not "
                      "medical advice):")
@@ -704,8 +704,12 @@ def format_recap(recap: VisitRecap) -> str:
         for f in recap.follow_ups:
             lines.append(f"  • \"{f}\"")
     lines.append("")
-    lines.append(f"full notes saved to your timeline "
-                 f"{'(id ' + recap.logged_event_id + ')' if recap.logged_event_id else ''}.")
+    if recap.logged_event_id:
+        lines.append(f"full notes saved to your timeline "
+                     f"(id {recap.logged_event_id}).")
+    else:
+        lines.append("full notes could NOT be saved to your timeline — "
+                     "keep this copy of your notes.")
     lines.append("this is your record of what the doctor said — only "
                  "your doctor can interpret it.")
     return "\n".join(lines)

@@ -135,12 +135,19 @@ class RuntimeSearchMixin:
         try:
             if verb == "list" or not verb:
                 books = forge.list_books()
+                unreadable = forge.last_list_unreadable
                 if not books:
+                    if unreadable:
+                        return (f"no readable books — {unreadable} book(s) on disk are"
+                                " unreadable (corrupt book.json).")
                     return "no books yet. /book <topic> [chapters] writes one and sends the pdf."
                 lines = ["books:"]
                 for b in books:
                     lines.append(f"  {b['slug']} — {b['status']} · {b['written']}/{b['chapters']} ch · "
                                  f"{b['words']} words")
+                if unreadable:
+                    lines.append(f"  ({unreadable} book(s) on disk unreadable"
+                                 " — corrupt book.json)")
                 lines.append("\n/book status [slug] for details · /book build <slug> for the pdf")
                 return "\n".join(lines)
 
@@ -149,9 +156,16 @@ class RuntimeSearchMixin:
                     return _one_line(parts[1])
                 books = forge.list_books()
                 if not books:
+                    if forge.last_list_unreadable:
+                        return (f"no readable books — {forge.last_list_unreadable} book(s)"
+                                " on disk are unreadable (corrupt book.json).")
                     return "no books on disk yet."
-                return "\n".join([f"{b['slug']} — {b['status']} · {b['written']}/{b['chapters']} ch · "
-                                  f"{b['words']} words" for b in books])
+                lines = [f"{b['slug']} — {b['status']} · {b['written']}/{b['chapters']} ch · "
+                         f"{b['words']} words" for b in books]
+                if forge.last_list_unreadable:
+                    lines.append(f"  ({forge.last_list_unreadable} book(s) on disk"
+                                 " unreadable — corrupt book.json)")
+                return "\n".join(lines)
 
             if verb == "build":
                 if len(parts) < 2:

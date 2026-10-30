@@ -19,11 +19,21 @@ def _cmd_book(args: argparse.Namespace, context: Any) -> int:
 
     if action == "list":
         books = forge.list_books()
+        unreadable = forge.last_list_unreadable
         lines = [f"  {b['slug']:<28} {b['title'][:50]:<52} "
                  f"{b['written']}/{b['chapters']} ch · {b['words']}w · {b['status']}"
                  for b in books]
-        _emit(args, {"books": books},
-              "books:\n" + "\n".join(lines) if lines else "no books yet — nm book create \"<topic>\"")
+        if lines:
+            text = "books:\n" + "\n".join(lines)
+            if unreadable:
+                text += (f"\n  ({unreadable} book(s) on disk unreadable"
+                         " — corrupt book.json)")
+        elif unreadable:
+            text = (f"no readable books — {unreadable} book(s) on disk are"
+                    " unreadable (corrupt book.json)")
+        else:
+            text = "no books yet — nm book create \"<topic>\""
+        _emit(args, {"books": books, "unreadable": unreadable}, text)
         return 0
 
     if action == "create":

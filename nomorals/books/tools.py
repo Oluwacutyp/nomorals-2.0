@@ -226,8 +226,10 @@ def register(registry: Any) -> None:
         capability=Capability.FS_READ,
     )
     def book_list() -> dict[str, Any]:
+        f = forge()
         return {
-            "books": forge().list_books(),
+            "books": f.list_books(),
+            "unreadable": f.last_list_unreadable,
             "library": _library().list_books(),
         }
 
