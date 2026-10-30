@@ -211,11 +211,20 @@ def _fill_first(tab: Any, candidates: list[str], value: str,
         f"{last_exc}")
 
 
-def _page_text(tab: Any) -> str:
+def _page_text(tab: Any) -> str | None:
+    """The page's visible text, or None when the read itself failed.
+
+    None is NOT the empty page: a genuinely textless page returns
+    "". Both consumers verify outcomes against this text (rejection
+    markers, success text), so an unreadable page must stay
+    distinguishable from a read page with no markers — callers
+    treat None as UNVERIFIED and fail closed.
+    """
     try:
         return str(tab.text(max_chars=20000).get("text") or "")
-    except Exception:  # noqa: BLE001 — text is best-effort here
-        return ""
+    except Exception as exc:  # noqa: BLE001 — read failure -> None
+        _log.debug("page text read failed: %s", exc)
+        return None
 
 
 def _wait_after_submit(tab: Any, success_text: str = "",
@@ -414,6 +423,10 @@ def login_with_vault(
             _wait_after_submit(tab, cfg.success_text, cfg.post_login_wait_ms)
 
         page_text = _page_text(tab)
+        if page_text is None:
+            raise LoginFailed(
+                f"{service} login unverified: the page could not be "
+                "read after submit — no session was saved")
         failure = _failure_reason(page_text)
         if failure:
             raise LoginFailed(
@@ -671,6 +684,10 @@ def change_password_on_site(
         _wait_after_submit(tab, cfg.success_text, cfg.post_login_wait_ms)
 
         page_text = _page_text(tab)
+        if page_text is None:
+            raise LoginFailed(
+                f"{service} password change unverified: the page "
+                "could not be read — the vault secret was NOT touched")
         low = page_text.lower()
         for marker in CHANGE_FAILURE_MARKERS:
             if marker in low:
