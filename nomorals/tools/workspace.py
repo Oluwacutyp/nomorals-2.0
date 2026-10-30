@@ -145,8 +145,10 @@ def register(registry: Any) -> None:
                            linked_id=linked or "")
             return {"room": r.to_dict()}
         if act == "list":
-            return {"rooms": [r.to_dict()
-                              for r in mgr.list(status=status or "")]}
+            rooms = mgr.list(status=status or "")
+            if rooms is None:
+                return {"error": "room store unavailable"}
+            return {"rooms": [r.to_dict() for r in rooms]}
         if act == "enter" and val:
             with mgr.enter(val):
                 pass
@@ -168,12 +170,18 @@ def register(registry: Any) -> None:
                 return {"error": "link needs two slugs: link <a> <b>"}
             return {"linked": mgr.link(parts[0], parts[1])}
         if act == "search" and val:
-            return {"hits": mgr.search(val, deep=is_deep)}
+            hits = mgr.search(val, deep=is_deep)
+            if hits is None:
+                return {"error": "room store unavailable"}
+            return {"hits": hits}
         if act == "tick":
             from ..agents.goals import GoalSystem
             from ..agents.projects import ProjectManager
             return mgr.tick(goal_system=GoalSystem(context),
                             project_manager=ProjectManager(context))
         if act == "stale":
-            return {"stale": [r.to_dict() for r in mgr.stale_rooms()]}
+            stale = mgr.stale_rooms()
+            if stale is None:
+                return {"error": "room store unavailable"}
+            return {"stale": [r.to_dict() for r in stale]}
         return {"error": f"unsupported room action {act!r}"}

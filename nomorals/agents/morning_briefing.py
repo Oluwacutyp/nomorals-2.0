@@ -683,7 +683,15 @@ class RoomsProvider(_Provider):
             root = Path(ctx.settings.workspace_dir)
             mgr = RoomManager(root, db=ctx.db)
             rooms = mgr.list()
-            stale_slugs = {r.slug for r in mgr.stale_rooms()}
+            if rooms is None:
+                # omission consumer: a store failure omits the rooms
+                # section entirely — the briefing makes no claim
+                # about rooms either way, so None == [] here.
+                return None
+            stale_list = mgr.stale_rooms()
+            if stale_list is None:
+                return None
+            stale_slugs = {r.slug for r in stale_list}
         except Exception:  # noqa: BLE001 — rooms optional
             return None
         dirty = [r for r in rooms if r.dirty and r.status == "active"]

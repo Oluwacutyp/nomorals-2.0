@@ -584,11 +584,24 @@ class RoomManager:
             rows = self.db.query_rows(
                 "SELECT * FROM rooms WHERE kind=? AND linked_id=? LIMIT 1",
                 (kind, linked_id))
-        except Exception:  # noqa: BLE001
-            return None
+        except Exception as exc:  # noqa: BLE001
+            # a failed read is NOT "no linked room": callers auto-create
+            # a room on None, so swallowing this would duplicate rooms.
+            # Surface it — every production caller already guards this
+            # call (records / logs) and treats a raise as "cannot tell".
+            _log.warning("room get_by_linked failed for %s/%s: %s",
+                         kind, linked_id, exc)
+            raise
         return self._row_to_room(rows[0]) if rows else None
 
-    def list(self, status: str = "") -> list[Room]:
+    def list(self, status: str = "") -> list[Room] | None:
+        """All rooms (optionally filtered by status), newest first.
+
+        Returns ``None`` when the room store could not be read — a DB
+        failure is NOT "no rooms": consumers must treat None as
+        "unavailable" and must not render it as an empty estate.
+        A genuinely empty store returns ``[]``.
+        """
         if self.db is None:
             return []
         try:
@@ -599,8 +612,9 @@ class RoomManager:
             else:
                 rows = self.db.query_rows(
                     "SELECT * FROM rooms ORDER BY updated_at DESC")
-        except Exception:  # noqa: BLE001
-            return []
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("room list failed: %s", exc)
+            return None
         return [self._row_to_room(r) for r in rows]
 
     # -- enter / exit --------------------------------------------------------------
@@ -915,10 +929,15 @@ class RoomManager:
         lines.append(f"\n**Next:** {nxt}")
         return "\n".join(lines)
 
-    def index(self) -> Path:
+    def index(self) -> Path | None:
         """Write the MOC-style hub: ``rooms/INDEX.md`` listing every room
-        with status, step, and freshness.  Returns the path."""
+        with status, step, and freshness.  Returns the path, or None
+        when the room store could not be read — in that case INDEX.md
+        is left untouched rather than overwritten with a false
+        "0 rooms" hub."""
         rooms = self.list()
+        if rooms is None:
+            return None
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         lines = ["# Rooms index", "", f"_updated {now} · {len(rooms)} rooms_",
                  ""]
@@ -947,7 +966,15 @@ class RoomManager:
         """PARA-style weekly review: what's active, blocked, stale, dirty,
         and what got decided lately.  Pure (returns a string)."""
         rooms = self.list()
+        if rooms is None:
+            return ("# Room review — unavailable\n\n"
+                    "Room store unavailable — the room list could not "
+                    "be read, so no review can be produced.")
         stale = self.stale_rooms(30.0)
+        if stale is None:
+            return ("# Room review — unavailable\n\n"
+                    "Room store unavailable — the room list could not "
+                    "be read, so no review can be produced.")
         stale_slugs = {r.slug for r in stale}
         cutoff = time.time() - days * 86400
         lines = [f"# Room review — last {days:g} days", ""]
@@ -998,17 +1025,22 @@ class RoomManager:
 
     # -- search ------------------------------------------------------------------------------
     def search(self, query: str, *, deep: bool = False,
-               limit: int = 20) -> list[dict[str, Any]]:
+               limit: int = 20) -> list[dict[str, Any]] | None:
         """Search ROOM.md + decisions across rooms.
 
         Default searches titles, current step, blockers and decisions —
         NOT file contents (``deep=True`` also greps ``files/``).
+        Returns None when the room store could not be read (``[]``
+        means "searched, no matches" and is never a failure value).
         """
         q = (query or "").lower().strip()
         if not q:
             return []
+        rooms = self.list()
+        if rooms is None:
+            return None
         hits: list[dict[str, Any]] = []
-        for room in self.list():
+        for room in rooms:
             hay = "\n".join([
                 room.title, room.slug, room.current_step,
                 *room.blockers, *room.tags,
@@ -1043,10 +1075,15 @@ class RoomManager:
                 break
         return hits[:limit]
 
-    def stale_rooms(self, days: float = 30.0) -> list[Room]:
-        """Rooms idle longer than ``days`` — reported, never auto-archived."""
+    def stale_rooms(self, days: float = 30.0) -> list[Room] | None:
+        """Rooms idle longer than ``days`` — reported, never auto-archived.
+
+        Returns None when the room store could not be read."""
+        rooms = self.list(status="active")
+        if rooms is None:
+            return None
         cutoff = _utcnow() - days * 86400
-        return [r for r in self.list(status="active")
+        return [r for r in rooms
                 if (r.last_entered_at or r.created_at) < cutoff]
 
 
@@ -1063,7 +1100,16 @@ class RoomManager:
         """
         summary: dict[str, Any] = {"advanced": [], "skipped": [],
                                    "reconciled": [], "errors": []}
-        for room in self.list(status="active"):
+        active = self.list(status="active")
+        if active is None:
+            # the store read failed: nothing was processed, and the
+            # summary must say so — never report a clean run.
+            summary["errors"].append(
+                {"slug": "rooms",
+                 "error": "room store unavailable: room list could "
+                          "not be read"})
+            return summary
+        for room in active:
             slug = room.slug
             try:
                 if room.blockers:

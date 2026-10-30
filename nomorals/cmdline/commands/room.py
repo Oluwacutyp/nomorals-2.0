@@ -41,6 +41,10 @@ def _cmd_room(args: argparse.Namespace, context: Any) -> int:
             return 0
         if action == "list":
             rooms = mgr.list(status=args.status or "")
+            if rooms is None:
+                print("rooms unavailable: room store could not be read",
+                      file=sys.stderr)
+                return 1
             if as_json:
                 print(json.dumps([r.to_dict() for r in rooms], indent=2,
                                  default=str))
@@ -95,6 +99,10 @@ def _cmd_room(args: argparse.Namespace, context: Any) -> int:
             return 0
         if action == "search":
             hits = mgr.search(args.query, deep=args.deep)
+            if hits is None:
+                print("rooms unavailable: room store could not be read",
+                      file=sys.stderr)
+                return 1
             if as_json:
                 print(json.dumps(hits, indent=2, default=str))
             else:
@@ -122,6 +130,10 @@ def _cmd_room(args: argparse.Namespace, context: Any) -> int:
             return 0
         if action == "stale":
             stale = mgr.stale_rooms(days=args.days)
+            if stale is None:
+                print("rooms unavailable: room store could not be read",
+                      file=sys.stderr)
+                return 1
             if as_json:
                 print(json.dumps([r.to_dict() for r in stale], indent=2,
                                  default=str))
