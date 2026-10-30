@@ -40,6 +40,7 @@ from ..core.logging_setup import get_logger
 from ..core.policy import Capability
 from ..llm.base import Message, SamplingParams
 from ..llm.brain import brain_for
+from .failures import record_failure
 from .reasoning import _extract_json, reasoning_eval
 
 _log = get_logger(__name__)
@@ -881,8 +882,11 @@ def _run_claim_check(check: tuple[Any, ...] | None) -> bool | None:
             from .. import cli as _cli
 
             return str(check[1]) in _cli.CLI_ALIASES
-    except Exception:  # noqa: BLE001 — a broken check reads as False
-        return False
+    except Exception as exc:  # noqa: BLE001 — a broken check is
+        # unverifiable (None), never a false verdict: it is excluded
+        # from the scored denominator and reported separately.
+        record_failure("benchmark.claim_check", exc)
+        return None
     return None
 
 
@@ -954,9 +958,20 @@ def _score_claim_labels(task: ResearchTask,
     verifiable = [c for c in task.claims if c.get("check")]
     unverifiable = [c for c in task.claims if not c.get("check")]
     correct = 0
+    broken = 0  # checks that crashed: unverifiable, excluded below
     per_claim: list[dict[str, Any]] = []
     for claim in verifiable:
         truth = _run_claim_check(claim["check"])
+        if truth is None:
+            # The harness could not verify this claim: it leaves the
+            # scored denominator and joins the unverifiable tally.
+            broken += 1
+            got = labels.get(claim["id"], "unverifiable")
+            per_claim.append({"id": claim["id"],
+                              "expected": "unverifiable",
+                              "got": got,
+                              "hit": got == "unverifiable"})
+            continue
         expected = "true" if truth else "false"
         got = labels.get(claim["id"], "unverifiable")
         hit = got == expected
@@ -965,8 +980,8 @@ def _score_claim_labels(task: ResearchTask,
                           "got": got, "hit": hit})
     return {
         "correct": correct,
-        "verifiable": len(verifiable),
-        "unverifiable": len(unverifiable),
+        "verifiable": len(verifiable) - broken,
+        "unverifiable": len(unverifiable) + broken,
         "per_claim": per_claim,
     }
 
