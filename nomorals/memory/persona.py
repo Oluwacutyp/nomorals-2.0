@@ -815,11 +815,8 @@ class MemoryCurator:
         """forget_below() but every deletion lands in the archive first."""
         from .base import MemoryKind as MK
         now = time.time()
-        try:
-            rows = self.db.query(
-                "SELECT id, importance, decay, created_at, kind FROM memories")
-        except Exception:  # noqa: BLE001
-            return 0
+        rows = self.db.query(
+            "SELECT id, importance, decay, created_at, kind FROM memories")
         doomed: list[str] = []
         for row in rows:
             record = MemoryRecord.from_row({**row, "content": ""})
