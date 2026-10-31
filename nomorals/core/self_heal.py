@@ -161,9 +161,17 @@ def _probe_inner(handle_control, kind: str, chat_key: str = "") -> ProbeReport:
                            f"{frames[-1].lineno}")
                 return ProbeReport(broken=True, exc=exc, err=err, loc=loc,
                                    elapsed=_time.monotonic() - start)
-    except Exception:  # noqa: BLE001 - the probe itself must never die
-        return ProbeReport(broken=False, exc=None, err="", loc="",
-                           elapsed=_time.monotonic() - start)
+    except Exception as exc:  # noqa: BLE001 - the probe itself must never die
+        # The probe MACHINERY failed (executor, submit machinery) —
+        # the command was never actually probed, so "healthy" would
+        # be a lie on the heal decision surface. Report broken with
+        # exc=None: the report-only shape (never auto-fixed — there
+        # is no command exception to fix from; the caller reports).
+        return ProbeReport(
+            broken=True, exc=None,
+            err=(f"probe machinery failed: "
+                 f"{type(exc).__name__}: {exc}"),
+            loc="", elapsed=_time.monotonic() - start)
     # Like the tour: a reply is only healthy if it is a real answer.
     # The probe used to discard the reply, so a registered command
     # answering "unknown command /<kind>" (dispatch gap) or nothing at

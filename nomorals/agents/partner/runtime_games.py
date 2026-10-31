@@ -949,6 +949,13 @@ class RuntimeGamesMixin:
             dropped = store.cancel(player.key)
             if dropped is None:
                 return "nothing pending — /gift @name 100 to start one."
+            if dropped.status != "cancelled":
+                # The cancel write failed: the gift is still live.
+                # Never claim "nothing moved" over a pending gift.
+                return (f"couldn't cancel {dropped.describe()} — the "
+                        f"record write failed, so the gift is still "
+                        f"pending. /gift confirm would still send it; "
+                        f"otherwise it expires in 5 minutes.")
             return f"cancelled: {dropped.describe()}. nothing moved."
 
         if low == "confirm":
@@ -1044,6 +1051,17 @@ class RuntimeGamesMixin:
         giver = Player(key=player.key, platform=player.platform,
                        name=player.name)
 
+        def _done_note(ok: bool) -> str:
+            # mark_done's write failed AFTER the transfer landed: the
+            # row stays 'pending', so an uninformed re-confirm would
+            # send the gift twice. Say so on the success reply.
+            if ok:
+                return ""
+            return ("\n⚠️ the gift went through, but the gift record "
+                    "failed to save — do NOT /gift confirm again (it "
+                    "would send twice). The leftover pending record "
+                    "expires in 5 minutes.")
+
         if gift.kind == "coins":
             new_bal = engine.store.spend_coins(
                 giver, gift.amount, f"gift:out:{gift.id}")
@@ -1060,10 +1078,10 @@ class RuntimeGamesMixin:
                     giver, gift.amount, f"gift:refund:{gift.id}")
                 store.cancel(player.key)
                 return f"transfer failed ({exc}) — refunded."
-            store.mark_done(gift.id)
+            noted = _done_note(store.mark_done(gift.id))
             self._notify_gift(recipient, gift, player)
             return (f"🎁 sent {gift.amount} coins to {gift.recipient_name}! "
-                    f"({new_bal} left)")
+                    f"({new_bal} left){noted}")
 
         if gift.kind == "gear":
             from ...games.gear import GearStore
@@ -1077,10 +1095,10 @@ class RuntimeGamesMixin:
             if not ok:
                 store.cancel(player.key)
                 return f"transfer failed: {name} — gift cancelled."
-            store.mark_done(gift.id)
+            noted = _done_note(store.mark_done(gift.id))
             self._notify_gift(recipient, gift, player)
             return (f"🎁 sent {name} to {gift.recipient_name}! "
-                    f"it's in their inventory now.")
+                    f"it's in their inventory now.{noted}")
 
         # item
         if not engine.store.consume_item(giver, gift.ref):
@@ -1092,11 +1110,11 @@ class RuntimeGamesMixin:
             engine.store.grant_item(giver, gift.ref)  # refund
             store.cancel(player.key)
             return f"transfer failed ({exc}) — refunded."
-        store.mark_done(gift.id)
+        noted = _done_note(store.mark_done(gift.id))
         self._notify_gift(recipient, gift, player)
         item = engine.economy._items.get(gift.ref)
         label = item.name if item else gift.ref
-        return f"🎁 sent {label} to {gift.recipient_name}!"
+        return f"🎁 sent {label} to {gift.recipient_name}!{noted}"
 
     def _notify_gift(self, recipient: Any, gift: Any, giver: Any) -> None:
         """Best-effort DM to the recipient: 'you got a gift!'.

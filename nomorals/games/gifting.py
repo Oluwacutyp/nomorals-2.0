@@ -138,25 +138,39 @@ class GiftStore:
             _log.debug("game_gifts create failed", exc_info=True)
         return gift
 
-    def _set_status(self, gift_id: str, status: str) -> None:
+    def _set_status(self, gift_id: str, status: str) -> bool:
+        """Write a gift's status; True when the write landed.
+
+        A failed write is traced (the file's idiom, cf. _ensure/create)
+        and reported to the caller — this UPDATE *is* the operation:
+        swallowing it leaves the row 'pending', so a gift whose
+        transfer already landed stays confirmable and sends twice.
+        db=None is degraded mode: no durable record exists and
+        pending_for returns None there, so nothing can re-confirm —
+        the write is vacuously landed."""
         if self.db is None:
-            return
+            return True
         try:
             self.db.execute(
                 "UPDATE game_gifts SET status = ? WHERE id = ?",
                 (status, gift_id))
         except Exception:  # noqa: BLE001
-            pass
+            _log.debug("game_gifts set_status failed", exc_info=True)
+            return False
+        return True
 
-    def mark_done(self, gift_id: str) -> None:
-        self._set_status(gift_id, "done")
+    def mark_done(self, gift_id: str) -> bool:
+        return self._set_status(gift_id, "done")
 
     def cancel(self, giver_key: str) -> Gift | None:
         gift = self.pending_for(giver_key)
         if gift is None:
             return None
-        self._set_status(gift.id, "cancelled")
-        gift.status = "cancelled"
+        # Stamp 'cancelled' on the returned gift ONLY when the write
+        # landed — otherwise the caller would report a cancellation
+        # over a gift that is still live and confirmable.
+        if self._set_status(gift.id, "cancelled"):
+            gift.status = "cancelled"
         return gift
 
     def history(self, player_key: str, limit: int = 10) -> list[Gift]:
