@@ -1039,19 +1039,19 @@ class MissionStore:
         lock_key = (lock_key or "").strip()
         if not lock_key:
             return []
-        try:
-            rows = self.db.query(
-                "SELECT * FROM missions WHERE status NOT IN "
-                "('done', 'failed', 'cancelled')"
-            )
-        except Exception:  # noqa: BLE001
-            return []
+        # No swallow here, deliberately: this function's only job is
+        # proving NO live mission holds the lock. A crashed query or
+        # an unreadable live row cannot prove that negative, so the
+        # failure propagates (the store's fail-fast idiom — list()
+        # queries and get() behave the same) and the runner fails
+        # fast instead of starting a duplicate mission on the lock.
+        rows = self.db.query(
+            "SELECT * FROM missions WHERE status NOT IN "
+            "('done', 'failed', 'cancelled')"
+        )
         out = []
         for r in rows:
-            try:
-                mission = Mission.from_row(dict(r))
-            except Exception:  # noqa: BLE001 - a bad row is not our problem
-                continue
+            mission = Mission.from_row(dict(r))
             if str((mission.metadata or {}).get("lock_key") or "") == lock_key:
                 out.append(mission)
         return out
