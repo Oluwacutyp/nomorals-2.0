@@ -180,18 +180,15 @@ def refresh_profile(db: Any, chat_key: str, *, force: bool = False) -> dict[str,
         # Participant counts from the whole history (cheap aggregate).
         participants: dict[str, int] = {}
         total = 0
-        try:
-            for r in db.query(
-                "SELECT name, COUNT(*) AS n FROM messages "
-                "WHERE conversation_id = ? AND role = 'user' "
-                "GROUP BY name ORDER BY n DESC LIMIT ?",
-                (chat_key, _MAX_PARTICIPANTS),
-            ):
-                name = (r.get("name") or "").strip() or "someone"
-                participants[name] = int(r.get("n") or 0)
-                total += int(r.get("n") or 0)
-        except Exception:  # noqa: BLE001
-            pass
+        for r in db.query(
+            "SELECT name, COUNT(*) AS n FROM messages "
+            "WHERE conversation_id = ? AND role = 'user' "
+            "GROUP BY name ORDER BY n DESC LIMIT ?",
+            (chat_key, _MAX_PARTICIPANTS),
+        ):
+            name = (r.get("name") or "").strip() or "someone"
+            participants[name] = int(r.get("n") or 0)
+            total += int(r.get("n") or 0)
 
         new_messages = total - old_count
         profile = dict(old)
