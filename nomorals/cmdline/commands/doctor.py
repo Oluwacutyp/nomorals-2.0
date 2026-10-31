@@ -74,8 +74,9 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
         from ...tools.registry import ToolRegistry
         _probe = ToolRegistry().register_builtins()
         _failed = _probe.failed_modules()
-    except Exception:  # noqa: BLE001 — doctor must always report
-        _failed = []
+    except Exception as exc:  # noqa: BLE001 — doctor must always report
+        _failed = [{"module": "tool registry probe",
+                    "error": f"{type(exc).__name__}: {exc}"}]
     _status = None
     try:
         from ...core.config import config_env_status
