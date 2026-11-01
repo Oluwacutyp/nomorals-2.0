@@ -354,7 +354,12 @@ class RuntimeSearchMixin:
 
         if verb == "list":
             stories = reader.following()
+            unreadable = reader.last_following_unreadable
             if not stories:
+                if unreadable:
+                    return (f"no readable followed stories — {unreadable} "
+                            "story(ies) on disk are unreadable "
+                            "(corrupt story.json)")
                 return ("no stories followed yet. /novel follow <url or title> — "
                         "e.g. /novel follow my vampire system")
             lines = ["followed stories:"]
@@ -368,6 +373,9 @@ class RuntimeSearchMixin:
                              f"{s['ingest_total']}"
                              + (" ✓" if s.get("library_complete") else ""))
                 lines.append(line)
+            if unreadable:
+                lines.append(f"  ({unreadable} story(ies) on disk unreadable"
+                             " — corrupt story.json)")
             return "\n".join(lines)
 
         if verb == "follow":

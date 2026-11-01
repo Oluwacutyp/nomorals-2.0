@@ -321,7 +321,9 @@ def register(registry: Any) -> None:
         capability=Capability.FS_READ,
     )
     def story_following() -> dict[str, Any]:
-        return {"stories": _reader().following()}
+        reader = _reader()
+        return {"stories": reader.following(),
+                "unreadable": reader.last_following_unreadable}
 
     @registry.register(
         "story_read",

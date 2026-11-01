@@ -107,11 +107,20 @@ def _cmd_book(args: argparse.Namespace, context: Any) -> int:
 
     if action == "following":
         stories = reader.following()
+        unreadable = reader.last_following_unreadable
         lines = [f"  {s['slug']:<30} {s['title'][:48]:<50} "
                  f"{s['progress']:<12} [{s['source']}]" for s in stories]
-        _emit(args, {"stories": stories},
-              "followed stories:\n" + "\n".join(lines) if lines
-              else "not following any stories — nm book follow \"<title>\"")
+        if lines:
+            text = "followed stories:\n" + "\n".join(lines)
+            if unreadable:
+                text += (f"\n  ({unreadable} story(ies) on disk unreadable"
+                         " — corrupt story.json)")
+        elif unreadable:
+            text = (f"no readable followed stories — {unreadable} "
+                    "story(ies) on disk are unreadable (corrupt story.json)")
+        else:
+            text = "not following any stories — nm book follow \"<title>\""
+        _emit(args, {"stories": stories, "unreadable": unreadable}, text)
         return 0
 
     if action in ("read", "next", "prev"):

@@ -28,6 +28,7 @@ from typing import Any
 
 from ..core.logging_setup import get_logger
 from ..core.profiles import get_profile_kind
+from .failures import record_failure
 from .model import slugify
 from .sources import (ADAPTERS, Chapter, SourceAdapter, SourceError,
                       StoryMeta, adapter_for_url, book_registry_for_context,
@@ -114,6 +115,14 @@ class StoryReader:
         self._source_registry_injected = source_registry
         self._source_registry_cache: Any = None
         self._source_registry_resolved = False
+        #: Story directories skipped by the most recent following()
+        #: call because their story.json existed but could not be
+        #: read/parsed. Companion surface for following()'s unchanged
+        #: list return: a consumer that just called following() on
+        #: this instance reads the count here, so an empty list can be
+        #: rendered honestly ("no readable stories — N unreadable")
+        #: instead of as absence.
+        self.last_following_unreadable: int = 0
 
     def _registry(self) -> Any:
         """The source registry for book outcomes, or None when this
@@ -340,10 +349,16 @@ class StoryReader:
 
     def following(self) -> list[dict[str, Any]]:
         out = []
+        self.last_following_unreadable = 0
         for meta_path in sorted(self.reader_dir().glob("*/story.json")):
             try:
                 story = self._load(meta_path.parent.name)
-            except Exception:  # noqa: BLE001 - a corrupt entry never lists
+            except Exception as exc:  # noqa: BLE001 - a corrupt entry never lists
+                self.last_following_unreadable += 1
+                _log.warning(
+                    "following: skipping unreadable story at %s: %s",
+                    meta_path.parent, exc)
+                record_failure("reader.following", exc)
                 continue
             out.append({
                 "slug": story.slug, "title": story.title,

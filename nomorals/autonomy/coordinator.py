@@ -253,8 +253,23 @@ class IdleCoordinator:
             try:
                 if idle_inhibited(db):
                     held = inhibitors(db)
-            except Exception:  # noqa: BLE001
-                held = []
+            except Exception as exc:  # noqa: BLE001
+                # A crashed check is not "no inhibitors held":
+                # defer the cycle and record the cause, so a sick
+                # inhibitor store reads as repeated recorded
+                # deferrals — never as silent runs against an
+                # organ's explicit "not now".
+                _log.warning("idle cycle %s: inhibitor check failed "
+                             "(%s) — deferring cycle", cycle_id, exc,
+                             exc_info=True)
+                self._ledger(db, "cycle_deferred", cycle_id,
+                             f"cycle deferred — inhibitor check "
+                             f"failed: {exc}",
+                             metadata={"inhibitors": [],
+                                       "error": str(exc)})
+                stats["inhibitor_error"] = str(exc)
+                self._last_cycle = stats
+                return
             if held:
                 _log.info("idle cycle %s deferred: %d inhibitor(s) held "
                           "(%s)", cycle_id, len(held),
