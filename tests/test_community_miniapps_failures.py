@@ -36,7 +36,6 @@ Verdict notes (full grounds in the tail-45 SURVEY.md):
 import sys
 import time
 
-sys.path.insert(0, "/home/hatch/workspace/nm-tail45-tree")
 
 from nomorals.agents import failures as ag_fail
 from nomorals.community import miniapps as mp

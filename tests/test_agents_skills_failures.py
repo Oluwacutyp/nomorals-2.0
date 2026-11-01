@@ -38,7 +38,6 @@ Verdict notes (full grounds in SURVEY.md):
 import sys
 from unittest.mock import patch
 
-sys.path.insert(0, "/home/hatch/workspace/nm-tail41-tree")
 
 from nomorals.agents import failures as ag_fail
 from nomorals.agents import skills as sk

@@ -34,7 +34,6 @@ import json
 import sys
 from types import SimpleNamespace
 
-sys.path.insert(0, "/home/hatch/workspace/nm-tail43-tree")
 
 from nomorals.agents import failures as ag_fail
 from nomorals.api.mcp_server import MCPServer

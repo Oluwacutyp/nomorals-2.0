@@ -51,7 +51,6 @@ import urllib.parse
 
 import pytest
 
-sys.path.insert(0, "/home/hatch/workspace/nm-tail47-tree")
 
 from nomorals.agents import failures as ag_fail
 from nomorals.core import http as http_mod

@@ -45,7 +45,6 @@ import typing
 import urllib.parse
 from dataclasses import dataclass, fields
 
-sys.path.insert(0, "/home/hatch/workspace/nm-tail46-tree")
 
 from nomorals.agents import failures as ag_fail
 from nomorals.core import config as cfg

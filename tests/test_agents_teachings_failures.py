@@ -37,7 +37,6 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
-sys.path.insert(0, "/home/hatch/workspace/nm-tail42-tree")
 
 from nomorals.agents import failures as ag_fail
 from nomorals.agents import teachings as T

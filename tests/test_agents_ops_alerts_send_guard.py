@@ -15,7 +15,6 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
-sys.path.insert(0, "/home/hatch/workspace/nm-tail40-tree")
 
 from nomorals.agents import ops_alerts as oa
 

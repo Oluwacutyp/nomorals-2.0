@@ -37,7 +37,6 @@ Verdict notes (full grounds in the tail-44 SURVEY.md):
 """
 import sys
 
-sys.path.insert(0, "/home/hatch/workspace/nm-tail44-tree")
 
 from nomorals.agents import failures as ag_fail
 from nomorals.browser import tab_tools as tt
