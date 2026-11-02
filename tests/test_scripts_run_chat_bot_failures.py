@@ -453,6 +453,33 @@ def test_pin_no_record_certifi(monkeypatch):
     assert _sites() == []
 
 
+def test_pin_no_record_certifi_where_raises(monkeypatch):
+    # Dense-1 gap closure: #188's certifi pin exercises only the
+    # ImportError branch; this pins the sibling handler where certifi
+    # imports fine but certifi.where() itself raises — env left alone,
+    # platform store fallback, nothing recorded.
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    broken = SimpleNamespace(
+        where=lambda: (_ for _ in ()).throw(_Boom("certifi broken")))
+    monkeypatch.setitem(sys.modules, "certifi", broken)
+    assert MOD._ensure_ssl_cert_file() is None
+    assert "SSL_CERT_FILE" not in os.environ
+    assert _sites() == []
+
+
+def test_pin_certifi_where_ok_sets_env(monkeypatch, tmp_path):
+    # Positive control for the two pins above: a healthy certifi DOES
+    # set SSL_CERT_FILE, so the silent paths are the failure branches.
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    bundle = tmp_path / "ca.pem"
+    bundle.write_text("x", encoding="utf-8")
+    healthy = SimpleNamespace(where=lambda: str(bundle))
+    monkeypatch.setitem(sys.modules, "certifi", healthy)
+    assert MOD._ensure_ssl_cert_file() is None
+    assert os.environ.get("SSL_CERT_FILE") == str(bundle)
+    assert _sites() == []
+
+
 def test_pin_no_record_snapshot_adapters():
     rt = _base_runtime()
     rt.gateway = SimpleNamespace(status=lambda: (_ for _ in ()).throw(_Boom("gw down")))
