@@ -371,8 +371,9 @@ def _dj_mix(text: str) -> str:
             trending = fetch_trending(text)
             tracks = trending.get("tracks", []) if trending.get("ok") else []
             queries = [t.get("title", "") for t in tracks[:6] if t.get("title")]
-        except Exception:  # noqa: BLE001
-            queries = []
+        except Exception as exc:  # noqa: BLE001
+            return (f"trending lookup failed: {exc} — "
+                    "name songs explicitly")
         if not queries:
             return f"no trending tracks found for '{text}' — name songs explicitly"
     resolver = SourceResolver()
