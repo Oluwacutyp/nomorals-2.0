@@ -1188,11 +1188,10 @@ class CredentialVault:
         """Re-encrypt every blob in ``table.column`` (purpose-scoped)."""
         from ..core.cipher import (CipherError as _CipherError,
                                    aes_decrypt as _dec, aes_encrypt as _enc)
-        try:
-            cols = ", ".join(key_column)
-            rows = self.db.query(f"SELECT {cols}, {column} FROM {table}")
-        except Exception:  # noqa: BLE001 — table may not exist
-            return 0
+        if not self.db.table_exists(table):
+            return 0  # table may not exist (e.g. no sessions stored yet)
+        cols = ", ".join(key_column)
+        rows = self.db.query(f"SELECT {cols}, {column} FROM {table}")
         count = 0
         for row in rows:
             blob = row[column]
