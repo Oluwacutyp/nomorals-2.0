@@ -129,8 +129,11 @@ class EngineDrainTests(unittest.TestCase):
         # rig the kill: house at 0 HP
         room.state["house"]["hp"] = 0
         room.state["done"] = True
-        engine.quit("test:dm3")
-        joined = "\n".join(sent)
+        # the settle (finale narration included) is RETURNED as one
+        # message since the P0 settle fix — the finish no longer
+        # emits line by line into `sent`.
+        out = engine.quit("test:dm3")
+        joined = "\n".join(out)
         self.assertIn("🎲", joined)
 
     def test_no_finale_for_opt_out_games(self):

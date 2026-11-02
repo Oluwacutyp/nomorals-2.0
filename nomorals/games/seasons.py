@@ -52,7 +52,7 @@ SEASON_ROSTER: tuple[dict[str, Any], ...] = (
         "games": ("blackjack", "roulette", "slots", "poker", "craps"),
         "coin_mult": 1.5,
         "xp_mult": 1.0,
-        "blurb": "Golden Week — the casino pays +50% coins on every game.",
+        "blurb": "the casino pays +50% coins on every game.",
     },
     {
         "id": "mind_games",
@@ -62,7 +62,7 @@ SEASON_ROSTER: tuple[dict[str, Any], ...] = (
                   "trivia", "duel", "20q", "hangman"),
         "coin_mult": 1.0,
         "xp_mult": 2.0,
-        "blurb": "Mind Games week — puzzles & quizzes pay DOUBLE XP.",
+        "blurb": "puzzles & quizzes pay DOUBLE XP.",
     },
     {
         "id": "grand_melee",
@@ -80,7 +80,7 @@ SEASON_ROSTER: tuple[dict[str, Any], ...] = (
         "games": ("world", "shop", "auction"),
         "coin_mult": 1.5,
         "xp_mult": 1.5,
-        "blurb": "Harvest Festival — builders & traders earn +50%.",
+        "blurb": "builders & traders earn +50%.",
     },
     {
         "id": "quiet",

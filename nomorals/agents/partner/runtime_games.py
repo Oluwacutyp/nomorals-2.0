@@ -215,11 +215,17 @@ class RuntimeGamesMixin:
             # provable-fairness status for the live table in this chat
             from ...games.fairness import FAIR_GAMES, verify
             if live is None or live.game not in FAIR_GAMES:
+                # no live fair table: the last finished one's reveal
+                # is served on demand (it is never blasted at settle).
+                reveal = engine.last_fair_reveal(chat_key)
+                if reveal:
+                    return reveal
                 return ("🔒 provably-fair tables: "
                         + ", ".join(FAIR_GAMES) + "\n"
                         "start one and the house publishes a sha256 "
-                        "commitment before the first draw — the seed is "
-                        "revealed at the end so you can verify every draw.\n"
+                        "commitment before the first draw — after the "
+                        "game, /game fair shows the seed so you can "
+                        "verify every draw.\n"
                         "/game seed <word> — set your own entropy.")
             fair = (live.state or {}).get("fair") or {}
             commit = str(fair.get("commit") or "")

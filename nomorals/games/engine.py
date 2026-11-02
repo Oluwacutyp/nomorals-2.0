@@ -59,9 +59,14 @@ def render_game_over_card(game_name: str, players: list[Player],
                 bits.append(f"{sc} pts")
             if store is not None:
                 try:
+                    from .progression import level_for_xp
+
                     prof = store.get_for(p)
                     bits.append(f"{prof.coins}c")
-                    bits.append(f"lvl {getattr(prof, 'level', 1)}")
+                    # level is DERIVED from xp (Profile has no level
+                    # field) — getattr(..., 'level', 1) pinned every
+                    # card to "lvl 1" forever.
+                    bits.append(f"lvl {level_for_xp(prof.xp)}")
                 except Exception as e:  # noqa: BLE001
                     record_failure("render_game_over_card:store_coins", e)
             if db is not None:
@@ -178,6 +183,10 @@ class GameEngine:
         self._dm_obj: Any = None  # lazy GameMaster (see dm property)
         self._forge_obj: Any = None  # lazy TriviaForge (see forge property)
         self._last_game: dict[str, tuple[str, list[Player], str]] = {}
+        # last finished fair table per chat: (game, fair fragment) —
+        # the fairness reveal is served ON DEMAND from here (/game
+        # fair), never blasted into the chat at settle time.
+        self._last_fair: dict[str, tuple[str, dict[str, Any]]] = {}
         self._register_builtins()
         self._start_scheduler()
 
@@ -1119,7 +1128,10 @@ class GameEngine:
             if (self._rooms.get(room.chat_key) is not room
                     or room.status != "active"):
                 return
-        self._finish(room, "the table closed — idle too long.")
+        # no caller waits on this finish — the engine delivers the
+        # settle itself (one joined message, as composed).
+        for text in self._finish(room, "the table closed — idle too long."):
+            self._emit(room, text)
 
     def is_over(self, room: Room) -> bool:
         """Pure check — never mutates. ``_finish`` owns the close:
@@ -1144,7 +1156,7 @@ class GameEngine:
         engine lock) to keep lock order engine → room everywhere.
         """
         with room.guard:
-            msgs, rematch_mem = self._finish_inner(room, extra)
+            msgs, rematch_mem, fair_mem = self._finish_inner(room, extra)
         with self._lock:
             self._rooms.pop(room.chat_key, None)
             self._by_id.pop(room.id, None)
@@ -1152,24 +1164,33 @@ class GameEngine:
             # are excluded — a rematch there needs a fresh invite)
             if rematch_mem is not None:
                 self._last_game[room.chat_key] = rematch_mem
+            if fair_mem is not None:
+                self._last_fair[room.chat_key] = fair_mem
         return msgs
 
     def _finish_inner(self, room: Room,
                       extra: str | None = None
-                      ) -> tuple[list[str], tuple | None]:
+                      ) -> tuple[list[str], tuple | None, tuple | None]:
         """The body of :meth:`_finish`. Caller holds ``room.guard``.
 
-        Returns (messages, rematch_memory) — the wrapper stores the
-        rematch memory under the engine lock after releasing the guard,
-        keeping lock order engine → room everywhere.
+        Returns (messages, rematch_memory, fair_memory) — the wrapper
+        stores the memories under the engine lock after releasing the
+        guard, keeping lock order engine → room everywhere.
+
+        The settle is ONE message: every finish line is composed here
+        and joined into a single text, returned — never emitted line
+        by line. Callers own delivery (the chat reply, the timeout
+        pump's emit, the idle close), so a finish reaches the chat
+        exactly once on every path.
         """
         game = self.games.get(room.game)
         if room.status == "finished":
-            return ([extra] if extra else [], None)
+            return ([extra] if extra else [], None, None)
         room.status = "finished"
         msgs: list[str] = []
         card_scores: dict[str, int] = {}
         winner_label = ""
+        fair_mem: tuple[str, dict[str, Any]] | None = None
         if extra:
             msgs.append(extra)
         if game is not None:
@@ -1178,14 +1199,18 @@ class GameEngine:
             except Exception as e:  # noqa: BLE001
                 record_failure("_finish_inner:final_message", e)
                 msgs.append("game over.")
-            # fairness reveal: the server seed is published now that the
-            # game is over, with the recipe to re-derive every draw.
+            # provably fair: the settle card carries the one-line
+            # commitment only. The full reveal (server seed + recipe)
+            # is served ON DEMAND from the retained fragment —
+            # /game fair via last_fair_reveal() — never blasted into
+            # the chat after every game.
             if room.state.get("fair") is not None:
                 try:
-                    from .fairness import reveal_block
-                    msgs.append(reveal_block(room.state["fair"]))
+                    from .fairness import commit_line
+                    fair_mem = (room.game, dict(room.state["fair"]))
+                    msgs.append(commit_line(room.state["fair"]))
                 except Exception:  # noqa: BLE001
-                    _log.debug("fair reveal failed", exc_info=True)
+                    _log.debug("fair commit line failed", exc_info=True)
             # the DM gets the last word: drain any remaining feed, then
             # narrate the finale for games that opted into one.
             # Safe wrapper: narration must never break the quit path.
@@ -1421,7 +1446,13 @@ class GameEngine:
                     msgs.append(card)
         except Exception:  # noqa: BLE001
             _log.debug("game over card failed", exc_info=True)
-        self._emit(room, *msgs)
+        # the settle leaves as ONE joined message (see docstring):
+        # record it in the room history exactly as _emit would have,
+        # then hand it to the caller as a single-element list.
+        settle = "\n".join(m for m in msgs if m)
+        if settle:
+            room.messages.append(settle[:4000])
+            room.messages = room.messages[-40:]
         # remember the table for /game rematch (relay virtual rooms are
         # excluded — a rematch there needs a fresh invite). The wrapper
         # stores this under the engine lock; we only compute it here.
@@ -1430,7 +1461,7 @@ class GameEngine:
             humans = [p for p in room.players if not p.is_ai]
             if humans:
                 rematch_mem = (room.game, humans, room.kind)
-        return msgs, rematch_mem
+        return ([settle] if settle else []), rematch_mem, fair_mem
 
     @staticmethod
     def _settle_won(game: MultiGame, room: Room, player: Player,
@@ -1483,6 +1514,34 @@ class GameEngine:
         return GameEconomy.coin_breakdown(
             won, score=score, difficulty=difficulty,
             streak_after=streak_after)
+
+    def last_fair(self, chat_key: str) -> tuple[str, dict[str, Any]] | None:
+        """The last finished fair table in this chat: (game, fragment).
+
+        The fragment is a copy — callers may render or mutate it
+        without touching the retained record.
+        """
+        mem = self._last_fair.get(chat_key)
+        if mem is None:
+            return None
+        game, fair = mem
+        return game, dict(fair)
+
+    def last_fair_reveal(self, chat_key: str) -> str | None:
+        """The on-demand fairness reveal for the last finished fair
+        table in this chat (server seed + verification recipe), or
+        None when no fair table has finished here."""
+        mem = self.last_fair(chat_key)
+        if mem is None:
+            return None
+        game, fair = mem
+        try:
+            from .fairness import reveal_block
+
+            return f"🎲 {game} — last table\n" + reveal_block(fair)
+        except Exception:  # noqa: BLE001
+            _log.debug("last fair reveal failed", exc_info=True)
+            return None
 
     def rematch(self, chat_key: str, difficulty: str = "normal",
                 ) -> tuple[Room | None, list[str]]:

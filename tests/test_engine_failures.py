@@ -283,8 +283,10 @@ def finish_room(players):
 def test_finish_final_message_failure_uses_generic_and_records():
     eng = finish_engine()
     eng.games = {"g": finish_game(final_message=raising_fn("final down"))}
-    msgs, _ = eng._finish_inner(finish_room([]))
-    assert "game over." in msgs
+    msgs, _, _ = eng._finish_inner(finish_room([]))
+    # the settle is ONE joined message since the P0 settle fix
+    assert len(msgs) == 1
+    assert "game over." in msgs[0]
     assert "_finish_inner:final_message" in sites()
 
 
@@ -298,7 +300,7 @@ def test_finish_difficulty_and_streak_fallbacks_flow_into_settlement():
     eng = finish_engine()
     eng.games = {"g": finish_game(winner=lambda room: "all",
                                   coin_payout=coin_payout)}
-    msgs, _ = eng._finish_inner(finish_room([player()]))
+    msgs, _, _ = eng._finish_inner(finish_room([player()]))
     assert "_finish_inner:difficulty" in sites()
     assert "_finish_inner:streak" in sites()
     # won=True (co-op "all") so the streak fallback is 1, not 0

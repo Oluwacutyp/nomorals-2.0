@@ -123,7 +123,7 @@ class ClientSeedTests(unittest.TestCase):
 
 
 class CasinoWiringTests(unittest.TestCase):
-    def test_blackjack_commit_before_deal_and_reveal_at_finish(self):
+    def test_blackjack_commit_before_deal_and_reveal_on_demand(self):
         engine, db, sent = make_engine()
         room, msgs = engine.start("test:bj", "blackjack", ADA, kind="dm")
         # commitment published at table open, before any card is known
@@ -133,13 +133,21 @@ class CasinoWiringTests(unittest.TestCase):
         # the deck was dealt from the committed sequence
         self.assertTrue(room.state["dealt"])
         self.assertEqual(len(room.state["player"]), 2)
-        # finish → the seed is revealed and verifies
-        engine.quit("test:bj")
-        joined = "\n".join(sent)
-        self.assertIn("fairness reveal", joined)
-        self.assertIn(room.state["fair"]["seed"], joined)
-        self.assertTrue(
-            fairness.verify(commit, room.state["fair"]["seed"]))
+        # finish → the settle is ONE message carrying the commitment
+        # line; the seed is NOT blasted into the chat (owner design:
+        # the reveal moved on demand).
+        seed = room.state["fair"]["seed"]
+        out = engine.quit("test:bj")
+        self.assertEqual(len(out), 1)
+        self.assertIn("provably fair", out[0])
+        self.assertNotIn(seed, out[0])
+        self.assertNotIn(seed, "\n".join(sent))
+        # the reveal is served on demand and verifies
+        reveal = engine.last_fair_reveal("test:bj")
+        self.assertIsNotNone(reveal)
+        self.assertIn("fairness reveal", reveal)
+        self.assertIn(seed, reveal)
+        self.assertTrue(fairness.verify(commit, seed))
 
     def test_roulette_spin_uses_fair_stream(self):
         engine, db, sent = make_engine()
