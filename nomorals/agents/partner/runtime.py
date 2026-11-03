@@ -799,6 +799,18 @@ class PartnerRuntime(
             self._harvest_play_downloads(message.chat.key, message.chat)
         except Exception as e:
             record_failure("runtime.PartnerRuntime._process_inner", e)
+        # Channel posture (owner order, 2026-11-02): a channel is a
+        # broadcast surface, not a conversation. Devon never replies in
+        # one — no commands, no catalog, no games, no persona chat, not
+        # even for the owner. Channel control happens in DM or the
+        # linked discussion group; the channel system (programming,
+        # analytics) reads posts through its own path. Ingest stops
+        # here on purpose: channel traffic must not feed the interest
+        # models, the memory, or the brain.
+        if message.chat.kind == ChatKind.CHANNEL:
+            _log.info("channel post in %s noted; channels are silent "
+                      "by posture", message.chat.key)
+            return
         # One-time login intake (armed by /provision login): the
         # owner's next message IS a password. Consumed here — before
         # the autonomy interest recorder and before the brain — so the
