@@ -153,6 +153,86 @@ class RuntimeMetaMixin:
             lines.append(format_failures(limit=5))
         return "\n".join(lines)
 
+    def _control_ping(self, message: Any = None) -> str:
+        """The life of the /ping message itself, stage by stage.
+
+        Owner spec (2026-11-01): arrival, receipt, processing,
+        inbound and sent stages plus system condition. Every number
+        comes from a real stamp — the platform timestamp on the
+        message (arrival), ``meta['received_at']`` stamped in
+        :meth:`PartnerRuntime.on_message` (receipt), and
+        ``meta['process_at']`` stamped in ``_process_inner``
+        (processing start; the gap between receipt and processing is
+        the inbound queue wait). A stage with no stamp says so —
+        nothing is estimated or invented. The sent stage is this
+        reply: it is composed now and handed to the platform the
+        moment this handler returns.
+        """
+        now = time.time()
+        meta = getattr(message, "meta", None) or {}
+        arrived = float(getattr(message, "ts", 0.0) or 0.0)
+        received = float(meta.get("received_at") or 0.0)
+        processing = float(meta.get("process_at") or 0.0)
+
+        def clock(ts: float) -> str:
+            return time.strftime("%H:%M:%S", time.localtime(ts))
+
+        def delta(a: float, b: float) -> str:
+            secs = b - a
+            if secs < 1:
+                return f"{secs * 1000:.0f}ms"
+            if secs < 90:
+                return f"{secs:.1f}s"
+            return f"{secs / 60:.1f}m"
+
+        lines = ["🏓 pong — this message's journey:"]
+        lines.append(
+            f"· arrival: {clock(arrived)} (platform stamp)"
+            if arrived else "· arrival: not stamped by the platform")
+        if received:
+            gap = (f" (+{delta(arrived, received)} in transit)"
+                   if arrived and received >= arrived else "")
+            lines.append(f"· receipt: {clock(received)}{gap}")
+        else:
+            lines.append("· receipt: not stamped")
+        if received and processing:
+            lines.append(
+                f"· inbound: {delta(received, processing)} in the queue")
+        if processing:
+            lines.append(
+                f"· processing: from {clock(processing)}, "
+                f"reply composed in {delta(processing, now)}")
+        else:
+            lines.append("· processing: not stamped")
+        total = f", {delta(arrived, now)} end to end" if arrived else ""
+        lines.append(f"· sent: this reply{total}")
+        # system condition — the same sources /status reads, compressed.
+        try:
+            running = [
+                name for name, info in self.gateway.status().items()
+                if not name.startswith("_") and isinstance(info, dict)
+                and info.get("running_in_session")
+            ]
+            platforms = ", ".join(running) if running else "none running"
+        except Exception as exc:  # noqa: BLE001 - ping must never crash
+            record_failure("runtime_meta._control_ping:platforms", exc)
+            platforms = "unknown"
+        try:
+            self.context.db.query_one("SELECT 1 AS ok")
+            db_line = "db ok"
+        except Exception as exc:  # noqa: BLE001
+            record_failure("runtime_meta._control_ping:db", exc)
+            db_line = f"db failing ({type(exc).__name__})"
+        try:
+            stats = self._stats_snapshot()
+            traffic = (f"{stats['messages']} msgs in, {stats['replies']} "
+                       f"replies, {stats['errors']} errors")
+        except Exception as exc:  # noqa: BLE001
+            record_failure("runtime_meta._control_ping:stats", exc)
+            traffic = "traffic unknown"
+        lines.append(f"condition: platforms {platforms} · {db_line} · {traffic}")
+        return "\n".join(lines)
+
     def _control_mood(self, arg: str) -> str:
         engine = self.brain.mood
         try:

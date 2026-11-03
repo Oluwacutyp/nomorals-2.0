@@ -156,7 +156,7 @@ PUBLIC_GAME_COMMANDS: tuple[str, ...] = (
 #: commands + /game + the 32 public game commands. ``/menu`` and ``/list``
 #: are NOT in here — bare /menu is a menu trigger, not a menu item.
 PUBLIC_COMMANDS: frozenset[str] = frozenset([
-    "help", "search", "news", "book", "music", "play", "video", "podcast",
+    "help", "ping", "search", "news", "book", "music", "play", "video", "podcast",
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
     "game",
@@ -216,6 +216,7 @@ def caller_may_run(kind: str, is_owner: bool) -> bool:
 CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "help": (0, 1),
     "status": (0, 0),
+    "ping": (0, 0),
     "platforms": (0, 0),
     "start": (1, 1),
     "stop": (1, 1),
@@ -1301,6 +1302,9 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "status": {"what": "her live state — platforms, model budget, active goals, loop cadence.",
                "usage": "/status", "example": "/status",
                "related": "/platforms /benchmark"},
+    "ping": {"what": "the life of this very message — when it arrived, when she took it in, when processing started, how long the reply took — plus her system condition.",
+             "usage": "/ping", "example": "/ping",
+             "related": "/status /platforms"},
     "platforms": {"what": "which chat platforms are running in this session.",
                   "usage": "/platforms", "example": "/platforms",
                   "related": "/start /stop"},
@@ -2404,7 +2408,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
 
 #: The catalog's groups — every registered command must appear in one.
 _HELP_GROUPS: list[tuple[str, list[str]]] = [
-    ("her day", ["status", "platforms", "proposals", "approve", "deny",
+    ("her day", ["status", "ping", "platforms", "proposals", "approve", "deny",
                  "mood", "stage", "model", "providers", "say", "power", "quit",
                  "mode", "agent", "mind", "pulse"]),
     ("search & research", ["search", "searchdeep", "searchleads",
@@ -2659,7 +2663,7 @@ def _public_no_help_page(t: str) -> str:
 #: (COMMAND_DETAILS already carries richer pages; /list stays scannable.)
 LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("her day — state & control",
-     ["status", "platforms", "mood", "stage", "model", "providers", "say", "power",
+     ["status", "ping", "platforms", "mood", "stage", "model", "providers", "say", "power",
       "proposals", "approve", "deny", "start", "stop", "quit",
       "mode", "agent", "chatmode", "style", "doctor", "profile", "mind",
       "spend", "budget", "spending", "mandate", "balances", "goal",
@@ -2758,6 +2762,7 @@ _LIST_GROUP_ALIASES = {
 #: by construction.
 LIST_ONELINERS: dict[str, str] = {
     "status": "her live state — platforms, budget, goals, loop",
+    "ping": "this message's journey — arrival → receipt → processing → sent, plus her condition",
     "platforms": "which chat platforms are running",
     "mood": "set or read her mood (label or dim=NN)",
     "stage": "relationship stage (committed|dating|…)",

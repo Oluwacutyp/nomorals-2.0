@@ -564,6 +564,13 @@ class PartnerRuntime(
         release_thread_connection(getattr(self.context, "db", None))
 
     def on_message(self, message: ChatMessage) -> None:
+        # /ping stage stamp: the moment the runtime took this message
+        # in (receipt). The platform's own timestamp on the message is
+        # the arrival stage; _process stamps the processing stage.
+        try:
+            message.meta["received_at"] = time.time()
+        except Exception as e:  # noqa: BLE001 - a stamp must never break intake
+            record_failure("runtime.PartnerRuntime.on_message:stamp", e)
         key = message.chat.key
         with self._queue_guard:
             queue = self._queues.setdefault(key, deque())
@@ -778,6 +785,11 @@ class PartnerRuntime(
         self._process_inner(message)
 
     def _process_inner(self, message: ChatMessage) -> None:
+        # /ping stage stamp: processing starts now (after any queue wait).
+        try:
+            message.meta["process_at"] = time.time()
+        except Exception as e:  # noqa: BLE001 - a stamp must never break intake
+            record_failure("runtime.PartnerRuntime._process_inner:stamp", e)
         self._bump("messages")
         # Background /play + /download jobs: surface any that died in
         # this chat without reporting (crashed worker, heartbeat
@@ -3532,6 +3544,9 @@ class PartnerRuntime(
 
         if kind == "status":
             return self._control_status()
+
+        if kind == "ping":
+            return self._control_ping(message)
 
         if kind == "platforms":
             lines = ["platforms:"]
