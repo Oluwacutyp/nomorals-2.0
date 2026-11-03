@@ -279,12 +279,26 @@ class GameRelay:
             raise
         # seat the second player alongside the inviter: mirror their
         # snapshots first (inventory/gear/skills/progression), then let
-        # the game build their seat via on_join
+        # the game build their seat via on_join. When the starter room
+        # is already full, the invitee takes the AI seat — duel games
+        # seat a House player for solo play (connect4, battleship),
+        # and a relayed duel is two humans, exactly as a group join
+        # replaces the House. Appending past a full table instead
+        # left the House in seat 2: the AI kept taking the invitee's
+        # turns and the invitee's own moves landed as the wrong side.
         with room.guard:
             if room.player(to_player.key) is None:
+                game = self.engine.games.get(game_name)
+                if game is not None \
+                        and len(room.players) >= game.max_players:
+                    ai = next((p for p in room.players if p.is_ai), None)
+                    if ai is not None:
+                        room.players = [
+                            p for p in room.players if p.key != ai.key]
+                        if room.turn >= len(room.players):
+                            room.turn = 0
                 room.players.append(to_player)
                 self.engine._mirror_player(room, to_player)
-                game = self.engine.games.get(game_name)
                 if game is not None:
                     try:
                         game.on_join(room, to_player,

@@ -541,23 +541,63 @@ class TicTacToeGame(MultiGame):
             rows.append(" | ".join(cells))
         return "  " + "\n  ".join(rows)
 
+    @staticmethod
+    def _seat_mark(room: Room, player: Player) -> str | None:
+        """The mark a seat plays: seat 0 is X, seat 1 is O."""
+        for i, seated in enumerate(room.players):
+            if seated.key == player.key:
+                return "X" if i == 0 else "O"
+        return None
+
+    def _duel_move(self, room: Room, p: Player, text: str) -> list[str]:
+        """Two-human tic-tac-toe (relay duels, group tables): each
+        seat plays its own mark and nobody plays for the other side
+        — the solo flow's built-in house reply must NOT fire."""
+        s = room.state
+        if s["over"]:
+            return ["the board is done."]
+        mark = self._seat_mark(room, p)
+        if mark is None:
+            return ["you're not at this table."]
+        if s["turn"] != mark:
+            return [f"waiting on {'X' if mark == 'O' else 'O'}."]
+        idx = self._parse_square(text)
+        if idx is None or not 0 <= idx <= 8:
+            return ["a square 1–9."]
+        if s["board"][idx]:
+            return [f"square {idx+1} is taken."]
+        s["board"][idx] = mark
+        s["moves"] += 1
+        glyph = "❌" if mark == "X" else "⭕"
+        out = [f"{p.name} takes {idx+1} {glyph}.", self._board_text(room)]
+        if self._finish(room):
+            return out
+        s["turn"] = "O" if mark == "X" else "X"
+        return out
+
+    @staticmethod
+    def _parse_square(text: str) -> int | None:
+        t = text.strip().lower()
+        m = re.match(r"^(\d)$", t)
+        if m:
+            return int(m.group(1)) - 1
+        if t in {"c", "center", "5"}:
+            return 4
+        if t in {"c1", "1"}:
+            return 0
+        if t in {"c3", "3"}:
+            return 8
+        return None
+
     def _human_move(self, room: Room, p: Player, text: str) -> list[str]:
         s = room.state
+        if len(room.humans) >= 2:
+            return self._duel_move(room, p, text)
         if s["over"]:
             return ["the board is done."]
         if s["turn"] != "X":
             return ["the house is thinking."]
-        t = text.strip().lower()
-        idx = None
-        m = re.match(r"^(\d)$", t)
-        if m:
-            idx = int(m.group(1)) - 1
-        elif t in {"c", "center", "5"}:
-            idx = 4
-        elif t in {"c1", "1"} and idx is None:
-            idx = 0
-        elif t in {"c3", "3"} and idx is None:
-            idx = 8
+        idx = self._parse_square(text)
         if idx is None or not 0 <= idx <= 8:
             return ["a square 1–9."]
         if s["board"][idx]:
@@ -580,17 +620,23 @@ class TicTacToeGame(MultiGame):
     def _finish(self, room: Room) -> bool:
         s = room.state
         w = _ttt_win(tuple(s["board"]))
+        duel = len(room.humans) >= 2
         if w:
             s["over"] = True
             s["winner"] = w
-            out = "🏁 " + ("you win. the legend is true."
-                           if w == "X" else "the house wins. perfect play.")
-            s["msg"] = out
+            if duel:
+                victor = room.players[0] if w == "X" else room.players[1]
+                s["msg"] = f"🏁 {victor.name} wins."
+            else:
+                s["msg"] = "🏁 " + (
+                    "you win. the legend is true." if w == "X"
+                    else "the house wins. perfect play.")
             return True
         if all(s["board"]):
             s["over"] = True
             s["winner"] = "draw"
-            s["msg"] = "🏁 a draw — the best the perfect house allows."
+            s["msg"] = ("🏁 a draw." if duel else
+                        "🏁 a draw — the best the perfect house allows.")
             return True
         return False
 
@@ -612,12 +658,23 @@ class TicTacToeGame(MultiGame):
         if s.get("winner") == "X":
             humans = [p for p in room.players if not p.is_ai]
             return humans[0] if humans else None
+        # O: in a duel the second seat is a human, not the house.
+        if len(room.players) > 1 and not room.players[1].is_ai:
+            return room.players[1]
         return Player(key="ai:ttt", platform="ai", name="The House",
                       is_ai=True)
 
     def score(self, room, player):
         s = room.state
         if player.is_ai:
+            return 0
+        if len(room.humans) >= 2:
+            # duel: only the winning seat scores the win
+            mark = self._seat_mark(room, player)
+            if s.get("winner") == "draw":
+                return 15
+            if mark is not None and s.get("winner") == mark:
+                return 50
             return 0
         if s.get("winner") == "X":
             # beating the perfect house (normal+) is legendary; on easy

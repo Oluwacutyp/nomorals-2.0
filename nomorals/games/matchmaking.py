@@ -45,8 +45,16 @@ __all__ = [
 
 #: games the queue will match: verified true 1v1 human tables (each
 #: human plays their own side — most board games are human-side vs
-#: house-side, so they can't host a real duel).
-QUEUE_GAMES = ("pvp", "connect4")
+#: house-side, so they can't host a real duel). Every entry here is
+#: proven by tests/test_cross_platform_match.py: paired across
+#: platforms, moves relayed both ways with the right side to move,
+#: no house seat playing, ranked finish recording both ratings.
+#: ttt earned its place by growing a real two-human mode (its solo
+#: flow plays the house reply inside the human's move). reversi,
+#: gomoku and checkers were tested 2026-11-02 and FAILED that proof
+#: (human-side vs house-side on_move) — they join this list one at a
+#: time as each grows a two-human mode, never before.
+QUEUE_GAMES = ("pvp", "connect4", "ttt")
 
 #: games whose 1v1 human finishes move ELO (a superset of the queue).
 RANKED_GAMES = QUEUE_GAMES
