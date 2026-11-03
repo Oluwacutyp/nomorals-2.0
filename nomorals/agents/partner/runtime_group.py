@@ -71,6 +71,7 @@ class RuntimeGroupMixin:
                     welcomed.append(text)
             for text in welcomed:
                 self._send(message.chat, text)
+            self._clean_service_message(surface, message)
             return True
         if service == "leave":
             left = meta.get("left_member") or {}
@@ -80,6 +81,7 @@ class RuntimeGroupMixin:
                     group_name=str(message.chat.title or ""))
                 if text:
                     self._send(message.chat, text)
+            self._clean_service_message(surface, message)
             return True
 
         user_id = str(message.sender_id or message.sender or "")
@@ -109,6 +111,231 @@ class RuntimeGroupMixin:
             if kind in ("delete", "ban") and executed:
                 consumed = True
         return consumed
+
+    def _clean_service_message(self, surface, message) -> None:  # type: ignore[no-untyped-def]
+        """Service-message hygiene (P1): the raw "X joined the
+        group" service message is deleted after the surface has
+        handled it — the welcome is the visible artifact, the
+        platform's own notice is clutter.  Setting-gated,
+        best-effort, audited on success."""
+        try:
+            settings = surface.store.settings(message.chat.key)
+            if not settings.get("clean_service"):
+                return
+            if not message.message_id:
+                return
+            adapter = self._group_adapter(message.chat.platform)
+            fn = getattr(adapter, "admin_delete", None) \
+                if adapter else None
+            if fn is None:
+                return
+            fn(message.chat, str(message.message_id))
+            surface._audit(message.chat.key, "service_cleaned",
+                           message_id=str(message.message_id))
+            surface.store.save()
+        except Exception:  # noqa: BLE001 - hygiene never breaks joins
+            _log.debug("group service cleanup failed", exc_info=True)
+
+    # ---- admin gate ------------------------------------------------
+    def _group_admin_ok(self, message) -> bool:  # type: ignore[no-untyped-def]
+        """Operator (on surfaces where operator power exists) OR
+        the platform's own word that this sender admins the group.
+        On the gated public bot nobody is an operator — surface law
+        — so platform admin status is the authority there, exactly
+        how group-helper bots work."""
+        try:
+            if self._is_operator(message):
+                return True
+        except Exception:  # noqa: BLE001 - fall to platform check
+            pass
+        adapter = self._group_adapter(message.chat.platform)
+        if adapter is None:
+            return False
+        fn = getattr(adapter, "admin_member", None) or getattr(
+            adapter, "admin_member_mtproto", None)
+        if fn is None:
+            return False
+        try:
+            info = fn(message.chat, str(message.sender_id or ""))
+        except Exception:  # noqa: BLE001 - no proof, no admin
+            return False
+        if not isinstance(info, dict):
+            return False
+        status = info.get("status") or info.get("role") or ""
+        if not status and isinstance(info.get("result"), dict):
+            status = info["result"].get("status") or ""
+        return str(status).lower() in (
+            "creator", "administrator", "admin", "owner")
+
+    # ---- group commands (P1 slice 2) --------------------------------
+    def _control_group_help(self, message) -> str:  # type: ignore[no-untyped-def]
+        """Bare /help INSIDE a group (owner order 2026-11-03):
+        list what is actually available in this group — the member
+        surface and the admin surface side by side, rendered from
+        this group's live state, not the global owner catalog.
+        Everyone sees both sections; the admin commands themselves
+        stay gated at execution."""
+        key = message.chat.key
+        surface = self._group_surface()
+        settings = surface.store.settings(key)
+        members = surface.members(key)
+        title = message.chat.title or "this group"
+        lines = [
+            f"🛠️ {title} — what I do here",
+            "",
+            "for everyone:",
+            "  /rules — the group rules",
+            "  /member [@name] — a member's card: tenure, activity, "
+            "username/name changes",
+            "  /ping — check I'm alive, and how fast I answered",
+            "  🎮 games — /ttt /connect4 /reversi /checkers /mines "
+            "and the rest of the board; /game lists them, moves are "
+            "plain text (a1, b2 …). Some games queue you against "
+            "players on other platforms.",
+            "  /help <command> — the full page for any command",
+            "",
+            "for admins:",
+            "  /gsettings — welcome & goodbye, the rules list, "
+            "flood/link moderation, service-message cleanup",
+            "  /glog — the group audit log (I keep it; I only show "
+            "it when an admin asks)",
+            "  I moderate on my own: floods, repeat spam and "
+            "off-allowlist links get deleted; repeat offenders are "
+            "muted, then banned — all tuned in /gsettings.",
+            "",
+            f"this group: {len(members)} members in my ledger · "
+            f"{len(settings.get('rules') or [])} rules · welcome "
+            f"{'on' if settings['welcome_enabled'] else 'off'} · "
+            f"link moderation "
+            f"{'allowlist' if (settings['moderation'].get('link_allowlist')) else 'open'}",
+        ]
+        return "\n".join(lines)
+
+    def _group_key_or_none(self, message):  # type: ignore[no-untyped-def]
+        if message is None:
+            return None
+        from ...social.chat.base import ChatKind
+
+        if message.chat.kind != ChatKind.GROUP:
+            return None
+        return message.chat.key
+
+    def _control_rules(self, message) -> str:  # type: ignore[no-untyped-def]
+        key = self._group_key_or_none(message)
+        if key is None:
+            return "that's a group command — run it inside the group."
+        return self._group_surface().rules_text(key)
+
+    def _control_member(self, arg, message) -> str:  # type: ignore[no-untyped-def]
+        key = self._group_key_or_none(message)
+        if key is None:
+            return "that's a group command — run it inside the group."
+        surface = self._group_surface()
+        members = surface.members(key)
+        target = None
+        wanted = str(arg or "").strip().lstrip("@").lower()
+        if wanted:
+            for uid, member in members.items():
+                if uid == wanted or str(
+                        member.get("username") or "").lower() == wanted \
+                        or str(member.get("name") or "").lower() == wanted:
+                    target = member
+                    break
+            if target is None:
+                return (f"I haven't seen {arg} in this group yet — "
+                        f"the ledger only knows people who've been "
+                        f"active or joined since I started watching.")
+        else:
+            target = members.get(str(message.sender_id or ""))
+            if target is None:
+                return "I don't have a card for you in this group yet."
+        return _member_card(surface, key, target)
+
+    def _control_glog(self, arg, message) -> str:  # type: ignore[no-untyped-def]
+        key = self._group_key_or_none(message)
+        if key is None:
+            return "that's a group command — run it inside the group."
+        if not self._group_admin_ok(message):
+            return "the group log is for admins."
+        try:
+            n = int(str(arg or "10").strip() or 10)
+        except ValueError:
+            n = 10
+        entries = self._group_surface().audit(key, limit=max(1, min(n, 50)))
+        if not entries:
+            return "nothing in the group log yet."
+        lines = ["📋 group log (held by me, shown on demand):"]
+        for entry in entries:
+            lines.append(_audit_line(entry))
+        return "\n".join(lines)
+
+    def _control_gsettings(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        key = self._group_key_or_none(message)
+        if key is None:
+            return "that's a group command — run it inside the group."
+        if not self._group_admin_ok(message):
+            return "group settings are for admins."
+        surface = self._group_surface()
+        text = str(tail or "").strip()
+        if not text:
+            s = surface.store.settings(key)
+            mod = s["moderation"]
+            return (
+                f"⚙️ group settings\n"
+                f"welcome: {'on' if s['welcome_enabled'] else 'off'} · "
+                f"goodbye: {'on' if s['goodbye_enabled'] else 'off'} · "
+                f"service cleanup: {'on' if s['clean_service'] else 'off'}\n"
+                f"rules: {len(s.get('rules') or [])} · "
+                f"flood: {mod['flood_max']} per "
+                f"{int(mod['flood_window_s'])}s · repeats ×"
+                f"{mod['repeat_threshold']} · links: "
+                f"{', '.join(mod.get('link_allowlist') or []) or 'open'}\n"
+                f"change: /gsettings welcome on|off · rules add "
+                f"<text> · rules clear · flood <n> · links "
+                f"<domains>|off · clean on|off")
+        parts = text.split(None, 2)
+        head = parts[0].lower()
+        rest = parts[1] if len(parts) > 1 else ""
+        rest2 = parts[2] if len(parts) > 2 else ""
+        on = rest.lower() == "on"
+        if head == "welcome" and rest.lower() in ("on", "off"):
+            surface.update_settings(key, welcome_enabled=on)
+            return f"welcome {'on' if on else 'off'}."
+        if head == "goodbye" and rest.lower() in ("on", "off"):
+            surface.update_settings(key, goodbye_enabled=on)
+            return f"goodbye {'on' if on else 'off'}."
+        if head == "clean" and rest.lower() in ("on", "off"):
+            surface.update_settings(key, clean_service=on)
+            return f"service cleanup {'on' if on else 'off'}."
+        if head == "rules" and rest.lower() == "add" and rest2:
+            current = surface.store.settings(key)
+            rules = list(current.get("rules") or []) + [rest2]
+            surface.update_settings(key, rules=rules)
+            return f"rule added ({len(rules)} total)."
+        if head == "rules" and rest.lower() == "clear":
+            surface.update_settings(key, rules=[])
+            return "rules cleared."
+        if head == "flood" and rest.isdigit():
+            current = surface.store.settings(key)
+            mod = dict(current["moderation"])
+            mod["flood_max"] = max(2, int(rest))
+            surface.update_settings(key, moderation=mod)
+            return f"flood limit {mod['flood_max']} per window."
+        if head == "links":
+            current = surface.store.settings(key)
+            mod = dict(current["moderation"])
+            if rest.lower() == "off" or not rest:
+                mod["link_allowlist"] = []
+                surface.update_settings(key, moderation=mod)
+                return "links open (no allowlist)."
+            domains = [d.strip().lower() for d in
+                       (rest + " " + rest2).replace(",", " ").split()
+                       if d.strip()]
+            mod["link_allowlist"] = domains
+            surface.update_settings(key, moderation=mod)
+            return f"link allowlist: {', '.join(domains)}."
+        return ("I didn't follow that — /gsettings alone shows the "
+                "current settings and the change grammar.")
 
     def _execute_group_action(self, surface, key, adapter, message,
                               action) -> bool:  # type: ignore[no-untyped-def]
@@ -154,3 +381,45 @@ class RuntimeGroupMixin:
                        rule=action.get("rule"), user_id=user_id)
         surface.store.save()
         return True
+
+
+def _fmt_ts(ts) -> str:
+    try:
+        return time.strftime("%Y-%m-%d %H:%M UTC",
+                             time.gmtime(float(ts)))
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _member_card(surface, key: str, member: dict) -> str:
+    name = member.get("name") or member.get("username") or "member"
+    handle = (f"@{member['username']}" if member.get("username")
+              else "no username")
+    lines = [f"👤 {name} ({handle})"]
+    joined = member.get("joined_ts") or member.get("first_seen")
+    lines.append(f"joined: {_fmt_ts(joined)} · messages: "
+                 f"{member.get('message_count') or 0} · last seen: "
+                 f"{_fmt_ts(member.get('last_seen'))}")
+    if member.get("left_ts"):
+        lines.append(f"left: {_fmt_ts(member['left_ts'])}")
+    changes = [c for c in surface.changes(key, limit=200)
+               if c.get("user_id") == member.get("user_id")]
+    for change in changes[-3:]:
+        lines.append(
+            f"{change.get('kind', 'changed')}: "
+            f"{change.get('old') or '—'} → {change.get('new') or '—'} "
+            f"({_fmt_ts(change.get('ts'))})")
+    return "\n".join(lines)
+
+
+def _audit_line(entry: dict) -> str:
+    kind = entry.get("kind", "?")
+    bits = [_fmt_ts(entry.get("ts")), kind]
+    for field_name in ("action", "rule", "user_id", "change_kind",
+                       "reason"):
+        if entry.get(field_name):
+            bits.append(f"{field_name}={entry[field_name]}")
+    if entry.get("old") or entry.get("new"):
+        bits.append(f"{entry.get('old') or '—'} → "
+                    f"{entry.get('new') or '—'}")
+    return " · ".join(str(b) for b in bits)

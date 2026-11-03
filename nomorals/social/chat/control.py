@@ -159,6 +159,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "help", "ping", "search", "news", "book", "music", "play", "video", "podcast",
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
+    "rules", "member", "glog", "gsettings",
     "game",
     *PUBLIC_GAME_COMMANDS,
 ])
@@ -433,6 +434,10 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "connectors": (0, 2),   # /connectors [list|status|connect] [name] — manage the service connectors
     "provision": (0, None),  # /provision [service] | login <service> <username> — Devon fetches missing API keys herself (owner only)
     "pair": (0, None),        # /pair [whatsapp <number> [label]|code|start|stop|restart|remove <id>] — pairing-with-code account pool (§15; owner only)
+    "rules": (0, 0),          # /rules — this group's rules, rendered from the settings the enforcer reads (P1)
+    "member": (0, 1),         # /member [@name] — group member card: tenure, activity, identity changes (P1)
+    "glog": (0, 1),           # /glog [n] — the group's held audit log (admins; P1)
+    "gsettings": (0, None),   # /gsettings [welcome|goodbye|clean on|off|rules add|clear|flood <n>|links ...] — group settings (admins; P1)
     "notion": (0, None),      # /notion dbs|query|add — Notion reads + page writes
     "gcal": (0, None),        # /gcal [agenda] | add — Google Calendar
     "trello": (0, None),      # /trello boards|lists|cards|add — Trello
@@ -2020,6 +2025,22 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/pair | /pair whatsapp <number> [label] | /pair code <id> | /pair start|stop|restart|remove <id>",
             "example": "/pair whatsapp 2348012345678 main",
             "related": "/provision /connectors"},
+    "rules": {"what": "this group's rules — rendered live from the same settings the moderation enforcer reads, so what you see is what's enforced.",
+            "usage": "/rules",
+            "example": "/rules",
+            "related": "/gsettings /member"},
+    "member": {"what": "a group member's card: when they joined, how active they are, and their username/name changes as Devon noticed them. No argument = your own card.",
+            "usage": "/member [@name]",
+            "example": "/member @ada",
+            "related": "/rules /glog"},
+    "glog": {"what": "the group's audit log — moderation actions, joins, identity changes — held by Devon and shown on demand to group admins. Never posted on its own.",
+            "usage": "/glog [n]",
+            "example": "/glog 10",
+            "related": "/gsettings /member"},
+    "gsettings": {"what": "this group's settings: welcome and goodbye switches, service-message cleanup, the rules list, flood limit, link allowlist. Group admins only — Devon checks your platform admin status.",
+            "usage": "/gsettings | /gsettings welcome on|off | /gsettings rules add <text> | /gsettings rules clear | /gsettings flood <n> | /gsettings links <domains>|off",
+            "example": "/gsettings rules add No spam",
+            "related": "/rules /glog"},
     "notion": {"what": "Notion: list databases, query rows, create pages — through your connected Notion integration.",
             "usage": "/notion dbs [query] | /notion query <db> [text] | /notion add <page-id> <title> [| <body>]",
             "example": "/notion add <page-id> Shopping list | milk | eggs",
@@ -2450,7 +2471,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("media system", ["music", "distribute", "play", "video", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
                       "download", "shorts", "caption", "imggen", "sham", "musicnote"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
-    ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "notion",
+    ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "pair", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "desk", "apk", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
@@ -2460,6 +2481,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("platform control", ["start", "stop", "profile", "chatmode", "style",
                           "doctor",
                           "update", "pull", "deploy", "restart"]),
+    ("groups & communities", ["rules", "member", "glog", "gsettings"]),
     ("discovery", ["list", "commands", "menu", "help", "tour", "heal"]),
 ]
 
@@ -2710,11 +2732,13 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["schedule", "db", "artifact", "api", "proxy", "toolhub", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "desk", "apk", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
-      "connectors", "provision", "notion", "gcal", "trello", "exness", "stripe",
+      "connectors", "provision", "pair", "notion", "gcal", "trello", "exness", "stripe",
       "guardrails", "content",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
     ("platform control — updates & restarts",
      ["update", "pull", "deploy", "restart"]),
+    ("groups & communities",
+     ["rules", "member", "glog", "gsettings"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
@@ -2731,6 +2755,7 @@ _GROUP_EMOJI = {
     "voice & vision": "🎙️",
     "tools & automation": "⚙️",
     "platform control — updates & restarts": "🔄",
+    "groups & communities": "👥",
     "discovery": "🧭",
 }
 

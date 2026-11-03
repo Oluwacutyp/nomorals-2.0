@@ -61,6 +61,9 @@ def _default_settings() -> dict[str, Any]:
         "welcome_enabled": True,
         "welcome_text": "",
         "goodbye_enabled": False,
+        "clean_service": True,          # delete raw join/leave
+                                        # service messages after
+                                        # handling (hygiene, §P1)
         "rules": [],
         "captcha_mode": "off",          # off | button (P1 wiring
                                         # of CaptchaGate lands with

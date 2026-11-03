@@ -11,6 +11,7 @@ unexecuted, never faked.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
 
@@ -120,6 +121,9 @@ class _Chat:
     title = "Builders"
     key = KEY
 
+    from nomorals.social.chat.base import ChatKind as _CK
+    kind = _CK.GROUP
+
 
 class _Msg:
     def __init__(self, **kw):
@@ -133,8 +137,9 @@ class _Msg:
 
 
 class _Adapter:
-    def __init__(self):
+    def __init__(self, admin_ids=()):
         self.calls = []
+        self.admin_ids = set(admin_ids)
 
     def admin_delete(self, chat, message_id):
         self.calls.append(("delete", message_id))
@@ -147,6 +152,11 @@ class _Adapter:
     def admin_restrict(self, chat, user_id, *, until=0, **kw):
         self.calls.append(("restrict", user_id, until))
         return {"ok": True}
+
+    def admin_member(self, chat, user_id):
+        status = ("administrator" if user_id in self.admin_ids
+                  else "member")
+        return {"ok": True, "result": {"status": status}}
 
 
 class _Gateway:
@@ -169,6 +179,9 @@ class _Runtime(RuntimeGroupMixin):
 
     def _send(self, chat, text):
         self.sent.append(text)
+
+    def _is_operator(self, message):
+        return False
 
     def turn(self, msg):
         return self._group_surface_turn(msg)
@@ -217,6 +230,91 @@ def test_runtime_unexecutable_action_is_audited_not_faked(tmp_path):
     surface2 = default_surface(str(tmp_path))
     kinds = [a["kind"] for a in surface2.audit(KEY)]
     assert "moderation_unexecuted" in kinds
+
+
+def test_group_commands_registered_public():
+    from nomorals.social.chat.control import (
+        CONTROL_COMMANDS,
+        caller_may_run,
+        parse_control,
+    )
+
+    for kind in ("rules", "member", "glog", "gsettings"):
+        assert kind in CONTROL_COMMANDS
+        assert caller_may_run(kind, is_owner=False)
+    assert parse_control("/rules").kind == "rules"
+    assert parse_control("/gsettings flood 5").kind == "gsettings"
+
+
+def test_runtime_rules_member_glog_gsettings(tmp_path):
+    adapter = _Adapter(admin_ids={"7"})
+    rt = _Runtime(tmp_path, adapter)
+    admin = _Msg(sender_id="7")
+    member_msg = _Msg(sender_id="8", sender="Bo",
+                      sender_username="bo")
+    # seed activity + an identity change for member 8
+    rt.turn(_Msg(sender_id="8", sender="Bo", sender_username="bo",
+                 text="hello", message_id="1"))
+    rt.turn(_Msg(sender_id="8", sender="Bo", sender_username="bo2",
+                 text="again", message_id="2"))
+    # /rules is open to everyone in the group
+    out = rt._control_rules(member_msg)
+    assert "Group rules" in out
+    # /member card shows the change
+    card = rt._control_member("@bo2", member_msg)
+    assert "username_changed" in card and "bo → bo2" in card
+    # /gsettings + /glog are admin-gated by platform status
+    assert "admins" in rt._control_gsettings("", member_msg)
+    assert "admins" in rt._control_glog("", member_msg)
+    assert "welcome" in rt._control_gsettings("", admin)
+    assert "rule added" in rt._control_gsettings(
+        "rules add No spam", admin)
+    assert "No spam" in rt._control_rules(member_msg)
+    log = rt._control_glog("", admin)
+    assert "identity_change" in log or "join" in log or "moderation" \
+        in log or "group log" in log
+
+
+def test_service_message_cleaned_after_join(tmp_path):
+    adapter = _Adapter()
+    rt = _Runtime(tmp_path, adapter)
+    msg = _Msg(meta={"service": "join", "new_members": [
+        {"id": "7", "username": "ada", "name": "Ada"}]},
+        message_id="77")
+    assert rt.turn(msg) is True
+    assert ("delete", "77") in adapter.calls
+    # setting off: no cleanup
+    from nomorals.social.chat.group_surface import default_surface
+
+    default_surface(str(tmp_path)).update_settings(
+        KEY, clean_service=False)
+    rt2 = _Runtime(tmp_path, adapter)
+    rt2.turn(_Msg(meta={"service": "join", "new_members": [
+        {"id": "9", "username": "cy", "name": "Cy"}]},
+        message_id="78"))
+    assert ("delete", "78") not in adapter.calls
+
+
+def test_group_help_lists_member_and_admin_surfaces(tmp_path):
+    adapter = _Adapter(admin_ids={"7"})
+    rt = _Runtime(tmp_path, adapter)
+    msg = _Msg(sender_id="8", sender="Bo", sender_username="bo")
+    rt.turn(_Msg(sender_id="8", sender="Bo", sender_username="bo",
+                 text="hi", message_id="1"))
+    text = rt._control_group_help(msg)
+    # member surface
+    assert "/rules" in text and "/member" in text and "/ping" in text
+    assert "games" in text
+    # admin surface is listed for everyone (gated at execution)
+    assert "/gsettings" in text and "/glog" in text
+    assert "for admins:" in text
+    # rendered from live state: 1 ledger member, 0 rules, welcome on
+    assert "1 members in my ledger" in text
+    assert "0 rules" in text and "welcome on" in text
+    # the runtime's /help branch routes group chats here
+    src = (Path(__file__).resolve().parent.parent
+           / "nomorals/agents/partner/runtime.py").read_text()
+    assert "_control_group_help(message)" in src
 
 
 def test_bot_api_convert_maps_join(tmp_path):

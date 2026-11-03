@@ -3586,6 +3586,13 @@ class PartnerRuntime(
             if platform in ("whatsapp", "wa") and not (arg or command.tail):
                 from ...social.chat.control import help_menu
                 return help_menu("whatsapp")
+            # Bare /help inside a GROUP lists what is available in
+            # that group — member and admin surfaces alike, from the
+            # group's live state (owner order 2026-11-03).  A topic
+            # still gets its full command page.
+            if not (arg or command.tail) \
+                    and self._group_key_or_none(message) is not None:
+                return self._control_group_help(message)
             return detailed_help(arg or command.tail,
                                  public_only=is_gated_surface(platform))
 
@@ -3626,6 +3633,22 @@ class PartnerRuntime(
 
         if kind == "ping":
             return self._control_ping(message)
+
+        if kind == "pair":
+            return self._control_pair(command.tail, chat_key=chat_key,
+                                      message=message)
+
+        if kind == "rules":
+            return self._control_rules(message)
+
+        if kind == "member":
+            return self._control_member(arg, message)
+
+        if kind == "glog":
+            return self._control_glog(arg, message)
+
+        if kind == "gsettings":
+            return self._control_gsettings(command.tail, message)
 
         if kind == "platforms":
             lines = ["platforms:"]
