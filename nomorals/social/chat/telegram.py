@@ -959,6 +959,43 @@ class TelegramAdapter(ChatAdapter):
                         return
                     await self._handle_inbound(event, client, handler, allow_check=False)
 
+                # Defense evidentiary feeds (brief §2.1): MTProto
+                # is the ONLY Telegram surface that can see edits
+                # and deletions at all — the Bot API has no such
+                # events.  Both feed the group surface's
+                # antidelete/antiedit sensors.
+                @client.on(events.MessageEdited())
+                async def on_edited(event: Any) -> None:
+                    try:
+                        event._devon_edited = True
+                    except Exception:  # noqa: BLE001 - marker is
+                        pass              # best-effort
+                    await self._handle_inbound(
+                        event, client, handler, allow_check=True)
+
+                @client.on(events.MessageDeleted())
+                async def on_deleted(event: Any) -> None:
+                    chat_id = str(getattr(event, "chat_id", "")
+                                  or "")
+                    deleted = [str(d) for d in
+                               (getattr(event, "deleted_ids", None)
+                                or [])]
+                    if not chat_id.startswith("-") or not deleted:
+                        return  # groups/channels only; a DM
+                        # deletion is not the surface's business
+                    _log.info("telegram: %d message(s) deleted in "
+                              "%s", len(deleted), chat_id)
+                    handler(ChatMessage(
+                        chat=ChatRef(platform=self.name,
+                                     chat_id=chat_id,
+                                     kind=ChatKind.GROUP,
+                                     title=""),
+                        incoming=True, text="", sender="",
+                        sender_id="",
+                        meta={"service": "delete",
+                              "deleted_ids": deleted,
+                              "envelope": None}))
+
                 await client.run_until_disconnected()
             finally:
                 try:
@@ -1409,6 +1446,12 @@ class TelegramAdapter(ChatAdapter):
                         "id": str(getattr(_action, "user_id", "")
                                   or ""),
                         "username": "", "name": ""}}
+        # Defense envelope (brief §1.3) + the antiedit marker when
+        # this delivery is an edit event (see the MessageEdited
+        # registration in the connect loop).
+        service_meta["envelope"] = _mtproto_envelope(message, text)
+        if getattr(event, "_devon_edited", False):
+            service_meta["edited"] = True
         handler_msg = ChatMessage(
             chat=ChatRef(
                 platform=self.name,
@@ -2044,6 +2087,252 @@ def _chunk_text(text: str, limit: int) -> list[str]:
     return chunks
 
 
+def _bot_message_envelope(msg: dict[str, Any], text: str
+                          ) -> dict[str, Any]:
+    """The defense envelope (brief §1.3) from a raw Bot API
+    message: entities + resolved text_mention ids, media
+    metadata, forward origin, reply-chain depth.  @username
+    mentions stay unresolved (counted via entities) — inventing
+    ids for them would be fabrication."""
+    entities: list[dict[str, Any]] = []
+    mentions: list[str] = []
+    raw_entities = msg.get("entities") or msg.get("caption_entities") \
+        or []
+    if isinstance(raw_entities, list):
+        for ent in raw_entities:
+            if not isinstance(ent, dict):
+                continue
+            entry: dict[str, Any] = {
+                "type": str(ent.get("type") or ""),
+                "offset": ent.get("offset") or 0,
+                "length": ent.get("length") or 0}
+            user = ent.get("user") or {}
+            if isinstance(user, dict) and user.get("id"):
+                entry["user_id"] = str(user["id"])
+                if entry["type"] == "text_mention":
+                    mentions.append(str(user["id"]))
+            if ent.get("url"):
+                entry["url"] = str(ent["url"])
+            entities.append(entry)
+    media: dict[str, Any] | None = None
+    photos = msg.get("photo") or []
+    if isinstance(photos, list) and photos:
+        dicts = [p for p in photos if isinstance(p, dict)]
+        if dicts:
+            biggest = max(dicts,
+                          key=lambda p: p.get("file_size") or 0)
+            media = {"kind": "photo",
+                     "width": biggest.get("width"),
+                     "height": biggest.get("height"),
+                     "bytes": biggest.get("file_size"), "count": 1}
+    for kind_key in ("video", "animation", "audio", "voice",
+                     "video_note", "document"):
+        value = msg.get(kind_key)
+        if isinstance(value, dict) and media is None:
+            media = {"kind": kind_key,
+                     "width": value.get("width"),
+                     "height": value.get("height"),
+                     "seconds": value.get("duration"),
+                     "bytes": value.get("file_size"),
+                     "mime": str(value.get("mime_type") or ""),
+                     "count": 1}
+            fname = str(value.get("file_name") or "")
+            if "." in fname:
+                media["ext"] = fname.rsplit(".", 1)[-1]
+    sticker_env: dict[str, Any] | None = None
+    sticker = msg.get("sticker")
+    if isinstance(sticker, dict):
+        sticker_env = {
+            "animated": bool(sticker.get("is_animated")
+                             or sticker.get("is_video")),
+            "bytes": sticker.get("file_size"),
+            "key": str(sticker.get("file_unique_id") or ""),
+            "pack": str(sticker.get("set_name") or "")}
+        if media is None:
+            media = {"kind": "sticker",
+                     "width": sticker.get("width"),
+                     "height": sticker.get("height"),
+                     "bytes": sticker.get("file_size"), "count": 1}
+    forward: dict[str, Any] | None = None
+    sender_chat = msg.get("sender_chat") or {}
+    if not isinstance(sender_chat, dict):
+        sender_chat = {}
+    origin = msg.get("forward_origin") or {}
+    if isinstance(origin, dict) and origin:
+        otype = str(origin.get("type") or "")
+        ochat = origin.get("chat") or {}
+        if not isinstance(ochat, dict):
+            ochat = {}
+        forward = {
+            "is_forwarded": True,
+            "origin_kind": {"channel": "channel", "chat": "group",
+                            "user": "user",
+                            "hidden_user": "user"}.get(otype, otype),
+            "origin_name": str(ochat.get("title") or ""),
+            "sender_chat_id": str(sender_chat.get("id")
+                                  or ochat.get("id") or ""),
+            "is_automatic": bool(msg.get("is_automatic_forward"))}
+    elif msg.get("forward_date") or msg.get("forward_from") \
+            or msg.get("forward_from_chat"):
+        fchat = msg.get("forward_from_chat") or {}
+        if not isinstance(fchat, dict):
+            fchat = {}
+        ftype = str(fchat.get("type") or "")
+        forward = {
+            "is_forwarded": True,
+            "origin_kind": "channel" if ftype == "channel" else (
+                "group" if ftype in ("group", "supergroup")
+                else "user"),
+            "origin_name": str(fchat.get("title") or ""),
+            "sender_chat_id": str(sender_chat.get("id")
+                                  or fchat.get("id") or ""),
+            "is_automatic": bool(msg.get("is_automatic_forward"))}
+    elif sender_chat:
+        forward = {
+            "is_forwarded": False, "origin_kind": "",
+            "origin_name": str(sender_chat.get("title") or ""),
+            "sender_chat_id": str(sender_chat.get("id") or ""),
+            "is_automatic": bool(msg.get("is_automatic_forward"))}
+    depth = 0
+    quoted = 0
+    node: Any = msg
+    while isinstance(node, dict) and depth < 64:
+        nxt = node.get("reply_to_message")
+        if not isinstance(nxt, dict) or not nxt:
+            break
+        depth += 1
+        quoted += len(str(nxt.get("text")
+                          or nxt.get("caption") or ""))
+        node = nxt
+    return {"entities": entities, "mentions": mentions,
+            "media": media, "forward": forward,
+            "quote_depth": depth, "quoted_chars": quoted,
+            "sticker": sticker_env, "raw_len": len(text)}
+
+
+def _mtproto_envelope(message: Any, text: str) -> dict[str, Any]:
+    """The defense envelope (brief §1.3) from a Telethon message:
+    entity classes, media attributes, forward header, reply
+    depth.  Attribute-driven and defensive — a Telethon shape
+    this build doesn't know degrades to absence, never to a
+    crash or an invented value."""
+    entities: list[dict[str, Any]] = []
+    mentions: list[str] = []
+    for ent in getattr(message, "entities", None) or []:
+        cls = type(ent).__name__
+        etype = {
+            "MessageEntityMention": "mention",
+            "MessageEntityTextMention": "text_mention",
+            "MessageEntityMentionName": "text_mention",
+            "MessageEntityCustomEmoji": "custom_emoji",
+            "MessageEntityUrl": "url",
+            "MessageEntityTextUrl": "text_link",
+            "MessageEntityBold": "bold",
+            "MessageEntityItalic": "italic",
+            "MessageEntityCode": "code",
+            "MessageEntityPre": "pre",
+            "MessageEntityStrike": "strikethrough",
+            "MessageEntitySpoiler": "spoiler",
+        }.get(cls, cls.replace("MessageEntity", "").lower())
+        entry: dict[str, Any] = {
+            "type": etype,
+            "offset": getattr(ent, "offset", 0) or 0,
+            "length": getattr(ent, "length", 0) or 0}
+        uid = getattr(ent, "user_id", None)
+        if uid:
+            entry["user_id"] = str(uid)
+            if etype == "text_mention":
+                mentions.append(str(uid))
+        url = getattr(ent, "url", None)
+        if url:
+            entry["url"] = str(url)
+        entities.append(entry)
+    media: dict[str, Any] | None = None
+    sticker_env: dict[str, Any] | None = None
+    raw_media = getattr(message, "media", None)
+    media_cls = type(raw_media).__name__ if raw_media else ""
+    document = getattr(raw_media, "document", None) \
+        if media_cls == "MessageMediaDocument" else None
+    if media_cls == "MessageMediaPhoto":
+        media = {"kind": "photo", "count": 1}
+    elif document is not None:
+        kind = "document"
+        seconds = None
+        width = height = None
+        animated = False
+        pack = ""
+        ext = ""
+        for attr in getattr(document, "attributes", None) or []:
+            ac = type(attr).__name__
+            if ac == "DocumentAttributeVideo":
+                kind = "video"
+                width = getattr(attr, "w", None)
+                height = getattr(attr, "h", None)
+                seconds = getattr(attr, "duration", None)
+            elif ac == "DocumentAttributeAnimated":
+                kind = "animation"
+                animated = True
+            elif ac == "DocumentAttributeAudio":
+                kind = "audio"
+                seconds = getattr(attr, "duration", None)
+            elif ac == "DocumentAttributeSticker":
+                kind = "sticker"
+                pack = str(getattr(
+                    getattr(attr, "stickerset", None), "short_name",
+                    "") or "")
+            elif ac == "DocumentAttributeFilename":
+                fname = str(getattr(attr, "file_name", "") or "")
+                if "." in fname:
+                    ext = fname.rsplit(".", 1)[-1]
+        media = {"kind": kind, "width": width, "height": height,
+                 "seconds": seconds,
+                 "bytes": getattr(document, "size", None),
+                 "mime": str(getattr(document, "mime_type", "")
+                             or ""),
+                 "ext": ext, "count": 1}
+        if kind == "sticker":
+            sticker_env = {
+                "animated": animated, "bytes": media["bytes"],
+                "key": str(getattr(document, "id", "") or ""),
+                "pack": pack}
+    elif media_cls:
+        media = {"kind": media_cls.replace("MessageMedia", "")
+                 .lower(), "count": 1}
+    forward: dict[str, Any] | None = None
+    fwd = getattr(message, "fwd_from", None)
+    if fwd is not None:
+        peer = getattr(fwd, "from_id", None)
+        peer_cls = type(peer).__name__ if peer else ""
+        origin_kind = {"PeerChannel": "channel",
+                       "PeerChat": "group",
+                       "PeerUser": "user"}.get(peer_cls, "")
+        channel_id = getattr(peer, "channel_id", None)
+        forward = {
+            "is_forwarded": True, "origin_kind": origin_kind,
+            "origin_name": str(getattr(fwd, "from_name", "")
+                               or getattr(fwd, "post_author", "")
+                               or ""),
+            "sender_chat_id": str(channel_id or ""),
+            "is_automatic": False}
+    else:
+        sender_id = getattr(message, "sender_id", None)
+        if isinstance(sender_id, int) and sender_id < 0:
+            # Posted into the group AS a chat (channel identity).
+            forward = {"is_forwarded": False, "origin_kind": "",
+                       "origin_name": "",
+                       "sender_chat_id": str(sender_id),
+                       "is_automatic": False}
+    reply_to = getattr(message, "reply_to", None)
+    depth = 1 if (reply_to is not None
+                  and getattr(reply_to, "reply_to_msg_id", None)
+                  or getattr(message, "reply_to_msg_id", None)) \
+        else 0
+    return {"entities": entities, "mentions": mentions,
+            "media": media, "forward": forward,
+            "quote_depth": depth, "quoted_chars": 0,
+            "sticker": sticker_env, "raw_len": len(text)}
+
+
 class TelegramBotAdapter(ChatAdapter):
     """Devon's own Telegram bot, over the Bot API.
 
@@ -2525,6 +2814,11 @@ class TelegramBotAdapter(ChatAdapter):
                 "name": str(_replied_from.get("first_name") or "")}
             if replied.get("text"):
                 meta["reply_to_text"] = str(replied["text"])[:200]
+        # Defense envelope (brief §1.3): the group surface's
+        # sensors read structure, not text alone.
+        meta["envelope"] = _bot_message_envelope(msg, text)
+        if "edited_message" in update and "message" not in update:
+            meta["edited"] = True
         # Group service events (DESIGN §1: the group surface claims
         # joins/leaves): Bot API service messages carry no text, so
         # without this they reached the runtime as empty messages

@@ -159,7 +159,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "help", "ping", "search", "news", "book", "music", "play", "video", "podcast",
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
-    "rules", "member", "glog", "gsettings",
+    "rules", "member", "glog", "gsettings", "strikes",
     "balance", "mine", "work", "pay", "gshop", "quests", "treasury",
     "deposit", "withdraw", "rob", "bail", "coinflip",
     "top", "tax", "grant",
@@ -443,6 +443,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "rules": (0, 0),          # /rules — this group's rules, rendered from the settings the enforcer reads (P1)
     "member": (0, 1),         # /member [@name] — group member card: tenure, activity, identity changes (P1)
     "glog": (0, 1),           # /glog [n] — the group's held audit log (admins; P1)
+    "strikes": (0, 1),        # /strikes [@member] — the defense strike ledger: who's on the ladder (admins; §17)
     "gsettings": (0, None),   # /gsettings [welcome|goodbye|clean on|off|rules add|clear|flood <n>|links ...] — group settings (admins; P1)
     "balance": (0, 0),        # /balance — your sparks + the group treasury (P2 economy)
     "mine": (0, 0),           # /mine — claim mined sparks at the decaying rate (P2)
@@ -2076,10 +2077,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/glog [n]",
             "example": "/glog 10",
             "related": "/gsettings /member"},
-    "gsettings": {"what": "this group's settings: welcome and goodbye switches, service-message cleanup, the rules list, flood limit, link allowlist, the economy switch and transfer tax. Group admins only — Devon checks your platform admin status.",
-            "usage": "/gsettings | /gsettings welcome on|off | /gsettings rules add <text> | /gsettings rules clear | /gsettings flood <n> | /gsettings links <domains>|off | /gsettings economy on|off | /gsettings tax <pct>",
+    "strikes": {"what": "the defense strike ledger: every sensor and every manual warn lands on one per-member ladder (mute at the warn limit, removal and ban above it, 7-day window). No argument lists who's on the ladder; a member shows their record.",
+            "usage": "/strikes [@name]",
+            "example": "/strikes @ada",
+            "related": "/glog /gsettings /warn"},
+    "gsettings": {"what": "this group's settings: welcome and goodbye switches, service-message cleanup, the rules list, flood limit, link allowlist, the economy switch and transfer tax, and the defense system (autonomy, anticrash, antichannel, antitag, antidelete, antiedit) with the platform limits stated plainly. Group admins only — Devon checks your platform admin status; the autonomy switch belongs to the group owner on Telegram.",
+            "usage": "/gsettings | /gsettings welcome on|off | /gsettings rules add <text> | /gsettings rules clear | /gsettings flood <n> | /gsettings links <domains>|off | /gsettings economy on|off | /gsettings tax <pct> | /gsettings autonomy on|off | /gsettings anticrash on|off | /gsettings antitag <n>",
             "example": "/gsettings rules add No spam",
-            "related": "/rules /glog"},
+            "related": "/rules /glog /strikes"},
     "balance": {"what": "your sparks balance in this group, with your recent ledger and the group treasury. Sparks are group game points — earned by chatting, streaks, quests, work, mining and in-group game wins.",
             "usage": "/balance",
             "example": "/balance",
@@ -2630,6 +2635,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                           "doctor",
                           "update", "pull", "deploy", "restart"]),
     ("groups & communities", ["rules", "member", "glog", "gsettings",
+                            "strikes",
                             "balance", "mine", "work", "pay", "gshop",
                             "quests", "treasury", "drop", "claim",
                             "mute", "unmute", "ban", "unban", "kick",
@@ -2890,7 +2896,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("platform control — updates & restarts",
      ["update", "pull", "deploy", "restart"]),
     ("groups & communities",
-     ["rules", "member", "glog", "gsettings",
+     ["rules", "member", "glog", "gsettings", "strikes",
       "balance", "mine", "work", "pay", "gshop", "quests",
       "treasury", "deposit", "withdraw", "rob", "bail", "coinflip",
       "top", "tax", "grant", "drop", "claim",

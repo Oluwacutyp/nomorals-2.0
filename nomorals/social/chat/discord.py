@@ -44,6 +44,80 @@ __all__ = ["DiscordAdapter"]
 _log = get_logger(__name__)
 
 
+def _discord_envelope(message: Any, text: str) -> dict[str, Any]:
+    """The defense envelope (brief §1.3) from a discord.py
+    message object: resolved mentions, @everyone, the first
+    attachment's metadata, sticker format, reply depth."""
+    mentions = [str(u.id) for u in
+                (getattr(message, "mentions", None) or [])]
+    entities: list[dict[str, Any]] = [
+        {"type": "mention", "offset": 0, "length": 0,
+         "user_id": m} for m in mentions]
+    if getattr(message, "mention_everyone", False):
+        entities.append({"type": "mention_everyone", "offset": 0,
+                         "length": 0})
+    media: dict[str, Any] | None = None
+    atts = list(getattr(message, "attachments", ()) or ())
+    if atts:
+        first = atts[0]
+        ctype = str(getattr(first, "content_type", "") or "")
+        fname = str(getattr(first, "filename", "") or "")
+        media = {"kind": ctype.split("/")[0] or "file",
+                 "width": getattr(first, "width", None),
+                 "height": getattr(first, "height", None),
+                 "bytes": getattr(first, "size", None),
+                 "mime": ctype, "count": len(atts)}
+        if "." in fname:
+            media["ext"] = fname.rsplit(".", 1)[-1].lower()
+    sticker: dict[str, Any] | None = None
+    stickers = list(getattr(message, "stickers", ()) or ())
+    if stickers:
+        s0 = stickers[0]
+        sticker = {"animated": getattr(s0, "format_type", 0)
+                   in (2, 3, 4),
+                   "bytes": None,
+                   "key": str(getattr(s0, "id", "") or ""),
+                   "pack": str(getattr(s0, "name", "") or "")}
+    return {"entities": entities, "mentions": mentions,
+            "media": media, "forward": None,
+            "quote_depth": 1 if getattr(message, "reference",
+                                         None) else 0,
+            "quoted_chars": 0, "sticker": sticker,
+            "raw_len": len(text)}
+
+
+def _discord_raw_envelope(data: dict[str, Any], text: str
+                          ) -> dict[str, Any]:
+    """The same envelope from a raw gateway update dict (the
+    antiedit feed carries raw payloads, not message objects)."""
+    mentions = [str(u.get("id")) for u in
+                (data.get("mentions") or [])
+                if isinstance(u, dict) and u.get("id")]
+    entities: list[dict[str, Any]] = [
+        {"type": "mention", "offset": 0, "length": 0,
+         "user_id": m} for m in mentions]
+    if data.get("mention_everyone"):
+        entities.append({"type": "mention_everyone", "offset": 0,
+                         "length": 0})
+    media: dict[str, Any] | None = None
+    atts = data.get("attachments") or []
+    if atts and isinstance(atts[0], dict):
+        first = atts[0]
+        ctype = str(first.get("content_type") or "")
+        fname = str(first.get("filename") or "")
+        media = {"kind": ctype.split("/")[0] or "file",
+                 "width": first.get("width"),
+                 "height": first.get("height"),
+                 "bytes": first.get("size"), "mime": ctype,
+                 "count": len(atts)}
+        if "." in fname:
+            media["ext"] = fname.rsplit(".", 1)[-1].lower()
+    return {"entities": entities, "mentions": mentions,
+            "media": media, "forward": None, "quote_depth": 0,
+            "quoted_chars": 0, "sticker": None,
+            "raw_len": len(text)}
+
+
 class DiscordAdapter(ChatAdapter):
     """A discord.py bot: DMs + server text channels, official API only."""
 
@@ -303,29 +377,86 @@ class DiscordAdapter(ChatAdapter):
                 if not text and not media:
                     return
                 display, stable_id, username = self._author_identity(message)
-                self._deliver(
-                    handler,
-                    ChatMessage(
-                        chat=ChatRef(
-                            platform=self.name,
-                            chat_id=chat_id,
-                            kind=kind,
-                            title=str(getattr(channel, "name", "") or chat_id),
-                            peer=display,
-                        ),
-                        incoming=True,
-                        text=text,
-                        sender=display,
-                        sender_id=stable_id,
-                        sender_username=username,
-                        media=media,
-                        message_id=str(message.id),
-                        mentioned=self._mentions_me(message),
-                        ts=(message.created_at.timestamp() if hasattr(message, "created_at") else time.time()),
+                dc_msg = ChatMessage(
+                    chat=ChatRef(
+                        platform=self.name,
+                        chat_id=chat_id,
+                        kind=kind,
+                        title=str(getattr(channel, "name", "") or chat_id),
+                        peer=display,
                     ),
+                    incoming=True,
+                    text=text,
+                    sender=display,
+                    sender_id=stable_id,
+                    sender_username=username,
+                    media=media,
+                    message_id=str(message.id),
+                    mentioned=self._mentions_me(message),
+                    ts=(message.created_at.timestamp() if hasattr(message, "created_at") else time.time()),
                 )
+                dc_msg.meta["envelope"] = _discord_envelope(
+                    message, text)
+                if getattr(message, "edited_at", None):
+                    dc_msg.meta["edited"] = True
+                self._deliver(handler, dc_msg)
             except Exception as exc:  # noqa: BLE001 - one bad message must not kill the bot
                 _log.exception("discord on_message failed: %s", exc)
+
+        @bot.event
+        async def on_raw_message_delete(payload: Any) -> None:
+            # Evidentiary antidelete feed (defense brief §2.1):
+            # raw events fire even for messages this session never
+            # cached — the surface's own cache decides what
+            # evidence exists.
+            try:
+                if not getattr(payload, "guild_id", None):
+                    return
+                self._deliver(handler, ChatMessage(
+                    chat=ChatRef(
+                        platform=self.name,
+                        chat_id=str(payload.channel_id),
+                        kind=ChatKind.GROUP, title=""),
+                    incoming=True, text="", sender="", sender_id="",
+                    message_id=str(payload.message_id),
+                    meta={"service": "delete",
+                          "deleted_ids": [str(payload.message_id)]}))
+            except Exception as exc:  # noqa: BLE001
+                _log.debug("discord on_raw_message_delete failed: "
+                           "%s", exc)
+
+        @bot.event
+        async def on_raw_message_edit(payload: Any) -> None:
+            # Evidentiary antiedit feed: the raw update carries
+            # the new content + author; the surface holds the old.
+            try:
+                if not getattr(payload, "guild_id", None):
+                    return
+                data = getattr(payload, "data", None) or {}
+                content = data.get("content")
+                if content is None:
+                    return  # embed-only edit: nothing to record
+                author = data.get("author") or {}
+                msg = ChatMessage(
+                    chat=ChatRef(
+                        platform=self.name,
+                        chat_id=str(payload.channel_id),
+                        kind=ChatKind.GROUP, title=""),
+                    incoming=True, text=str(content),
+                    sender=str(author.get("global_name")
+                               or author.get("username") or ""),
+                    sender_id=str(author.get("id") or ""),
+                    sender_username=str(
+                        author.get("username") or ""),
+                    message_id=str(payload.message_id),
+                )
+                msg.meta["edited"] = True
+                msg.meta["envelope"] = _discord_raw_envelope(
+                    data, str(content))
+                self._deliver(handler, msg)
+            except Exception as exc:  # noqa: BLE001
+                _log.debug("discord on_raw_message_edit failed: %s",
+                           exc)
 
         @bot.event
         async def on_member_join(member: Any) -> None:

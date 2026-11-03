@@ -245,6 +245,61 @@ def _split_text(text: str, *, limit: int | None = None) -> list[str]:
     return [c for c in chunks if c] or [text]
 
 
+def _wa_envelope(obj: dict[str, Any], text: str) -> dict[str, Any]:
+    """The defense envelope (brief §1.3) from a bridge event —
+    PASS-THROUGH ONLY: the bridge is an external Node process
+    whose event schema this repo does not own, so every field is
+    read defensively under its plausible names and stays absent
+    when the bridge doesn't send it.  Nothing is invented."""
+    mentions: list[str] = []
+    raw = obj.get("mentions") or obj.get("mentioned_jids") \
+        or obj.get("mentionedJids") or []
+    if isinstance(raw, list):
+        mentions = [str(m) for m in raw if m]
+    ctx = obj.get("context") or obj.get("contextInfo") or {}
+    if isinstance(ctx, dict):
+        for jid in ctx.get("mentionedJid") or []:
+            if str(jid) and str(jid) not in mentions:
+                mentions.append(str(jid))
+    entities = [{"type": "mention", "offset": 0, "length": 0,
+                 "user_id": m} for m in mentions]
+    media: dict[str, Any] | None = None
+    sticker: dict[str, Any] | None = None
+    media_list = obj.get("media") or []
+    if isinstance(media_list, list) and media_list \
+            and isinstance(media_list[0], dict):
+        first = media_list[0]
+        media = {"kind": str(first.get("kind") or ""),
+                 "mime": str(first.get("mime") or ""),
+                 "bytes": first.get("size") or first.get("bytes"),
+                 "count": len(media_list)}
+        fname = str(first.get("name") or first.get("path") or "")
+        if "." in fname:
+            media["ext"] = fname.rsplit(".", 1)[-1].lower()
+        if media["kind"] == "sticker":
+            sticker = {"animated": bool(first.get("animated")),
+                       "bytes": media["bytes"],
+                       "key": str(obj.get("id") or ""), "pack": ""}
+    forward: dict[str, Any] | None = None
+    fwd = obj.get("forward")
+    if obj.get("is_forwarded") or obj.get("forwarding_score") \
+            or isinstance(fwd, dict):
+        fwd = fwd if isinstance(fwd, dict) else {}
+        forward = {"is_forwarded": True,
+                   "score": obj.get("forwarding_score")
+                   or fwd.get("score"),
+                   "origin_kind": str(fwd.get("origin_kind") or ""),
+                   "origin_name": str(fwd.get("origin_name") or ""),
+                   "sender_chat_id": str(
+                       fwd.get("sender_chat_id") or ""),
+                   "is_automatic": False}
+    return {"entities": entities, "mentions": mentions,
+            "media": media, "forward": forward,
+            "quote_depth": 1 if obj.get("reply_to") else 0,
+            "quoted_chars": len(str(obj.get("quoted_text") or "")),
+            "sticker": sticker, "raw_len": len(text)}
+
+
 class WhatsAppAdapter(ChatAdapter):
     """Client for the local WhatsApp bridge (bridge/whatsapp-bridge.mjs)."""
 
@@ -541,6 +596,52 @@ class WhatsAppAdapter(ChatAdapter):
             # The sender IS the owner — flag it for group recognition.
             msg.meta["from_owner"] = True
             self._deliver(handler, msg)
+        elif kind in ("revoke", "edit"):
+            # Evidentiary feeds (defense brief §2.1), pass-through:
+            # recognized IF the bridge sends them (Baileys emits
+            # protocol REVOKE / edited-message updates).  An older
+            # bridge that never sends them simply never feeds the
+            # sensors — nothing here invents an event.
+            chat = obj.get("chat") or {}
+            chat_id = str(chat.get("id") or obj.get("chat_id")
+                          or "")
+            mid = str(obj.get("id") or obj.get("message_id")
+                      or "")
+            if not chat_id or not mid:
+                return
+            ts = obj.get("ts") or 0
+            try:
+                ts = float(ts) / 1000.0
+            except (TypeError, ValueError):
+                ts = time.time()
+            ref = ChatRef(
+                platform=self.name, chat_id=chat_id,
+                kind=str(chat.get("kind") or ChatKind.GROUP),
+                title=str(chat.get("title") or ""), peer=chat_id)
+            if kind == "revoke":
+                self._deliver(handler, ChatMessage(
+                    chat=ref, incoming=True, text="", sender="",
+                    sender_id=str((obj.get("from") or {}).get("id")
+                                  or ""),
+                    message_id=mid, ts=ts,
+                    meta={"service": "delete",
+                          "deleted_ids": [mid],
+                          "by_user_id": str(
+                              (obj.get("from") or {}).get("id")
+                              or "")}))
+            else:
+                msg = ChatMessage(
+                    chat=ref, incoming=True,
+                    text=str(obj.get("text") or ""),
+                    sender=str((obj.get("from") or {}).get("name")
+                             or ""),
+                    sender_id=str((obj.get("from") or {}).get("id")
+                                  or ""),
+                    message_id=mid, ts=ts)
+                msg.meta["edited"] = True
+                msg.meta["envelope"] = _wa_envelope(
+                    obj, msg.text)
+                self._deliver(handler, msg)
         elif kind == "message":
             chat = obj.get("chat") or {}
             chat_id = str(chat.get("id") or "")
@@ -551,9 +652,7 @@ class WhatsAppAdapter(ChatAdapter):
                 ts = float(ts) / 1000.0
             except (TypeError, ValueError):
                 ts = time.time()
-            self._deliver(
-                handler,
-                ChatMessage(
+            wa_msg = ChatMessage(
                     chat=ChatRef(
                         platform=self.name,
                         chat_id=chat_id,
@@ -584,8 +683,9 @@ class WhatsAppAdapter(ChatAdapter):
                     # replies trigger exactly like Telegram's _mentions_me.
                     mentioned=bool(obj.get("mentioned")),
                     ts=ts,
-                ),
-            )
+                )
+            wa_msg.meta["envelope"] = _wa_envelope(obj, wa_msg.text)
+            self._deliver(handler, wa_msg)
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     def run(self, handler: IncomingHandler) -> None:

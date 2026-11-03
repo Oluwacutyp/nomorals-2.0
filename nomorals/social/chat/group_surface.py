@@ -31,8 +31,10 @@ raised.  Writes are atomic (tmp + replace).
 """
 from __future__ import annotations
 
+import copy
 import json
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,9 +47,43 @@ from ...community.welcome_moderation import (
     render_goodbye,
     render_welcome,
 )
+from ...security.payload_inspection import (
+    SignatureStore,
+    inspect_payload,
+    normalize_envelope,
+)
+from .group_defense import (
+    DEFAULTS as DEFENSE_DEFAULTS,
+)
+from .group_defense import (
+    DefenseConfig,
+    add_strike,
+    check_antichannel,
+    check_antitag,
+    consequence_text,
+    ladder_rung,
+    recent_strikes,
+    render_warning,
+)
 
 AUDIT_RING = 500
 CHANGE_RING = 200
+MSG_CACHE_RING = 200
+_ACTION_RANK = {"allow": 0, "warn": 1, "delete": 2, "mute": 3,
+                "kick": 4, "ban": 5}
+
+
+def _deep_merge(base: dict[str, Any], stored: dict[str, Any]
+                ) -> dict[str, Any]:
+    out = dict(base)
+    for key, value in (stored or {}).items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            inner = dict(out[key])
+            inner.update(value)
+            out[key] = inner
+        else:
+            out[key] = value
+    return out
 
 
 class GroupStoreError(RuntimeError):
@@ -82,6 +118,10 @@ def _default_settings() -> dict[str, Any]:
         "fine_amount": 0,               # sparks an auto-mute costs
         "governance_threshold": 500,    # treasury spends above
                                         # this need a 2nd admin
+        "defense": copy.deepcopy(DEFENSE_DEFAULTS),
+                                        # automatic admin (§17):
+                                        # autonomy + sensors +
+                                        # escalation spine
         "games_enabled": True,
         "state": "discovered",          # discovered|configured|
                                         # active|dormant
@@ -141,10 +181,13 @@ class GroupStore:
         merged = _default_settings()
         stored = self.group(group_key).get("settings") or {}
         merged.update({k: v for k, v in stored.items()
-                       if k in merged})
+                       if k in merged and k != "defense"})
         mod = dict(merged["moderation"])
         mod.update((stored.get("moderation") or {}))
         merged["moderation"] = mod
+        merged["defense"] = _deep_merge(
+            copy.deepcopy(DEFENSE_DEFAULTS),
+            stored.get("defense") or {})
         return merged
 
 
@@ -167,6 +210,22 @@ class GroupSurface:
         self.store = store
         self.bans = ban_list or BanList()
         self._moderators: dict[str, Moderator] = {}
+        self._msg_cache: dict[str, deque] = {}
+        self._signatures: SignatureStore | None = None
+
+    @property
+    def signatures(self) -> SignatureStore:
+        """Learned anticrash shapes, persisted beside the group
+        store (derived data — the store quarantines itself on
+        corruption and relearns by observation)."""
+        if self._signatures is None:
+            self._signatures = SignatureStore(
+                self.store.path.parent / "payload_signatures.json")
+        return self._signatures
+
+    def defense_config(self, group_key: str) -> DefenseConfig:
+        return DefenseConfig.from_settings(
+            self.store.settings(group_key))
 
     # ---- settings / moderation plumbing -------------------------
     def _moderator(self, group_key: str) -> Moderator:
@@ -312,14 +371,43 @@ class GroupSurface:
             config)
 
     # ---- the message pipeline ------------------------------------
+    def _cache_message(self, group_key: str, *, message_id: str,
+                       user_id: str, text: str, sticker_key: str,
+                       now: float) -> None:
+        """Bounded per-group message cache — the evidentiary
+        basis for antidelete/antiedit (in-memory by design: it
+        covers the live session, it is not an archive)."""
+        if not message_id:
+            return
+        cache = self._msg_cache.setdefault(
+            group_key, deque(maxlen=MSG_CACHE_RING))
+        cache.append({"message_id": str(message_id),
+                      "user_id": user_id, "text": text or "",
+                      "ts": now, "sticker_key": sticker_key or ""})
+
+    def _cached(self, group_key: str, message_id: str
+                ) -> dict[str, Any] | None:
+        for item in reversed(self._msg_cache.get(group_key, ())):
+            if item["message_id"] == str(message_id):
+                return item
+        return None
+
     def handle_message(self, group_key: str, user_id: str, *,
                        username: str = "", name: str = "",
                        text: str = "", message_id: str = "",
-                       ts: float | None = None) -> dict[str, Any]:
-        """One ordinary group message: ledger observation +
-        moderation.  Returns ``{"changes": [...], "actions":
-        [...]}`` — actions are ModerationAction dicts for the
-        caller to execute (delete / warn / mute / ban)."""
+                       ts: float | None = None,
+                       envelope: Any = None,
+                       sender_is_admin: bool = False,
+                       sender_is_operator: bool = False
+                       ) -> dict[str, Any]:
+        """One ordinary group message: ledger observation, then
+        the DEFENSE pipeline in its fixed order (brief §1.4) —
+        identity → anticrash inspection → Moderator → envelope
+        sensors → escalation spine → fines / economy / notices.
+        Returns ``{"changes", "actions", "notices"}``; actions
+        are dicts for the caller to execute (delete / warn / mute
+        / kick / ban).  A message any stage deletes earns NO
+        economy credit and fires no quest/season notices."""
         now = ts if ts is not None else time.time()
         changes = self._observe_identity(
             group_key, user_id, username=username, name=name, ts=now)
@@ -327,33 +415,312 @@ class GroupSurface:
         member = entry["members"][user_id]
         member["message_count"] = int(
             member.get("message_count") or 0) + 1
+        if message_id:
+            member["last_message_id"] = str(message_id)
+        settings = self.store.settings(group_key)
+        cfg = DefenseConfig.from_settings(settings)
+        warn_threshold = int(settings.get("warn_threshold") or 3)
+        suppressed = not cfg.autonomy
+        privileged = sender_is_admin or sender_is_operator
+        mention = name or (f"@{username}" if username else user_id)
+        env = normalize_envelope(
+            envelope if isinstance(envelope, dict) else None,
+            platform=group_key.split(":", 1)[0], chat_key=group_key,
+            sender_id=user_id, message_id=message_id, text=text)
+        self._cache_message(
+            group_key, message_id=message_id, user_id=user_id,
+            text=text, sticker_key=(env.sticker or {}).get("key")
+            or "", now=now)
+
         actions: list[dict[str, Any]] = []
+        strike_counts: dict[str, int] = {}
+        struck: set[str] = set()
+
+        def strike(stage: str, rule: str, action_kind: str) -> int:
+            """One strike per stage per message on the shared
+            spine; landing on a rung appends the ladder action.
+            Under autonomy OFF the spine is observe-only too: the
+            audits carry the verdict, the ledger does not move."""
+            if privileged or suppressed or stage in struck:
+                return strike_counts.get(rule, 0)
+            struck.add(stage)
+            count = add_strike(member, rule=rule,
+                               action=action_kind, now=now,
+                               window_days=cfg.window_days)
+            strike_counts[rule] = count
+            self._audit(group_key, "strike", user_id=user_id,
+                        rule=rule, count=count,
+                        window_days=cfg.window_days)
+            rung = ladder_rung(count, cfg,
+                               warn_threshold=warn_threshold)
+            if rung and all(_ACTION_RANK.get(a.get("kind"), 0)
+                            < _ACTION_RANK[rung] for a in actions):
+                if rung == "mute":
+                    actions.append({
+                        "kind": "delete", "rule": "escalation",
+                        "reason": f"strike {count} — {rule}",
+                        "user_id": user_id, "group_id": group_key})
+                actions.append({
+                    "kind": rung, "rule": "escalation",
+                    "reason": f"strike {count} — {rule}",
+                    "user_id": user_id, "group_id": group_key,
+                    "minutes": cfg.mute_minutes,
+                    "_strike_count": count, "_strike_rule": rule})
+            return count
+
+        def finish(blocked: bool) -> dict[str, Any]:
+            # ONE public warning per offense, on the strongest
+            # action, worded by the organ (never meta-narration).
+            if actions and not suppressed:
+                top = max(actions, key=lambda a: _ACTION_RANK.get(
+                    a.get("kind"), 0))
+                rule = top.get("_strike_rule") or top.get(
+                    "rule") or ""
+                count = top.get("_strike_count") \
+                    or strike_counts.get(rule, 0)
+                if top.get("kind") in ("warn", "delete", "mute",
+                                       "kick", "ban"):
+                    top["warning"] = render_warning(
+                        mention, rule,
+                        consequence_text(
+                            executed=top["kind"], count=count,
+                            cfg=cfg,
+                            warn_threshold=warn_threshold))
+            for action in actions:
+                action.pop("_strike_count", None)
+                action.pop("_strike_rule", None)
+            out_actions = actions
+            n_suppressed = 0
+            if suppressed:
+                n_suppressed = len(actions)
+                out_actions = []
+                blocked = False
+            elif not blocked:
+                # Moderation fines (DESIGN §5 sink): an auto-mute
+                # costs sparks — paid to the treasury.
+                for action in actions:
+                    if action.get("kind") == "mute":
+                        self.apply_fine(group_key, user_id, now=now)
+            notices: list[str] = []
+            if not blocked:
+                self._economy_activity(group_key, user_id, now)
+                season_note = self.season_cycle(group_key, now=now)
+                if season_note:
+                    notices.append(season_note)
+                for paid in self.group_quest_cycle(group_key,
+                                                   now=now):
+                    notices.append(
+                        f"🎉 group quest complete: "
+                        f"<b>{paid['name']}</b> — +{paid['bonus']} "
+                        f"sparks to the treasury!")
+            self.store.save()
+            return {"changes": changes, "actions": out_actions,
+                    "notices": notices, "suppressed": n_suppressed}
+
+        # ── stage 1: anticrash inspection ──────────────────────
+        if cfg.anticrash_enabled:
+            cache = self._msg_cache.get(group_key, ())
+            recent = [c for c in cache if c["user_id"] == user_id
+                      and now - c["ts"] <= 60]
+            context = {
+                "roster_size": len(entry["members"]),
+                "sticker_velocity": sum(
+                    1 for c in recent if c["sticker_key"]),
+                "sticker_repeats": sum(
+                    1 for c in recent
+                    if c["sticker_key"]
+                    and c["sticker_key"]
+                    == (env.sticker or {}).get("key")),
+            }
+            verdict = inspect_payload(
+                env, context=context, signatures=self.signatures)
+            if verdict.action == "quarantine":
+                self._audit(
+                    group_key, "anticrash", user_id=user_id,
+                    action=("delete" if cfg.anticrash_action
+                            == "delete" else "flag"),
+                    rule="anticrash", reason=verdict.reason,
+                    score=verdict.score, classes=verdict.classes,
+                    signature=verdict.signature,
+                    **({"suppressed": "autonomy_off"}
+                       if suppressed else {}))
+                self.signatures.observe(verdict.signature, user_id,
+                                        now=now)
+                if cfg.anticrash_action == "delete":
+                    actions.append({
+                        "kind": "delete", "rule": "anticrash",
+                        "reason": verdict.reason,
+                        "user_id": user_id, "group_id": group_key})
+                    strike("anticrash", "anticrash", "delete")
+                    return finish(blocked=True)
+            elif verdict.action == "flag":
+                self._audit(
+                    group_key, "anticrash_flag", user_id=user_id,
+                    rule="anticrash", reason=verdict.reason,
+                    score=verdict.score, classes=verdict.classes,
+                    signature=verdict.signature,
+                    **({"suppressed": "autonomy_off"}
+                       if suppressed else {}))
+                self.signatures.observe(verdict.signature, user_id,
+                                        now=now)
+
+        # ── stage 2: the Moderator (unchanged organ) ───────────
         if text:
             for action in self._moderator(group_key).check_message(
                     group_key, user_id, text, ts=now):
                 actions.append(action.to_dict())
                 self._audit(group_key, "moderation",
                             action=action.kind, rule=action.rule,
-                            reason=action.reason, user_id=user_id)
-        if message_id:
-            member["last_message_id"] = str(message_id)
-        # Moderation fines (DESIGN §5 sink): an auto-mute costs
-        # sparks when the group set a fine — paid to the treasury.
-        for action in actions:
-            if action.get("kind") == "mute":
-                self.apply_fine(group_key, user_id, now=now)
-        self._economy_activity(group_key, user_id, now)
-        notices: list[str] = []
-        season_note = self.season_cycle(group_key, now=now)
-        if season_note:
-            notices.append(season_note)
-        for paid in self.group_quest_cycle(group_key, now=now):
-            notices.append(
-                f"🎉 group quest complete: <b>{paid['name']}</b> — "
-                f"+{paid['bonus']} sparks to the treasury!")
+                            reason=action.reason, user_id=user_id,
+                            **({"suppressed": "autonomy_off"}
+                               if suppressed else {}))
+                if action.kind in ("warn", "delete", "mute", "ban"):
+                    strike("moderator", action.rule, action.kind)
+
+        # ── stage 3: envelope sensors ──────────────────────────
+        hit = check_antichannel(env, cfg)
+        if hit is not None:
+            self._audit(group_key, hit.rule, user_id=user_id,
+                        action=hit.action, reason=hit.reason,
+                        signal=hit.signal,
+                        **({"suppressed": "autonomy_off"}
+                           if suppressed else {}))
+            if "delete" in hit.action:
+                actions.append({
+                    "kind": "delete", "rule": hit.rule,
+                    "reason": hit.reason, "user_id": user_id,
+                    "group_id": group_key})
+            else:
+                actions.append({
+                    "kind": "warn", "rule": hit.rule,
+                    "reason": hit.reason, "user_id": user_id,
+                    "group_id": group_key})
+            strike("antichannel", hit.rule,
+                   "delete" if "delete" in hit.action else "warn")
+        hit = check_antitag(env, cfg,
+                            roster_size=len(entry["members"]),
+                            sender_is_admin=privileged)
+        if hit is not None:
+            self._audit(group_key, hit.rule, user_id=user_id,
+                        action=hit.action, reason=hit.reason,
+                        signal=hit.signal,
+                        **({"suppressed": "autonomy_off"}
+                           if suppressed else {}))
+            if "delete" in hit.action:
+                actions.append({
+                    "kind": "delete", "rule": hit.rule,
+                    "reason": hit.reason, "user_id": user_id,
+                    "group_id": group_key})
+            else:
+                actions.append({
+                    "kind": "warn", "rule": hit.rule,
+                    "reason": hit.reason, "user_id": user_id,
+                    "group_id": group_key})
+            strike("antitag", hit.rule,
+                   "delete" if "delete" in hit.action else "warn")
+
+        blocked = any(a.get("kind") in ("delete", "kick", "ban")
+                      for a in actions)
+        return finish(blocked)
+
+    # ---- evidentiary sensors: delete / edit ----------------------
+    def _member_label(self, group_key: str, user_id: str) -> str:
+        member = self.store.group(group_key)["members"].get(
+            user_id) or {}
+        return (member.get("name")
+                or (f"@{member['username']}"
+                    if member.get("username") else "")
+                or user_id or "someone")
+
+    def handle_delete(self, group_key: str, *,
+                      message_id: str, by_user_id: str = "",
+                      ts: float | None = None) -> dict[str, Any]:
+        """A message was deleted in the group (fed by the
+        surfaces that can SEE delete events — MTProto / Baileys /
+        Discord; the Bot API never produces these).  Evidentiary
+        only: the cached original is quoted into the held audit;
+        a callout is composed when the group's mode asks for one.
+        The message itself is gone — nothing here pretends
+        otherwise."""
+        now = ts if ts is not None else time.time()
+        cfg = self.defense_config(group_key)
+        cached = self._cached(group_key, message_id)
+        author = str(cached["user_id"]) if cached else ""
+        excerpt = (cached["text"][:200] if cached else "")
+        if cached:
+            cache = self._msg_cache.get(group_key)
+            if cache is not None:
+                self._msg_cache[group_key] = deque(
+                    (c for c in cache
+                     if c["message_id"] != str(message_id)),
+                    maxlen=MSG_CACHE_RING)
+        suppressed = not cfg.autonomy
+        self._audit(group_key, "antidelete", user_id=author,
+                    by=by_user_id, message_id=str(message_id),
+                    cached=bool(cached), excerpt=excerpt,
+                    mode=cfg.antidelete_mode,
+                    enabled=cfg.antidelete_enabled,
+                    **({"suppressed": "autonomy_off"}
+                       if suppressed else {}))
         self.store.save()
-        return {"changes": changes, "actions": actions,
-                "notices": notices}
+        callouts: list[dict[str, Any]] = []
+        if cfg.antidelete_enabled and not suppressed \
+                and cfg.antidelete_mode == "callout":
+            who = self._member_label(group_key, author) \
+                if author else "Someone"
+            shown = f" “{excerpt}”" if excerpt else \
+                " (content not in the live cache)"
+            callouts.append({
+                "to": cfg.antidelete_callout_to,
+                "text": f"🗑 {who} deleted a message:{shown}"})
+        return {"callouts": callouts, "cached": bool(cached)}
+
+    def handle_edit(self, group_key: str, *, message_id: str,
+                    new_text: str, ts: float | None = None
+                    ) -> dict[str, Any]:
+        """A message was edited: both versions land in the held
+        audit (the evidence is the point — a scam that edits
+        itself innocent leaves the original on record)."""
+        now = ts if ts is not None else time.time()
+        cfg = self.defense_config(group_key)
+        cached = self._cached(group_key, message_id)
+        author = str(cached["user_id"]) if cached else ""
+        old = cached["text"] if cached else ""
+        if cached:
+            cached["text"] = new_text or ""
+        suppressed = not cfg.autonomy
+        self._audit(group_key, "antiedit", user_id=author,
+                    message_id=str(message_id),
+                    cached=bool(cached), old=old[:200],
+                    new=(new_text or "")[:200],
+                    mode=cfg.antiedit_mode,
+                    enabled=cfg.antiedit_enabled,
+                    **({"suppressed": "autonomy_off"}
+                       if suppressed else {}))
+        self.store.save()
+        callouts: list[dict[str, Any]] = []
+        if cfg.antiedit_enabled and not suppressed \
+                and cfg.antiedit_mode == "callout":
+            who = self._member_label(group_key, author) \
+                if author else "Someone"
+            callouts.append({
+                "to": cfg.antiedit_callout_to,
+                "text": f"✏️ {who} edited a message: "
+                        f"“{old[:120]}” → “{(new_text or '')[:120]}”"})
+        return {"callouts": callouts, "cached": bool(cached)}
+
+    def strikes_for(self, group_key: str, user_id: str, *,
+                    now: float | None = None) -> dict[str, Any]:
+        """The member's live strike ledger (windowed) — the
+        read model behind /strikes and the ladder."""
+        now = now if now is not None else time.time()
+        cfg = self.defense_config(group_key)
+        member = self.store.group(group_key)["members"].get(
+            user_id) or {}
+        strikes = recent_strikes(member, now=now,
+                                 window_days=cfg.window_days)
+        return {"count": len(strikes), "strikes": strikes,
+                "window_days": cfg.window_days}
 
     # ---- economy (P2: the country, wired live) --------------------
     @property
@@ -1005,9 +1372,13 @@ class GroupSurface:
 
     def record_warn(self, group_key: str, user_id: str, *,
                     by: str = "", reason: str = "") -> int:
-        """One admin /warn on a member: counted in the member
-        record, audited, and the count returned (the caller runs
-        the escalation ladder against the warn threshold)."""
+        """One admin /warn on a member: lands on the SHARED
+        strike spine (defense brief §2.2 — manual warns and
+        sensor strikes are one ledger, one ladder), audited, and
+        the WINDOWED strike count returned (the caller runs the
+        escalation ladder against the warn threshold).  The
+        legacy warn bookkeeping is kept alongside for the member
+        record."""
         entry = self.store.group(group_key)
         member = entry["members"].setdefault(
             user_id, {"user_id": user_id, "message_count": 0})
@@ -1015,16 +1386,21 @@ class GroupSurface:
         member.setdefault("warns", []).append(
             {"ts": time.time(), "by": by, "reason": reason[:200]})
         member["warns"] = member["warns"][-20:]
+        cfg = self.defense_config(group_key)
+        count = add_strike(member, rule="manual_warn",
+                           action="warn", now=time.time(),
+                           window_days=cfg.window_days)
         self._audit(group_key, "warn", user_id=user_id, by=by,
-                    count=member["warn_count"], reason=reason[:200])
+                    count=count, reason=reason[:200])
         self.store.save()
-        return int(member["warn_count"])
+        return count
 
     def clear_warns(self, group_key: str, user_id: str) -> None:
         member = self.store.group(group_key)["members"].get(user_id)
         if member:
             member["warn_count"] = 0
             member["warns"] = []
+            member["strikes"] = []
             self.store.save()
 
     # ---- read models ----------------------------------------------

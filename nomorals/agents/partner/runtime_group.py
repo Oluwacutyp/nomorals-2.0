@@ -109,16 +109,41 @@ class RuntimeGroupMixin:
                     self._send(message.chat, text)
             self._clean_service_message(surface, message)
             return True
+        if service == "delete":
+            # Evidentiary antidelete (defense brief §2.1): fed
+            # only by surfaces that can see deletions (MTProto /
+            # Baileys / Discord) — the Bot API never sends these.
+            ids = meta.get("deleted_ids") or []
+            if not ids and meta.get("deleted_id"):
+                ids = [meta["deleted_id"]]
+            for mid in ids:
+                out = surface.handle_delete(
+                    key, message_id=str(mid),
+                    by_user_id=str(meta.get("by_user_id") or ""))
+                for callout in out.get("callouts") or []:
+                    if callout.get("to") == "group":
+                        self._send(message.chat,
+                                   str(callout.get("text") or ""))
+            return True
 
         user_id = str(message.sender_id or message.sender or "")
         if not user_id:
             return False
+        if meta.get("edited"):
+            # Evidentiary antiedit: record both versions, then
+            # let the edited text flow through the normal path.
+            surface.handle_edit(
+                key, message_id=str(message.message_id or ""),
+                new_text=str(message.text or ""))
         result = surface.handle_message(
             key, user_id,
             username=str(message.sender_username or ""),
             name=str(message.sender or ""),
             text=str(message.text or ""),
-            message_id=str(message.message_id or ""))
+            message_id=str(message.message_id or ""),
+            envelope=meta.get("envelope"),
+            sender_is_admin=self._group_admin_ok(message),
+            sender_is_operator=self._operator_or_false(message))
         for notice in result.get("notices") or []:
             self._send(message.chat, str(notice))
         self._execute_pending_pin(surface, message)
@@ -131,14 +156,19 @@ class RuntimeGroupMixin:
             kind = str(action.get("kind") or "")
             executed = self._execute_group_action(
                 surface, key, adapter, message, action)
-            if kind == "warn" and executed:
+            warning = str(action.get("warning") or "")
+            if warning and executed:
+                # The organ's one public warning IS the record
+                # (no meta-narration): name + rule + consequence.
+                self._send(message.chat, warning)
+            elif kind == "warn" and executed:
                 who = (message.sender_username
                        and f"@{message.sender_username}") \
                     or message.sender or "there"
                 self._send(
                     message.chat,
                     f"⚠️ {who} — {action.get('reason') or 'warning'}")
-            if kind in ("delete", "ban") and executed:
+            if kind in ("delete", "ban", "kick") and executed:
                 consumed = True
         return consumed
 
@@ -241,6 +271,81 @@ class RuntimeGroupMixin:
         return str(status).lower() in (
             "creator", "administrator", "admin", "owner")
 
+    def _member_status(self, message):  # type: ignore[no-untyped-def]
+        """The platform's word on this sender's standing in the
+        group: (status string, raw info dict) — ("", {}) when the
+        surface cannot say."""
+        adapter = self._group_adapter(message.chat.platform)
+        if adapter is None:
+            return "", {}
+        fn = getattr(adapter, "admin_member", None) or getattr(
+            adapter, "admin_member_mtproto", None)
+        if fn is None:
+            return "", {}
+        try:
+            info = fn(message.chat, str(message.sender_id or ""))
+        except Exception:  # noqa: BLE001 - no proof, no standing
+            return "", {}
+        if not isinstance(info, dict):
+            return "", {}
+        status = info.get("status") or info.get("role") or ""
+        if not status and isinstance(info.get("result"), dict):
+            status = info["result"].get("status") or ""
+        return str(status).lower(), info
+
+    def _group_owner_ok(self, message) -> bool:  # type: ignore[no-untyped-def]
+        """The OWNER gate (defense brief §2.3): who may flip the
+        autonomy master switch.  The operator always may.  On
+        WhatsApp any group admin may (the platform hands group
+        control to admins collectively).  On Telegram only the
+        group's creator/owner — admin is a delegated role there,
+        and the kill-switch outranks delegation.  Discord: the
+        server owner."""
+        if self._operator_or_false(message):
+            return True
+        platform = str(message.chat.platform or "")
+        if platform.startswith("whatsapp"):
+            return self._group_admin_ok(message)
+        status, info = self._member_status(message)
+        if platform.startswith("telegram"):
+            return status in ("creator", "owner")
+        if platform.startswith("discord"):
+            return status in ("owner", "creator") \
+                or info.get("is_owner") is True
+        return False
+
+    def _defense_surface_kind(self, message) -> str:  # type: ignore[no-untyped-def]
+        """Which adapter family serves this chat — the key the
+        platform-honesty matrix reads (Bot API vs MTProto is a
+        capability cliff for delete events)."""
+        platform = str(message.chat.platform or "")
+        if platform.startswith("whatsapp"):
+            return "baileys"
+        if platform.startswith("discord"):
+            return "user"
+        if platform == "telegram":
+            return "mtproto"
+        adapter = self._group_adapter(platform)
+        cls = type(adapter).__name__.lower() if adapter else ""
+        return "mtproto" if "mtproto" in cls or "user" in cls \
+            else "botapi"
+
+    def _defense_update(self, surface, key, sensor, **fields):  # type: ignore[no-untyped-def]
+        """Mutate one defense settings block through the store's
+        own settings machinery (defaults-merged, persisted)."""
+        import copy as _copy
+
+        current = surface.store.settings(key)
+        defense = _copy.deepcopy(current.get("defense") or {})
+        if sensor == "_root":
+            defense.update(fields)
+        else:
+            block = dict(defense.get(sensor) or {})
+            block.update(fields)
+            defense[sensor] = block
+        surface.update_settings(key, defense=defense)
+        return defense
+
     # ---- group commands (P1 slice 2) --------------------------------
     def _control_group_help(self, message):  # type: ignore[no-untyped-def]
         """Bare /help INSIDE a group (owner order 2026-11-03):
@@ -310,9 +415,13 @@ class RuntimeGroupMixin:
             "up to an automatic mute (limit in /gsettings).",
             "  /glog — the group audit log (I keep it; I only show "
             "it when an admin asks)",
+            "  /strikes — the defense strike ledger: who is on "
+            "the ladder, and how close the rungs are",
             "  I moderate on my own: floods, repeat spam and "
-            "off-allowlist links get deleted; repeat offenders are "
-            "muted, then banned — all tuned in /gsettings.",
+            "off-allowlist links get deleted; crash payloads are "
+            "quarantined, channel injections and mass tags are "
+            "struck; repeat offenders are muted, kicked, then "
+            "banned — all tuned in /gsettings.",
             "",
             f"<i>{len(members)} members in my ledger · "
             f"{len(settings.get('rules') or [])} rules · welcome "
@@ -420,6 +529,73 @@ class RuntimeGroupMixin:
                  _toggle("🪙 Economy", "economy",
                          bool(s["economy_enabled"]))],
             ]
+            # Defense block (DESIGN §17): sensor states from the
+            # same settings the pipeline reads + the platform-
+            # honesty notes + what has degraded on THIS surface.
+            from ...social.chat.group_defense import (
+                defense_availability)
+            d = s.get("defense") or {}
+            d_ac = d.get("anticrash") or {}
+            d_ch = d.get("antichannel") or {}
+            d_tg = d.get("antitag") or {}
+            d_dl = d.get("antidelete") or {}
+            d_ed = d.get("antiedit") or {}
+            d_esc = d.get("escalation") or {}
+            avail = defense_availability(
+                str(message.chat.platform or ""),
+                self._defense_surface_kind(message))
+            honesty = []
+            if not avail["antidelete"]:
+                honesty.append(avail["antidelete_note"])
+            if not avail["antiedit"]:
+                honesty.append(avail["antiedit_note"])
+            degraded = []
+            for entry in surface.audit(key, limit=50):
+                if entry.get("kind") == "moderation_unexecuted":
+                    degraded.append(
+                        f"{entry.get('action')} — "
+                        f"{entry.get('reason')}")
+            seen: set = set()
+            degraded = [x for x in degraded
+                        if not (x in seen or seen.add(x))][:3]
+            defense_block = (
+                f"\ndefense: autonomy "
+                f"{'ON' if d.get('autonomy', True) else 'OFF'}"
+                f" (owner's switch — WhatsApp: any admin; "
+                f"Telegram: group owner only)\n"
+                f"anticrash: "
+                f"{'on' if d_ac.get('enabled', True) else 'off'}"
+                f" ({d_ac.get('action', 'delete')}) · antichannel: "
+                f"{'on' if d_ch.get('enabled', True) else 'off'}"
+                f" · antitag: "
+                f"{'on' if d_tg.get('enabled', True) else 'off'}"
+                f" (≤{d_tg.get('max_mentions', 10)} mentions or "
+                f"{d_tg.get('max_roster_pct', 20)}% of the group)\n"
+                f"antidelete: "
+                f"{'on' if d_dl.get('enabled', True) else 'off'}"
+                f" ({d_dl.get('mode', 'log')}) · antiedit: "
+                f"{'on' if d_ed.get('enabled', True) else 'off'}"
+                f" ({d_ed.get('mode', 'log')}) · strikes: mute at "
+                f"{s.get('warn_threshold', 3)} · kick at "
+                f"{d_esc.get('kick_at', 5)} · ban at "
+                f"{d_esc.get('ban_at', 7)} "
+                f"({d_esc.get('window_days', 7)}-day window)"
+                + (("\n⚠ " + "\n⚠ ".join(honesty)) if honesty
+                   else "")
+                + (("\ndegraded here: " + "; ".join(degraded))
+                   if degraded else "")
+                + f"\n<code>/gsettings autonomy on|off</code> · "
+                  f"<code>/gsettings anticrash on|off|delete|flag"
+                  f"</code>\n"
+                  f"<code>/gsettings antichannel on|off</code> · "
+                  f"<code>/gsettings antitag on|off</code> · "
+                  f"<code>/gsettings antitag N</code>\n"
+                  f"<code>/gsettings antidelete on|off</code> · "
+                  f"<code>/gsettings antidelete mode "
+                  f"log|callout</code>\n"
+                  f"<code>/gsettings antiedit on|off</code> · "
+                  f"<code>/gsettings antiedit mode log|callout"
+                  f"</code>")
             return actionable(
                 f"⚙️ <b>group settings</b>\n"
                 f"welcome: {'on' if s['welcome_enabled'] else 'off'} · "
@@ -451,7 +627,8 @@ class RuntimeGroupMixin:
                 f"<code>/gsettings governance N</code>\n"
                 f"<code>/gsettings filter add WORD</code> · "
                 f"<code>/gsettings filter action "
-                f"delete|warn|mute</code>",
+                f"delete|warn|mute</code>"
+                f"{defense_block}",
                 buttons)
         parts = text.split(None, 2)
         head = parts[0].lower()
@@ -545,6 +722,50 @@ class RuntimeGroupMixin:
             mod["link_allowlist"] = domains
             surface.update_settings(key, moderation=mod)
             return f"link allowlist: {', '.join(domains)}."
+        # ── defense grammar (DESIGN §17) ────────────────────────
+        if head == "autonomy" and rest.lower() in ("on", "off"):
+            # The master switch outranks ordinary admin: WhatsApp
+            # any group admin; Telegram the group OWNER only.
+            if not self._group_owner_ok(message):
+                return ("autonomy is the owner's switch — on "
+                        "Telegram only the group owner can flip "
+                        "it (WhatsApp: any group admin). Admins "
+                        "keep every manual command either way.")
+            self._defense_update(surface, key, "_root",
+                                 autonomy=on)
+            return (f"defense autonomy {'on' if on else 'off'}."
+                    + ("" if on else
+                       " Sensors still watch and log to /glog — "
+                       "nothing is enforced or announced."))
+        if head in ("anticrash", "antichannel", "antitag",
+                    "antidelete", "antiedit"):
+            if rest.lower() in ("on", "off"):
+                self._defense_update(surface, key, head,
+                                     enabled=on)
+                return f"{head} {'on' if on else 'off'}."
+            if head == "anticrash" and rest.lower() in (
+                    "delete", "flag"):
+                self._defense_update(surface, key, head,
+                                     action=rest.lower())
+                return (f"anticrash action: {rest.lower()} "
+                        f"quarantined payloads.")
+            if head == "antitag" and rest.isdigit():
+                ceiling = max(1, int(rest))
+                self._defense_update(surface, key, head,
+                                     max_mentions=ceiling)
+                return f"antitag ceiling: {ceiling} mentions."
+            if head in ("antidelete", "antiedit") \
+                    and rest.lower() == "mode" \
+                    and rest2.lower() in ("log", "callout"):
+                self._defense_update(surface, key, head,
+                                     mode=rest2.lower())
+                return f"{head} mode: {rest2.lower()}."
+            if head in ("antidelete", "antiedit") \
+                    and rest.lower() == "to" \
+                    and rest2.lower() in ("group", "admins"):
+                self._defense_update(surface, key, head,
+                                     callout_to=rest2.lower())
+                return f"{head} callouts go to: {rest2.lower()}."
         return ("I didn't follow that — /gsettings alone shows the "
                 "current settings and the change grammar.")
 
@@ -772,6 +993,59 @@ class RuntimeGroupMixin:
             return f"⚠️ {label}: warning {count}/{threshold}{tail_note}"
         return (f"⚠️ {label} — warning {count}/{threshold}"
                 + (f": {rest.strip()}" if rest.strip() else ""))
+
+    def _control_strikes(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        """The strike ledger (defense brief §2.2): one member's
+        record, or the group's current holders when no target is
+        named.  Read from the same spine the sensors write."""
+        key, err = self._mod_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id, label, _ = self._mod_target(
+            surface, key, tail, message)
+        if not user_id:
+            rows = []
+            for uid, member in surface.members(key).items():
+                info = surface.strikes_for(key, uid)
+                if info["count"]:
+                    rows.append((info["count"], uid, member))
+            if not rows:
+                return "no strikes on record right now."
+            rows.sort(key=lambda r: -r[0])
+            lines = ["⚖️ <b>strike ledger</b> (live window):"]
+            for count, uid, member in rows[:10]:
+                who = member.get("name") or (
+                    f"@{member['username']}"
+                    if member.get("username") else uid)
+                lines.append(f"{who} — {count} strike"
+                             f"{'s' if count != 1 else ''}")
+            return "\n".join(lines)
+        info = surface.strikes_for(key, user_id)
+        window = info["window_days"]
+        if not info["count"]:
+            return (f"{label} — clean record (no strikes in the "
+                    f"last {window} days).")
+        lines = [f"⚖️ {label} — {info['count']} strike"
+                 f"{'s' if info['count'] != 1 else ''} "
+                 f"(last {window} days):"]
+        for strike in info["strikes"]:
+            lines.append(
+                f"· {strike.get('rule')} ({strike.get('action')})"
+                f" — {_fmt_ts(strike.get('ts'))}")
+        cfg = surface.defense_config(key)
+        threshold = int(surface.store.settings(
+            key).get("warn_threshold") or 3)
+        rungs = []
+        if threshold and info["count"] < threshold:
+            rungs.append(f"mute at {threshold}")
+        if cfg.kick_at and info["count"] < cfg.kick_at:
+            rungs.append(f"removal at {cfg.kick_at}")
+        if cfg.ban_at and info["count"] < cfg.ban_at:
+            rungs.append(f"ban at {cfg.ban_at}")
+        if rungs:
+            lines.append("next: " + " · ".join(rungs))
+        return "\n".join(lines)
 
     def _control_pin(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._mod_gate(message)
@@ -1613,6 +1887,37 @@ class RuntimeGroupMixin:
         only when the platform actually performed it."""
         kind = str(action.get("kind") or "")
         user_id = str(action.get("user_id") or "")
+        if kind == "kick":
+            # A kick is a ban immediately lifted (the /kick
+            # grammar): out now, free to rejoin later.
+            ban = getattr(adapter, "admin_ban", None) if adapter \
+                else None
+            unban = getattr(adapter, "admin_unban", None) \
+                if adapter else None
+            if ban is None or unban is None:
+                surface._audit(
+                    key, "moderation_unexecuted", action=kind,
+                    rule=action.get("rule"), user_id=user_id,
+                    reason="adapter has no admin_ban/admin_unban")
+                surface.store.save()
+                return False
+            try:
+                out = ban(message.chat, user_id)
+                if isinstance(out, dict) and out.get("ok") is False:
+                    raise RuntimeError(str(out.get("error")
+                                           or "platform refused"))
+                unban(message.chat, user_id)
+            except Exception as exc:  # noqa: BLE001 - audited
+                surface._audit(
+                    key, "moderation_unexecuted", action=kind,
+                    rule=action.get("rule"), user_id=user_id,
+                    reason=f"{type(exc).__name__}: {exc}")
+                surface.store.save()
+                return False
+            surface._audit(key, "moderation_executed", action=kind,
+                           rule=action.get("rule"), user_id=user_id)
+            surface.store.save()
+            return True
         method = {"delete": "admin_delete", "ban": "admin_ban",
                   "mute": "admin_restrict"}.get(kind)
         if method is None:
@@ -1631,14 +1936,16 @@ class RuntimeGroupMixin:
             elif kind == "ban":
                 fn(message.chat, user_id)
             else:
-                # A one-hour mute; the two Telegram adapters spell
-                # it differently (minutes vs until) — speak each
-                # one's own grammar.
+                # A timed mute (1h by default posture; defense
+                # actions carry their configured minutes); the two
+                # Telegram adapters spell it differently (minutes
+                # vs until) — speak each one's own grammar.
+                minutes = int(action.get("minutes") or 60)
                 try:
-                    fn(message.chat, user_id, minutes=60)
+                    fn(message.chat, user_id, minutes=minutes)
                 except TypeError:
                     fn(message.chat, user_id,
-                       until=int(time.time()) + 3600)
+                       until=int(time.time()) + minutes * 60)
         except Exception as exc:  # noqa: BLE001 - audited, not raised
             surface._audit(
                 key, "moderation_unexecuted", action=kind,
@@ -1723,6 +2030,14 @@ def _audit_line(entry: dict) -> str:
                        "reason"):
         if entry.get(field_name):
             bits.append(f"{field_name}={entry[field_name]}")
+    if entry.get("count"):
+        bits.append(f"count={entry['count']}")
+    if entry.get("suppressed"):
+        bits.append(f"suppressed={entry['suppressed']}")
+    if entry.get("signature"):
+        bits.append(f"sig={entry['signature']}")
+    if entry.get("excerpt"):
+        bits.append(f"“{str(entry['excerpt'])[:60]}”")
     if entry.get("old") or entry.get("new"):
         bits.append(f"{entry.get('old') or '—'} → "
                     f"{entry.get('new') or '—'}")

@@ -3,6 +3,8 @@
 - :mod:`nomorals.security.dnsleak` — DNS leak check (bash.ws nonce technique).
 - :mod:`nomorals.security.netleak` — WebRTC-style (STUN) + IPv6 leak checks.
 - :mod:`nomorals.security.exif` — lossless image metadata stripping.
+- :mod:`nomorals.security.payload_inspection` — structural
+  anticrash inspection of chat payloads + learned signatures.
 """
 
 from . import dnsleak as _dnsleak_mod

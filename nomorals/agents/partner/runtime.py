@@ -3672,6 +3672,9 @@ class PartnerRuntime(
         if kind == "glog":
             return self._control_glog(arg, message)
 
+        if kind == "strikes":
+            return self._control_strikes(arg, message)
+
         if kind == "gsettings":
             return self._control_gsettings(command.tail, message)
 
