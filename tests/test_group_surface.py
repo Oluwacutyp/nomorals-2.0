@@ -177,8 +177,13 @@ class _Runtime(RuntimeGroupMixin):
             "settings": type("S", (), {
                 "workspace_dir": str(tmp_path)})()})()
 
-    def _send(self, chat, text):
+    def _send(self, chat, text, **kw):
+        # records the text; buttons/parse_mode ride along (the
+        # presentation build's _send contract — this recorder used
+        # to be the stub that masked the missing-_send live bug;
+        # tests/test_group_presentation.py pins the real method)
         self.sent.append(text)
+        self.sent_kwargs = kw
 
     def _is_operator(self, message):
         return False
@@ -266,7 +271,7 @@ def test_runtime_rules_member_glog_gsettings(tmp_path):
     # /gsettings + /glog are admin-gated by platform status
     assert "admins" in rt._control_gsettings("", member_msg)
     assert "admins" in rt._control_glog("", member_msg)
-    assert "welcome" in rt._control_gsettings("", admin)
+    assert "welcome" in rt._control_gsettings("", admin).text
     assert "rule added" in rt._control_gsettings(
         "rules add No spam", admin)
     assert "No spam" in rt._control_rules(member_msg)
@@ -301,7 +306,7 @@ def test_group_help_lists_member_and_admin_surfaces(tmp_path):
     msg = _Msg(sender_id="8", sender="Bo", sender_username="bo")
     rt.turn(_Msg(sender_id="8", sender="Bo", sender_username="bo",
                  text="hi", message_id="1"))
-    text = rt._control_group_help(msg)
+    text = rt._control_group_help(msg).text
     # member surface
     assert "/rules" in text and "/member" in text and "/ping" in text
     assert "games" in text

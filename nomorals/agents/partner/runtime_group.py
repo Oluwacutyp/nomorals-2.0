@@ -43,6 +43,31 @@ class RuntimeGroupMixin:
             self._group_surface_obj = surface
         return surface
 
+    def _send(self, chat, text: str, *, buttons=None,  # type: ignore[no-untyped-def]
+              parse_mode: str = "") -> None:
+        """The mixin's own outbound channel (welcomes, goodbyes,
+        notices).  This method was CALLED by every welcome path
+        since P1 but defined NOWHERE on PartnerRuntime — the live
+        bug found 2026-11-03: every join's welcome died on
+        AttributeError, caught upstream and logged, never sent.
+        Defined here, on the mixin that calls it, riding the same
+        gateway contract (buttons + parse_mode) as every surface."""
+        self.gateway.send(chat.platform, chat, str(text),
+                          buttons=buttons, parse_mode=parse_mode)
+
+    def _welcome_buttons(self, surface: Any, key: str) -> list:
+        """Buttons authored from the group's LIVE state: rules are
+        always reachable; the sparks row appears only when the
+        economy actually runs here."""
+        rows = [[("📜 Rules", "rules")]]
+        try:
+            if surface.economy_on(key):
+                rows.append([("🪙 My sparks", "balance"),
+                             ("🗺️ Quests", "quests")])
+        except Exception:  # noqa: BLE001 - buttons never block a welcome
+            pass
+        return rows
+
     def _group_adapter(self, platform: str):  # type: ignore[no-untyped-def]
         gateway = getattr(self, "gateway", None)
         adapters = getattr(gateway, "adapters", {}) or {}
@@ -70,7 +95,8 @@ class RuntimeGroupMixin:
                 if text:
                     welcomed.append(text)
             for text in welcomed:
-                self._send(message.chat, text)
+                self._send(message.chat, text,
+                           buttons=self._welcome_buttons(surface, key))
             self._clean_service_message(surface, message)
             return True
         if service == "leave":
@@ -206,22 +232,31 @@ class RuntimeGroupMixin:
             "creator", "administrator", "admin", "owner")
 
     # ---- group commands (P1 slice 2) --------------------------------
-    def _control_group_help(self, message) -> str:  # type: ignore[no-untyped-def]
+    def _control_group_help(self, message):  # type: ignore[no-untyped-def]
         """Bare /help INSIDE a group (owner order 2026-11-03):
         list what is actually available in this group — the member
         surface and the admin surface side by side, rendered from
         this group's live state, not the global owner catalog.
         Everyone sees both sections; the admin commands themselves
-        stay gated at execution."""
+        stay gated at execution.
+
+        Presentation build: the reply is an ActionableMessage —
+        HTML text and buttons authored from the SAME state (the
+        sparks row exists exactly when the economy runs here; the
+        buttons mirror the sections on screen)."""
+        import html as _html
+
+        from ...social.chat.tgbot_buttons import actionable
         key = message.chat.key
         surface = self._group_surface()
         settings = surface.store.settings(key)
         members = surface.members(key)
-        title = message.chat.title or "this group"
+        eco = surface.economy_on(key)
+        title = _html.escape(message.chat.title or "this group")
         lines = [
-            f"🛠️ {title} — what I do here",
+            f"🛠️ <b>{title}</b> — what I do here",
             "",
-            "for everyone:",
+            "<b>for everyone:</b>",
             "  /rules — the group rules",
             "  /report — flag a message or member for the admins "
             "(reply to it, or /report @member why)",
@@ -232,36 +267,47 @@ class RuntimeGroupMixin:
             "and the rest of the board; /game lists them, moves are "
             "plain text (a1, b2 …). Some games queue you against "
             "players on other platforms.",
-            "  🪙 sparks (the group purse) — /balance · /mine · "
-            "/work · /pay @member 50 · /gshop · /quests · /treasury "
-            "· /claim when a drop is live. Chatting, streaks, "
-            "quests and in-group game wins all earn.",
-            "  /help <command> — the full page for any command",
+        ]
+        if eco:
+            lines.append(
+                "  🪙 sparks (the group purse) — /balance · /mine · "
+                "/work · /pay @member 50 · /gshop · /quests · "
+                "/treasury · /claim when a drop is live. Chatting, "
+                "streaks, quests and in-group game wins all earn.")
+        lines += [
+            "  /help /balance — the full page for any command",
             "",
-            "for admins:",
+            "<b>for admins:</b>",
             "  /gsettings — welcome & goodbye, the rules list, "
             "flood/link moderation, service-message cleanup, the "
             "economy switch and transfer tax",
-            "  /drop <total> <per claim> — fund a giveaway pool "
-            "from your own sparks; members claim with /claim",
+            "  /drop 100 10 — fund a giveaway pool from the "
+            "treasury; members claim with /claim",
             "  moderation, by hand: reply to a member's message "
-            "with /warn, /mute [10m|2h|1d], /ban or /kick — or "
-            "name @member instead. /unmute /unban undo them; /pin "
-            "and /purge work on the message you reply to; warns "
-            "pile up to an automatic mute (limit in /gsettings).",
+            "with /warn, /mute 10m|2h|1d, /ban or /kick — or name "
+            "@member instead. /unmute /unban undo them; /pin and "
+            "/purge work on the message you reply to; warns pile "
+            "up to an automatic mute (limit in /gsettings).",
             "  /glog — the group audit log (I keep it; I only show "
             "it when an admin asks)",
             "  I moderate on my own: floods, repeat spam and "
             "off-allowlist links get deleted; repeat offenders are "
             "muted, then banned — all tuned in /gsettings.",
             "",
-            f"this group: {len(members)} members in my ledger · "
+            f"<i>{len(members)} members in my ledger · "
             f"{len(settings.get('rules') or [])} rules · welcome "
             f"{'on' if settings['welcome_enabled'] else 'off'} · "
             f"link moderation "
-            f"{'allowlist' if (settings['moderation'].get('link_allowlist')) else 'open'}",
+            f"{'allowlist' if (settings['moderation'].get('link_allowlist')) else 'open'}</i>",
         ]
-        return "\n".join(lines)
+        buttons = [[("📜 Rules", "rules"), ("🎮 Games", "game")]]
+        if eco:
+            buttons.append([("🪙 My sparks", "balance"),
+                            ("🗺️ Quests", "quests"),
+                            ("🏦 Treasury", "treasury")])
+        buttons.append([("⚙️ Group settings", "gsettings"),
+                        ("📋 Audit log", "glog")])
+        return actionable("\n".join(lines), buttons)
 
     def _group_key_or_none(self, message):  # type: ignore[no-untyped-def]
         if message is None:
@@ -330,10 +376,30 @@ class RuntimeGroupMixin:
         surface = self._group_surface()
         text = str(tail or "").strip()
         if not text:
+            from ...social.chat.tgbot_buttons import actionable
             s = surface.store.settings(key)
             mod = s["moderation"]
-            return (
-                f"⚙️ group settings\n"
+
+            def _toggle(label: str, kind: str, on_now: bool) -> tuple:
+                # The button SHOWS the current state and carries
+                # the flip — authored from the live settings, so
+                # it can never disagree with the summary above it.
+                return (f"{label}: {'ON' if on_now else 'OFF'}",
+                        f"gsettings {kind} "
+                        f"{'off' if on_now else 'on'}")
+
+            buttons = [
+                [_toggle("👋 Welcome", "welcome",
+                         bool(s["welcome_enabled"])),
+                 _toggle("🚪 Goodbye", "goodbye",
+                         bool(s["goodbye_enabled"]))],
+                [_toggle("🧹 Cleanup", "clean",
+                         bool(s["clean_service"])),
+                 _toggle("🪙 Economy", "economy",
+                         bool(s["economy_enabled"]))],
+            ]
+            return actionable(
+                f"⚙️ <b>group settings</b>\n"
                 f"welcome: {'on' if s['welcome_enabled'] else 'off'} · "
                 f"goodbye: {'on' if s['goodbye_enabled'] else 'off'} · "
                 f"service cleanup: {'on' if s['clean_service'] else 'off'}\n"
@@ -346,11 +412,13 @@ class RuntimeGroupMixin:
                 f"({mod.get('filter_action') or 'delete'})\n"
                 f"economy: {'on' if s['economy_enabled'] else 'off'}"
                 f" · transfer tax {s.get('transfer_tax_pct', 2)}%\n"
+                f"tap a button to flip a switch, or type:\n"
                 f"change: /gsettings welcome on|off · rules add "
-                f"<text> · rules clear · flood <n> · links "
-                f"<domains>|off · clean on|off · economy on|off · "
-                f"tax <pct> · warns <n> · filter add <word> · "
-                f"filter action delete|warn|mute")
+                f"text · rules clear · flood n · links "
+                f"domains|off · clean on|off · economy on|off · "
+                f"tax pct · warns n · filter add word · "
+                f"filter action delete|warn|mute",
+                buttons)
         parts = text.split(None, 2)
         head = parts[0].lower()
         rest = parts[1] if len(parts) > 1 else ""
@@ -770,17 +838,31 @@ class RuntimeGroupMixin:
             return None
         return token or None
 
-    def _control_balance(self, message) -> str:  # type: ignore[no-untyped-def]
+    def _control_balance(self, message):  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
         if err:
             return err
+        import html as _html
+
+        from ...social.chat.tgbot_buttons import actionable
         surface = self._group_surface()
         user_id = str(message.sender_id or message.sender or "")
-        from ...community.group_economy import format_statement
-
-        text = format_statement(surface.economy.statement(key, user_id))
-        return (text + f"\n🏦 group treasury: "
-                f"{surface.economy.treasury_balance(key)} sparks")
+        stmt = surface.economy.statement(key, user_id)
+        member = surface.members(key).get(user_id) or {}
+        name = _html.escape(
+            str(member.get("name") or message.sender or "you"))
+        lines = [f"💰 <b>{name}</b> — <b>{stmt.get('balance', 0)}"
+                 f"</b> sparks"]
+        for badge in stmt.get("badges", []):
+            lines.append(f"  🏅 {_html.escape(str(badge.get('badge')))}"
+                         f" ({_html.escape(str(badge.get('season')))})")
+        lines.append(
+            f"🏦 group treasury: "
+            f"{surface.economy.treasury_balance(key)} sparks")
+        lines.append(f"<i>{_html.escape(str(stmt.get('disclaimer') or ''))}</i>")
+        buttons = [[("⛏️ Mine", "mine"), ("🛠️ Work", "work")],
+                   [("🗺️ Quests", "quests"), ("🛒 Shop", "gshop")]]
+        return actionable("\n".join(lines), buttons)
 
     def _control_mine(self, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
@@ -877,13 +959,32 @@ class RuntimeGroupMixin:
                         f"sparks, heard by the whole group.")
             return (f"✨ {grant['name']} is yours — granted and "
                     f"ledgered ({grant['ledger_id']}).")
+        from ...social.chat.tgbot_buttons import actionable
         balance = surface.economy.balance(key, user_id)
-        lines = [f"🛒 group shop — your sparks: {balance}"]
+        lines = [f"🛒 <b>group shop</b> — your sparks: "
+                 f"<b>{balance}</b>"]
+        buy_row: list = []
+        buttons: list = []
         for item_id, item in STATUS_SHOP.items():
-            lines.append(f"{item_id} — {item['name']} · "
-                         f"{item['cost']} sparks · {item['blurb']}")
-        lines.append("buy with /gshop buy <item>")
-        return "\n".join(lines)
+            afford = balance >= int(item["cost"])
+            lines.append(
+                f"<code>{item_id}</code> — {item['name']} · "
+                f"{item['cost']} sparks · {item['blurb']}"
+                + ("" if afford else " · <i>not yet</i>"))
+            # Buttons are authored from the LIVE shelf + balance:
+            # an item gets a buy button exactly when this member
+            # can actually buy it — the buttons match the display.
+            if afford:
+                buy_row.append(
+                    (f"Buy {item['name']} · {item['cost']}",
+                     f"gshop buy {item_id}"))
+                if len(buy_row) == 2:
+                    buttons.append(buy_row)
+                    buy_row = []
+        if buy_row:
+            buttons.append(buy_row)
+        buttons.append([("🪙 My balance", "balance")])
+        return actionable("\n".join(lines), buttons)
 
     def _control_quests(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
@@ -920,7 +1021,7 @@ class RuntimeGroupMixin:
             return err
         surface = self._group_surface()
         health = surface.economy_health(key)
-        return (f"🏦 treasury: {health['treasury']} sparks · "
+        return (f"🏦 <b>treasury: {health['treasury']} sparks</b>\n"
                 f"circulating: {health['circulating']} across "
                 f"{health['holders']} holders · biggest holder "
                 f"{int(health['top_share'] * 100)}% · "
@@ -947,11 +1048,18 @@ class RuntimeGroupMixin:
             if result["reason"] == "funds":
                 return "you don't hold that many sparks to fund a drop."
             return "that drop doesn't work as written."
+        from ...social.chat.tgbot_buttons import actionable
         drop = result["drop"]
         claims = drop["total"] // drop["per_claim"]
-        return (f"🎁 DROP: {drop['total']} sparks in the pool, "
-                f"{drop['per_claim']} per claim, {claims} claims. "
-                f"Members: /claim to take yours.")
+        # The button is authored from THIS drop's state: its label
+        # carries the actual per-claim amount of the pool on
+        # screen — never a generic claim button.
+        return actionable(
+            f"🎁 <b>DROP: {drop['total']} sparks in the pool</b>\n"
+            f"{drop['per_claim']} per claim · {claims} claims · "
+            f"tap Claim or send /claim",
+            [[(f"🎁 Claim {drop['per_claim']} sparks", "claim"),
+              ("🪙 My balance", "balance")]])
 
     def _control_claim(self, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)

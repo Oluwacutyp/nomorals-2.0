@@ -1310,13 +1310,8 @@ class PartnerRuntime(
                         reply = "that broke something on my end — try again."
                     if reply:
                         try:
-                            # Same typing treatment as every other reply
-                            # path (operator branch, games): the public
-                            # branch originally sent bare, so the main
-                            # bot never showed "typing…" for its commands.
-                            self._typing_for(message.chat, reply)
-                            self.gateway.send(
-                                message.chat.platform, message.chat, reply,
+                            self._send_control_reply(
+                                message, reply,
                                 reply_keyboard=public_menu_keyboard()
                                 if bare_menu else None)
                         except Exception:  # noqa: BLE001
@@ -1365,9 +1360,7 @@ class PartnerRuntime(
                         reply = "that broke something on my end — try again."
                     if reply:
                         try:
-                            self._typing_for(message.chat, reply)
-                            self.gateway.send(
-                                message.chat.platform, message.chat, reply)
+                            self._send_control_reply(message, reply)
                         except Exception:  # noqa: BLE001
                             _log.warning("group command reply send failed")
                     return
@@ -1453,10 +1446,6 @@ class PartnerRuntime(
                              f"/help {command.kind} shows the right usage")
                 if reply:
                     try:
-                        self._typing_for(message.chat, reply)
-                        # Septorch-style outputs carry HTML tags — render
-                        # them formatted, everything else stays plain text.
-                        _pm = "HTML" if ("<b>" in reply or "<code>" in reply) else ""
                         # Bare /start and /menu carry the bottom menu
                         # keyboard on operator chats too (any platform).
                         _kb = None
@@ -1464,9 +1453,8 @@ class PartnerRuntime(
                             from ...social.chat.tgbot_buttons import (
                                 public_menu_keyboard)
                             _kb = public_menu_keyboard()
-                        self.gateway.send(message.chat.platform, message.chat,
-                                          reply, parse_mode=_pm,
-                                          reply_keyboard=_kb)
+                        self._send_control_reply(
+                            message, reply, reply_keyboard=_kb)
                     except Exception as exc:  # noqa: BLE001
                         _log.warning("control reply send failed: %s", exc)
                 return
@@ -3376,6 +3364,11 @@ class PartnerRuntime(
             try:
                 reply = self.handle_control(
                     expanded, chat_key, message=message, _no_stack=True)
+                # A stacked reply is composite TEXT — a step that
+                # returned an ActionableMessage contributes its text;
+                # its buttons belong to its own send, not the stack.
+                if hasattr(reply, "text"):
+                    reply = str(reply.text)
             except Exception as exc:  # noqa: BLE001 - one bad step stops the stack, loudly
                 parts.append(
                     f"── {i + 1}/{total} /{cmd.kind} ──\n"
@@ -3414,6 +3407,37 @@ class PartnerRuntime(
                 f"── {i + 1}/{total} /{cmd.kind} ──\n"
                 f"{reply if reply else '(no output)'}")
         return "\n".join(parts)
+
+    def _send_control_reply(self, message, reply, *,  # type: ignore[no-untyped-def]
+                            reply_keyboard=None) -> None:
+        """The ONE send channel for control-command replies, on
+        every bot and surface (presentation build, owner order
+        2026-11-03: buttons + formatting are platform-wide, not a
+        per-surface improvisation).
+
+        A handler returns either a plain string or an
+        ActionableMessage (tgbot_buttons.actionable): text and its
+        buttons authored together from the same state that
+        rendered the display, so the buttons always match what's
+        on screen.  Platforms without buttons ignore the keyboard.
+
+        Formatting convention: reply text carrying <b> or <code>
+        goes out as HTML (the adapter falls back to plain text if
+        the platform rejects the markup — formatting never eats
+        the message)."""
+        text, buttons = reply, None
+        if hasattr(reply, "text") and hasattr(reply, "buttons"):
+            text, buttons = str(reply.text), reply.buttons
+        text = str(text or "")
+        if not text and not buttons:
+            return
+        self._typing_for(message.chat, text)
+        parse_mode = "HTML" if ("<b>" in text or "<code>" in text) \
+            else ""
+        self.gateway.send(message.chat.platform, message.chat,
+                          text, buttons=buttons,
+                          parse_mode=parse_mode,
+                          reply_keyboard=reply_keyboard)
 
     def handle_control(self, text: str, chat_key: str,
                        message: Any = None, _no_stack: bool = False) -> str:

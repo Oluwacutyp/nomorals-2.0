@@ -61,28 +61,34 @@ class ActionableMessage:
         return f"ActionableMessage(text={self.text[:40]!r}, buttons={self.buttons!r})"
 
 
-def actionable(text: str, buttons: list[tuple[str, str]]) -> ActionableMessage:
+def actionable(text: str, buttons: list) -> ActionableMessage:
     """Build a message with tappable inline buttons.
 
     ``buttons`` is ``[(label, command), …]`` — ``command`` is the chat
     command run on tap, with or without the leading slash
     (``"/proxy refresh"`` or ``"proxy refresh"``; the adapter normalizes
-    it). All buttons land on a single row; pass nested lists via the
-    raw ``Keyboard`` type for multi-row layouts.
+    it). A flat list lands on a single row; a list of ROWS (each a
+    list of pairs) keeps its layout — handlers author whichever
+    matches their display.
 
     Raises :class:`ValueError` if any callback payload exceeds Telegram's
     47-byte budget (after the adapter's HMAC signature is added).
     """
-    keyboard: Keyboard = []
-    row: list[Button] = []
-    for label, command in buttons:
+    def _pair(item) -> Button:  # type: ignore[no-untyped-def]
+        label, command = item
         data = (command or "").strip()
         if data.startswith("/"):
             data = data[1:]
         check_callback_data(data)
-        row.append((label, data))
-    if row:
-        keyboard.append(row)
+        return (str(label), data)
+
+    items = list(buttons or [])
+    nested = bool(items) and isinstance(items[0], (list, tuple)) \
+        and bool(items[0]) \
+        and isinstance(items[0][0], (list, tuple))
+    rows = items if nested else ([items] if items else [])
+    keyboard: Keyboard = [[_pair(pair) for pair in row]
+                          for row in rows if row]
     return ActionableMessage(text, keyboard)
 
 
