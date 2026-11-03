@@ -328,6 +328,14 @@ def _fetch_news(context: Any) -> list[dict[str, Any]]:
     _migrate_seen_store(context, agent)
     report = agent.poll()
     items = agent.undelivered() if report.get("ok") else []
+    # Owner-language delivery (translation organ): rows are localized
+    # HERE, at the pulse's composition input, so the headlines, the
+    # story segments and the voice script (written from these items)
+    # are all in the owner's language before TTS ever sees them.
+    if items:
+        from ..llm.translate import localize_news_rows
+
+        items = localize_news_rows(context, items)
     _log.info("morning-pulse: news radar got %d items", len(items))
     return items
 
@@ -1120,6 +1128,11 @@ def _story_block(item: dict[str, Any]) -> str:
     source = publisher_of(item)
     url = str(item.get("url", "") or "").strip()
     lines = [f"• **{title}**" + (f" — {source}" if source else "")]
+    original = str(item.get("title_original", "") or "").strip()
+    if original and original != title:
+        # the original headline, kept as a small secondary line when
+        # the story was delivered translated (translation organ).
+        lines.append(f"  ◦ original: {original}")
     if url:
         lines.append(url)
     summary = _short_summary(str(item.get("summary", "") or ""), 400)
@@ -1275,7 +1288,12 @@ def _fresh_news_items(context: Any) -> list[dict[str, Any]]:
         agent = NewsAgent(context)
         _migrate_seen_store(context, agent)
         report = agent.poll()
-        return agent.undelivered() if report.get("ok") else []
+        items = agent.undelivered() if report.get("ok") else []
+        if items:
+            from ..llm.translate import localize_news_rows
+
+            items = localize_news_rows(context, items)
+        return items
     except Exception as exc:  # noqa: BLE001
         record_failure("morning_pulse._fresh_news_items.poll", exc)
         return []

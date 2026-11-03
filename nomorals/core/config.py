@@ -708,6 +708,27 @@ class LocationSettings:
 
 
 @dataclass
+class TranslateSettings:
+    """The translation organ (llm/translate.py).
+
+    ``owner_language`` is the language owner-addressed deliveries
+    arrive in (default English); /translate lang <code> overrides it
+    at runtime and the stored preference wins over this seed.
+    ``local_model`` names the local NMT weights (a path or an HF repo
+    id) for the ladder's local rung — empty = the default drop-in
+    location.  ``providers`` adds Lingva-compatible instance base
+    URLs (comma-separated) to the provider seed list — the seed list
+    is a seed (open-sources law), never a closed set.
+    Env: NM_TRANSLATE_OWNER_LANGUAGE, NM_TRANSLATE_MODEL,
+    NM_TRANSLATE_PROVIDERS.
+    """
+
+    owner_language: str = "en"
+    local_model: str = ""
+    providers: str = ""
+
+
+@dataclass
 class Settings:
     """Root configuration object."""
 
@@ -766,6 +787,8 @@ class Settings:
         default_factory=lambda: TakeoverSettings())
     location: "LocationSettings" = field(
         default_factory=lambda: LocationSettings())
+    translate: "TranslateSettings" = field(
+        default_factory=lambda: TranslateSettings())
 
     # -- path helpers --------------------------------------------------------
     @property
@@ -993,6 +1016,9 @@ _ENV_MAP: dict[str, str] = {
     "NM_API_HOST": "api.host",
     "NM_API_PORT": "api.port",
     "NM_API_TOKEN": "api.token",
+    "NM_TRANSLATE_OWNER_LANGUAGE": "translate.owner_language",
+    "NM_TRANSLATE_MODEL": "translate.local_model",
+    "NM_TRANSLATE_PROVIDERS": "translate.providers",
     "NM_HUB_URL": "hub.url",
     "NM_HUB_TOKEN": "hub.token",
     "NM_HUB_HOST": "hub.bind_host",

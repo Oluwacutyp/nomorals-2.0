@@ -156,7 +156,7 @@ PUBLIC_GAME_COMMANDS: tuple[str, ...] = (
 #: commands + /game + the 32 public game commands. ``/menu`` and ``/list``
 #: are NOT in here — bare /menu is a menu trigger, not a menu item.
 PUBLIC_COMMANDS: frozenset[str] = frozenset([
-    "help", "ping", "search", "news", "book", "music", "play", "video", "podcast",
+    "help", "ping", "search", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
     "rules", "member", "glog", "gsettings", "strikes",
@@ -355,6 +355,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # wave 87: the Core Mind — manual override over natural-language routing
     "mind": (0, None),       # /mind [status|clear|<goal>] — the core mind
     "news": (0, 2),          # /news [run|briefing|status]
+    "translate": (0, None),   # /translate [to <lang>] <text> | <url> | (as a reply) | lang <code> | status
+    "tl": (0, None),          # alias of /translate
     "pulse": (0, None),       # /pulse [status|config|run|catchup] [slot]
     # /research is ONE command (single registry entry — a duplicate key
     # here would silently discard one meaning): ad-hoc web research on
@@ -1821,6 +1823,13 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "news": {"what": "fetch and summarize the news feeds.",
              "usage": "/news [run [n]|briefing|status]", "example": "/news run",
              "related": "/research · /pulse"},
+    "translate": {"what": "translate anything: text you type, a message you reply to, or a link (you get the article translated, as a gist when it's long). News and briefings already arrive in your language automatically — this is the on-demand form. The ladder: a local model when this machine carries one, then the brain, then free provider endpoints, each health-tracked; if every rung is down you get the original text, plainly marked as untranslated.",
+             "usage": "/translate [to <lang>] <text> · /translate <url> · /translate (as a reply) · /translate lang <code> · /translate status", "example": "/translate Bonjour le monde",
+             "related": "/news · /pulse · /tts"},
+    "tl": {"what": "alias of /translate.",
+            "usage": "/tl [to <lang>] <text…> — same as /translate",
+            "example": "/tl es Good morning",
+            "related": "/translate"},
     "pulse": {"what": "briefings: morning, afternoon, evening, midnight — check the schedule or trigger any briefing on demand. Each briefing covers what's new since the last one; long briefings arrive in full, paginated.",
              "usage": "/pulse [status|config|run|catchup] [morning|afternoon|evening|midnight|all]", "example": "/pulse run midnight",
              "related": "/news · /brief"},
@@ -2681,7 +2690,8 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
       "sudoku", "anagram", "cryptogram", "math", "npc", "dm", "charagent",
       "pvp", "raid"]),
     ("voice & vision", ["tts", "speak", "stt", "voice", "look", "image", "lens",
-                        "vision", "voices", "clonevoice", "sing"]),
+                        "vision", "voices", "clonevoice", "sing",
+                        "translate", "tl"]),
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate"]),
     ("media system", ["music", "distribute", "play", "video", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
@@ -2952,7 +2962,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "pvp", "raid"]),
     ("voice & vision",
      ["tts", "speak", "stt", "voice", "look", "image", "lens",
-      "vision", "voices", "clonevoice", "sing"]),
+      "vision", "voices", "clonevoice", "sing", "translate", "tl"]),
     ("tools & automation",
      ["schedule", "db", "artifact", "api", "proxy", "toolhub", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
@@ -3066,6 +3076,8 @@ LIST_ONELINERS: dict[str, str] = {
     "searchhist": "your recent research runs",
     "research": "web research on any topic + the always-on research loop (status/ideas/approve)",
     "news": "fetch + summarize the feeds",
+    "translate": "translate text, a replied-to message, or a link — /translate [to <lang>] <text>",
+    "tl": "alias of /translate",
     "pulse": "briefings — schedule + run any slot on demand",
     "osint": "read-only public-intel: reports, campaigns, graph",
     "dns": "DNS records, zero dependencies",

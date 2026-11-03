@@ -1134,12 +1134,22 @@ class NewsAgent:
                     if len(push_candidates) > remaining:
                         out["push_cap_reached"] = True
                     for row in push_candidates[:remaining]:
-                        body = _short_summary(row.get("summary") or "")
+                        # Owner-language delivery (translation organ):
+                        # the alert's headline + gist arrive translated,
+                        # the original headline kept as a small line,
+                        # the source link untouched.
+                        disp = self._localized_item(
+                            str(row.get("title") or ""),
+                            _short_summary(row.get("summary") or ""))
+                        body = disp.summary or ""
+                        if disp.translated and disp.original_title:
+                            body = (body + "\n" if body else "") \
+                                + f"original: {disp.original_title}"
                         body = (body + "\n" if body else "") \
                             + str(row.get("url") or "")
                         try:
                             res = self.notifier.publish(
-                                "news", str(row.get("title") or ""), body)
+                                "news", disp.title, body)
                         except Exception as exc:  # noqa: BLE001
                             record_failure("news.score_tier_publish", exc)
                             res = {}
@@ -1205,9 +1215,33 @@ class NewsAgent:
             # carries everything undelivered (pass #85).
             for it in items:
                 summary = summaries.get(it["url"]) or it.get("summary") or ""
-                lines.append(f"  • {it['title']}" + (
-                    f" — {_short_summary(summary)}" if summary else ""))
+                # Owner-language delivery (translation organ): the
+                # headline + gist arrive in the owner's language; the
+                # original headline rides as a small secondary line.
+                disp = self._localized_item(it["title"], summary)
+                lines.append(f"  • {disp.title}" + (
+                    f" — {_short_summary(disp.summary)}"
+                    if disp.summary else ""))
+                if disp.translated and disp.original_title:
+                    lines.append(f"    ◦ original: {disp.original_title}")
         return "\n".join(lines)
+
+    def _localized_item(self, title: str, summary: str) -> Any:
+        """One headline + gist in the owner's language (the
+        translation organ's item shape).  Degrades to the organ's
+        marked identity — the original text — when no rung can
+        translate; never raises into a delivery path."""
+        try:
+            from ..llm.translate import translator_for
+
+            return translator_for(self.context).translate_item(
+                str(title or ""), str(summary or ""))
+        except Exception as exc:  # noqa: BLE001
+            record_failure("news.localized_item", exc)
+            from ..llm.translate import ItemTranslation
+
+            return ItemTranslation(title=str(title or ""),
+                                   summary=str(summary or ""))
 
     def brief(self, rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """Compose and deliver the digest of ALL undelivered stories.

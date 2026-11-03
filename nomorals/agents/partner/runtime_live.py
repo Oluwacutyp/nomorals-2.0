@@ -50,6 +50,134 @@ class RuntimeLiveMixin:
         res = convert_time(raw, from_zone, to_zone)
         return res.get("text") or f"couldn't parse that: {res.get('error','')}"
 
+    # ── translate ────────────────────────────────────────────────────
+    def _control_translate(self, tail: str, message=None) -> str:
+        """/translate [to <lang>] <text> | <url> | (as a reply) |
+        lang <code> | status — the translation organ, on demand.
+
+        News and briefings already arrive in the owner's language on
+        their own; this is the explicit form: text, a replied-to
+        message, or a link.  The ladder's marked identity fallback is
+        surfaced as-is — original text is never dressed up as a
+        translation.
+        """
+        from ...llm.languages import language_name, normalize_code
+        from ...llm.translate import translator_for
+
+        translator = translator_for(self.context)
+        owner_lang = translator.owner_language()
+
+        def _replied_text() -> str:
+            if message is None:
+                return ""
+            meta = getattr(message, "meta", None) or {}
+            for key in ("reply_to_text", "quoted_text", "reply_text"):
+                val = meta.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            return ""
+
+        def _render(outcome, source_text: str) -> str:
+            if outcome.rung == "same-language":
+                return (f"that's already in "
+                        f"{language_name(outcome.target_lang)} — "
+                        f"nothing to translate.")
+            if not outcome.translated:
+                return (f"{source_text}\n"
+                        f"⚠ {outcome.note}")
+            footer = "— translated"
+            if outcome.source_lang:
+                footer += f" from {language_name(outcome.source_lang)}"
+            if outcome.target_lang != owner_lang:
+                footer += f" to {language_name(outcome.target_lang)}"
+            return f"{outcome.text}\n{footer}"
+
+        text = (tail or "").strip()
+        words = text.split()
+        first = words[0].lower() if words else ""
+
+        # /translate lang [code] — the owner-language setting itself.
+        if first in ("lang", "language"):
+            if len(words) < 2:
+                return (f"your language: "
+                        f"{language_name(owner_lang)} ({owner_lang}) — "
+                        f"news, briefings and /translate land in it. "
+                        f"/translate lang <code> changes it.")
+            try:
+                code = translator.set_owner_language(words[1])
+            except ValueError as exc:
+                return str(exc)
+            return (f"your language is now "
+                    f"{language_name(code)} ({code}) — deliveries and "
+                    f"/translate will use it.")
+
+        # /translate status — the ladder, honestly.
+        if first == "status" and len(words) == 1:
+            lines = [f"translation ladder — your language: "
+                     f"{language_name(owner_lang)} ({owner_lang})"]
+            for rung in translator.ladder_status():
+                mark = "✓" if rung["available"] else "✗"
+                lines.append(f"  {mark} {rung['rung']}: {rung['detail']}")
+            return "\n".join(lines)
+
+        # Target override: "to <lang>" prefix, or a leading language
+        # token (/tl es …).  A bare code with nothing after it applies
+        # to a replied-to message, or asks for the text.
+        target = ""
+        rest = text
+        if first == "to" and len(words) >= 2 and normalize_code(words[1]):
+            target = normalize_code(words[1])
+            rest = text.split(None, 2)[2] if len(words) > 2 else ""
+        elif first and normalize_code(first) and first not in ("http",):
+            code = normalize_code(first)
+            # a leading code only counts as a target when something
+            # follows it or a reply supplies the text — a one-word
+            # message that happens to be a code is likelier text.
+            if len(words) > 1 or _replied_text():
+                target = code
+                rest = text.split(None, 1)[1] if len(words) > 1 else ""
+
+        rest = rest.strip()
+        if rest.lower().startswith(("http://", "https://")):
+            url = rest.split()[0]
+            res = translator.translate_url(url, target=target)
+            if not res.get("ok"):
+                return f"couldn't translate that page — {res.get('error')}"
+            lines = []
+            if res.get("title"):
+                lines.append(str(res["title"]))
+                if (res.get("translated")
+                        and res.get("title_original")
+                        and res["title_original"] != res["title"]):
+                    lines.append(f"  ◦ original: {res['title_original']}")
+            lines.append(str(res.get("text") or ""))
+            if res.get("translated"):
+                foot = "— translated"
+                if res.get("source_lang"):
+                    foot += f" from {language_name(res['source_lang'])}"
+                foot += (" · full text" if res.get("full") else
+                         f" · gist of a {res.get('words', 0)}-word page "
+                         f"— the link has the whole thing")
+                lines.append(foot)
+            else:
+                lines.append(f"⚠ {res.get('note') or 'untranslated'}")
+            return "\n".join(lines)
+        if rest:
+            outcome = translator.translate(rest, target=target)
+            return _render(outcome, rest)
+        replied = _replied_text()
+        if replied:
+            outcome = translator.translate(replied, target=target)
+            return _render(outcome, replied)
+        if message is not None and getattr(message, "reply_to", ""):
+            return ("I can see you replied to a message, but this "
+                    "surface didn't hand me its text — paste the text "
+                    "and I'll translate it.")
+        return ("nothing to translate — give me text, a link, or "
+                "reply to a message with /translate. "
+                f"Your language: {language_name(owner_lang)} "
+                f"({owner_lang}); /translate lang <code> changes it.")
+
     # ── news ─────────────────────────────────────────────────────────────────
     def _control_news(self, tail: str) -> str:
         from ..features import feature_enabled

@@ -4679,6 +4679,8 @@ class PartnerRuntime(
                 player=self._game_player_for_key(chat_key))
         if kind == "news":
             return self._control_news(command.tail or arg)
+        if kind in {"translate", "tl"}:
+            return self._control_translate(command.tail or "", message)
         if kind == "pulse":
             return self._control_pulse(command.tail or arg)
         if kind == "code":

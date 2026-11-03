@@ -636,6 +636,19 @@ class NewsProvider(_Provider):
         except Exception as exc:  # noqa: BLE001
             record_failure("morning_briefing.NewsProvider.collect.agent", exc)
             return None
+        # Owner-language delivery (translation organ): localize BEFORE
+        # the topic filter — the owner's topics are in his language, so
+        # a French story on his beat only matches once it reads in his
+        # language.  Localized copies keep the original headline for
+        # the small secondary line below.
+        if items:
+            try:
+                from ..llm.translate import localize_news_rows
+
+                items = localize_news_rows(ctx, items)
+            except Exception as exc:  # noqa: BLE001
+                record_failure(
+                    "morning_briefing.NewsProvider.collect.localize", exc)
         if topics:
             lowered = [t.lower() for t in topics]
             items = [i for i in items
@@ -658,15 +671,22 @@ class NewsProvider(_Provider):
                     "title": i.get("title", ""),
                     "body": (i.get("summary", "") or "")[:300],
                     "url": i.get("url", ""),
-                    "source": src})
+                    "source": src,
+                    "title_original": i.get("title_original", "")})
         if not picked:
             return None
+        lines: list[str] = []
+        for i in picked:
+            lines.append(f"• {i['title']} ({i['source']})")
+            original = str(i.get("title_original") or "").strip()
+            if original and original != i["title"]:
+                lines.append(f"  ◦ original: {original}")
         # no fixed clip: the composer sizes this section adaptively
         return BriefingSection(
             name=self.name, title=self.title, priority=self.priority,
             source="news",
             items=picked,
-            lines=[f"• {i['title']} ({i['source']})" for i in picked])
+            lines=lines)
 
 
 class RoomsProvider(_Provider):
