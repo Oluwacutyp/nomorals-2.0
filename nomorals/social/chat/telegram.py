@@ -2037,6 +2037,93 @@ class TelegramAdapter(ChatAdapter):
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"member list failed: {exc}"}
 
+    def member_by_username(self, chat: ChatRef, username: str
+                           ) -> dict[str, Any] | None:
+        """One Telegram user by @handle, via the username
+        registry (DESIGN §29 path 5): the member-resolution
+        organ's deep lookup when the ledger and the group's
+        own lists miss.  A handle that names a channel/group,
+        or no handle at all, returns None.  Read-only."""
+        if self._client is None:
+            return None
+
+        async def _do() -> dict[str, Any] | None:
+            entity = await self.resolve_username(username)
+            if entity is None:
+                return None
+            if not hasattr(entity, "first_name"):
+                return None  # a channel/group, not a person
+            return {
+                "id": str(getattr(entity, "id", "") or ""),
+                "username": getattr(entity, "username", "") or "",
+                "name": " ".join(filter(None, [
+                    getattr(entity, "first_name", ""),
+                    getattr(entity, "last_name", "")])).strip(),
+                "bot": bool(getattr(entity, "bot", False)),
+            }
+
+        try:
+            return self._run_on_loop(_do(), timeout=30.0)
+        except Exception as exc:  # noqa: BLE001 - a path, not a dependency
+            _log.debug("telegram member_by_username failed: %s", exc)
+            return None
+
+    def message_sender(self, chat: ChatRef, message_id: str
+                       ) -> dict[str, Any] | None:
+        """Who wrote ONE message, fetched by id (DESIGN §29
+        path 5) — the only route that names the author of a
+        message sent before the bot deployed, when neither
+        the platform's reply payload nor any local record
+        carries them.  ``kind`` is "user" for a person and
+        "channel" for a channel post / anonymous admin post
+        (its sender is a chat, not a member).  Read-only;
+        None when the message or its sender is gone."""
+        if self._client is None:
+            return None
+
+        async def _do() -> dict[str, Any] | None:
+            entity = await self._resolve(chat)
+            if entity is None:
+                return None
+            msgs = await self._client.get_messages(
+                entity, ids=int(message_id))
+            msg = msgs[0] if isinstance(msgs, list) else msgs
+            if msg is None:
+                return None
+            sender = getattr(msg, "sender", None)
+            if sender is None:
+                sender_id = getattr(msg, "sender_id", None)
+                if sender_id:
+                    try:
+                        sender = await self._client.get_entity(
+                            sender_id)
+                    except Exception:  # noqa: BLE001
+                        sender = None
+            if sender is None:
+                return None
+            if hasattr(sender, "first_name"):
+                return {
+                    "id": str(getattr(sender, "id", "") or ""),
+                    "username": getattr(sender, "username", "")
+                    or "",
+                    "name": " ".join(filter(None, [
+                        getattr(sender, "first_name", ""),
+                        getattr(sender, "last_name", "")])).strip(),
+                    "kind": "user",
+                }
+            return {
+                "id": str(getattr(sender, "id", "") or ""),
+                "username": getattr(sender, "username", "") or "",
+                "name": str(getattr(sender, "title", "") or ""),
+                "kind": "channel",
+            }
+
+        try:
+            return self._run_on_loop(_do(), timeout=30.0)
+        except Exception as exc:  # noqa: BLE001 - a path, not a dependency
+            _log.debug("telegram message_sender failed: %s", exc)
+            return None
+
     async def _forum_topic_coro(self, chat: ChatRef, title: str) -> int:
         from telethon.tl import functions
         entity = await self._resolve(chat)
@@ -2807,7 +2894,22 @@ class TelegramBotAdapter(ChatAdapter):
         # of every group-helper bot.  Without this the runtime only
         # ever saw the replied message's id, never its author.
         _replied_from = replied.get("from") or {}
-        if isinstance(_replied_from, dict) and _replied_from.get("id"):
+        if not isinstance(_replied_from, dict):
+            _replied_from = {}
+        _replied_chat = replied.get("sender_chat") or {}
+        if not isinstance(_replied_chat, dict):
+            _replied_chat = {}
+        # A channel post (or an admin posting anonymously, where
+        # sender_chat is the group itself) has no member author:
+        # moderation targeting must hear "posted as X", not hunt
+        # for a person who isn't there (DESIGN §29).
+        if _replied_chat.get("id"):
+            meta["reply_to_sender_chat"] = {
+                "id": str(_replied_chat.get("id") or ""),
+                "title": str(_replied_chat.get("title") or "")}
+            if replied.get("text"):
+                meta["reply_to_text"] = str(replied["text"])[:200]
+        elif _replied_from.get("id"):
             meta["reply_to_sender"] = {
                 "id": str(_replied_from.get("id") or ""),
                 "username": str(_replied_from.get("username") or ""),
@@ -3669,6 +3771,7 @@ class TelegramBotAdapter(ChatAdapter):
             u = m.get("user") or {}
             admins.append({"id": u.get("id", ""),
                            "name": u.get("first_name", ""),
+                           "username": u.get("username", ""),
                            "status": m.get("status", ""),
                            "title": m.get("custom_title", "")})
         return {"ok": True, "administrators": admins}

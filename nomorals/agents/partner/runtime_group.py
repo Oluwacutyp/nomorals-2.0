@@ -524,24 +524,33 @@ class RuntimeGroupMixin:
         if key is None:
             return "that's a group command — run it inside the group."
         surface = self._group_surface()
-        members = surface.members(key)
-        target = None
-        wanted = str(arg or "").strip().lstrip("@").lower()
+        wanted = str(arg or "").strip()
         if wanted:
-            for uid, member in members.items():
-                if uid == wanted or str(
-                        member.get("username") or "").lower() == wanted \
-                        or str(member.get("name") or "").lower() == wanted:
-                    target = member
-                    break
+            # §29: the card names a person by every path, not
+            # only the ledger's memory.
+            res = self._resolver(surface).resolve_token(
+                key, message, wanted)
+            if not res.found:
+                if res.channel_post:
+                    return (f"that was posted as "
+                            f"{res.channel_label} — a channel, "
+                            f"not a member with a card.")
+                return res.exhaustion_text()
+            target = surface.member(key, res.member.user_id)
             if target is None:
-                return (f"I haven't seen {arg} in this group yet — "
-                        f"the ledger only knows people who've been "
-                        f"active or joined since I started watching.")
-        else:
-            target = members.get(str(message.sender_id or ""))
-            if target is None:
-                return "I don't have a card for you in this group yet."
+                # Resolved on a platform surface but never
+                # recorded: the card is built from what the
+                # resolution itself proved.
+                target = {"user_id": res.member.user_id,
+                          "username": res.member.username,
+                          "name": res.member.name,
+                          "first_seen": None, "joined_ts": None,
+                          "message_count": 0, "last_seen": None}
+            return _member_card(surface, key, target)
+        target = surface.members(key).get(
+            str(message.sender_id or ""))
+        if target is None:
+            return "I don't have a card for you in this group yet."
         return _member_card(surface, key, target)
 
     def _control_glog(self, arg, message) -> str:  # type: ignore[no-untyped-def]
@@ -679,7 +688,9 @@ class RuntimeGroupMixin:
                 f"{s.get('warn_threshold', 3)} · kick at "
                 f"{d_esc.get('kick_at', 5)} · ban at "
                 f"{d_esc.get('ban_at', 7)} "
-                f"({d_esc.get('window_days', 7)}-day window)",
+                f"({d_esc.get('window_days', 7)}-day window) · "
+                f"mute default: "
+                f"{_duration_text(int(s.get('mute_default_s') or 0)) if s.get('mute_default_s') else 'ask'}",
             ]
             defense_lines += [f"⚠ {note}" for note in honesty]
             if degraded:
@@ -710,7 +721,8 @@ class RuntimeGroupMixin:
                 "`/gsettings links DOMAINS|off`",
                 "`/gsettings economy on|off` · "
                 "`/gsettings tax PCT` · "
-                "`/gsettings warns N`",
+                "`/gsettings warns N` · "
+                "`/gsettings mute default 2h|off`",
                 "`/gsettings fine N` · "
                 "`/gsettings governance N`",
                 "`/gsettings filter add WORD` · "
@@ -742,6 +754,18 @@ class RuntimeGroupMixin:
             surface.update_settings(
                 key, warn_threshold=max(1, int(rest)))
             return f"warn limit {max(1, int(rest))} before an auto-mute."
+        if head == "mute" and rest.lower() == "default":
+            if rest2.lower() in ("off", "none", "0", ""):
+                surface.update_settings(key, mute_default_s=0)
+                return ("no standing mute length — when a member "
+                        "is named without one, I'll ask.")
+            secs, _why = _parse_duration(rest2)
+            if secs:
+                surface.update_settings(key, mute_default_s=secs)
+                return (f"standing mute length "
+                        f"{_duration_text(secs)} when a named "
+                        f"member is given none.")
+            return "usage: /gsettings mute default 10m|2h|1d|off"
         if head == "fine" and rest.lstrip("-").isdigit():
             amount = max(0, int(rest))
             surface.update_settings(key, fine_amount=amount)
@@ -941,34 +965,40 @@ class RuntimeGroupMixin:
             return None, "that's an admin call — I'm not taking it from a non-admin."
         return key, None
 
+    def _resolver(self, surface):  # type: ignore[no-untyped-def]
+        """The member-resolution organ (DESIGN §29): every
+        path Devon has — reply, mention, ledger, bot admin
+        surface, the userbot — behind one call."""
+        from ...social.chat.member_resolution import MemberResolver
+
+        return MemberResolver(surface, self._group_adapter)
+
     def _mod_target(self, surface, key, tail, message):  # type: ignore[no-untyped-def]
-        """Resolve who a moderation command acts on, in the
-        grammar every group bot uses: (1) the AUTHOR of the
-        message the admin replied to (adapter meta, then the
-        ledger's last-message map), (2) @username or id in the
-        command text.  Returns (user_id, label, rest)."""
-        meta = message.meta or {}
-        rts = meta.get("reply_to_sender") or {}
-        if isinstance(rts, dict) and rts.get("id"):
-            label = (rts.get("username")
-                     and f"@{rts['username']}") or rts.get("name") \
-                or str(rts["id"])
-            return str(rts["id"]), label, str(tail or "")
-        if getattr(message, "reply_to", ""):
-            for uid, member in surface.members(key).items():
-                if str(member.get("last_message_id") or "") == str(
-                        message.reply_to):
-                    label = (member.get("username")
-                             and f"@{member['username']}") \
-                        or member.get("name") or uid
-                    return uid, label, str(tail or "")
-        parts = str(tail or "").split(None, 1)
-        if parts:
-            uid = self._member_ref(surface, key, parts[0], message)
-            if uid:
-                return uid, parts[0], (parts[1] if len(parts) > 1
-                                       else "")
-        return None, "", str(tail or "")
+        """Resolve who a moderation command acts on (§29):
+        the AUTHOR of the replied-to message first (platform
+        report, ledger message map, then the userbot fetching
+        the message itself — the path that reaches pre-
+        deployment messages), else the named token by every
+        path.  Returns the organ's Resolution."""
+        return self._resolver(surface).resolve_command(
+            key, message, str(tail or ""))
+
+    def _mod_no_target(self, res, verb: str) -> str:  # type: ignore[no-untyped-def]
+        """The honest failure text when a moderation command
+        named someone the resolver could not land (§29): a
+        channel post is its own fact with its own remedy;
+        a named-but-missing member gets ONE line naming what
+        was tried — never the generic who-prompt.  "" means
+        nothing was named at all (caller shows usage)."""
+        if res.channel_post:
+            return (f"that message was posted as "
+                    f"{res.channel_label} — there's no member "
+                    f"to {verb}. Reply to it with /purge to "
+                    f"delete it, and /gsettings antichannel "
+                    f"keeps channel posts out.")
+        if res.named_token:
+            return res.exhaustion_text()
+        return ""
 
     def _mod_run(self, surface, key, message, action, user_id,  # type: ignore[no-untyped-def]
                  call) -> bool:
@@ -1019,14 +1049,32 @@ class RuntimeGroupMixin:
         if err:
             return err
         surface = self._group_surface()
-        user_id, label, rest = self._mod_target(
-            surface, key, tail, message)
-        if not user_id:
+        res = self._mod_target(surface, key, tail, message)
+        if not res.found:
+            note = self._mod_no_target(res, "mute")
+            if note:
+                return note
             return ("who should I mute? Reply to their message with "
                     "/mute, or /mute @member [10m|2h|1d].")
-        seconds, reason = _parse_duration(rest)
+        user_id, label = res.member.user_id, res.member.label
+        seconds, reason = _parse_duration(res.rest)
         if seconds is None:
-            seconds = 3600
+            # Target first, then the rest (§29): the group's
+            # standing default when one is set; the standing
+            # hour for a reply-target (the grammar every group
+            # bot uses); and for a NAMED member with no length
+            # given, ask for the length — never "who?".
+            default_s = int(surface.store.settings(
+                key).get("mute_default_s") or 0)
+            if default_s:
+                seconds = default_s
+            elif res.via_reply:
+                seconds = 3600
+            else:
+                return (f"for how long should I mute {label}? "
+                        f"/mute {res.named_token} 10m|2h|1d — or "
+                        f"set a standing default: /gsettings "
+                        f"mute default 2h.")
         ok = self._mod_run(
             surface, key, message, "mute", user_id,
             self._mod_mute_call(message, user_id, seconds))
@@ -1042,10 +1090,13 @@ class RuntimeGroupMixin:
         if err:
             return err
         surface = self._group_surface()
-        user_id, label, _ = self._mod_target(surface, key, tail,
-                                             message)
-        if not user_id:
+        res = self._mod_target(surface, key, tail, message)
+        if not res.found:
+            note = self._mod_no_target(res, "unmute")
+            if note:
+                return note
             return "who should I unmute? Reply to them or /unmute @member."
+        user_id, label = res.member.user_id, res.member.label
 
         def call(adapter):  # type: ignore[no-untyped-def]
             fn = getattr(adapter, "admin_unrestrict", None)
@@ -1063,10 +1114,14 @@ class RuntimeGroupMixin:
         if err:
             return err
         surface = self._group_surface()
-        user_id, label, rest = self._mod_target(
-            surface, key, tail, message)
-        if not user_id:
+        res = self._mod_target(surface, key, tail, message)
+        if not res.found:
+            note = self._mod_no_target(res, "ban")
+            if note:
+                return note
             return "who should I ban? Reply to their message or /ban @member."
+        user_id, label, rest = (res.member.user_id,
+                                res.member.label, res.rest)
 
         def call(adapter):  # type: ignore[no-untyped-def]
             fn = getattr(adapter, "admin_ban", None)
@@ -1085,10 +1140,13 @@ class RuntimeGroupMixin:
         if err:
             return err
         surface = self._group_surface()
-        user_id, label, _ = self._mod_target(surface, key, tail,
-                                             message)
-        if not user_id:
+        res = self._mod_target(surface, key, tail, message)
+        if not res.found:
+            note = self._mod_no_target(res, "unban")
+            if note:
+                return note
             return "who should I unban? /unban @member or their id."
+        user_id, label = res.member.user_id, res.member.label
 
         def call(adapter):  # type: ignore[no-untyped-def]
             fn = getattr(adapter, "admin_unban", None)
@@ -1106,10 +1164,14 @@ class RuntimeGroupMixin:
         if err:
             return err
         surface = self._group_surface()
-        user_id, label, rest = self._mod_target(
-            surface, key, tail, message)
-        if not user_id:
+        res = self._mod_target(surface, key, tail, message)
+        if not res.found:
+            note = self._mod_no_target(res, "kick")
+            if note:
+                return note
             return "who should I kick? Reply to their message or /kick @member."
+        user_id, label, rest = (res.member.user_id,
+                                res.member.label, res.rest)
 
         def call(adapter):  # type: ignore[no-untyped-def]
             ban = getattr(adapter, "admin_ban", None)
@@ -1135,10 +1197,14 @@ class RuntimeGroupMixin:
         if err:
             return err
         surface = self._group_surface()
-        user_id, label, rest = self._mod_target(
-            surface, key, tail, message)
-        if not user_id:
+        res = self._mod_target(surface, key, tail, message)
+        if not res.found:
+            note = self._mod_no_target(res, "warn")
+            if note:
+                return note
             return "who should I warn? Reply to their message or /warn @member."
+        user_id, label, rest = (res.member.user_id,
+                                res.member.label, res.rest)
         actor = str(message.sender_id or message.sender or "")
         count = surface.record_warn(key, user_id, by=actor,
                                     reason=rest.strip())
@@ -1164,8 +1230,14 @@ class RuntimeGroupMixin:
         if err:
             return err
         surface = self._group_surface()
-        user_id, label, _ = self._mod_target(
-            surface, key, tail, message)
+        res = self._mod_target(surface, key, tail, message)
+        if not res.found:
+            note = self._mod_no_target(res, "look up")
+            if note:
+                return note
+            user_id, label = None, ""
+        else:
+            user_id, label = res.member.user_id, res.member.label
         if not user_id:
             rows = []
             for uid, member in surface.members(key).items():
@@ -1261,8 +1333,10 @@ class RuntimeGroupMixin:
         if key is None:
             return "that's a group command — run it inside the group."
         surface = self._group_surface()
-        user_id, label, rest = self._mod_target(
-            surface, key, tail, message)
+        res = self._mod_target(surface, key, tail, message)
+        user_id = res.member.user_id if res.found else ""
+        label = res.member.label if res.found else (
+            res.channel_label if res.channel_post else "")
         reporter = str(message.sender_id or message.sender or "")
         surface._audit(key, "report", user_id=user_id or "",
                        by=reporter, target_label=label,
@@ -1274,6 +1348,16 @@ class RuntimeGroupMixin:
         if user_id:
             return (f"📣 reported {label} — it's in the group log "
                     f"for the admins (/glog).")
+        if res.channel_post:
+            return (f"📣 reported — that message was posted as "
+                    f"{res.channel_label} (a channel post, not a "
+                    f"member); it's in the group log for the "
+                    f"admins (/glog).")
+        if res.named_token:
+            return (f"📣 reported — I couldn't pin "
+                    f"{res.named_token} to a member, but your "
+                    f"words are in the group log for the admins "
+                    f"(/glog).")
         return ("📣 reported — it's in the group log for the "
                 "admins (/glog). Reply to the message next time "
                 "and I'll attach who wrote it.")
@@ -1316,16 +1400,22 @@ class RuntimeGroupMixin:
         return key, None
 
     def _member_ref(self, surface, key, token, message):  # type: ignore[no-untyped-def]
-        """Resolve a /pay target: @username from the member
-        ledger, or a raw member id."""
-        token = str(token or "").strip()
-        if token.startswith("@"):
-            want = token[1:].lower()
-            for uid, member in surface.members(key).items():
-                if str(member.get("username") or "").lower() == want:
-                    return uid
-            return None
-        return token or None
+        """Resolve a /pay target to a member id — now the
+        §29 organ's job (every path, write-back included);
+        kept as the thin delegate the economy handlers call."""
+        res = self._resolver(surface).resolve_token(
+            key, message, str(token or ""))
+        return res.member.user_id if res.found else None
+
+    def _named_ref(self, surface, key, token, message):  # type: ignore[no-untyped-def]
+        """(user_id, failure_text): resolve a named economy
+        target; on a miss the failure text is the organ's
+        honest exhaustion line, not a ledger-only shrug."""
+        res = self._resolver(surface).resolve_token(
+            key, message, str(token or ""))
+        if res.found:
+            return res.member.user_id, ""
+        return None, res.exhaustion_text()
 
     def _control_balance(self, message):  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
@@ -1454,10 +1544,10 @@ class RuntimeGroupMixin:
                 target_token = part
         if amount is None or not target_token:
             return "usage: /pay @member 50"
-        recipient = self._member_ref(surface, key, target_token,
-                                     message)
+        recipient, miss = self._named_ref(surface, key,
+                                          target_token, message)
         if not recipient:
-            return f"I don't have {target_token} in this group's ledger."
+            return miss
         sender = str(message.sender_id or message.sender or "")
         result = surface.pay(key, sender, recipient, amount)
         if not result["ok"]:
@@ -1889,14 +1979,13 @@ class RuntimeGroupMixin:
             [[("🪙 My balance", "balance"), ("🛠️ Work", "work")]])
 
     def _rob_target(self, surface, key, tail, message):  # type: ignore[no-untyped-def]
-        meta = getattr(message, "meta", None) or {}
-        replied = meta.get("reply_to_sender")
-        if replied:
-            return str(replied)
-        for part in str(tail or "").split():
-            if part.startswith("@") or part.isdigit():
-                return self._member_ref(surface, key, part, message)
-        return None
+        """Who gets robbed (§29): the replied-to author, or the
+        named member — by every resolution path.  (The old
+        code stringified the reply-sender DICT into a phantom
+        member id; the organ returns the real ID.)"""
+        res = self._resolver(surface).resolve_command(
+            key, message, str(tail or ""))
+        return res.member.user_id if res.found else None
 
     def _control_rob(self, tail, message):  # type: ignore[no-untyped-def]
         import random
@@ -2141,11 +2230,10 @@ class RuntimeGroupMixin:
                 target_token = part
         if amount is None or not target_token:
             return "usage: /grant @member 100"
-        recipient = self._member_ref(surface, key, target_token,
-                                     message)
+        recipient, miss = self._named_ref(surface, key,
+                                          target_token, message)
         if not recipient:
-            return (f"I don't have {target_token} in this "
-                    "group's ledger.")
+            return miss
         admin = str(message.sender_id or message.sender or "")
         threshold = int(surface.store.settings(
             key).get("governance_threshold") or 0)
@@ -2194,11 +2282,10 @@ class RuntimeGroupMixin:
                 target_token = part
         if amount is None or not target_token:
             return "usage: /grant gems @member 25"
-        recipient = self._member_ref(surface, key, target_token,
-                                     message)
+        recipient, miss = self._named_ref(surface, key,
+                                          target_token, message)
         if not recipient:
-            return (f"I don't have {target_token} in this "
-                    f"group's ledger.")
+            return miss
         admin = str(message.sender_id or message.sender or "")
         threshold = int(surface.store.settings(
             key).get("governance_threshold") or 0)

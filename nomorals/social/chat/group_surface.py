@@ -121,6 +121,9 @@ def _default_settings() -> dict[str, Any]:
         "economy_enabled": True,        # consumed by P2
         "transfer_tax_pct": 2,          # /pay fee to the treasury
         "warn_threshold": 3,            # warns before an auto-mute
+        "mute_default_s": 0,            # standing mute length when
+                                        # a name is given without
+                                        # one (0 = ask each time)
         "fine_amount": 0,               # sparks an auto-mute costs
         "governance_threshold": 500,    # treasury spends above
                                         # this need a 2nd admin
@@ -1902,6 +1905,43 @@ class GroupSurface:
 
     def members(self, group_key: str) -> dict[str, Any]:
         return dict(self.store.group(group_key)["members"])
+
+    def member_by_message_id(self, group_key: str, message_id: str
+                             ) -> dict[str, Any] | None:
+        """The ledger member who sent a message Devon recorded
+        (the last-message map) — reply targeting for messages
+        the platform doesn't attribute in the command itself."""
+        wanted = str(message_id or "")
+        if not wanted:
+            return None
+        for member in self.store.group(group_key)["members"].values():
+            if str(member.get("last_message_id") or "") == wanted:
+                return member
+        return None
+
+    def note_resolution(self, group_key: str, user_id: str, *,
+                        username: str = "", name: str = "",
+                        source: str = "",
+                        ts: float | None = None
+                        ) -> dict[str, Any] | None:
+        """Write a platform-proven identity back into the ledger
+        (DESIGN §29, path 6): the member-resolution organ calls
+        this whenever a platform surface — not a guess — names
+        who a member is, so the local paths get stronger with
+        use.  Identity CHANGES still flow through the same
+        change-event machinery as a live observation."""
+        user_id = str(user_id or "")
+        if not user_id:
+            return None
+        now = ts if ts is not None else time.time()
+        self._observe_identity(group_key, user_id,
+                               username=username or "",
+                               name=name or "", ts=now)
+        member = self.store.group(group_key)["members"].get(user_id)
+        if member is not None and source:
+            member["resolved_via"] = source
+        self.store.save()
+        return member
 
     def changes(self, group_key: str, limit: int = 50
                 ) -> list[dict[str, Any]]:
