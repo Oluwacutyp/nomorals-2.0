@@ -68,6 +68,9 @@ _log = get_logger("nomorals.community.group_economy")
 
 __all__ = [
     "POINTS_NAME", "CURRENCY_DISCLAIMER", "EARN_TABLE", "QUESTS", "STATUS_SHOP",
+    "BANK_PREFIX", "JACKPOT_MEMBER", "DAILY_BASE", "DAILY_STREAK_STEP",
+    "DAILY_STREAK_CAP", "GROUP_QUESTS", "SLOTS_REELS", "SLOTS_TRIPLE",
+    "SLOTS_PAIR_PAYS",
     "EARN_CAPS", "MINING_BASE_RATE", "MINING_DECAY", "MINING_CLAIM_COOLDOWN_S",
     "LedgerEntry", "GroupEconomy", "GroupEconomyError", "PrizePool",
     "season_key", "current_season",
@@ -99,6 +102,45 @@ EARN_TABLE: dict[str, int] = {
 #: Per-member earn caps per period. Caps count real earns (quests,
 #: activity, mining) — not transfers in, not treasury grants.
 EARN_CAPS: dict[str, int] = {"daily": 200, "weekly": 800}
+
+#: Bank vaults + jackpot live under pseudo-members, the treasury's
+#: own trick ("" is the treasury) generalized: "bank:<id>" is one
+#: member's vault (safe from robbery — rob takes wallet only) and
+#: "jackpot:" is the shared pot gambling losses feed.  Pseudo
+#: members never appear in holder statistics or leaderboards.
+BANK_PREFIX = "bank:"
+JACKPOT_MEMBER = "jackpot:"
+
+#: The daily claim (Septorch-loop staple): once per day, streaks
+#: grow the amount modestly — showing up is the faucet's front door.
+DAILY_BASE = 25
+DAILY_STREAK_STEP = 2
+DAILY_STREAK_CAP = 25
+
+#: Group quests: COLLECTIVE goals over the whole group's activity
+#: in the period (DESIGN §5).  Completion mints the bonus into the
+#: treasury — the country rewarding itself for being alive.
+GROUP_QUESTS: dict[str, dict[str, Any]] = {
+    "chat_week": {"name": "Loud Week", "measure": "messages",
+                  "period": "weekly", "need": 500, "bonus": 200,
+                  "blurb": "500 messages group-wide this week"},
+    "earn_week": {"name": "Working Country", "measure": "earned",
+                  "period": "weekly", "need": 2000, "bonus": 250,
+                  "blurb": "2,000 sparks earned group-wide this week"},
+    "show_up_week": {"name": "Full House", "measure": "attends",
+                     "period": "weekly", "need": 10, "bonus": 150,
+                     "blurb": "10 event attendances this week"},
+}
+
+#: Slots: weighted reels + three-of-a-kind multipliers.  Expected
+#: return is below the bet by design — gambling is a SINK with a
+#: jackpot dream attached, not a faucet.
+SLOTS_REELS: list[tuple[str, int]] = [
+    ("🍒", 30), ("🍋", 25), ("🔔", 20), ("⭐", 15), ("💎", 7),
+    ("7️⃣", 3)]
+SLOTS_TRIPLE: dict[str, int] = {
+    "🍒": 3, "🍋": 4, "🔔": 6, "⭐": 10, "💎": 25, "7️⃣": 77}
+SLOTS_PAIR_PAYS = 1  # any pair returns the bet (push)
 
 #: Quest table: id → (name, period, activity kind, count needed, reward).
 #: ``period`` is "daily" or "weekly"; a quest is claimable once per period.
@@ -406,6 +448,11 @@ class GroupEconomy:
         self._save_json(group_id, "activities", activities[-5000:])
         amount = EARN_TABLE.get(kind, 0)
         if amount > 0:
+            # Monetary policy: when issuance runs hot, the faucet
+            # halves — visibly (issuance_state is on /treasury),
+            # never silently.
+            if self.issuance_state(group_id, now=now)["throttled"]:
+                amount = max(1, amount // 2)
             return self.award(group_id, member, amount,
                               f"activity: {kind}", ref=kind, now=now)
         return None
@@ -530,6 +577,257 @@ class GroupEconomy:
             group_id, recipient, "treasury_out", amount,
             f"treasury grant: {reason}"[:300], ref="treasury", ts=now))
         return True
+
+    # ── bank vaults / jackpot / gambling / robbery ──
+    # The Septorch loop, on this ledger's mechanics: every move is
+    # paired legs between ledger members (real or pseudo), so the
+    # group's total is conserved except at named issuance points
+    # (awards, quest bonuses, gambling payouts) — all journaled.
+
+    @staticmethod
+    def is_pseudo_member(member: str) -> bool:
+        return member == "" or member == JACKPOT_MEMBER \
+            or str(member).startswith(BANK_PREFIX)
+
+    def bank_member(self, member: str) -> str:
+        return BANK_PREFIX + str(member)
+
+    def bank_balance(self, group_id: str, member: str) -> int:
+        return self.balance(group_id, self.bank_member(member))
+
+    def total_balance(self, group_id: str, member: str) -> int:
+        return self.balance(group_id, member) \
+            + self.bank_balance(group_id, member)
+
+    def _move(self, group_id: str, src: str, dst: str, amount: int,
+              kind: str, reason: str,
+              now: float | None = None) -> bool:
+        """Paired-leg move between any two ledger members."""
+        now = now if now is not None else time.time()
+        amount = int(amount)
+        if amount <= 0 or src == dst \
+                or self.balance(group_id, src) < amount:
+            return False
+        self._append(group_id, self._new_entry(
+            group_id, src, kind, -amount, reason[:300],
+            ref=f"to:{dst}", ts=now))
+        self._append(group_id, self._new_entry(
+            group_id, dst, kind, amount, reason[:300],
+            ref=f"from:{src}", ts=now))
+        return True
+
+    def bank_deposit(self, group_id: str, member: str, amount: int,
+                     now: float | None = None) -> bool:
+        """Wallet → the member's own vault.  Vaulted sparks are
+        safe from robbery and count toward their total wealth."""
+        return self._move(group_id, member, self.bank_member(member),
+                          amount, "bank_deposit",
+                          "deposited to bank vault", now)
+
+    def bank_withdraw(self, group_id: str, member: str, amount: int,
+                      now: float | None = None) -> bool:
+        return self._move(group_id, self.bank_member(member), member,
+                          amount, "bank_withdraw",
+                          "withdrew from bank vault", now)
+
+    def jackpot_balance(self, group_id: str) -> int:
+        return self.balance(group_id, JACKPOT_MEMBER)
+
+    def gamble_slots(self, group_id: str, member: str, bet: int,
+                     rng: Any, now: float | None = None) -> dict[str, Any]:
+        """One slots pull, settled on the ledger.
+
+        The bet leaves the wallet; a loss is split between the
+        treasury and the jackpot pot (conserved — the burn leg
+        equals the two credit legs); a win is paid at the table
+        multiplier; triple 7s ALSO empties the jackpot pot."""
+        now = now if now is not None else time.time()
+        bet = int(bet)
+        if bet <= 0 or self.balance(group_id, member) < bet:
+            return {"ok": False, "reason": "funds"}
+        self._append(group_id, self._new_entry(
+            group_id, member, "gamble", -bet, "slots bet",
+            ref="slots", ts=now))
+        symbols = [rng.choices(
+            [s for s, _w in SLOTS_REELS],
+            weights=[w for _s, w in SLOTS_REELS])[0] for _ in range(3)]
+        mult = 0
+        if symbols[0] == symbols[1] == symbols[2]:
+            mult = SLOTS_TRIPLE[symbols[0]]
+        elif len(set(symbols)) == 2:
+            mult = SLOTS_PAIR_PAYS
+        payout = bet * mult
+        jackpot = 0
+        if payout > 0:
+            self._append(group_id, self._new_entry(
+                group_id, member, "gamble", payout,
+                f"slots win {''.join(symbols)} ×{mult}",
+                ref="slots", ts=now))
+        else:
+            to_treasury = bet // 2
+            to_jackpot = bet - to_treasury
+            if to_treasury:
+                self._append(group_id, self._new_entry(
+                    group_id, "", "treasury_in", to_treasury,
+                    "slots house share", ref="slots", ts=now))
+            if to_jackpot:
+                self._append(group_id, self._new_entry(
+                    group_id, JACKPOT_MEMBER, "jackpot_in", to_jackpot,
+                    "slots jackpot feed", ref="slots", ts=now))
+        if symbols == ["7️⃣", "7️⃣", "7️⃣"]:
+            pot = self.jackpot_balance(group_id)
+            if pot > 0 and self._move(
+                    group_id, JACKPOT_MEMBER, member, pot,
+                    "jackpot_win", "JACKPOT — triple 7s", now):
+                jackpot = pot
+        return {"ok": True, "symbols": symbols, "multiplier": mult,
+                "payout": payout, "jackpot": jackpot,
+                "balance": self.balance(group_id, member)}
+
+    def gamble_coinflip(self, group_id: str, member: str, bet: int,
+                        choice: str, rng: Any,
+                        now: float | None = None) -> dict[str, Any]:
+        """Coinflip against the house: a win pays 1.9× (5% edge);
+        a loss splits treasury/jackpot like slots."""
+        now = now if now is not None else time.time()
+        bet = int(bet)
+        if bet <= 0 or self.balance(group_id, member) < bet:
+            return {"ok": False, "reason": "funds"}
+        flip = "heads" if rng.random() < 0.5 else "tails"
+        won = (choice or "").lower().startswith(flip[0])
+        self._append(group_id, self._new_entry(
+            group_id, member, "gamble", -bet, "coinflip bet",
+            ref="coinflip", ts=now))
+        payout = int(bet * 1.9) if won else 0
+        if won:
+            self._append(group_id, self._new_entry(
+                group_id, member, "gamble", payout,
+                f"coinflip win ({flip})", ref="coinflip", ts=now))
+        else:
+            to_treasury = bet // 2
+            to_jackpot = bet - to_treasury
+            if to_treasury:
+                self._append(group_id, self._new_entry(
+                    group_id, "", "treasury_in", to_treasury,
+                    "coinflip house share", ref="coinflip", ts=now))
+            if to_jackpot:
+                self._append(group_id, self._new_entry(
+                    group_id, JACKPOT_MEMBER, "jackpot_in", to_jackpot,
+                    "coinflip jackpot feed", ref="coinflip", ts=now))
+        return {"ok": True, "flip": flip, "won": won,
+                "payout": payout,
+                "balance": self.balance(group_id, member)}
+
+    def rob_attempt(self, group_id: str, actor: str, target: str,
+                    rng: Any, now: float | None = None) -> dict[str, Any]:
+        """Rob the target's WALLET (banked sparks are safe).
+
+        Success moves 10–25% of the target's wallet (capped);
+        failure is reported for the surface to jail or fine.
+        The money legs live here; consequences (jail) are state
+        the surface owns."""
+        now = now if now is not None else time.time()
+        if actor == target or not actor or not target:
+            return {"ok": False, "reason": "target"}
+        wallet = self.balance(group_id, target)
+        if wallet <= 0:
+            return {"ok": False, "reason": "empty"}
+        if rng.random() < 0.45:
+            amount = max(1, min(200, int(wallet * rng.uniform(0.10, 0.25))))
+            moved = self._move(group_id, target, actor, amount,
+                               "robbery", f"robbed by {actor}", now)
+            return {"ok": True, "success": bool(moved),
+                    "amount": amount if moved else 0}
+        return {"ok": True, "success": False, "amount": 0}
+
+    # ── group quests / monetary policy / seasons ──
+
+    def group_quest_progress(self, group_id: str,
+                             now: float | None = None) -> dict[str, Any]:
+        """Collective progress over the whole group's activity."""
+        now = now if now is not None else time.time()
+        activities = self._load_json(group_id, "activities", []) or []
+        entries = self._ledger(group_id)
+        out: dict[str, Any] = {}
+        for quest_id, quest in GROUP_QUESTS.items():
+            key = _period_key(quest["period"], now)
+            if quest["measure"] == "messages":
+                have = sum(
+                    1 for a in activities
+                    if a.get("kind") == "message"
+                    and _period_key(quest["period"],
+                                    float(a.get("ts") or 0)) == key)
+            elif quest["measure"] == "attends":
+                have = sum(
+                    1 for a in activities
+                    if a.get("kind") == "event_attend"
+                    and _period_key(quest["period"],
+                                    float(a.get("ts") or 0)) == key)
+            else:  # earned
+                have = sum(
+                    e.amount for e in entries
+                    if e.kind in ("earn", "mining") and e.amount > 0
+                    and not self.is_pseudo_member(e.member)
+                    and _period_key(quest["period"], e.ts) == key)
+            out[quest_id] = {**quest, "have": int(have),
+                             "complete": have >= quest["need"]}
+        return out
+
+    def treasury_bonus(self, group_id: str, amount: int, reason: str,
+                       now: float | None = None) -> bool:
+        """Mint a bonus into the treasury (group-quest completion).
+        Issuance, journaled as itself — never disguised."""
+        now = now if now is not None else time.time()
+        amount = int(amount)
+        if amount <= 0:
+            return False
+        self._append(group_id, self._new_entry(
+            group_id, "", "treasury_in", amount, reason[:300],
+            ref="bonus", ts=now))
+        return True
+
+    def issuance_state(self, group_id: str, *, days: int = 7,
+                       now: float | None = None) -> dict[str, Any]:
+        """Monetary policy (DESIGN §5): faucet issuance vs sinks
+        over the window.  When issuance runs hot — earned more
+        than 3× the sunk total, at real volume — faucets throttle
+        (activity pays halve) until sinks catch up.  Visible on
+        /treasury; never a hidden nerf."""
+        now = now if now is not None else time.time()
+        since = now - days * 86400
+        earned = sunk = 0
+        for e in self._ledger(group_id):
+            if e.ts < since or self.is_pseudo_member(e.member):
+                continue
+            if e.kind in ("earn", "mining") and e.amount > 0:
+                earned += e.amount
+            elif e.amount < 0 and e.kind in (
+                    "spend", "treasury_in", "gamble", "bank_deposit"):
+                sunk += -e.amount
+        throttled = earned >= 1000 and earned > 3 * max(1, sunk)
+        return {"earned": earned, "sunk": sunk, "days": days,
+                "throttled": throttled}
+
+    def season_top(self, group_id: str, season: str, *,
+                   limit: int = 3) -> list[tuple[str, int]]:
+        totals: dict[str, int] = {}
+        for e in self._ledger(group_id):
+            if e.season != season or e.amount <= 0:
+                continue
+            if e.kind not in ("earn", "mining"):
+                continue
+            if self.is_pseudo_member(e.member):
+                continue
+            totals[e.member] = totals.get(e.member, 0) + e.amount
+        return sorted(totals.items(), key=lambda kv: -kv[1])[:limit]
+
+    def archive_season(self, group_id: str, season: str) -> int:
+        """Snapshot one season's ledger entries to the archive
+        file (rollover keeps the proof, not just the totals)."""
+        rows = [e.to_dict() for e in self._ledger(group_id)
+                if e.season == season]
+        self._save_json(group_id, f"archive-{season}", rows)
+        return len(rows)
 
     # ── reversals: never delete ──
     def reverse(self, group_id: str, entry_id: str, reason: str,

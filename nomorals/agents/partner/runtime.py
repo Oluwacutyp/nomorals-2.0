@@ -3702,6 +3702,47 @@ class PartnerRuntime(
         if kind == "claim":
             return self._control_claim(message)
 
+        if kind == "deposit":
+            return self._control_deposit(command.tail, message)
+
+        if kind == "withdraw":
+            return self._control_withdraw(command.tail, message)
+
+        # daily / slots / approve are CONTEXT kinds: in a group
+        # they are the economy's (daily claim, purse slots,
+        # treasury approvals); everywhere else the existing
+        # owners of those names (arena daily, game slots,
+        # proposal approvals) keep them — fall through untouched.
+        if kind == "daily" \
+                and self._group_key_or_none(message) is not None:
+            return self._control_group_daily(message)
+
+        if kind == "rob":
+            return self._control_rob(command.tail, message)
+
+        if kind == "bail":
+            return self._control_bail(message)
+
+        if kind == "slots" \
+                and self._group_key_or_none(message) is not None:
+            return self._control_slots(command.tail, message)
+
+        if kind == "coinflip":
+            return self._control_coinflip(command.tail, message)
+
+        if kind == "top":
+            return self._control_top(message)
+
+        if kind == "tax":
+            return self._control_tax(message)
+
+        if kind == "grant":
+            return self._control_grant(command.tail, message)
+
+        if kind == "approve" \
+                and self._group_key_or_none(message) is not None:
+            return self._control_approve(command.tail, message)
+
         if kind == "mute":
             return self._control_mute(command.tail, message)
 

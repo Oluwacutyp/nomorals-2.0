@@ -79,6 +79,9 @@ def _default_settings() -> dict[str, Any]:
         "economy_enabled": True,        # consumed by P2
         "transfer_tax_pct": 2,          # /pay fee to the treasury
         "warn_threshold": 3,            # warns before an auto-mute
+        "fine_amount": 0,               # sparks an auto-mute costs
+        "governance_threshold": 500,    # treasury spends above
+                                        # this need a 2nd admin
         "games_enabled": True,
         "state": "discovered",          # discovered|configured|
                                         # active|dormant
@@ -334,9 +337,23 @@ class GroupSurface:
                             reason=action.reason, user_id=user_id)
         if message_id:
             member["last_message_id"] = str(message_id)
+        # Moderation fines (DESIGN §5 sink): an auto-mute costs
+        # sparks when the group set a fine — paid to the treasury.
+        for action in actions:
+            if action.get("kind") == "mute":
+                self.apply_fine(group_key, user_id, now=now)
         self._economy_activity(group_key, user_id, now)
+        notices: list[str] = []
+        season_note = self.season_cycle(group_key, now=now)
+        if season_note:
+            notices.append(season_note)
+        for paid in self.group_quest_cycle(group_key, now=now):
+            notices.append(
+                f"🎉 group quest complete: <b>{paid['name']}</b> — "
+                f"+{paid['bonus']} sparks to the treasury!")
         self.store.save()
-        return {"changes": changes, "actions": actions}
+        return {"changes": changes, "actions": actions,
+                "notices": notices}
 
     # ---- economy (P2: the country, wired live) --------------------
     @property
@@ -547,7 +564,7 @@ class GroupSurface:
         now = now if now is not None else time.time()
         econ = self.economy
         balances = {m: b for m, b in econ.balances(group_key).items()
-                    if m}
+                    if m and not econ.is_pseudo_member(m)}
         total = sum(balances.values())
         top = max(balances.values()) if balances else 0
         activities = econ._load_json(group_key, "activities", []) or []
@@ -555,9 +572,424 @@ class GroupSurface:
                   if float(a.get("ts") or 0) >= now - 7 * 86400}
         return {"holders": len(balances), "circulating": total,
                 "treasury": econ.treasury_balance(group_key),
+                "jackpot": econ.jackpot_balance(group_key),
+                "policy": econ.issuance_state(group_key, now=now),
                 "top_share": (round(top / total, 3)
                               if total else 0.0),
                 "active_7d": len(active - {None, ""})}
+
+    # ---- the full loop: bank / daily / crime / gambling / boards
+    # (the Septorch-class surface on this ledger — every verb is a
+    # real state change, journaled, with honest refusals) ---------
+
+    def reserved_treasury(self, group_key: str) -> int:
+        """Treasury sparks already promised to open drops."""
+        drops = self._extras(group_key).setdefault("drops", [])
+        return sum(int(d.get("remaining") or 0)
+                   for d in drops if d.get("open"))
+
+    def open_drop_from_treasury(self, group_key: str, total: int,
+                                per_claim: int, *,
+                                by: str = "",
+                                now: float | None = None
+                                ) -> dict[str, Any]:
+        """A drop funded by the treasury itself: no contribution
+        leg — the pool IS a reservation against the treasury, and
+        grants respect reservations (see grant())."""
+        now = now if now is not None else time.time()
+        if not self.economy_on(group_key):
+            return {"ok": False, "reason": "off"}
+        total, per_claim = int(total), int(per_claim)
+        if total <= 0 or per_claim <= 0 or per_claim > total:
+            return {"ok": False, "reason": "shape"}
+        available = self.economy.treasury_balance(group_key) \
+            - self.reserved_treasury(group_key)
+        if total > available:
+            return {"ok": False, "reason": "funds",
+                    "available": available}
+        drops = self._extras(group_key).setdefault("drops", [])
+        drop = {"id": f"drop-{int(now)}-{len(drops)}",
+                "total": total, "per_claim": per_claim,
+                "remaining": total, "funder": "treasury",
+                "claims": {}, "opened_at": now, "open": True}
+        drops.append(drop)
+        self._audit(group_key, "drop_opened", funder="treasury",
+                    by=by, total=total, per_claim=per_claim)
+        self.store.save()
+        return {"ok": True, "drop": drop}
+
+    def grant(self, group_key: str, recipient: str, amount: int, *,
+              by: str = "", reason: str = "",
+              now: float | None = None) -> dict[str, Any]:
+        """/grant: an admin pays a member OUT of the treasury.
+        Reservation-aware: sparks promised to open drops are not
+        grantable."""
+        now = now if now is not None else time.time()
+        if not self.economy_on(group_key):
+            return {"ok": False, "reason": "off"}
+        amount = int(amount)
+        if amount <= 0:
+            return {"ok": False, "reason": "shape"}
+        econ = self.economy
+        available = econ.treasury_balance(group_key) \
+            - self.reserved_treasury(group_key)
+        if amount > available:
+            return {"ok": False, "reason": "funds",
+                    "available": available}
+        if not econ.is_verified(group_key, recipient):
+            econ.verify_member(group_key, recipient)
+        if not econ.treasury_grant(group_key, recipient, amount,
+                                   reason=reason or "admin grant",
+                                   now=now):
+            return {"ok": False, "reason": "funds",
+                    "available": available}
+        self._audit(group_key, "treasury_grant", by=by,
+                    recipient=recipient, amount=amount)
+        self.store.save()
+        return {"ok": True, "amount": amount,
+                "treasury": econ.treasury_balance(group_key),
+                "balance": econ.balance(group_key, recipient)}
+
+    def propose_spend(self, group_key: str, *, kind: str,
+                      payload: dict[str, Any], by: str,
+                      now: float | None = None) -> dict[str, Any]:
+        """Treasury governance (DESIGN §5): a spend above the
+        group's threshold does not execute on one admin's word —
+        it becomes a proposal a SECOND admin must approve.  The
+        proposal is state, listed in /glog, never chat vapor."""
+        now = now if now is not None else time.time()
+        proposals = self._extras(group_key).setdefault(
+            "proposals", {})
+        pid = f"prop-{int(now)}-{len(proposals)}"
+        proposals[pid] = {"kind": kind, "payload": payload,
+                          "by": by, "at": now, "open": True}
+        self._audit(group_key, "proposal_opened", proposal=pid,
+                    spend_kind=kind, by=by, **{
+                        k: v for k, v in payload.items()
+                        if isinstance(v, (int, str))})
+        self.store.save()
+        return {"id": pid, **proposals[pid]}
+
+    def approve_spend(self, group_key: str, proposal_id: str, *,
+                      by: str,
+                      now: float | None = None) -> dict[str, Any]:
+        """Execute an open proposal — only by a DIFFERENT admin
+        than the proposer (the handler checks admin rights)."""
+        now = now if now is not None else time.time()
+        proposals = self._extras(group_key).setdefault(
+            "proposals", {})
+        proposal = proposals.get(proposal_id)
+        if not proposal or not proposal.get("open"):
+            return {"ok": False, "reason": "no_proposal"}
+        if proposal.get("by") == by:
+            return {"ok": False, "reason": "self_approve"}
+        payload = proposal.get("payload") or {}
+        if proposal["kind"] == "grant":
+            out = self.grant(group_key, str(payload["recipient"]),
+                             int(payload["amount"]), by=by,
+                             reason=str(payload.get("reason") or ""),
+                             now=now)
+        elif proposal["kind"] == "drop":
+            out = self.open_drop_from_treasury(
+                group_key, int(payload["total"]),
+                int(payload["per_claim"]), by=by, now=now)
+        else:
+            return {"ok": False, "reason": "kind"}
+        if out.get("ok"):
+            proposal["open"] = False
+            proposal["approved_by"] = by
+            self._audit(group_key, "proposal_executed",
+                        proposal=proposal_id, by=by)
+            self.store.save()
+        return out
+
+    def open_proposals(self, group_key: str) -> dict[str, Any]:
+        proposals = self._extras(group_key).setdefault(
+            "proposals", {})
+        return {pid: p for pid, p in proposals.items()
+                if p.get("open")}
+
+    def deposit(self, group_key: str, user_id: str,
+                amount: int | None, *,
+                now: float | None = None) -> dict[str, Any]:
+        """/deposit: wallet → the member's bank vault (amount
+        None = everything).  Banked sparks can't be robbed."""
+        now = now if now is not None else time.time()
+        if not self.economy_on(group_key):
+            return {"ok": False, "reason": "off"}
+        econ = self.economy
+        wallet = econ.balance(group_key, user_id)
+        amount = wallet if amount is None else int(amount)
+        if amount <= 0:
+            return {"ok": False, "reason": "empty"}
+        if not econ.bank_deposit(group_key, user_id, amount,
+                                 now=now):
+            return {"ok": False, "reason": "funds"}
+        return {"ok": True, "amount": amount,
+                "wallet": econ.balance(group_key, user_id),
+                "bank": econ.bank_balance(group_key, user_id)}
+
+    def withdraw(self, group_key: str, user_id: str,
+                 amount: int | None, *,
+                 now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        if not self.economy_on(group_key):
+            return {"ok": False, "reason": "off"}
+        econ = self.economy
+        bank = econ.bank_balance(group_key, user_id)
+        amount = bank if amount is None else int(amount)
+        if amount <= 0:
+            return {"ok": False, "reason": "empty"}
+        if not econ.bank_withdraw(group_key, user_id, amount,
+                                  now=now):
+            return {"ok": False, "reason": "funds"}
+        return {"ok": True, "amount": amount,
+                "wallet": econ.balance(group_key, user_id),
+                "bank": econ.bank_balance(group_key, user_id)}
+
+    def daily_claim(self, group_key: str, user_id: str, *,
+                    now: float | None = None) -> dict[str, Any]:
+        """/daily: the front-door faucet.  Once a day; a streak
+        of consecutive days grows it (data in the organ)."""
+        from ...community.group_economy import (
+            DAILY_BASE, DAILY_STREAK_CAP, DAILY_STREAK_STEP)
+
+        now = now if now is not None else time.time()
+        if not self.economy_on(group_key):
+            return {"ok": False, "reason": "off"}
+        state = self._extras(group_key).setdefault("daily", {})
+        mine = state.get(user_id) or {}
+        today = time.strftime("%Y-%m-%d", time.gmtime(now))
+        if mine.get("day") == today:
+            return {"ok": False, "reason": "cooldown",
+                    "streak": int(mine.get("streak") or 0)}
+        yesterday = time.strftime(
+            "%Y-%m-%d", time.gmtime(now - 86400))
+        streak = (int(mine.get("streak") or 0) + 1
+                  if mine.get("day") == yesterday else 1)
+        amount = DAILY_BASE + min(
+            DAILY_STREAK_CAP, DAILY_STREAK_STEP * (streak - 1))
+        econ = self.economy
+        if not econ.is_verified(group_key, user_id):
+            econ.verify_member(group_key, user_id)
+        entry = econ.award(group_key, user_id, amount,
+                           "daily claim", ref="daily", now=now)
+        if entry is None:
+            return {"ok": False, "reason": "cap"}
+        state[user_id] = {"day": today, "streak": streak}
+        self.store.save()
+        return {"ok": True, "amount": amount, "streak": streak,
+                "balance": econ.balance(group_key, user_id)}
+
+    def jail_state(self, group_key: str, user_id: str, *,
+                   now: float | None = None) -> dict[str, Any] | None:
+        """The member's live jail record, or None (expired jails
+        clear themselves on read)."""
+        now = now if now is not None else time.time()
+        jail = self._extras(group_key).setdefault("jail", {})
+        record = jail.get(user_id)
+        if not record:
+            return None
+        if float(record.get("until") or 0) <= now:
+            jail.pop(user_id, None)
+            self.store.save()
+            return None
+        return record
+
+    def rob(self, group_key: str, actor: str, target: str, *,
+            rng: Any, now: float | None = None) -> dict[str, Any]:
+        """/rob: steal from a member's WALLET.  Failure means
+        jail (30 min) with a bail price — the consequence loop
+        that makes the crime a system, not a coin toss."""
+        now = now if now is not None else time.time()
+        if not self.economy_on(group_key):
+            return {"ok": False, "reason": "off"}
+        if self.jail_state(group_key, actor, now=now):
+            return {"ok": False, "reason": "jailed",
+                    "jail": self.jail_state(group_key, actor,
+                                            now=now)}
+        state = self._extras(group_key).setdefault("rob", {})
+        last = float((state.get(actor) or {}).get("last") or 0)
+        if now - last < 600:
+            return {"ok": False, "reason": "cooldown",
+                    "wait_s": int(600 - (now - last))}
+        econ = self.economy
+        out = econ.rob_attempt(group_key, actor, target, rng,
+                               now=now)
+        if not out.get("ok"):
+            return {"ok": False, "reason": out.get("reason",
+                                                   "target")}
+        state[actor] = {"last": now}
+        if out.get("success"):
+            self.store.save()
+            return {"ok": True, "success": True,
+                    "amount": out["amount"],
+                    "balance": econ.balance(group_key, actor)}
+        wallet = econ.balance(group_key, actor)
+        bail = max(10, min(100, wallet // 4)) if wallet else 10
+        jail = self._extras(group_key).setdefault("jail", {})
+        jail[actor] = {"until": now + 1800, "bail": bail,
+                       "at": now}
+        self._audit(group_key, "jailed", user_id=actor,
+                    reason="failed robbery", bail=bail)
+        self.store.save()
+        return {"ok": True, "success": False, "jailed": True,
+                "bail": bail, "until": now + 1800}
+
+    def bail(self, group_key: str, user_id: str, *,
+             now: float | None = None) -> dict[str, Any]:
+        """/bail: pay the treasury to walk out of jail now."""
+        now = now if now is not None else time.time()
+        if not self.economy_on(group_key):
+            return {"ok": False, "reason": "off"}
+        record = self.jail_state(group_key, user_id, now=now)
+        if not record:
+            return {"ok": False, "reason": "free"}
+        cost = int(record.get("bail") or 10)
+        econ = self.economy
+        if not econ._move(group_key, user_id, "", cost, "fine",
+                          "bail paid to treasury", now):
+            return {"ok": False, "reason": "funds", "cost": cost}
+        jail = self._extras(group_key).setdefault("jail", {})
+        jail.pop(user_id, None)
+        self._audit(group_key, "bailed", user_id=user_id, cost=cost)
+        self.store.save()
+        return {"ok": True, "cost": cost,
+                "balance": econ.balance(group_key, user_id)}
+
+    def slots(self, group_key: str, user_id: str, bet: int, *,
+              rng: Any, now: float | None = None) -> dict[str, Any]:
+        if self.jail_state(group_key, user_id, now=now):
+            return {"ok": False, "reason": "jailed"}
+        return self.economy.gamble_slots(group_key, user_id, bet,
+                                         rng, now=now)
+
+    def coinflip(self, group_key: str, user_id: str, bet: int,
+                 choice: str, *, rng: Any,
+                 now: float | None = None) -> dict[str, Any]:
+        if self.jail_state(group_key, user_id, now=now):
+            return {"ok": False, "reason": "jailed"}
+        return self.economy.gamble_coinflip(
+            group_key, user_id, bet, choice, rng, now=now)
+
+    def top_holders(self, group_key: str, *,
+                    limit: int = 10) -> list[dict[str, Any]]:
+        """The board: real members by TOTAL wealth (wallet +
+        bank).  Pseudo-members (treasury, vaults, jackpot) are
+        accounts, not people — never ranked."""
+        econ = self.economy
+        rows = []
+        for member, wallet in econ.balances(group_key).items():
+            if not member or econ.is_pseudo_member(member):
+                continue
+            bank = econ.bank_balance(group_key, member)
+            rows.append({"member": member, "wallet": wallet,
+                         "bank": bank, "total": wallet + bank})
+        rows.sort(key=lambda r: -r["total"])
+        return rows[:limit]
+
+    def group_quest_cycle(self, group_key: str, *,
+                          now: float | None = None
+                          ) -> list[dict[str, Any]]:
+        """Pay newly-completed group quests into the treasury,
+        once per period each (hourly-throttled check; called from
+        the message path).  Returns the quests paid THIS cycle."""
+        from ...community.group_economy import _period_key
+
+        now = now if now is not None else time.time()
+        extras = self._extras(group_key)
+        last = float(extras.get("quest_check_at") or 0)
+        if now - last < 3600:
+            return []
+        extras["quest_check_at"] = now
+        if not self.economy_on(group_key):
+            return []
+        progress = self.economy.group_quest_progress(
+            group_key, now=now)
+        paid_state = extras.setdefault("group_quests_paid", {})
+        paid: list[dict[str, Any]] = []
+        for quest_id, quest in progress.items():
+            if not quest["complete"]:
+                continue
+            key = _period_key(quest["period"], now)
+            if paid_state.get(quest_id) == key:
+                continue
+            if self.economy.treasury_bonus(
+                    group_key, int(quest["bonus"]),
+                    f"group quest: {quest['name']}", now=now):
+                paid_state[quest_id] = key
+                self._audit(group_key, "group_quest_paid",
+                            quest=quest_id, bonus=quest["bonus"])
+                paid.append(quest)
+        if paid:
+            self.store.save()
+        return paid
+
+    def season_cycle(self, group_key: str, *,
+                     now: float | None = None) -> str | None:
+        """Season rollover (DESIGN §5): when the season turns,
+        archive the ended season's ledger, crown its champions,
+        and return the announcement (None when nothing turned)."""
+        from ...community.group_economy import season_key
+
+        now = now if now is not None else time.time()
+        extras = self._extras(group_key)
+        current = season_key(now)
+        seen = extras.get("season_seen")
+        if seen is None:
+            extras["season_seen"] = current
+            return None
+        if seen == current:
+            return None
+        econ = self.economy
+        champs = econ.season_top(group_key, seen, limit=3)
+        archived = econ.archive_season(group_key, seen)
+        extras["season_seen"] = current
+        self._audit(group_key, "season_rollover", season=seen,
+                    archived=archived)
+        self.store.save()
+        if not champs:
+            return None
+        members = self.members(group_key)
+        lines = [f"🏆 <b>season {seen} champions</b> — "
+                 f"a new season starts now:"]
+        medals = ["🥇", "🥈", "🥉"]
+        for i, (uid, earned) in enumerate(champs):
+            record = members.get(uid) or {}
+            who = record.get("name") or record.get("username") \
+                or uid
+            lines.append(f"{medals[i]} {who} — {earned} earned")
+        return "\n".join(lines)
+
+    def apply_fine(self, group_key: str, user_id: str, *,
+                   now: float | None = None) -> int:
+        """The moderation fine sink: settings-driven, paid to the
+        treasury, capped at what the member actually holds.  One
+        fine per punishment event — a member already muted does
+        not get fined again for the same episode (10-minute
+        spacing between fines for one member)."""
+        now = now if now is not None else time.time()
+        try:
+            amount = int(self.store.settings(
+                group_key).get("fine_amount") or 0)
+        except Exception:  # noqa: BLE001 - settings never break chat
+            return 0
+        if amount <= 0 or not self.economy_on(group_key):
+            return 0
+        fines = self._extras(group_key).setdefault("fines", {})
+        if now - float(fines.get(user_id) or 0) < 600:
+            return 0
+        fines[user_id] = now
+        econ = self.economy
+        paid = min(amount, econ.balance(group_key, user_id))
+        if paid <= 0:
+            return 0
+        if econ._move(group_key, user_id, "", paid, "fine",
+                      "moderation fine", now):
+            self._audit(group_key, "fine", user_id=user_id,
+                        amount=paid)
+            return paid
+        return 0
 
     def grant_pin(self, group_key: str, user_id: str) -> None:
         self._extras(group_key).setdefault(

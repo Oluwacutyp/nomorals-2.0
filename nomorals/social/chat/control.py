@@ -161,6 +161,8 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "cipher", "wisdom", "think",
     "rules", "member", "glog", "gsettings",
     "balance", "mine", "work", "pay", "gshop", "quests", "treasury",
+    "deposit", "withdraw", "rob", "bail", "coinflip",
+    "top", "tax", "grant",
     "drop", "claim",
     "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
     "unpin", "purge", "report",
@@ -240,7 +242,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # branch in handle_control routes on the tail shape.
     "say": (1, None),
     "proposals": (0, 0),
-    "approve": (1, 1),
+    "approve": (0, 1),     # context kind: proposal approvals in DM (arg required there); in a group it executes treasury proposals, bare lists them
     "deny": (1, 2),       # /deny <id> [reason] — reason required for upgrade tickets
     "stage": (0, 1),
     "power": (1, 3),  # /power on <key> | /power on <identity> <passphrase> (seal)
@@ -342,7 +344,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # arcade (wave 97)
     "2048": (0, 0), "snake": (0, 0), "connect4": (0, 0), "battleship": (0, 0),
     # casino (wave 98)
-    "blackjack": (0, 0), "roulette": (0, 0), "slots": (0, 0),
+    "blackjack": (0, 0), "roulette": (0, 0), "slots": (0, 1),  # optional bet arg — the DM game ignores it; in a group /slots is the purse casino
     # inbox (wave F2): async, one message per turn, no clock
     "gomoku": (0, 0), "reversi": (0, 0), "checkers": (0, 0),
     # puzzles (gamesbooks-1.0)
@@ -451,6 +453,14 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "treasury": (0, 0),       # /treasury — the group's purse: balance, circulation, health (P2)
     "drop": (0, None),        # /drop <total> <per claim> — admin funds a giveaway pool (P2)
     "claim": (0, 0),          # /claim — take your share of the live drop (P2)
+    "deposit": (0, 1),        # /deposit 50|all — wallet → bank vault, safe from robbery
+    "withdraw": (0, 1),       # /withdraw 50|all — bank vault → wallet
+    "rob": (0, 1),            # /rob @member (or reply) — steal wallet sparks; failure is jail
+    "bail": (0, 0),           # /bail — pay the treasury to leave jail now
+    "coinflip": (0, 2),       # /coinflip 10 heads — casino sink at 1.9×
+    "top": (0, 0),            # /top — the richest board (wallet + bank)
+    "tax": (0, 0),            # /tax — the group's monetary policy, stated
+    "grant": (0, None),       # /grant @member 100 — admin pays from the treasury (governance above threshold)
     "mute": (0, None),        # /mute [@member] [10m|2h|1d|inf] — admin: reply to their message or name them (P1 §4)
     "unmute": (0, 1),         # /unmute [@member] — admin: lift a mute
     "ban": (0, None),         # /ban [@member] [reason] — admin: reply or name
@@ -2106,6 +2116,39 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/claim",
             "example": "/claim",
             "related": "/drop /balance"},
+    "deposit": {"what": "move sparks from your wallet into your bank vault. Banked sparks count toward your total wealth and the richest board, and robbers cannot touch them.",
+            "usage": "/deposit 50 | /deposit all",
+            "example": "/deposit all",
+            "related": "/withdraw /balance /rob"},
+    "withdraw": {"what": "move sparks back from your bank vault into your wallet (wallet sparks are what you spend, pay and gamble with).",
+            "usage": "/withdraw 50 | /withdraw all",
+            "example": "/withdraw 50",
+            "related": "/deposit /balance"},
+    "rob": {"what": "try to steal sparks from a member's WALLET (banked sparks are safe). Success takes 10–25% of their wallet; failure puts YOU in jail for 30 minutes — /bail pays the treasury to get out.",
+            "usage": "/rob @member, or reply to their message with /rob",
+            "example": "/rob @ada",
+            "related": "/bail /deposit /balance"},
+    "bail": {"what": "pay your bail to the group treasury and leave jail immediately (robbery failures land you there).",
+            "usage": "/bail",
+            "example": "/bail",
+            "related": "/rob"},
+    "coinflip": {"what": "flip a coin against the house at 1.9×: call heads or tails. Losses feed the treasury and the jackpot pot.",
+            "usage": "/coinflip <bet> heads|tails",
+            "example": "/coinflip 10 heads",
+            "related": "/slots /balance"},
+    "top": {"what": "the richest board: members ranked by total wealth — wallet plus banked sparks.",
+            "usage": "/top",
+            "example": "/top",
+            "related": "/balance /deposit"},
+    "tax": {"what": "the group's monetary policy, stated plainly: transfer tax, moderation fine, earn caps, the governance threshold, and whether issuance is running hot enough that faucets are throttled.",
+            "usage": "/tax",
+            "example": "/tax",
+            "related": "/treasury /gsettings"},
+    "grant": {"what": "pay a member out of the group treasury (admins). Above the governance threshold (see /tax) the grant becomes a proposal a second admin must /approve.",
+            "usage": "/grant @member <amount>",
+            "example": "/grant @ada 100",
+            "related": "/approve /treasury /drop"},
+
     "mute": {"what": "mute a member (admins): they can read but not send. Reply to their message with /mute, or name them. A duration like 10m, 2h, 1d sets the length; bare /mute is an hour, 'inf' is indefinite.",
             "usage": "/mute [10m|2h|1d|inf] as a reply, or /mute @member [duration]",
             "example": "/mute @spammer 2h",
@@ -2849,7 +2892,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("groups & communities",
      ["rules", "member", "glog", "gsettings",
       "balance", "mine", "work", "pay", "gshop", "quests",
-      "treasury", "drop", "claim",
+      "treasury", "deposit", "withdraw", "rob", "bail", "coinflip",
+      "top", "tax", "grant", "drop", "claim",
       "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
       "unpin", "purge", "report"]),
     ("discovery",

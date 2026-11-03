@@ -119,6 +119,8 @@ class RuntimeGroupMixin:
             name=str(message.sender or ""),
             text=str(message.text or ""),
             message_id=str(message.message_id or ""))
+        for notice in result.get("notices") or []:
+            self._send(message.chat, str(notice))
         self._execute_pending_pin(surface, message)
         actions = result.get("actions") or []
         if not actions:
@@ -201,6 +203,14 @@ class RuntimeGroupMixin:
             _log.debug("group service cleanup failed", exc_info=True)
 
     # ---- admin gate ------------------------------------------------
+    def _operator_or_false(self, message) -> bool:  # type: ignore[no-untyped-def]
+        """Operator status, quietly: surfaces without operator
+        power (and bare test rigs) read as non-operator."""
+        try:
+            return bool(self._is_operator(message))
+        except Exception:  # noqa: BLE001 - no operator surface
+            return False
+
     def _group_admin_ok(self, message) -> bool:  # type: ignore[no-untyped-def]
         """Operator (on surfaces where operator power exists) OR
         the platform's own word that this sender admins the group.
@@ -270,10 +280,16 @@ class RuntimeGroupMixin:
         ]
         if eco:
             lines.append(
-                "  🪙 sparks (the group purse) — /balance · /mine · "
-                "/work · /pay @member 50 · /gshop · /quests · "
-                "/treasury · /claim when a drop is live. Chatting, "
+                "  🪙 sparks (the group purse) — /balance · /daily · "
+                "/mine · /work · /pay @member 50 · /deposit · "
+                "/withdraw · /gshop · /quests · /treasury · /top · "
+                "/tax · /claim when a drop is live. Chatting, "
                 "streaks, quests and in-group game wins all earn.")
+            lines.append(
+                "  🥷 the risky side — /rob @member (fail and it's "
+                "jail; /bail gets you out) · 🎰 /slots 10 · 🪙 "
+                "/coinflip 10 — losses feed the treasury and the "
+                "jackpot pot; triple 7️⃣ takes the pot.")
         lines += [
             "  /help /balance — the full page for any command",
             "",
@@ -281,8 +297,12 @@ class RuntimeGroupMixin:
             "  /gsettings — welcome & goodbye, the rules list, "
             "flood/link moderation, service-message cleanup, the "
             "economy switch and transfer tax",
-            "  /drop 100 10 — fund a giveaway pool from the "
-            "treasury; members claim with /claim",
+            "  /drop 100 10 — fund a giveaway pool from your own "
+            "sparks (or /drop treasury 100 10 from the treasury); "
+            "members claim with /claim",
+            "  /grant @member 100 — pay a member from the treasury; "
+            "above the governance threshold a second admin must "
+            "/approve it first",
             "  moderation, by hand: reply to a member's message "
             "with /warn, /mute 10m|2h|1d, /ban or /kick — or name "
             "@member instead. /unmute /unban undo them; /pin and "
@@ -413,7 +433,9 @@ class RuntimeGroupMixin:
                 f" · filters: {len(mod.get('word_filters') or [])} "
                 f"({mod.get('filter_action') or 'delete'})\n"
                 f"economy: {'on' if s['economy_enabled'] else 'off'}"
-                f" · transfer tax {s.get('transfer_tax_pct', 2)}%\n"
+                f" · transfer tax {s.get('transfer_tax_pct', 2)}%"
+                f" · fine {s.get('fine_amount', 0)}"
+                f" · governance ≥{s.get('governance_threshold', 500)}\n"
                 f"tap a button to flip a switch, or type:\n"
                 f"<code>/gsettings welcome on|off</code> · "
                 f"<code>/gsettings goodbye on|off</code> · "
@@ -425,6 +447,8 @@ class RuntimeGroupMixin:
                 f"<code>/gsettings economy on|off</code> · "
                 f"<code>/gsettings tax PCT</code> · "
                 f"<code>/gsettings warns N</code>\n"
+                f"<code>/gsettings fine N</code> · "
+                f"<code>/gsettings governance N</code>\n"
                 f"<code>/gsettings filter add WORD</code> · "
                 f"<code>/gsettings filter action "
                 f"delete|warn|mute</code>",
@@ -438,6 +462,18 @@ class RuntimeGroupMixin:
             surface.update_settings(
                 key, warn_threshold=max(1, int(rest)))
             return f"warn limit {max(1, int(rest))} before an auto-mute."
+        if head == "fine" and rest.lstrip("-").isdigit():
+            amount = max(0, int(rest))
+            surface.update_settings(key, fine_amount=amount)
+            return (f"moderation fine {amount} sparks per auto-mute "
+                    f"(paid to the treasury)."
+                    if amount else "moderation fines off.")
+        if head == "governance" and rest.isdigit():
+            threshold = max(0, int(rest))
+            surface.update_settings(
+                key, governance_threshold=threshold)
+            return (f"governance threshold {threshold} sparks — "
+                    "bigger treasury spends need a second admin.")
         if head == "economy" and rest.lower() in ("on", "off"):
             surface.update_settings(key, economy_enabled=on)
             return f"economy {'on' if on else 'off'}."
@@ -861,17 +897,30 @@ class RuntimeGroupMixin:
         member = surface.members(key).get(user_id) or {}
         name = _html.escape(
             str(member.get("name") or message.sender or "you"))
-        lines = [f"💰 <b>{name}</b> — <b>{stmt.get('balance', 0)}"
-                 f"</b> sparks"]
+        wallet = int(stmt.get("balance", 0))
+        bank = surface.economy.bank_balance(key, user_id)
+        lines = [f"💰 <b>{name}</b> — wallet <b>{wallet}</b> sparks"]
+        if bank:
+            lines.append(f"🏦 banked: <b>{bank}</b> sparks "
+                         f"(safe from robbery) · total "
+                         f"<b>{wallet + bank}</b>")
         for badge in stmt.get("badges", []):
             lines.append(f"  🏅 {_html.escape(str(badge.get('badge')))}"
                          f" ({_html.escape(str(badge.get('season')))})")
         lines.append(
             f"🏦 group treasury: "
-            f"{surface.economy.treasury_balance(key)} sparks")
+            f"{surface.economy.treasury_balance(key)} sparks · "
+            f"jackpot pot: {surface.economy.jackpot_balance(key)}")
         lines.append(f"<i>{_html.escape(str(stmt.get('disclaimer') or ''))}</i>")
         buttons = [[("⛏️ Mine", "mine"), ("🛠️ Work", "work")],
                    [("🗺️ Quests", "quests"), ("🛒 Shop", "gshop")]]
+        vault_row = []
+        if wallet > 0:
+            vault_row.append(("🏦 Deposit", "deposit all"))
+        if bank > 0:
+            vault_row.append(("💵 Withdraw", "withdraw all"))
+        if vault_row:
+            buttons.append(vault_row)
         return actionable("\n".join(lines), buttons)
 
     def _control_mine(self, message):  # type: ignore[no-untyped-def]
@@ -881,6 +930,8 @@ class RuntimeGroupMixin:
         from ...social.chat.tgbot_buttons import actionable
         surface = self._group_surface()
         user_id = str(message.sender_id or message.sender or "")
+        if surface.jail_state(key, user_id):
+            return "🔒 no mining from jail — /bail first."
         buttons = [[("🛠️ Work", "work"), ("🪙 My balance", "balance")]]
         entry = surface.economy.mining_claim(key, user_id)
         if entry is None:
@@ -902,6 +953,8 @@ class RuntimeGroupMixin:
             return err
         surface = self._group_surface()
         user_id = str(message.sender_id or message.sender or "")
+        if surface.jail_state(key, user_id):
+            return "🔒 no shifts from jail — /bail first."
         result = surface.work_shift(key, user_id)
         if not result["ok"]:
             if result["reason"] == "cooldown":
@@ -1046,6 +1099,27 @@ class RuntimeGroupMixin:
             if quest["complete"] and not quest["claimed"]:
                 buttons.append([(f"🎁 Claim: {quest['name']}",
                                   f"quests claim {quest_id}")])
+        # Group quests: the COLLECTIVE board — everyone's
+        # activity counts; completion pays the treasury.
+        import time as _time
+
+        from ...community.group_economy import _period_key
+        group_progress = surface.economy.group_quest_progress(
+            key, now=_time.time())
+        paid_state = surface._extras(key).get(
+            "group_quests_paid") or {}
+        lines.append("🏛️ <b>group quests</b> (everyone together):")
+        for quest_id, quest in group_progress.items():
+            paid = paid_state.get(quest_id) == _period_key(
+                quest["period"], _time.time())
+            mark = ("✅ paid to treasury" if paid else
+                    "🎉 complete — bonus lands soon"
+                    if quest["complete"] else
+                    f"{quest['have']}/{quest['need']}")
+            lines.append(f"<code>{quest_id}</code> — "
+                         f"<b>{quest['name']}</b>: "
+                         f"{quest['blurb']} · {mark} · "
+                         f"treasury bonus {quest['bonus']}")
         buttons.append([("🪙 My balance", "balance")])
         return actionable("\n".join(lines), buttons)
 
@@ -1055,11 +1129,34 @@ class RuntimeGroupMixin:
             return err
         surface = self._group_surface()
         health = surface.economy_health(key)
-        return (f"🏦 <b>treasury: {health['treasury']} sparks</b>\n"
-                f"circulating: {health['circulating']} across "
-                f"{health['holders']} holders · biggest holder "
-                f"{int(health['top_share'] * 100)}% · "
-                f"{health['active_7d']} members active this week.")
+        policy = health.get("policy") or {}
+        reserved = surface.reserved_treasury(key)
+        lines = [
+            f"🏦 <b>treasury: {health['treasury']} sparks</b>"
+            + (f" ({reserved} reserved for open drops)"
+               if reserved else ""),
+            f"circulating: {health['circulating']} across "
+            f"{health['holders']} holders · biggest holder "
+            f"{int(health['top_share'] * 100)}% · "
+            f"{health['active_7d']} members active this week.",
+            f"🎰 jackpot pot: {health.get('jackpot', 0)} sparks "
+            f"(triple 7️⃣ on /slots takes it)",
+        ]
+        if policy.get("throttled"):
+            lines.append(
+                "📉 <b>monetary policy: faucets throttled</b> — "
+                f"issuance ({policy['earned']}) is running hot "
+                f"against sinks ({policy['sunk']}) this week, so "
+                "activity pays half until sinks catch up.")
+        else:
+            lines.append(
+                f"📈 monetary policy: normal — {policy.get('earned', 0)} "
+                f"issued vs {policy.get('sunk', 0)} sunk this week.")
+        proposals = surface.open_proposals(key)
+        if proposals:
+            lines.append(f"🗳️ {len(proposals)} treasury proposal(s) "
+                         "waiting for a second admin (/approve).")
+        return "\n".join(lines)
 
     def _control_drop(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key = self._group_key_or_none(message)
@@ -1070,12 +1167,49 @@ class RuntimeGroupMixin:
         key, err = self._economy_gate(message)
         if err:
             return err
-        numbers = [int(p) for p in str(tail or "").split()
-                   if p.isdigit()]
+        words = str(tail or "").split()
+        numbers = [int(p) for p in words if p.isdigit()]
         if len(numbers) < 2:
-            return "usage: /drop <total> <per claim> — e.g. /drop 500 50"
+            return ("usage: /drop <total> <per claim> — or "
+                    "/drop treasury <total> <per claim> to fund "
+                    "it from the treasury.")
         surface = self._group_surface()
         funder = str(message.sender_id or message.sender or "")
+        if any(w.lower() == "treasury" for w in words):
+            threshold = int(surface.store.settings(
+                key).get("governance_threshold") or 0)
+            if threshold and numbers[0] > threshold \
+                    and not self._operator_or_false(message):
+                proposal = surface.propose_spend(
+                    key, kind="drop",
+                    payload={"total": numbers[0],
+                             "per_claim": numbers[1]},
+                    by=funder)
+                from ...social.chat.tgbot_buttons import actionable
+                return actionable(
+                    f"🗳️ that treasury drop ({numbers[0]} sparks) "
+                    f"is above the governance threshold "
+                    f"({threshold}) — proposal "
+                    f"<code>{proposal['id']}</code> is open. A "
+                    "SECOND admin approves it:",
+                    [[("✅ Approve drop", f"approve {proposal['id']}")]])
+            result = surface.open_drop_from_treasury(
+                key, numbers[0], numbers[1], by=funder)
+            if not result["ok"]:
+                if result["reason"] == "funds":
+                    return (f"the treasury can't fund that — "
+                            f"{result.get('available', 0)} available "
+                            "after open-drop reservations.")
+                return "that drop doesn't work as written."
+            from ...social.chat.tgbot_buttons import actionable
+            drop = result["drop"]
+            claims = drop["total"] // drop["per_claim"]
+            return actionable(
+                f"🎁 <b>DROP: {drop['total']} sparks from the "
+                f"treasury</b>\n{drop['per_claim']} per claim · "
+                f"{claims} claims · tap Claim or send /claim",
+                [[(f"🎁 Claim {drop['per_claim']} sparks", "claim"),
+                  ("🪙 My balance", "balance")]])
         result = surface.open_drop(key, funder, numbers[0],
                                    numbers[1])
         if not result["ok"]:
@@ -1116,6 +1250,361 @@ class RuntimeGroupMixin:
             f"(pool left: {result['remaining']} · your balance: "
             f"{result['balance']})",
             [[("🪙 My balance", "balance")]])
+
+    # ---- the full economy loop (bank / daily / crime / casino /
+    # boards / governance) --------------------------------------
+
+    def _amount_arg(self, tail, wallet: int) -> int | None:  # type: ignore[no-untyped-def]
+        """Parse "<n>|all" against a live balance; None = all of
+        it (the Septorch grammar the owner reached for first)."""
+        text = str(tail or "").strip().lower()
+        if not text or text == "all":
+            return None
+        digits = text.split()[0]
+        return int(digits) if digits.isdigit() else -1
+
+    def _control_deposit(self, tail, message):  # type: ignore[no-untyped-def]
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        amount = self._amount_arg(
+            tail, surface.economy.balance(key, user_id))
+        if amount is not None and amount < 0:
+            return "usage: /deposit 50 — or /deposit all"
+        result = surface.deposit(key, user_id, amount)
+        if not result["ok"]:
+            if result["reason"] == "empty":
+                return "your wallet is empty — nothing to deposit."
+            return "that deposit doesn't work as written."
+        from ...social.chat.tgbot_buttons import actionable
+        return actionable(
+            f"🏦 deposited <b>{result['amount']} sparks</b> — "
+            f"wallet {result['wallet']} · banked "
+            f"<b>{result['bank']}</b> (robbers can't touch it).",
+            [[("💵 Withdraw", "withdraw all"),
+              ("🪙 My balance", "balance")]])
+
+    def _control_withdraw(self, tail, message):  # type: ignore[no-untyped-def]
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        amount = self._amount_arg(
+            tail, surface.economy.bank_balance(key, user_id))
+        if amount is not None and amount < 0:
+            return "usage: /withdraw 50 — or /withdraw all"
+        result = surface.withdraw(key, user_id, amount)
+        if not result["ok"]:
+            if result["reason"] == "empty":
+                return "your bank vault is empty."
+            return "that withdrawal doesn't work as written."
+        from ...social.chat.tgbot_buttons import actionable
+        return actionable(
+            f"💵 withdrew <b>{result['amount']} sparks</b> — "
+            f"wallet <b>{result['wallet']}</b> · banked "
+            f"{result['bank']}.",
+            [[("🪙 My balance", "balance")]])
+
+    def _control_group_daily(self, message):  # type: ignore[no-untyped-def]
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        result = surface.daily_claim(key, user_id)
+        if not result["ok"]:
+            if result["reason"] == "cooldown":
+                return (f"🌅 already claimed today — streak at "
+                        f"{result.get('streak', 0)}. Tomorrow it "
+                        "grows.")
+            return "🌅 no daily paid — the earn cap is hit."
+        from ...social.chat.tgbot_buttons import actionable
+        return actionable(
+            f"🌅 daily claimed: <b>+{result['amount']} sparks</b> "
+            f"(streak {result['streak']} · balance "
+            f"{result['balance']}).",
+            [[("🪙 My balance", "balance"), ("🛠️ Work", "work")]])
+
+    def _rob_target(self, surface, key, tail, message):  # type: ignore[no-untyped-def]
+        meta = getattr(message, "meta", None) or {}
+        replied = meta.get("reply_to_sender")
+        if replied:
+            return str(replied)
+        for part in str(tail or "").split():
+            if part.startswith("@") or part.isdigit():
+                return self._member_ref(surface, key, part, message)
+        return None
+
+    def _control_rob(self, tail, message):  # type: ignore[no-untyped-def]
+        import random
+
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        actor = str(message.sender_id or message.sender or "")
+        target = self._rob_target(surface, key, tail, message)
+        if not target:
+            return ("usage: reply to a member with /rob, or "
+                    "/rob @member")
+        if target == actor:
+            return "robbing yourself is just moving sparks around."
+        result = surface.rob(key, actor, target,
+                             rng=random.Random())
+        if not result["ok"]:
+            reason = result["reason"]
+            if reason == "jailed":
+                jail = result.get("jail") or {}
+                from ...social.chat.tgbot_buttons import actionable
+                return actionable(
+                    f"🔒 you're in jail — bail is "
+                    f"<b>{jail.get('bail', 0)} sparks</b> to the "
+                    "treasury, or wait it out.",
+                    [[("🔓 Pay bail", "bail")]])
+            if reason == "cooldown":
+                return (f"🥷 too soon — the heat dies down in "
+                        f"~{max(1, result['wait_s'] // 60)} min.")
+            if reason == "empty":
+                return "their wallet is empty — nothing to take."
+            return "that robbery doesn't work as written."
+        from ...social.chat.tgbot_buttons import actionable
+        if result.get("success"):
+            return actionable(
+                f"🥷 got away with <b>{result['amount']} "
+                f"sparks</b> (balance {result['balance']}). "
+                "Bank it before someone returns the favour: "
+                "/deposit all",
+                [[("🏦 Deposit", "deposit all"),
+                  ("🪙 My balance", "balance")]])
+        return actionable(
+            f"🚔 caught. You're in jail for 30 minutes — bail is "
+            f"<b>{result['bail']} sparks</b> to the treasury.",
+            [[("🔓 Pay bail", "bail")]])
+
+    def _control_bail(self, message):  # type: ignore[no-untyped-def]
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        result = surface.bail(key, user_id)
+        if not result["ok"]:
+            if result["reason"] == "free":
+                return "you're not in jail."
+            return (f"bail is {result.get('cost', 0)} sparks and "
+                    "your wallet can't cover it.")
+        return (f"🔓 bail paid — <b>{result['cost']} sparks</b> to "
+                f"the treasury. You're out (balance "
+                f"{result['balance']}).")
+
+    def _bet_arg(self, tail, default: int = 10) -> int:  # type: ignore[no-untyped-def]
+        for part in str(tail or "").split():
+            if part.isdigit():
+                return int(part)
+        return default
+
+    def _control_slots(self, tail, message):  # type: ignore[no-untyped-def]
+        import random
+
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        bet = self._bet_arg(tail)
+        result = surface.slots(key, user_id, bet,
+                               rng=random.Random())
+        if not result["ok"]:
+            if result.get("reason") == "jailed":
+                return "🔒 no slots from jail — /bail first."
+            return "not enough sparks in your wallet for that bet."
+        reels = " ".join(result["symbols"])
+        from ...social.chat.tgbot_buttons import actionable
+        buttons = [[(f"🎰 Spin again ({bet})", f"slots {bet}"),
+                    ("🪙 My balance", "balance")]]
+        if result.get("jackpot"):
+            return actionable(
+                f"🎰 {reels}\n🎉 <b>JACKPOT — "
+                f"{result['jackpot']} sparks!</b> plus "
+                f"{result['payout']} from the reels. Balance "
+                f"{result['balance']}.", buttons)
+        if result["payout"] > 0:
+            return actionable(
+                f"🎰 {reels}\n<b>+{result['payout']} sparks</b> "
+                f"(×{result['multiplier']}). Balance "
+                f"{result['balance']}.", buttons)
+        return actionable(
+            f"🎰 {reels}\nno win — the house share feeds the "
+            f"treasury and the jackpot pot "
+            f"({surface.economy.jackpot_balance(key)} and "
+            "growing).", buttons)
+
+    def _control_coinflip(self, tail, message):  # type: ignore[no-untyped-def]
+        import random
+
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        bet = self._bet_arg(tail)
+        choice = "tails" if "tail" in str(tail or "").lower() \
+            else "heads"
+        result = surface.coinflip(key, user_id, bet, choice,
+                                  rng=random.Random())
+        if not result["ok"]:
+            if result.get("reason") == "jailed":
+                return "🔒 no coinflips from jail — /bail first."
+            return "not enough sparks in your wallet for that bet."
+        from ...social.chat.tgbot_buttons import actionable
+        buttons = [[(f"🪙 Flip again ({bet})", f"coinflip {bet}"),
+                    ("🪙 My balance", "balance")]]
+        if result["won"]:
+            return actionable(
+                f"🪙 it landed <b>{result['flip']}</b> — you "
+                f"called it: <b>+{result['payout']} sparks</b>. "
+                f"Balance {result['balance']}.", buttons)
+        return actionable(
+            f"🪙 it landed <b>{result['flip']}</b> — not your "
+            "call. The house share feeds the treasury and the "
+            "jackpot.", buttons)
+
+    def _control_top(self, message):  # type: ignore[no-untyped-def]
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        import html as _html
+
+        surface = self._group_surface()
+        rows = surface.top_holders(key, limit=10)
+        if not rows:
+            return "no sparks held yet — /work and /mine start it."
+        members = surface.members(key)
+        lines = ["🏆 <b>richest in the group</b>"]
+        medals = ["🥇", "🥈", "🥉"]
+        for i, row in enumerate(rows):
+            record = members.get(row["member"]) or {}
+            who = _html.escape(str(
+                record.get("name") or record.get("username")
+                or row["member"]))
+            mark = medals[i] if i < 3 else f"{i + 1}."
+            bank = (f" (🏦 {row['bank']})" if row["bank"] else "")
+            lines.append(f"{mark} {who} — <b>{row['total']}</b>"
+                         f"{bank}")
+        return "\n".join(lines)
+
+    def _control_tax(self, message) -> str:  # type: ignore[no-untyped-def]
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        s = surface.store.settings(key)
+        policy = surface.economy.issuance_state(key)
+        state = ("throttled (activity pays half)"
+                 if policy["throttled"] else "normal")
+        return (
+            f"🧾 <b>the group's monetary policy</b>\n"
+            f"transfer tax: {s.get('transfer_tax_pct', 2)}% to "
+            f"the treasury · moderation fine: "
+            f"{s.get('fine_amount', 0)} sparks\n"
+            f"earn caps: 200/day · 800/week · governance: "
+            f"treasury spends above "
+            f"{s.get('governance_threshold', 500)} need a second "
+            f"admin\nissuance this week: {policy['earned']} "
+            f"issued / {policy['sunk']} sunk — faucets {state}.")
+
+    def _control_grant(self, tail, message):  # type: ignore[no-untyped-def]
+        key = self._group_key_or_none(message)
+        if key is None:
+            return "that's a group command — run it inside the group."
+        if not self._group_admin_ok(message):
+            return "treasury grants are for admins."
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        parts = str(tail or "").split()
+        amount = None
+        target_token = ""
+        for part in parts:
+            if part.isdigit() and amount is None:
+                amount = int(part)
+            elif not target_token:
+                target_token = part
+        if amount is None or not target_token:
+            return "usage: /grant @member 100"
+        recipient = self._member_ref(surface, key, target_token,
+                                     message)
+        if not recipient:
+            return (f"I don't have {target_token} in this "
+                    "group's ledger.")
+        admin = str(message.sender_id or message.sender or "")
+        threshold = int(surface.store.settings(
+            key).get("governance_threshold") or 0)
+        # Governance binds ADMINS spending the country's money;
+        # the operator is sovereign (Septorch's owner posture)
+        # and never deadlocks against his own threshold.
+        if threshold and amount > threshold \
+                and not self._operator_or_false(message):
+            proposal = surface.propose_spend(
+                key, kind="grant",
+                payload={"recipient": recipient, "amount": amount,
+                         "reason": "admin grant"}, by=admin)
+            from ...social.chat.tgbot_buttons import actionable
+            return actionable(
+                f"🗳️ that grant ({amount} sparks) is above the "
+                f"governance threshold ({threshold}) — proposal "
+                f"<code>{proposal['id']}</code> is open. A SECOND "
+                "admin approves it:",
+                [[("✅ Approve grant", f"approve {proposal['id']}")]])
+        result = surface.grant(key, recipient, amount, by=admin)
+        if not result["ok"]:
+            return (f"the treasury can't cover that — "
+                    f"{result.get('available', 0)} available after "
+                    "open-drop reservations.")
+        return (f"🏦 granted <b>{amount} sparks</b> from the "
+                f"treasury (treasury now {result['treasury']}).")
+
+    def _control_approve(self, tail, message):  # type: ignore[no-untyped-def]
+        key = self._group_key_or_none(message)
+        if key is None:
+            return "that's a group command — run it inside the group."
+        if not self._group_admin_ok(message):
+            return "approvals are for admins."
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        pid = str(tail or "").strip().split()[0] \
+            if str(tail or "").strip() else ""
+        if not pid:
+            open_now = surface.open_proposals(key)
+            if not open_now:
+                return "no treasury proposals are open."
+            lines = ["🗳️ <b>open treasury proposals:</b>"]
+            for open_pid, proposal in open_now.items():
+                payload = proposal.get("payload") or {}
+                lines.append(
+                    f"<code>{open_pid}</code> — "
+                    f"{proposal.get('kind')}: {payload}")
+            lines.append("approve with /approve <id> (a different "
+                         "admin than the proposer).")
+            return "\n".join(lines)
+        admin = str(message.sender_id or message.sender or "")
+        result = surface.approve_spend(key, pid, by=admin)
+        if not result["ok"]:
+            return {"no_proposal": "no open proposal with that id.",
+                    "self_approve": "the proposer can't approve "
+                                    "their own spend — a second "
+                                    "admin has to.",
+                    "funds": "the treasury can't cover it any "
+                             "more."}.get(result["reason"],
+                                          "can't approve that.")
+        return (f"✅ proposal <code>{pid}</code> approved and "
+                "executed.")
 
     def _execute_group_action(self, surface, key, adapter, message,
                               action) -> bool:  # type: ignore[no-untyped-def]
