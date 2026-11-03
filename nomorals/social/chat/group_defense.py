@@ -38,6 +38,202 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
+#: The per-group escalation ladder (DESIGN §30): the warn limit
+#: is the final-action count; interval actions are DESIGNED steps
+#: at stated counts (mute / restrict / fine / kick), each
+#: optional; the window is when warns expire.  The defaults ARE
+#: the shipped ladder — mute at 3, kick at 5, ban at 7, 7-day
+#: window — so a group that never configures it sees no change.
+ESCALATION_DEFAULTS: dict[str, Any] = {
+    "warn_limit": 7,
+    "final_action": "ban",              # kick | ban
+    "window_days": 7,
+    "intervals": [
+        {"at": 3, "action": "mute", "minutes": 60},
+        {"at": 5, "action": "kick"},
+    ],
+}
+
+#: Interval actions the ladder can fire at a designed count.
+INTERVAL_ACTIONS = ("mute", "restrict", "fine", "kick")
+
+
+def _normalize_intervals(raw: Any) -> list[dict[str, Any]]:
+    """Coerce a stored intervals list into clean steps: known
+    actions only, at >= 1, sorted by count, one step per count
+    (a later entry at the same count wins — it is the newer
+    design)."""
+    by_at: dict[int, dict[str, Any]] = {}
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action") or "").lower()
+        if action not in INTERVAL_ACTIONS:
+            continue
+        try:
+            at = int(item.get("at") or 0)
+        except (TypeError, ValueError):
+            continue
+        if at < 1:
+            continue
+        step: dict[str, Any] = {"at": at, "action": action}
+        if action == "mute":
+            step["minutes"] = max(
+                1, int(item.get("minutes") or 60))
+        elif action == "fine":
+            step["amount"] = max(
+                1, int(item.get("amount") or 0)) or 1
+        by_at[at] = step
+    return [by_at[at] for at in sorted(by_at)]
+
+
+@dataclass
+class EscalationConfig:
+    """One group's ladder (§30), read by EVERY strike consumer:
+    the defense sensors, manual warns, acceptance enforcement.
+    ``from_settings`` reads the ``escalation`` settings block
+    when present and otherwise derives the same ladder from the
+    legacy defense escalation fields + warn_threshold, so raw
+    settings dicts from before the block existed behave
+    identically."""
+    warn_limit: int = 7
+    final_action: str = "ban"
+    window_days: int = 7
+    intervals: list[dict[str, Any]] = field(default_factory=list)
+
+    @classmethod
+    def from_settings(cls, settings: dict[str, Any]
+                      ) -> "EscalationConfig":
+        settings = settings or {}
+        block = settings.get("escalation")
+        if isinstance(block, dict):
+            merged = dict(ESCALATION_DEFAULTS)
+            merged.update({k: v for k, v in block.items()
+                           if k in merged})
+            final = str(merged.get("final_action")
+                        or "ban").lower()
+            return cls(
+                warn_limit=max(1, int(merged.get("warn_limit")
+                                      or 7)),
+                final_action=final if final in ("kick", "ban")
+                else "ban",
+                window_days=max(1, int(merged.get("window_days")
+                                       or 7)),
+                intervals=_normalize_intervals(
+                    merged.get("intervals")))
+        defense = _merge(DEFAULTS,
+                         settings.get("defense") or {})
+        legacy = defense["escalation"]
+        threshold = int(settings.get("warn_threshold") or 0)
+        mute_minutes = max(1, int(legacy.get("mute_minutes")
+                                  or 60))
+        kick_at = int(legacy.get("kick_at") or 0)
+        ban_at = int(legacy.get("ban_at") or 0)
+        intervals: list[dict[str, Any]] = []
+        if threshold:
+            intervals.append({"at": threshold, "action": "mute",
+                              "minutes": mute_minutes})
+        if kick_at and kick_at != ban_at:
+            intervals.append({"at": kick_at, "action": "kick"})
+        if ban_at:
+            limit, final = ban_at, "ban"
+        elif kick_at:
+            limit, final = kick_at, "kick"
+            intervals = [s for s in intervals
+                         if s["at"] != kick_at]
+        else:
+            limit, final = 7, "ban"
+        return cls(warn_limit=limit, final_action=final,
+                   window_days=max(
+                       1, int(legacy.get("window_days") or 7)),
+                   intervals=_normalize_intervals(intervals))
+
+    def interval_at(self, count: int) -> dict[str, Any] | None:
+        """The designed step landing exactly on ``count``."""
+        for step in self.intervals:
+            if step["at"] == count:
+                return step
+        return None
+
+    def action_at(self, count: int) -> dict[str, Any] | None:
+        """What fires when a new strike lands on ``count``: the
+        interval step at that count, else the final action when
+        the limit is reached (counts past the limit keep firing
+        the final action — a banned member re-offending after a
+        rejoin does not fall off the ladder)."""
+        step = self.interval_at(count)
+        if step is not None:
+            return step
+        if count >= self.warn_limit:
+            return {"at": self.warn_limit,
+                    "action": self.final_action}
+        return None
+
+    def next_step(self, count: int) -> dict[str, Any] | None:
+        """The next designed consequence after ``count`` strikes:
+        the nearest interval above it, else the final action."""
+        for step in self.intervals:
+            if step["at"] > count:
+                return step
+        if count < self.warn_limit:
+            return {"at": self.warn_limit,
+                    "action": self.final_action}
+        return None
+
+    def mute_minutes(self) -> int:
+        """Minutes of the first mute step (the legacy flat
+        figure other organs quote)."""
+        for step in self.intervals:
+            if step["action"] == "mute":
+                return int(step.get("minutes") or 60)
+        return 60
+
+    def describe(self) -> str:
+        """The ladder in one plain line, for settings surfaces."""
+        parts = []
+        for step in self.intervals:
+            label = step["action"]
+            if label == "mute":
+                label = f"mute {step.get('minutes', 60)}m"
+            elif label == "fine":
+                label = f"fine {step.get('amount', 0)}"
+            parts.append(f"{label} at {step['at']}")
+        parts.append(f"{self.final_action} at {self.warn_limit}")
+        return " → ".join(parts) + \
+            f" · warns expire after {self.window_days}d"
+
+
+def ladder_label(step: dict[str, Any]) -> str:
+    """One ladder step in the member's terms ("mute for 60 min",
+    "a 250-spark fine", "removal", "a ban")."""
+    action = str(step.get("action") or "")
+    if action == "mute":
+        return f"mute for {int(step.get('minutes') or 60)} min"
+    if action == "restrict":
+        return "restriction until an admin lifts it"
+    if action == "fine":
+        return f"a {int(step.get('amount') or 0)}-spark fine"
+    if action == "kick":
+        return "removal"
+    if action == "ban":
+        return "a ban"
+    return action
+
+
+def warn_expiry_text(oldest_ts: float, *, window_days: int,
+                     now: float) -> str:
+    """When the oldest active warn clears, in the member's
+    terms ("oldest warn clears 10 Nov") — "" when there is no
+    active warn to expire.  Dates render day-first like the
+    reference notices the owner captured (§31)."""
+    if not oldest_ts:
+        return ""
+    clears = time.localtime(
+        float(oldest_ts) + window_days * 86400)
+    return ("oldest warn clears "
+            + time.strftime("%d %b", clears))
+
+
 def _merge(base: dict[str, Any], stored: dict[str, Any]
            ) -> dict[str, Any]:
     out = dict(base)
@@ -83,6 +279,47 @@ class DefenseConfig:
         dl = raw["antidelete"]
         ed = raw["antiedit"]
         esc = raw["escalation"]
+        # The §30 ladder is the source of truth when the group
+        # has an escalation block: the flat fields below are
+        # DERIVED from it (window, first mute's minutes, the
+        # kick interval, the final action) so ladder_rung and
+        # every older consumer quote the group's own ladder.
+        if isinstance((settings or {}).get("escalation"), dict):
+            ladder = EscalationConfig.from_settings(settings)
+            kick_step = next(
+                (s for s in ladder.intervals
+                 if s["action"] == "kick"), None)
+            return cls(
+                autonomy=bool(raw.get("autonomy", True)),
+                anticrash_enabled=bool(ac.get("enabled", True)),
+                anticrash_action=str(ac.get("action")
+                                     or "delete"),
+                antichannel_enabled=bool(ch.get("enabled", True)),
+                antichannel_action=str(ch.get("action")
+                                       or "delete_warn"),
+                antichannel_exempt_linked=bool(
+                    ch.get("exempt_linked", True)),
+                antitag_enabled=bool(tg.get("enabled", True)),
+                antitag_max_mentions=max(
+                    1, int(tg.get("max_mentions") or 10)),
+                antitag_max_roster_pct=max(
+                    1, int(tg.get("max_roster_pct") or 20)),
+                antitag_action=str(tg.get("action")
+                                   or "delete_warn"),
+                antidelete_enabled=bool(dl.get("enabled", True)),
+                antidelete_mode=str(dl.get("mode")
+                                    or "log").lower(),
+                antidelete_callout_to=str(
+                    dl.get("callout_to") or "admins").lower(),
+                antiedit_enabled=bool(ed.get("enabled", True)),
+                antiedit_mode=str(ed.get("mode") or "log").lower(),
+                antiedit_callout_to=str(
+                    ed.get("callout_to") or "admins").lower(),
+                window_days=ladder.window_days,
+                mute_minutes=ladder.mute_minutes(),
+                kick_at=int(kick_step["at"]) if kick_step else 0,
+                ban_at=ladder.warn_limit
+                if ladder.final_action == "ban" else 0)
         action = str(ac.get("action") or "delete").lower()
         return cls(
             autonomy=bool(raw.get("autonomy", True)),
@@ -271,9 +508,12 @@ RULE_PHRASES: dict[str, str] = {
     "flood": "flooding the group isn't allowed",
     "links": "that link isn't allowed here",
     "words": "that word is filtered here",
+    "word_filter": "that word is filtered here",
     "repeat": "repeating the same message isn't allowed",
     "banlist": "you're on this group's ban list",
     "manual_warn": "an admin warned you",
+    "acceptance": "your profile doesn't meet this group's "
+                  "acceptance rules",
 }
 
 
@@ -294,22 +534,54 @@ def render_warning(mention: str, rule: str, consequence: str) -> str:
 
 
 def consequence_text(*, executed: str, count: int,
-                     cfg: DefenseConfig, warn_threshold: int
-                     ) -> str:
-    """What happened + the next rung, in the member's terms."""
+                     cfg: DefenseConfig, warn_threshold: int,
+                     esc: EscalationConfig | None = None,
+                     fine_amount: int = 0,
+                     oldest_ts: float = 0.0,
+                     now: float = 0.0) -> str:
+    """What happened + the member's ladder position, in their
+    terms: the count of the limit, the next consequence, and
+    when the oldest active warn clears (§30/§31).  With ``esc``
+    the position comes from the group's own ladder; without it
+    the legacy flat wording stands byte-for-byte."""
     parts = []
     if executed == "delete":
         parts.append("Message deleted")
     elif executed == "mute":
+        minutes = cfg.mute_minutes
+        if esc is not None:
+            step = esc.interval_at(count)
+            if step and step.get("action") == "mute":
+                minutes = int(step.get("minutes") or minutes)
         parts.append(f"Message deleted — muted for "
-                     f"{cfg.mute_minutes} min")
+                     f"{minutes} min")
     elif executed == "kick":
         parts.append("Removed from the group")
     elif executed == "ban":
         parts.append("Banned from the group")
     elif executed == "warn":
         parts.append("This is a warning")
-    if executed not in ("kick", "ban"):
+    elif executed == "fine":
+        parts.append(f"Fined {fine_amount} sparks"
+                     if fine_amount else "Fined")
+    elif executed == "restrict":
+        parts.append("Restricted until an admin lifts it")
+    if fine_amount and executed != "fine":
+        parts.append(f"fined {fine_amount} sparks")
+    if esc is not None:
+        if executed not in ("kick", "ban"):
+            parts.append(f"strike {count} of {esc.warn_limit}")
+            nxt = esc.next_step(count)
+            if nxt is not None:
+                parts.append(
+                    f"next: {ladder_label(nxt)} "
+                    f"at {nxt['at']}")
+            expiry = warn_expiry_text(
+                oldest_ts, window_days=esc.window_days,
+                now=now)
+            if expiry:
+                parts.append(expiry)
+    elif executed not in ("kick", "ban"):
         parts.append(f"strike {count}")
         nxt = _next_rung(count, cfg, warn_threshold)
         if nxt:

@@ -3680,6 +3680,10 @@ class PartnerRuntime(
 
         if kind == "joinq":
             return self._control_joinq(command.tail, message)
+        if kind == "console":
+            return self._control_console(command.tail, message)
+        if kind == "undonotice":
+            return self._control_undonotice(command.tail, message)
 
         if kind == "gsettings":
             return self._control_gsettings(command.tail, message)

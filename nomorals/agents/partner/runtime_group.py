@@ -44,16 +44,63 @@ class RuntimeGroupMixin:
         return surface
 
     def _send(self, chat, text: str, *, buttons=None,  # type: ignore[no-untyped-def]
-              parse_mode: str = "") -> None:
+              parse_mode: str = ""):
         """The mixin's own outbound channel (welcomes, goodbyes,
         notices).  This method was CALLED by every welcome path
         since P1 but defined NOWHERE on PartnerRuntime — the live
         bug found 2026-11-03: every join's welcome died on
         AttributeError, caught upstream and logged, never sent.
         Defined here, on the mixin that calls it, riding the same
-        gateway contract (buttons + parse_mode) as every surface."""
-        self.gateway.send(chat.platform, chat, str(text),
-                          buttons=buttons, parse_mode=parse_mode)
+        gateway contract (buttons + parse_mode) as every surface.
+        Returns the gateway's SendResult (callers that need the
+        posted message's id — the notice layer — read it there;
+        everyone else ignores it, as before)."""
+        return self.gateway.send(chat.platform, chat, str(text),
+                                 buttons=buttons,
+                                 parse_mode=parse_mode)
+
+    def _send_best_effort(self, chat, text: str, **kw):  # type: ignore[no-untyped-def]
+        """A side-send from a control handler (a notice for an
+        action whose RECORD is already durable on the surface):
+        the send is the announcement, never the state — a
+        transport that can't take it here degrades to the debug
+        log instead of failing the command that caused it."""
+        try:
+            return self._send(chat, text, **kw)
+        except Exception:  # noqa: BLE001 - announcement, not state
+            _log.debug("group side-send failed", exc_info=True)
+            return None
+
+    def _send_action_notice(self, surface, key, message,  # type: ignore[no-untyped-def]
+                            action) -> None:
+        """Post one §31 notice for an executed action.  The text
+        and the Undo button are authored from the SAME record
+        the surface stored (never re-derived at send time), and
+        the posted message's id is written back to the record so
+        an undo can edit the notice in place where the platform
+        supports it."""
+        from ...social.chat.group_notices import (
+            notice_keyboard, notice_text)
+
+        nid = str(action.get("notice_id") or "")
+        record = surface.get_notice(key, nid) if nid else None
+        text = str(action.get("warning") or "") or str(
+            (record or {}).get("text") or "")
+        if not text:
+            return
+        platform = str(message.chat.platform or "")
+        if record is not None:
+            body = notice_text({**record, "text": text}, platform)
+            buttons = notice_keyboard(record)
+        else:
+            body, buttons = text, None
+        result = self._send(
+            message.chat, body, buttons=buttons,
+            parse_mode=self._rendered_mode(message, body))
+        if record is not None:
+            mid = getattr(result, "message_id", "") or ""
+            if mid:
+                surface.set_notice_message(key, nid, str(mid))
 
     def _rendered_mode(self, message, text: str) -> str:  # type: ignore[no-untyped-def]
         """Parse mode for a surface-rendered text (welcome /
@@ -465,10 +512,13 @@ class RuntimeGroupMixin:
             executed = self._execute_group_action(
                 surface, key, adapter, message, action)
             warning = str(action.get("warning") or "")
-            if warning and executed:
+            if executed and (warning or action.get("notice_id")):
                 # The organ's one public warning IS the record
-                # (no meta-narration): name + rule + consequence.
-                self._send(message.chat, warning)
+                # (no meta-narration): name + rule + consequence
+                # — posted through the §31 notice layer, with
+                # its Undo authored from the same record.
+                self._send_action_notice(surface, key, message,
+                                         action)
             elif kind == "warn" and executed:
                 who = (message.sender_username
                        and f"@{message.sender_username}") \
@@ -963,11 +1013,7 @@ class RuntimeGroupMixin:
                 f"{'on' if d_dl.get('enabled', True) else 'off'}"
                 f" ({d_dl.get('mode', 'log')}) · antiedit: "
                 f"{'on' if d_ed.get('enabled', True) else 'off'}"
-                f" ({d_ed.get('mode', 'log')}) · strikes: mute at "
-                f"{s.get('warn_threshold', 3)} · kick at "
-                f"{d_esc.get('kick_at', 5)} · ban at "
-                f"{d_esc.get('ban_at', 7)} "
-                f"({d_esc.get('window_days', 7)}-day window) · "
+                f" ({d_ed.get('mode', 'log')}) · "
                 f"mute default: "
                 f"{_duration_text(int(s.get('mute_default_s') or 0)) if s.get('mute_default_s') else 'ask'}",
             ]
@@ -1012,6 +1058,25 @@ class RuntimeGroupMixin:
                 f"queue: {queue_n} waiting · raid posture: "
                 f"{'ACTIVE (tightened)' if raid_now else 'calm'}",
             ], title="Acceptance")
+            # Escalation block (DESIGN §30): the ladder EVERY
+            # strike consumer reads — sensors, manual warns,
+            # acceptance enforcement — as the group designed it.
+            esc_now = surface.escalation_config(key)
+            card.block_lines([
+                esc_now.describe(),
+                "every warning names the count of the limit, "
+                "the next step, and when the oldest warn clears",
+            ], title="Escalation")
+            # Estate block (§17/§20 levers — their grammar lives
+            # here and in the DM console).
+            est = s.get("estate") or {}
+            card.block_lines([
+                f"market cut {est.get('market_cut_pct', 5)}% · "
+                f"sell-back {est.get('sellback_pct', 70)}% · "
+                f"ownership cap {est.get('ownership_cap', 12)} · "
+                f"mortgage LTV {est.get('ltv_pct', 60)}% at "
+                f"{est.get('mortgage_rate_pct', 5)}%",
+            ], title="Estate")
             card.block_lines([
                 "`/gsettings welcome on|off` · "
                 "`/gsettings goodbye on|off` · "
@@ -1052,6 +1117,17 @@ class RuntimeGroupMixin:
                 "decline|restricted|kick|default`",
                 "`/gsettings acceptance whitelist add|remove "
                 "@name|id`",
+                "`/gsettings escalation limit N` · "
+                "`/gsettings escalation final kick|ban` · "
+                "`/gsettings escalation window DAYS`",
+                "`/gsettings escalation at N mute [10m|2h]` · "
+                "`… at N fine AMOUNT` · `… at N restrict|kick` · "
+                "`… clear N` · `… reset`",
+                "`/gsettings estate cut PCT` · "
+                "`/gsettings estate sellback PCT` · "
+                "`/gsettings estate cap N` · "
+                "`/gsettings estate ltv PCT` · "
+                "`/gsettings estate rate PCT`",
             ], title="Change it")
             card.note("tap a button to flip a switch, or type a "
                       "command")
@@ -1263,6 +1339,26 @@ class RuntimeGroupMixin:
             self._presentation_update(surface, key,
                                       stamp_classes=wanted)
             return f"stamp shows on: {', '.join(wanted)}."
+        # ── escalation grammar (DESIGN §30) ────────────────────
+        if head == "escalation":
+            reply = self._apply_escalation_grammar(
+                surface, key, text.split()[1:])
+            if reply is not None:
+                return reply
+            return ("escalation grammar: limit N · final "
+                    "kick|ban · window DAYS · at N mute [10m] · "
+                    "at N fine AMOUNT · at N restrict|kick · "
+                    "clear N · reset — /gsettings shows the "
+                    "ladder.")
+        # ── estate grammar (§17/§20 levers) ─────────────────────
+        if head == "estate":
+            reply = self._apply_estate_grammar(
+                surface, key, text.split()[1:])
+            if reply is not None:
+                return reply
+            return ("estate grammar: cut PCT · sellback PCT · "
+                    "cap N · ltv PCT · rate PCT — /gsettings "
+                    "shows the levers.")
         # ── acceptance grammar (DESIGN §28) ─────────────────────
         if head == "acceptance":
             sub = rest.lower()
@@ -1370,6 +1466,975 @@ class RuntimeGroupMixin:
                     "whitelist — /gsettings shows the block.")
         return ("I didn't follow that — /gsettings alone shows the "
                 "current settings and the change grammar.")
+
+    # ---- escalation + estate settings (DESIGN §30 / §20) -------
+    def _escalation_update(self, surface, key, **fields):  # type: ignore[no-untyped-def]
+        """Mutate the escalation settings block (the §30 ladder)
+        through the store's own settings machinery."""
+        import copy as _copy
+
+        current = surface.store.settings(key)
+        block = _copy.deepcopy(current.get("escalation") or {})
+        block.update(fields)
+        surface.update_settings(key, escalation=block)
+        return block
+
+    def _estate_update(self, surface, key, **fields):  # type: ignore[no-untyped-def]
+        """Mutate the estate settings block (the §17/§20 levers)
+        through the store's own settings machinery — the grammar
+        the estate build left to this console slice."""
+        import copy as _copy
+
+        current = surface.store.settings(key)
+        block = _copy.deepcopy(current.get("estate") or {})
+        block.update(fields)
+        surface.update_settings(key, estate=block)
+        return block
+
+    def _apply_escalation_grammar(self, surface, key, words):  # type: ignore[no-untyped-def]
+        """The escalation change grammar, shared verbatim by
+        /gsettings and the DM console: ``limit N`` · ``final
+        kick|ban`` · ``window DAYS`` · ``at N mute [10m|2h]`` ·
+        ``at N fine AMOUNT`` · ``at N restrict|kick`` ·
+        ``clear N`` · ``reset``.  Returns the reply line, or
+        None when the words don't parse."""
+        from ...social.chat.group_defense import (
+            ESCALATION_DEFAULTS, EscalationConfig)
+
+        words = [str(w) for w in words]
+        if not words:
+            return None
+        esc = surface.escalation_config(key)
+
+        def ladder() -> str:
+            return ("ladder now: "
+                    f"{surface.escalation_config(key).describe()}.")
+
+        head = words[0].lower()
+        if head == "limit" and len(words) == 2 \
+                and words[1].isdigit():
+            self._escalation_update(
+                surface, key,
+                warn_limit=max(1, int(words[1])))
+            return (f"warn limit {max(1, int(words[1]))} — the "
+                    "final action lands there. " + ladder())
+        if head == "final" and len(words) == 2 \
+                and words[1].lower() in ("kick", "ban"):
+            self._escalation_update(surface, key,
+                                    final_action=words[1].lower())
+            return (f"final action: {words[1].lower()} at the "
+                    f"limit. {ladder()}")
+        if head == "window" and len(words) == 2:
+            digits = words[1].lower().rstrip("d")
+            if digits.isdigit():
+                self._escalation_update(
+                    surface, key,
+                    window_days=max(1, int(digits)))
+                return (f"warns expire after "
+                        f"{max(1, int(digits))} days. {ladder()}")
+            return None
+        if head == "reset" and len(words) == 1:
+            import copy as _copy
+
+            self._escalation_update(
+                surface, key,
+                **_copy.deepcopy(ESCALATION_DEFAULTS))
+            return ("escalation reset to the house ladder. "
+                    f"{ladder()}")
+        if head == "clear" and len(words) == 2 \
+                and words[1].isdigit():
+            at = int(words[1])
+            steps = [s for s in esc.intervals if s["at"] != at]
+            if len(steps) == len(esc.intervals):
+                return f"no designed step sits at {at}."
+            self._escalation_update(surface, key, intervals=steps)
+            return f"step at {at} removed. {ladder()}"
+        if head == "at" and len(words) >= 3 and words[1].isdigit():
+            at = int(words[1])
+            action = words[2].lower()
+            steps = [s for s in esc.intervals if s["at"] != at]
+            if action == "mute":
+                minutes = 60
+                if len(words) >= 4:
+                    secs, _rest = _parse_duration(words[3])
+                    if not secs:
+                        return None
+                    minutes = max(1, secs // 60)
+                steps.append({"at": at, "action": "mute",
+                              "minutes": minutes})
+            elif action == "fine":
+                if len(words) < 4 or not words[3].isdigit():
+                    return None
+                steps.append({"at": at, "action": "fine",
+                              "amount": max(1, int(words[3]))})
+            elif action in ("restrict", "kick"):
+                steps.append({"at": at, "action": action})
+            else:
+                return None
+            steps.sort(key=lambda s: s["at"])
+            self._escalation_update(surface, key, intervals=steps)
+            return (f"step designed: {action} at {at}. "
+                    f"{ladder()}")
+        return None
+
+    def _apply_estate_grammar(self, surface, key, words):  # type: ignore[no-untyped-def]
+        """The estate lever grammar, shared by /gsettings and
+        the DM console: ``cut PCT`` · ``sellback PCT`` · ``cap
+        N`` · ``ltv PCT`` · ``rate PCT``."""
+        words = [str(w) for w in words]
+        if len(words) != 2:
+            return None
+        field = {"cut": "market_cut_pct",
+                 "sellback": "sellback_pct",
+                 "cap": "ownership_cap",
+                 "ltv": "ltv_pct",
+                 "rate": "mortgage_rate_pct"}.get(words[0].lower())
+        digits = words[1].rstrip("%")
+        if field is None or not digits.isdigit():
+            return None
+        value = int(digits)
+        if field == "ownership_cap":
+            value = max(1, value)
+        else:
+            value = max(0, min(100, value))
+        self._estate_update(surface, key, **{field: value})
+        return f"estate {words[0].lower()}: {value}."
+
+    # ---- the DM admin console (DESIGN §30) ----------------------
+    _CONSOLE_TTL_S = 1800
+    _CONSOLE_SECTIONS = ("defense", "acceptance", "economy",
+                         "estate", "presentation", "welcome")
+
+    def _console_session_map(self) -> dict:  # type: ignore[no-untyped-def]
+        sessions = getattr(self, "_console_sessions", None)
+        if sessions is None:
+            sessions = self._console_sessions = {}
+        return sessions
+
+    def _console_member_status(self, key, user_id):  # type: ignore[no-untyped-def]
+        """(status, info) for a user in a TARGET group — the
+        _member_status logic aimed at the group being configured
+        (the console itself runs in a DM; authority must be read
+        where the authority lives)."""
+        platform = str(key).split(":", 1)[0]
+        adapter = self._group_adapter(platform)
+        if adapter is None:
+            return "", {}
+        fn = getattr(adapter, "admin_member", None) or getattr(
+            adapter, "admin_member_mtproto", None)
+        if fn is None:
+            return "", {}
+        from ...social.chat.base import ChatRef
+
+        try:
+            info = fn(ChatRef.parse(str(key)), str(user_id))
+        except Exception:  # noqa: BLE001 - no proof, no standing
+            return "", {}
+        if not isinstance(info, dict):
+            return "", {}
+        status = info.get("status") or info.get("role") or ""
+        if not status and isinstance(info.get("result"), dict):
+            status = info["result"].get("status") or ""
+        return str(status).lower(), info
+
+    def _console_is_admin(self, key, user_id) -> bool:  # type: ignore[no-untyped-def]
+        status, _info = self._console_member_status(key, user_id)
+        return status in ("creator", "administrator", "admin",
+                          "owner")
+
+    def _console_owner_ok(self, key, user_id, message) -> bool:  # type: ignore[no-untyped-def]
+        """The owner gate against the TARGET group — the
+        _group_owner_ok split, relocated: the operator always;
+        WhatsApp any admin; Telegram the group's creator/owner
+        only; Discord the server owner."""
+        if self._operator_or_false(message):
+            return True
+        platform = str(key).split(":", 1)[0]
+        if platform.startswith("whatsapp"):
+            return self._console_is_admin(key, user_id)
+        status, info = self._console_member_status(key, user_id)
+        if platform.startswith("telegram"):
+            return status in ("creator", "owner")
+        if platform.startswith("discord"):
+            return status in ("owner", "creator") \
+                or info.get("is_owner") is True
+        return False
+
+    def _console_status_lines(self) -> list:  # type: ignore[no-untyped-def]
+        """Runtime status for the console home: process uptime
+        from the runtime's own boot marker (console_snapshot),
+        per-platform connected duration from each adapter's
+        run-loop start stamp, and the userbot session state.
+        Runtime state only — a value the runtime doesn't track
+        is omitted, never invented."""
+        lines: list = []
+        snap: dict = {}
+        fn = getattr(self, "console_snapshot", None)
+        if callable(fn):
+            try:
+                snap = fn() or {}
+            except Exception:  # noqa: BLE001 - status is garnish
+                snap = {}
+        uptime = snap.get("uptime_s")
+        if uptime is not None:
+            lines.append(f"uptime {_duration_text(int(uptime))} "
+                         "(this process)")
+        gateway = getattr(self, "gateway", None)
+        adapters = getattr(gateway, "adapters", {}) or {}
+        now = time.time()
+        for name in sorted(adapters):
+            stats = getattr(adapters[name], "stats", {}) or {}
+            started = float(stats.get("started_at") or 0)
+            if started:
+                lines.append(
+                    f"{name}: connected "
+                    f"{_duration_text(max(0, int(now - started)))}")
+            else:
+                lines.append(f"{name}: not running")
+        if "telegram" in adapters:
+            stats = getattr(adapters["telegram"], "stats", {}) \
+                or {}
+            live = bool(float(stats.get("started_at") or 0))
+            lines.append("userbot session: "
+                         + ("live" if live else "down"))
+        return lines
+
+    def _control_console(self, tail, message):  # type: ignore[no-untyped-def]
+        """The DM admin console (§30): an admin opens Devon's DM,
+        picks a group THEY admin (proved per group through the
+        platform's own admin surface — never assumed from the
+        DM), and configures its systems in tappable sections.
+        Changes apply immediately and journal to the group's
+        /glog naming the admin.  Authority is identical to
+        in-group: owner-only items stay owner-only, evaluated
+        against the target group."""
+        from ...social.chat.base import ChatKind
+
+        if message.chat.kind != ChatKind.DM:
+            return ("the console lives in my DM — open a chat "
+                    "with me there and send /console.")
+        surface = self._group_surface()
+        sender = str(message.sender_id or message.sender or "")
+        words = str(tail or "").split()
+        skey = f"{message.chat.platform}:{sender}"
+        session = self._console_session_map().get(skey) or {}
+        if time.time() - float(session.get("at") or 0) \
+                > self._CONSOLE_TTL_S:
+            session = {}
+        if not words:
+            return self._console_home(surface, message, sender,
+                                      skey)
+        token = words[0].lower()
+        key = (session.get("groups") or {}).get(token)
+        if key is None:
+            return self._console_home(
+                surface, message, sender, skey,
+                note="that group handle expired — pick again:")
+        if len(words) == 1:
+            return self._console_group_menu(surface, key, message,
+                                            token)
+        section = words[1].lower()
+        if section not in self._CONSOLE_SECTIONS:
+            return self._console_group_menu(surface, key, message,
+                                            token)
+        if len(words) == 2:
+            return self._console_section(surface, key, message,
+                                         token, section)
+        # The autonomy pre-gate: a refused flip must not journal
+        # as a console change, so the owner check (against the
+        # TARGET group) runs before anything is applied.
+        if section == "defense" and len(words) > 2 \
+                and words[2].lower() == "autonomy" \
+                and not self._console_owner_ok(key, sender,
+                                               message):
+            return ("autonomy is the owner's switch — on "
+                    "Telegram only the group owner can flip it "
+                    "(WhatsApp: any group admin). Nothing was "
+                    "changed.")
+        reply = self._console_apply(surface, key, message, sender,
+                                    section, words[2:])
+        if reply is None:
+            return (f"I didn't follow that for the {section} "
+                    "section — its card shows the grammar.")
+        surface._audit(key, "console_change", by=sender,
+                       user_id=sender, section=section,
+                       change=" ".join(words[2:]))
+        surface.store.save()
+        return self._console_section(surface, key, message, token,
+                                     section, lead=f"✓ {reply}")
+
+    def _console_home(self, surface, message, sender, skey,  # type: ignore[no-untyped-def]
+                      note: str = ""):
+        from ...social.chat.typography import Card
+
+        keys = [k for k in sorted(surface.store.data.keys())
+                if self._operator_or_false(message)
+                or self._console_is_admin(k, sender)]
+        if not keys:
+            return ("you don't admin any group I serve — the "
+                    "console opens for group admins.")
+        groups: dict = {}
+        rows: list = []
+        buttons: list = []
+        for i, key in enumerate(keys, 1):
+            token = f"g{i}"
+            groups[token] = key
+            members = surface.store.group(key).get("members") \
+                or {}
+            rows.append(f"{token} — {key} "
+                        f"({len(members)} in the ledger)")
+            buttons.append([(f"⚙️ {token} · {key}",
+                             f"console {token}")])
+        self._console_session_map()[skey] = {
+            "groups": groups, "at": time.time()}
+        card = Card("settings", title="Devon console", icon="🛠️")
+        if note:
+            card.line(note)
+        status = self._console_status_lines()
+        if status:
+            card.block_lines(status, title="Status")
+        card.block_lines(rows, title="Your groups")
+        card.note("tap a group, or type /console g1 — then a "
+                  "section: " + ", ".join(self._CONSOLE_SECTIONS))
+        return self._card(message, card, buttons)
+
+    def _console_group_menu(self, surface, key, message, token):  # type: ignore[no-untyped-def]
+        from ...social.chat.typography import Card
+
+        esc = surface.escalation_config(key)
+        s = surface.store.settings(key)
+        card = Card("settings", title=f"Console — {key}",
+                    icon="🛠️")
+        card.block_lines([
+            f"defense autonomy "
+            f"{'ON' if (s.get('defense') or {}).get('autonomy', True) else 'OFF'}"
+            f" · ladder: {esc.describe()}",
+            f"acceptance mode "
+            f"{(s.get('acceptance') or {}).get('mode', 'open')}"
+            f" · economy "
+            f"{'on' if s.get('economy_enabled') else 'off'}"
+            f" · governance "
+            f"≥{s.get('governance_threshold', 500)}",
+            f"welcome "
+            f"{'on' if s.get('welcome_enabled') else 'off'}"
+            f" · rules {len(s.get('rules') or [])} · presentation "
+            f"theme {(s.get('presentation') or {}).get('theme', 'house')}",
+        ])
+        buttons = [[(f"🛡️ Defense + ladder",
+                     f"console {token} defense"),
+                    ("🚪 Acceptance",
+                     f"console {token} acceptance")],
+                   [("🪙 Economy", f"console {token} economy"),
+                    ("🏘️ Estate", f"console {token} estate")],
+                   [("🎨 Presentation",
+                     f"console {token} presentation"),
+                    ("👋 Welcome + rules",
+                     f"console {token} welcome")],
+                   [("⬅️ All groups", "console")]]
+        card.note("tap a section, or type its grammar — every "
+                  "change lands in the group's /glog with your "
+                  "name on it")
+        return self._card(message, card, buttons)
+
+    def _console_section(self, surface, key, message, token,  # type: ignore[no-untyped-def]
+                         section, lead: str = ""):
+        from ...social.chat.typography import (
+            DEFAULT_STAMP_TEXT, Card)
+
+        s = surface.store.settings(key)
+        card = Card("settings",
+                    title=f"{section.title()} — {key}", icon="🛠️")
+        if lead:
+            card.line(lead)
+        buttons: list = []
+
+        def _toggle(label: str, grammar: str, on_now: bool):
+            return (f"{label}: {'ON' if on_now else 'OFF'}",
+                    f"console {token} {section} {grammar} "
+                    f"{'off' if on_now else 'on'}")
+
+        if section == "defense":
+            d = s.get("defense") or {}
+            esc = surface.escalation_config(key)
+            card.block_lines([
+                f"autonomy "
+                f"{'ON' if d.get('autonomy', True) else 'OFF'}"
+                " (owner's switch — Telegram: group owner; "
+                "WhatsApp: any admin)",
+                f"sensors: anticrash "
+                f"{'on' if (d.get('anticrash') or {}).get('enabled', True) else 'off'}"
+                f" · antichannel "
+                f"{'on' if (d.get('antichannel') or {}).get('enabled', True) else 'off'}"
+                f" · antitag "
+                f"{'on' if (d.get('antitag') or {}).get('enabled', True) else 'off'}"
+                f" · antidelete "
+                f"{'on' if (d.get('antidelete') or {}).get('enabled', True) else 'off'}"
+                f" · antiedit "
+                f"{'on' if (d.get('antiedit') or {}).get('enabled', True) else 'off'}",
+                f"moderation: flood "
+                f"{(s.get('moderation') or {}).get('flood_max', 6)}"
+                f" per window · filters "
+                f"{len((s.get('moderation') or {}).get('word_filters') or [])}"
+                f" · standing mute "
+                f"{_duration_text(int(s.get('mute_default_s') or 0)) if s.get('mute_default_s') else 'ask'}"
+                f" · mute fine {s.get('fine_amount', 0)}",
+                f"ladder: {esc.describe()}",
+            ])
+            buttons = [
+                [_toggle("🤖 Autonomy", "autonomy",
+                         bool(d.get("autonomy", True))),
+                 _toggle("💥 Anticrash", "anticrash",
+                         bool((d.get('anticrash') or {})
+                              .get('enabled', True)))],
+                [_toggle("📣 Antichannel", "antichannel",
+                         bool((d.get('antichannel') or {})
+                              .get('enabled', True))),
+                 _toggle("🏷️ Antitag", "antitag",
+                         bool((d.get('antitag') or {})
+                              .get('enabled', True)))],
+            ]
+            card.block_lines([
+                "`autonomy on|off` · `anticrash on|off|delete|flag`",
+                "`antichannel|antitag|antidelete|antiedit on|off`"
+                " · `antitag N` · `antidelete mode log|callout`",
+                "`flood N` · `links DOMAINS|off` · "
+                "`filter add|remove WORD` · `filter clear` · "
+                "`filter action delete|warn|mute`",
+                "`warns N` · `mute default 2h|off` · `fine N`",
+                "`escalation limit N` · `escalation final "
+                "kick|ban` · `escalation window DAYS`",
+                "`escalation at N mute [10m]` · `escalation at N "
+                "fine AMOUNT` · `escalation at N restrict|kick` "
+                "· `escalation clear N` · `escalation reset`",
+            ], title="Grammar")
+        elif section == "acceptance":
+            acc = s.get("acceptance") or {}
+            crit = acc.get("criteria") or {}
+            on = [n for n in ("username", "photo", "firstname",
+                              "lastname", "hygiene", "banned",
+                              "bots") if crit.get(n)]
+            card.block_lines([
+                f"mode {acc.get('mode', 'open')} · action "
+                f"{acc.get('action', 'restricted')} · grace "
+                f"{int(acc.get('grace_minutes') or 60)}m · "
+                f"auto-approve "
+                f"{'on' if acc.get('auto_approve', True) else 'off'}",
+                "criteria on: "
+                + (", ".join(on) if on else "none — door open"),
+            ])
+            card.block_lines([
+                "`mode open|request|invite` · `action "
+                "decline|restricted|kick` · `grace MIN`",
+                "`username|photo|firstname|lastname|hygiene|"
+                "banned|bots on|off` · `auto on|off`",
+                "`override CRITERION decline|restricted|kick|"
+                "default` · `whitelist add|remove @name|id`",
+            ], title="Grammar")
+        elif section == "economy":
+            card.block_lines([
+                f"economy "
+                f"{'on' if s.get('economy_enabled') else 'off'}"
+                f" · transfer tax "
+                f"{s.get('transfer_tax_pct', 2)}% · governance "
+                f"threshold {s.get('governance_threshold', 500)}"
+                f" · moderation fine {s.get('fine_amount', 0)}",
+            ])
+            buttons = [[_toggle("🪙 Economy", "economy",
+                                bool(s.get("economy_enabled")))]]
+            card.block_lines([
+                "`economy on|off` · `tax PCT` · `governance N`"
+                " · `fine N`",
+            ], title="Grammar")
+        elif section == "estate":
+            est = s.get("estate") or {}
+            card.block_lines([
+                f"market cut {est.get('market_cut_pct', 5)}% · "
+                f"sell-back {est.get('sellback_pct', 70)}% · "
+                f"ownership cap {est.get('ownership_cap', 12)}",
+                f"mortgage LTV {est.get('ltv_pct', 60)}% · rate "
+                f"{est.get('mortgage_rate_pct', 5)}%",
+            ])
+            card.block_lines([
+                "`cut PCT` · `sellback PCT` · `cap N` · "
+                "`ltv PCT` · `rate PCT`",
+            ], title="Grammar")
+        elif section == "presentation":
+            pres = s.get("presentation") or {}
+            card.block_lines([
+                f"theme {pres.get('theme', 'house')} · stamp "
+                f"{'ON' if pres.get('stamp', True) else 'OFF'}"
+                f" — “{pres.get('stamp_text') or DEFAULT_STAMP_TEXT}”",
+            ])
+            theme_cycle = {"house": "clean", "clean": "board",
+                           "board": "house"}
+            theme_now = str(pres.get("theme") or "house")
+            buttons = [
+                [(f"🎨 Theme: {theme_now}",
+                  f"console {token} presentation theme "
+                  f"{theme_cycle.get(theme_now, 'house')}"),
+                 _toggle("🔖 Stamp", "stamp",
+                         bool(pres.get("stamp", True)))],
+            ]
+            card.block_lines([
+                "`theme house|clean|board` · `class game|"
+                "economy|… board|clean|default`",
+                "`stamp on|off` · `stamp text TEXT|default` · "
+                "`stamp classes a,b|default`",
+            ], title="Grammar")
+        elif section == "welcome":
+            card.block_lines([
+                f"welcome "
+                f"{'on' if s.get('welcome_enabled') else 'off'}"
+                f" · goodbye "
+                f"{'on' if s.get('goodbye_enabled') else 'off'}"
+                f" · service cleanup "
+                f"{'on' if s.get('clean_service') else 'off'}"
+                f" · rules {len(s.get('rules') or [])}",
+            ])
+            buttons = [
+                [_toggle("👋 Welcome", "welcome",
+                         bool(s.get("welcome_enabled"))),
+                 _toggle("🚪 Goodbye", "goodbye",
+                         bool(s.get("goodbye_enabled")))],
+                [_toggle("🧹 Cleanup", "clean",
+                         bool(s.get("clean_service")))],
+            ]
+            card.block_lines([
+                "`welcome on|off` · `goodbye on|off` · "
+                "`clean on|off`",
+                "`rules add TEXT` · `rules clear`",
+            ], title="Grammar")
+        buttons.append([("⬅️ Sections",
+                         f"console {token}"),
+                        ("🏠 Console home", "console")])
+        return self._card(message, card, buttons)
+
+    def _console_apply(self, surface, key, message, sender,  # type: ignore[no-untyped-def]
+                       section, words):
+        """Apply one console grammar line to the TARGET group.
+        The words are the section's own grammar — the same words
+        /gsettings takes in-group, minus the command head — and
+        they land through the same update helpers.  Returns the
+        reply line, or None when the words don't parse."""
+        words = [str(w) for w in words]
+        if not words:
+            return None
+        head = words[0].lower()
+        rest = words[1].lower() if len(words) > 1 else ""
+        on = rest == "on"
+        if section == "defense":
+            if head == "escalation":
+                return self._apply_escalation_grammar(
+                    surface, key, words[1:])
+            if head == "autonomy" and rest in ("on", "off"):
+                if not self._console_owner_ok(key, sender,
+                                              message):
+                    return ("autonomy is the owner's switch — "
+                            "on Telegram only the group owner "
+                            "can flip it (WhatsApp: any admin).")
+                self._defense_update(surface, key, "_root",
+                                     autonomy=on)
+                return f"defense autonomy {'on' if on else 'off'}."
+            if head in ("anticrash", "antichannel", "antitag",
+                        "antidelete", "antiedit"):
+                if rest in ("on", "off"):
+                    self._defense_update(surface, key, head,
+                                         enabled=on)
+                    return f"{head} {'on' if on else 'off'}."
+                if head == "anticrash" and rest in (
+                        "delete", "flag"):
+                    self._defense_update(surface, key, head,
+                                         action=rest)
+                    return f"anticrash action: {rest}."
+                if head == "antitag" and rest.isdigit():
+                    self._defense_update(
+                        surface, key, head,
+                        max_mentions=max(1, int(rest)))
+                    return f"antitag ceiling: {rest} mentions."
+                if head in ("antidelete", "antiedit") \
+                        and rest == "mode" and len(words) > 2 \
+                        and words[2].lower() in ("log", "callout"):
+                    self._defense_update(surface, key, head,
+                                         mode=words[2].lower())
+                    return f"{head} mode: {words[2].lower()}."
+                if head in ("antidelete", "antiedit") \
+                        and rest == "to" and len(words) > 2 \
+                        and words[2].lower() in ("group", "admins"):
+                    self._defense_update(
+                        surface, key, head,
+                        callout_to=words[2].lower())
+                    return f"{head} callouts: {words[2].lower()}."
+                return None
+            if head == "flood" and rest.isdigit():
+                current = surface.store.settings(key)
+                mod = dict(current["moderation"])
+                mod["flood_max"] = max(2, int(rest))
+                surface.update_settings(key, moderation=mod)
+                return f"flood limit {mod['flood_max']} per window."
+            if head == "links":
+                current = surface.store.settings(key)
+                mod = dict(current["moderation"])
+                if rest in ("off", ""):
+                    mod["link_allowlist"] = []
+                    surface.update_settings(key, moderation=mod)
+                    return "links open (no allowlist)."
+                domains = [d.strip().lower() for d in
+                           " ".join(words[1:]).replace(",", " ")
+                           .split() if d.strip()]
+                mod["link_allowlist"] = domains
+                surface.update_settings(key, moderation=mod)
+                return f"link allowlist: {', '.join(domains)}."
+            if head == "filter" and len(words) >= 2:
+                current = surface.store.settings(key)
+                mod = dict(current["moderation"])
+                if rest == "add" and len(words) > 2:
+                    filters = list(
+                        mod.get("word_filters") or []) + [words[2]]
+                    mod["word_filters"] = filters
+                    surface.update_settings(key, moderation=mod)
+                    return f"filter added ({len(filters)} active)."
+                if rest == "remove" and len(words) > 2:
+                    filters = [f for f in
+                               (mod.get("word_filters") or [])
+                               if f != words[2]]
+                    mod["word_filters"] = filters
+                    surface.update_settings(key, moderation=mod)
+                    return (f"filter list now has {len(filters)} "
+                            "entries.")
+                if rest == "clear":
+                    mod["word_filters"] = []
+                    surface.update_settings(key, moderation=mod)
+                    return "filters cleared."
+                if rest == "action" and len(words) > 2 \
+                        and words[2].lower() in (
+                        "delete", "warn", "mute"):
+                    mod["filter_action"] = words[2].lower()
+                    surface.update_settings(key, moderation=mod)
+                    return f"filter action: {words[2].lower()}."
+                return None
+            if head == "warns" and rest.isdigit():
+                surface.update_settings(
+                    key, warn_threshold=max(1, int(rest)))
+                return (f"warn limit {max(1, int(rest))} before "
+                        "an auto-mute.")
+            if head == "mute" and rest == "default":
+                arg = words[2] if len(words) > 2 else ""
+                if arg.lower() in ("off", "none", "0", ""):
+                    surface.update_settings(key, mute_default_s=0)
+                    return "no standing mute length."
+                secs, _why = _parse_duration(arg)
+                if secs:
+                    surface.update_settings(key,
+                                            mute_default_s=secs)
+                    return (f"standing mute length "
+                            f"{_duration_text(secs)}.")
+                return None
+            if head == "fine" and rest.lstrip("-").isdigit():
+                amount = max(0, int(rest))
+                surface.update_settings(key, fine_amount=amount)
+                return f"moderation fine {amount} sparks."
+            return None
+        if section == "acceptance":
+            sub = head
+            arg = words[1] if len(words) > 1 else ""
+            tail = " ".join(words[2:])
+            if sub == "mode" and arg.lower() in (
+                    "open", "request", "invite"):
+                self._acceptance_update(surface, key,
+                                        mode=arg.lower())
+                return f"join mode: {arg.lower()}."
+            if sub in ("username", "photo", "firstname",
+                       "lastname", "hygiene", "banned", "bots") \
+                    and arg.lower() in ("on", "off"):
+                current = surface.store.settings(key)
+                crit = dict((current.get("acceptance") or {})
+                            .get("criteria") or {})
+                crit[sub] = (arg.lower() == "on")
+                self._acceptance_update(surface, key,
+                                        criteria=crit)
+                return f"acceptance criterion {sub}: {arg.lower()}."
+            if sub == "action" and arg.lower() in (
+                    "decline", "restricted", "kick"):
+                self._acceptance_update(surface, key,
+                                        action=arg.lower())
+                return f"failed checks now mean: {arg.lower()}."
+            if sub == "grace" and arg.rstrip("m").isdigit():
+                minutes = max(1, min(10080, int(arg.rstrip("m"))))
+                self._acceptance_update(surface, key,
+                                        grace_minutes=minutes)
+                return f"acceptance grace: {minutes} minutes."
+            if sub == "auto" and arg.lower() in ("on", "off"):
+                self._acceptance_update(
+                    surface, key, auto_approve=(arg.lower() == "on"))
+                return f"auto-approve: {arg.lower()}."
+            if sub == "override" and tail:
+                bits = tail.split(None, 1)
+                crit_name = bits[0].lower()
+                act = bits[1].lower() if len(bits) > 1 else ""
+                if crit_name in ("username", "photo", "firstname",
+                                 "lastname", "hygiene", "banned",
+                                 "bots") and act in (
+                        "decline", "restricted", "kick", "default"):
+                    current = surface.store.settings(key)
+                    overrides = dict(
+                        (current.get("acceptance") or {})
+                        .get("overrides") or {})
+                    if act == "default":
+                        overrides.pop(crit_name, None)
+                    else:
+                        overrides[crit_name] = act
+                    self._acceptance_update(surface, key,
+                                            overrides=overrides)
+                    return f"{crit_name} failures now take: {act}."
+                return None
+            if sub == "whitelist" and tail:
+                bits = tail.split(None, 1)
+                verb = bits[0].lower()
+                token = bits[1].strip() if len(bits) > 1 else ""
+                if verb in ("add", "remove") and token:
+                    current = surface.store.settings(key)
+                    wl = [str(w) for w in (
+                        (current.get("acceptance") or {})
+                        .get("bot_whitelist") or [])]
+                    if verb == "add" and token not in wl:
+                        wl.append(token)
+                    if verb == "remove":
+                        wl = [w for w in wl if w != token]
+                    self._acceptance_update(surface, key,
+                                            bot_whitelist=wl)
+                    return (f"bot whitelist: "
+                            f"{', '.join(wl) or 'empty'}.")
+                return None
+            return None
+        if section == "economy":
+            if head == "economy" and rest in ("on", "off"):
+                surface.update_settings(key, economy_enabled=on)
+                return f"economy {'on' if on else 'off'}."
+            if head == "tax" and rest.rstrip("%").isdigit():
+                pct = max(0, min(25, int(rest.rstrip("%"))))
+                surface.update_settings(key, transfer_tax_pct=pct)
+                return f"transfer tax {pct}%."
+            if head == "governance" and rest.isdigit():
+                surface.update_settings(
+                    key, governance_threshold=max(0, int(rest)))
+                return f"governance threshold {int(rest)} sparks."
+            if head == "fine" and rest.lstrip("-").isdigit():
+                amount = max(0, int(rest))
+                surface.update_settings(key, fine_amount=amount)
+                return f"moderation fine {amount} sparks."
+            return None
+        if section == "estate":
+            return self._apply_estate_grammar(surface, key, words)
+        if section == "presentation":
+            if head == "theme" and rest in (
+                    "house", "clean", "board"):
+                self._presentation_update(surface, key, theme=rest)
+                return f"presentation theme: {rest}."
+            if head == "class" and len(words) > 2:
+                cls = rest
+                preset = words[2].lower()
+                if cls in ("economy", "moderation", "game",
+                           "briefing", "announcement", "leaderboard",
+                           "settings", "chat") and preset in (
+                        "clean", "board", "default"):
+                    current = surface.store.settings(key)
+                    classes = dict(
+                        (current.get("presentation") or {})
+                        .get("classes") or {})
+                    if preset == "default":
+                        classes.pop(cls, None)
+                    else:
+                        classes[cls] = preset
+                    self._presentation_update(surface, key,
+                                              classes=classes)
+                    return f"{cls} surfaces render {preset}."
+                return None
+            if head == "stamp" and rest in ("on", "off"):
+                self._presentation_update(surface, key, stamp=on)
+                return f"footer stamp {'on' if on else 'off'}."
+            if head == "stamp" and rest == "text":
+                text = " ".join(words[2:])
+                if text.lower() in ("", "default", "clear"):
+                    self._presentation_update(surface, key,
+                                              stamp_text="")
+                    return "stamp text back to the house default."
+                self._presentation_update(surface, key,
+                                          stamp_text=text)
+                return f"stamp text: “{text}”."
+            if head == "stamp" and rest == "classes":
+                text = " ".join(words[2:])
+                if text.lower() in ("", "default", "clear"):
+                    self._presentation_update(surface, key,
+                                              stamp_classes=[])
+                    return "stamp classes back to the defaults."
+                from ...social.chat.typography import \
+                    SURFACE_CLASSES
+
+                wanted = [c.strip().lower() for c in
+                          text.replace(" ", ",").split(",")
+                          if c.strip() in SURFACE_CLASSES]
+                if not wanted:
+                    return None
+                self._presentation_update(surface, key,
+                                          stamp_classes=wanted)
+                return f"stamp shows on: {', '.join(wanted)}."
+            return None
+        if section == "welcome":
+            if head == "welcome" and rest in ("on", "off"):
+                surface.update_settings(key, welcome_enabled=on)
+                return f"welcome {'on' if on else 'off'}."
+            if head == "goodbye" and rest in ("on", "off"):
+                surface.update_settings(key, goodbye_enabled=on)
+                return f"goodbye {'on' if on else 'off'}."
+            if head == "clean" and rest in ("on", "off"):
+                surface.update_settings(key, clean_service=on)
+                return f"service cleanup {'on' if on else 'off'}."
+            if head == "rules" and rest == "add" \
+                    and len(words) > 2:
+                current = surface.store.settings(key)
+                rules = list(current.get("rules") or []) + [
+                    " ".join(words[2:])]
+                surface.update_settings(key, rules=rules)
+                return f"rule added ({len(rules)} total)."
+            if head == "rules" and rest == "clear":
+                surface.update_settings(key, rules=[])
+                return "rules cleared."
+            return None
+        return None
+
+    # ---- the notice undo (DESIGN §31) ---------------------------
+    def _control_undonotice(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        """Undo ONE automated action from its notice: the strike
+        it recorded is removed, any fine is refunded, and the
+        platform action is reversed as far as the platform
+        allows (unmute / unban / unrestrict; a kick needs
+        nothing — the member can already rejoin; a deleted
+        message is stated plainly as unrestorable).  Journaled
+        like the action (notice_undo in /glog, naming the
+        admin).  Where the platform edits, the notice itself is
+        edited in place and this handler answers with silence;
+        elsewhere the outcome posts as one follow-up line."""
+        key = self._group_key_or_none(message)
+        if key is None:
+            return "that's a group command — run it inside the group."
+        if not self._group_admin_ok(message):
+            return "undoing an action is for admins."
+        surface = self._group_surface()
+        words = str(tail or "").strip().split()
+        nid = words[0] if words else ""
+        record = surface.get_notice(key, nid) if nid else None
+        if record is None:
+            return ("I don't have that notice on record — "
+                    "notices age out of the registry (the /glog "
+                    "journal keeps the history).")
+        if record.get("undone"):
+            return "already undone — the reversal stands."
+        actor = str(message.sender_id or message.sender or "")
+        user_id = str(record.get("user_id") or "")
+        bits: list[str] = []
+        if record.get("strike_ts"):
+            removed = surface.remove_strike(
+                key, user_id,
+                rule=str(record.get("strike_rule")
+                         or record.get("rule") or ""),
+                ts=float(record["strike_ts"]))
+            if removed is not None:
+                bits.append("the strike is removed")
+        fine = int(record.get("fine") or 0)
+        if fine:
+            if surface.refund_fine(key, user_id, fine, by=actor):
+                bits.append(f"the {fine}-spark fine is refunded")
+            else:
+                bits.append("the fine could not be refunded "
+                            "(see /glog)")
+        action = str(record.get("action") or "")
+        extra = record.get("extra") or {}
+        if action == "mute":
+            ok = self._mod_run(
+                surface, key, message, "unmute", user_id,
+                self._mod_unrestrict_call(message, user_id))
+            bits.append("the mute is lifted" if ok else
+                        "the mute could not be lifted (see /glog)")
+        elif action == "ban":
+            ok = self._mod_run(
+                surface, key, message, "unban", user_id,
+                self._mod_unban_call(message, user_id))
+            bits.append("the ban is lifted" if ok else
+                        "the ban could not be lifted (see /glog)")
+        elif action == "acceptance_restrict":
+            ok = self._mod_run(
+                surface, key, message, "unmute", user_id,
+                self._mod_unrestrict_call(message, user_id))
+            surface.clear_acceptance(key, user_id)
+            bits.append("the restriction is lifted" if ok else
+                        "the restriction could not be lifted "
+                        "(see /glog)")
+        elif action == "kick":
+            bits.append("a removal needs nothing lifted — they "
+                        "can rejoin")
+        elif action == "delete":
+            bits.append("the deleted message itself can't be "
+                        "restored")
+        elif action == "drop":
+            out = surface.cancel_drop(
+                key, str(extra.get("drop_id") or ""), by=actor)
+            if out.get("ok"):
+                refund = int(out.get("refunded") or 0)
+                bits.append("the drop is closed"
+                            + (f" — {refund} unclaimed sparks "
+                               "refunded" if refund else ""))
+            else:
+                bits.append("the drop was already closed")
+        outcome = "; ".join(bits) if bits else "the record is reversed"
+        surface.mark_notice_undone(key, nid, by=actor)
+        if self._edit_notice_in_place(surface, key, message,
+                                      record, outcome):
+            return ""
+        mention = str(record.get("mention") or user_id)
+        return f"↩️ {mention} [{user_id}] — undone: {outcome}."
+
+    def _mod_unrestrict_call(self, message, user_id):  # type: ignore[no-untyped-def]
+        def call(adapter):  # type: ignore[no-untyped-def]
+            fn = getattr(adapter, "admin_unrestrict", None)
+            if fn is None:
+                raise RuntimeError("this platform path cannot "
+                                   "lift a restriction")
+            return fn(message.chat, user_id)
+
+        return call
+
+    def _mod_unban_call(self, message, user_id):  # type: ignore[no-untyped-def]
+        def call(adapter):  # type: ignore[no-untyped-def]
+            fn = getattr(adapter, "admin_unban", None)
+            if fn is None:
+                raise RuntimeError("this platform path cannot "
+                                   "unban")
+            return fn(message.chat, user_id)
+
+        return call
+
+    def _edit_notice_in_place(self, surface, key, message,  # type: ignore[no-untyped-def]
+                              record, outcome: str) -> bool:
+        """Edit the posted notice to show its reversal, where
+        the adapter supports editing and the posted message's id
+        was captured.  Honest False everywhere else — the caller
+        posts the follow-up line instead."""
+        from ...social.chat.group_notices import undone_text
+
+        message_id = str(record.get("message_id") or "")
+        if not message_id:
+            return False
+        adapter = self._group_adapter(message.chat.platform)
+        edit = getattr(adapter, "edit_message", None) \
+            if adapter else None
+        if edit is None:
+            return False
+        try:
+            out = edit(message.chat, message_id,
+                       undone_text(record, outcome), buttons=[])
+        except Exception:  # noqa: BLE001 - fall back to a send
+            return False
+        return out is not None
 
     # ---- join acceptance commands (DESIGN §28) --------------------
     def _acceptance_update(self, surface, key, **fields):  # type: ignore[no-untyped-def]
@@ -1837,21 +2902,139 @@ class RuntimeGroupMixin:
         user_id, label, rest = (res.member.user_id,
                                 res.member.label, res.rest)
         actor = str(message.sender_id or message.sender or "")
+        reason = rest.strip()
         count = surface.record_warn(key, user_id, by=actor,
-                                    reason=rest.strip())
-        threshold = int(surface.store.settings(
-            key).get("warn_threshold") or 3)
-        if count >= threshold:
+                                    reason=reason)
+        # The ladder is the group's own (§30): the count a
+        # warning quotes is the NEXT designed step, and landing
+        # on a step fires it — an interval step restarts the
+        # admin-facing warn count only (the spine keeps its
+        # history); the final action resets everything, as the
+        # shipped ladder always did.
+        esc = surface.escalation_config(key)
+        step = esc.action_at(count)
+        nxt = esc.next_step(count - 1)
+        denom = int(nxt["at"]) if nxt else esc.warn_limit
+        if step is None:
+            return (f"⚠️ {label} — warning {count}/{denom}"
+                    + (f": {reason}" if reason else ""))
+        ok, phrase, paid = self._fire_warn_step(
+            surface, key, message, user_id, step)
+        is_final = count >= esc.warn_limit and \
+            step["action"] == esc.final_action
+        if is_final:
+            surface.clear_warns(key, user_id)
+        else:
+            surface.reset_warn_bookkeeping(key, user_id)
+        if not ok:
+            return (f"⚠️ {label}: warning {count}/{denom} — "
+                    f"that's the step ({phrase}), but it was "
+                    "refused (see /glog).")
+        if is_final:
+            tail_note = f" — that's the limit: {phrase}, " \
+                        "warns reset."
+        else:
+            tail_note = f" — that's the step: {phrase}."
+        self._post_warn_notice(surface, key, message, user_id,
+                               label, step, count, paid)
+        return f"⚠️ {label}: warning {count}/{denom}{tail_note}"
+
+    def _fire_warn_step(self, surface, key, message, user_id,  # type: ignore[no-untyped-def]
+                        step) -> tuple:
+        """Execute one ladder step a manual warn landed on.
+        Returns (ok, phrase, paid_fine) — the phrase in the
+        member's terms, from what ACTUALLY executed."""
+        action = str(step.get("action") or "")
+        if action == "fine":
+            paid = surface.apply_fine(
+                key, user_id, amount=int(step.get("amount") or 0))
+            if paid:
+                return True, f"fined {paid} sparks", paid
+            return False, (f"a {int(step.get('amount') or 0)}-spark "
+                           "fine (nothing to collect)"), 0
+        if action == "mute":
+            minutes = int(step.get("minutes") or 60)
             ok = self._mod_run(
                 surface, key, message, "mute", user_id,
-                self._mod_mute_call(message, user_id, 3600))
-            surface.clear_warns(key, user_id)
-            tail_note = (" — that's the limit: muted for an hour, "
-                         "warns reset.") if ok else \
-                " — that's the limit, but the mute was refused (see /glog)."
-            return f"⚠️ {label}: warning {count}/{threshold}{tail_note}"
-        return (f"⚠️ {label} — warning {count}/{threshold}"
-                + (f": {rest.strip()}" if rest.strip() else ""))
+                self._mod_mute_call(message, user_id, minutes * 60))
+            phrase = "muted for an hour" if minutes == 60 else \
+                f"muted for {minutes} min"
+            return ok, phrase, 0
+        if action == "restrict":
+            def call(adapter):  # type: ignore[no-untyped-def]
+                if not self._acceptance_restrict(
+                        adapter, message.chat, user_id, on=True):
+                    raise RuntimeError("restrict refused")
+                return {"ok": True}
+
+            ok = self._mod_run(surface, key, message, "restrict",
+                               user_id, call)
+            return ok, "restricted until an admin lifts it", 0
+        if action == "kick":
+            def kick_call(adapter):  # type: ignore[no-untyped-def]
+                ban = getattr(adapter, "admin_ban", None)
+                unban = getattr(adapter, "admin_unban", None)
+                if ban is None or unban is None:
+                    raise RuntimeError("platform can't kick")
+                out = ban(message.chat, user_id)
+                unban(message.chat, user_id)
+                return out
+
+            ok = self._mod_run(surface, key, message, "kick",
+                               user_id, kick_call)
+            return ok, "removed from the group", 0
+        if action == "ban":
+            def ban_call(adapter):  # type: ignore[no-untyped-def]
+                fn = getattr(adapter, "admin_ban", None)
+                if fn is None:
+                    raise RuntimeError("platform can't ban")
+                return fn(message.chat, user_id)
+
+            ok = self._mod_run(surface, key, message, "ban",
+                               user_id, ban_call)
+            return ok, "banned from the group", 0
+        return False, action, 0
+
+    def _post_warn_notice(self, surface, key, message, user_id,  # type: ignore[no-untyped-def]
+                          label, step, count, paid) -> None:
+        """The §31 notice for a ladder step a manual warn fired:
+        recorded on the surface, posted with its Undo."""
+        from ...social.chat.group_defense import (
+            consequence_text, render_warning)
+
+        esc = surface.escalation_config(key)
+        info = surface.strikes_for(key, user_id)
+        strike_ts = 0.0
+        for strike in reversed(info["strikes"]):
+            if strike.get("rule") == "manual_warn":
+                strike_ts = float(strike.get("ts") or 0)
+                break
+        kind = {"restrict": "acceptance_restrict"}.get(
+            str(step.get("action")), str(step.get("action")))
+        text = render_warning(
+            f"{label} [{user_id}]", "manual_warn",
+            consequence_text(
+                executed="restrict" if kind
+                == "acceptance_restrict" else kind,
+                count=count, cfg=surface.defense_config(key),
+                warn_threshold=0, esc=esc,
+                fine_amount=paid if kind == "fine" else 0,
+                oldest_ts=info["oldest_ts"], now=time.time()))
+        nid = surface.record_notice(
+            key, user_id=user_id, mention=label,
+            rule="manual_warn", action=kind, count=count,
+            limit=esc.warn_limit, strike_ts=strike_ts,
+            strike_rule="manual_warn",
+            minutes=int(step.get("minutes") or 0)
+            if kind == "mute" else 0,
+            fine=paid if kind == "fine" else 0, text=text)
+        # The notice RECORD is the state (undo works from it
+        # whenever the tap lands); the post is best-effort.
+        try:
+            self._send_action_notice(surface, key, message,
+                                     {"notice_id": nid})
+        except Exception:  # noqa: BLE001 - the record is durable
+            _log.debug("warn notice post failed", exc_info=True)
 
     def _control_strikes(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         """The strike ledger (defense brief §2.2): one member's
@@ -1905,18 +3088,22 @@ class RuntimeGroupMixin:
             f"· {strike.get('rule')} ({strike.get('action')})"
             f" — {_fmt_ts(strike.get('ts'))}"
             for strike in info["strikes"]])
-        cfg = surface.defense_config(key)
-        threshold = int(surface.store.settings(
-            key).get("warn_threshold") or 3)
-        rungs = []
-        if threshold and info["count"] < threshold:
-            rungs.append(f"mute at {threshold}")
-        if cfg.kick_at and info["count"] < cfg.kick_at:
-            rungs.append(f"removal at {cfg.kick_at}")
-        if cfg.ban_at and info["count"] < cfg.ban_at:
-            rungs.append(f"ban at {cfg.ban_at}")
-        if rungs:
-            card.note("next: " + " · ".join(rungs))
+        # The ledger reads against the group's OWN ladder (§30):
+        # the next designed step, the limit it climbs to, and
+        # when the oldest active warn clears.
+        from ...social.chat.group_defense import warn_expiry_text
+
+        notes = []
+        if info["next_at"]:
+            notes.append(f"next: {info['next_label']} "
+                         f"at {info['next_at']}")
+        notes.append(f"limit {info['limit']} "
+                     f"({info['final_action']})")
+        expiry = warn_expiry_text(info["oldest_ts"],
+                                  window_days=window, now=time.time())
+        if expiry:
+            notes.append(expiry)
+        card.note(" · ".join(notes))
         return self._card(message, card)
 
     def _control_pin(self, tail, message) -> str:  # type: ignore[no-untyped-def]
@@ -2467,10 +3654,13 @@ class RuntimeGroupMixin:
                          True),
                         ("Claims", str(claims))])
             card.note("tap Claim or send /claim")
+            nid = self._record_drop_notice(
+                surface, key, message, drop, treasury=True)
             return self._card(
                 message, card,
                 [[(f"🎁 Claim {drop['per_claim']} sparks", "claim"),
-                  ("🪙 My balance", "balance")]])
+                  ("🪙 My balance", "balance")],
+                 [("↩️ Cancel drop", f"undonotice {nid}")]])
         result = surface.open_drop(key, funder, numbers[0],
                                    numbers[1])
         if not result["ok"]:
@@ -2489,10 +3679,40 @@ class RuntimeGroupMixin:
         card.stats([("Per claim", sparks(drop["per_claim"]), True),
                     ("Claims", str(claims))])
         card.note("tap Claim or send /claim")
+        nid = self._record_drop_notice(
+            surface, key, message, drop, treasury=False)
         return self._card(
             message, card,
             [[(f"🎁 Claim {drop['per_claim']} sparks", "claim"),
-              ("🪙 My balance", "balance")]])
+              ("🪙 My balance", "balance")],
+             [("↩️ Cancel drop", f"undonotice {nid}")]])
+
+    def _record_drop_notice(self, surface, key, message, drop,  # type: ignore[no-untyped-def]
+                            *, treasury: bool) -> str:
+        """Record a drop opening as a §31 notice: an admin can
+        cancel the drop from its own announcement (unclaimed
+        sparks refund; claims already paid stand)."""
+        from ...social.chat.group_notices import drop_notice_text
+
+        funder = str(drop.get("funder") or "")
+        if treasury:
+            # The notice's member is the admin who opened it
+            # ("treasury" is the funding source, not a person).
+            user_id = str(message.sender_id
+                          or message.sender or "")
+            mention = str(message.sender or user_id)
+        else:
+            user_id = funder
+            mention = str(message.sender or funder)
+        return surface.record_notice(
+            key, user_id=user_id, mention=mention, rule="drop",
+            action="drop",
+            text=drop_notice_text(
+                mention, funder, total=int(drop["total"]),
+                per_claim=int(drop["per_claim"]),
+                treasury=treasury),
+            extra={"drop_id": str(drop["id"]),
+                   "treasury": treasury})
 
     def _control_claim(self, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
@@ -2511,6 +3731,13 @@ class RuntimeGroupMixin:
                         result["reason"], "can't claim right now.")
         from ...social.chat.typography import Card, sparks
 
+        if result.get("closed"):
+            # The drop's closing record (§31): the pool is done,
+            # said once, in the group where it ran.
+            self._send_best_effort(message.chat, (
+                f"🎁 the drop is done — "
+                f"**{sparks(result.get('drop_total') or 0)}** "
+                "claimed in full."))
         card = Card("economy", title="Drop claimed", icon="🎁")
         card.line(f"**+{sparks(result['amount'])}** claimed!")
         card.stats([("Pool left", sparks(result["remaining"]),
@@ -2976,6 +4203,7 @@ class RuntimeGroupMixin:
                       "admin than the proposer)")
             return self._card(message, card)
         admin = str(message.sender_id or message.sender or "")
+        proposal = surface.open_proposals(key).get(pid) or {}
         result = surface.approve_spend(key, pid, by=admin)
         if not result["ok"]:
             return {"no_proposal": "no open proposal with that id.",
@@ -2985,8 +4213,56 @@ class RuntimeGroupMixin:
                     "funds": "the treasury can't cover it any "
                              "more."}.get(result["reason"],
                                           "can't approve that.")
+        # A governance execution is a §31 notice consumer: the
+        # group sees what its treasury just did, on the record.
+        kind = str(proposal.get("kind") or "")
+        payload = proposal.get("payload") or {}
+        if kind == "drop" and result.get("drop"):
+            self._announce_governance_drop(surface, key, message,
+                                           result["drop"])
+        elif kind == "grant":
+            recipient = str(payload.get("recipient") or "")
+            label = self._estate_member_label(surface, key,
+                                              recipient)
+            text = (f"🏦 {label} [{recipient}] received "
+                    f"**{int(payload.get('amount') or 0)} sparks** "
+                    f"from the treasury — proposal approved by "
+                    f"{message.sender or 'an admin'}.")
+            surface.record_notice(
+                key, user_id=recipient, mention=label,
+                rule="governance", action="grant", text=text,
+                extra={"reversible": False, "proposal": pid})
+            self._send_best_effort(message.chat, text)
         return (f"✅ proposal <code>{pid}</code> approved and "
                 "executed.")
+
+    def _announce_governance_drop(self, surface, key, message,  # type: ignore[no-untyped-def]
+                                  drop) -> None:
+        """A drop a governance vote opened gets the same public
+        announcement (and the same undoable notice) as an
+        admin-opened one — before this slice it opened silently
+        and members could not claim what they never saw."""
+        from ...social.chat.typography import Card, sparks
+
+        claims = int(drop["total"]) // int(drop["per_claim"])
+        card = Card("announcement", title="Drop", icon="🎁")
+        card.line(f"**{sparks(drop['total'])}** from the "
+                  f"treasury is up for grabs.")
+        card.stats([("Per claim", sparks(drop["per_claim"]), True),
+                    ("Claims", str(claims))])
+        card.note("tap Claim or send /claim")
+        nid = self._record_drop_notice(surface, key, message,
+                                       drop, treasury=True)
+        rendered = self._card(
+            message, card,
+            [[(f"🎁 Claim {drop['per_claim']} sparks", "claim"),
+              ("🪙 My balance", "balance")],
+             [("↩️ Cancel drop", f"undonotice {nid}")]])
+        self._send_best_effort(
+            message.chat, rendered.text,
+            buttons=rendered.buttons,
+            parse_mode=self._rendered_mode(message,
+                                           rendered.text))
 
     # ── real estate (§17 slice 2 / §20: the whole class) ──────
     def _estate_gate(self, message):  # type: ignore[no-untyped-def]

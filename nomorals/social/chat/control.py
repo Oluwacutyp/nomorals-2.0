@@ -160,7 +160,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
     "rules", "member", "glog", "gsettings", "strikes",
-    "recheck", "joinq",
+    "recheck", "joinq", "console", "undonotice",
     "balance", "mine", "work", "pay", "gshop", "quests", "treasury",
     "deposit", "withdraw", "rob", "bail", "coinflip",
     "top", "tax", "grant",
@@ -449,6 +449,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "strikes": (0, 1),        # /strikes [@member] — the defense strike ledger: who's on the ladder (admins; §17)
     "recheck": (0, 0),        # /recheck — a restricted member's “check me again”: re-runs the join criteria live (§28)
     "joinq": (0, None),       # /joinq [approve|decline <id>|all] — the admin join queue: requests + raid holds (§28)
+    "console": (0, None),     # /console [gN [section [grammar]]] — the DM admin console: groups the sender admins, configured in tappable sections (§30)
+    "undonotice": (0, None),  # /undonotice <id> — undo one automated action from its notice: strike removed, platform action reversed (§31)
     "gsettings": (0, None),   # /gsettings [welcome|goodbye|clean on|off|rules add|clear|flood <n>|links ...] — group settings (admins; P1)
     "balance": (0, 0),        # /balance — your sparks + the group treasury (P2 economy)
     "mine": (0, 0),           # /mine — claim mined sparks at the decaying rate (P2)
@@ -2102,6 +2104,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/joinq | /joinq approve <id> | /joinq decline <id> | /joinq approve all",
             "example": "/joinq",
             "related": "/gsettings /glog /recheck"},
+    "console": {"what": "the DM admin console (§30): message Devon privately and she lists the groups where YOU hold admin — pick one and configure its systems there in tappable sections (defense + the warn ladder, acceptance, economy + governance, estate levers, presentation, welcome/rules), with runtime status (uptime, per-platform connection, userbot session) on the home card. Changes apply at once and land in the group's /glog with your name on them. Owner-only switches stay owner-only, judged in the target group.",
+            "usage": "/console | /console g1 | /console g1 defense escalation limit 5",
+            "example": "/console",
+            "related": "/gsettings /glog /strikes"},
+    "undonotice": {"what": "undo one automated action from its notice (§31): the strike it recorded is removed, a fine is refunded, and the platform action is reversed as far as the platform allows (mute lifted, ban lifted, restriction released; a removal needs nothing — the member can rejoin; a deleted message can't be restored and the undo says so). The notice edits in place where the platform supports it. Admins only; the undo is journaled in /glog like the action.",
+            "usage": "/undonotice <notice id> (or tap the notice's Undo button)",
+            "example": "/undonotice n1730…-0",
+            "related": "/glog /strikes /console"},
     "gsettings": {"what": "this group's settings: welcome and goodbye switches, service-message cleanup, the rules list, flood limit, link allowlist, the economy switch and transfer tax, and the defense system (autonomy, anticrash, antichannel, antitag, antidelete, antiedit) with the platform limits stated plainly. Group admins only — Devon checks your platform admin status; the autonomy switch belongs to the group owner on Telegram.",
             "usage": "/gsettings | /gsettings welcome on|off | /gsettings rules add <text> | /gsettings rules clear | /gsettings flood <n> | /gsettings links <domains>|off | /gsettings economy on|off | /gsettings tax <pct> | /gsettings autonomy on|off | /gsettings anticrash on|off | /gsettings antitag <n>",
             "example": "/gsettings rules add No spam",
@@ -2688,7 +2698,8 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                           "doctor",
                           "update", "pull", "deploy", "restart"]),
     ("groups & communities", ["rules", "member", "glog", "gsettings",
-                            "strikes", "recheck", "joinq",
+                            "strikes", "recheck", "joinq", "console",
+                            "undonotice",
                             "balance", "mine", "work", "pay", "gshop",
                             "quests", "treasury", "drop", "claim",
                             "property", "buyproperty", "sellproperty",
@@ -2953,7 +2964,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["update", "pull", "deploy", "restart"]),
     ("groups & communities",
      ["rules", "member", "glog", "gsettings", "strikes",
-      "recheck", "joinq",
+      "recheck", "joinq", "console", "undonotice",
       "balance", "mine", "work", "pay", "gshop", "quests",
       "treasury", "deposit", "withdraw", "rob", "bail", "coinflip",
       "top", "tax", "grant", "drop", "claim",

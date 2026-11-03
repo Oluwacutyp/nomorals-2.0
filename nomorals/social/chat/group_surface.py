@@ -64,21 +64,24 @@ from .group_defense import (
 )
 from .typography import DEFAULT_PRESENTATION, notice_line, sparks
 from .group_defense import (
+    ESCALATION_DEFAULTS,
     DefenseConfig,
+    EscalationConfig,
     add_strike,
     check_antichannel,
     check_antitag,
     consequence_text,
-    ladder_rung,
+    ladder_label,
     recent_strikes,
     render_warning,
 )
 
 AUDIT_RING = 500
+NOTICE_RING = 100
 CHANGE_RING = 200
 MSG_CACHE_RING = 200
 _ACTION_RANK = {"allow": 0, "warn": 1, "delete": 2, "mute": 3,
-                "kick": 4, "ban": 5}
+                "acceptance_restrict": 3, "kick": 4, "ban": 5}
 
 
 def _deep_merge(base: dict[str, Any], stored: dict[str, Any]
@@ -146,6 +149,12 @@ def _default_settings() -> dict[str, Any]:
                                         # join acceptance (§28):
                                         # mode, criteria, actions,
                                         # grace, the raid posture
+        "escalation": copy.deepcopy(ESCALATION_DEFAULTS),
+                                        # the warn ladder (§30):
+                                        # limit, interval steps,
+                                        # final action, warn
+                                        # expiry window — defaults
+                                        # ARE the shipped 3/5/7
         "games_enabled": True,
         "state": "discovered",          # discovered|configured|
                                         # active|dormant
@@ -211,7 +220,8 @@ class GroupStore:
         merged.update({k: v for k, v in stored.items()
                        if k in merged
                        and k not in ("defense", "presentation",
-                                     "estate", "acceptance")})
+                                     "estate", "acceptance",
+                                     "escalation")})
         mod = dict(merged["moderation"])
         mod.update((stored.get("moderation") or {}))
         merged["moderation"] = mod
@@ -227,6 +237,9 @@ class GroupStore:
         merged["acceptance"] = _deep_merge(
             copy.deepcopy(ACCEPTANCE_DEFAULTS),
             stored.get("acceptance") or {})
+        merged["escalation"] = _deep_merge(
+            copy.deepcopy(ESCALATION_DEFAULTS),
+            stored.get("escalation") or {})
         return merged
 
 
@@ -1125,10 +1138,14 @@ class GroupSurface:
             member["last_message_id"] = str(message_id)
         settings = self.store.settings(group_key)
         cfg = DefenseConfig.from_settings(settings)
+        esc = EscalationConfig.from_settings(settings)
         warn_threshold = int(settings.get("warn_threshold") or 3)
         suppressed = not cfg.autonomy
         privileged = sender_is_admin or sender_is_operator
         mention = name or (f"@{username}" if username else user_id)
+        # The §31 notice identity: mention + the numeric id the
+        # resolver guarantees — the same label on every surface.
+        who = f"{mention} [{user_id}]"
         # Join acceptance is a STANDING condition (§28): a
         # member who dropped a required attribute is warned with
         # a grace window (the restriction itself engages in the
@@ -1151,42 +1168,67 @@ class GroupSurface:
         actions: list[dict[str, Any]] = []
         strike_counts: dict[str, int] = {}
         struck: set[str] = set()
+        fines_due: list[int] = []
 
         def strike(stage: str, rule: str, action_kind: str) -> int:
             """One strike per stage per message on the shared
-            spine; landing on a rung appends the ladder action.
-            Under autonomy OFF the spine is observe-only too: the
-            audits carry the verdict, the ledger does not move."""
+            spine; landing on one of the group's designed steps
+            (§30) appends that step's action — a fine is money,
+            collected in finish; mute/restrict/kick/ban are
+            platform actions.  Under autonomy OFF the spine is
+            observe-only too: the audits carry the verdict, the
+            ledger does not move."""
             if privileged or suppressed or stage in struck:
                 return strike_counts.get(rule, 0)
             struck.add(stage)
             count = add_strike(member, rule=rule,
                                action=action_kind, now=now,
-                               window_days=cfg.window_days)
+                               window_days=esc.window_days)
             strike_counts[rule] = count
             self._audit(group_key, "strike", user_id=user_id,
                         rule=rule, count=count,
-                        window_days=cfg.window_days)
-            rung = ladder_rung(count, cfg,
-                               warn_threshold=warn_threshold)
-            if rung and all(_ACTION_RANK.get(a.get("kind"), 0)
-                            < _ACTION_RANK[rung] for a in actions):
-                if rung == "mute":
+                        window_days=esc.window_days)
+            step = esc.action_at(count)
+            if step is None:
+                return count
+            if step["action"] == "fine":
+                fines_due.append(int(step.get("amount") or 0))
+                return count
+            kind = {"mute": "mute", "kick": "kick", "ban": "ban",
+                    "restrict": "acceptance_restrict"}[
+                        step["action"]]
+            if all(_ACTION_RANK.get(a.get("kind"), 0)
+                   < _ACTION_RANK[kind] for a in actions):
+                if kind == "mute":
                     actions.append({
                         "kind": "delete", "rule": "escalation",
                         "reason": f"strike {count} — {rule}",
                         "user_id": user_id, "group_id": group_key})
                 actions.append({
-                    "kind": rung, "rule": "escalation",
+                    "kind": kind, "rule": "escalation",
                     "reason": f"strike {count} — {rule}",
                     "user_id": user_id, "group_id": group_key,
-                    "minutes": cfg.mute_minutes,
+                    "minutes": int(step.get("minutes")
+                                   or cfg.mute_minutes),
                     "_strike_count": count, "_strike_rule": rule})
             return count
 
         def finish(blocked: bool) -> dict[str, Any]:
+            # A designed fine step is collected BEFORE the
+            # warning is composed, so the notice only ever claims
+            # what was actually charged.  It is a punishment, not
+            # activity earnings — the blocked flag (which gates
+            # earning on surviving messages) does not apply; the
+            # autonomy switch does.
+            paid_fine = 0
+            if fines_due and not suppressed:
+                paid_fine = self.apply_fine(
+                    group_key, user_id, amount=sum(fines_due),
+                    now=now)
             # ONE public warning per offense, on the strongest
-            # action, worded by the organ (never meta-narration).
+            # action, worded by the organ (never meta-narration)
+            # — and recorded as a §31 notice, so an admin can
+            # undo exactly this action from the message itself.
             if actions and not suppressed:
                 top = max(actions, key=lambda a: _ACTION_RANK.get(
                     a.get("kind"), 0))
@@ -1195,13 +1237,42 @@ class GroupSurface:
                 count = top.get("_strike_count") \
                     or strike_counts.get(rule, 0)
                 if top.get("kind") in ("warn", "delete", "mute",
-                                       "kick", "ban"):
+                                       "kick", "ban",
+                                       "acceptance_restrict"):
+                    executed = "restrict" if (
+                        top["kind"] == "acceptance_restrict"
+                    ) else top["kind"]
+                    live = recent_strikes(
+                        member, now=now,
+                        window_days=esc.window_days)
+                    oldest = min(
+                        (float(s.get("ts") or 0) for s in live),
+                        default=0.0)
                     top["warning"] = render_warning(
-                        mention, rule,
+                        who, rule,
                         consequence_text(
-                            executed=top["kind"], count=count,
+                            executed=executed, count=count,
                             cfg=cfg,
-                            warn_threshold=warn_threshold))
+                            warn_threshold=warn_threshold,
+                            esc=esc, fine_amount=paid_fine,
+                            oldest_ts=oldest, now=now))
+                    strike_ts = 0.0
+                    for s in reversed(member.get("strikes")
+                                      or []):
+                        if isinstance(s, dict) \
+                                and s.get("rule") == rule:
+                            strike_ts = float(s.get("ts") or 0)
+                            break
+                    top["notice_id"] = self.record_notice(
+                        group_key, user_id=user_id,
+                        mention=mention, rule=rule,
+                        action=top["kind"], count=count,
+                        limit=esc.warn_limit,
+                        strike_ts=strike_ts, strike_rule=rule,
+                        minutes=int(top.get("minutes") or 0)
+                        if top["kind"] == "mute" else 0,
+                        fine=paid_fine, text=top["warning"],
+                        now=now)
             for action in actions:
                 action.pop("_strike_count", None)
                 action.pop("_strike_rule", None)
@@ -1213,7 +1284,9 @@ class GroupSurface:
                 blocked = False
             elif not blocked:
                 # Moderation fines (DESIGN §5 sink): an auto-mute
-                # costs sparks — paid to the treasury.
+                # costs sparks — paid to the treasury.  (A ladder
+                # fine charged above already used this member's
+                # fine slot; the spacing guard keeps it to one.)
                 for action in actions:
                     if action.get("kind") == "mute":
                         self.apply_fine(group_key, user_id, now=now)
@@ -1238,12 +1311,44 @@ class GroupSurface:
                 # engage their restriction.  (When autonomy is
                 # off, out_actions is already emptied — the cycle
                 # runs in audit-only mode and holds its kicks.)
-                actions.extend(self.acceptance_cycle(
-                    group_key, now=now, enforce=not suppressed))
+                cycle_actions = self.acceptance_cycle(
+                    group_key, now=now, enforce=not suppressed)
+                actions.extend(cycle_actions)
+                if not suppressed:
+                    # Each acceptance execution is a §31 notice
+                    # too: the member sees who/what/why, and an
+                    # admin can undo the restriction from it.
+                    for action in cycle_actions:
+                        if action.get("kind") not in (
+                                "acceptance_restrict", "kick"):
+                            continue
+                        target = str(action.get("user_id")
+                                     or "")
+                        trec = entry["members"].get(target) \
+                            or {}
+                        tmention = trec.get("name") or (
+                            f"@{trec['username']}"
+                            if trec.get("username") else target)
+                        label = (
+                            "Restricted — restore the required "
+                            "profile details to lift it."
+                            if action["kind"]
+                            == "acceptance_restrict"
+                            else "Removed from the group.")
+                        text = render_warning(
+                            f"{tmention} [{target}]",
+                            "acceptance", label)
+                        action["notice_id"] = \
+                            self.record_notice(
+                                group_key, user_id=target,
+                                mention=tmention,
+                                rule="acceptance",
+                                action=action["kind"], text=text,
+                                now=now)
                 if acc_event and acc_event.get("warn"):
                     notices.append(notice_line(
                         "🚪",
-                        f"{mention} — this group requires a "
+                        f"{who} — this group requires a "
                         f"username. Restore yours within "
                         f"{acc_event.get('grace_minutes', 60)} "
                         f"minutes or you'll be muted until you "
@@ -1450,12 +1555,21 @@ class GroupSurface:
         read model behind /strikes and the ladder."""
         now = now if now is not None else time.time()
         cfg = self.defense_config(group_key)
+        esc = self.escalation_config(group_key)
         member = self.store.group(group_key)["members"].get(
             user_id) or {}
         strikes = recent_strikes(member, now=now,
-                                 window_days=cfg.window_days)
+                                 window_days=esc.window_days)
+        nxt = esc.next_step(len(strikes))
         return {"count": len(strikes), "strikes": strikes,
-                "window_days": cfg.window_days}
+                "window_days": esc.window_days,
+                "limit": esc.warn_limit,
+                "final_action": esc.final_action,
+                "next_at": int(nxt["at"]) if nxt else 0,
+                "next_label": ladder_label(nxt) if nxt else "",
+                "oldest_ts": min(
+                    (float(s.get("ts") or 0) for s in strikes),
+                    default=0.0)}
 
     # ---- economy (P2: the country, wired live) --------------------
     @property
@@ -2043,6 +2157,9 @@ class GroupSurface:
         self.store.save()
         return {"ok": True, "amount": int(drop["per_claim"]),
                 "remaining": drop["remaining"],
+                "closed": not drop["open"],
+                "drop_total": int(drop["total"]),
+                "drop_id": drop["id"],
                 "balance": econ.balance(group_key, user_id)}
 
     def economy_health(self, group_key: str, *,
@@ -2501,18 +2618,23 @@ class GroupSurface:
         return "\n".join(lines)
 
     def apply_fine(self, group_key: str, user_id: str, *,
+                   amount: int | None = None,
                    now: float | None = None) -> int:
         """The moderation fine sink: settings-driven, paid to the
         treasury, capped at what the member actually holds.  One
         fine per punishment event — a member already muted does
         not get fined again for the same episode (10-minute
-        spacing between fines for one member)."""
+        spacing between fines for one member).  ``amount``
+        overrides the settings figure — the §30 ladder's designed
+        fine steps charge their own amount."""
         now = now if now is not None else time.time()
-        try:
-            amount = int(self.store.settings(
-                group_key).get("fine_amount") or 0)
-        except Exception:  # noqa: BLE001 - settings never break chat
-            return 0
+        if amount is None:
+            try:
+                amount = int(self.store.settings(
+                    group_key).get("fine_amount") or 0)
+            except Exception:  # noqa: BLE001 - settings never break chat
+                return 0
+        amount = int(amount)
         if amount <= 0 or not self.economy_on(group_key):
             return 0
         fines = self._extras(group_key).setdefault("fines", {})
@@ -2574,6 +2696,186 @@ class GroupSurface:
             member["warns"] = []
             member["strikes"] = []
             self.store.save()
+
+    def reset_warn_bookkeeping(self, group_key: str,
+                               user_id: str) -> None:
+        """Zero the LEGACY warn counters only — the strike spine
+        keeps its history.  Used when a manual-warn ladder step
+        fires short of the final action: the admin-facing warn
+        count restarts, the ladder does not (§30)."""
+        member = self.store.group(group_key)["members"].get(user_id)
+        if member:
+            member["warn_count"] = 0
+            member["warns"] = []
+            self.store.save()
+
+    # ---- the escalation ladder (§30) ------------------------------
+    def escalation_config(self, group_key: str) -> EscalationConfig:
+        return EscalationConfig.from_settings(
+            self.store.settings(group_key))
+
+    def warn_step(self, group_key: str, count: int
+                  ) -> dict[str, Any] | None:
+        """The ladder step a manual warn landing on ``count``
+        fires (None between steps)."""
+        return self.escalation_config(group_key).action_at(count)
+
+    def remove_strike(self, group_key: str, user_id: str, *,
+                      rule: str = "", ts: float = 0.0
+                      ) -> dict[str, Any] | None:
+        """Remove ONE strike — the newest matching ``rule`` (and
+        ``ts`` when given).  The undo primitive behind the
+        notice layer: reversing a warn removes exactly the
+        strike that warn recorded, never the member's whole
+        history.  A manual_warn removal also steps the legacy
+        warn bookkeeping back one."""
+        entry = self.store.group(group_key)
+        member = entry["members"].get(user_id)
+        if not member:
+            return None
+        strikes = member.get("strikes") or []
+        for idx in range(len(strikes) - 1, -1, -1):
+            strike = strikes[idx]
+            if not isinstance(strike, dict):
+                continue
+            if rule and strike.get("rule") != rule:
+                continue
+            if ts and float(strike.get("ts") or 0) != float(ts):
+                continue
+            removed = strikes.pop(idx)
+            member["strikes"] = strikes
+            if removed.get("rule") == "manual_warn":
+                member["warn_count"] = max(
+                    0, int(member.get("warn_count") or 0) - 1)
+                warns = member.get("warns") or []
+                if warns:
+                    warns.pop()
+                    member["warns"] = warns
+            self.store.save()
+            return removed
+        return None
+
+    # ---- the notice layer (§31) -----------------------------------
+    def record_notice(self, group_key: str, *, user_id: str,
+                      mention: str, rule: str, action: str,
+                      count: int = 0, limit: int = 0,
+                      strike_ts: float = 0.0, strike_rule: str = "",
+                      minutes: int = 0, fine: int = 0, text: str = "",
+                      extra: dict[str, Any] | None = None,
+                      now: float | None = None) -> str:
+        """Record one automated action as an undoable notice.
+        The record is the state the posted message's buttons are
+        authored from: who, the trigger rule, the action taken,
+        the ladder position, and exactly what undo must reverse
+        (the strike it recorded, the platform action, any drop
+        it opened).  Bounded ring — old notices age out of the
+        registry, never out of the audit journal."""
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        notices = entry.setdefault("notices", {})
+        nid = f"n{int(now * 1000)}-{len(notices)}"
+        while nid in notices:
+            nid += "x"
+        notices[nid] = {
+            "id": nid, "user_id": str(user_id),
+            "mention": mention, "rule": rule, "action": action,
+            "count": int(count), "limit": int(limit),
+            "strike_ts": float(strike_ts),
+            "strike_rule": strike_rule or rule,
+            "minutes": int(minutes), "fine": int(fine),
+            "text": text, "extra": dict(extra or {}),
+            "message_id": "", "undone": False, "undone_by": "",
+            "undone_at": 0.0, "at": now,
+        }
+        while len(notices) > NOTICE_RING:
+            notices.pop(next(iter(notices)))
+        self._audit(group_key, "notice_posted", notice=nid,
+                    user_id=str(user_id), action=action, rule=rule)
+        return nid
+
+    def get_notice(self, group_key: str, notice_id: str
+                   ) -> dict[str, Any] | None:
+        return self.store.group(group_key).get(
+            "notices", {}).get(notice_id)
+
+    def set_notice_message(self, group_key: str, notice_id: str,
+                           message_id: str) -> None:
+        """Remember the posted message's platform id, so an undo
+        can EDIT the notice in place where the platform allows."""
+        record = self.get_notice(group_key, notice_id)
+        if record is not None and message_id:
+            record["message_id"] = str(message_id)
+            self.store.save()
+
+    def mark_notice_undone(self, group_key: str, notice_id: str,
+                           *, by: str) -> dict[str, Any] | None:
+        """Journal an undo exactly like the action was journaled
+        (§31): who undid it, when, on which notice."""
+        record = self.get_notice(group_key, notice_id)
+        if record is None:
+            return None
+        record["undone"] = True
+        record["undone_by"] = str(by)
+        record["undone_at"] = time.time()
+        self._audit(group_key, "notice_undo", notice=notice_id,
+                    by=str(by), user_id=record.get("user_id"),
+                    action=record.get("action"),
+                    rule=record.get("rule"))
+        self.store.save()
+        return record
+
+    def clear_acceptance(self, group_key: str, user_id: str
+                         ) -> None:
+        """Lift a member's acceptance state entirely (the undo
+        of an acceptance restriction): the next message re-runs
+        the profile check fresh, with its full grace."""
+        entry = self.store.group(group_key)
+        self._clear_acceptance(entry, user_id)
+        self.store.save()
+
+    def refund_fine(self, group_key: str, user_id: str,
+                    amount: int, *, by: str = "") -> bool:
+        """Pay a notice's fine back out of the treasury (the
+        money half of an undo).  Reservation-aware like every
+        treasury grant."""
+        amount = int(amount or 0)
+        if amount <= 0 or not self.economy_on(group_key):
+            return False
+        if not self.economy.treasury_grant(
+                group_key, user_id, amount,
+                reason="fine refunded (notice undone)",
+                now=time.time()):
+            return False
+        self._audit(group_key, "fine_refunded", user_id=user_id,
+                    amount=amount, by=by)
+        self.store.save()
+        return True
+
+    def cancel_drop(self, group_key: str, drop_id: str, *,
+                    by: str = "") -> dict[str, Any]:
+        """Close an open drop early — the undo for a drop
+        announcement.  Unclaimed sparks refund to the funder (a
+        treasury-funded drop simply releases its reservation);
+        claims already paid are journaled history and stand."""
+        drops = self._extras(group_key).setdefault("drops", [])
+        drop = next((d for d in drops if d.get("id") == drop_id),
+                    None)
+        if drop is None or not drop.get("open"):
+            return {"ok": False, "reason": "no_drop"}
+        drop["open"] = False
+        remaining = int(drop.get("remaining") or 0)
+        funder = str(drop.get("funder") or "")
+        refunded = 0
+        if remaining > 0 and funder and funder != "treasury":
+            if self.economy.treasury_grant(
+                    group_key, funder, remaining,
+                    reason=f"drop {drop_id} cancelled",
+                    now=time.time()):
+                refunded = remaining
+        self._audit(group_key, "drop_cancelled", drop=drop_id,
+                    by=by, refunded=refunded)
+        self.store.save()
+        return {"ok": True, "refunded": refunded, "drop": drop}
 
     # ---- read models ----------------------------------------------
     def member(self, group_key: str, user_id: str

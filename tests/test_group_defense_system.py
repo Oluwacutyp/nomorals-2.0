@@ -328,7 +328,10 @@ def test_quarantined_message_earns_no_economy(tmp_path):
     assert not surface.economy.is_verified(KEY, "9")
     assert surface.strikes_for(KEY, "9", now=NOW)["count"] == 1
     warning = bad["actions"][0].get("warning") or ""
-    assert warning.startswith("⛔ Cy — ")
+    # §31 shape: mention + [numeric id] leads every action
+    # notice (the owner's captured reference format) — this pin
+    # previously asserted the pre-notice-layer prefix.
+    assert warning.startswith("⛔ Cy [9] — ")
     assert "strike 1" in warning
 
 
