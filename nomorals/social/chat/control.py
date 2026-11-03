@@ -828,6 +828,12 @@ def parse_control(text: str) -> ControlCommand | None:
         return ControlCommand(kind="help")
     words = rest.split(None, 1)
     kind = words[0].lower()
+    if "@" in kind:
+        # Telegram's group command menu inserts /cmd@BotName —
+        # that IS the command, addressed to the bot (owner
+        # live-test 2026-11-03: /work@Nomorals_bot fell into
+        # conversation while /work executed).  Strip the addressee.
+        kind = kind.split("@", 1)[0]
     if kind not in CONTROL_COMMANDS:
         return None  # unknown slash: treat as a normal message, let her answer
     tail = words[1].strip() if len(words) > 1 else ""

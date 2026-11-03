@@ -359,12 +359,14 @@ class RuntimeGroupMixin:
             n = int(str(arg or "10").strip() or 10)
         except ValueError:
             n = 10
+        import html as _html
+
         entries = self._group_surface().audit(key, limit=max(1, min(n, 50)))
         if not entries:
             return "nothing in the group log yet."
-        lines = ["📋 group log (held by me, shown on demand):"]
+        lines = ["📋 <b>group log</b> (held by me, shown on demand):"]
         for entry in entries:
-            lines.append(_audit_line(entry))
+            lines.append(_html.escape(_audit_line(entry)))
         return "\n".join(lines)
 
     def _control_gsettings(self, tail, message) -> str:  # type: ignore[no-untyped-def]
@@ -413,11 +415,19 @@ class RuntimeGroupMixin:
                 f"economy: {'on' if s['economy_enabled'] else 'off'}"
                 f" · transfer tax {s.get('transfer_tax_pct', 2)}%\n"
                 f"tap a button to flip a switch, or type:\n"
-                f"change: /gsettings welcome on|off · rules add "
-                f"text · rules clear · flood n · links "
-                f"domains|off · clean on|off · economy on|off · "
-                f"tax pct · warns n · filter add word · "
-                f"filter action delete|warn|mute",
+                f"<code>/gsettings welcome on|off</code> · "
+                f"<code>/gsettings goodbye on|off</code> · "
+                f"<code>/gsettings clean on|off</code>\n"
+                f"<code>/gsettings rules add TEXT</code> · "
+                f"<code>/gsettings rules clear</code>\n"
+                f"<code>/gsettings flood N</code> · "
+                f"<code>/gsettings links DOMAINS|off</code>\n"
+                f"<code>/gsettings economy on|off</code> · "
+                f"<code>/gsettings tax PCT</code> · "
+                f"<code>/gsettings warns N</code>\n"
+                f"<code>/gsettings filter add WORD</code> · "
+                f"<code>/gsettings filter action "
+                f"delete|warn|mute</code>",
                 buttons)
         parts = text.split(None, 2)
         head = parts[0].lower()
@@ -864,25 +874,29 @@ class RuntimeGroupMixin:
                    [("🗺️ Quests", "quests"), ("🛒 Shop", "gshop")]]
         return actionable("\n".join(lines), buttons)
 
-    def _control_mine(self, message) -> str:  # type: ignore[no-untyped-def]
+    def _control_mine(self, message):  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
         if err:
             return err
+        from ...social.chat.tgbot_buttons import actionable
         surface = self._group_surface()
         user_id = str(message.sender_id or message.sender or "")
+        buttons = [[("🛠️ Work", "work"), ("🪙 My balance", "balance")]]
         entry = surface.economy.mining_claim(key, user_id)
         if entry is None:
             rate = surface.economy.claim_rate(key, user_id)
-            return (f"⛏️ nothing to claim yet — claims cool down "
-                    f"between hits, and the daily cap is real. "
-                    f"Next claim pays {rate} sparks.")
+            return actionable(
+                f"⛏️ nothing to claim yet — claims cool down "
+                f"between hits, and the daily cap is real. "
+                f"Next claim pays <b>{rate}</b> sparks.", buttons)
         rate = surface.economy.hashrate(key, user_id)
-        return (f"⛏️ +{entry.amount} sparks "
-                f"(balance {surface.economy.balance(key, user_id)}). "
-                f"Your hashrate is {rate['hashrate']} — it's "
-                f"engagement: real activity this week.")
+        return actionable(
+            f"⛏️ <b>+{entry.amount} sparks</b> "
+            f"(balance {surface.economy.balance(key, user_id)}). "
+            f"Your hashrate is {rate['hashrate']} — it's "
+            f"engagement: real activity this week.", buttons)
 
-    def _control_work(self, message) -> str:  # type: ignore[no-untyped-def]
+    def _control_work(self, message):  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
         if err:
             return err
@@ -894,9 +908,12 @@ class RuntimeGroupMixin:
                 return (f"🛠️ you're between shifts — next one opens "
                         f"in ~{max(1, result['wait_s'] // 60)} min.")
             return "🛠️ no shift paid — the daily earn cap is hit."
-        return (f"🛠️ shift done: +{result['pay']} sparks "
-                f"(level {result['level']}, balance "
-                f"{result['balance']}).")
+        from ...social.chat.tgbot_buttons import actionable
+        return actionable(
+            f"🛠️ shift done: <b>+{result['pay']} sparks</b> "
+            f"(level {result['level']}, balance "
+            f"{result['balance']}).",
+            [[("⛏️ Mine", "mine"), ("🪙 My balance", "balance")]])
 
     def _control_pay(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
@@ -925,8 +942,11 @@ class RuntimeGroupMixin:
             return "that payment doesn't work as written."
         fee_line = (f" ({result['fee']} to the treasury)"
                     if result["fee"] else "")
-        return (f"💸 paid {result['net']} sparks{fee_line}. "
-                f"Your balance: {result['balance']}.")
+        from ...social.chat.tgbot_buttons import actionable
+        return actionable(
+            f"💸 paid <b>{result['net']} sparks</b>{fee_line}. "
+            f"Your balance: {result['balance']}.",
+            [[("🪙 My balance", "balance")]])
 
     def _control_gshop(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
@@ -968,7 +988,7 @@ class RuntimeGroupMixin:
         for item_id, item in STATUS_SHOP.items():
             afford = balance >= int(item["cost"])
             lines.append(
-                f"<code>{item_id}</code> — {item['name']} · "
+                f"<code>{item_id}</code> — <b>{item['name']}</b> · "
                 f"{item['cost']} sparks · {item['blurb']}"
                 + ("" if afford else " · <i>not yet</i>"))
             # Buttons are authored from the LIVE shelf + balance:
@@ -1000,20 +1020,34 @@ class RuntimeGroupMixin:
                 return ("that quest isn't claimable — either not "
                         "finished yet, or already claimed this "
                         "period.")
-            return (f"🏅 quest claimed: +{entry.amount} sparks "
-                    f"(balance "
-                    f"{surface.economy.balance(key, user_id)}).")
+            from ...social.chat.tgbot_buttons import actionable
+            return actionable(
+                f"🏅 quest claimed: <b>+{entry.amount} sparks</b> "
+                f"(balance "
+                f"{surface.economy.balance(key, user_id)}).",
+                [[("🪙 My balance", "balance"),
+                  ("🗺️ Quests", "quests")]])
+        from ...social.chat.tgbot_buttons import actionable
         progress = surface.economy.quest_progress(key, user_id)
-        lines = ["🗺️ your quests:"]
+        lines = ["🗺️ <b>your quests:</b>"]
+        buttons = []
         for quest_id, quest in progress.items():
             mark = "✅ claimed" if quest["claimed"] else (
                 "🎁 ready — /quests claim " + quest_id
                 if quest["complete"] else
                 f"{quest['have']}/{quest['need']}")
-            lines.append(f"{quest_id} — {quest['name']}: "
+            lines.append(f"<code>{quest_id}</code> — "
+                         f"<b>{quest['name']}</b>: "
                          f"{quest['blurb']} · {mark} · "
                          f"reward {quest['reward']}")
-        return "\n".join(lines)
+            # A claim button exists exactly for quests this
+            # member can claim RIGHT NOW — authored from the
+            # same progress state the list renders.
+            if quest["complete"] and not quest["claimed"]:
+                buttons.append([(f"🎁 Claim: {quest['name']}",
+                                  f"quests claim {quest_id}")])
+        buttons.append([("🪙 My balance", "balance")])
+        return actionable("\n".join(lines), buttons)
 
     def _control_treasury(self, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
@@ -1076,9 +1110,12 @@ class RuntimeGroupMixin:
                     "treasury": "the pool couldn't pay out — an "
                                 "admin needs to look."}.get(
                         result["reason"], "can't claim right now.")
-        return (f"🎁 +{result['amount']} sparks claimed! "
-                f"(pool left: {result['remaining']} · your balance: "
-                f"{result['balance']})")
+        from ...social.chat.tgbot_buttons import actionable
+        return actionable(
+            f"🎁 <b>+{result['amount']} sparks claimed!</b> "
+            f"(pool left: {result['remaining']} · your balance: "
+            f"{result['balance']})",
+            [[("🪙 My balance", "balance")]])
 
     def _execute_group_action(self, surface, key, adapter, message,
                               action) -> bool:  # type: ignore[no-untyped-def]
@@ -1166,10 +1203,13 @@ def _fmt_ts(ts) -> str:
 
 
 def _member_card(surface, key: str, member: dict) -> str:
-    name = member.get("name") or member.get("username") or "member"
-    handle = (f"@{member['username']}" if member.get("username")
-              else "no username")
-    lines = [f"👤 {name} ({handle})"]
+    import html as _html
+
+    name = _html.escape(
+        str(member.get("name") or member.get("username") or "member"))
+    handle = (f"@{_html.escape(str(member['username']))}"
+              if member.get("username") else "no username")
+    lines = [f"👤 <b>{name}</b> ({handle})"]
     joined = member.get("joined_ts") or member.get("first_seen")
     lines.append(f"joined: {_fmt_ts(joined)} · messages: "
                  f"{member.get('message_count') or 0} · last seen: "
@@ -1181,7 +1221,8 @@ def _member_card(surface, key: str, member: dict) -> str:
     for change in changes[-3:]:
         lines.append(
             f"{change.get('kind', 'changed')}: "
-            f"{change.get('old') or '—'} → {change.get('new') or '—'} "
+            f"{_html.escape(str(change.get('old') or '—'))} → "
+            f"{_html.escape(str(change.get('new') or '—'))} "
             f"({_fmt_ts(change.get('ts'))})")
     return "\n".join(lines)
 

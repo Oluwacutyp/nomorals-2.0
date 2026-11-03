@@ -612,11 +612,13 @@ class GroupSurface:
         """The published rules, rendered from the SAME settings
         the enforcer reads (DESIGN §12: one config, two readers).
         """
+        import html as _html
+
         settings = self.store.settings(group_key)
-        lines = ["📜 Group rules"]
+        lines = ["📜 <b>Group rules</b>"]
         rules = settings.get("rules") or []
         if rules:
-            lines.extend(f"{i}. {rule}"
+            lines.extend(f"{i}. {_html.escape(str(rule))}"
                          for i, rule in enumerate(rules, 1))
         else:
             lines.append("No written rules yet — be decent, no "
