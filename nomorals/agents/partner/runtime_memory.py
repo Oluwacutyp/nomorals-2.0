@@ -267,7 +267,10 @@ class RuntimeMemoryMixin:
                         chat.platform, chat, path,
                         caption="🎙️ Ekiti reference — shadow this")
                     if getattr(sent, "ok", False):
-                        return f"🎙️ reference audio sent ({result.get('backend', '?')})"
+                        # The audio IS the reply — no "reference audio
+                        # sent" receipt (owner no-meta-narration rule,
+                        # 2026-11-01). Failure keeps its text below.
+                        return ""
                 except Exception as e:
                     record_failure("runtime_memory.RuntimeMemoryMixin._control_ekiti", e)
                 return f"🎙️ reference audio saved at {path}"

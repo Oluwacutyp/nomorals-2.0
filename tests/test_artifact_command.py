@@ -188,7 +188,9 @@ class ArtifactCommandTest(unittest.TestCase):
     # ── send ────────────────────────────────────────────────────────────
     def test_send_by_id_delivers_real_bytes(self) -> None:
         out = self._run(f"/artifact send {self.report.id}")
-        self.assertIn("sent", out)
+        # No meta-narration (owner rule, 2026-11-01): the file
+        # landing is the delivery — no "📎 sent" receipt text.
+        self.assertEqual(out, "")
         self.assertEqual(len(self.tools.calls), 1)
         name, kwargs = self.tools.calls[0]
         self.assertEqual(name, "file_send")
@@ -199,12 +201,16 @@ class ArtifactCommandTest(unittest.TestCase):
 
     def test_send_by_alias(self) -> None:
         out = self._run("/artifact send latest-report")
-        self.assertIn("sent", out)
+        # No meta-narration (owner rule, 2026-11-01): the file
+        # landing is the delivery — no "📎 sent" receipt text.
+        self.assertEqual(out, "")
         self.assertEqual(len(self.tools.calls), 1)
 
     def test_send_by_artm_uri(self) -> None:
         out = self._run(f"/artifact send artm://{self.data.id}")
-        self.assertIn("sent", out)
+        # No meta-narration (owner rule, 2026-11-01): the file
+        # landing is the delivery — no "📎 sent" receipt text.
+        self.assertEqual(out, "")
         self.assertEqual(len(self.tools.calls), 1)
         _, kwargs = self.tools.calls[0]
         self.assertEqual(Path(kwargs["path"]).read_bytes(),

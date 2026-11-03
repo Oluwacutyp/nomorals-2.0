@@ -177,7 +177,12 @@ class RuntimeIntelMixin:
                     f" → {best.get('output', {}).get('magic')}"
                     if isinstance(best.get("output"), dict) else "decoded file")
                 if getattr(res, "ok", False):
-                    sent = " (file sent)"
+                    # The file landing IS the confirmation — no
+                    # "(file sent)" narration appended to the report
+                    # (owner no-meta-narration rule, 2026-11-01). The
+                    # failure branch below keeps its "(saved at ...)"
+                    # line: that is information, not narration.
+                    sent = ""
             except Exception as exc:  # noqa: BLE001
                 record_failure("runtime_intel._control_decode", exc)
                 sent = f" (saved at {v['saved_to']})"

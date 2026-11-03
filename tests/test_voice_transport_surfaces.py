@@ -360,8 +360,10 @@ class TestRuntimeVoiceWiring:
             extras={"gateway": gateway})
         mixin._ref_from_key = lambda key: _chat()
         out = mixin._control_tts("hello there", chat_key="telegram-personal:42")
-        assert "voice note sent" in out
-        assert "DEGRADED" not in out
+        # No meta-narration (owner rule, 2026-11-01): a clean voice
+        # note delivery returns silence, not a "voice note sent"
+        # receipt.
+        assert out == ""
 
     def test_deliver_voice_note_labels(self, monkeypatch):
         _ogg(monkeypatch)
@@ -371,7 +373,9 @@ class TestRuntimeVoiceWiring:
         mixin._ref_from_key = lambda key: _chat()
         out = mixin._deliver_voice_note("telegram-personal:42",
                                         _tmp(".wav"), "hi", "xtts")
-        assert "voice note" in out and "DEGRADED" not in out
+        # No meta-narration (owner rule, 2026-11-01): a landed voice
+        # note is its own reply — the helper returns silence.
+        assert out == ""
 
     def test_deliver_voice_note_degraded_label(self, monkeypatch):
         wav = _tmp(".wav")

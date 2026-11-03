@@ -127,11 +127,13 @@ def test_completed_job_sends_file_and_followup_to_originating_chat():
     assert job.result["delivered"] is True
     rt.gateway.send_file.assert_called_once_with(
         "telegram", "telegram:bg-2", "/tmp/song.mp3", caption="🎵 Song")
+    # No meta-narration (owner rule, 2026-11-01): a successful
+    # background delivery posts NO follow-up text — the file landing
+    # in the chat is the completion signal, and the job records
+    # delivered=True so the harvester never invents a lost report.
     followups = [c.args[2] for c in rt.gateway.send.call_args_list]
-    assert any("▶ sent" in t and "Song" in t for t in followups), \
-        f"no sent-confirmation follow-up: {followups}"
-    # The follow-up must not repeat the queue line the ack already showed.
-    assert all("queued 1" not in t for t in followups)
+    assert followups == [], f"unexpected follow-up text: {followups}"
+    assert job.result["delivered"] is True
 
 
 # ── 3: honest failure — wording + queue hygiene preserved in the job ──
@@ -362,5 +364,8 @@ def test_submit_failure_falls_back_to_synchronous_send():
             lambda: rt._play_send_in_chat_result(
                 engine, _item(), out, chat),
             title="Song")
-    assert "▶ sent" in text and "downloading in the background" not in text
+    # Sync fallback returns the command's own report only — the
+    # "▶ sent" delivery narration is gone (owner no-meta-narration
+    # rule, 2026-11-01); the file send itself is the delivery.
+    assert text == out and "downloading in the background" not in text
     rt.gateway.send_file.assert_called_once()

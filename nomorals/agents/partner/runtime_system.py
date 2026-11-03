@@ -452,7 +452,11 @@ class RuntimeSystemMixin:
                 record_failure("runtime_system._control_proxy", exc)
                 sent = False
             if sent:
-                return (f"🧱 sent the clean file — {v['count']} working proxies "
+                # The result line is the content; "sent the clean
+                # file" was narration about the delivery (owner
+                # no-meta-narration rule, 2026-11-01) — the file
+                # itself already landed with this as its caption.
+                return (f"🧱 {v['count']} working proxies "
                         f"(fastest: {v.get('fastest', '?')})")
             return (f"🧱 clean file ready ({v['count']} proxies): {v['path']} "
                     f"\n(plain chat — no file sending on this adapter)")
@@ -911,8 +915,10 @@ class RuntimeSystemMixin:
             if not outcome.ok:
                 return (f"artifact send failed ({art.size} bytes): "
                         f"{getattr(outcome.error, 'message', outcome.error)}")
-            return (f"📎 sent {path.name} ({art.size} bytes) — "
-                    f"artifact {art.id} → this chat")
+            # The artifact file IS the delivery — no "📎 sent …"
+            # receipt beside it in the same chat (owner
+            # no-meta-narration rule, 2026-11-01).
+            return ""
         return ("usage: /artifact list | info <id|alias|uri> | "
                 "send <id|alias|uri>")
 

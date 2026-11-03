@@ -85,44 +85,49 @@ class RuntimeVoiceMixin:
         if not outcome.ok:
             return f"tts failed: {getattr(outcome.error, 'message', outcome.error)}"
         info = outcome.value
-        note = ""
+        # No meta-narration (owner rule, 2026-11-01): when the voice
+        # note lands, it IS the reply — no "voice note sent" receipt
+        # after it. Text comes back only for what went wrong:
+        # synthesis degradations (sounds/pauses the engine could not
+        # render) and delivery failures, plainly, once. Success
+        # narration (auto-tags applied, pause timings, byte counts)
+        # is not reported at all.
+        warns: list[str] = []
         if info.get("dropped_sounds"):
-            note += (" — [" + "] [".join(info["dropped_sounds"]) + "] dropped "
-                     "(this engine can't laugh; /speak for real laughs)")
-        if info.get("auto_tags_applied"):
-            note += " — auto-tags applied: " + ", ".join(info["auto_tags_applied"])
+            warns.append("[" + "] [".join(info["dropped_sounds"]) +
+                         "] dropped (this engine can't laugh; "
+                         "/speak for real laughs)")
         if info.get("pauses_dropped"):
-            note += " — pauses dropped (endpoint rejected wav format)"
-        elif info.get("pauses_ms"):
-            note += f" — pauses {info['pauses_ms']}ms"
+            warns.append("pauses dropped (endpoint rejected wav format)")
         if info.get("gap_ignored"):
-            note += f" — gap ignored ({info.get('engine')} has no word-gap control)"
+            warns.append(f"gap ignored ({info.get('engine')} has no "
+                         "word-gap control)")
         chat = self._ref_from_key(chat_key)
         # Voice-note path (default): OGG/Opus + voice-note type, so it
         # lands as a playable bubble, not a document. file=on skips it.
         if not file_mode:
             delivery = self._send_tts_voice_note(chat, info["path"])
             if delivery.ok and delivery.voice_note:
-                return (f"🎙️ voice note sent ({info.get('engine')}, {info.get('bytes', 0) // 1024} KB, "
-                        f"{info.get('seconds')}s){note}")
+                return "\n".join(warns)
             if delivery.ok and delivery.degraded:
                 # The transport already delivered the artifact as a
                 # file — say so, with the reason, never as a voice note.
-                return (f"🔊 spoken ({info.get('engine')}, {info.get('bytes', 0) // 1024} KB, "
-                        f"{info.get('seconds')}s){note} — ⚠️ DEGRADED: sent as a "
-                        f"file, not a voice note ({delivery.reason})")
+                return "\n".join(
+                    [f"⚠️ DEGRADED: sent as a file, not a voice note "
+                     f"({delivery.reason})", *warns])
             # Total delivery failure — try the plain file route below,
             # labelled honestly as a file, never as a voice note.
-            note += f" — voice-note send failed ({delivery.reason}); sent as file instead"
+            warns.append(f"voice-note send failed ({delivery.reason}); "
+                         "sent as file instead")
         try:
             result = self.gateway.send_file(chat.platform, chat, info["path"],
                                             caption=f"[{info.get('engine')}]")
             if getattr(result, "ok", False):
-                return (f"🔊 spoken ({info.get('engine')}, {info.get('bytes', 0) // 1024} KB, "
-                        f"{info.get('seconds')}s){note}")
+                return "\n".join(warns)
         except Exception as e:
             record_failure("runtime_voice.RuntimeVoiceMixin._control_tts", e)
-        return f"🔊 spoken ({info.get('engine')}) — saved at {info.get('path')}{note}"
+        return "\n".join(
+            [f"couldn't send it — saved at {info.get('path')}", *warns])
 
     def _send_tts_voice_note(self, chat: Any, audio_path: str):
         """Send TTS audio as a voice note via the surface's own transport.
@@ -330,7 +335,9 @@ class RuntimeVoiceMixin:
         if not size_kb and os.path.exists(path):
             size_kb = os.path.getsize(path) // 1024
         if delivery is not None and delivery.ok and delivery.voice_note:
-            return f"🎙️ said it ({backend}, {size_kb} KB voice note)"
+            # The voice note IS the reply (no meta-narration, owner
+            # rule 2026-11-01) — no "said it" receipt after it.
+            return ""
         if delivery is not None and delivery.ok and delivery.degraded:
             return (f"🎙️ said it ({backend}, {size_kb} KB) — ⚠️ DEGRADED: "
                     f"sent as a file, not a voice note ({delivery.reason})")

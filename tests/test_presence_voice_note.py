@@ -280,7 +280,9 @@ def test_tts_sends_voice_note_not_file(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr("subprocess.run", _fake_run)
     monkeypatch.setattr(os.path, "isfile", lambda p: str(p) == str(ogg))
     reply = obj._control_tts("hello there", chat_key="whatsapp:123")
-    assert "voice note sent" in reply
+    # No meta-narration (owner rule, 2026-11-01): the voice note IS
+    # the reply — a clean delivery returns no receipt text at all.
+    assert reply == ""
     assert len(adapter.sent) == 1
     media = adapter.sent[0]["media"]
     assert media.kind == "voice"
@@ -295,8 +297,9 @@ def test_tts_file_on_forces_file_send() -> None:
     adapter = _FakeAdapter(ok=True)
     obj = _tts_mixin(adapter=adapter)
     reply = obj._control_tts("file=on hello there", chat_key="whatsapp:123")
-    assert "spoken" in reply
-    assert "voice note" not in reply
+    # No meta-narration (owner rule, 2026-11-01): the file landing is
+    # the delivery — no "spoken" receipt text after it.
+    assert reply == ""
     assert adapter.sent == []
     assert len(obj.gateway.files_sent) == 1
 

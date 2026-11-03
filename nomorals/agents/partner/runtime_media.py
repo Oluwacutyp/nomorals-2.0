@@ -1023,9 +1023,11 @@ class RuntimeMediaMixin:
         whole text rather than a mangled slice.  Never raises."""
         try:
             if out_prefix and full_text.startswith(out_prefix):
-                delta = full_text[len(out_prefix):].lstrip("\n")
-                if delta:
-                    return delta
+                # An empty delta is a real outcome now: the body's
+                # whole text was the ack's queue line and the delivery
+                # itself carries the rest (no meta-narration, owner
+                # rule 2026-11-01) — return "" so no follow-up posts.
+                return full_text[len(out_prefix):].lstrip("\n")
             return full_text
         except Exception as e:
             record_failure("runtime_media.RuntimeMediaMixin._play_job_delta_text", e)
@@ -1112,6 +1114,15 @@ class RuntimeMediaMixin:
                 except Exception as e:
                     record_failure("runtime_media.RuntimeMediaMixin._body:1105", e)
                     delivered = False
+            elif sent:
+                # Success with nothing to add: the file landing in
+                # the chat IS the report (no meta-narration, owner
+                # rule 2026-11-01) — the body deliberately posts no
+                # follow-up. Mark delivered so the harvester does not
+                # invent a "its report never reached this chat"
+                # failure for a delivery that landed silently on
+                # purpose.
+                delivered = True
             self._play_dl_mark_finished(holder)
             return {"ok": True, "delivered": delivered,
                     "sent": bool(sent), "title": title, "text": final,
@@ -1404,7 +1415,10 @@ class RuntimeMediaMixin:
             self.gateway.send_file(
                 chat.platform, f"{chat.platform}:{chat.chat_id}",
                 send_path, caption=f"🎵 {title}")
-            return out + f"\n▶ sent “{title}” to this chat.", True
+            # The track landing in the chat is the delivery — no
+            # "▶ sent … to this chat" narration appended to the report
+            # (owner no-meta-narration rule, 2026-11-01).
+            return out, True
         except Exception as exc:  # noqa: BLE001
             return out + f"\nhad the file ({path}) but couldn't send it: {exc}", False
 
@@ -2798,7 +2812,10 @@ class RuntimeMediaMixin:
                     chat.platform, f"{chat.platform}:{chat.chat_id}",
                     out_path,
                     caption=f"🎬 captioned ({style} style)")
-                return f"🎬 captioned video sent ({style} style)."
+                # The captioned video IS the reply — no "video sent"
+                # receipt after it (owner no-meta-narration rule,
+                # 2026-11-01). Failures still return their text below.
+                return ""
             except Exception as e:
                 record_failure("runtime_media.RuntimeMediaMixin._control_caption", e)
         return f"🎬 captioned ({style}): {out_path or '(render failed)'}"

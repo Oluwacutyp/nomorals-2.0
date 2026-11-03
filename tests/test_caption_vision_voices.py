@@ -62,7 +62,9 @@ def test_caption_style_parsing():
         m.gateway.send_file.return_value = SimpleNamespace(ok=True)
         out = m._control_caption("karaoke", chat_key="tg:1", message=msg)
         assert cv.call_args[1]["style"] == "karaoke"
-        assert "karaoke" in out
+        # No meta-narration (owner rule, 2026-11-01): the captioned
+        # video landing is the reply — no "captioned video sent" text.
+        assert out == ""
 
 
 def test_caption_default_style_is_hormozi():
