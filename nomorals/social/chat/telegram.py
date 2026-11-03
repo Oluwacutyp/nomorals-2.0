@@ -1384,6 +1384,31 @@ class TelegramAdapter(ChatAdapter):
                 reply_to = getattr(message, "reply_to", None)
                 if reply_to is not None and getattr(reply_to, "id", 0):
                     thread_id = str(reply_to.id)
+        # Group service events (DESIGN §1): Telethon delivers joins
+        # and leaves as message actions, not text — surface them in
+        # meta so the group surface's welcome/ledger organs fire.
+        service_meta: dict = {}
+        _action = getattr(message, "action", None)
+        if _action is not None:
+            _action_name = type(_action).__name__
+            if _action_name in ("MessageActionChatAddUser",
+                                "MessageActionChatJoinedByLink"):
+                _users = [str(u) for u in
+                          (getattr(_action, "users", None) or [])]
+                if not _users and sender_id:
+                    _users = [sender_id]
+                service_meta = {
+                    "service": "join",
+                    "new_members": [
+                        {"id": u, "username": "", "name": ""}
+                        for u in _users]}
+            elif _action_name == "MessageActionChatDeleteUser":
+                service_meta = {
+                    "service": "leave",
+                    "left_member": {
+                        "id": str(getattr(_action, "user_id", "")
+                                  or ""),
+                        "username": "", "name": ""}}
         handler_msg = ChatMessage(
             chat=ChatRef(
                 platform=self.name,
@@ -1404,6 +1429,7 @@ class TelegramAdapter(ChatAdapter):
             message_id=str(getattr(message, "id", "")),
             ts=(time.time() if not getattr(message, "date", None)
                 else message.date.timestamp()),
+            meta=service_meta,
         )
         _log.info("telegram: DELIVERING inbound from %s in %s: %.60s", handler_msg.sender, chat_id, text)
         self._deliver(handler, handler_msg)
@@ -2468,6 +2494,25 @@ class TelegramBotAdapter(ChatAdapter):
                 "bot_role": "personal" if self.owner_only else "gated"}
         if replied_audio_file_id:
             meta["replied_audio_file_id"] = replied_audio_file_id
+        # Group service events (DESIGN §1: the group surface claims
+        # joins/leaves): Bot API service messages carry no text, so
+        # without this they reached the runtime as empty messages
+        # and the welcome/member-ledger organs never fired.
+        _members = msg.get("new_chat_members")
+        if isinstance(_members, list) and _members:
+            meta["service"] = "join"
+            meta["new_members"] = [
+                {"id": str(m.get("id", "") or ""),
+                 "username": str(m.get("username") or ""),
+                 "name": str(m.get("first_name") or "")}
+                for m in _members if isinstance(m, dict)]
+        _left = msg.get("left_chat_member")
+        if isinstance(_left, dict) and _left:
+            meta["service"] = "leave"
+            meta["left_member"] = {
+                "id": str(_left.get("id", "") or ""),
+                "username": str(_left.get("username") or ""),
+                "name": str(_left.get("first_name") or "")}
         who = sender.get("username") or sender.get("first_name") or str(sender.get("id", ""))
         if not isinstance(who, str):
             who = str(who)

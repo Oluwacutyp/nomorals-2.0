@@ -37,6 +37,7 @@ from .runtime_voice import RuntimeVoiceMixin
 from .runtime_memory import RuntimeMemoryMixin
 from .runtime_games import RuntimeGamesMixin
 from .runtime_provision import RuntimeProvisionMixin
+from .runtime_group import RuntimeGroupMixin
 from .runtime_system import RuntimeSystemMixin
 from .runtime_media import RuntimeMediaMixin
 from .runtime_intel import RuntimeIntelMixin
@@ -182,6 +183,7 @@ class PartnerRuntime(
     RuntimeGamesMixin,
     RuntimeSystemMixin,
     RuntimeProvisionMixin,
+    RuntimeGroupMixin,
     RuntimeMediaMixin,
     RuntimeIntelMixin,
     RuntimeSearchMixin,
@@ -811,6 +813,21 @@ class PartnerRuntime(
             _log.info("channel post in %s noted; channels are silent "
                       "by posture", message.chat.key)
             return
+        # Group surface (DESIGN §1, P1): group chats are claimed by
+        # the surface before conversation — service events (join /
+        # leave) run the welcome and member-ledger organs, ordinary
+        # messages are observed into the ledger and moderated. A
+        # message the surface consumes (service event, or moderated
+        # away) never reaches the conversation pipeline.
+        if message.chat.kind == ChatKind.GROUP:
+            try:
+                if self._group_surface_turn(message):
+                    return
+            except Exception as e:  # noqa: BLE001 - surface never
+                # breaks the chat; the failure is recorded, the
+                # message flows on unmoderated rather than dropped.
+                record_failure(
+                    "runtime.PartnerRuntime._group_surface_turn", e)
         # One-time login intake (armed by /provision login): the
         # owner's next message IS a password. Consumed here — before
         # the autonomy interest recorder and before the brain — so the
