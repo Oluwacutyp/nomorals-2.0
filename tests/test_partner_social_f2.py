@@ -328,18 +328,21 @@ class TypingTimingTest(unittest.TestCase):
         capped = human_typing_seconds("x" * 10000, cap=10.0, rng=random.Random(0))
         self.assertLessEqual(capped, 10.0)
 
-    def test_telegram_bot_typing_holds_full_window(self) -> None:
+    def test_telegram_bot_typing_fires_once_and_never_delays(self) -> None:
+        # Owner order (2026-11-01): the indicator is fire-and-forget —
+        # ONE sendChatAction, back at once, whatever window was asked
+        # for. Telegram clears it server-side; holding the reply
+        # thread to re-fire was the banned delay.
         adapter = TelegramBotAdapter(token="test-token")
         calls: list[dict[str, Any]] = []
         adapter._api = lambda method, **kw: calls.append({"method": method, **kw}) or {"ok": True}  # noqa: SLF001
         chat = ChatRef(platform="telegram-bot", chat_id="123", kind=ChatKind.DM)
         started = time.time()
-        self.assertTrue(adapter.typing(chat, seconds=5.0))
+        self.assertTrue(adapter.typing(chat, seconds=30.0))
         elapsed = time.time() - started
-        # 5s window with ~5s server-side expiry -> must re-fire at least twice.
-        self.assertGreaterEqual(len(calls), 2)
-        self.assertTrue(all(c["method"] == "sendChatAction" for c in calls))
-        self.assertGreaterEqual(elapsed, 4.5)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["method"], "sendChatAction")
+        self.assertLess(elapsed, 2.0)
 
     def test_telegram_bot_typing_short_window_single_shot(self) -> None:
         adapter = TelegramBotAdapter(token="test-token")

@@ -443,37 +443,39 @@ class DiscordAdapter(ChatAdapter):
         return SendResult(ok=False, platform=self.name, error=last_error,
                           seconds=time.perf_counter() - started)
 
-    #: Discord clears a typing indicator after ~10 s; refresh cadence.
-    TYPING_REFRESH = 10.0
-
     def typing(self, chat: ChatRef, seconds: float = 3.0,
                action: str = "typing") -> bool:
         """Typing indicator. ``action`` is accepted for the shared protocol
         (the gateway passes it) — Discord only has typing, so "recording"
-        maps to the same indicator."""
+        maps to the same indicator.
+
+        Fire-and-forget (owner order, 2026-11-01): ONE send_typing is
+        scheduled on the adapter loop and this returns at once — the
+        indicator must never delay the message it precedes. Discord
+        clears it after ~10s server-side; a caller that wants it
+        longer re-fires (the runtime's typing tick loop does).
+        ``seconds`` stays for the shared protocol; it no longer holds
+        anyone.
+        """
         if seconds <= 0:
             return False
-        seconds = min(float(seconds), 120.0)
+        if self._loop is None or self._loop.is_closed():
+            return False
 
-        async def _do() -> bool:
-            channel = await self._channel(chat)
-            deadline = time.time() + seconds
-            while time.time() < deadline and not self.stopped:
-                try:
-                    await channel.send_typing()
-                except Exception as exc:  # noqa: BLE001 - cosmetic
-                    _log.debug("discord typing event failed: %s", exc)
-                    return False
-                await asyncio.sleep(
-                    min(self.TYPING_REFRESH, max(0.2, deadline - time.time()))
-                )
-            return True
+        async def _do() -> None:
+            try:
+                channel = await self._channel(chat)
+                await channel.send_typing()
+            except Exception as exc:  # noqa: BLE001 - cosmetic
+                _log.debug("discord typing event failed: %s", exc)
 
         try:
-            return bool(self._run_on_loop(_do(), timeout=seconds + 15))
+            asyncio.run_coroutine_threadsafe(_do(), self._loop)
+            return True
         except Exception as exc:  # noqa: BLE001
             _log.debug("discord typing failed: %s", exc)
             return False
+
 
     def history(self, chat: ChatRef, limit: int = 20) -> list[ChatMessage]:
         try:

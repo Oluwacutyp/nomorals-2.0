@@ -1647,7 +1647,16 @@ class TelegramAdapter(ChatAdapter):
 
     def typing(self, chat: ChatRef, seconds: float = 3.0,
              action: str = "typing") -> bool:
-        """Chat action indicator: "typing" or "recording" (voice)."""
+        """Chat action indicator: "typing" or "recording" (voice).
+
+        Fire-and-forget (owner order, 2026-11-01): ONE action is
+        scheduled on the adapter loop and this returns at once — the
+        indicator must never delay the message it precedes. Telethon
+        keeps the action up server-side on its own; a caller that
+        wants it longer re-fires (the runtime's typing tick loop
+        does). ``seconds`` stays in the signature for the shared
+        protocol; it no longer holds anyone.
+        """
         client = self._client
         if client is None or seconds <= 0:
             _log.debug("telegram typing: skipped (client=%s, seconds=%s)", client is not None, seconds)
@@ -1657,66 +1666,40 @@ class TelegramAdapter(ChatAdapter):
             # cosmetic; skip quietly instead of spamming warnings per message.
             _log.debug("telegram typing: skipped, adapter loop not running")
             return False
-        started = time.time()
 
-        async def _do() -> bool:
+        async def _do() -> None:
             from telethon.tl.functions.messages import SetTypingRequest
             from telethon.tl.types import (SendMessageRecordAudioAction,
                                            SendMessageTypingAction)
             _action = (SendMessageRecordAudioAction()
                        if action == "recording" else SendMessageTypingAction())
-
-            # Try to use cached input entity first (most reliable for DMs)
             entity = self._input_entity_cache.get(chat.chat_id)
             if entity is None:
-                _log.debug("telegram typing: no cached entity for chat_id=%s, resolving", chat.chat_id)
                 try:
                     entity = await self._resolve(chat)
                 except Exception as exc:
                     _log.warning("telegram typing: resolve raised for chat_id=%s: %s", chat.chat_id, exc)
-                    entity = None
-            else:
-                _log.debug("telegram typing: using cached entity for chat_id=%s", chat.chat_id)
-            
+                    return
             if entity is None:
                 _log.warning("telegram typing: entity resolution failed for chat_id=%s", chat.chat_id)
-                return False
-            
-            _log.debug("telegram typing: starting for chat_id=%s, seconds=%s, entity_type=%s", 
-                      chat.chat_id, seconds, type(entity).__name__)
-            
-            sent_count = 0
-            while time.time() - started < seconds and not self.stopped:
+                return
+            try:
+                # Use the low-level SetTypingRequest directly — more
+                # reliable than send_action("typing") across Telethon
+                # versions and userbot/bot differences.
+                await client(SetTypingRequest(entity, _action))
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("telegram typing: SetTypingRequest failed for chat_id=%s: %s, trying send_action", chat.chat_id, exc)
                 try:
-                    # Use the low-level SetTypingRequest directly — more
-                    # reliable than send_action("typing") across Telethon
-                    # versions and userbot/bot differences.
-                    await client(SetTypingRequest(entity, _action))
-                    sent_count += 1
-                    _log.debug("telegram typing: SetTypingRequest succeeded for chat_id=%s (count=%d)", 
-                              chat.chat_id, sent_count)
-                except Exception as exc:  # noqa: BLE001
-                    _log.warning("telegram typing: SetTypingRequest failed for chat_id=%s: %s, trying send_action", 
-                                chat.chat_id, exc)
-                    # Fallback: try send_action with string
-                    try:
-                        await client.send_action(entity, "record-audio" if action == "recording" else "typing")
-                        sent_count += 1
-                        _log.debug("telegram typing: send_action fallback succeeded for chat_id=%s", chat.chat_id)
-                    except Exception as exc2:
-                        _log.warning("telegram typing: both methods failed for chat_id=%s: %s", chat.chat_id, exc2)
-                        return sent_count > 0
-                sleep_for = min(5.0, max(0.1, seconds - (time.time() - started)))
-                await asyncio.sleep(sleep_for)
-            
-            _log.info("telegram typing: finished for chat_id=%s, sent %d action(s)", chat.chat_id, sent_count)
-            return sent_count > 0
+                    await client.send_action(entity, "record-audio" if action == "recording" else "typing")
+                except Exception as exc2:
+                    _log.warning("telegram typing: both methods failed for chat_id=%s: %s", chat.chat_id, exc2)
 
         try:
-            result = self._run_on_loop(_do(), timeout=seconds + 10)
-            return bool(result)
+            asyncio.run_coroutine_threadsafe(_do(), self._loop)
+            return True
         except Exception as exc:  # noqa: BLE001 - typing is cosmetic, never fatal
-            _log.debug("telegram typing: _run_on_loop failed for chat_id=%s: %s", chat.chat_id, exc)
+            _log.debug("telegram typing: schedule failed for chat_id=%s: %s", chat.chat_id, exc)
             return False
 
     def history(self, chat: ChatRef, limit: int = 20) -> list[ChatMessage]:
@@ -3152,25 +3135,23 @@ class TelegramBotAdapter(ChatAdapter):
 
     def typing(self, chat: ChatRef, seconds: float = 3.0,
                action: str = "typing") -> bool:
-        # The Bot API clears a typing indicator after ~5s server-side, so a
-        # requested duration longer than that is held by re-firing
-        # sendChatAction — the indicator stays up for the whole requested
-        # window, proportional to the outgoing message length.
+        # Fire-and-forget (owner order, 2026-11-01): ONE sendChatAction,
+        # return at once. The Bot API clears the indicator after ~5s
+        # server-side; a caller that wants it longer re-fires (the
+        # runtime's typing tick loop does). The indicator must never
+        # delay the message it precedes — the old hold-the-window loop
+        # slept the reply thread for the full requested duration,
+        # which is exactly the delay the owner banned.
         # ``action="recording"`` maps to the Bot API's record_voice action.
         if seconds <= 0:
             return False
         api_action = "record_voice" if action == "recording" else "typing"
-        deadline = time.time() + float(seconds)
-        sent = False
         try:
-            while time.time() < deadline:
-                self._api("sendChatAction", chat_id=int(chat.chat_id), action=api_action)
-                sent = True
-                time.sleep(min(4.0, max(0.1, deadline - time.time())))
-            return sent
+            self._api("sendChatAction", chat_id=int(chat.chat_id), action=api_action)
+            return True
         except Exception as exc:  # noqa: BLE001 - best-effort
             record_failure('telegram.TelegramBotAdapter.typing', exc)
-            return sent
+            return False
 
     # ── group/channel administration (Bot API) ──────────────────────────
     # The bot can only act where it is an admin with the right privilege.
