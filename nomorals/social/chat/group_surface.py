@@ -80,6 +80,15 @@ AUDIT_RING = 500
 NOTICE_RING = 100
 CHANGE_RING = 200
 MSG_CACHE_RING = 200
+
+#: Platforms that ARE Devon-the-bot — her own bot identities
+#: (DESIGN §33).  A group key on one of these exists only
+#: because her bot is in that room receiving its traffic.
+#: Every other platform key (``telegram`` the userbot,
+#: ``whatsapp`` Baileys, ``discord``) is one of the owner's
+#: PERSONAL accounts: those sessions converse as him (never
+#: gated) but carry no bot-system standing on their own.
+BOT_PLATFORMS = ("telegram-bot", "telegram-personal")
 _ACTION_RANK = {"allow": 0, "warn": 1, "delete": 2, "mute": 3,
                 "acceptance_restrict": 3, "kick": 4, "ban": 5}
 
@@ -156,6 +165,18 @@ def _default_settings() -> dict[str, Any]:
                                         # expiry window — defaults
                                         # ARE the shipped 3/5/7
         "games_enabled": True,
+        "system_claim": {"designated": False,
+                         "bot_admin": None},
+                                        # the §33 claim: may
+                                        # Devon's BOT SYSTEMS
+                                        # speak / accrue in this
+                                        # room?  designated =
+                                        # the owner named this
+                                        # room for system output;
+                                        # bot_admin = the
+                                        # runtime's last verified
+                                        # standing of her bot
+                                        # (None = never probed)
         "state": "discovered",          # discovered|configured|
                                         # active|dormant
     }
@@ -221,7 +242,7 @@ class GroupStore:
                        if k in merged
                        and k not in ("defense", "presentation",
                                      "estate", "acceptance",
-                                     "escalation")})
+                                     "escalation", "system_claim")})
         mod = dict(merged["moderation"])
         mod.update((stored.get("moderation") or {}))
         merged["moderation"] = mod
@@ -240,6 +261,9 @@ class GroupStore:
         merged["escalation"] = _deep_merge(
             copy.deepcopy(ESCALATION_DEFAULTS),
             stored.get("escalation") or {})
+        merged["system_claim"] = _deep_merge(
+            {"designated": False, "bot_admin": None},
+            stored.get("system_claim") or {})
         return merged
 
 
@@ -278,6 +302,90 @@ class GroupSurface:
     def defense_config(self, group_key: str) -> DefenseConfig:
         return DefenseConfig.from_settings(
             self.store.settings(group_key))
+
+    # ---- the system-output gate (DESIGN §33) --------------------
+    # Two hats on the owner's personal accounts: his sessions
+    # converse AS HIM in any room he belongs to (never gated —
+    # that path does not come through here), while Devon's BOT
+    # SYSTEMS (economy, quests, games, welcomes, notices,
+    # briefings) may only speak and accrue in CLAIMED rooms.
+    # This helper is the one gate every system-output path
+    # consults, evaluated from live settings at send time, so
+    # a claim that lapses stops output on the very next send.
+
+    def claim_state(self, group_key: str) -> dict[str, Any]:
+        """The room's §33 facts, exactly as recorded: owner
+        designation, the runtime's last verified bot standing,
+        the derived claim and its source ("" when unclaimed)."""
+        claim = self.store.settings(group_key).get(
+            "system_claim") or {}
+        designated = bool(claim.get("designated"))
+        bot_admin = claim.get("bot_admin")
+        platform = str(group_key).split(":", 1)[0]
+        bot_platform = platform in BOT_PLATFORMS
+        bot = bot_admin is True or (
+            bot_platform and bot_admin is not False)
+        claimed = designated or bot
+        source = ("designated" if designated
+                  else "bot" if bot else "")
+        return {"claimed": claimed, "designated": designated,
+                "bot_admin": bot_admin,
+                "bot_platform": bot_platform, "source": source}
+
+    def system_output_allowed(self, group_key: str, *,
+                              via_platform: str = "") -> bool:
+        """May Devon's bot systems post into / accrue in this
+        room right now?  Claimed when the owner designated the
+        room, or when her bot operates there — proved by its
+        verified admin standing, by the sending session being
+        one of her bot platforms (``via_platform``, when the
+        caller knows it), or by the room's own key living on a
+        bot platform.  A VERIFIED demotion (bot_admin False)
+        lapses the bot claim on every session at once; a
+        designation stands until the owner lifts it."""
+        state = self.claim_state(group_key)
+        if state["designated"]:
+            return True
+        if state["bot_admin"] is True:
+            return True
+        if state["bot_admin"] is False:
+            return False
+        if state["bot_platform"]:
+            return True
+        session = str(via_platform or "").split(":", 1)[0]
+        return session in BOT_PLATFORMS
+
+    def set_designated(self, group_key: str, on: bool, *,
+                       by: str = "") -> dict[str, Any]:
+        """The owner's designation (§33b): name this room for
+        system output, or lift the name.  Audited either way —
+        the flip is a standing decision about where his
+        personal sessions may speak as the bot system."""
+        claim = dict(self.store.settings(group_key).get(
+            "system_claim") or {})
+        claim["designated"] = bool(on)
+        self.update_settings(group_key, system_claim=claim)
+        self._audit(group_key, "system_claim",
+                    designated=bool(on), by=by)
+        self.store.save()
+        return self.claim_state(group_key)
+
+    def note_bot_admin(self, group_key: str, is_admin: bool
+                       ) -> None:
+        """Record the runtime's verified standing of Devon's
+        bot in this room (its probe of the bot's own member
+        status).  Only a CHANGE writes + audits: a demotion
+        lapsing the claim is an event worth the /glog line; a
+        steady state is not."""
+        claim = dict(self.store.settings(group_key).get(
+            "system_claim") or {})
+        if claim.get("bot_admin") is bool(is_admin):
+            return
+        claim["bot_admin"] = bool(is_admin)
+        self.update_settings(group_key, system_claim=claim)
+        self._audit(group_key, "bot_claim",
+                    bot_admin=bool(is_admin))
+        self.store.save()
 
     def _card_render(self, group_key: str, card: Any) -> str:
         """Render a typography Card (§27) for this group's
@@ -1928,6 +2036,8 @@ class GroupSurface:
         import random
 
         now = now if now is not None else time.time()
+        if not self.system_output_allowed(group_key):
+            return []  # §33: the estate never ticks abroad
         if not self.estate_on(group_key):
             return []
         from ...community.group_real_estate import DISTRICTS, TIERS
@@ -2007,6 +2117,11 @@ class GroupSurface:
         day pays the streak spark.  Best-effort: the economy never
         breaks the message path."""
         try:
+            if not self.system_output_allowed(group_key):
+                # §33: no foreign accrual — a room Devon-the-bot
+                # doesn't operate in builds NO economy state,
+                # whichever of the owner's accounts sits there.
+                return
             if not self.economy_on(group_key):
                 return
             econ = self.economy
@@ -2029,6 +2144,8 @@ class GroupSurface:
         the games wallet keeps its own copy either way, this is
         the group country's share of group play)."""
         try:
+            if not self.system_output_allowed(group_key):
+                return 0  # §33: no game accrual in foreign rooms
             if coins <= 0 or not self.economy_on(group_key):
                 return 0
             econ = self.economy
@@ -2535,6 +2652,11 @@ class GroupSurface:
         the message path).  Returns the quests paid THIS cycle."""
         from ...community.group_economy import _period_key
 
+        if not self.system_output_allowed(group_key):
+            # §33: an unclaimed room never completes a quest —
+            # no treasury exists there to pay into (this also
+            # freezes state accrued before the gate existed).
+            return []
         now = now if now is not None else time.time()
         extras = self._extras(group_key)
         last = float(extras.get("quest_check_at") or 0)
@@ -2571,6 +2693,8 @@ class GroupSurface:
         and return the announcement (None when nothing turned)."""
         from ...community.group_economy import season_key
 
+        if not self.system_output_allowed(group_key):
+            return None  # §33: no season turns in foreign rooms
         now = now if now is not None else time.time()
         extras = self._extras(group_key)
         current = season_key(now)

@@ -78,6 +78,28 @@ class RuntimeGamesMixin:
     #: /game delete again.  Mirrors the gift flow's 5-minute window.
     _delete_pending: dict[str, float] = {}
 
+    def _group_system_blocked(self, chat_key: str) -> bool:
+        """§33 for game surfaces: True when ``chat_key`` is a
+        group the group surface KNOWS and the room is
+        unclaimed — Devon's bot systems don't play there.
+        Anything the surface doesn't know (DMs, duel relays,
+        test rigs without a group store) is not a group-system
+        surface and is never blocked here; a gate error also
+        never blocks a game (the strict gates live in the
+        group surface and the group runtime)."""
+        try:
+            surface = self._group_surface()
+            if chat_key not in surface.store.data:
+                return False
+            if surface.system_output_allowed(chat_key):
+                return False
+            surface._audit(chat_key, "system_output_suppressed",
+                           what="game")
+            surface.store.save()
+            return True
+        except Exception:  # noqa: BLE001 - never break games
+            return False
+
     def _control_game(self, tail: str, chat_key: str, *,
                        player: Any = None, kind: str = "dm",
                        is_owner: bool = True) -> str:
@@ -103,6 +125,19 @@ class RuntimeGamesMixin:
                 return ("Math Class is a group game — play it in a group "
                         "with /math.")
             return res
+        if str(kind).lower() == "group" \
+                and self._group_system_blocked(chat_key):
+            # §33: ENGINE games are bot-system play — they start
+            # only in claimed rooms.  (Math Class above keeps its
+            # own social gate: public games for outsiders in
+            # groups is its pinned product behavior, and its
+            # purse never touches the group ledger — the coin
+            # sink into the group purse is claim-gated in the
+            # surface.)
+            return ("games aren't running in this group — my "
+                    "bot systems only play where my bot "
+                    "operates, or where the owner has "
+                    "designated the room.")
         engine = self._game_engine()
         live = engine.live(chat_key)
         _log.debug("_control_game: live=%s", live)
@@ -1247,6 +1282,11 @@ class RuntimeGamesMixin:
             # channels get a friendly redirect in runtime.py instead.)
             if str(kind).lower() == ChatKind.CHANNEL:
                 return None
+            if str(kind).lower() == ChatKind.GROUP \
+                    and self._group_system_blocked(chat_key):
+                # §33: a lapsed/unclaimed room's game freezes —
+                # the message is just chat here.
+                return None
             
             # Check for relay room first (DM-to-DM multiplayer)
             relay = self._game_relay()
@@ -1816,6 +1856,10 @@ class RuntimeGamesMixin:
         ``platform:chat_id`` — never assume telegram.  Buttons ride
         the same gateway contract as any surface (platforms
         without them ignore the keyboard)."""
+        if self._group_system_blocked(chat_key):
+            # §33: a relay board is a proactive system post —
+            # it never lands in an unclaimed group.
+            return False
         platform = (chat_key or "").partition(":")[0].strip() or "telegram"
         try:
             result = self.gateway.send(platform, chat_key, text,

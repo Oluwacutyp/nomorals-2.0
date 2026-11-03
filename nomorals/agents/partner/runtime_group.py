@@ -71,6 +71,70 @@ class RuntimeGroupMixin:
             _log.debug("group side-send failed", exc_info=True)
             return None
 
+    # ---- the system-output gate (DESIGN §33) --------------------
+    def _system_send_ok(self, surface, key, message,  # type: ignore[no-untyped-def]
+                        what: str) -> bool:
+        """§33, evaluated at send time: may Devon's BOT SYSTEMS
+        post this into this room, through THIS session?  The
+        surface's one helper decides (owner designation, the
+        bot's own standing, the sending session's platform).
+        A refusal is a journaled non-event in the group's held
+        audit — never a post, never a fake success.  The
+        as-him conversational path never comes through here."""
+        platform = str(getattr(message.chat, "platform", "")
+                       or "")
+        if surface.system_output_allowed(key,
+                                         via_platform=platform):
+            return True
+        surface._audit(key, "system_output_suppressed",
+                       what=what, via=platform)
+        surface.store.save()
+        return False
+
+    _BOT_CLAIM_TTL_S = 600
+
+    def _probe_bot_claim(self, surface, key, message) -> None:  # type: ignore[no-untyped-def]
+        """Keep the room's bot standing (§33a) honest: when a
+        BOT-platform session serves this group, verify the
+        bot's own member status through the adapter and stamp
+        the result on the surface — a demotion observed here
+        lapses the claim for every session at once.  Probed at
+        most once per room per TTL (the fact changes rarely);
+        an adapter that cannot say leaves the stamp alone."""
+        platform = str(getattr(message.chat, "platform", "")
+                       or "")
+        if platform not in ("telegram-bot", "telegram-personal"):
+            return
+        probes = getattr(self, "_bot_claim_probes", None)
+        if probes is None:
+            probes = self._bot_claim_probes = {}
+        now = time.time()
+        if now - float(probes.get(key) or 0) \
+                < self._BOT_CLAIM_TTL_S:
+            return
+        adapter = self._group_adapter(platform)
+        bot_id = getattr(adapter, "_bot_id", None) \
+            if adapter is not None else None
+        fn = getattr(adapter, "admin_member", None) \
+            if adapter is not None else None
+        if bot_id is None or fn is None:
+            return
+        probes[key] = now
+        try:
+            info = fn(message.chat, str(bot_id))
+        except Exception:  # noqa: BLE001 - unproven, unstamped
+            return
+        if not isinstance(info, dict):
+            return
+        status = info.get("status") or info.get("role") or ""
+        if not status and isinstance(info.get("result"), dict):
+            status = info["result"].get("status") or ""
+        if not status:
+            return
+        surface.note_bot_admin(
+            key, str(status).lower() in (
+                "creator", "administrator", "admin", "owner"))
+
     def _send_action_notice(self, surface, key, message,  # type: ignore[no-untyped-def]
                             action) -> None:
         """Post one §31 notice for an executed action.  The text
@@ -82,6 +146,9 @@ class RuntimeGroupMixin:
         from ...social.chat.group_notices import (
             notice_keyboard, notice_text)
 
+        if not self._system_send_ok(surface, key, message,
+                                    "notice"):
+            return
         nid = str(action.get("notice_id") or "")
         record = surface.get_notice(key, nid) if nid else None
         text = str(action.get("warning") or "") or str(
@@ -260,6 +327,9 @@ class RuntimeGroupMixin:
         from ...social.chat.group_acceptance import fix_it_text
         from ...social.chat.typography import Card
 
+        if not self._system_send_ok(surface, key, message,
+                                    "acceptance_note"):
+            return
         card = Card("moderation", title=f"{label} — one moment",
                     icon="🚪")
         body = fix_it_text(
@@ -281,6 +351,9 @@ class RuntimeGroupMixin:
         (internal ids don't print)."""
         from ...social.chat.typography import Card
 
+        if not self._system_send_ok(surface, key, message,
+                                    "acceptance_queue"):
+            return
         label = (record.get("name")
                  or (f"@{record['username']}"
                      if record.get("username") else "")
@@ -318,6 +391,7 @@ class RuntimeGroupMixin:
         or moderated away)."""
         surface = self._group_surface()
         key = message.chat.key
+        self._probe_bot_claim(surface, key, message)
         meta = message.meta or {}
         service = str(meta.get("service") or "")
 
@@ -375,11 +449,14 @@ class RuntimeGroupMixin:
                         out.get("reasons") or [],
                         grace_minutes=out.get("grace_minutes"),
                         pending_kick=bool(out.get("pending_kick")))
-            for text in welcomed:
-                self._send(
-                    message.chat, text,
-                    buttons=self._welcome_buttons(surface, key),
-                    parse_mode=self._rendered_mode(message, text))
+            if welcomed and self._system_send_ok(
+                    surface, key, message, "welcome"):
+                for text in welcomed:
+                    self._send(
+                        message.chat, text,
+                        buttons=self._welcome_buttons(surface, key),
+                        parse_mode=self._rendered_mode(message,
+                                                       text))
             self._clean_service_message(surface, message)
             return True
         if service == "join_request":
@@ -433,7 +510,9 @@ class RuntimeGroupMixin:
                                 username=facts["username"],
                                 group_name=str(
                                     message.chat.title or ""))
-                            if text:
+                            if text and self._system_send_ok(
+                                    surface, key, message,
+                                    "welcome"):
                                 self._send(
                                     message.chat, text,
                                     buttons=self._welcome_buttons(
@@ -457,7 +536,8 @@ class RuntimeGroupMixin:
                 text = surface.record_leave(
                     key, str(left.get("id") or ""),
                     group_name=str(message.chat.title or ""))
-                if text:
+                if text and self._system_send_ok(
+                        surface, key, message, "goodbye"):
                     self._send(
                         message.chat, text,
                         parse_mode=self._rendered_mode(message,
@@ -476,7 +556,10 @@ class RuntimeGroupMixin:
                     key, message_id=str(mid),
                     by_user_id=str(meta.get("by_user_id") or ""))
                 for callout in out.get("callouts") or []:
-                    if callout.get("to") == "group":
+                    if callout.get("to") == "group" \
+                            and self._system_send_ok(
+                                surface, key, message,
+                                "antidelete_callout"):
                         self._send(message.chat,
                                    str(callout.get("text") or ""))
             return True
@@ -499,8 +582,11 @@ class RuntimeGroupMixin:
             envelope=meta.get("envelope"),
             sender_is_admin=self._group_admin_ok(message),
             sender_is_operator=self._operator_or_false(message))
-        for notice in result.get("notices") or []:
-            self._send(message.chat, str(notice))
+        notices = result.get("notices") or []
+        if notices and self._system_send_ok(
+                surface, key, message, "notice"):
+            for notice in notices:
+                self._send(message.chat, str(notice))
         self._execute_pending_pin(surface, message)
         actions = result.get("actions") or []
         if not actions:
@@ -519,7 +605,9 @@ class RuntimeGroupMixin:
                 # its Undo authored from the same record.
                 self._send_action_notice(surface, key, message,
                                          action)
-            elif kind == "warn" and executed:
+            elif kind == "warn" and executed \
+                    and self._system_send_ok(
+                        surface, key, message, "warning"):
                 who = (message.sender_username
                        and f"@{message.sender_username}") \
                     or message.sender or "there"
@@ -1077,6 +1165,24 @@ class RuntimeGroupMixin:
                 f"mortgage LTV {est.get('ltv_pct', 60)}% at "
                 f"{est.get('mortgage_rate_pct', 5)}%",
             ], title="Estate")
+            # System-output claim (§33): where Devon's bot
+            # systems may speak and accrue in this room — the
+            # two-hats law, read from the same state the gate
+            # itself reads.
+            claim_now = surface.claim_state(key)
+            if claim_now["claimed"]:
+                claim_line = (
+                    f"system output: ON — claimed "
+                    f"({claim_now['source']})")
+            else:
+                claim_line = (
+                    "system output: OFF — my bot doesn't run "
+                    "here; my sessions only watch and converse")
+            card.block_lines([
+                claim_line,
+                "the owner designates a room with "
+                "`/gsettings system output on`",
+            ], title="System output")
             card.block_lines([
                 "`/gsettings welcome on|off` · "
                 "`/gsettings goodbye on|off` · "
@@ -1128,6 +1234,9 @@ class RuntimeGroupMixin:
                 "`/gsettings estate cap N` · "
                 "`/gsettings estate ltv PCT` · "
                 "`/gsettings estate rate PCT`",
+                "`/gsettings system output on|off` "
+                "(owner — designates this room for my "
+                "bot-system output, §33)",
             ], title="Change it")
             card.note("tap a button to flip a switch, or type a "
                       "command")
@@ -1137,6 +1246,26 @@ class RuntimeGroupMixin:
         rest = parts[1] if len(parts) > 1 else ""
         rest2 = parts[2] if len(parts) > 2 else ""
         on = rest.lower() == "on"
+        if head == "system" and rest.lower() == "output" \
+                and rest2.lower() in ("on", "off"):
+            # §33 designation is the OWNER's call: it decides
+            # where his personal sessions may speak as the bot
+            # system, so a group admin alone cannot flip it.
+            if not self._operator_or_false(message):
+                return ("designating a room for my system "
+                        "output is the owner's call — it "
+                        "decides where my bot systems may "
+                        "speak through his accounts.")
+            state = surface.set_designated(
+                key, rest2.lower() == "on",
+                by=str(message.sender_id or ""))
+            if state["designated"]:
+                return ("system output: this room is "
+                        "designated — my bot systems (economy, "
+                        "quests, games, notices) run here.")
+            return ("system output: designation lifted — "
+                    "this room is claimed only where my bot "
+                    "itself operates.")
         if head == "warns" and rest.isdigit():
             surface.update_settings(
                 key, warn_threshold=max(1, int(rest)))
@@ -1781,8 +1910,13 @@ class RuntimeGroupMixin:
             groups[token] = key
             members = surface.store.group(key).get("members") \
                 or {}
+            claim = surface.claim_state(key)
+            claim_txt = (f"system output on ({claim['source']})"
+                         if claim["claimed"]
+                         else "system output off")
             rows.append(f"{token} — {key} "
-                        f"({len(members)} in the ledger)")
+                        f"({len(members)} in the ledger) · "
+                        f"{claim_txt}")
             buttons.append([(f"⚙️ {token} · {key}",
                              f"console {token}")])
         self._console_session_map()[skey] = {
@@ -2544,7 +2678,8 @@ class RuntimeGroupMixin:
                     key, name=str(record.get("name") or ""),
                     username=str(record.get("username") or ""),
                     group_name=str(message.chat.title or ""))
-                if text:
+                if text and self._system_send_ok(
+                        surface, key, message, "welcome"):
                     self._send(
                         message.chat, text,
                         buttons=self._welcome_buttons(surface, key),
@@ -2561,7 +2696,8 @@ class RuntimeGroupMixin:
                     key, name=str(record.get("name") or ""),
                     username=str(record.get("username") or ""),
                     group_name=str(message.chat.title or ""))
-                if text:
+                if text and self._system_send_ok(
+                        surface, key, message, "welcome"):
                     self._send(
                         message.chat, text,
                         buttons=self._welcome_buttons(surface, key),
@@ -3208,6 +3344,17 @@ class RuntimeGroupMixin:
         if key is None:
             return None, "that's a group command — run it inside the group."
         surface = self._group_surface()
+        if not surface.system_output_allowed(
+                key, via_platform=str(
+                    getattr(message.chat, "platform", "") or "")):
+            # §33: the economy is a bot system — it does not run
+            # (or build state) in a room Devon-the-bot doesn't
+            # operate in, whichever account is sitting there.
+            return None, ("my group systems aren't running in "
+                          "this group — they speak only where my "
+                          "bot operates, or where the owner has "
+                          "designated the room (/gsettings system "
+                          "output on).")
         frozen = surface.economy_frozen(key)
         if frozen:
             return None, ("the group economy is frozen — its ledger "
@@ -3734,10 +3881,12 @@ class RuntimeGroupMixin:
         if result.get("closed"):
             # The drop's closing record (§31): the pool is done,
             # said once, in the group where it ran.
-            self._send_best_effort(message.chat, (
-                f"🎁 the drop is done — "
-                f"**{sparks(result.get('drop_total') or 0)}** "
-                "claimed in full."))
+            if self._system_send_ok(surface, key, message,
+                                    "drop_close"):
+                self._send_best_effort(message.chat, (
+                    f"🎁 the drop is done — "
+                    f"**{sparks(result.get('drop_total') or 0)}** "
+                    "claimed in full."))
         card = Card("economy", title="Drop claimed", icon="🎁")
         card.line(f"**+{sparks(result['amount'])}** claimed!")
         card.stats([("Pool left", sparks(result["remaining"]),
@@ -4232,7 +4381,9 @@ class RuntimeGroupMixin:
                 key, user_id=recipient, mention=label,
                 rule="governance", action="grant", text=text,
                 extra={"reversible": False, "proposal": pid})
-            self._send_best_effort(message.chat, text)
+            if self._system_send_ok(surface, key, message,
+                                    "governance"):
+                self._send_best_effort(message.chat, text)
         return (f"✅ proposal <code>{pid}</code> approved and "
                 "executed.")
 
@@ -4258,11 +4409,12 @@ class RuntimeGroupMixin:
             [[(f"🎁 Claim {drop['per_claim']} sparks", "claim"),
               ("🪙 My balance", "balance")],
              [("↩️ Cancel drop", f"undonotice {nid}")]])
-        self._send_best_effort(
-            message.chat, rendered.text,
-            buttons=rendered.buttons,
-            parse_mode=self._rendered_mode(message,
-                                           rendered.text))
+        if self._system_send_ok(surface, key, message, "drop"):
+            self._send_best_effort(
+                message.chat, rendered.text,
+                buttons=rendered.buttons,
+                parse_mode=self._rendered_mode(message,
+                                               rendered.text))
 
     # ── real estate (§17 slice 2 / §20: the whole class) ──────
     def _estate_gate(self, message):  # type: ignore[no-untyped-def]
