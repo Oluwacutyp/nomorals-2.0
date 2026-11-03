@@ -276,6 +276,10 @@ class WhatsAppAdapter(ChatAdapter):
         # needs re-linking)
         self.last_qr: str = ""
         self.last_qr_at: float = 0.0
+        # last pairing code (bridge in WA_PAIRING_CODE mode), so the
+        # /pair flow can surface it like the QR (§15)
+        self.last_pairing_code: str = ""
+        self.last_pairing_code_at: float = 0.0
         self.bridge_state: str = "unknown"
         # Outbound resilience: sends while the bridge is down are queued to
         # disk and flushed on reconnect, so a bridge restart doesn't eat
@@ -496,6 +500,14 @@ class WhatsAppAdapter(ChatAdapter):
             _log.warning("whatsapp QR received — scan it with WhatsApp "
                          "(Linked Devices); also available via health()")
             print("WHATSAPP QR:\n" + self.last_qr)
+        elif kind == "pairing_code":
+            self.last_pairing_code = str(obj.get("data") or "")
+            self.last_pairing_code_at = time.time()
+            self.connected.clear()
+            _log.warning(
+                "whatsapp pairing code received — type it into "
+                "WhatsApp (Linked Devices → Link with phone number); "
+                "also available via health()")
         elif kind == "own_message":
             # The owner's own outgoing message (shared-account mode).
             # Persist-only: the brain records it (double-reply discipline,
@@ -1218,5 +1230,9 @@ class WhatsAppAdapter(ChatAdapter):
                 "qr_pending": bool(self.last_qr),
                 "qr_age_s": round(time.time() - self.last_qr_at, 1)
                 if self.last_qr else None,
+                "pairing_code_pending": bool(self.last_pairing_code),
+                "pairing_code_age_s":
+                round(time.time() - self.last_pairing_code_at, 1)
+                if self.last_pairing_code else None,
                 "outbox_pending": self.outbox.pending_count(),
                 "receipts_tracked": len(self._receipts)}

@@ -432,6 +432,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "api": (0, None),        # /api list | <connector> [json params]
     "connectors": (0, 2),   # /connectors [list|status|connect] [name] — manage the service connectors
     "provision": (0, None),  # /provision [service] | login <service> <username> — Devon fetches missing API keys herself (owner only)
+    "pair": (0, None),        # /pair [whatsapp <number> [label]|code|start|stop|restart|remove <id>] — pairing-with-code account pool (§15; owner only)
     "notion": (0, None),      # /notion dbs|query|add — Notion reads + page writes
     "gcal": (0, None),        # /gcal [agenda] | add — Google Calendar
     "trello": (0, None),      # /trello boards|lists|cards|add — Trello
@@ -2015,6 +2016,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/provision [service] | /provision login <service> <username>",
             "example": "/provision hf",
             "related": "/connectors /browser watch"},
+    "pair": {"what": "pairing-with-code account pool (§15): pair your own WhatsApp accounts into Devon with an 8-character code — no QR. Each account gets its own supervised bridge session; the pool is the reach behind the group/channel tools. Owner only.",
+            "usage": "/pair | /pair whatsapp <number> [label] | /pair code <id> | /pair start|stop|restart|remove <id>",
+            "example": "/pair whatsapp 2348012345678 main",
+            "related": "/provision /connectors"},
     "notion": {"what": "Notion: list databases, query rows, create pages — through your connected Notion integration.",
             "usage": "/notion dbs [query] | /notion query <db> [text] | /notion add <page-id> <title> [| <body>]",
             "example": "/notion add <page-id> Shopping list | milk | eggs",
@@ -2941,6 +2946,7 @@ LIST_ONELINERS: dict[str, str] = {
     "checksms": "read SMS on your temp number: /checksms [code | forget]",
     "browser": "the browser tool in chat: /browser open|text|links|forms|headings <url> | takeover [url] | run <url> [goal] (owner-only, background job) | run status [job] | watch [session] — attach a live view to a running browser session (owner-only)",
     "provision": "self-provisioning: /provision [service] — Devon fetches a missing API key herself (login or account creation; key validated + vaulted, request retried); /provision login <service> <username> hands her an existing login",
+    "pair": "pairing-with-code pool: /pair whatsapp <number> [label] — pair a WhatsApp account by 8-char code (own bridge session each); /pair lists the pool with Registered/Connected counts (owner only)",
     "paper": "paper trading: /paper start <symbol> [market] [capital] | status | stop | list (simulated, never real)",
     "people": "the people spine: /people list | show <name> | add <name> | note <name> <text>",
     "commitments": "the obligation layer: /commitments list | add <what> [by <deadline>] | kept|broken|cancel <id> | overdue | due | reliability | verify",

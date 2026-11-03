@@ -477,6 +477,125 @@ class RuntimeProvisionMixin:
                        exc_info=True)
         return out
 
+    # ── pairing-with-code account pool (§15) ────────────────────────
+    def _pairing_supervisor(self) -> Any:
+        sup = getattr(self, "_pair_supervisor", None)
+        if sup is None:
+            from ...social.pairing import default_supervisor
+
+            ws = getattr(self.context.settings, "workspace_dir", ".")
+            sup = default_supervisor(ws)
+            self._pair_supervisor = sup
+        return sup
+
+    @staticmethod
+    def _pair_find(sup: Any, ref: str) -> Any | None:
+        ref = (ref or "").strip()
+        if not ref:
+            return None
+        rec = sup.registry.get(ref)
+        if rec is not None:
+            return rec
+        digits = "".join(c for c in ref if c.isdigit())
+        matches = [r for r in sup.registry.all()
+                   if r.identity == digits or r.id.endswith(ref)]
+        return matches[0] if len(matches) == 1 else None
+
+    def _control_pair(self, tail: str, *, chat_key: str = "",
+                      message: Any = None) -> str:
+        """/pair — the pairing-with-code account pool (§15).
+
+        /pair                              pool summary + accounts
+        /pair whatsapp <number> [label]    pair a WhatsApp account:
+                                           returns the 8-char code to
+                                           type into Linked Devices
+        /pair code <id>                    re-show a live code
+        /pair start|stop|restart <id>      supervise that session
+        /pair remove <id>                  forget the account
+
+        Owner-only (not a public command): pairing an account in is
+        the owner's explicit act, and the pool is his accounts.
+        """
+        from ...social.pairing import PairingStoreError
+
+        try:
+            sup = self._pairing_supervisor()
+        except PairingStoreError as exc:
+            return f"⚠️ {exc}"
+        parts = (tail or "").split()
+        if not parts or parts[0].lower() in ("list", "status"):
+            counts = sup.counts()
+            lines = [f"📟 paired accounts — Registered: "
+                     f"{counts['registered']} · Connected: "
+                     f"{counts['connected']}"]
+            for row in sup.status_all():
+                label = f" “{row['label']}”" if row.get("label") else ""
+                lines.append(
+                    f"  {row['id']}{label} — {row['status']}"
+                    f" (bridge {row['process']})")
+            lines.append("pair one: /pair whatsapp <number> [label]")
+            return "\n".join(lines)
+        sub = parts[0].lower()
+        if sub == "whatsapp":
+            if len(parts) < 2:
+                return ("usage: /pair whatsapp <number> [label] — the "
+                        "number in international format, e.g. "
+                        "2348012345678")
+            label = " ".join(parts[2:])
+            try:
+                rec = sup.pair_whatsapp(parts[1], label)
+            except ValueError as exc:
+                return f"⚠️ {exc}"
+            import time as _time
+
+            for _ in range(50):  # up to ~25s for WhatsApp to issue it
+                got = sup.pairing_code(rec.id)
+                if got:
+                    code, _age = got
+                    return (
+                        f"📟 pairing code for +{rec.identity}: "
+                        f"**{code}**\nOn that phone: WhatsApp → "
+                        "Linked Devices → Link a device → “Link with "
+                        "phone number instead” → enter the code. It "
+                        "expires in a few minutes — once linked, the "
+                        "account is a live Devon session.")
+                _time.sleep(0.5)
+            return (f"bridge started for +{rec.identity} "
+                    f"({rec.id}) — WhatsApp hasn't issued the code "
+                    f"yet. /pair code {rec.id} in a few seconds.")
+        if sub == "code":
+            rec = self._pair_find(sup, parts[1] if len(parts) > 1 else "")
+            if rec is None:
+                return "which account? /pair lists them."
+            got = sup.pairing_code(rec.id)
+            if not got:
+                return (f"no live code for {rec.id} — codes expire in "
+                        f"minutes. /pair whatsapp {rec.identity} "
+                        "issues a fresh one.")
+            code, age = got
+            return (f"📟 {rec.id}: **{code}** "
+                    f"({int(age)}s old — type it into Linked Devices)")
+        if sub in ("start", "stop", "restart", "remove"):
+            rec = self._pair_find(sup, parts[1] if len(parts) > 1 else "")
+            if rec is None:
+                return "which account? /pair lists them."
+            if sub == "start":
+                sup.start(rec.id)
+                return f"▶️ bridge starting for {rec.id}."
+            if sub == "stop":
+                sup.stop(rec.id)
+                return f"⏸️ bridge stopped for {rec.id}."
+            if sub == "restart":
+                sup.stop(rec.id)
+                sup.start(rec.id)
+                return f"🔁 bridge restarted for {rec.id}."
+            sup.remove(rec.id)
+            return (f"🗑️ {rec.id} removed from the pool. Its saved "
+                    "session stays on disk; the number can be paired "
+                    "again any time.")
+        return ("usage: /pair [whatsapp <number> [label]|code <id>|"
+                "start|stop|restart|remove <id>]")
+
     def _control_browser_watch(self, tail: str, *, chat_key: str = "",
                                message: Any = None) -> str:
         """``/browser watch [session]`` — attach a LiveView to a live
