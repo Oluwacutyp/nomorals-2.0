@@ -160,6 +160,10 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
     "rules", "member", "glog", "gsettings",
+    "balance", "mine", "work", "pay", "gshop", "quests", "treasury",
+    "drop", "claim",
+    "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
+    "unpin", "purge", "report",
     "game",
     *PUBLIC_GAME_COMMANDS,
 ])
@@ -438,6 +442,25 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "member": (0, 1),         # /member [@name] — group member card: tenure, activity, identity changes (P1)
     "glog": (0, 1),           # /glog [n] — the group's held audit log (admins; P1)
     "gsettings": (0, None),   # /gsettings [welcome|goodbye|clean on|off|rules add|clear|flood <n>|links ...] — group settings (admins; P1)
+    "balance": (0, 0),        # /balance — your sparks + the group treasury (P2 economy)
+    "mine": (0, 0),           # /mine — claim mined sparks at the decaying rate (P2)
+    "work": (0, 0),           # /work — a cooldown-bound shift; pay follows engagement + level (P2)
+    "pay": (0, None),         # /pay @member <amount> — transfer sparks; the tax % feeds the treasury (P2)
+    "gshop": (0, None),       # /gshop [buy <item>] — the group status shop (P2; 'shop' is the shop GAME)
+    "quests": (0, None),      # /quests [claim <id>] — group quests and their rewards (P2)
+    "treasury": (0, 0),       # /treasury — the group's purse: balance, circulation, health (P2)
+    "drop": (0, None),        # /drop <total> <per claim> — admin funds a giveaway pool (P2)
+    "claim": (0, 0),          # /claim — take your share of the live drop (P2)
+    "mute": (0, None),        # /mute [@member] [10m|2h|1d|inf] — admin: reply to their message or name them (P1 §4)
+    "unmute": (0, 1),         # /unmute [@member] — admin: lift a mute
+    "ban": (0, None),         # /ban [@member] [reason] — admin: reply or name
+    "unban": (0, 1),          # /unban [@member] — admin: lift a ban
+    "kick": (0, None),        # /kick [@member] [reason] — admin: out now, may rejoin
+    "warn": (0, None),        # /warn [@member] [reason] — admin: warns escalate to an auto-mute at the limit
+    "pin": (0, 0),            # /pin — admin: pin the message you reply to
+    "unpin": (0, 0),          # /unpin — admin: unpin the current pin
+    "purge": (0, 0),          # /purge — admin: delete the message you reply to
+    "report": (0, None),      # /report [@member] [reason] — member: flag something for the admins (held log)
     "notion": (0, None),      # /notion dbs|query|add — Notion reads + page writes
     "gcal": (0, None),        # /gcal [agenda] | add — Google Calendar
     "trello": (0, None),      # /trello boards|lists|cards|add — Trello
@@ -2037,10 +2060,86 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/glog [n]",
             "example": "/glog 10",
             "related": "/gsettings /member"},
-    "gsettings": {"what": "this group's settings: welcome and goodbye switches, service-message cleanup, the rules list, flood limit, link allowlist. Group admins only — Devon checks your platform admin status.",
-            "usage": "/gsettings | /gsettings welcome on|off | /gsettings rules add <text> | /gsettings rules clear | /gsettings flood <n> | /gsettings links <domains>|off",
+    "gsettings": {"what": "this group's settings: welcome and goodbye switches, service-message cleanup, the rules list, flood limit, link allowlist, the economy switch and transfer tax. Group admins only — Devon checks your platform admin status.",
+            "usage": "/gsettings | /gsettings welcome on|off | /gsettings rules add <text> | /gsettings rules clear | /gsettings flood <n> | /gsettings links <domains>|off | /gsettings economy on|off | /gsettings tax <pct>",
             "example": "/gsettings rules add No spam",
             "related": "/rules /glog"},
+    "balance": {"what": "your sparks balance in this group, with your recent ledger and the group treasury. Sparks are group game points — earned by chatting, streaks, quests, work, mining and in-group game wins.",
+            "usage": "/balance",
+            "example": "/balance",
+            "related": "/mine /work /quests /treasury"},
+    "mine": {"what": "claim mined sparks. The rate decays with each claim in a day and claims cool down between hits — grinding is pointless by design; your hashrate is your real engagement this week.",
+            "usage": "/mine",
+            "example": "/mine",
+            "related": "/balance /work"},
+    "work": {"what": "work a shift for sparks: one shift an hour, pay follows your engagement (hashrate) and your shift level, which rises every 10 shifts.",
+            "usage": "/work",
+            "example": "/work",
+            "related": "/balance /mine /quests"},
+    "pay": {"what": "send sparks to another member of this group. A small tax (set by the admins, default 2%) goes to the group treasury.",
+            "usage": "/pay @member <amount>",
+            "example": "/pay @ada 50",
+            "related": "/balance /treasury"},
+    "gshop": {"what": "the group status shop: spend sparks on status — a shout-out, a pinned message, a custom sticker or emoji, a nickname change. Status, never power.",
+            "usage": "/gshop | /gshop buy <item>",
+            "example": "/gshop buy shout_out",
+            "related": "/balance"},
+    "quests": {"what": "the group's quests: daily and weekly goals (helpful answers, streaks, events, invites) with spark rewards, claimable once per period.",
+            "usage": "/quests | /quests claim <id>",
+            "example": "/quests claim helpful_3",
+            "related": "/balance /work"},
+    "treasury": {"what": "the group's treasury and economy health: what's in the pool, how much circulates, who holds it, how many members were active this week.",
+            "usage": "/treasury",
+            "example": "/treasury",
+            "related": "/balance /pay /drop"},
+    "drop": {"what": "start a giveaway drop (admins): you fund a pool from your own sparks; members claim a fixed share each with /claim until it runs dry. One claim per member.",
+            "usage": "/drop <total> <per claim>",
+            "example": "/drop 500 50",
+            "related": "/claim /treasury"},
+    "claim": {"what": "claim your share of the live giveaway drop.",
+            "usage": "/claim",
+            "example": "/claim",
+            "related": "/drop /balance"},
+    "mute": {"what": "mute a member (admins): they can read but not send. Reply to their message with /mute, or name them. A duration like 10m, 2h, 1d sets the length; bare /mute is an hour, 'inf' is indefinite.",
+            "usage": "/mute [10m|2h|1d|inf] as a reply, or /mute @member [duration]",
+            "example": "/mute @spammer 2h",
+            "related": "/unmute /warn /ban"},
+    "unmute": {"what": "lift a member's mute (admins).",
+            "usage": "/unmute @member, or as a reply",
+            "example": "/unmute @ada",
+            "related": "/mute"},
+    "ban": {"what": "ban a member (admins): out of the group and can't rejoin until unbanned. Reply to their message or name them; anything after the name is the reason, kept in the group log.",
+            "usage": "/ban as a reply, or /ban @member [reason]",
+            "example": "/ban @spammer flooding",
+            "related": "/unban /kick /mute"},
+    "unban": {"what": "lift a ban (admins) — the member can rejoin.",
+            "usage": "/unban @member",
+            "example": "/unban @ada",
+            "related": "/ban"},
+    "kick": {"what": "kick a member (admins): out of the group now, but free to rejoin. Reply to their message or name them.",
+            "usage": "/kick as a reply, or /kick @member",
+            "example": "/kick @ada",
+            "related": "/ban /warn"},
+    "warn": {"what": "warn a member (admins). Warns are counted on the member's card; at the limit (default 3, set in /gsettings) the member is auto-muted for an hour and the count resets.",
+            "usage": "/warn as a reply, or /warn @member [reason]",
+            "example": "/warn @ada caps",
+            "related": "/mute /member"},
+    "pin": {"what": "pin a message (admins): reply to the message with /pin.",
+            "usage": "/pin as a reply",
+            "example": "/pin",
+            "related": "/unpin"},
+    "unpin": {"what": "unpin the currently pinned message (admins).",
+            "usage": "/unpin",
+            "example": "/unpin",
+            "related": "/pin"},
+    "purge": {"what": "delete a message (admins): reply to it with /purge.",
+            "usage": "/purge as a reply",
+            "example": "/purge",
+            "related": "/glog"},
+    "report": {"what": "report a member or message to the group admins. The report goes into the held group log with the author's name attached when you reply to their message; admins read it with /glog.",
+            "usage": "/report as a reply, or /report @member [reason]",
+            "example": "/report @ada spamming",
+            "related": "/glog"},
     "notion": {"what": "Notion: list databases, query rows, create pages — through your connected Notion integration.",
             "usage": "/notion dbs [query] | /notion query <db> [text] | /notion add <page-id> <title> [| <body>]",
             "example": "/notion add <page-id> Shopping list | milk | eggs",
@@ -2481,7 +2580,11 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("platform control", ["start", "stop", "profile", "chatmode", "style",
                           "doctor",
                           "update", "pull", "deploy", "restart"]),
-    ("groups & communities", ["rules", "member", "glog", "gsettings"]),
+    ("groups & communities", ["rules", "member", "glog", "gsettings",
+                            "balance", "mine", "work", "pay", "gshop",
+                            "quests", "treasury", "drop", "claim",
+                            "mute", "unmute", "ban", "unban", "kick",
+                            "warn", "pin", "unpin", "purge", "report"]),
     ("discovery", ["list", "commands", "menu", "help", "tour", "heal"]),
 ]
 
@@ -2738,7 +2841,11 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("platform control — updates & restarts",
      ["update", "pull", "deploy", "restart"]),
     ("groups & communities",
-     ["rules", "member", "glog", "gsettings"]),
+     ["rules", "member", "glog", "gsettings",
+      "balance", "mine", "work", "pay", "gshop", "quests",
+      "treasury", "drop", "claim",
+      "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
+      "unpin", "purge", "report"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]

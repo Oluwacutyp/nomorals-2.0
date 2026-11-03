@@ -159,6 +159,10 @@ class GameEngine:
         self.db = getattr(context, "db", None)
         self._send = send
         self._suggest = suggest
+        #: Optional group-economy bridge: callable(chat_key, player,
+        #: coins, game) invoked when a human wins coins in a group
+        #: room.  Installed by the runtime; None = no bridge.
+        self.coin_sink = None
         self._lock = threading.RLock()
         self._rooms: dict[str, Room] = {}        # chat_key -> live room
         self._by_id: dict[str, Room] = {}
@@ -1289,6 +1293,19 @@ class GameEngine:
                         p, won=won, game=room.game, points=points,
                         coins=coins, score=score)
                     msgs.append(f"🪙 {p.name}: +{coins} coins ({coin_why})")
+                    # one purse (group build P2): coins won in a
+                    # GROUP game also land in that group's economy
+                    # purse for the member — the runtime installs
+                    # the sink; the engine only reports the win.
+                    _sink = getattr(self, "coin_sink", None)
+                    if _sink is not None and coins > 0 \
+                            and room.kind == "group" and not p.is_ai:
+                        try:
+                            _sink(room.chat_key, p, int(coins),
+                                  room.game)
+                        except Exception:  # noqa: BLE001
+                            _log.debug("coin sink failed",
+                                       exc_info=True)
                     # economy ledger: every faucet tagged for the health
                     # report (sources/sinks, inflation watch)
                     try:

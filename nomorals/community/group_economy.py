@@ -69,7 +69,8 @@ _log = get_logger("nomorals.community.group_economy")
 __all__ = [
     "POINTS_NAME", "CURRENCY_DISCLAIMER", "EARN_TABLE", "QUESTS", "STATUS_SHOP",
     "EARN_CAPS", "MINING_BASE_RATE", "MINING_DECAY", "MINING_CLAIM_COOLDOWN_S",
-    "LedgerEntry", "GroupEconomy", "PrizePool", "season_key", "current_season",
+    "LedgerEntry", "GroupEconomy", "GroupEconomyError", "PrizePool",
+    "season_key", "current_season",
     "format_statement",
 ]
 
@@ -172,6 +173,13 @@ def _period_key(period: str, ts: float) -> str:
 # ── ledger ───────────────────────────────────────────────────────────────
 
 
+class GroupEconomyError(RuntimeError):
+    """The group's ledger exists but cannot be read.  Raised,
+    never swallowed into an empty balance: a corrupt ledger
+    freezes the economy (see GroupSurface) rather than losing
+    the group's money history to the next append."""
+
+
 @dataclass
 class LedgerEntry:
     """One append-only ledger line. Nothing here is ever deleted."""
@@ -244,8 +252,28 @@ class GroupEconomy:
             _log.warning("group economy save failed %s/%s: %s", group_id, name, exc)
 
     def _ledger(self, group_id: str) -> list[LedgerEntry]:
+        # The ledger is the money: an existing-but-unreadable
+        # ledger file is NOT an empty ledger.  Reading it as empty
+        # would let the next append overwrite the group's whole
+        # history with a single entry — unreadable raises, and the
+        # caller freezes economy writes instead (DESIGN §5
+        # integrity).  A missing file is a fresh group: empty.
+        path = self._path(group_id, "ledger")
+        raw: Any = []
+        if path.exists():
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise GroupEconomyError(
+                    f"group ledger for {group_id} is unreadable "
+                    f"({type(exc).__name__}: {exc}) — refusing to "
+                    f"treat it as empty") from exc
+            if not isinstance(raw, list):
+                raise GroupEconomyError(
+                    f"group ledger for {group_id} is not a list — "
+                    f"refusing to treat it as empty")
         out: list[LedgerEntry] = []
-        for item in self._load_json(group_id, "ledger", []) or []:
+        for item in raw or []:
             try:
                 e = LedgerEntry.from_dict(item)
                 if e.id:

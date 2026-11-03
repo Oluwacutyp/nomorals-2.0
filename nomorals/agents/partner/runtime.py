@@ -3650,6 +3650,63 @@ class PartnerRuntime(
         if kind == "gsettings":
             return self._control_gsettings(command.tail, message)
 
+        if kind == "balance":
+            return self._control_balance(message)
+
+        if kind == "mine":
+            return self._control_mine(message)
+
+        if kind == "work":
+            return self._control_work(message)
+
+        if kind == "pay":
+            return self._control_pay(command.tail, message)
+
+        if kind == "gshop":
+            return self._control_gshop(command.tail, message)
+
+        if kind == "quests":
+            return self._control_quests(command.tail, message)
+
+        if kind == "treasury":
+            return self._control_treasury(message)
+
+        if kind == "drop":
+            return self._control_drop(command.tail, message)
+
+        if kind == "claim":
+            return self._control_claim(message)
+
+        if kind == "mute":
+            return self._control_mute(command.tail, message)
+
+        if kind == "unmute":
+            return self._control_unmute(command.tail, message)
+
+        if kind == "ban":
+            return self._control_ban(command.tail, message)
+
+        if kind == "unban":
+            return self._control_unban(command.tail, message)
+
+        if kind == "kick":
+            return self._control_kick(command.tail, message)
+
+        if kind == "warn":
+            return self._control_warn(command.tail, message)
+
+        if kind == "pin":
+            return self._control_pin(command.tail, message)
+
+        if kind == "unpin":
+            return self._control_unpin(command.tail, message)
+
+        if kind == "purge":
+            return self._control_purge(command.tail, message)
+
+        if kind == "report":
+            return self._control_report(command.tail, message)
+
         if kind == "platforms":
             lines = ["platforms:"]
             for name, info in sorted(self.gateway.status().items()):

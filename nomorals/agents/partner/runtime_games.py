@@ -1765,6 +1765,9 @@ class RuntimeGamesMixin:
                 send=self._game_send,
                 suggest=self._game_suggest(),
             )
+            # Group economy bridge (P2): in-group game coins land
+            # in the group's purse too — one purse for group play.
+            engine.coin_sink = self._group_coin_sink
             # character/brain agent seats play through the live engine
             try:
                 from ...characters import CharacterStore, register_with_engine

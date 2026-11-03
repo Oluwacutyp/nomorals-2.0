@@ -1939,6 +1939,24 @@ class TelegramAdapter(ChatAdapter):
         return self._admin(
             self._restrict_coro(chat, user_id, minutes), "restrict")
 
+    async def _unrestrict_coro(self, chat: ChatRef,
+                               user_id: str) -> None:
+        from telethon.tl import functions
+        from telethon.tl.types import ChatBannedRights
+
+        entity = await self._resolve(chat)
+        user = await self._client.get_entity(int(user_id))
+        # Default banned rights = nothing banned: the mute lifts.
+        await self._client(functions.channels.EditBannedRequest(
+            channel=entity, participant=user,
+            banned_rights=ChatBannedRights(until_date=None)))
+
+    def admin_unrestrict(self, chat: ChatRef, user_id: str
+                         ) -> dict[str, Any]:
+        """Lift a mute (clear the send restriction)."""
+        return self._admin(
+            self._unrestrict_coro(chat, user_id), "unrestrict")
+
     async def _delete_coro(self, chat: ChatRef, message_id: str) -> None:
         from telethon.tl import functions
         entity = await self._resolve(chat)
@@ -2494,6 +2512,19 @@ class TelegramBotAdapter(ChatAdapter):
                 "bot_role": "personal" if self.owner_only else "gated"}
         if replied_audio_file_id:
             meta["replied_audio_file_id"] = replied_audio_file_id
+        # Who wrote the replied-to message: reply-targeted group
+        # admin commands (/mute /ban /warn …) act on the AUTHOR of
+        # the message the admin replied to — the standard grammar
+        # of every group-helper bot.  Without this the runtime only
+        # ever saw the replied message's id, never its author.
+        _replied_from = replied.get("from") or {}
+        if isinstance(_replied_from, dict) and _replied_from.get("id"):
+            meta["reply_to_sender"] = {
+                "id": str(_replied_from.get("id") or ""),
+                "username": str(_replied_from.get("username") or ""),
+                "name": str(_replied_from.get("first_name") or "")}
+            if replied.get("text"):
+                meta["reply_to_text"] = str(replied["text"])[:200]
         # Group service events (DESIGN §1: the group surface claims
         # joins/leaves): Bot API service messages carry no text, so
         # without this they reached the runtime as empty messages
@@ -3276,6 +3307,19 @@ class TelegramBotAdapter(ChatAdapter):
         if until:
             params["until_date"] = int(until)
         return self._admin("restrictChatMember", chat, **params)
+
+    def admin_unrestrict(self, chat: ChatRef, user_id: str
+                         ) -> dict[str, Any]:
+        """Lift a mute: re-grant the full standard permission set."""
+        full = {key: True for key in (
+            "can_send_messages", "can_send_audios",
+            "can_send_documents", "can_send_photos",
+            "can_send_videos", "can_send_video_notes",
+            "can_send_voice_notes", "can_send_polls",
+            "can_send_other_messages", "can_add_web_page_previews",
+            "can_invite_users", "can_pin_messages")}
+        return self._admin("restrictChatMember", chat,
+                           user_id=int(user_id), permissions=full)
 
     def admin_promote(self, chat: ChatRef, user_id: str,
                       title: str = "") -> dict[str, Any]:

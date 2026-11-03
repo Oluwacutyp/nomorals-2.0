@@ -273,6 +273,11 @@ class ModerationConfig:
     repeat_threshold: int = 3  # same text this many times → repeated
     repeat_window_s: float = 300.0
     warn_before_mute: bool = True
+    # Word filters (group build §4 — was the named GAP): per-group
+    # entries, plain text = case-insensitive substring, /…/ =
+    # regex.  filter_action is what a match earns.
+    word_filters: list[str] = field(default_factory=list)
+    filter_action: str = "delete"  # delete | warn | mute
 
 
 @dataclass
@@ -326,6 +331,26 @@ class Appeal:
 
 
 _URL_RE = re.compile(r"https?://([A-Za-z0-9.-]+)(?::\d+)?(?:[/?#]|$)", re.I)
+
+
+def _filter_hit(filters: list[str], text: str) -> str | None:
+    """The filter entry that matches ``text``, or None."""
+    lowered = text.lower()
+    for entry in filters:
+        entry = str(entry or "").strip()
+        if not entry:
+            continue
+        if len(entry) > 2 and entry.startswith("/") \
+                and entry.endswith("/"):
+            try:
+                if re.search(entry[1:-1], text, re.I):
+                    return entry
+                continue
+            except re.error:
+                pass  # fall through to a literal match
+        if entry.lower() in lowered:
+            return entry
+    return None
 
 
 def _normalise(text: str) -> str:
@@ -487,6 +512,24 @@ class Moderator:
                     kind="delete", reason=f"link to non-allowlisted domain {domain}",
                     rule="link_allowlist", user_id=user_id, group_id=group_id,
                 )
+                actions.append(act)
+                self._log(act)
+                return actions
+        # Word filters: per-group list; /…/ entries are regex,
+        # anything else a case-insensitive substring.  A broken
+        # regex degrades to a literal match, never to a crash and
+        # never to silently not filtering.
+        if cfg.word_filters and text:
+            hit = _filter_hit(cfg.word_filters, text)
+            if hit is not None:
+                kind = cfg.filter_action \
+                    if cfg.filter_action in ("delete", "warn", "mute") \
+                    else "delete"
+                act = ModerationAction(
+                    kind=kind,
+                    reason=f"filtered word: {hit}",
+                    rule="word_filter", user_id=user_id,
+                    group_id=group_id)
                 actions.append(act)
                 self._log(act)
                 return actions
