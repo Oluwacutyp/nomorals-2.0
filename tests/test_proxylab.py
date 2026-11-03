@@ -281,6 +281,63 @@ class ProxyLabTests(unittest.TestCase):
         self.assertIn("source_stats", report)
         self.assertIn("disabled_sources", report)
 
+    def test_scrape_forwards_on_source_progress(self):
+        lab = PL.ProxyLab(_ctx(self))
+        lab._scraper = PL.ProxyScraper(
+            fetcher=lambda url: b"1.2.3.4:8080\n",
+            sources=[("s-ok", "http://ok/x.txt", "list")],
+        )
+        events = []
+        report = lab.scrape(
+            "http", sources=[("s-ok", "http://ok/x.txt", "list")],
+            on_source=lambda n, a, e: events.append((n, a, e)))
+        self.assertEqual(report["total"], 1)
+        self.assertEqual(events, [("s-ok", 1, "")])
+
+    def test_scrape_on_source_reports_source_errors(self):
+        def _boom(url):
+            raise OSError("dead feed")
+
+        lab = PL.ProxyLab(_ctx(self))
+        lab._scraper = PL.ProxyScraper(
+            fetcher=_boom,
+            sources=[("s-dead", "http://dead/x.txt", "list")],
+        )
+        events = []
+        lab.scrape(
+            "http", sources=[("s-dead", "http://dead/x.txt", "list")],
+            on_source=lambda n, a, e: events.append((n, a, e)))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0], "s-dead")
+        self.assertEqual(events[0][1], 0)
+        self.assertIn("dead feed", events[0][2])
+
+    def test_refresh_empty_store_accepts_progress_hooks(self):
+        # the live /toolhub path: an empty candidate store forces
+        # refresh()'s scrape branch, which forwards the hook into
+        # scrape() — the call that died live with "unexpected
+        # keyword argument 'on_source'".
+        lab = PL.ProxyLab(_ctx(self))
+        lab._scraper = PL.ProxyScraper(
+            fetcher=lambda url: b"1.2.3.4:8080\n",
+            sources=[("s-ok", "http://ok/x.txt", "list")],
+        )
+        lab.registry.sources = lambda: [
+            ("s-ok", "http://ok/x.txt", "list")]
+
+        class _StubTester:
+            detect_country = True
+
+            def test_many(self, proxies, limit=150):
+                return []
+
+        lab._tester = _StubTester()
+        events = []
+        report = lab.refresh(
+            on_scrape_source=lambda n, a, e: events.append((n, a, e)))
+        self.assertEqual(report["scraped"], 1)
+        self.assertEqual(events, [("s-ok", 1, "")])
+
 
 class RegistrationTests(unittest.TestCase):
     def test_all_proxy_tools_register(self):

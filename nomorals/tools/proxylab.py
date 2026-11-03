@@ -1591,7 +1591,18 @@ class ProxyLab:
 
     def scrape(self, schemes: str = "http,https,socks4,socks5",
                limit: int = 2000,
-               sources: list[tuple[str, str, str]] | None = None) -> dict[str, Any]:
+               sources: list[tuple[str, str, str]] | None = None,
+               on_source: Callable[[str, int, str], None] | None = None,
+               ) -> dict[str, Any]:
+        """Scrape via the inner scraper and feed the harvest back
+        into registry health + the candidate store. ``on_source``
+        is the per-source progress hook ``ProxyScraper.scrape``
+        already fires — this facade accepts it because
+        ``refresh()`` forwards it here (the /toolhub live path
+        died on exactly this missing parameter: refresh passed
+        ``on_source=`` into a scrape() that never took it, but
+        only on the empty-store branch, so the defect slept
+        until a fresh host scraped)."""
         pool = sources or self.registry.sources()
         # yield quarantine (proxy_sources.SourceYieldTracker): a source
         # whose measured live rate collapsed sits out until its 24h
@@ -1603,7 +1614,15 @@ class ProxyLab:
             skip = set(yield_quarantined)
             pool = [s for s in pool if s[0] not in skip]
         self._scraper.sources = pool
-        report = self._scraper.scrape(schemes, sources=pool, limit=limit)
+        # on_source rides only when given: scraper doubles in the
+        # test corpus implement the pre-hook signature, and an
+        # unexpected keyword would break them — the same
+        # discipline refresh() applies to test_many's on_done.
+        scrape_kwargs: dict[str, Any] = {"sources": pool,
+                                         "limit": limit}
+        if on_source is not None:
+            scrape_kwargs["on_source"] = on_source
+        report = self._scraper.scrape(schemes, **scrape_kwargs)
         report["yield_quarantined"] = yield_quarantined
         try:
             self.store.save([], candidates=report["proxies"])
