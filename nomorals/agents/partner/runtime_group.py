@@ -55,6 +55,37 @@ class RuntimeGroupMixin:
         self.gateway.send(chat.platform, chat, str(text),
                           buttons=buttons, parse_mode=parse_mode)
 
+    def _rendered_mode(self, message, text: str) -> str:  # type: ignore[no-untyped-def]
+        """Parse mode for a surface-rendered text (welcome /
+        goodbye): the typography organ renders Telegram-family
+        surfaces as HTML, so the send must SAY so — otherwise
+        the gateway's F1 presentation would convert the already-
+        rendered HTML a second time.  Other platforms' renders
+        carry their own native marks and send bare."""
+        platform = str(getattr(message.chat, "platform", "") or "")
+        if platform.startswith("telegram") and "<" in str(text):
+            return "HTML"
+        return ""
+
+    def _card(self, message, card, buttons=None):  # type: ignore[no-untyped-def]
+        """Render a typography Card (§27) for this message's
+        platform under the group's presentation settings, and
+        bundle the buttons the handler authored from the same
+        state.  This is the ONE way group control replies are
+        composed now: handlers name what renders, the group's
+        theme decides how it looks."""
+        from ...social.chat.tgbot_buttons import actionable
+        from ...social.chat.typography import render_card
+
+        surface = self._group_surface()
+        key = message.chat.key
+        rendered = render_card(
+            card, platform=str(message.chat.platform or ""),
+            settings=surface.store.settings(key))
+        if buttons is not None:
+            return actionable(rendered.text, buttons)
+        return rendered.text
+
     def _welcome_buttons(self, surface: Any, key: str) -> list:
         """Buttons authored from the group's LIVE state: rules are
         always reachable; the sparks row appears only when the
@@ -95,8 +126,10 @@ class RuntimeGroupMixin:
                 if text:
                     welcomed.append(text)
             for text in welcomed:
-                self._send(message.chat, text,
-                           buttons=self._welcome_buttons(surface, key))
+                self._send(
+                    message.chat, text,
+                    buttons=self._welcome_buttons(surface, key),
+                    parse_mode=self._rendered_mode(message, text))
             self._clean_service_message(surface, message)
             return True
         if service == "leave":
@@ -106,7 +139,10 @@ class RuntimeGroupMixin:
                     key, str(left.get("id") or ""),
                     group_name=str(message.chat.title or ""))
                 if text:
-                    self._send(message.chat, text)
+                    self._send(
+                        message.chat, text,
+                        parse_mode=self._rendered_mode(message,
+                                                       text))
             self._clean_service_message(surface, message)
             return True
         if service == "delete":
@@ -346,6 +382,18 @@ class RuntimeGroupMixin:
         surface.update_settings(key, defense=defense)
         return defense
 
+    def _presentation_update(self, surface, key, **fields):  # type: ignore[no-untyped-def]
+        """Mutate the presentation settings block (DESIGN §27:
+        theme / per-class presets / stamp) through the store's
+        own settings machinery (defaults-merged, persisted)."""
+        import copy as _copy
+
+        current = surface.store.settings(key)
+        pres = _copy.deepcopy(current.get("presentation") or {})
+        pres.update(fields)
+        surface.update_settings(key, presentation=pres)
+        return pres
+
     # ---- group commands (P1 slice 2) --------------------------------
     def _control_group_help(self, message):  # type: ignore[no-untyped-def]
         """Bare /help INSIDE a group (owner order 2026-11-03):
@@ -356,79 +404,80 @@ class RuntimeGroupMixin:
         stay gated at execution.
 
         Presentation build: the reply is an ActionableMessage —
-        HTML text and buttons authored from the SAME state (the
+        text and buttons authored from the SAME state (the
         sparks row exists exactly when the economy runs here; the
-        buttons mirror the sections on screen)."""
-        import html as _html
+        buttons mirror the sections on screen).  Typography
+        (§27): composed as a Card, settings class — the group's
+        theme decides the form."""
+        from ...social.chat.typography import Card
 
-        from ...social.chat.tgbot_buttons import actionable
         key = message.chat.key
         surface = self._group_surface()
         settings = surface.store.settings(key)
         members = surface.members(key)
         eco = surface.economy_on(key)
-        title = _html.escape(message.chat.title or "this group")
-        lines = [
-            f"🛠️ <b>{title}</b> — what I do here",
-            "",
-            "<b>for everyone:</b>",
-            "  /rules — the group rules",
-            "  /report — flag a message or member for the admins "
+        card = Card("settings",
+                    title=f"{message.chat.title or 'this group'} "
+                          f"— what I do here",
+                    icon="🛠️")
+        everyone = [
+            "/rules — the group rules",
+            "/report — flag a message or member for the admins "
             "(reply to it, or /report @member why)",
-            "  /member [@name] — a member's card: tenure, activity, "
+            "/member [@name] — a member's card: tenure, activity, "
             "username/name changes",
-            "  /ping — check I'm alive, and how fast I answered",
-            "  🎮 games — /ttt /connect4 /reversi /checkers /mines "
+            "/ping — check I'm alive, and how fast I answered",
+            "🎮 games — /ttt /connect4 /reversi /checkers /mines "
             "and the rest of the board; /game lists them, moves are "
             "plain text (a1, b2 …). Some games queue you against "
             "players on other platforms.",
         ]
         if eco:
-            lines.append(
-                "  🪙 sparks (the group purse) — /balance · /daily · "
+            everyone.append(
+                "🪙 sparks (the group purse) — /balance · /daily · "
                 "/mine · /work · /pay @member 50 · /deposit · "
                 "/withdraw · /gshop · /quests · /treasury · /top · "
                 "/tax · /claim when a drop is live. Chatting, "
                 "streaks, quests and in-group game wins all earn.")
-            lines.append(
-                "  🥷 the risky side — /rob @member (fail and it's "
+            everyone.append(
+                "🥷 the risky side — /rob @member (fail and it's "
                 "jail; /bail gets you out) · 🎰 /slots 10 · 🪙 "
                 "/coinflip 10 — losses feed the treasury and the "
                 "jackpot pot; triple 7️⃣ takes the pot.")
-        lines += [
-            "  /help /balance — the full page for any command",
-            "",
-            "<b>for admins:</b>",
-            "  /gsettings — welcome & goodbye, the rules list, "
+        everyone.append(
+            "/help /balance — the full page for any command")
+        card.block_lines(everyone, title="for everyone:")
+        card.block_lines([
+            "/gsettings — welcome & goodbye, the rules list, "
             "flood/link moderation, service-message cleanup, the "
             "economy switch and transfer tax",
-            "  /drop 100 10 — fund a giveaway pool from your own "
+            "/drop 100 10 — fund a giveaway pool from your own "
             "sparks (or /drop treasury 100 10 from the treasury); "
             "members claim with /claim",
-            "  /grant @member 100 — pay a member from the treasury; "
+            "/grant @member 100 — pay a member from the treasury; "
             "above the governance threshold a second admin must "
             "/approve it first",
-            "  moderation, by hand: reply to a member's message "
+            "moderation, by hand: reply to a member's message "
             "with /warn, /mute 10m|2h|1d, /ban or /kick — or name "
             "@member instead. /unmute /unban undo them; /pin and "
             "/purge work on the message you reply to; warns pile "
             "up to an automatic mute (limit in /gsettings).",
-            "  /glog — the group audit log (I keep it; I only show "
+            "/glog — the group audit log (I keep it; I only show "
             "it when an admin asks)",
-            "  /strikes — the defense strike ledger: who is on "
+            "/strikes — the defense strike ledger: who is on "
             "the ladder, and how close the rungs are",
-            "  I moderate on my own: floods, repeat spam and "
+            "I moderate on my own: floods, repeat spam and "
             "off-allowlist links get deleted; crash payloads are "
             "quarantined, channel injections and mass tags are "
             "struck; repeat offenders are muted, kicked, then "
             "banned — all tuned in /gsettings.",
-            "",
-            f"<i>{len(members)} members in my ledger · "
+        ], title="for admins:")
+        card.note(
+            f"{len(members)} members in my ledger · "
             f"{len(settings.get('rules') or [])} rules · welcome "
             f"{'on' if settings['welcome_enabled'] else 'off'} · "
             f"link moderation "
-            f"{'allowlist' if (settings['moderation'].get('link_allowlist')) else 'open'}</i>",
-        ]
+            f"{'allowlist' if (settings['moderation'].get('link_allowlist')) else 'open'}")
         buttons = [[("📜 Rules", "rules"), ("🎮 Games", "game")]]
         if eco:
             buttons.append([("🪙 My sparks", "balance"),
@@ -436,7 +485,7 @@ class RuntimeGroupMixin:
                             ("🏦 Treasury", "treasury")])
         buttons.append([("⚙️ Group settings", "gsettings"),
                         ("📋 Audit log", "glog")])
-        return actionable("\n".join(lines), buttons)
+        return self._card(message, card, buttons)
 
     def _group_key_or_none(self, message):  # type: ignore[no-untyped-def]
         if message is None:
@@ -488,15 +537,17 @@ class RuntimeGroupMixin:
             n = int(str(arg or "10").strip() or 10)
         except ValueError:
             n = 10
-        import html as _html
-
-        entries = self._group_surface().audit(key, limit=max(1, min(n, 50)))
+        entries = self._group_surface().audit(
+            key, limit=max(1, min(n, 50)))
         if not entries:
             return "nothing in the group log yet."
-        lines = ["📋 <b>group log</b> (held by me, shown on demand):"]
-        for entry in entries:
-            lines.append(_html.escape(_audit_line(entry)))
-        return "\n".join(lines)
+        from ...social.chat.typography import Card
+
+        card = Card("settings", title="Group log", icon="📋")
+        card.board("\n".join(_audit_line(entry)
+                             for entry in entries))
+        card.note("held by me, shown on demand")
+        return self._card(message, card)
 
     def _control_gsettings(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key = self._group_key_or_none(message)
@@ -507,7 +558,6 @@ class RuntimeGroupMixin:
         surface = self._group_surface()
         text = str(tail or "").strip()
         if not text:
-            from ...social.chat.tgbot_buttons import actionable
             s = surface.store.settings(key)
             mod = s["moderation"]
 
@@ -519,6 +569,10 @@ class RuntimeGroupMixin:
                         f"gsettings {kind} "
                         f"{'off' if on_now else 'on'}")
 
+            pres = s.get("presentation") or {}
+            theme_cycle = {"house": "clean", "clean": "board",
+                           "board": "house"}
+            theme_now = str(pres.get("theme") or "house")
             buttons = [
                 [_toggle("👋 Welcome", "welcome",
                          bool(s["welcome_enabled"])),
@@ -528,6 +582,11 @@ class RuntimeGroupMixin:
                          bool(s["clean_service"])),
                  _toggle("🪙 Economy", "economy",
                          bool(s["economy_enabled"]))],
+                [(f"🎨 Theme: {theme_now}",
+                  f"gsettings theme "
+                  f"{theme_cycle.get(theme_now, 'house')}"),
+                 _toggle("🔖 Stamp", "stamp",
+                         bool(pres.get("stamp", True)))],
             ]
             # Defense block (DESIGN §17): sensor states from the
             # same settings the pipeline reads + the platform-
@@ -558,11 +617,35 @@ class RuntimeGroupMixin:
             seen: set = set()
             degraded = [x for x in degraded
                         if not (x in seen or seen.add(x))][:3]
-            defense_block = (
-                f"\ndefense: autonomy "
+            # Typography (§27): the settings panel is a Card —
+            # state blocks, then the change grammar as code
+            # lines, each rendered per platform by the organ.
+            from ...social.chat.typography import (
+                DEFAULT_STAMP_TEXT, Card, resolve_style)
+
+            card = Card("settings", title="Group settings",
+                        icon="⚙️")
+            card.block_lines([
+                f"welcome: {'on' if s['welcome_enabled'] else 'off'} · "
+                f"goodbye: {'on' if s['goodbye_enabled'] else 'off'} · "
+                f"service cleanup: {'on' if s['clean_service'] else 'off'}",
+                f"rules: {len(s.get('rules') or [])} · "
+                f"flood: {mod['flood_max']} per "
+                f"{int(mod['flood_window_s'])}s · repeats ×"
+                f"{mod['repeat_threshold']} · links: "
+                f"{', '.join(mod.get('link_allowlist') or []) or 'open'}"
+                f" · filters: {len(mod.get('word_filters') or [])} "
+                f"({mod.get('filter_action') or 'delete'})",
+                f"economy: {'on' if s['economy_enabled'] else 'off'}"
+                f" · transfer tax {s.get('transfer_tax_pct', 2)}%"
+                f" · fine {s.get('fine_amount', 0)}"
+                f" · governance ≥{s.get('governance_threshold', 500)}",
+            ])
+            defense_lines = [
+                f"autonomy "
                 f"{'ON' if d.get('autonomy', True) else 'OFF'}"
                 f" (owner's switch — WhatsApp: any admin; "
-                f"Telegram: group owner only)\n"
+                f"Telegram: group owner only)",
                 f"anticrash: "
                 f"{'on' if d_ac.get('enabled', True) else 'off'}"
                 f" ({d_ac.get('action', 'delete')}) · antichannel: "
@@ -570,7 +653,7 @@ class RuntimeGroupMixin:
                 f" · antitag: "
                 f"{'on' if d_tg.get('enabled', True) else 'off'}"
                 f" (≤{d_tg.get('max_mentions', 10)} mentions or "
-                f"{d_tg.get('max_roster_pct', 20)}% of the group)\n"
+                f"{d_tg.get('max_roster_pct', 20)}% of the group)",
                 f"antidelete: "
                 f"{'on' if d_dl.get('enabled', True) else 'off'}"
                 f" ({d_dl.get('mode', 'log')}) · antiedit: "
@@ -579,57 +662,60 @@ class RuntimeGroupMixin:
                 f"{s.get('warn_threshold', 3)} · kick at "
                 f"{d_esc.get('kick_at', 5)} · ban at "
                 f"{d_esc.get('ban_at', 7)} "
-                f"({d_esc.get('window_days', 7)}-day window)"
-                + (("\n⚠ " + "\n⚠ ".join(honesty)) if honesty
-                   else "")
-                + (("\ndegraded here: " + "; ".join(degraded))
-                   if degraded else "")
-                + f"\n<code>/gsettings autonomy on|off</code> · "
-                  f"<code>/gsettings anticrash on|off|delete|flag"
-                  f"</code>\n"
-                  f"<code>/gsettings antichannel on|off</code> · "
-                  f"<code>/gsettings antitag on|off</code> · "
-                  f"<code>/gsettings antitag N</code>\n"
-                  f"<code>/gsettings antidelete on|off</code> · "
-                  f"<code>/gsettings antidelete mode "
-                  f"log|callout</code>\n"
-                  f"<code>/gsettings antiedit on|off</code> · "
-                  f"<code>/gsettings antiedit mode log|callout"
-                  f"</code>")
-            return actionable(
-                f"⚙️ <b>group settings</b>\n"
-                f"welcome: {'on' if s['welcome_enabled'] else 'off'} · "
-                f"goodbye: {'on' if s['goodbye_enabled'] else 'off'} · "
-                f"service cleanup: {'on' if s['clean_service'] else 'off'}\n"
-                f"rules: {len(s.get('rules') or [])} · "
-                f"flood: {mod['flood_max']} per "
-                f"{int(mod['flood_window_s'])}s · repeats ×"
-                f"{mod['repeat_threshold']} · links: "
-                f"{', '.join(mod.get('link_allowlist') or []) or 'open'}"
-                f" · filters: {len(mod.get('word_filters') or [])} "
-                f"({mod.get('filter_action') or 'delete'})\n"
-                f"economy: {'on' if s['economy_enabled'] else 'off'}"
-                f" · transfer tax {s.get('transfer_tax_pct', 2)}%"
-                f" · fine {s.get('fine_amount', 0)}"
-                f" · governance ≥{s.get('governance_threshold', 500)}\n"
-                f"tap a button to flip a switch, or type:\n"
-                f"<code>/gsettings welcome on|off</code> · "
-                f"<code>/gsettings goodbye on|off</code> · "
-                f"<code>/gsettings clean on|off</code>\n"
-                f"<code>/gsettings rules add TEXT</code> · "
-                f"<code>/gsettings rules clear</code>\n"
-                f"<code>/gsettings flood N</code> · "
-                f"<code>/gsettings links DOMAINS|off</code>\n"
-                f"<code>/gsettings economy on|off</code> · "
-                f"<code>/gsettings tax PCT</code> · "
-                f"<code>/gsettings warns N</code>\n"
-                f"<code>/gsettings fine N</code> · "
-                f"<code>/gsettings governance N</code>\n"
-                f"<code>/gsettings filter add WORD</code> · "
-                f"<code>/gsettings filter action "
-                f"delete|warn|mute</code>"
-                f"{defense_block}",
-                buttons)
+                f"({d_esc.get('window_days', 7)}-day window)",
+            ]
+            defense_lines += [f"⚠ {note}" for note in honesty]
+            if degraded:
+                defense_lines.append(
+                    "degraded here: " + "; ".join(degraded))
+            card.block_lines(defense_lines, title="Defense")
+            game_style = resolve_style(s, "game")
+            economy_style = resolve_style(s, "economy")
+            card.block_lines([
+                f"theme: {game_style.theme} · games render "
+                f"{game_style.preset} · panels render "
+                f"{economy_style.preset}",
+                f"stamp: "
+                f"{'ON' if pres.get('stamp', True) else 'OFF'}"
+                f" — \"{pres.get('stamp_text') or DEFAULT_STAMP_TEXT}\""
+                f" on presented panels"
+                + (f" (classes: "
+                   f"{', '.join(pres.get('stamp_classes') or [])})"
+                   if pres.get("stamp_classes") else ""),
+            ], title="Presentation")
+            card.block_lines([
+                "`/gsettings welcome on|off` · "
+                "`/gsettings goodbye on|off` · "
+                "`/gsettings clean on|off`",
+                "`/gsettings rules add TEXT` · "
+                "`/gsettings rules clear`",
+                "`/gsettings flood N` · "
+                "`/gsettings links DOMAINS|off`",
+                "`/gsettings economy on|off` · "
+                "`/gsettings tax PCT` · "
+                "`/gsettings warns N`",
+                "`/gsettings fine N` · "
+                "`/gsettings governance N`",
+                "`/gsettings filter add WORD` · "
+                "`/gsettings filter action delete|warn|mute`",
+                "`/gsettings autonomy on|off` · "
+                "`/gsettings anticrash on|off|delete|flag`",
+                "`/gsettings antichannel on|off` · "
+                "`/gsettings antitag on|off` · "
+                "`/gsettings antitag N`",
+                "`/gsettings antidelete on|off` · "
+                "`/gsettings antidelete mode log|callout`",
+                "`/gsettings antiedit on|off` · "
+                "`/gsettings antiedit mode log|callout`",
+                "`/gsettings theme house|clean|board` · "
+                "`/gsettings class game board|clean|default`",
+                "`/gsettings stamp on|off` · "
+                "`/gsettings stamp text TEXT|default` · "
+                "`/gsettings stamp classes a,b|default`",
+            ], title="Change it")
+            card.note("tap a button to flip a switch, or type a "
+                      "command")
+            return self._card(message, card, buttons)
         parts = text.split(None, 2)
         head = parts[0].lower()
         rest = parts[1] if len(parts) > 1 else ""
@@ -766,6 +852,65 @@ class RuntimeGroupMixin:
                 self._defense_update(surface, key, head,
                                      callout_to=rest2.lower())
                 return f"{head} callouts go to: {rest2.lower()}."
+        # ── presentation grammar (DESIGN §27) ───────────────────
+        if head == "theme" and rest.lower() in (
+                "house", "clean", "board"):
+            self._presentation_update(surface, key,
+                                      theme=rest.lower())
+            return (f"presentation theme: {rest.lower()} — the "
+                    "whole group's surfaces follow it.")
+        if head == "class" and rest.lower() in (
+                "economy", "moderation", "game", "briefing",
+                "announcement", "leaderboard", "settings",
+                "chat") and rest2.lower() in (
+                "clean", "board", "default"):
+            current = surface.store.settings(key)
+            classes = dict(
+                (current.get("presentation") or {}).get(
+                    "classes") or {})
+            if rest2.lower() == "default":
+                classes.pop(rest.lower(), None)
+                self._presentation_update(surface, key,
+                                          classes=classes)
+                return (f"{rest.lower()} surfaces follow the "
+                        "theme again.")
+            classes[rest.lower()] = rest2.lower()
+            self._presentation_update(surface, key,
+                                      classes=classes)
+            return (f"{rest.lower()} surfaces render "
+                    f"{rest2.lower()} in this group.")
+        if head == "stamp" and rest.lower() in ("on", "off"):
+            self._presentation_update(
+                surface, key, stamp=(rest.lower() == "on"))
+            return (f"footer stamp {'on' if rest.lower() == 'on' else 'off'}"
+                    " for presented panels.")
+        if head == "stamp" and rest.lower() == "text":
+            if rest2.lower() in ("", "default", "clear"):
+                self._presentation_update(surface, key,
+                                          stamp_text="")
+                return "stamp text back to the house default."
+            self._presentation_update(surface, key,
+                                      stamp_text=rest2)
+            return f"stamp text: “{rest2}”."
+        if head == "stamp" and rest.lower() == "classes":
+            if rest2.lower() in ("", "default", "clear"):
+                self._presentation_update(surface, key,
+                                          stamp_classes=[])
+                return ("stamp classes back to the presented "
+                        "defaults.")
+            wanted = [c.strip().lower() for c in
+                      rest2.replace(" ", ",").split(",")
+                      if c.strip()]
+            from ...social.chat.typography import SURFACE_CLASSES
+
+            wanted = [c for c in wanted if c in SURFACE_CLASSES]
+            if not wanted:
+                return ("name at least one surface class: "
+                        "economy, game, briefing, announcement, "
+                        "leaderboard, moderation, settings, chat.")
+            self._presentation_update(surface, key,
+                                      stamp_classes=wanted)
+            return f"stamp shows on: {', '.join(wanted)}."
         return ("I didn't follow that — /gsettings alone shows the "
                 "current settings and the change grammar.")
 
@@ -1013,26 +1158,33 @@ class RuntimeGroupMixin:
             if not rows:
                 return "no strikes on record right now."
             rows.sort(key=lambda r: -r[0])
-            lines = ["⚖️ <b>strike ledger</b> (live window):"]
-            for count, uid, member in rows[:10]:
-                who = member.get("name") or (
+            from ...social.chat.typography import Card
+
+            card = Card("moderation", title="Strike ledger",
+                        icon="⚖️")
+            card.stats([
+                (str(member.get("name") or (
                     f"@{member['username']}"
-                    if member.get("username") else uid)
-                lines.append(f"{who} — {count} strike"
-                             f"{'s' if count != 1 else ''}")
-            return "\n".join(lines)
+                    if member.get("username") else uid)),
+                 f"{count} strike{'s' if count != 1 else ''}")
+                for count, uid, member in rows[:10]])
+            card.note("live window")
+            return self._card(message, card)
         info = surface.strikes_for(key, user_id)
         window = info["window_days"]
         if not info["count"]:
             return (f"{label} — clean record (no strikes in the "
                     f"last {window} days).")
-        lines = [f"⚖️ {label} — {info['count']} strike"
-                 f"{'s' if info['count'] != 1 else ''} "
-                 f"(last {window} days):"]
-        for strike in info["strikes"]:
-            lines.append(
-                f"· {strike.get('rule')} ({strike.get('action')})"
-                f" — {_fmt_ts(strike.get('ts'))}")
+        from ...social.chat.typography import Card
+
+        card = Card("moderation", title="Strike record", icon="⚖️")
+        card.line(f"**{label}** — {info['count']} strike"
+                  f"{'s' if info['count'] != 1 else ''} "
+                  f"(last {window} days)")
+        card.block_lines([
+            f"· {strike.get('rule')} ({strike.get('action')})"
+            f" — {_fmt_ts(strike.get('ts'))}"
+            for strike in info["strikes"]])
         cfg = surface.defense_config(key)
         threshold = int(surface.store.settings(
             key).get("warn_threshold") or 3)
@@ -1044,8 +1196,8 @@ class RuntimeGroupMixin:
         if cfg.ban_at and info["count"] < cfg.ban_at:
             rungs.append(f"ban at {cfg.ban_at}")
         if rungs:
-            lines.append("next: " + " · ".join(rungs))
-        return "\n".join(lines)
+            card.note("next: " + " · ".join(rungs))
+        return self._card(message, card)
 
     def _control_pin(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._mod_gate(message)
@@ -1162,30 +1314,35 @@ class RuntimeGroupMixin:
         key, err = self._economy_gate(message)
         if err:
             return err
-        import html as _html
+        from ...social.chat.typography import Card, sparks
 
-        from ...social.chat.tgbot_buttons import actionable
         surface = self._group_surface()
         user_id = str(message.sender_id or message.sender or "")
         stmt = surface.economy.statement(key, user_id)
         member = surface.members(key).get(user_id) or {}
-        name = _html.escape(
-            str(member.get("name") or message.sender or "you"))
+        name = str(member.get("name") or message.sender or "you")
         wallet = int(stmt.get("balance", 0))
         bank = surface.economy.bank_balance(key, user_id)
-        lines = [f"💰 <b>{name}</b> — wallet <b>{wallet}</b> sparks"]
+        card = Card("economy", title=name, icon="💰")
+        rows = [("Wallet", sparks(wallet), True)]
         if bank:
-            lines.append(f"🏦 banked: <b>{bank}</b> sparks "
-                         f"(safe from robbery) · total "
-                         f"<b>{wallet + bank}</b>")
+            rows.append(("Banked", sparks(bank), True))
+            rows.append(("Total", sparks(wallet + bank), True))
+        card.stats(rows)
         for badge in stmt.get("badges", []):
-            lines.append(f"  🏅 {_html.escape(str(badge.get('badge')))}"
-                         f" ({_html.escape(str(badge.get('season')))})")
-        lines.append(
-            f"🏦 group treasury: "
-            f"{surface.economy.treasury_balance(key)} sparks · "
-            f"jackpot pot: {surface.economy.jackpot_balance(key)}")
-        lines.append(f"<i>{_html.escape(str(stmt.get('disclaimer') or ''))}</i>")
+            card.line(f"🏅 {badge.get('badge')} "
+                      f"({badge.get('season')})")
+        card.stats([
+            ("Group treasury",
+             sparks(surface.economy.treasury_balance(key)), True),
+            ("Jackpot pot",
+             sparks(surface.economy.jackpot_balance(key)), True),
+        ], title="The group")
+        if bank:
+            card.note("banked sparks are safe from robbery")
+        disclaimer = str(stmt.get("disclaimer") or "")
+        if disclaimer:
+            card.flavor(disclaimer)
         buttons = [[("⛏️ Mine", "mine"), ("🛠️ Work", "work")],
                    [("🗺️ Quests", "quests"), ("🛒 Shop", "gshop")]]
         vault_row = []
@@ -1195,7 +1352,7 @@ class RuntimeGroupMixin:
             vault_row.append(("💵 Withdraw", "withdraw all"))
         if vault_row:
             buttons.append(vault_row)
-        return actionable("\n".join(lines), buttons)
+        return self._card(message, card, buttons)
 
     def _control_mine(self, message):  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
@@ -1215,11 +1372,18 @@ class RuntimeGroupMixin:
                 f"between hits, and the daily cap is real. "
                 f"Next claim pays <b>{rate}</b> sparks.", buttons)
         rate = surface.economy.hashrate(key, user_id)
-        return actionable(
-            f"⛏️ <b>+{entry.amount} sparks</b> "
-            f"(balance {surface.economy.balance(key, user_id)}). "
-            f"Your hashrate is {rate['hashrate']} — it's "
-            f"engagement: real activity this week.", buttons)
+        from ...social.chat.typography import Card, sparks
+
+        card = Card("economy", title="Mining claim", icon="⛏️")
+        card.line(f"**+{sparks(entry.amount)}**")
+        card.stats([
+            ("Balance",
+             sparks(surface.economy.balance(key, user_id)), True),
+            ("Hashrate", str(rate["hashrate"])),
+        ])
+        card.note("hashrate is engagement: real activity this "
+                  "week")
+        return self._card(message, card, buttons)
 
     def _control_work(self, message):  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
@@ -1235,11 +1399,14 @@ class RuntimeGroupMixin:
                 return (f"🛠️ you're between shifts — next one opens "
                         f"in ~{max(1, result['wait_s'] // 60)} min.")
             return "🛠️ no shift paid — the daily earn cap is hit."
-        from ...social.chat.tgbot_buttons import actionable
-        return actionable(
-            f"🛠️ shift done: <b>+{result['pay']} sparks</b> "
-            f"(level {result['level']}, balance "
-            f"{result['balance']}).",
+        from ...social.chat.typography import Card, sparks
+
+        card = Card("economy", title="Shift done", icon="🛠️")
+        card.line(f"**+{sparks(result['pay'])}**")
+        card.stats([("Level", str(result["level"])),
+                    ("Balance", sparks(result["balance"]), True)])
+        return self._card(
+            message, card,
             [[("⛏️ Mine", "mine"), ("🪙 My balance", "balance")]])
 
     def _control_pay(self, tail, message) -> str:  # type: ignore[no-untyped-def]
@@ -1267,13 +1434,17 @@ class RuntimeGroupMixin:
             if result["reason"] == "funds":
                 return "not enough sparks for that."
             return "that payment doesn't work as written."
-        fee_line = (f" ({result['fee']} to the treasury)"
-                    if result["fee"] else "")
-        from ...social.chat.tgbot_buttons import actionable
-        return actionable(
-            f"💸 paid <b>{result['net']} sparks</b>{fee_line}. "
-            f"Your balance: {result['balance']}.",
-            [[("🪙 My balance", "balance")]])
+        from ...social.chat.typography import Card, sparks
+
+        card = Card("economy", title="Payment sent", icon="💸")
+        card.line(f"**{sparks(result['net'])}** paid.")
+        rows = [("Your balance", sparks(result["balance"]), True)]
+        if result["fee"]:
+            rows.insert(0, ("Treasury fee",
+                            sparks(result["fee"]), True))
+        card.stats(rows)
+        return self._card(message, card,
+                          [[("🪙 My balance", "balance")]])
 
     def _control_gshop(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
@@ -1306,18 +1477,20 @@ class RuntimeGroupMixin:
                         f"sparks, heard by the whole group.")
             return (f"✨ {grant['name']} is yours — granted and "
                     f"ledgered ({grant['ledger_id']}).")
-        from ...social.chat.tgbot_buttons import actionable
+        from ...social.chat.typography import Card, sparks
+
         balance = surface.economy.balance(key, user_id)
-        lines = [f"🛒 <b>group shop</b> — your sparks: "
-                 f"<b>{balance}</b>"]
+        card = Card("economy", title="Group shop", icon="🛒")
+        card.line(f"your sparks: **{sparks(balance)}**")
+        shelf = []
         buy_row: list = []
         buttons: list = []
         for item_id, item in STATUS_SHOP.items():
             afford = balance >= int(item["cost"])
-            lines.append(
-                f"<code>{item_id}</code> — <b>{item['name']}</b> · "
-                f"{item['cost']} sparks · {item['blurb']}"
-                + ("" if afford else " · <i>not yet</i>"))
+            shelf.append(
+                f"`{item_id}` — **{item['name']}** · "
+                f"{sparks(item['cost'])} · {item['blurb']}"
+                + ("" if afford else " · *not yet*"))
             # Buttons are authored from the LIVE shelf + balance:
             # an item gets a buy button exactly when this member
             # can actually buy it — the buttons match the display.
@@ -1331,7 +1504,8 @@ class RuntimeGroupMixin:
         if buy_row:
             buttons.append(buy_row)
         buttons.append([("🪙 My balance", "balance")])
-        return actionable("\n".join(lines), buttons)
+        card.block_lines(shelf)
+        return self._card(message, card, buttons)
 
     def _control_quests(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
@@ -1347,32 +1521,38 @@ class RuntimeGroupMixin:
                 return ("that quest isn't claimable — either not "
                         "finished yet, or already claimed this "
                         "period.")
-            from ...social.chat.tgbot_buttons import actionable
-            return actionable(
-                f"🏅 quest claimed: <b>+{entry.amount} sparks</b> "
-                f"(balance "
-                f"{surface.economy.balance(key, user_id)}).",
+            from ...social.chat.typography import Card, sparks
+
+            card = Card("economy", title="Quest claimed", icon="🏅")
+            card.line(f"**+{sparks(entry.amount)}**")
+            card.stats([("Balance",
+                         sparks(surface.economy.balance(
+                             key, user_id)), True)])
+            return self._card(
+                message, card,
                 [[("🪙 My balance", "balance"),
                   ("🗺️ Quests", "quests")]])
-        from ...social.chat.tgbot_buttons import actionable
+        from ...social.chat.typography import Card
+
         progress = surface.economy.quest_progress(key, user_id)
-        lines = ["🗺️ <b>your quests:</b>"]
+        card = Card("economy", title="Your quests", icon="🗺️")
+        mine = []
         buttons = []
         for quest_id, quest in progress.items():
             mark = "✅ claimed" if quest["claimed"] else (
                 "🎁 ready — /quests claim " + quest_id
                 if quest["complete"] else
                 f"{quest['have']}/{quest['need']}")
-            lines.append(f"<code>{quest_id}</code> — "
-                         f"<b>{quest['name']}</b>: "
-                         f"{quest['blurb']} · {mark} · "
-                         f"reward {quest['reward']}")
+            mine.append(f"`{quest_id}` — **{quest['name']}**: "
+                        f"{quest['blurb']} · {mark} · "
+                        f"reward {quest['reward']}")
             # A claim button exists exactly for quests this
             # member can claim RIGHT NOW — authored from the
             # same progress state the list renders.
             if quest["complete"] and not quest["claimed"]:
                 buttons.append([(f"🎁 Claim: {quest['name']}",
                                   f"quests claim {quest_id}")])
+        card.block_lines(mine)
         # Group quests: the COLLECTIVE board — everyone's
         # activity counts; completion pays the treasury.
         import time as _time
@@ -1382,7 +1562,7 @@ class RuntimeGroupMixin:
             key, now=_time.time())
         paid_state = surface._extras(key).get(
             "group_quests_paid") or {}
-        lines.append("🏛️ <b>group quests</b> (everyone together):")
+        together = []
         for quest_id, quest in group_progress.items():
             paid = paid_state.get(quest_id) == _period_key(
                 quest["period"], _time.time())
@@ -1390,47 +1570,56 @@ class RuntimeGroupMixin:
                     "🎉 complete — bonus lands soon"
                     if quest["complete"] else
                     f"{quest['have']}/{quest['need']}")
-            lines.append(f"<code>{quest_id}</code> — "
-                         f"<b>{quest['name']}</b>: "
-                         f"{quest['blurb']} · {mark} · "
-                         f"treasury bonus {quest['bonus']}")
+            together.append(f"`{quest_id}` — **{quest['name']}**: "
+                            f"{quest['blurb']} · {mark} · "
+                            f"treasury bonus {quest['bonus']}")
+        card.block_lines(together,
+                         title="Group quests — everyone together")
         buttons.append([("🪙 My balance", "balance")])
-        return actionable("\n".join(lines), buttons)
+        return self._card(message, card, buttons)
 
     def _control_treasury(self, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
         if err:
             return err
+        from ...social.chat.typography import Card, sparks
+
         surface = self._group_surface()
         health = surface.economy_health(key)
         policy = health.get("policy") or {}
         reserved = surface.reserved_treasury(key)
-        lines = [
-            f"🏦 <b>treasury: {health['treasury']} sparks</b>"
-            + (f" ({reserved} reserved for open drops)"
-               if reserved else ""),
-            f"circulating: {health['circulating']} across "
-            f"{health['holders']} holders · biggest holder "
-            f"{int(health['top_share'] * 100)}% · "
-            f"{health['active_7d']} members active this week.",
-            f"🎰 jackpot pot: {health.get('jackpot', 0)} sparks "
-            f"(triple 7️⃣ on /slots takes it)",
+        card = Card("economy", title="Treasury", icon="🏦")
+        rows = [("Treasury", sparks(health["treasury"]), True)]
+        if reserved:
+            rows.append(("Reserved for open drops",
+                         sparks(reserved), True))
+        rows += [
+            ("Circulating", sparks(health["circulating"]), True),
+            ("Holders", str(health["holders"])),
+            ("Biggest holder",
+             f"{int(health['top_share'] * 100)}%"),
+            ("Active this week", str(health["active_7d"])),
+            ("Jackpot pot", sparks(health.get("jackpot", 0)), True),
         ]
+        card.stats(rows)
         if policy.get("throttled"):
-            lines.append(
-                "📉 <b>monetary policy: faucets throttled</b> — "
-                f"issuance ({policy['earned']}) is running hot "
-                f"against sinks ({policy['sunk']}) this week, so "
-                "activity pays half until sinks catch up.")
+            card.line(
+                "📉 **monetary policy: faucets throttled** — "
+                f"issuance ({sparks(policy['earned'])}) is running "
+                f"hot against sinks ({sparks(policy['sunk'])}) "
+                "this week, so activity pays half until sinks "
+                "catch up.")
         else:
-            lines.append(
-                f"📈 monetary policy: normal — {policy.get('earned', 0)} "
-                f"issued vs {policy.get('sunk', 0)} sunk this week.")
+            card.line(
+                f"📈 monetary policy: normal — "
+                f"{sparks(policy.get('earned', 0))} issued vs "
+                f"{sparks(policy.get('sunk', 0))} sunk this week.")
         proposals = surface.open_proposals(key)
         if proposals:
-            lines.append(f"🗳️ {len(proposals)} treasury proposal(s) "
-                         "waiting for a second admin (/approve).")
-        return "\n".join(lines)
+            card.line(f"🗳️ {len(proposals)} treasury proposal(s) "
+                      "waiting for a second admin (/approve).")
+        card.note("triple 7️⃣ on /slots takes the jackpot pot")
+        return self._card(message, card)
 
     def _control_drop(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key = self._group_key_or_none(message)
@@ -1475,13 +1664,19 @@ class RuntimeGroupMixin:
                             f"{result.get('available', 0)} available "
                             "after open-drop reservations.")
                 return "that drop doesn't work as written."
-            from ...social.chat.tgbot_buttons import actionable
+            from ...social.chat.typography import Card, sparks
+
             drop = result["drop"]
             claims = drop["total"] // drop["per_claim"]
-            return actionable(
-                f"🎁 <b>DROP: {drop['total']} sparks from the "
-                f"treasury</b>\n{drop['per_claim']} per claim · "
-                f"{claims} claims · tap Claim or send /claim",
+            card = Card("announcement", title="Drop", icon="🎁")
+            card.line(f"**{sparks(drop['total'])}** from the "
+                      f"treasury is up for grabs.")
+            card.stats([("Per claim", sparks(drop["per_claim"]),
+                         True),
+                        ("Claims", str(claims))])
+            card.note("tap Claim or send /claim")
+            return self._card(
+                message, card,
                 [[(f"🎁 Claim {drop['per_claim']} sparks", "claim"),
                   ("🪙 My balance", "balance")]])
         result = surface.open_drop(key, funder, numbers[0],
@@ -1490,16 +1685,20 @@ class RuntimeGroupMixin:
             if result["reason"] == "funds":
                 return "you don't hold that many sparks to fund a drop."
             return "that drop doesn't work as written."
-        from ...social.chat.tgbot_buttons import actionable
+        from ...social.chat.typography import Card, sparks
+
         drop = result["drop"]
         claims = drop["total"] // drop["per_claim"]
         # The button is authored from THIS drop's state: its label
         # carries the actual per-claim amount of the pool on
         # screen — never a generic claim button.
-        return actionable(
-            f"🎁 <b>DROP: {drop['total']} sparks in the pool</b>\n"
-            f"{drop['per_claim']} per claim · {claims} claims · "
-            f"tap Claim or send /claim",
+        card = Card("announcement", title="Drop", icon="🎁")
+        card.line(f"**{sparks(drop['total'])}** in the pool.")
+        card.stats([("Per claim", sparks(drop["per_claim"]), True),
+                    ("Claims", str(claims))])
+        card.note("tap Claim or send /claim")
+        return self._card(
+            message, card,
             [[(f"🎁 Claim {drop['per_claim']} sparks", "claim"),
               ("🪙 My balance", "balance")]])
 
@@ -1518,12 +1717,16 @@ class RuntimeGroupMixin:
                     "treasury": "the pool couldn't pay out — an "
                                 "admin needs to look."}.get(
                         result["reason"], "can't claim right now.")
-        from ...social.chat.tgbot_buttons import actionable
-        return actionable(
-            f"🎁 <b>+{result['amount']} sparks claimed!</b> "
-            f"(pool left: {result['remaining']} · your balance: "
-            f"{result['balance']})",
-            [[("🪙 My balance", "balance")]])
+        from ...social.chat.typography import Card, sparks
+
+        card = Card("economy", title="Drop claimed", icon="🎁")
+        card.line(f"**+{sparks(result['amount'])}** claimed!")
+        card.stats([("Pool left", sparks(result["remaining"]),
+                     True),
+                    ("Your balance", sparks(result["balance"]),
+                     True)])
+        return self._card(message, card,
+                          [[("🪙 My balance", "balance")]])
 
     # ---- the full economy loop (bank / daily / crime / casino /
     # boards / governance) --------------------------------------
@@ -1552,11 +1755,16 @@ class RuntimeGroupMixin:
             if result["reason"] == "empty":
                 return "your wallet is empty — nothing to deposit."
             return "that deposit doesn't work as written."
-        from ...social.chat.tgbot_buttons import actionable
-        return actionable(
-            f"🏦 deposited <b>{result['amount']} sparks</b> — "
-            f"wallet {result['wallet']} · banked "
-            f"<b>{result['bank']}</b> (robbers can't touch it).",
+        from ...social.chat.typography import Card, sparks
+
+        card = Card("economy", title="Deposit", icon="🏦")
+        card.line(f"deposited **{sparks(result['amount'])}** — "
+                  f"now in your vault.")
+        card.stats([("Wallet", sparks(result["wallet"]), True),
+                    ("Banked", sparks(result["bank"]), True)])
+        card.note("robbers can't touch banked sparks")
+        return self._card(
+            message, card,
             [[("💵 Withdraw", "withdraw all"),
               ("🪙 My balance", "balance")]])
 
@@ -1575,12 +1783,15 @@ class RuntimeGroupMixin:
             if result["reason"] == "empty":
                 return "your bank vault is empty."
             return "that withdrawal doesn't work as written."
-        from ...social.chat.tgbot_buttons import actionable
-        return actionable(
-            f"💵 withdrew <b>{result['amount']} sparks</b> — "
-            f"wallet <b>{result['wallet']}</b> · banked "
-            f"{result['bank']}.",
-            [[("🪙 My balance", "balance")]])
+        from ...social.chat.typography import Card, sparks
+
+        card = Card("economy", title="Withdraw", icon="💵")
+        card.line(f"withdrew **{sparks(result['amount'])}** — "
+                  f"back in your wallet.")
+        card.stats([("Wallet", sparks(result["wallet"]), True),
+                    ("Banked", sparks(result["bank"]), True)])
+        return self._card(message, card,
+                          [[("🪙 My balance", "balance")]])
 
     def _control_group_daily(self, message):  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
@@ -1595,11 +1806,14 @@ class RuntimeGroupMixin:
                         f"{result.get('streak', 0)}. Tomorrow it "
                         "grows.")
             return "🌅 no daily paid — the earn cap is hit."
-        from ...social.chat.tgbot_buttons import actionable
-        return actionable(
-            f"🌅 daily claimed: <b>+{result['amount']} sparks</b> "
-            f"(streak {result['streak']} · balance "
-            f"{result['balance']}).",
+        from ...social.chat.typography import Card, sparks
+
+        card = Card("economy", title="Daily", icon="🌅")
+        card.line(f"daily claimed: **+{sparks(result['amount'])}**")
+        card.stats([("Streak", f"{result['streak']} days"),
+                    ("Balance", sparks(result["balance"]), True)])
+        return self._card(
+            message, card,
             [[("🪙 My balance", "balance"), ("🛠️ Work", "work")]])
 
     def _rob_target(self, surface, key, tail, message):  # type: ignore[no-untyped-def]
@@ -1644,19 +1858,25 @@ class RuntimeGroupMixin:
             if reason == "empty":
                 return "their wallet is empty — nothing to take."
             return "that robbery doesn't work as written."
-        from ...social.chat.tgbot_buttons import actionable
+        from ...social.chat.typography import Card, sparks
+
         if result.get("success"):
-            return actionable(
-                f"🥷 got away with <b>{result['amount']} "
-                f"sparks</b> (balance {result['balance']}). "
-                "Bank it before someone returns the favour: "
-                "/deposit all",
+            card = Card("economy", title="Got away", icon="🥷")
+            card.line(f"**{sparks(result['amount'])}** lifted.")
+            card.stats([("Balance", sparks(result["balance"]),
+                         True)])
+            card.note("bank it before someone returns the "
+                      "favour: /deposit all")
+            return self._card(
+                message, card,
                 [[("🏦 Deposit", "deposit all"),
                   ("🪙 My balance", "balance")]])
-        return actionable(
-            f"🚔 caught. You're in jail for 30 minutes — bail is "
-            f"<b>{result['bail']} sparks</b> to the treasury.",
-            [[("🔓 Pay bail", "bail")]])
+        card = Card("economy", title="Caught", icon="🚔")
+        card.line("You're in jail for 30 minutes.")
+        card.stats([("Bail", sparks(result["bail"]), True)])
+        card.note("bail goes to the treasury")
+        return self._card(message, card,
+                          [[("🔓 Pay bail", "bail")]])
 
     def _control_bail(self, message):  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
@@ -1670,9 +1890,13 @@ class RuntimeGroupMixin:
                 return "you're not in jail."
             return (f"bail is {result.get('cost', 0)} sparks and "
                     "your wallet can't cover it.")
-        return (f"🔓 bail paid — <b>{result['cost']} sparks</b> to "
-                f"the treasury. You're out (balance "
-                f"{result['balance']}).")
+        from ...social.chat.typography import Card, sparks
+
+        card = Card("economy", title="Bail paid", icon="🔓")
+        card.line(f"**{sparks(result['cost'])}** to the treasury "
+                  f"— you're out.")
+        card.stats([("Balance", sparks(result["balance"]), True)])
+        return self._card(message, card)
 
     def _bet_arg(self, tail, default: int = 10) -> int:  # type: ignore[no-untyped-def]
         for part in str(tail or "").split():
@@ -1696,25 +1920,36 @@ class RuntimeGroupMixin:
                 return "🔒 no slots from jail — /bail first."
             return "not enough sparks in your wallet for that bet."
         reels = " ".join(result["symbols"])
-        from ...social.chat.tgbot_buttons import actionable
+        from ...social.chat.typography import Card, sparks
+
         buttons = [[(f"🎰 Spin again ({bet})", f"slots {bet}"),
                     ("🪙 My balance", "balance")]]
         if result.get("jackpot"):
-            return actionable(
-                f"🎰 {reels}\n🎉 <b>JACKPOT — "
-                f"{result['jackpot']} sparks!</b> plus "
-                f"{result['payout']} from the reels. Balance "
-                f"{result['balance']}.", buttons)
+            card = Card("game", title="Slots", icon="🎰")
+            card.board(reels)
+            card.line(f"🎉 **JACKPOT — {sparks(result['jackpot'])}!** "
+                      f"plus {sparks(result['payout'])} from the "
+                      f"reels.")
+            card.stats([("Balance", sparks(result["balance"]),
+                         True)])
+            return self._card(message, card, buttons)
         if result["payout"] > 0:
-            return actionable(
-                f"🎰 {reels}\n<b>+{result['payout']} sparks</b> "
-                f"(×{result['multiplier']}). Balance "
-                f"{result['balance']}.", buttons)
-        return actionable(
-            f"🎰 {reels}\nno win — the house share feeds the "
-            f"treasury and the jackpot pot "
-            f"({surface.economy.jackpot_balance(key)} and "
-            "growing).", buttons)
+            card = Card("game", title="Slots", icon="🎰")
+            card.board(reels)
+            card.line(f"**+{sparks(result['payout'])}** "
+                      f"(×{result['multiplier']})")
+            card.stats([("Balance", sparks(result["balance"]),
+                         True)])
+            return self._card(message, card, buttons)
+        card = Card("game", title="Slots", icon="🎰")
+        card.board(reels)
+        card.line("no win this spin.")
+        card.stats([("Jackpot pot",
+                     sparks(surface.economy.jackpot_balance(key)),
+                     True)])
+        card.note("the house share feeds the treasury and the "
+                  "jackpot pot")
+        return self._card(message, card, buttons)
 
     def _control_coinflip(self, tail, message):  # type: ignore[no-untyped-def]
         import random
@@ -1733,62 +1968,79 @@ class RuntimeGroupMixin:
             if result.get("reason") == "jailed":
                 return "🔒 no coinflips from jail — /bail first."
             return "not enough sparks in your wallet for that bet."
-        from ...social.chat.tgbot_buttons import actionable
+        from ...social.chat.typography import Card, sparks
+
         buttons = [[(f"🪙 Flip again ({bet})", f"coinflip {bet}"),
                     ("🪙 My balance", "balance")]]
+        card = Card("game", title="Coinflip", icon="🪙")
+        card.board(f"🪙 {result['flip']}")
         if result["won"]:
-            return actionable(
-                f"🪙 it landed <b>{result['flip']}</b> — you "
-                f"called it: <b>+{result['payout']} sparks</b>. "
-                f"Balance {result['balance']}.", buttons)
-        return actionable(
-            f"🪙 it landed <b>{result['flip']}</b> — not your "
-            "call. The house share feeds the treasury and the "
-            "jackpot.", buttons)
+            card.line(f"you called it — "
+                      f"**+{sparks(result['payout'])}**")
+            card.stats([("Balance", sparks(result["balance"]),
+                         True)])
+        else:
+            card.line("not your call this time.")
+            card.note("the house share feeds the treasury and "
+                      "the jackpot")
+        return self._card(message, card, buttons)
 
     def _control_top(self, message):  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
         if err:
             return err
-        import html as _html
+        from ...social.chat.typography import Card, sparks
 
         surface = self._group_surface()
         rows = surface.top_holders(key, limit=10)
         if not rows:
             return "no sparks held yet — /work and /mine start it."
         members = surface.members(key)
-        lines = ["🏆 <b>richest in the group</b>"]
+        card = Card("leaderboard", title="richest in the group",
+                    icon="🏆")
         medals = ["🥇", "🥈", "🥉"]
+        stats = []
         for i, row in enumerate(rows):
             record = members.get(row["member"]) or {}
-            who = _html.escape(str(
-                record.get("name") or record.get("username")
-                or row["member"]))
+            who = str(record.get("name") or record.get("username")
+                      or row["member"])
             mark = medals[i] if i < 3 else f"{i + 1}."
-            bank = (f" (🏦 {row['bank']})" if row["bank"] else "")
-            lines.append(f"{mark} {who} — <b>{row['total']}</b>"
-                         f"{bank}")
-        return "\n".join(lines)
+            value = sparks(row["total"])
+            if row["bank"]:
+                value += f" (🏦 {sparks(row['bank'])} banked)"
+            stats.append((f"{mark} {who}", value, True))
+        card.stats(stats)
+        return self._card(message, card)
 
     def _control_tax(self, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
         if err:
             return err
+        from ...social.chat.typography import Card, sparks
+
         surface = self._group_surface()
         s = surface.store.settings(key)
         policy = surface.economy.issuance_state(key)
         state = ("throttled (activity pays half)"
                  if policy["throttled"] else "normal")
-        return (
-            f"🧾 <b>the group's monetary policy</b>\n"
-            f"transfer tax: {s.get('transfer_tax_pct', 2)}% to "
-            f"the treasury · moderation fine: "
-            f"{s.get('fine_amount', 0)} sparks\n"
-            f"earn caps: 200/day · 800/week · governance: "
-            f"treasury spends above "
-            f"{s.get('governance_threshold', 500)} need a second "
-            f"admin\nissuance this week: {policy['earned']} "
-            f"issued / {policy['sunk']} sunk — faucets {state}.")
+        card = Card("economy", title="The group's monetary "
+                    "policy", icon="🧾")
+        card.stats([
+            ("Transfer tax",
+             f"{s.get('transfer_tax_pct', 2)}% to the treasury"),
+            ("Moderation fine", sparks(s.get("fine_amount", 0)),
+             True),
+            ("Earn caps", "200/day · 800/week"),
+            ("Governance",
+             f"treasury spends above "
+             f"{sparks(s.get('governance_threshold', 500))} need "
+             f"a second admin"),
+            ("Issuance this week",
+             f"{sparks(policy['earned'])} issued / "
+             f"{sparks(policy['sunk'])} sunk"),
+        ])
+        card.note(f"faucets {state}")
+        return self._card(message, card)
 
     def _control_grant(self, tail, message):  # type: ignore[no-untyped-def]
         key = self._group_key_or_none(message)
@@ -1839,8 +2091,14 @@ class RuntimeGroupMixin:
             return (f"the treasury can't cover that — "
                     f"{result.get('available', 0)} available after "
                     "open-drop reservations.")
-        return (f"🏦 granted <b>{amount} sparks</b> from the "
-                f"treasury (treasury now {result['treasury']}).")
+        from ...social.chat.typography import Card, sparks
+
+        card = Card("economy", title="Grant paid", icon="🏦")
+        card.line(f"**{sparks(amount)}** granted from the "
+                  f"treasury.")
+        card.stats([("Treasury now", sparks(result["treasury"]),
+                     True)])
+        return self._card(message, card)
 
     def _control_approve(self, tail, message):  # type: ignore[no-untyped-def]
         key = self._group_key_or_none(message)
@@ -1858,15 +2116,17 @@ class RuntimeGroupMixin:
             open_now = surface.open_proposals(key)
             if not open_now:
                 return "no treasury proposals are open."
-            lines = ["🗳️ <b>open treasury proposals:</b>"]
-            for open_pid, proposal in open_now.items():
-                payload = proposal.get("payload") or {}
-                lines.append(
-                    f"<code>{open_pid}</code> — "
-                    f"{proposal.get('kind')}: {payload}")
-            lines.append("approve with /approve <id> (a different "
-                         "admin than the proposer).")
-            return "\n".join(lines)
+            from ...social.chat.typography import Card
+
+            card = Card("economy", title="Open treasury "
+                        "proposals", icon="🗳️")
+            card.block_lines([
+                f"`{open_pid}` — {proposal.get('kind')}: "
+                f"{proposal.get('payload') or {}}"
+                for open_pid, proposal in open_now.items()])
+            card.note("approve with /approve <id> (a different "
+                      "admin than the proposer)")
+            return self._card(message, card)
         admin = str(message.sender_id or message.sender or "")
         result = surface.approve_spend(key, pid, by=admin)
         if not result["ok"]:
@@ -1999,28 +2259,37 @@ def _fmt_ts(ts) -> str:
 
 
 def _member_card(surface, key: str, member: dict) -> str:
-    import html as _html
+    """The member card, through the typography organ (§27,
+    moderation class): identity fields are literals — a hostile
+    display name renders as text, never markup."""
+    from ...social.chat.typography import Card, render_card
 
-    name = _html.escape(
-        str(member.get("name") or member.get("username") or "member"))
-    handle = (f"@{_html.escape(str(member['username']))}"
-              if member.get("username") else "no username")
-    lines = [f"👤 <b>{name}</b> ({handle})"]
+    name = str(member.get("name") or member.get("username")
+               or "member")
+    handle = (f"@{member['username']}" if member.get("username")
+              else "no username")
+    card = Card("moderation", title=name, icon="👤")
     joined = member.get("joined_ts") or member.get("first_seen")
-    lines.append(f"joined: {_fmt_ts(joined)} · messages: "
-                 f"{member.get('message_count') or 0} · last seen: "
-                 f"{_fmt_ts(member.get('last_seen'))}")
+    rows = [("Handle", handle),
+            ("Joined", _fmt_ts(joined)),
+            ("Messages", int(member.get("message_count") or 0)),
+            ("Last seen", _fmt_ts(member.get("last_seen")))]
     if member.get("left_ts"):
-        lines.append(f"left: {_fmt_ts(member['left_ts'])}")
+        rows.append(("Left", _fmt_ts(member["left_ts"])))
+    card.stats(rows)
     changes = [c for c in surface.changes(key, limit=200)
                if c.get("user_id") == member.get("user_id")]
-    for change in changes[-3:]:
-        lines.append(
+    if changes:
+        card.board("\n".join(
             f"{change.get('kind', 'changed')}: "
-            f"{_html.escape(str(change.get('old') or '—'))} → "
-            f"{_html.escape(str(change.get('new') or '—'))} "
-            f"({_fmt_ts(change.get('ts'))})")
-    return "\n".join(lines)
+            f"{change.get('old') or '—'} → "
+            f"{change.get('new') or '—'} "
+            f"({_fmt_ts(change.get('ts'))})"
+            for change in changes[-3:]),
+            title="Identity changes")
+    return render_card(
+        card, platform=str(key).split(":", 1)[0],
+        settings=surface.store.settings(key)).text
 
 
 def _audit_line(entry: dict) -> str:

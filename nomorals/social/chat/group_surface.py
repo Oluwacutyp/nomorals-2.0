@@ -55,6 +55,7 @@ from ...security.payload_inspection import (
 from .group_defense import (
     DEFAULTS as DEFENSE_DEFAULTS,
 )
+from .typography import DEFAULT_PRESENTATION, notice_line, sparks
 from .group_defense import (
     DefenseConfig,
     add_strike,
@@ -122,6 +123,10 @@ def _default_settings() -> dict[str, Any]:
                                         # automatic admin (§17):
                                         # autonomy + sensors +
                                         # escalation spine
+        "presentation": copy.deepcopy(DEFAULT_PRESENTATION),
+                                        # typography (§27): theme
+                                        # pack, per-class preset
+                                        # overrides, the stamp
         "games_enabled": True,
         "state": "discovered",          # discovered|configured|
                                         # active|dormant
@@ -181,13 +186,17 @@ class GroupStore:
         merged = _default_settings()
         stored = self.group(group_key).get("settings") or {}
         merged.update({k: v for k, v in stored.items()
-                       if k in merged and k != "defense"})
+                       if k in merged
+                       and k not in ("defense", "presentation")})
         mod = dict(merged["moderation"])
         mod.update((stored.get("moderation") or {}))
         merged["moderation"] = mod
         merged["defense"] = _deep_merge(
             copy.deepcopy(DEFENSE_DEFAULTS),
             stored.get("defense") or {})
+        merged["presentation"] = _deep_merge(
+            copy.deepcopy(DEFAULT_PRESENTATION),
+            stored.get("presentation") or {})
         return merged
 
 
@@ -226,6 +235,18 @@ class GroupSurface:
     def defense_config(self, group_key: str) -> DefenseConfig:
         return DefenseConfig.from_settings(
             self.store.settings(group_key))
+
+    def _card_render(self, group_key: str, card: Any) -> str:
+        """Render a typography Card (§27) for this group's
+        platform — derived from the group key's prefix, the one
+        platform fact the transport-free surface owns — under
+        the group's own presentation settings."""
+        from .typography import render_card
+
+        platform = str(group_key).split(":", 1)[0]
+        return render_card(
+            card, platform=platform,
+            settings=self.store.settings(group_key)).text
 
     # ---- settings / moderation plumbing -------------------------
     def _moderator(self, group_key: str) -> Moderator:
@@ -348,7 +369,19 @@ class GroupSurface:
         custom = str(settings.get("welcome_text") or "")
         if custom:
             config.welcome_template = custom
-        return render_welcome(name or username or "there", config)
+        body = render_welcome(name or username or "there", config)
+        # The welcome is a presented surface (§27, announcement
+        # class): the group's own template supplies the words,
+        # the typography organ supplies the form — its first
+        # line becomes the card's title, the stamp closes it.
+        from .typography import Card
+
+        lines = [ln for ln in str(body).splitlines() if ln.strip()]
+        if not lines:
+            return ""
+        card = Card("announcement", title=lines[0], icon="👋")
+        card.lines(lines[1:])
+        return self._card_render(group_key, card)
 
     def record_leave(self, group_key: str, user_id: str, *,
                      group_name: str = "",
@@ -366,9 +399,13 @@ class GroupSurface:
         config = WelcomeConfig(
             group_name=group_name,
             rules=list(settings.get("rules") or []))
-        return render_goodbye(
+        body = render_goodbye(
             member.get("name") or member.get("username") or "there",
             config)
+        from .typography import Card
+
+        card = Card("announcement", title=str(body), icon="👋")
+        return self._card_render(group_key, card)
 
     # ---- the message pipeline ------------------------------------
     def _cache_message(self, group_key: str, *, message_id: str,
@@ -509,10 +546,12 @@ class GroupSurface:
                     notices.append(season_note)
                 for paid in self.group_quest_cycle(group_key,
                                                    now=now):
-                    notices.append(
-                        f"🎉 group quest complete: "
-                        f"<b>{paid['name']}</b> — +{paid['bonus']} "
-                        f"sparks to the treasury!")
+                    notices.append(notice_line(
+                        "🎉",
+                        f"group quest complete: "
+                        f"<b>{paid['name']}</b> — "
+                        f"+{sparks(paid['bonus'])} to the "
+                        f"treasury!"))
             self.store.save()
             return {"changes": changes, "actions": out_actions,
                     "notices": notices, "suppressed": n_suppressed}
@@ -1418,28 +1457,32 @@ class GroupSurface:
 
     def rules_text(self, group_key: str) -> str:
         """The published rules, rendered from the SAME settings
-        the enforcer reads (DESIGN §12: one config, two readers).
+        the enforcer reads (DESIGN §12: one config, two readers)
+        — through the typography organ (§27, announcement
+        class): the rules list is a literal block, so a rule's
+        own text can never become markup.
         """
-        import html as _html
+        from .typography import Card
 
         settings = self.store.settings(group_key)
-        lines = ["📜 <b>Group rules</b>"]
+        card = Card("announcement", title="Group rules", icon="📜")
         rules = settings.get("rules") or []
         if rules:
-            lines.extend(f"{i}. {_html.escape(str(rule))}"
-                         for i, rule in enumerate(rules, 1))
+            card.board("\n".join(
+                f"{i}. {rule}"
+                for i, rule in enumerate(rules, 1)))
         else:
-            lines.append("No written rules yet — be decent, no "
-                         "spam, no flooding.")
+            card.line("No written rules yet — be decent, no "
+                      "spam, no flooding.")
         mod = settings["moderation"]
-        lines.append(
+        card.line(
             f"Moderation: flood limit {mod['flood_max']} messages "
             f"per {int(mod['flood_window_s'])}s · repeats ×"
             f"{mod['repeat_threshold']} are removed")
         if mod.get("link_allowlist"):
-            lines.append("Links: only allowlisted domains are "
-                         "permitted.")
-        return "\n".join(lines)
+            card.line("Links: only allowlisted domains are "
+                      "permitted.")
+        return self._card_render(group_key, card)
 
 
 def default_surface(workspace_dir: str | Path) -> GroupSurface:

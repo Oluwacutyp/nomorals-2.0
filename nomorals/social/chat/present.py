@@ -149,16 +149,24 @@ def _coerce_kv(item: Any) -> KV:
 
 @dataclass(frozen=True)
 class Section:
-    """A named block of a Doc: KV rows, prose lines, and/or quote
-    (detail) lines. ``expandable`` collapses the quote block on
-    Telegram (``<blockquote expandable>``); other transports render
-    the same lines visibly — they have no collapse affordance."""
+    """A named block of a Doc: KV rows, prose lines, quote
+    (detail) lines, and/or a ``pre`` block. ``expandable`` collapses
+    the quote block on Telegram (``<blockquote expandable>``); other
+    transports render the same lines visibly — they have no collapse
+    affordance.
+
+    ``pre`` lines are LITERAL preformatted text (grids, boards, log
+    excerpts): escaped literally per dialect like structural text —
+    never dialect-converted, so a ``<b>`` inside a pre line can
+    neither inject markup nor break a marker pair — and rendered
+    as a monospace block (``<pre>`` / fenced) so columns align."""
 
     title: str = ""
     rows: tuple[KV, ...] = ()
     lines: tuple[str, ...] = ()
     quote: tuple[str, ...] = ()
     expandable: bool = False
+    pre: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -167,6 +175,8 @@ class Section:
             self, "lines", tuple(str(x) for x in self.lines or ()))
         object.__setattr__(
             self, "quote", tuple(str(x) for x in self.quote or ()))
+        object.__setattr__(
+            self, "pre", tuple(str(x) for x in self.pre or ()))
 
 
 @dataclass(frozen=True)
@@ -559,6 +569,16 @@ def _section_lines(section: Section, dialect: str) -> list[str]:
         line = _kv_line(kv, dialect)
         lines.append(f"  {line}" if dialect == "plain" else line)
     lines.extend(_prose(x, dialect) for x in section.lines)
+    if section.pre:
+        if dialect == "html":
+            inner = "\n".join(_html.escape(x) for x in section.pre)
+            lines.append(f"<pre>{inner}</pre>")
+        elif dialect in ("whatsapp", "markdown", "canonical"):
+            inner = "\n".join(
+                x.replace("`", "") for x in section.pre)
+            lines.append(f"```\n{inner}\n```")
+        else:  # plain
+            lines.extend(section.pre)
     if section.quote:
         if dialect == "html":
             tag = ("<blockquote expandable>" if section.expandable
@@ -757,6 +777,7 @@ def doc_to_json(doc: Doc) -> str:
                 "lines": list(s.lines),
                 "quote": list(s.quote),
                 "expandable": bool(s.expandable),
+                "pre": list(s.pre),
             }
             for s in doc.sections
         ],
@@ -803,6 +824,7 @@ def doc_from_json(text: Any) -> Doc | None:
                 lines=tuple(str(x) for x in raw.get("lines") or []),
                 quote=tuple(str(x) for x in raw.get("quote") or []),
                 expandable=bool(raw.get("expandable")),
+                pre=tuple(str(x) for x in raw.get("pre") or []),
             ))
         actions = []
         for row in payload.get("actions") or []:

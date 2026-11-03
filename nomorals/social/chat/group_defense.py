@@ -284,9 +284,13 @@ def rule_phrase(rule: str) -> str:
 def render_warning(mention: str, rule: str, consequence: str) -> str:
     """⛔ {who} — {rule, plain}. {what happened, and what comes
     next if it repeats}.  One message; it IS the record (the
-    no-meta-narration law)."""
-    return (f"⛔ {mention} — {rule_phrase(rule)}. "
-            f"{consequence}")
+    no-meta-narration law).  Composed by the typography organ
+    (DESIGN §27, moderation class): the name + rule lead plain,
+    the consequence carries the emphasis."""
+    from .typography import moderation_warning
+
+    return moderation_warning(mention, rule_phrase(rule),
+                              consequence)
 
 
 def consequence_text(*, executed: str, count: int,
