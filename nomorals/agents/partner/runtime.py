@@ -1305,6 +1305,56 @@ class PartnerRuntime(
                 except Exception:  # noqa: BLE001
                     _log.warning("public-bot gate reply failed")
                 return
+            # Claimed once, groups on every surface (group build P0):
+            # the public-bot branch above claims recognized commands on
+            # telegram-bot. A GROUP on any other surface (the userbot's
+            # groups, WhatsApp, Discord) reaches here with a recognized
+            # non-game command from a non-operator still unclaimed —
+            # and would otherwise fall through to the persona and get a
+            # conversational reply, the double-claim the owner banned.
+            # Claim it the same way: a public command runs
+            # (handle_control re-checks the grant), an owner-only kind
+            # gets one honest redirect. Operators skip this — their own
+            # control branch below owns their commands. DMs keep the
+            # standing behavior; channels are their own posture.
+            if (command is not None
+                    and message.chat.kind == ChatKind.GROUP
+                    and not self._is_operator(message)):
+                from ...social.chat.control import PUBLIC_COMMANDS
+
+                if (command.kind in PUBLIC_COMMANDS
+                        or command.kind == "error"):
+                    self._bump("controls")
+                    _log.info("group command /%s from %s in %s",
+                              command.kind, message.sender or "?",
+                              message.chat.key)
+                    try:
+                        reply = self.handle_control(
+                            message.text, message.chat.key, message=message)
+                    except Exception as exc:  # noqa: BLE001
+                        _log.exception("group command failed: %s", exc)
+                        reply = "that broke something on my end — try again."
+                    if reply:
+                        try:
+                            self._typing_for(message.chat, reply)
+                            self.gateway.send(
+                                message.chat.platform, message.chat, reply)
+                        except Exception:  # noqa: BLE001
+                            _log.warning("group command reply send failed")
+                    return
+                self._bump("controls")
+                _log.info("group gate: blocked /%s from %s in %s",
+                          command.kind, message.sender or "?",
+                          message.chat.key)
+                try:
+                    self.gateway.send(
+                        message.chat.platform, message.chat,
+                        "that one's owner-only — I run it in the owner's "
+                        "own chats. Games and the public list work here: "
+                        "/game list shows what's on.")
+                except Exception:  # noqa: BLE001
+                    _log.warning("group gate reply failed")
+                return
         # WisdomKeeper practice sessions own their chats while live: plain
         # words (pause/resume/stop) steer the run and the reply after a
         # session closes is journaled. Only active sessions and pending
