@@ -413,7 +413,7 @@ class ReversiGame(MultiGame):
     move_timeout = 0
     idle_ttl = INBOX_IDLE_TTL
     difficulties = DIFFICULTY_LEVELS
-    rules = ("8×8 othello. You're ● (black, first), the house is ○. Say a "
+    rules = ("8×8 othello. You're ⚫ (black, first), the house is ⚪. Say a "
              "square like d3 — it must outflank at least one white disc in "
              "a straight line (every line you close flips to your colour). "
              "No legal move? You pass automatically. Most discs when nobody "
@@ -440,18 +440,27 @@ class ReversiGame(MultiGame):
             grid[fr][fc] = side
 
     def setup(self, room: Room, mind: GameMind) -> str:
-        return ("reversi — you're ● (black, first). say a square like d3 "
-                "that flips at least one ○. no clock — play whenever.")
+        return ("reversi — you're ⚫ (black, first). say a square like d3 "
+                "that flips at least one ⚪. no clock — play whenever.")
 
     def _board(self, room: Room) -> str:
+        from ..boards import render_board
+
         g = room.state["grid"]
+        b, w = _reversi_count(g)
+        text = render_board("reversi", room.state)
+        if text is not None:
+            rows = ["   " + " ".join("abcdefgh")]
+            rows += [f"{i + 1}  {row}"
+                     for i, row in enumerate(text.split("\n"))]
+            rows.append(f"⚫ {b} — ⚪ {w}")
+            return "\n".join(rows)
         rows = ["   " + " ".join("abcdefgh")]
         for r in range(_REVERSI_SIZE):
             cells = [g[r][c] if g[r][c] else "·"
                      for c in range(_REVERSI_SIZE)]
             rows.append(f"{r + 1}  " + " ".join(cells))
-        b, w = _reversi_count(g)
-        rows.append(f"● {b} — ○ {w}")
+        rows.append(f"⚫ {b} — ⚪ {w}")
         return "\n".join(rows)
 
     def _apply(self, room: Room, r: int, c: int, side: str) -> int:
@@ -491,7 +500,7 @@ class ReversiGame(MultiGame):
             hint = (" legal: " + ", ".join(legal)) if legal else ""
             return [f"{t} flips nothing — illegal.{hint}"]
         n = self._apply(room, r, c, "B")
-        out = [f"● {t} flips {n}."]
+        out = [f"⚫ {t} flips {n}."]
         if self._close(room):
             out.append(self._board(room))
             return out
@@ -513,7 +522,7 @@ class ReversiGame(MultiGame):
                     break
                 hr, hc = hm
                 n = self._apply(room, hr, hc, "W")
-                out.append(f"○ {_reversi_sq(hr, hc)} flips {n}.")
+                out.append(f"⚪ {_reversi_sq(hr, hc)} flips {n}.")
                 if self._close(room):
                     break
                 if _reversi_legal(s["grid"], "B"):
@@ -556,16 +565,16 @@ class ReversiGame(MultiGame):
         if s.get("winner") == "B":
             h = _human(room)
             return (f"🏁 {(h.name if h else 'you')} win reversi "
-                    f"● {b} — ○ {w}.")
+                    f"⚫ {b} — ⚪ {w}.")
         if s.get("winner") == "W":
-            return f"🏁 the house wins reversi ○ {w} — ● {b}."
-        return f"🏁 reversi drawn — ● {b}, ○ {w}."
+            return f"🏁 the house wins reversi ⚪ {w} — ⚫ {b}."
+        return f"🏁 reversi drawn — ⚫ {b}, ⚪ {w}."
 
     def describe_state(self, room: Room) -> str:
         s = room.state
         legal = [_reversi_sq(r, c)
                  for r, c, _ in _reversi_legal(s["grid"], "B")[:10]]
-        head = f"move {s['moves']} · you ●\n"
+        head = f"move {s['moves']} · you ⚫\n"
         if legal and not s.get("over"):
             head += "your moves: " + ", ".join(legal) + "\n"
         return head + self._board(room)
@@ -762,7 +771,17 @@ class CheckersGame(MultiGame):
                 "forced. no clock — play whenever.")
 
     def _board(self, room: Room) -> str:
+        from ..boards import render_board
+
         g = room.state["grid"]
+        s = room.state
+        text = render_board("checkers", room.state)
+        if text is not None:
+            rows = ["   " + " ".join("abcdefgh")]
+            rows += [f"{i + 1}  {row}"
+                     for i, row in enumerate(text.split("\n"))]
+            rows.append(f"taken — you {s['caps_b']}, house {s['caps_w']}")
+            return "\n".join(rows)
         rows = ["   " + " ".join("abcdefgh")]
         for r in range(8):
             cells = []
@@ -774,7 +793,6 @@ class CheckersGame(MultiGame):
                 else:
                     cells.append("·")
             rows.append(f"{r + 1}  " + " ".join(cells))
-        s = room.state
         rows.append(f"taken — you {s['caps_b']}, house {s['caps_w']}")
         return "\n".join(rows)
 

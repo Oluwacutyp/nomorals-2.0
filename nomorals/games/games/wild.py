@@ -525,11 +525,15 @@ class TicTacToeGame(MultiGame):
         return move
 
     def setup(self, room, mind):
-        return ("tic-tac-toe — you're X, the house is O. say 1–9. "
-                "layout:\n 1 | 2 | 3 \n-----------\n 4 | 5 | 6 "
-                "\n-----------\n 7 | 8 | 9")
+        return ("tic-tac-toe — you're ❌, the house is ⭕. "
+                "say a numbered square.\n" + self._board_text(room))
 
     def _board_text(self, room: Room) -> str:
+        from ..boards import render_board
+
+        text = render_board("ttt", room.state)
+        if text is not None:
+            return text
         b = room.state["board"]
         rows = []
         for i in (0, 3, 6):
@@ -1110,11 +1114,11 @@ class MinesweeperGame(MultiGame):
                         row.append("💥")
                     else:
                         n = self._count(room, i)
-                        row.append("·" if n == 0 else str(n))
+                        row.append("⬜" if n == 0 else str(n))
                 elif i in s["flag"]:
                     row.append("🚩")
                 else:
-                    row.append("▫")
+                    row.append("🟦")
             lines.append("  ".join(row))
         return "\n".join(lines)
 

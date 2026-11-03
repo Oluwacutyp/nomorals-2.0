@@ -151,7 +151,7 @@ class ReversiPlayTests(unittest.TestCase):
         self.assertEqual(room.status, "active")
         # the human's own move message is deterministic; the house reply
         # that follows is room-seeded, so only pin the human's facts
-        self.assertEqual(out[0], "● d3 flips 1.")
+        self.assertEqual(out[0], "⚫ d3 flips 1.")  # emoji board glyphs (§12)
         self.assertEqual(room.state["grid"][2][3], "B")  # d3 stays black
 
     def test_illegal_move_rejected_with_hint(self):

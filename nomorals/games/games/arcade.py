@@ -355,6 +355,11 @@ class ConnectFourGame(MultiGame):
         return False
 
     def _render(self, board: list[list[int]]) -> str:
+        from ..boards import render_board
+
+        text = render_board("connect4", {"board": board})
+        if text is not None:
+            return text
         symbols = {0: "·", 1: "🔴", 2: "🟡"}
         lines = ["  1 2 3 4 5 6 7"]
         for row in board:
