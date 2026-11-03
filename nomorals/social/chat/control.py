@@ -163,6 +163,8 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "balance", "mine", "work", "pay", "gshop", "quests", "treasury",
     "deposit", "withdraw", "rob", "bail", "coinflip",
     "top", "tax", "grant",
+    "property", "buyproperty", "sellproperty", "rent",
+    "listproperty", "auctions", "mortgage", "insure",
     "drop", "claim",
     "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
     "unpin", "purge", "report",
@@ -462,6 +464,14 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "top": (0, 0),            # /top — the richest board (wallet + bank)
     "tax": (0, 0),            # /tax — the group's monetary policy, stated
     "grant": (0, None),       # /grant @member 100 — admin pays from the treasury (governance above threshold)
+    "property": (0, 1),       # /property [manager] — districts + market index, your portfolio, your gems (§17/§20 real estate)
+    "buyproperty": (0, None), # /buyproperty <district> <tier> | public <district> <tier> — buy a building from the system (admins: public stock via governance)
+    "sellproperty": (1, 1),   # /sellproperty <id> — sell back at the depreciated rate
+    "rent": (0, 0),           # /rent — collect accrued property rent, paid in gems 💎
+    "listproperty": (0, None),# /listproperty [<id> <ask> | buy <listing> | cancel <id>] — the member property market (treasury cut on sales)
+    "auctions": (0, None),    # /auctions [start <id> <start> [hours] | bid <auction> <amount>] — property auctions, treasury escrow, anti-snipe
+    "mortgage": (0, None),    # /mortgage [borrow <id> <amount> | repay <id> <amount>] — treasury loans against property; bank-debited weekly; default = repossession
+    "insure": (0, None),      # /insure [buy <id> | pay <id>] — 30-day cover against repair waves; rent offsets repair debt
     "mute": (0, None),        # /mute [@member] [10m|2h|1d|inf] — admin: reply to their message or name them (P1 §4)
     "unmute": (0, 1),         # /unmute [@member] — admin: lift a mute
     "ban": (0, None),         # /ban [@member] [reason] — admin: reply or name
@@ -2141,18 +2151,50 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/coinflip <bet> heads|tails",
             "example": "/coinflip 10 heads",
             "related": "/slots /balance"},
-    "top": {"what": "the richest board: members ranked by total wealth — wallet plus banked sparks.",
+    "top": {"what": "the richest board: members ranked by total wealth — wallet plus banked sparks plus property value at the live market index.",
             "usage": "/top",
             "example": "/top",
-            "related": "/balance /deposit"},
+            "related": "/balance /deposit /property"},
     "tax": {"what": "the group's monetary policy, stated plainly: transfer tax, moderation fine, earn caps, the governance threshold, and whether issuance is running hot enough that faucets are throttled.",
             "usage": "/tax",
             "example": "/tax",
             "related": "/treasury /gsettings"},
-    "grant": {"what": "pay a member out of the group treasury (admins). Above the governance threshold (see /tax) the grant becomes a proposal a second admin must /approve.",
-            "usage": "/grant @member <amount>",
+    "grant": {"what": "pay a member out of the group treasury (admins). Above the governance threshold (see /tax) the grant becomes a proposal a second admin must /approve. The 'gems' form — /grant gems @member 25 — gifts gems 💎, the premium purse, which moves ONLY through this governance road.",
+            "usage": "/grant @member <amount> · /grant gems @member <amount>",
             "example": "/grant @ada 100",
             "related": "/approve /treasury /drop"},
+    "property": {"what": "the property map and your portfolio: districts with their live market index and trend, every tier priced per district, your buildings with their rent standing, your gems, and your management rung. Property is an asset class inside the group economy — it counts toward the richest board.",
+            "usage": "/property · /property manager (hire the next management rung)",
+            "example": "/property",
+            "related": "/buyproperty /rent /sellproperty"},
+    "buyproperty": {"what": "buy a building from the system at the district's index price, paid to the treasury. Spark tiers (room → plaza) price in sparks; penthouse and tower are the premium shelf — gems only. Admins can buy PUBLIC property for the treasury ('public'), whose rent funds drops and prizes; large public buys go through governance like any treasury spend.",
+            "usage": "/buyproperty <district> <tier> · /buyproperty public <district> <tier>",
+            "example": "/buyproperty market_mile shop",
+            "related": "/property /sellproperty /rent"},
+    "sellproperty": {"what": "sell a property back to the system at the depreciated rate (the group's sell-back %, see /property), in the currency its tier is priced in. A listed, auctioned or mortgaged property must be freed first.",
+            "usage": "/sellproperty <property id>",
+            "example": "/sellproperty prop-a1b2",
+            "related": "/property /listproperty"},
+    "rent": {"what": "collect the rent standing on all your properties. Rent accrues one period per day per building (capped by your management rung) and pays in GEMS 💎 — the premium purse. Repair debt is offset from rent first. A manager (level 1+) collects automatically, even while you're jailed or away.",
+            "usage": "/rent",
+            "example": "/rent",
+            "related": "/property /buyproperty /insure"},
+    "listproperty": {"what": "the member property market: list one of your buildings at your ask (bare /listproperty shows the board), buy a listed building, or cancel your listing. The treasury takes the group's market cut of every sale, journaled apart from the seller's net. The rent clock follows the property through a sale.",
+            "usage": "/listproperty · /listproperty <id> <ask> · /listproperty buy <listing id> · /listproperty cancel <id>",
+            "example": "/listproperty prop-a1b2 1200",
+            "related": "/property /auctions /sellproperty"},
+    "auctions": {"what": "property auctions run through treasury escrow: the standing high bid is HELD in the treasury, outbids are refunded in full, and settlement pays the seller minus the market cut. A bid inside the last 2 minutes extends the close (anti-snipe). Bare /auctions shows the live board with bid buttons.",
+            "usage": "/auctions · /auctions start <id> <start price> [hours] · /auctions bid <auction id> <amount>",
+            "example": "/auctions bid auc-a1b2 900",
+            "related": "/listproperty /property"},
+    "mortgage": {"what": "borrow sparks from the treasury against one property's value (up to the group's LTV), at a flat stated interest per week. Instalments auto-debit your BANK vault weekly; paying by hand is always open. Miss the third weekly instalment and the property is repossessed into public stock, the remaining debt written off on the record.",
+            "usage": "/mortgage · /mortgage borrow <property id> <amount> · /mortgage repay <mortgage id> <amount>",
+            "example": "/mortgage borrow prop-a1b2 500",
+            "related": "/property /deposit /insure"},
+    "insure": {"what": "property insurance: a 30-day policy priced at 5% of the building's current value, in its own currency. District repair waves bill uninsured owners (bank first, then wallet; any shortfall becomes repair debt your rent offsets) — insured buildings are covered in full. Market falls are not insurable. Bare /insure shows your cover and debts.",
+            "usage": "/insure · /insure buy <property id> · /insure pay <property id>",
+            "example": "/insure buy prop-a1b2",
+            "related": "/property /rent /mortgage"},
 
     "mute": {"what": "mute a member (admins): they can read but not send. Reply to their message with /mute, or name them. A duration like 10m, 2h, 1d sets the length; bare /mute is an hour, 'inf' is indefinite.",
             "usage": "/mute [10m|2h|1d|inf] as a reply, or /mute @member [duration]",
@@ -2638,6 +2680,9 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "strikes",
                             "balance", "mine", "work", "pay", "gshop",
                             "quests", "treasury", "drop", "claim",
+                            "property", "buyproperty", "sellproperty",
+                            "rent", "listproperty", "auctions",
+                            "mortgage", "insure",
                             "mute", "unmute", "ban", "unban", "kick",
                             "warn", "pin", "unpin", "purge", "report"]),
     ("discovery", ["list", "commands", "menu", "help", "tour", "heal"]),
@@ -2900,6 +2945,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "balance", "mine", "work", "pay", "gshop", "quests",
       "treasury", "deposit", "withdraw", "rob", "bail", "coinflip",
       "top", "tax", "grant", "drop", "claim",
+      "property", "buyproperty", "sellproperty", "rent",
+      "listproperty", "auctions", "mortgage", "insure",
       "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
       "unpin", "purge", "report"]),
     ("discovery",

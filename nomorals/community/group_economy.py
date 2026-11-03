@@ -802,7 +802,14 @@ class GroupEconomy:
             if e.kind in ("earn", "mining") and e.amount > 0:
                 earned += e.amount
             elif e.amount < 0 and e.kind in (
-                    "spend", "treasury_in", "gamble", "bank_deposit"):
+                    "spend", "treasury_in", "gamble", "bank_deposit",
+                    # real estate (§20): every member-side estate
+                    # spend is a sink the policy must see — buys,
+                    # market fees, mortgage repayments, insurance
+                    # premiums, repair bills, management.
+                    "estate_buy", "estate_fee", "estate_repay",
+                    "estate_insure", "estate_repair",
+                    "estate_manager"):
                 sunk += -e.amount
         throttled = earned >= 1000 and earned > 3 * max(1, sunk)
         return {"earned": earned, "sunk": sunk, "days": days,

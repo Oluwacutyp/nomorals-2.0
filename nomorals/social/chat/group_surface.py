@@ -39,6 +39,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ...community.group_real_estate import (
+    ESTATE_DEFAULTS,
+    GroupRealEstate,
+    GroupRealEstateError,
+)
 from ...community.welcome_moderation import (
     BanList,
     ModerationConfig,
@@ -123,6 +128,11 @@ def _default_settings() -> dict[str, Any]:
                                         # automatic admin (§17):
                                         # autonomy + sensors +
                                         # escalation spine
+        "estate": copy.deepcopy(ESTATE_DEFAULTS),
+                                        # real estate (§17/§20):
+                                        # market cut, sell-back,
+                                        # ownership cap, mortgage
+                                        # LTV + rate levers
         "presentation": copy.deepcopy(DEFAULT_PRESENTATION),
                                         # typography (§27): theme
                                         # pack, per-class preset
@@ -187,13 +197,17 @@ class GroupStore:
         stored = self.group(group_key).get("settings") or {}
         merged.update({k: v for k, v in stored.items()
                        if k in merged
-                       and k not in ("defense", "presentation")})
+                       and k not in ("defense", "presentation",
+                                     "estate")})
         mod = dict(merged["moderation"])
         mod.update((stored.get("moderation") or {}))
         merged["moderation"] = mod
         merged["defense"] = _deep_merge(
             copy.deepcopy(DEFENSE_DEFAULTS),
             stored.get("defense") or {})
+        merged["estate"] = _deep_merge(
+            copy.deepcopy(ESTATE_DEFAULTS),
+            stored.get("estate") or {})
         merged["presentation"] = _deep_merge(
             copy.deepcopy(DEFAULT_PRESENTATION),
             stored.get("presentation") or {})
@@ -552,6 +566,8 @@ class GroupSurface:
                         f"<b>{paid['name']}</b> — "
                         f"+{sparks(paid['bonus'])} to the "
                         f"treasury!"))
+                notices.extend(self.estate_cycle(group_key,
+                                                 now=now))
             self.store.save()
             return {"changes": changes, "actions": out_actions,
                     "notices": notices, "suppressed": n_suppressed}
@@ -803,6 +819,392 @@ class GroupSurface:
             group_key)["economy_enabled"]) \
             and self.economy_frozen(group_key) is None
 
+    # ---- real estate (§17 slice 2 / §20: the whole class) ----
+    @property
+    def estate(self) -> GroupRealEstate:
+        est = getattr(self, "_estate", None)
+        if est is None:
+            est = GroupRealEstate(self.economy)
+            self._estate = est
+        return est
+
+    def estate_cfg(self, group_key: str) -> dict[str, Any]:
+        return dict(self.store.settings(group_key)["estate"])
+
+    def estate_frozen(self, group_key: str) -> str | None:
+        """Freeze reason when the estate store is unreadable,
+        else None (the economy_frozen discipline, probed once
+        per group per day)."""
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        probe = getattr(self, "_estate_probe", None)
+        if probe is None:
+            probe = self._estate_probe = {}
+        cached = probe.get(group_key)
+        if cached and cached[0] == day:
+            return cached[1]
+        reason: str | None = None
+        try:
+            self.estate.health(group_key)
+        except GroupRealEstateError as exc:
+            reason = str(exc)
+            self._audit(group_key, "estate_frozen", reason=reason)
+        probe[group_key] = (day, reason)
+        return reason
+
+    def estate_on(self, group_key: str) -> bool:
+        return self.economy_on(group_key) \
+            and self.estate_frozen(group_key) is None
+
+    def _estate_gate(self, group_key: str) -> dict[str, Any] | None:
+        """None when the estate runs here, else a refusal dict
+        in the facade's shape."""
+        if not self.store.settings(group_key)["economy_enabled"]:
+            return {"ok": False, "reason": "off"}
+        if self.estate_frozen(group_key) is not None:
+            return {"ok": False, "reason": "frozen"}
+        return None
+
+    def estate_summary(self, group_key: str, user_id: str, *,
+                       now: float | None = None) -> dict[str, Any]:
+        if self._estate_gate(group_key):
+            return {"gems": 0, "properties": [],
+                    "property_count": 0, "property_value": 0,
+                    "rent_ready_gems": 0, "manager_level": 0,
+                    "premium_owned": [], "mortgages": []}
+        return self.estate.summary(group_key, user_id, now=now)
+
+    def estate_catalog(self, group_key: str, *,
+                       now: float | None = None) -> list[dict[str, Any]]:
+        if self._estate_gate(group_key):
+            return []
+        return self.estate.catalog(group_key, now=now)
+
+    def estate_buy(self, group_key: str, user_id: str,
+                   district: str, tier: str, *,
+                   now: float | None = None) -> dict[str, Any]:
+        gate = self._estate_gate(group_key)
+        if gate:
+            return gate
+        econ = self.economy
+        if not econ.is_verified(group_key, user_id):
+            econ.verify_member(group_key, user_id)
+        return self.estate.buy(group_key, user_id, district, tier,
+                               cfg=self.estate_cfg(group_key),
+                               now=now)
+
+    def estate_buy_public(self, group_key: str, district: str,
+                          tier: str, *, by: str = "",
+                          now: float | None = None) -> dict[str, Any]:
+        """Public property (§20g): the treasury buys a building.
+        Reservation-aware like every treasury spend — escrowed
+        bids and open drops are not spendable."""
+        gate = self._estate_gate(group_key)
+        if gate:
+            return gate
+        price = self.estate.price(group_key, district, tier) \
+            if district and tier else 0
+        available = self.economy.treasury_balance(group_key) \
+            - self.reserved_treasury(group_key)
+        if price > available:
+            return {"ok": False, "reason": "funds",
+                    "available": available, "price": price}
+        out = self.estate.buy_public(group_key, district, tier,
+                                     by=by, now=now)
+        if out.get("ok"):
+            self._audit(group_key, "estate_public_buy", by=by,
+                        district=district, tier=tier,
+                        price=out["price"])
+        return out
+
+    def estate_sell(self, group_key: str, user_id: str, pid: str,
+                    *, now: float | None = None) -> dict[str, Any]:
+        gate = self._estate_gate(group_key)
+        if gate:
+            return gate
+        return self.estate.sell(group_key, user_id, pid,
+                                cfg=self.estate_cfg(group_key),
+                                now=now)
+
+    def estate_collect_rent(self, group_key: str, user_id: str, *,
+                            now: float | None = None
+                            ) -> dict[str, Any]:
+        gate = self._estate_gate(group_key)
+        if gate:
+            return gate
+        if self.jail_state(group_key, user_id, now=now):
+            return {"ok": False, "reason": "jailed"}
+        econ = self.economy
+        if not econ.is_verified(group_key, user_id):
+            econ.verify_member(group_key, user_id)
+        return self.estate.collect_rent(group_key, user_id,
+                                        now=now)
+
+    def estate_list(self, group_key: str, user_id: str, pid: str,
+                    ask: int, *, now: float | None = None
+                    ) -> dict[str, Any]:
+        gate = self._estate_gate(group_key)
+        if gate:
+            return gate
+        return self.estate.list_property(group_key, user_id, pid,
+                                         ask, now=now)
+
+    def estate_unlist(self, group_key: str, user_id: str,
+                      pid: str, *, now: float | None = None
+                      ) -> dict[str, Any]:
+        gate = self._estate_gate(group_key)
+        if gate:
+            return gate
+        return self.estate.unlist(group_key, user_id, pid, now=now)
+
+    def estate_market(self, group_key: str) -> list[dict[str, Any]]:
+        if self._estate_gate(group_key):
+            return []
+        return self.estate.market(group_key)
+
+    def estate_buy_listing(self, group_key: str, buyer: str,
+                           lid: str, *,
+                           now: float | None = None
+                           ) -> dict[str, Any]:
+        gate = self._estate_gate(group_key)
+        if gate:
+            return gate
+        return self.estate.buy_listing(
+            group_key, buyer, lid, cfg=self.estate_cfg(group_key),
+            now=now)
+
+    def estate_auction_start(self, group_key: str, user_id: str,
+                             pid: str, start: int, hours: float, *,
+                             now: float | None = None
+                             ) -> dict[str, Any]:
+        gate = self._estate_gate(group_key)
+        if gate:
+            return gate
+        return self.estate.start_auction(group_key, user_id, pid,
+                                         start, hours, now=now)
+
+    def estate_bid(self, group_key: str, user_id: str, aid: str,
+                   amount: int, *, now: float | None = None
+                   ) -> dict[str, Any]:
+        gate = self._estate_gate(group_key)
+        if gate:
+            return gate
+        return self.estate.place_bid(group_key, user_id, aid,
+                                     amount, now=now)
+
+    def estate_auctions(self, group_key: str, *,
+                        now: float | None = None
+                        ) -> list[dict[str, Any]]:
+        if self._estate_gate(group_key):
+            return []
+        return self.estate.open_auctions(
+            group_key, cfg=self.estate_cfg(group_key), now=now)
+
+    def estate_borrow(self, group_key: str, user_id: str,
+                      pid: str, amount: int, *,
+                      now: float | None = None) -> dict[str, Any]:
+        gate = self._estate_gate(group_key)
+        if gate:
+            return gate
+        if self.jail_state(group_key, user_id, now=now):
+            return {"ok": False, "reason": "jailed"}
+        # The treasury's lendable sparks respect ALL reservations
+        # (open drops + auction escrow), like grants do.
+        available = self.economy.treasury_balance(group_key) \
+            - self.reserved_treasury(group_key)
+        if amount > available:
+            return {"ok": False, "reason": "funds",
+                    "available": available}
+        return self.estate.borrow(group_key, user_id, pid, amount,
+                                  cfg=self.estate_cfg(group_key),
+                                  now=now)
+
+    def estate_repay(self, group_key: str, user_id: str, mid: str,
+                     amount: int, *, now: float | None = None
+                     ) -> dict[str, Any]:
+        gate = self._estate_gate(group_key)
+        if gate:
+            return gate
+        return self.estate.repay(group_key, user_id, mid, amount,
+                                 now=now)
+
+    def estate_mortgages(self, group_key: str, user_id: str = ""
+                         ) -> list[dict[str, Any]]:
+        if self._estate_gate(group_key):
+            return []
+        return self.estate.mortgages(group_key, user_id)
+
+    def estate_insure(self, group_key: str, user_id: str,
+                      pid: str, *, now: float | None = None
+                      ) -> dict[str, Any]:
+        gate = self._estate_gate(group_key)
+        if gate:
+            return gate
+        return self.estate.insure(group_key, user_id, pid,
+                                  now=now)
+
+    def estate_pay_repair(self, group_key: str, user_id: str,
+                          pid: str, *, now: float | None = None
+                          ) -> dict[str, Any]:
+        gate = self._estate_gate(group_key)
+        if gate:
+            return gate
+        return self.estate.pay_repair_debt(group_key, user_id,
+                                           pid, now=now)
+
+    def estate_manager_buy(self, group_key: str, user_id: str, *,
+                           now: float | None = None
+                           ) -> dict[str, Any]:
+        gate = self._estate_gate(group_key)
+        if gate:
+            return gate
+        return self.estate.buy_manager(group_key, user_id,
+                                       now=now)
+
+    def estate_premium_buy(self, group_key: str, user_id: str,
+                           item_id: str, *,
+                           now: float | None = None
+                           ) -> dict[str, Any] | None:
+        if self._estate_gate(group_key):
+            return None
+        return self.estate.buy_premium(group_key, user_id,
+                                       item_id, now=now)
+
+    def estate_grant_gems(self, group_key: str, recipient: str,
+                          amount: int, *, proposal_id: str,
+                          by: str = "",
+                          now: float | None = None
+                          ) -> dict[str, Any]:
+        """Execute a gems gift — called by the operator path and
+        by approve_spend for ``gems_gift`` proposals.  There is
+        no other road: the organ's only governance faucet."""
+        gate = self._estate_gate(group_key)
+        if gate:
+            return gate
+        econ = self.economy
+        if not econ.is_verified(group_key, recipient):
+            econ.verify_member(group_key, recipient)
+        entry = self.estate.grant_gems_governance(
+            group_key, recipient, amount,
+            proposal_id=proposal_id, now=now)
+        if entry is None:
+            return {"ok": False, "reason": "gems"}
+        self._audit(group_key, "estate_gems_gift", by=by,
+                    recipient=recipient, amount=amount,
+                    proposal=proposal_id)
+        return {"ok": True, "amount": amount,
+                "gems": self.estate.gems_balance(group_key,
+                                                 recipient)}
+
+    def estate_season_rewards(self, group_key: str,
+                              champs: list[tuple[str, int]], *,
+                              now: float | None = None
+                              ) -> list[tuple[str, int]]:
+        """Season podium gems (§17 premium source), granted at
+        rollover.  Returns what was actually granted."""
+        from ...community.group_real_estate import (
+            SEASON_GEM_REWARDS)
+
+        if self._estate_gate(group_key):
+            return []
+        granted: list[tuple[str, int]] = []
+        for rank, (member, _earned) in enumerate(champs[:3], 1):
+            gems = SEASON_GEM_REWARDS.get(rank) or 0
+            if gems and self.estate.credit_gems(
+                    group_key, member, gems, source="season",
+                    reason="season reward", ref="season",
+                    now=now):
+                granted.append((member, gems))
+        return granted
+
+    def estate_top_landlord(self, group_key: str
+                            ) -> tuple[str, int] | None:
+        if self._estate_gate(group_key):
+            return None
+        return self.estate.top_landlord(group_key)
+
+    def estate_cycle(self, group_key: str, *,
+                     rng: Any = None,
+                     now: float | None = None) -> list[str]:
+        """The estate tick, riding the message path beside the
+        quest/season cycles: auctions settle, mortgages run,
+        public rent lands, the day's district event fires.
+        Returns group-worthy announcement lines (personal
+        outcomes — one member's auto-collected rent, a mortgage
+        paid off — stay off the group feed)."""
+        import random
+
+        now = now if now is not None else time.time()
+        if not self.estate_on(group_key):
+            return []
+        from ...community.group_real_estate import DISTRICTS, TIERS
+
+        notices: list[str] = []
+        try:
+            events = self.estate.tick(
+                group_key, rng=rng or random.Random(),
+                cfg=self.estate_cfg(group_key), now=now)
+        except GroupRealEstateError:
+            return []
+        for event in events:
+            kind = event.get("kind")
+            if kind == "auction_settled":
+                if event.get("winner"):
+                    who = self._member_label(
+                        group_key, str(event["winner"]))
+                    notices.append(notice_line(
+                        "🔨",
+                        f"auction settled: "
+                        f"<b>{TIERS[event['tier']]['name']}</b> "
+                        f"went to {who} for "
+                        f"{sparks(event['price'])}"))
+                else:
+                    notices.append(notice_line(
+                        "🔨", "an auction closed with no bids — "
+                              "the property is back with its "
+                              "owner."))
+            elif kind == "repossession":
+                self._audit(group_key, "estate_repossession",
+                            mortgage=event.get("mortgage"),
+                            property=event.get("property"),
+                            written_off=event.get("written_off"))
+                notices.append(notice_line(
+                    "🏛️",
+                    f"mortgage default: a property was "
+                    f"repossessed into public stock "
+                    f"({sparks(event.get('written_off') or 0)} "
+                    f"of debt written off, on the record)."))
+            elif kind == "public_rent":
+                notices.append(notice_line(
+                    "🏛️",
+                    f"public property paid "
+                    f"{sparks(event['sparks'])} of rent into "
+                    f"the treasury."))
+            elif kind == "district_event":
+                name = DISTRICTS[event["district"]]["name"]
+                if event["event"] == "boom":
+                    notices.append(notice_line(
+                        "📈", f"<b>{name}</b> is booming — "
+                              f"property prices there are up "
+                              f"(index {event.get('index')})."))
+                elif event["event"] == "bust":
+                    notices.append(notice_line(
+                        "📉", f"<b>{name}</b> is in a slump — "
+                              f"property prices there are down "
+                              f"(index {event.get('index')})."))
+                elif event["event"] == "tenants":
+                    notices.append(notice_line(
+                        "🛋️", f"tenant trouble in <b>{name}</b> "
+                              f"— rents there pay 25% less for "
+                              f"3 days."))
+                elif event["event"] == "repairs":
+                    notices.append(notice_line(
+                        "🔧", f"repair wave in <b>{name}</b> — "
+                              f"{sparks(event.get('billed') or 0)} "
+                              f"of repair bills paid, "
+                              f"{sparks(event.get('covered') or 0)} "
+                              f"covered by insurance."))
+        return notices
+
     def _economy_activity(self, group_key: str, user_id: str,
                           now: float) -> None:
         """Every real group message feeds the economy: the member
@@ -989,10 +1391,22 @@ class GroupSurface:
     # real state change, journaled, with honest refusals) ---------
 
     def reserved_treasury(self, group_key: str) -> int:
-        """Treasury sparks already promised to open drops."""
+        """Treasury sparks already promised: open drops plus
+        auction escrow (standing high bids are HELD in the
+        treasury — §20a — and are not the treasury's to spend
+        until their auction settles)."""
         drops = self._extras(group_key).setdefault("drops", [])
-        return sum(int(d.get("remaining") or 0)
-                   for d in drops if d.get("open"))
+        total = sum(int(d.get("remaining") or 0)
+                    for d in drops if d.get("open"))
+        try:
+            total += self.estate.auction_reserved(group_key)
+        except GroupRealEstateError:
+            # The estate store is unreadable: how much escrow
+            # the treasury holds is UNKNOWN, so it is treated
+            # as unspendable rather than guessed at (estate
+            # commands surface the freeze itself).
+            total += 10 ** 12
+        return total
 
     def open_drop_from_treasury(self, group_key: str, total: int,
                                 per_claim: int, *,
@@ -1099,6 +1513,15 @@ class GroupSurface:
             out = self.open_drop_from_treasury(
                 group_key, int(payload["total"]),
                 int(payload["per_claim"]), by=by, now=now)
+        elif proposal["kind"] == "estate_public":
+            out = self.estate_buy_public(
+                group_key, str(payload["district"]),
+                str(payload["tier"]), by=by, now=now)
+        elif proposal["kind"] == "gems_gift":
+            out = self.estate_grant_gems(
+                group_key, str(payload["recipient"]),
+                int(payload["amount"]), proposal_id=proposal_id,
+                by=by, now=now)
         else:
             return {"ok": False, "reason": "kind"}
         if out.get("ok"):
@@ -1281,7 +1704,9 @@ class GroupSurface:
     def top_holders(self, group_key: str, *,
                     limit: int = 10) -> list[dict[str, Any]]:
         """The board: real members by TOTAL wealth (wallet +
-        bank).  Pseudo-members (treasury, vaults, jackpot) are
+        bank + property value at market, §20f — property is
+        wealth, and the board tells the truth about wealth).
+        Pseudo-members (treasury, vaults, jackpot) are
         accounts, not people — never ranked."""
         econ = self.economy
         rows = []
@@ -1291,7 +1716,18 @@ class GroupSurface:
             bank = econ.bank_balance(group_key, member)
             rows.append({"member": member, "wallet": wallet,
                          "bank": bank, "total": wallet + bank})
-        rows.sort(key=lambda r: -r["total"])
+        try:
+            estate = self.estate
+            for row in rows:
+                row["property"] = estate.member_property_value(
+                    group_key, row["member"])
+        except GroupRealEstateError:
+            for row in rows:
+                row["property"] = 0
+        for row in rows:
+            row.setdefault("property", 0)
+            row["worth"] = row["total"] + row["property"]
+        rows.sort(key=lambda r: -r["worth"])
         return rows[:limit]
 
     def group_quest_cycle(self, group_key: str, *,
@@ -1365,6 +1801,23 @@ class GroupSurface:
             who = record.get("name") or record.get("username") \
                 or uid
             lines.append(f"{medals[i]} {who} — {earned} earned")
+        # Season rewards pay GEMS to the podium (§17: a stated
+        # premium source), and property wealth gets its own
+        # crown — assets persist across seasons; earnings reset.
+        for uid, gems in self.estate_season_rewards(
+                group_key, champs, now=now):
+            record = members.get(uid) or {}
+            who = record.get("name") or record.get("username") \
+                or uid
+            lines.append(f"💎 {who} — +{gems} gems "
+                         f"(season reward)")
+        landlord = self.estate_top_landlord(group_key)
+        if landlord:
+            record = members.get(landlord[0]) or {}
+            who = record.get("name") or record.get("username") \
+                or landlord[0]
+            lines.append(f"🏘️ {who} — the group's landlord: "
+                         f"{landlord[1]} sparks of property")
         return "\n".join(lines)
 
     def apply_fine(self, group_key: str, user_id: str, *,

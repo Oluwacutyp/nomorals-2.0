@@ -444,6 +444,17 @@ class RuntimeGroupMixin:
                 "jail; /bail gets you out) · 🎰 /slots 10 · 🪙 "
                 "/coinflip 10 — losses feed the treasury and the "
                 "jackpot pot; triple 7️⃣ takes the pot.")
+            everyone.append(
+                "🏘️ property — /property (districts, the market "
+                "index, your portfolio) · /buyproperty "
+                "<district> <tier> · /rent collects daily rent "
+                "as gems 💎 · /sellproperty · /listproperty "
+                "(the member market) · /auctions (treasury "
+                "escrow) · /mortgage (borrow against a "
+                "building) · /insure (cover against repair "
+                "waves). Gems buy the premium shelf in /gshop "
+                "and the penthouse/tower tiers — they never "
+                "come from sparks.")
         everyone.append(
             "/help /balance — the full page for any command")
         card.block_lines(everyone, title="for everyone:")
@@ -457,6 +468,12 @@ class RuntimeGroupMixin:
             "/grant @member 100 — pay a member from the treasury; "
             "above the governance threshold a second admin must "
             "/approve it first",
+            "/grant gems @member 25 — gift gems 💎 (the premium "
+            "purse moves only through governance)",
+            "/buyproperty public <district> <tier> — the treasury "
+            "buys a public building; its rent funds drops and "
+            "prizes (large buys go through /approve like any "
+            "treasury spend)",
             "moderation, by hand: reply to a member's message "
             "with /warn, /mute 10m|2h|1d, /ban or /kick — or name "
             "@member instead. /unmute /unban undo them; /pin and "
@@ -1328,6 +1345,17 @@ class RuntimeGroupMixin:
         if bank:
             rows.append(("Banked", sparks(bank), True))
             rows.append(("Total", sparks(wallet + bank), True))
+        # One purse (§25): gems + property stand on the same
+        # card as the sparks — one wealth picture, three
+        # denominations, each with its own faucets and sinks.
+        estate = surface.estate_summary(key, user_id)
+        if estate["gems"] or estate["property_count"]:
+            rows.append(("Gems", f"{estate['gems']} 💎", True))
+        if estate["property_count"]:
+            rows.append(
+                ("Property",
+                 f"{estate['property_count']} · "
+                 f"{sparks(estate['property_value'])}", True))
         card.stats(rows)
         for badge in stmt.get("badges", []):
             card.line(f"🏅 {badge.get('badge')} "
@@ -1344,7 +1372,9 @@ class RuntimeGroupMixin:
         if disclaimer:
             card.flavor(disclaimer)
         buttons = [[("⛏️ Mine", "mine"), ("🛠️ Work", "work")],
-                   [("🗺️ Quests", "quests"), ("🛒 Shop", "gshop")]]
+                   [("🗺️ Quests", "quests"), ("🛒 Shop", "gshop")],
+                   [("🏘️ Property", "property"),
+                    ("💎 Rent", "rent")]]
         vault_row = []
         if wallet > 0:
             vault_row.append(("🏦 Deposit", "deposit all"))
@@ -1457,6 +1487,24 @@ class RuntimeGroupMixin:
         text = str(tail or "").strip()
         if text.lower().startswith("buy "):
             item_id = text[4:].strip().lower()
+            from ...community.group_real_estate import PREMIUM_SHELF
+
+            if item_id in PREMIUM_SHELF:
+                grant = surface.estate_premium_buy(key, user_id,
+                                                   item_id)
+                if grant is None:
+                    item = PREMIUM_SHELF[item_id]
+                    gems = surface.estate.gems_balance(key,
+                                                       user_id)
+                    return (f"not enough gems — {item['name']} "
+                            f"costs {item['cost']} 💎, you have "
+                            f"{gems} 💎. Gems come from property "
+                            f"rent, season rewards and "
+                            f"governance gifts — never from "
+                            f"sparks.")
+                return (f"💎 {grant['name']} is yours — granted "
+                        f"for gems and ledgered "
+                        f"({grant['ledger_id']}).")
             grant = surface.economy.buy_status(key, user_id, item_id)
             if grant is None:
                 item = STATUS_SHOP.get(item_id)
@@ -1481,7 +1529,9 @@ class RuntimeGroupMixin:
 
         balance = surface.economy.balance(key, user_id)
         card = Card("economy", title="Group shop", icon="🛒")
-        card.line(f"your sparks: **{sparks(balance)}**")
+        gems = surface.estate.gems_balance(key, user_id)
+        card.line(f"your sparks: **{sparks(balance)}** · "
+                  f"your gems: **{gems} 💎**")
         shelf = []
         buy_row: list = []
         buttons: list = []
@@ -1503,8 +1553,30 @@ class RuntimeGroupMixin:
                     buy_row = []
         if buy_row:
             buttons.append(buy_row)
-        buttons.append([("🪙 My balance", "balance")])
         card.block_lines(shelf)
+        # The premium shelf (§17): gems only — a second purse
+        # with its own faucets, never a sparks price in disguise.
+        from ...community.group_real_estate import PREMIUM_SHELF
+
+        premium = []
+        premium_row: list = []
+        for item_id, item in PREMIUM_SHELF.items():
+            afford = gems >= int(item["cost"])
+            premium.append(
+                f"`{item_id}` — **{item['name']}** · "
+                f"{item['cost']} 💎 · {item['blurb']}"
+                + ("" if afford else " · *not yet*"))
+            if afford:
+                premium_row.append(
+                    (f"Buy {item['name']} · {item['cost']}💎",
+                     f"gshop buy {item_id}"))
+                if len(premium_row) == 2:
+                    buttons.append(premium_row)
+                    premium_row = []
+        if premium_row:
+            buttons.append(premium_row)
+        card.block_lines(premium, title="Premium shelf — gems 💎")
+        buttons.append([("🪙 My balance", "balance")])
         return self._card(message, card, buttons)
 
     def _control_quests(self, tail, message) -> str:  # type: ignore[no-untyped-def]
@@ -2005,9 +2077,12 @@ class RuntimeGroupMixin:
             who = str(record.get("name") or record.get("username")
                       or row["member"])
             mark = medals[i] if i < 3 else f"{i + 1}."
-            value = sparks(row["total"])
+            value = sparks(row.get("worth", row["total"]))
             if row["bank"]:
                 value += f" (🏦 {sparks(row['bank'])} banked)"
+            if row.get("property"):
+                value += (f" (🏘️ {sparks(row['property'])} "
+                          f"property)")
             stats.append((f"{mark} {who}", value, True))
         card.stats(stats)
         return self._card(message, card)
@@ -2052,6 +2127,10 @@ class RuntimeGroupMixin:
         if err:
             return err
         surface = self._group_surface()
+        raw = str(tail or "").strip()
+        if raw.lower().startswith("gems "):
+            return self._control_grant_gems(raw[5:].strip(),
+                                            message, key, surface)
         parts = str(tail or "").split()
         amount = None
         target_token = ""
@@ -2100,6 +2179,58 @@ class RuntimeGroupMixin:
                      True)])
         return self._card(message, card)
 
+    def _control_grant_gems(self, tail, message, key, surface):  # type: ignore[no-untyped-def]
+        """/grant gems @member 25: a gems gift — the premium
+        purse's governance road (§17/§25).  Gems are never
+        minted on one admin's word above the threshold: the
+        gift becomes a proposal a second admin executes; the
+        operator, sovereign as ever, may gift directly."""
+        amount = None
+        target_token = ""
+        for part in str(tail or "").split():
+            if part.isdigit() and amount is None:
+                amount = int(part)
+            elif not target_token:
+                target_token = part
+        if amount is None or not target_token:
+            return "usage: /grant gems @member 25"
+        recipient = self._member_ref(surface, key, target_token,
+                                     message)
+        if not recipient:
+            return (f"I don't have {target_token} in this "
+                    f"group's ledger.")
+        admin = str(message.sender_id or message.sender or "")
+        threshold = int(surface.store.settings(
+            key).get("governance_threshold") or 0)
+        if threshold and amount > threshold \
+                and not self._operator_or_false(message):
+            proposal = surface.propose_spend(
+                key, kind="gems_gift",
+                payload={"recipient": recipient,
+                         "amount": amount,
+                         "reason": "admin gems gift"}, by=admin)
+            from ...social.chat.tgbot_buttons import actionable
+            return actionable(
+                f"🗳️ that gems gift ({amount} 💎) is above the "
+                f"governance threshold ({threshold}) — "
+                f"proposal <code>{proposal['id']}</code> is "
+                f"open. A SECOND admin approves it:",
+                [[("✅ Approve gift",
+                   f"approve {proposal['id']}")]])
+        result = surface.estate_grant_gems(
+            key, recipient, amount,
+            proposal_id="operator-direct", by=admin)
+        if not result["ok"]:
+            return "that gift can't be issued right now."
+        from ...social.chat.typography import Card
+
+        card = Card("economy", title="Gems gifted", icon="💎")
+        card.line(f"**{amount} 💎** gifted from the premium "
+                  f"purse — through governance, on the record.")
+        card.stats([("Their gems now",
+                     f"{result['gems']} 💎", True)])
+        return self._card(message, card)
+
     def _control_approve(self, tail, message):  # type: ignore[no-untyped-def]
         key = self._group_key_or_none(message)
         if key is None:
@@ -2139,6 +2270,805 @@ class RuntimeGroupMixin:
                                           "can't approve that.")
         return (f"✅ proposal <code>{pid}</code> approved and "
                 "executed.")
+
+    # ── real estate (§17 slice 2 / §20: the whole class) ──────
+    def _estate_gate(self, message):  # type: ignore[no-untyped-def]
+        """Economy gate + the estate freeze: (key, None) or
+        (None, text)."""
+        key, err = self._economy_gate(message)
+        if err:
+            return None, err
+        if self._group_surface().estate_frozen(key):
+            return None, ("the property market is frozen — its "
+                          "records need an admin's eyes before "
+                          "anything trades again.")
+        return key, None
+
+    def _estate_member_label(self, surface, key, user_id):  # type: ignore[no-untyped-def]
+        record = surface.members(key).get(str(user_id)) or {}
+        return str(record.get("name") or record.get("username")
+                   or user_id)
+
+    def _control_property(self, tail, message):  # type: ignore[no-untyped-def]
+        key, err = self._estate_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        if str(tail or "").strip().lower() == "manager":
+            return self._estate_manager(message, key, surface,
+                                        user_id)
+        from ...community.group_real_estate import (
+            MANAGER_LEVELS, TIERS)
+        from ...social.chat.typography import (
+            Card, fmt_amount, sparks)
+
+        summary = surface.estate_summary(key, user_id)
+        card = Card("economy", title="Property", icon="🏘️")
+        card.stats([
+            ("Your gems", f"{summary['gems']} 💎", True),
+            ("Property value",
+             sparks(summary["property_value"]), True),
+            ("Rent standing",
+             f"{summary['rent_ready_gems']} 💎", True),
+        ])
+        wallet = surface.economy.balance(key, user_id)
+        gems = summary["gems"]
+        buy_buttons: list = []
+        for row in surface.estate_catalog(key):
+            prices = []
+            for tier_id, spec in TIERS.items():
+                price = row["tiers"][tier_id]
+                if spec["currency"] == "gems":
+                    prices.append(f"{spec['icon']} {price}💎")
+                else:
+                    prices.append(
+                        f"{spec['icon']} {fmt_amount(price)}")
+            trend = row["trend_pct"]
+            arrow = "▲" if trend > 0 else (
+                "▼" if trend < 0 else "▬")
+            card.block_lines([
+                f"**{row['name']}** · index {row['value']} "
+                f"({arrow} {abs(trend)}% this week)",
+                " · ".join(prices),
+            ])
+            afford = [(t, row["tiers"][t]) for t in TIERS
+                      if (TIERS[t]["currency"] == "sparks"
+                          and row["tiers"][t] <= wallet)
+                      or (TIERS[t]["currency"] == "gems"
+                          and row["tiers"][t] <= gems)]
+            if afford:
+                tier_id, price = afford[0]
+                cur = "💎" if TIERS[tier_id]["currency"] == "gems" \
+                    else " sparks"
+                buy_buttons.append(
+                    (f"Buy {TIERS[tier_id]['name']} · "
+                     f"{row['name']} ({fmt_amount(price)}{cur})",
+                     f"buyproperty {row['district']} {tier_id}"))
+        if summary["properties"]:
+            lines = []
+            for prop in summary["properties"]:
+                spec = TIERS[prop["tier"]]
+                cur = "💎" if prop["currency"] == "gems" else ""
+                flags = []
+                if prop.get("listed"):
+                    flags.append("on the market")
+                if prop.get("auction"):
+                    flags.append("at auction")
+                if prop.get("mortgage"):
+                    flags.append("mortgaged")
+                if float(prop.get("insured_until") or 0) > 0:
+                    flags.append("insured")
+                if int(prop.get("repair_debt") or 0):
+                    flags.append(
+                        f"repair debt {prop['repair_debt']}")
+                lines.append(
+                    f"`{prop['id']}` {spec['icon']} "
+                    f"**{spec['name']}** — worth "
+                    f"{fmt_amount(prop['value'])}{cur} · rent "
+                    f"{prop['rent_gems']}💎 standing"
+                    + (f" · {' · '.join(flags)}" if flags else ""))
+            card.block_lines(lines, title="Yours")
+        level = summary["manager_level"]
+        mgr = MANAGER_LEVELS.get(level)
+        card.note(
+            f"manager: {mgr['name'] if mgr else 'none'} — "
+            f"/property manager hires the next rung "
+            f"(auto-collect, more rent, longer accrual)")
+        buttons = []
+        if summary["rent_ready_gems"] > 0:
+            buttons.append([("💎 Collect rent", "rent")])
+        for i in range(0, len(buy_buttons), 2):
+            buttons.append(buy_buttons[i:i + 2])
+        buttons.append([("🏪 Market", "listproperty"),
+                        ("🔨 Auctions", "auctions")])
+        return self._card(message, card, buttons)
+
+    def _estate_manager(self, message, key, surface, user_id):  # type: ignore[no-untyped-def]
+        result = surface.estate_manager_buy(key, user_id)
+        if not result["ok"]:
+            if result["reason"] == "top":
+                return ("🧑‍💼 you already run an Estate Agency — "
+                        "the top rung. Your whole portfolio is "
+                        "managed.")
+            return (f"🧑‍💼 the next rung costs "
+                    f"{result.get('cost', 0)} sparks — you have "
+                    f"{surface.economy.balance(key, user_id)}.")
+        from ...social.chat.typography import Card, sparks
+
+        card = Card("economy", title="Management hired",
+                    icon="🧑‍💼")
+        card.line(f"**{result['name']}** now runs your "
+                  f"properties.")
+        card.stats([
+            ("Rent", f"+{result['yield_pct']}%"),
+            ("Accrual cap", f"{result['cap_days']} days"),
+            ("Auto-collect", "yes — even while you're jailed "
+                             "or away" if result["auto"] else "no"),
+        ])
+        card.note(f"paid {sparks(result['cost'])} to the "
+                  f"treasury")
+        return self._card(message, card,
+                          [[("🏘️ My property", "property")]])
+
+    def _control_buyproperty(self, tail, message):  # type: ignore[no-untyped-def]
+        key, err = self._estate_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        parts = str(tail or "").split()
+        if parts and parts[0].lower() == "public":
+            return self._estate_buy_public(message, key, surface,
+                                           parts[1:], user_id)
+        if len(parts) < 2:
+            return ("usage: /buyproperty <district> <tier> — "
+                    "/property shows the districts and tiers.")
+        district, tier = parts[0].lower(), parts[1].lower()
+        result = surface.estate_buy(key, user_id, district, tier)
+        if not result["ok"]:
+            return {
+                "catalog": "no such district or tier — "
+                           "/property shows the map.",
+                "cap": f"you hold the group's property cap "
+                       f"({result.get('cap')}) — sell or trade "
+                       f"before buying more.",
+                "funds": f"not enough sparks — that costs "
+                         f"{result.get('price')} and you have "
+                         f"{surface.economy.balance(key, user_id)}.",
+                "gems": f"that tier is priced in gems 💎 — it "
+                        f"costs {result.get('price')}💎 and you "
+                        f"have "
+                        f"{surface.estate.gems_balance(key, user_id)}💎. "
+                        f"Gems come from property rent, season "
+                        f"rewards and governance gifts — never "
+                        f"from sparks.",
+            }.get(result["reason"], "can't buy that.")
+        from ...community.group_real_estate import DISTRICTS, TIERS
+        from ...social.chat.typography import Card, sparks
+
+        prop = result["property"]
+        spec = TIERS[prop["tier"]]
+        card = Card("economy", title="Property bought",
+                    icon="🏘️")
+        card.line(f"**{spec['name']}** in "
+                  f"{DISTRICTS[prop['district']]['name']} is "
+                  f"yours.")
+        price_text = (f"{result['price']} 💎"
+                      if prop["currency"] == "gems"
+                      else sparks(result["price"]))
+        card.stats([
+            ("Paid", price_text, True),
+            ("Rent", f"{spec['rent']} 💎 / day", True),
+            ("District index",
+             str(result["index"]["value"])),
+            ("Property id", prop["id"]),
+        ])
+        card.note("rent accrues daily — /rent collects it as "
+                  "gems")
+        return self._card(
+            message, card,
+            [[("🏘️ My property", "property"),
+              ("💎 Rent", "rent")]])
+
+    def _estate_buy_public(self, message, key, surface, parts,  # type: ignore[no-untyped-def]
+                           user_id):
+        if not self._group_admin_ok(message):
+            return "public property is an admin call."
+        if len(parts) < 2:
+            return ("usage: /buyproperty public <district> "
+                    "<tier>")
+        district, tier = parts[0].lower(), parts[1].lower()
+        from ...community.group_real_estate import DISTRICTS, TIERS
+
+        if district not in DISTRICTS or tier not in TIERS:
+            return "no such district or tier — /property shows it."
+        if TIERS[tier]["currency"] == "gems":
+            return ("public property is bought with treasury "
+                    "sparks — gem tiers are members' premium "
+                    "shelf only.")
+        price = surface.estate.price(key, district, tier)
+        threshold = int(surface.store.settings(
+            key).get("governance_threshold") or 0)
+        if threshold and price > threshold \
+                and not self._operator_or_false(message):
+            proposal = surface.propose_spend(
+                key, kind="estate_public",
+                payload={"district": district, "tier": tier},
+                by=user_id)
+            from ...social.chat.tgbot_buttons import actionable
+            return actionable(
+                f"🗳️ a public {TIERS[tier]['name']} "
+                f"({price} sparks of treasury money) is above "
+                f"the governance threshold ({threshold}) — "
+                f"proposal <code>{proposal['id']}</code> is "
+                f"open. A SECOND admin approves it:",
+                [[("✅ Approve purchase",
+                   f"approve {proposal['id']}")]])
+        result = surface.estate_buy_public(key, district, tier,
+                                           by=user_id)
+        if not result["ok"]:
+            return (f"the treasury can't cover that — "
+                    f"{result.get('available', 0)} available "
+                    f"after reservations.")
+        from ...community.group_real_estate import DISTRICTS
+        from ...social.chat.typography import Card, sparks
+
+        card = Card("economy", title="Public property bought",
+                    icon="🏛️")
+        card.line(f"**{TIERS[tier]['name']}** in "
+                  f"{DISTRICTS[district]['name']} now belongs "
+                  f"to the group.")
+        card.stats([("Paid from treasury", sparks(price), True),
+                    ("Treasury now",
+                     sparks(surface.economy.treasury_balance(key)),
+                     True)])
+        card.note("its rent lands in the treasury daily — "
+                  "funding drops and prizes")
+        return self._card(message, card)
+
+    def _control_sellproperty(self, tail, message):  # type: ignore[no-untyped-def]
+        key, err = self._estate_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        parts = str(tail or "").split()
+        if not parts:
+            return ("usage: /sellproperty <property id> — "
+                    "/property lists yours with their ids.")
+        pid = parts[0]
+        result = surface.estate_sell(key, user_id, pid)
+        if not result["ok"]:
+            return {
+                "not_found": "no property of yours with that "
+                             "id — /property lists yours.",
+                "listed": "that property is on the market — "
+                          "/listproperty cancel <id> first.",
+                "auction": "that property is at auction — the "
+                           "auction owns it until it settles.",
+                "mortgaged": "that property carries a mortgage "
+                             "— repay it before selling.",
+                "funds": "the treasury can't cover the "
+                         "buy-back right now.",
+            }.get(result["reason"], "can't sell that.")
+        from ...social.chat.typography import Card, sparks
+
+        proceeds = (f"{result['proceeds']} 💎"
+                    if result["currency"] == "gems"
+                    else sparks(result["proceeds"]))
+        card = Card("economy", title="Property sold back",
+                    icon="🏘️")
+        card.line(f"the system bought it back at the "
+                  f"depreciated rate.")
+        card.stats([("Market value",
+                     f"{result['value']}"
+                     + (" 💎" if result["currency"] == "gems"
+                        else " sparks"), True),
+                    ("You received", proceeds, True)])
+        return self._card(message, card,
+                          [[("🏘️ Property", "property")]])
+
+    def _control_rent(self, message):  # type: ignore[no-untyped-def]
+        key, err = self._estate_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        result = surface.estate_collect_rent(key, user_id)
+        if not result["ok"]:
+            if result["reason"] == "jailed":
+                return ("🔒 no rent collection from jail — /bail "
+                        "first, or hire a manager (/property "
+                        "manager) and it collects for you.")
+            return "the property market is off here."
+        import time as _time
+
+        from ...community.group_real_estate import TIERS
+        from ...social.chat.typography import Card
+
+        if not result["lines"]:
+            summary = surface.estate_summary(key, user_id)
+            if not summary["properties"]:
+                return ("you don't own property yet — /property "
+                        "shows the map, /buyproperty starts you.")
+            soonest = min(
+                float(p.get("anchor") or 0) + 86400
+                for p in summary["properties"])
+            wait_h = max(1, int((soonest - _time.time()) // 3600))
+            return (f"no rent standing yet — the next full day "
+                    f"lands in ~{wait_h}h. Rent pays gems 💎.")
+        card = Card("economy", title="Rent collected", icon="💎")
+        card.line(f"**+{result['gems']} 💎**")
+        lines = []
+        for line in result["lines"]:
+            spec = TIERS[line["tier"]]
+            text = (f"{spec['icon']} **{spec['name']}** — "
+                    f"{line['periods']} day(s) · "
+                    f"+{line['gems']} 💎")
+            if line["garnished"]:
+                text += (f" ({line['garnished']} 💎 went to "
+                         f"its repair debt)")
+            lines.append(text)
+        card.block_lines(lines)
+        if result["offset"]:
+            card.note(f"{result['offset']} 💎 of rent offset "
+                      f"repair debt first")
+        card.stats([("Gems now", f"{result['balance']} 💎", True)])
+        return self._card(
+            message, card,
+            [[("🏘️ Property", "property"),
+              ("🪙 My balance", "balance")]])
+
+    def _control_listproperty(self, tail, message):  # type: ignore[no-untyped-def]
+        key, err = self._estate_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        parts = str(tail or "").split()
+        if parts and parts[0].lower() == "buy" and len(parts) >= 2:
+            result = surface.estate_buy_listing(key, user_id,
+                                                parts[1])
+            if not result["ok"]:
+                return {
+                    "not_found": "that listing is gone — "
+                                 "/listproperty shows the live "
+                                 "market.",
+                    "own": "that's your own listing.",
+                    "cap": "you hold the group's property cap "
+                           "— sell before buying more.",
+                    "funds": f"not enough sparks — the ask is "
+                             f"{result.get('ask')} and you have "
+                             f"{surface.economy.balance(key, user_id)}.",
+                }.get(result["reason"], "can't buy that.")
+            from ...social.chat.typography import Card, sparks
+
+            card = Card("economy", title="Market purchase",
+                        icon="🏪")
+            card.line("the property is yours — its rent clock "
+                      "kept running through the sale.")
+            card.stats([("Ask paid", sparks(result["ask"]), True),
+                        ("Seller received",
+                         sparks(result["net"]), True),
+                        ("Treasury cut", sparks(result["cut"]),
+                         True)])
+            return self._card(message, card,
+                              [[("🏘️ My property", "property")]])
+        if parts and parts[0].lower() == "cancel" \
+                and len(parts) >= 2:
+            result = surface.estate_unlist(key, user_id, parts[1])
+            if not result["ok"]:
+                return ("no listed property of yours with that "
+                        "id.")
+            return "🏪 listing withdrawn — the property is back in your hands."
+        if len(parts) >= 2 and parts[1].isdigit():
+            result = surface.estate_list(key, user_id, parts[0],
+                                         int(parts[1]))
+            if not result["ok"]:
+                return {
+                    "not_found": "no property of yours with "
+                                 "that id — /property lists "
+                                 "yours.",
+                    "currency": "gem-priced tiers trade for "
+                                "gems at auction only — the "
+                                "sparks market can't list them.",
+                    "listed": "that property is already on "
+                              "the market.",
+                    "auction": "that property is at auction.",
+                    "mortgaged": "a mortgaged property can't "
+                                 "be listed.",
+                    "shape": "the ask must be a positive "
+                             "number of sparks.",
+                }.get(result["reason"], "can't list that.")
+            return (f"🏪 listed for {parts[1]} sparks as "
+                    f"`{result['listing']}` — /listproperty "
+                    f"shows the board; the treasury takes the "
+                    f"group's market cut on a sale.")
+        # bare: the market board
+        from ...community.group_real_estate import DISTRICTS, TIERS
+        from ...social.chat.typography import Card, fmt_amount
+
+        listings = surface.estate_market(key)
+        card = Card("economy", title="Property market", icon="🏪")
+        if not listings:
+            card.line("nothing listed right now — list yours: "
+                      "/listproperty <property id> <ask>")
+        buttons = []
+        lines = []
+        for listing in listings:
+            spec = TIERS[listing["tier"]]
+            seller = self._estate_member_label(
+                surface, key, listing["seller"])
+            mine = listing["seller"] == user_id
+            lines.append(
+                f"`{listing['id']}` {spec['icon']} "
+                f"**{spec['name']}** · "
+                f"{DISTRICTS[listing['district']]['name']} — "
+                f"**{fmt_amount(listing['ask'])} sparks** "
+                f"(value ≈ {fmt_amount(listing['value'])}) · "
+                f"{'yours' if mine else seller}")
+            if not mine and surface.economy.balance(
+                    key, user_id) >= int(listing["ask"]):
+                buttons.append(
+                    [(f"Buy {spec['name']} · "
+                      f"{fmt_amount(listing['ask'])}",
+                      f"listproperty buy {listing['id']}")])
+        card.block_lines(lines)
+        cut = surface.estate_cfg(key)["market_cut_pct"]
+        card.note(f"the treasury takes {cut}% of every sale · "
+                  f"rent clocks follow the property")
+        buttons.append([("🏘️ Property", "property")])
+        return self._card(message, card, buttons)
+
+    def _control_auctions(self, tail, message):  # type: ignore[no-untyped-def]
+        key, err = self._estate_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        parts = str(tail or "").split()
+        if parts and parts[0].lower() == "start":
+            if len(parts) < 3 or not parts[2].isdigit():
+                return ("usage: /auctions start <property id> "
+                        "<start price> [hours]")
+            hours = 24.0
+            if len(parts) >= 4:
+                try:
+                    hours = max(0.05, float(parts[3]))
+                except ValueError:
+                    return "hours must be a number."
+            result = surface.estate_auction_start(
+                key, user_id, parts[1], int(parts[2]), hours)
+            if not result["ok"]:
+                return {
+                    "not_found": "no property of yours with "
+                                 "that id.",
+                    "currency": "gem-priced tiers can't be "
+                                "auctioned for sparks.",
+                    "listed": "that property is on the market "
+                              "— unlist it first.",
+                    "auction": "that property is already at "
+                               "auction.",
+                    "mortgaged": "a mortgaged property can't "
+                                 "be auctioned.",
+                    "shape": "the start price must be "
+                             "positive.",
+                }.get(result["reason"], "can't start that.")
+            return (f"🔨 auction `{result['auction']}` is open "
+                    f"— /auctions shows it; bids are held in "
+                    f"the treasury until it settles.")
+        if parts and parts[0].lower() == "bid":
+            if len(parts) < 3 or not parts[2].isdigit():
+                return "usage: /auctions bid <auction id> <amount>"
+            result = surface.estate_bid(key, user_id, parts[1],
+                                        int(parts[2]))
+            if not result["ok"]:
+                return {
+                    "not_found": "that auction is closed or "
+                                 "gone — /auctions shows the "
+                                 "live ones.",
+                    "own": "you can't bid on your own auction.",
+                    "leading": "you're already the high bidder "
+                               "— your sparks are held; raise "
+                               "only by being outbid first.",
+                    "low": f"too low — the next bid is at "
+                           f"least {result.get('floor')}.",
+                    "funds": "not enough sparks in your wallet "
+                             "for that bid.",
+                }.get(result["reason"], "can't bid that.")
+            from ...social.chat.typography import Card, sparks
+
+            card = Card("economy", title="Bid placed", icon="🔨")
+            card.line(f"you lead at **{sparks(result['high'])}** "
+                      f"— held in the treasury until the "
+                      f"auction settles.")
+            if result["refunded"]:
+                card.line("the outbid member was refunded in "
+                          "full.")
+            if result["extended"]:
+                card.note("anti-snipe: the close moved out — "
+                          "a bid inside the last 2 minutes "
+                          "extends it")
+            return self._card(message, card,
+                              [[("🔨 Auctions", "auctions")]])
+        # bare: the auction board
+        import time as _time
+
+        from ...community.group_real_estate import DISTRICTS, TIERS
+        from ...social.chat.typography import Card, fmt_amount
+
+        auctions = surface.estate_auctions(key)
+        card = Card("economy", title="Auctions", icon="🔨")
+        if not auctions:
+            card.line("no auctions live — start one: /auctions "
+                      "start <property id> <start price> [hours]")
+        buttons = []
+        lines = []
+        for auction in auctions:
+            spec = TIERS[auction["tier"]]
+            left_s = max(0, int(float(auction["ends"])
+                                - _time.time()))
+            left = (f"{left_s // 3600}h"
+                    if left_s >= 3600 else f"{left_s // 60}m")
+            high = int(auction["high"] or 0)
+            leader = ""
+            if auction["high_bidder"]:
+                leader = (" · you lead"
+                          if auction["high_bidder"] == user_id
+                          else " · led by " +
+                          self._estate_member_label(
+                              surface, key,
+                              auction["high_bidder"]))
+            lines.append(
+                f"`{auction['id']}` {spec['icon']} "
+                f"**{spec['name']}** · "
+                f"{DISTRICTS[auction['district']]['name']} — "
+                f"high **{fmt_amount(high or auction['start'])} "
+                f"sparks** · {left} left{leader}")
+            if auction["seller"] != user_id \
+                    and auction["high_bidder"] != user_id:
+                nxt = high + max(1, high // 10) if high \
+                    else int(auction["start"])
+                if surface.economy.balance(key, user_id) >= nxt:
+                    buttons.append(
+                        [(f"Bid {fmt_amount(nxt)} on "
+                          f"{spec['name']}",
+                          f"auctions bid {auction['id']} {nxt}")])
+        card.block_lines(lines)
+        card.note("bids are held by the treasury; outbids "
+                  "refund in full; a late bid extends the close")
+        buttons.append([("🏘️ Property", "property")])
+        return self._card(message, card, buttons)
+
+    def _control_mortgage(self, tail, message):  # type: ignore[no-untyped-def]
+        key, err = self._estate_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        parts = str(tail or "").split()
+        if parts and parts[0].lower() == "borrow":
+            if len(parts) < 3 or not parts[2].isdigit():
+                return ("usage: /mortgage borrow <property id> "
+                        "<amount>")
+            result = surface.estate_borrow(key, user_id,
+                                           parts[1],
+                                           int(parts[2]))
+            if not result["ok"]:
+                return {
+                    "not_found": "no property of yours with "
+                                 "that id.",
+                    "currency": "gem-priced tiers can't "
+                                "collateralise a sparks loan.",
+                    "listed": "a listed property can't be "
+                              "mortgaged.",
+                    "auction": "a property at auction can't "
+                               "be mortgaged.",
+                    "mortgaged": "that property already "
+                                 "carries a mortgage.",
+                    "ltv": f"too much — against a value of "
+                           f"{result.get('value')}, the most "
+                           f"the treasury lends is "
+                           f"{result.get('max')}.",
+                    "funds": f"the treasury can't lend that "
+                             f"right now — "
+                             f"{result.get('available', 0)} "
+                             f"available after reservations.",
+                    "jailed": "🔒 no borrowing from jail.",
+                    "shape": "the amount must be positive.",
+                }.get(result["reason"], "can't borrow that.")
+            from ...social.chat.typography import Card, sparks
+
+            m = result["mortgage"]
+            card = Card("economy", title="Mortgage drawn",
+                        icon="🏦")
+            card.line(f"**{sparks(m['principal'])}** landed in "
+                      f"your wallet, against `{m['property']}`.")
+            card.stats([
+                ("Interest (flat, stated)",
+                 sparks(m["interest"]), True),
+                ("Total debt",
+                 sparks(m["principal"] + m["interest"]), True),
+                ("Instalment",
+                 f"{sparks(m['installment'])} / week from "
+                 f"your BANK", True),
+                ("Periods", str(m["periods_left"])),
+            ])
+            card.note("miss 3 weekly instalments and the "
+                      "property is repossessed — on the record")
+            return self._card(message, card,
+                              [[("🏦 Mortgage", "mortgage"),
+                                ("🪙 My balance", "balance")]])
+        if parts and parts[0].lower() == "repay":
+            if len(parts) < 3 or not parts[2].isdigit():
+                return ("usage: /mortgage repay <mortgage id> "
+                        "<amount>")
+            result = surface.estate_repay(key, user_id, parts[1],
+                                          int(parts[2]))
+            if not result["ok"]:
+                return {
+                    "not_found": "no open mortgage of yours "
+                                 "with that id — /mortgage "
+                                 "lists yours.",
+                    "funds": "not enough sparks in your "
+                             "wallet for that payment.",
+                    "shape": "the amount must be positive.",
+                }.get(result["reason"], "can't repay that.")
+            if result["closed"]:
+                return ("🏦 mortgage cleared — the property is "
+                        "yours outright again.")
+            from ...social.chat.typography import sparks
+
+            return (f"🏦 paid {sparks(result['paid'])} — "
+                    f"{sparks(result['remaining'])} of debt "
+                    f"left.")
+        # bare: my mortgages
+        from ...social.chat.typography import Card, fmt_amount
+
+        mine = surface.estate_mortgages(key, user_id)
+        card = Card("economy", title="Your mortgages", icon="🏦")
+        if not mine:
+            card.line("no mortgages — borrow against a "
+                      "property: /mortgage borrow <property "
+                      "id> <amount>")
+        buttons = []
+        lines = []
+        import time as _time
+
+        for m in mine:
+            due_in = max(0, int(float(m["next_due"])
+                                - _time.time()))
+            due = (f"{due_in // 86400}d" if due_in >= 86400
+                   else f"{due_in // 3600}h")
+            lines.append(
+                f"`{m['id']}` on `{m['property']}` — "
+                f"**{fmt_amount(m['remaining'])} sparks** of "
+                f"debt · instalment "
+                f"{fmt_amount(m['installment'])} from your "
+                f"bank in {due}"
+                + (f" · ⚠️ {m['missed']} missed"
+                   if m["missed"] else ""))
+            pay = min(int(m["installment"]),
+                      int(m["remaining"]))
+            if surface.economy.balance(key, user_id) >= pay \
+                    and pay > 0:
+                buttons.append(
+                    [(f"Repay {fmt_amount(pay)}",
+                      f"mortgage repay {m['id']} {pay}")])
+        card.block_lines(lines)
+        cfg = surface.estate_cfg(key)
+        card.note(f"the treasury lends up to "
+                  f"{cfg['ltv_pct']}% of a property's value at "
+                  f"{cfg['mortgage_rate_pct']}% per week, flat; "
+                  f"instalments debit your bank weekly")
+        buttons.append([("🏘️ Property", "property")])
+        return self._card(message, card, buttons)
+
+    def _control_insure(self, tail, message):  # type: ignore[no-untyped-def]
+        key, err = self._estate_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        parts = str(tail or "").split()
+        if parts and parts[0].lower() == "buy" \
+                and len(parts) >= 2:
+            result = surface.estate_insure(key, user_id,
+                                           parts[1])
+            if not result["ok"]:
+                return {
+                    "not_found": "no property of yours with "
+                                 "that id.",
+                    "funds": f"the premium is "
+                             f"{result.get('premium')} sparks — "
+                             f"not enough in your wallet.",
+                    "gems": f"the premium is "
+                            f"{result.get('premium')} 💎 — not "
+                            f"enough gems (premiums price in the "
+                            f"property's own currency).",
+                }.get(result["reason"], "can't insure that.")
+            import time as _time
+
+            until = _time.strftime(
+                "%Y-%m-%d",
+                _time.gmtime(result["insured_until"]))
+            premium = (f"{result['premium']} 💎"
+                       if result["currency"] == "gems"
+                       else f"{result['premium']} sparks")
+            return (f"🛡️ insured for 30 days (until {until}) "
+                    f"— premium {premium}. Repair-wave bills "
+                    f"on it are covered in full.")
+        if parts and parts[0].lower() == "pay" \
+                and len(parts) >= 2:
+            result = surface.estate_pay_repair(key, user_id,
+                                               parts[1])
+            if not result["ok"]:
+                return {
+                    "not_found": "no property of yours with "
+                                 "that id.",
+                    "no_debt": "that property carries no "
+                               "repair debt.",
+                    "funds": f"nothing payable — the debt is "
+                             f"{result.get('debt')} and your "
+                             f"wallet is empty.",
+                }.get(result["reason"], "can't pay that.")
+            from ...social.chat.typography import sparks
+
+            tail_text = (f" — {sparks(result['remaining'])} "
+                         f"still owed"
+                         if result["remaining"] else
+                         " — debt cleared")
+            return (f"🔧 paid {sparks(result['paid'])} of "
+                    f"repair debt{tail_text}.")
+        # bare: my cover
+        import time as _time
+
+        from ...community.group_real_estate import (
+            INSURANCE_PREMIUM_PCT, TIERS)
+        from ...social.chat.typography import Card, fmt_amount
+
+        summary = surface.estate_summary(key, user_id)
+        card = Card("economy", title="Insurance", icon="🛡️")
+        if not summary["properties"]:
+            card.line("you don't own property yet — insurance "
+                      "rides on property. /property shows the "
+                      "map.")
+            return self._card(message, card,
+                              [[("🏘️ Property", "property")]])
+        buttons = []
+        lines = []
+        for prop in summary["properties"]:
+            spec = TIERS[prop["tier"]]
+            insured_until = float(prop.get("insured_until")
+                                  or 0)
+            if insured_until > _time.time():
+                cover = ("insured until " + _time.strftime(
+                    "%Y-%m-%d", _time.gmtime(insured_until)))
+            else:
+                cover = "uninsured"
+                premium = max(1, int(round(
+                    prop["value"] * INSURANCE_PREMIUM_PCT / 100)))
+                cur = "💎" if prop["currency"] == "gems" else ""
+                buttons.append(
+                    [(f"Insure {spec['name']} · "
+                      f"{fmt_amount(premium)}{cur}",
+                      f"insure buy {prop['id']}")])
+            debt = int(prop.get("repair_debt") or 0)
+            lines.append(
+                f"`{prop['id']}` {spec['icon']} "
+                f"**{spec['name']}** — {cover}"
+                + (f" · 🔧 repair debt {debt}" if debt else ""))
+            if debt:
+                buttons.append(
+                    [(f"Pay repair debt · {debt}",
+                      f"insure pay {prop['id']}")])
+        card.block_lines(lines)
+        card.note("a policy runs 30 days; repair-wave bills "
+                  "on insured property are covered in full — "
+                  "market falls are not insurable")
+        buttons.append([("🏘️ Property", "property")])
+        return self._card(message, card, buttons)
 
     def _execute_group_action(self, surface, key, adapter, message,
                               action) -> bool:  # type: ignore[no-untyped-def]
@@ -2277,6 +3207,19 @@ def _member_card(surface, key: str, member: dict) -> str:
     if member.get("left_ts"):
         rows.append(("Left", _fmt_ts(member["left_ts"])))
     card.stats(rows)
+    # The estate rides the member card (§20f): what they hold
+    # is part of who they are in the group.
+    estate = surface.estate_summary(
+        key, str(member.get("user_id") or ""))
+    if estate["property_count"] or estate["gems"]:
+        from ...social.chat.typography import sparks as _sparks
+
+        card.stats([
+            ("Properties",
+             f"{estate['property_count']} · "
+             f"{_sparks(estate['property_value'])}"),
+            ("Gems", f"{estate['gems']} 💎"),
+        ], title="Estate")
     changes = [c for c in surface.changes(key, limit=200)
                if c.get("user_id") == member.get("user_id")]
     if changes:

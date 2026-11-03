@@ -3746,6 +3746,35 @@ class PartnerRuntime(
                 and self._group_key_or_none(message) is not None:
             return self._control_approve(command.tail, message)
 
+        # Real estate (§17 slice 2 / §20): group-only kinds —
+        # in DM they fall to the unknown-command honesty like
+        # every other group kind's gate text.
+        if kind == "property":
+            return self._control_property(command.tail, message)
+
+        if kind == "buyproperty":
+            return self._control_buyproperty(command.tail, message)
+
+        if kind == "sellproperty":
+            return self._control_sellproperty(command.tail,
+                                              message)
+
+        if kind == "rent":
+            return self._control_rent(message)
+
+        if kind == "listproperty":
+            return self._control_listproperty(command.tail,
+                                              message)
+
+        if kind == "auctions":
+            return self._control_auctions(command.tail, message)
+
+        if kind == "mortgage":
+            return self._control_mortgage(command.tail, message)
+
+        if kind == "insure":
+            return self._control_insure(command.tail, message)
+
         if kind == "mute":
             return self._control_mute(command.tail, message)
 
