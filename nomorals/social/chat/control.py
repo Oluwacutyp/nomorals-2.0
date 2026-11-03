@@ -160,6 +160,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
     "rules", "member", "glog", "gsettings", "strikes",
+    "recheck", "joinq",
     "balance", "mine", "work", "pay", "gshop", "quests", "treasury",
     "deposit", "withdraw", "rob", "bail", "coinflip",
     "top", "tax", "grant",
@@ -446,6 +447,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "member": (0, 1),         # /member [@name] — group member card: tenure, activity, identity changes (P1)
     "glog": (0, 1),           # /glog [n] — the group's held audit log (admins; P1)
     "strikes": (0, 1),        # /strikes [@member] — the defense strike ledger: who's on the ladder (admins; §17)
+    "recheck": (0, 0),        # /recheck — a restricted member's “check me again”: re-runs the join criteria live (§28)
+    "joinq": (0, None),       # /joinq [approve|decline <id>|all] — the admin join queue: requests + raid holds (§28)
     "gsettings": (0, None),   # /gsettings [welcome|goodbye|clean on|off|rules add|clear|flood <n>|links ...] — group settings (admins; P1)
     "balance": (0, 0),        # /balance — your sparks + the group treasury (P2 economy)
     "mine": (0, 0),           # /mine — claim mined sparks at the decaying rate (P2)
@@ -2091,6 +2094,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/strikes [@name]",
             "example": "/strikes @ada",
             "related": "/glog /gsettings /warn"},
+    "recheck": {"what": "check me again: if the group's acceptance rules (§28) let you in restricted — muted until you fix what's missing, like setting a username — tap this (or the button on your fix-it note) after fixing it. The criteria re-run live; a pass lifts the restriction and the welcome fires.",
+            "usage": "/recheck",
+            "example": "/recheck",
+            "related": "/joinq /gsettings /rules"},
+    "joinq": {"what": "the admin join queue (§28): join requests the rules held for a human, plus members held by the raid posture. Approve lets them in (restricted, if their check said so), decline refuses the request or removes the held member; 'all' decides the whole queue at once. The notice on each request carries the same decisions as buttons.",
+            "usage": "/joinq | /joinq approve <id> | /joinq decline <id> | /joinq approve all",
+            "example": "/joinq",
+            "related": "/gsettings /glog /recheck"},
     "gsettings": {"what": "this group's settings: welcome and goodbye switches, service-message cleanup, the rules list, flood limit, link allowlist, the economy switch and transfer tax, and the defense system (autonomy, anticrash, antichannel, antitag, antidelete, antiedit) with the platform limits stated plainly. Group admins only — Devon checks your platform admin status; the autonomy switch belongs to the group owner on Telegram.",
             "usage": "/gsettings | /gsettings welcome on|off | /gsettings rules add <text> | /gsettings rules clear | /gsettings flood <n> | /gsettings links <domains>|off | /gsettings economy on|off | /gsettings tax <pct> | /gsettings autonomy on|off | /gsettings anticrash on|off | /gsettings antitag <n>",
             "example": "/gsettings rules add No spam",
@@ -2677,7 +2688,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                           "doctor",
                           "update", "pull", "deploy", "restart"]),
     ("groups & communities", ["rules", "member", "glog", "gsettings",
-                            "strikes",
+                            "strikes", "recheck", "joinq",
                             "balance", "mine", "work", "pay", "gshop",
                             "quests", "treasury", "drop", "claim",
                             "property", "buyproperty", "sellproperty",
@@ -2942,6 +2953,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["update", "pull", "deploy", "restart"]),
     ("groups & communities",
      ["rules", "member", "glog", "gsettings", "strikes",
+      "recheck", "joinq",
       "balance", "mine", "work", "pay", "gshop", "quests",
       "treasury", "deposit", "withdraw", "rob", "bail", "coinflip",
       "top", "tax", "grant", "drop", "claim",

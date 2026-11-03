@@ -1434,11 +1434,46 @@ class TelegramAdapter(ChatAdapter):
                           (getattr(_action, "users", None) or [])]
                 if not _users and sender_id:
                     _users = [sender_id]
+                # Acceptance (§28) judges joins on identity facts
+                # — a bare id can't be judged.  Resolve each
+                # joined user's entity while we're here (bounded,
+                # best-effort: a miss keeps the id-only entry and
+                # the criteria read as unknown, never as failed).
+                _members = []
+                for _u in _users[:10]:
+                    _entry = {"id": _u, "username": "", "name": "",
+                              "first_name": "", "last_name": "",
+                              "is_bot": False}
+                    try:
+                        _client = client or getattr(
+                            self, "_client", None)
+                        if _client is not None:
+                            _ent = await _client.get_entity(int(_u))
+                            _first = str(getattr(
+                                _ent, "first_name", "") or "")
+                            _last = str(getattr(
+                                _ent, "last_name", "") or "")
+                            _entry.update({
+                                "username": str(getattr(
+                                    _ent, "username", "") or ""),
+                                "name": _first,
+                                "first_name": _first,
+                                "last_name": _last,
+                                "is_bot": bool(getattr(
+                                    _ent, "bot", False)),
+                                "has_photo": bool(
+                                    getattr(_ent, "photo", None)
+                                    is not None and getattr(
+                                        getattr(_ent, "photo",
+                                                None),
+                                        "photo_id", None))})
+                    except Exception as exc:  # noqa: BLE001
+                        record_failure(
+                            "telegram.mtproto_join_enrich", exc)
+                    _members.append(_entry)
                 service_meta = {
                     "service": "join",
-                    "new_members": [
-                        {"id": u, "username": "", "name": ""}
-                        for u in _users]}
+                    "new_members": _members}
             elif _action_name == "MessageActionChatDeleteUser":
                 service_meta = {
                     "service": "leave",
@@ -1999,6 +2034,46 @@ class TelegramAdapter(ChatAdapter):
         """Lift a mute (clear the send restriction)."""
         return self._admin(
             self._unrestrict_coro(chat, user_id), "unrestrict")
+
+    async def _join_request_coro(self, chat: ChatRef,
+                                 user_id: str,
+                                 approve: bool) -> None:
+        from telethon.tl import functions
+
+        entity = await self._resolve(chat)
+        user = await self._client.get_entity(int(user_id))
+        await self._client(
+            functions.messages.HideChatJoinRequestRequest(
+                peer=entity, user_id=user, approved=bool(approve)))
+
+    def admin_join_request(self, chat: ChatRef, user_id: str,
+                           approve: bool) -> dict[str, Any]:
+        """Decide a pending join request (DESIGN §28) over
+        MTProto: HideChatJoinRequest with approved=True/False —
+        the same decision the Bot API spells approve/decline."""
+        return self._admin(
+            self._join_request_coro(chat, user_id, approve),
+            "join_request")
+
+    async def _member_photo_coro(self, user_id: str) -> bool:
+        user = await self._client.get_entity(int(user_id))
+        photo = getattr(user, "photo", None)
+        return bool(photo is not None
+                    and getattr(photo, "photo_id", None))
+
+    def admin_member_photo(self, chat: ChatRef, user_id: str
+                           ) -> dict[str, Any]:
+        """Does this user have a profile photo (§28's photo
+        criterion)?  The entity carries it directly — no extra
+        call.  Errors read as ok=False = UNKNOWN to the caller,
+        never as "no photo"."""
+        try:
+            has = self._run_on_loop(
+                self._member_photo_coro(user_id), timeout=30.0)
+            return {"ok": True, "has_photo": bool(has)}
+        except Exception as exc:  # noqa: BLE001 - honest unknown
+            return {"ok": False,
+                    "error": f"member_photo failed: {exc}"}
 
     async def _delete_coro(self, chat: ChatRef, message_id: str) -> None:
         from telethon.tl import functions
@@ -2737,6 +2812,17 @@ class TelegramBotAdapter(ChatAdapter):
                     return
                 self._handle_callback(query, handler)
                 return
+            # Join requests (DESIGN §28): an approval-mode invite
+            # link produced a candidate — the group surface's
+            # acceptance organ judges them, never the brain.
+            if "chat_join_request" in update:
+                request = update["chat_join_request"]
+                if not isinstance(request, dict):
+                    _log.warning("telegram-bot: dropping non-dict chat_join_request %r",
+                                 type(request).__name__)
+                    return
+                self._handle_join_request(request, handler)
+                return
             # Inline queries (@BotName <query> in any chat).
             if "inline_query" in update:
                 query = update["inline_query"]
@@ -2931,7 +3017,10 @@ class TelegramBotAdapter(ChatAdapter):
             meta["new_members"] = [
                 {"id": str(m.get("id", "") or ""),
                  "username": str(m.get("username") or ""),
-                 "name": str(m.get("first_name") or "")}
+                 "name": str(m.get("first_name") or ""),
+                 "first_name": str(m.get("first_name") or ""),
+                 "last_name": str(m.get("last_name") or ""),
+                 "is_bot": bool(m.get("is_bot"))}
                 for m in _members if isinstance(m, dict)]
         _left = msg.get("left_chat_member")
         if isinstance(_left, dict) and _left:
@@ -3089,6 +3178,63 @@ class TelegramBotAdapter(ChatAdapter):
             meta={"callback_query": True,
                   "partner_context": self.partner_context,
                   "bot_role": "personal" if self.owner_only else "gated"},
+        )
+        self._deliver(handler, message)
+
+    def _handle_join_request(self, request: dict[str, Any],
+                             handler: IncomingHandler) -> None:
+        """Deliver one chat_join_request update to the pipeline
+        as a service message: the group surface's acceptance
+        organ (DESIGN §28) evaluates the candidate and the
+        runtime approves / declines / queues through
+        admin_join_request.  The candidate is NOT a member yet —
+        nothing is recorded until an approval lands."""
+        chat = request.get("chat") or {}
+        if not isinstance(chat, dict):
+            chat = {}
+        chat_id = str(chat.get("id", "") or "")
+        user = request.get("from") or {}
+        if not isinstance(user, dict):
+            user = {}
+        user_id = str(user.get("id", "") or "")
+        if not chat_id or not user_id:
+            _log.warning("telegram-bot: join request without "
+                         "chat/user ids — dropped")
+            return
+        chat_type = str(chat.get("type", "") or "")
+        kind = _BOT_CHAT_TYPES.get(chat_type, ChatKind.GROUP)
+        first = str(user.get("first_name") or "")
+        last = str(user.get("last_name") or "")
+        who = user.get("username") or first or user_id
+        message = ChatMessage(
+            chat=ChatRef(platform=self.name, chat_id=chat_id,
+                         kind=kind,
+                         title=str(chat.get("title", "") or ""),
+                         peer=""),
+            incoming=True,
+            text="",
+            sender=str(who),
+            sender_id=user_id,
+            sender_username=str(user.get("username") or ""),
+            media=[],
+            reply_to="",
+            mentioned=False,
+            ts=time.time(),
+            message_id=f"jr_{chat_id}_{user_id}_"
+                       f"{int(request.get('date') or 0)}",
+            meta={"service": "join_request",
+                  "partner_context": self.partner_context,
+                  "bot_role": "personal" if self.owner_only
+                              else "gated",
+                  "requester": {
+                      "id": user_id,
+                      "username": str(user.get("username") or ""),
+                      "name": first,
+                      "first_name": first,
+                      "last_name": last,
+                      "is_bot": bool(user.get("is_bot"))},
+                  "user_chat_id": str(
+                      request.get("user_chat_id") or "")},
         )
         self._deliver(handler, message)
 
@@ -3716,6 +3862,32 @@ class TelegramBotAdapter(ChatAdapter):
             "can_invite_users", "can_pin_messages")}
         return self._admin("restrictChatMember", chat,
                            user_id=int(user_id), permissions=full)
+
+    def admin_join_request(self, chat: ChatRef, user_id: str,
+                           approve: bool) -> dict[str, Any]:
+        """Decide a pending join request (DESIGN §28):
+        approveChatJoinRequest admits the candidate;
+        declineChatJoinRequest refuses them (they can request
+        again later — a decline is not a ban)."""
+        method = ("approveChatJoinRequest" if approve
+                  else "declineChatJoinRequest")
+        return self._admin(method, chat, user_id=int(user_id))
+
+    def admin_member_photo(self, chat: ChatRef, user_id: str
+                           ) -> dict[str, Any]:
+        """Does this user have ANY profile photo?  The §28 photo
+        criterion's one platform fact (getUserProfilePhotos).
+        An error returns ok=False — the caller reads that as
+        UNKNOWN, never as "no photo"."""
+        try:
+            result = self._api("getUserProfilePhotos",
+                               user_id=int(user_id), limit=1)
+        except Exception as exc:  # noqa: BLE001 - honest unknown
+            return {"ok": False, "error": str(exc)[:200]}
+        total = 0
+        if isinstance(result, dict):
+            total = int(result.get("total_count") or 0)
+        return {"ok": True, "has_photo": total > 0}
 
     def admin_promote(self, chat: ChatRef, user_id: str,
                       title: str = "") -> dict[str, Any]:

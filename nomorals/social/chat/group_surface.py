@@ -57,6 +57,8 @@ from ...security.payload_inspection import (
     inspect_payload,
     normalize_envelope,
 )
+from .failures import record_failure
+from .group_acceptance import ACCEPTANCE_DEFAULTS
 from .group_defense import (
     DEFAULTS as DEFENSE_DEFAULTS,
 )
@@ -140,6 +142,10 @@ def _default_settings() -> dict[str, Any]:
                                         # typography (§27): theme
                                         # pack, per-class preset
                                         # overrides, the stamp
+        "acceptance": copy.deepcopy(ACCEPTANCE_DEFAULTS),
+                                        # join acceptance (§28):
+                                        # mode, criteria, actions,
+                                        # grace, the raid posture
         "games_enabled": True,
         "state": "discovered",          # discovered|configured|
                                         # active|dormant
@@ -191,7 +197,11 @@ class GroupStore:
         entry = self.data.get(group_key)
         if entry is None:
             entry = {"settings": _default_settings(),
-                     "members": {}, "changes": [], "audit": []}
+                     "members": {}, "changes": [], "audit": [],
+                     "join_requests": {},
+                     "acceptance_state": {"recent_joins": [],
+                                          "raid_until": 0.0,
+                                          "req_seq": 0}}
             self.data[group_key] = entry
         return entry
 
@@ -201,7 +211,7 @@ class GroupStore:
         merged.update({k: v for k, v in stored.items()
                        if k in merged
                        and k not in ("defense", "presentation",
-                                     "estate")})
+                                     "estate", "acceptance")})
         mod = dict(merged["moderation"])
         mod.update((stored.get("moderation") or {}))
         merged["moderation"] = mod
@@ -214,6 +224,9 @@ class GroupStore:
         merged["presentation"] = _deep_merge(
             copy.deepcopy(DEFAULT_PRESENTATION),
             stored.get("presentation") or {})
+        merged["acceptance"] = _deep_merge(
+            copy.deepcopy(ACCEPTANCE_DEFAULTS),
+            stored.get("acceptance") or {})
         return merged
 
 
@@ -360,13 +373,18 @@ class GroupSurface:
                             new=event["new"])
         return events
 
-    def record_join(self, group_key: str, user_id: str, *,
-                    username: str = "", name: str = "",
-                    group_name: str = "",
-                    ts: float | None = None) -> str:
-        """Record a join; return the welcome text to send ("" when
-        welcome is off).  The text renders from the group's own
-        settings through the community welcome flow."""
+    def note_join(self, group_key: str, user_id: str, *,
+                  username: str = "", name: str = "",
+                  last_name: str = "", is_bot: bool = False,
+                  has_photo: bool | None = None,
+                  ts: float | None = None) -> dict[str, Any]:
+        """Record a join in the ledger WITHOUT rendering the
+        welcome (acceptance may hold it until admission — the
+        welcome fires when the member is actually in).  The
+        extra identity facts (last name, bot flag, photo
+        presence) are stored beside the name so a later
+        §28 re-check judges the same facts the join was
+        judged on.  Returns the member record."""
         now = ts if ts is not None else time.time()
         self._observe_identity(group_key, user_id,
                                username=username, name=name, ts=now)
@@ -374,9 +392,23 @@ class GroupSurface:
         member = entry["members"][user_id]
         member["joined_ts"] = now
         member["left_ts"] = None
+        if last_name:
+            member["last_name"] = last_name
+        if is_bot:
+            member["is_bot"] = True
+        if has_photo is not None:
+            member["has_photo"] = bool(has_photo)
         self._audit(group_key, "join", user_id=user_id,
                     username=username, name=name)
         self.store.save()
+        return member
+
+    def welcome_text_for(self, group_key: str, *,
+                         name: str = "", username: str = "",
+                         group_name: str = "") -> str:
+        """The welcome text for one member ("" when welcome is
+        off), rendered from the group's own settings through
+        the community welcome flow."""
         settings = self.store.settings(group_key)
         if not settings.get("welcome_enabled"):
             return ""
@@ -399,6 +431,18 @@ class GroupSurface:
         card = Card("announcement", title=lines[0], icon="👋")
         card.lines(lines[1:])
         return self._card_render(group_key, card)
+
+    def record_join(self, group_key: str, user_id: str, *,
+                    username: str = "", name: str = "",
+                    group_name: str = "",
+                    ts: float | None = None) -> str:
+        """Record a join; return the welcome text to send ("" when
+        welcome is off)."""
+        self.note_join(group_key, user_id, username=username,
+                       name=name, ts=ts)
+        return self.welcome_text_for(
+            group_key, name=name, username=username,
+            group_name=group_name)
 
     def record_leave(self, group_key: str, user_id: str, *,
                      group_name: str = "",
@@ -423,6 +467,614 @@ class GroupSurface:
 
         card = Card("announcement", title=str(body), icon="👋")
         return self._card_render(group_key, card)
+
+    # ---- join acceptance (DESIGN §28) -----------------------------
+    # The evaluation organ lives in group_acceptance.py; the
+    # surface owns its state: restricted records on the member
+    # ledger, the admin request queue, the raid posture, and the
+    # /glog trail of every evaluation and decision.
+
+    def _acceptance_state(self, entry: dict[str, Any]
+                          ) -> dict[str, Any]:
+        return entry.setdefault(
+            "acceptance_state",
+            {"recent_joins": [], "raid_until": 0.0, "req_seq": 0})
+
+    def _acceptance_raid(self, group_key: str,
+                         entry: dict[str, Any], *,
+                         now: float, count_join: bool = False
+                         ) -> bool:
+        """Join-burst bookkeeping: returns True while the raid
+        posture holds.  Every arrival (walk-in or request) is a
+        beat in the burst window."""
+        cfg = self.store.settings(
+            group_key).get("acceptance") or {}
+        state = self._acceptance_state(entry)
+        window = float(cfg.get("raid_window_s") or 120)
+        recent = [t for t in (state.get("recent_joins") or [])
+                  if now - float(t) <= window]
+        if count_join:
+            recent.append(now)
+            state["recent_joins"] = recent[-64:]
+            if len(recent) >= int(cfg.get("raid_burst") or 8):
+                state["raid_until"] = now + float(
+                    cfg.get("raid_cooldown_s") or 600)
+        else:
+            state["recent_joins"] = recent
+        return now < float(state.get("raid_until") or 0)
+
+    def acceptance_cfg(self, group_key: str, *,
+                       now: float | None = None
+                       ) -> tuple[dict[str, Any], bool]:
+        """(effective acceptance config, raid active?) — the
+        raid-tightened view every decision reads."""
+        from .group_acceptance import effective_cfg
+
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        raid = self._acceptance_raid(group_key, entry, now=now)
+        cfg = effective_cfg(
+            self.store.settings(group_key).get("acceptance") or {},
+            raid=raid)
+        return cfg, raid
+
+    def acceptance_previously_banned(self, group_key: str,
+                                     user_id: str
+                                     ) -> dict[str, Any] | None:
+        """Was this account banned HERE and never unbanned?
+        Sources, newest evidence wins: the shared BanList, then
+        the group's own audit trail (manual /ban writes
+        admin_action, the defense ladder writes
+        moderation_executed; an unban of either kind clears)."""
+        try:
+            ban = self.bans.is_banned(user_id, group_key)
+            if ban is not None:
+                return {"source": "ban_list",
+                        "reason": str(getattr(ban, "reason", "")
+                                      or "")}
+            for record in self.bans.bans_for(user_id):
+                if getattr(record, "active", False) and \
+                        getattr(record, "scope", "") == "global":
+                    return {"source": "ban_list_global",
+                            "reason": str(
+                                getattr(record, "reason", "") or "")}
+        except Exception as exc:  # noqa: BLE001 - evidence path
+            record_failure(
+                "group_surface.acceptance_previously_banned", exc)
+        entry = self.store.group(group_key)
+        for item in reversed(entry.get("audit") or []):
+            if str(item.get("user_id") or "") != str(user_id):
+                continue
+            if item.get("kind") not in ("admin_action",
+                                        "moderation_executed"):
+                continue
+            action = str(item.get("action") or "")
+            if action == "ban":
+                return {"source": str(item.get("kind")),
+                        "reason": str(item.get("reason") or "")}
+            if action == "unban":
+                return None
+        return None
+
+    def _acceptance_facts(self, group_key: str,
+                          facts: dict[str, Any]) -> dict[str, Any]:
+        """Enrich caller-supplied identity facts with the facts
+        only the store knows: ban history, the bot whitelist,
+        the group's word-filter list (name hygiene rides it)."""
+        out = dict(facts or {})
+        settings = self.store.settings(group_key)
+        cfg = settings.get("acceptance") or {}
+        banned = self.acceptance_previously_banned(
+            group_key, str(out.get("user_id") or ""))
+        out["previously_banned"] = banned is not None
+        out["ban_reason"] = (banned or {}).get("reason", "")
+        whitelist = {str(w).strip().lower()
+                     for w in (cfg.get("bot_whitelist") or [])}
+        out["whitelisted"] = (
+            str(out.get("user_id") or "").lower() in whitelist
+            or ("@" + str(out.get("username") or "").lower())
+            in whitelist
+            or str(out.get("username") or "").lower() in whitelist)
+        out["filter_words"] = list(
+            (settings.get("moderation") or {}).get(
+                "word_filters") or [])
+        return out
+
+    def _set_restricted(self, entry: dict[str, Any], user_id: str,
+                        *, missing: list[str], reasons: list[str],
+                        via: str, action: str,
+                        grace_until: float | None,
+                        now: float) -> None:
+        member = entry["members"].get(user_id)
+        if member is None:
+            return
+        member["acceptance"] = {
+            "state": "restricted", "missing": list(missing),
+            "reasons": list(reasons), "via": via, "action": action,
+            "since": now, "grace_until": grace_until,
+            "welcome_pending": True}
+
+    def _clear_acceptance(self, entry: dict[str, Any],
+                          user_id: str) -> dict[str, Any]:
+        member = entry["members"].get(user_id) or {}
+        acc = member.pop("acceptance", None) or {}
+        return acc
+
+    def acceptance_on_join(self, group_key: str,
+                           facts: dict[str, Any], *,
+                           has_photo: bool | None = None,
+                           now: float | None = None
+                           ) -> dict[str, Any]:
+        """A walk-in arrival (open/invite mode, or any platform
+        join event): ledger first, evaluation second, enforcement
+        described as actions for the caller to execute.  Returns
+        {verdict, missing, reasons, actions, welcome, raid,
+        grace_minutes, unverifiable}."""
+        from .group_acceptance import evaluate
+
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        raid = self._acceptance_raid(group_key, entry, now=now,
+                                     count_join=True)
+        cfg, _ = self.acceptance_cfg(group_key, now=now)
+        user_id = str(facts.get("user_id") or "")
+        self.note_join(
+            group_key, user_id,
+            username=str(facts.get("username") or ""),
+            name=str(facts.get("name") or ""),
+            last_name=str(facts.get("last_name") or ""),
+            is_bot=bool(facts.get("is_bot")),
+            has_photo=has_photo, ts=now)
+        judged = self._acceptance_facts(group_key, facts)
+        judged["has_photo"] = has_photo
+        ev = evaluate(cfg, judged)
+        grace = int(cfg.get("grace_minutes") or 60)
+        self._audit(group_key, "acceptance_eval", user_id=user_id,
+                    via="join", verdict=ev.verdict,
+                    missing=ev.missing, unknown=ev.unknown,
+                    decided_by="rule", raid=raid)
+        out: dict[str, Any] = {
+            "verdict": ev.verdict, "missing": ev.missing,
+            "reasons": ev.reasons, "actions": [], "welcome": False,
+            "raid": raid, "grace_minutes": grace,
+            "unverifiable": list(ev.unknown)}
+        if not ev.missing:
+            if ev.unknown:
+                # Open mode cannot hold a walk-in for a human:
+                # admit, and journal the unverifiable criterion.
+                self._audit(group_key, "acceptance_unverifiable",
+                            user_id=user_id, unknown=ev.unknown,
+                            via="join")
+                out["verdict"] = "admit"
+                out["welcome"] = True
+                self.store.save()
+                return out
+            if raid and str(cfg.get("mode") or "open") == "open":
+                # Raid posture: open behaves as request — a clean
+                # join is HELD (restricted, releasable from the
+                # queue) instead of waved through.
+                from .group_acceptance import FIX_LINES
+
+                req = self._queue_record(
+                    entry, kind="hold", user_id=user_id,
+                    facts=facts, missing=[],
+                    reasons=[FIX_LINES["raid_hold"]], now=now)
+                self._set_restricted(
+                    entry, user_id, missing=[],
+                    reasons=[FIX_LINES["raid_hold"]], via="raid",
+                    action="", grace_until=None, now=now)
+                self._audit(group_key, "acceptance_raid_hold",
+                            user_id=user_id, request=req["id"])
+                out.update({
+                    "verdict": "restricted", "missing": [],
+                    "reasons": [FIX_LINES["raid_hold"]],
+                    "request_id": req["id"],
+                    "actions": [{"kind": "acceptance_restrict",
+                                 "user_id": user_id,
+                                 "rule": "acceptance"}]})
+                self.store.save()
+                return out
+            out["verdict"] = "admit"
+            out["welcome"] = True
+            self._clear_acceptance(entry, user_id)
+            self.store.save()
+            return out
+        if ev.verdict == "restricted":
+            self._set_restricted(
+                entry, user_id, missing=ev.missing,
+                reasons=ev.reasons, via="join", action="restricted",
+                grace_until=None, now=now)
+            out["actions"] = [{"kind": "acceptance_restrict",
+                               "user_id": user_id,
+                               "rule": "acceptance"}]
+        elif ev.verdict == "kick":
+            # A kick-action failure is admitted restricted for
+            # the grace window first (§28) — a real person
+            # mid-setup isn't bounced instantly; the cycle
+            # removes them when the grace runs out unfixed.
+            self._set_restricted(
+                entry, user_id, missing=ev.missing,
+                reasons=ev.reasons, via="join", action="kick",
+                grace_until=now + grace * 60, now=now)
+            out["verdict"] = "restricted"
+            out["pending_kick"] = True
+            out["actions"] = [{"kind": "acceptance_restrict",
+                               "user_id": user_id,
+                               "rule": "acceptance"}]
+        elif ev.verdict == "decline":
+            # A returning banned member is banned again (the ban
+            # is the point); anyone else declined at the door is
+            # removed but may rejoin once fixed.
+            kind = "ban" if "banned" in ev.missing else "kick"
+            self._clear_acceptance(entry, user_id)
+            out["actions"] = [{"kind": kind, "user_id": user_id,
+                               "rule": "acceptance"}]
+        self.store.save()
+        return out
+
+    def _queue_record(self, entry: dict[str, Any], *, kind: str,
+                      user_id: str, facts: dict[str, Any],
+                      missing: list[str], reasons: list[str],
+                      now: float,
+                      unknown: list[str] | None = None
+                      ) -> dict[str, Any]:
+        state = self._acceptance_state(entry)
+        state["req_seq"] = int(state.get("req_seq") or 0) + 1
+        req_id = f"jr-{state['req_seq']:04d}"
+        record = {
+            "id": req_id, "kind": kind, "user_id": user_id,
+            "username": str(facts.get("username") or ""),
+            "name": str(facts.get("name") or ""),
+            "last_name": str(facts.get("last_name") or ""),
+            "is_bot": bool(facts.get("is_bot")),
+            "has_photo": facts.get("has_photo"),
+            "missing": list(missing), "reasons": list(reasons),
+            "unknown": list(unknown or []),
+            "state": "pending", "ts": now, "decided_by": ""}
+        entry.setdefault("join_requests", {})[req_id] = record
+        return record
+
+    def acceptance_on_request(self, group_key: str,
+                              facts: dict[str, Any], *,
+                              has_photo: bool | None = None,
+                              now: float | None = None
+                              ) -> dict[str, Any]:
+        """A Telegram join REQUEST (request mode): the candidate
+        is not in the group yet.  Returns {verdict, request_id,
+        missing, reasons, raid} where verdict is approve |
+        approve_restricted | queued | decline — execution
+        (approveChatJoinRequest / declineChatJoinRequest) is the
+        caller's, through the adapter."""
+        from .group_acceptance import evaluate
+
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        raid = self._acceptance_raid(group_key, entry, now=now,
+                                     count_join=True)
+        cfg, _ = self.acceptance_cfg(group_key, now=now)
+        user_id = str(facts.get("user_id") or "")
+        judged = self._acceptance_facts(group_key, facts)
+        judged["has_photo"] = has_photo
+        ev = evaluate(cfg, judged)
+        self._audit(group_key, "acceptance_eval", user_id=user_id,
+                    via="request", verdict=ev.verdict,
+                    missing=ev.missing, unknown=ev.unknown,
+                    decided_by="rule", raid=raid)
+        record = self._queue_record(
+            entry, kind="request", user_id=user_id,
+            facts={**facts, "has_photo": has_photo},
+            missing=ev.missing, reasons=ev.reasons,
+            unknown=ev.unknown, now=now)
+        out: dict[str, Any] = {
+            "missing": ev.missing, "reasons": ev.reasons,
+            "request_id": record["id"], "record": record,
+            "raid": raid}
+        if ev.verdict == "decline" or (
+                ev.verdict == "kick"):
+            # Kick at the request door IS a decline (they are
+            # not in to be kicked); they may re-request fixed.
+            record["state"] = "declined"
+            record["decided_by"] = "rule"
+            out["verdict"] = "decline"
+        elif ev.verdict == "restricted":
+            if cfg.get("auto_approve"):
+                record["state"] = "approved"
+                record["decided_by"] = "rule"
+                out["verdict"] = "approve_restricted"
+            else:
+                out["verdict"] = "queued"
+        elif ev.clean and not ev.unknown:
+            if cfg.get("auto_approve"):
+                record["state"] = "approved"
+                record["decided_by"] = "rule"
+                out["verdict"] = "approve"
+            else:
+                out["verdict"] = "queued"
+        else:  # unverifiable photo → a human decides
+            out["verdict"] = "queued"
+        self.store.save()
+        return out
+
+    def acceptance_request_admitted(self, group_key: str,
+                                    req_id: str, *,
+                                    now: float | None = None
+                                    ) -> dict[str, Any]:
+        """Bookkeeping after the caller approved a request:
+        ledger the join, and if the approval was restricted,
+        engage the restricted state.  Returns {welcome,
+        restricted, missing, reasons, grace_minutes}."""
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        record = (entry.get("join_requests") or {}).get(req_id)
+        if record is None:
+            return {"welcome": False, "restricted": False}
+        user_id = str(record.get("user_id") or "")
+        self.note_join(
+            group_key, user_id,
+            username=str(record.get("username") or ""),
+            name=str(record.get("name") or ""),
+            last_name=str(record.get("last_name") or ""),
+            is_bot=bool(record.get("is_bot")),
+            has_photo=record.get("has_photo"), ts=now)
+        cfg, _ = self.acceptance_cfg(group_key, now=now)
+        restricted = bool(record.get("missing"))
+        if restricted:
+            self._set_restricted(
+                entry, user_id, missing=record["missing"],
+                reasons=record.get("reasons") or [], via="request",
+                action="restricted", grace_until=None, now=now)
+        self.store.save()
+        return {"welcome": not restricted, "restricted": restricted,
+                "missing": record.get("missing") or [],
+                "reasons": record.get("reasons") or [],
+                "grace_minutes": int(cfg.get("grace_minutes") or 60)}
+
+    def acceptance_queue(self, group_key: str) -> list[dict[str, Any]]:
+        """Pending queue records, oldest first (FIFO fairness)."""
+        entry = self.store.group(group_key)
+        records = [r for r in
+                   (entry.get("join_requests") or {}).values()
+                   if r.get("state") == "pending"]
+        return sorted(records, key=lambda r: float(r.get("ts") or 0))
+
+    def acceptance_decide(self, group_key: str, req_id: str, *,
+                          approve: bool, by: str,
+                          now: float | None = None
+                          ) -> dict[str, Any]:
+        """An admin's queue decision.  Returns {ok, execute,
+        record} — execute tells the caller what to perform:
+        join_request (adapter approve/decline), release
+        (unrestrict a held member), kick (remove a held member),
+        or nothing (already decided / unknown id)."""
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        record = (entry.get("join_requests") or {}).get(req_id)
+        if record is None or record.get("state") != "pending":
+            return {"ok": False, "execute": "none",
+                    "record": record}
+        record["state"] = "approved" if approve else "declined"
+        record["decided_by"] = by
+        record["decided_ts"] = now
+        user_id = str(record.get("user_id") or "")
+        self._audit(group_key, "acceptance_decision",
+                    user_id=user_id, request=req_id,
+                    approve=approve, by=by,
+                    record_kind=record.get("kind"))
+        if record.get("kind") == "request":
+            execute = "join_request"
+        elif approve:
+            execute = "release"
+            acc = self._clear_acceptance(entry, user_id)
+            record["welcome"] = bool(acc.get("welcome_pending"))
+        else:
+            execute = "kick"
+            self._clear_acceptance(entry, user_id)
+        self.store.save()
+        return {"ok": True, "execute": execute, "record": record}
+
+    def acceptance_recheck(self, group_key: str, user_id: str, *,
+                           username: str = "", name: str = "",
+                           has_photo: bool | None = None,
+                           now: float | None = None
+                           ) -> dict[str, Any]:
+        """The “check me again” button: re-run the criteria live
+        for a restricted/warned member.  Facts are the freshest
+        each surface can supply — the tap-time username/name,
+        the ledger's stored name parts, and a fresh photo lookup
+        when the caller made one.  Returns {state: passed |
+        still | not_restricted, missing, reasons, welcome}."""
+        from .group_acceptance import evaluate
+
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        member = entry["members"].get(user_id)
+        if member is None or not member.get("acceptance"):
+            return {"state": "not_restricted", "missing": [],
+                    "reasons": [], "welcome": False}
+        acc = member["acceptance"]
+        cfg, raid = self.acceptance_cfg(group_key, now=now)
+        if acc.get("via") == "raid" and raid:
+            # A raid hold is an admin's call while the rush is
+            # on — the button doesn't self-release mid-raid.
+            from .group_acceptance import FIX_LINES
+
+            return {"state": "still", "missing": [],
+                    "reasons": [FIX_LINES["raid_hold"]],
+                    "welcome": False, "was_restricted": True}
+        facts = {
+            "user_id": user_id,
+            "username": username or member.get("username") or "",
+            "first_name": str(member.get("name") or "").split(
+                None, 1)[0] if member.get("name") else "",
+            "last_name": member.get("last_name") or "",
+            "name": name or member.get("name") or "",
+            "is_bot": bool(member.get("is_bot")),
+            "has_photo": (has_photo if has_photo is not None
+                          else member.get("has_photo")),
+        }
+        judged = self._acceptance_facts(group_key, facts)
+        judged["has_photo"] = facts["has_photo"]
+        ev = evaluate(cfg, judged)
+        if not ev.missing:
+            # Unknown-only also passes: unverifiable is not a
+            # failure (journaled, like open-mode joins).
+            if ev.unknown:
+                self._audit(group_key, "acceptance_unverifiable",
+                            user_id=user_id, unknown=ev.unknown,
+                            via="recheck")
+            self._clear_acceptance(entry, user_id)
+            self._audit(group_key, "acceptance_recheck",
+                        user_id=user_id, passed=True, raid=raid)
+            self.store.save()
+            return {"state": "passed", "missing": [],
+                    "reasons": [],
+                    "welcome": bool(acc.get("welcome_pending")),
+                    "was_restricted":
+                        acc.get("state") == "restricted"}
+        acc["missing"] = ev.missing
+        acc["reasons"] = ev.reasons
+        self._audit(group_key, "acceptance_recheck",
+                    user_id=user_id, passed=False,
+                    missing=ev.missing)
+        self.store.save()
+        return {"state": "still", "missing": ev.missing,
+                "reasons": ev.reasons, "welcome": False,
+                "was_restricted":
+                    acc.get("state") == "restricted"}
+
+    def acceptance_release(self, group_key: str, user_id: str, *,
+                           by: str = "rule",
+                           now: float | None = None
+                           ) -> dict[str, Any]:
+        """Clear a member's acceptance state (an admin's manual
+        release, or a passed re-check the caller already
+        journaled).  Returns {released, welcome}."""
+        entry = self.store.group(group_key)
+        member = entry["members"].get(user_id)
+        if member is None or not member.get("acceptance"):
+            return {"released": False, "welcome": False}
+        acc = self._clear_acceptance(entry, user_id)
+        self._audit(group_key, "acceptance_release",
+                    user_id=user_id, by=by)
+        self.store.save()
+        return {"released": True,
+                "welcome": bool(acc.get("welcome_pending"))}
+
+    def acceptance_cycle(self, group_key: str, *,
+                         now: float | None = None,
+                         enforce: bool = True
+                         ) -> list[dict[str, Any]]:
+        """Grace expiries, riding the message path like the
+        estate/quest cycles.  A kick-action restriction whose
+        grace ran out unfixed removes the member; a profile
+        warning whose grace ran out engages the restriction.
+        With enforce=False (defense autonomy off) expiries are
+        journaled once and held, never executed."""
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        actions: list[dict[str, Any]] = []
+        for user_id, member in list(entry["members"].items()):
+            acc = member.get("acceptance") or {}
+            if not acc:
+                continue
+            grace_until = acc.get("grace_until")
+            if grace_until is None or now < float(grace_until):
+                continue
+            if acc.get("state") == "warned":
+                if not enforce:
+                    if not acc.get("escalation_flagged"):
+                        acc["escalation_flagged"] = True
+                        self._audit(
+                            group_key, "acceptance_grace_expired",
+                            user_id=user_id, state="warned",
+                            suppressed="autonomy_off")
+                    continue
+                acc.update({
+                    "state": "restricted", "action": "restricted",
+                    "grace_until": None, "via": "profile"})
+                self._audit(group_key, "acceptance_escalated",
+                            user_id=user_id, from_state="warned")
+                actions.append({"kind": "acceptance_restrict",
+                                "user_id": user_id,
+                                "rule": "acceptance"})
+            elif acc.get("state") == "restricted" \
+                    and acc.get("action") == "kick":
+                if not enforce:
+                    if not acc.get("escalation_flagged"):
+                        acc["escalation_flagged"] = True
+                        self._audit(
+                            group_key, "acceptance_grace_expired",
+                            user_id=user_id, state="restricted",
+                            suppressed="autonomy_off")
+                    continue
+                self._clear_acceptance(entry, user_id)
+                self._audit(group_key, "acceptance_grace_kick",
+                            user_id=user_id,
+                            missing=acc.get("missing"))
+                actions.append({"kind": "kick",
+                                "user_id": user_id,
+                                "rule": "acceptance"})
+        if actions or any(
+                (m.get("acceptance") or {}).get(
+                    "escalation_flagged")
+                for m in entry["members"].values()):
+            self.store.save()
+        return actions
+
+    def acceptance_profile_check(self, group_key: str,
+                                 user_id: str, *,
+                                 username: str = "",
+                                 privileged: bool = False,
+                                 now: float | None = None
+                                 ) -> dict[str, Any] | None:
+        """The standing-condition re-check (§28): a member who
+        DROPS a required attribute (their stored username is
+        gone from their live identity) is warned first, with a
+        grace window to restore it; the restriction engages
+        only when the grace runs out (acceptance_cycle).  A
+        member who restores it inside the window clears
+        silently.  Admins/operators are exempt — the door rules
+        govern admission, not the staff.  Returns {warn} /
+        {recovered} / None."""
+        now = now if now is not None else time.time()
+        cfg, _raid = self.acceptance_cfg(group_key, now=now)
+        if not (cfg.get("criteria") or {}).get("username"):
+            return None
+        if privileged:
+            return None
+        entry = self.store.group(group_key)
+        member = entry["members"].get(user_id)
+        if member is None:
+            return None
+        acc = member.get("acceptance") or {}
+        if username:
+            if acc.get("state") == "warned":
+                self._clear_acceptance(entry, user_id)
+                self._audit(group_key, "acceptance_profile",
+                            user_id=user_id, recovered=True)
+                self.store.save()
+                return {"recovered": True}
+            return None
+        if acc:
+            return None       # already in the flow
+        if not member.get("username"):
+            return None       # never had one on record — the
+                              # drop can't be told from absence
+        from .group_acceptance import FIX_LINES
+
+        grace = int(cfg.get("grace_minutes") or 60)
+        member["acceptance"] = {
+            "state": "warned", "missing": ["username"],
+            "reasons": [FIX_LINES["username"]], "via": "profile",
+            "action": "restricted", "since": now,
+            "grace_until": now + grace * 60,
+            "welcome_pending": False}
+        self._audit(group_key, "acceptance_profile",
+                    user_id=user_id, dropped="username",
+                    grace_minutes=grace)
+        self.store.save()
+        return {"warn": True, "reasons": [FIX_LINES["username"]],
+                "grace_minutes": grace}
 
     # ---- the message pipeline ------------------------------------
     def _cache_message(self, group_key: str, *, message_id: str,
@@ -477,6 +1129,16 @@ class GroupSurface:
         suppressed = not cfg.autonomy
         privileged = sender_is_admin or sender_is_operator
         mention = name or (f"@{username}" if username else user_id)
+        # Join acceptance is a STANDING condition (§28): a
+        # member who dropped a required attribute is warned with
+        # a grace window (the restriction itself engages in the
+        # cycle below).  Enforcement sleeps with defense
+        # autonomy — the same one switch.
+        acc_event = None
+        if not suppressed:
+            acc_event = self.acceptance_profile_check(
+                group_key, user_id, username=username,
+                privileged=privileged, now=now)
         env = normalize_envelope(
             envelope if isinstance(envelope, dict) else None,
             platform=group_key.split(":", 1)[0], chat_key=group_key,
@@ -571,6 +1233,21 @@ class GroupSurface:
                         f"treasury!"))
                 notices.extend(self.estate_cycle(group_key,
                                                  now=now))
+                # Acceptance grace expiries ride the same cycle:
+                # kick-action graces remove, profile warnings
+                # engage their restriction.  (When autonomy is
+                # off, out_actions is already emptied — the cycle
+                # runs in audit-only mode and holds its kicks.)
+                actions.extend(self.acceptance_cycle(
+                    group_key, now=now, enforce=not suppressed))
+                if acc_event and acc_event.get("warn"):
+                    notices.append(notice_line(
+                        "🚪",
+                        f"{mention} — this group requires a "
+                        f"username. Restore yours within "
+                        f"{acc_event.get('grace_minutes', 60)} "
+                        f"minutes or you'll be muted until you "
+                        f"do."))
             self.store.save()
             return {"changes": changes, "actions": out_actions,
                     "notices": notices, "suppressed": n_suppressed}

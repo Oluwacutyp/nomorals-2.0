@@ -99,6 +99,167 @@ class RuntimeGroupMixin:
             pass
         return rows
 
+    # ---- join acceptance execution (DESIGN §28) -------------------
+    # The surface judges; these helpers perform.  Every execution
+    # speaks the adapter's own grammar and reports honestly —
+    # a missing surface is an audited non-execution, never a
+    # claimed success.
+
+    def _acceptance_restrict(self, adapter, chat, user_id: str, *,
+                             on: bool) -> bool:  # type: ignore[no-untyped-def]
+        """Restrict (read-only) or release one member.  The two
+        Telegram adapters spell restriction differently (MTProto
+        minutes=0 = indefinite; the Bot API's until defaults to
+        forever) — try each one's own grammar."""
+        if adapter is None:
+            return False
+        if on:
+            fn = getattr(adapter, "admin_restrict", None)
+            if fn is None:
+                return False
+            try:
+                out = fn(chat, user_id, minutes=0)
+            except TypeError:
+                try:
+                    out = fn(chat, user_id)
+                except Exception:  # noqa: BLE001 - reported below
+                    return False
+            except Exception:  # noqa: BLE001 - reported below
+                return False
+        else:
+            fn = getattr(adapter, "admin_unrestrict", None)
+            if fn is None:
+                return False
+            try:
+                out = fn(chat, user_id)
+            except Exception:  # noqa: BLE001 - reported below
+                return False
+        return not (isinstance(out, dict)
+                    and out.get("ok") is False)
+
+    def _acceptance_photo(self, adapter, chat, user_id: str):  # type: ignore[no-untyped-def]
+        """Fresh profile-photo fact for the §28 photo criterion:
+        True/False, or None when the platform can't say (an
+        adapter without the surface, or a failed lookup) —
+        None is UNKNOWN to the evaluator, never a failure."""
+        fn = getattr(adapter, "admin_member_photo", None) \
+            if adapter else None
+        if fn is None:
+            return None
+        try:
+            out = fn(chat, user_id)
+        except Exception:  # noqa: BLE001 - unknown, not failed
+            return None
+        if isinstance(out, dict) and out.get("ok"):
+            return bool(out.get("has_photo"))
+        return None
+
+    def _acceptance_join_request(self, surface, key, adapter,  # type: ignore[no-untyped-def]
+                                 chat, user_id: str, *,
+                                 approve: bool) -> bool:
+        """Perform one join-request decision through the
+        adapter; audit the outcome either way."""
+        fn = getattr(adapter, "admin_join_request", None) \
+            if adapter else None
+        action = ("join_request_approve" if approve
+                  else "join_request_decline")
+        if fn is None:
+            surface._audit(
+                key, "moderation_unexecuted", action=action,
+                rule="acceptance", user_id=user_id,
+                reason="adapter has no admin_join_request")
+            surface.store.save()
+            return False
+        try:
+            out = fn(chat, user_id, approve)
+            if isinstance(out, dict) and out.get("ok") is False:
+                raise RuntimeError(str(out.get("error")
+                                       or "platform refused"))
+        except Exception as exc:  # noqa: BLE001 - audited
+            surface._audit(
+                key, "moderation_unexecuted", action=action,
+                rule="acceptance", user_id=user_id,
+                reason=f"{type(exc).__name__}: {exc}")
+            surface.store.save()
+            return False
+        surface._audit(key, "moderation_executed", action=action,
+                       rule="acceptance", user_id=user_id)
+        surface.store.save()
+        return True
+
+    def _acceptance_facts(self, member: dict) -> dict:  # type: ignore[no-untyped-def]
+        """Identity facts for one arrival, in the evaluator's
+        shape, from a converter-supplied member/requester dict."""
+        name = str(member.get("name") or "")
+        first = str(member.get("first_name") or name)
+        last = str(member.get("last_name") or "")
+        if not last and name and first and name.startswith(first):
+            rest = name[len(first):].strip()
+            if rest:
+                last = rest
+        return {"user_id": str(member.get("id") or ""),
+                "username": str(member.get("username") or ""),
+                "name": name or first, "first_name": first,
+                "last_name": last,
+                "is_bot": bool(member.get("is_bot"))}
+
+    def _send_acceptance_note(self, surface, key, message,  # type: ignore[no-untyped-def]
+                              label: str, reasons: list, *,
+                              grace_minutes: int | None = None,
+                              pending_kick: bool = False) -> None:
+        """The restricted member's one message (§28): what to
+        fix + the “check me again” button, through the
+        typography organ like every presented surface."""
+        from ...social.chat.group_acceptance import fix_it_text
+        from ...social.chat.typography import Card
+
+        card = Card("moderation", title=f"{label} — one moment",
+                    icon="🚪")
+        body = fix_it_text(
+            list(reasons or []),
+            grace_minutes=grace_minutes if pending_kick else None)
+        card.lines(body.splitlines())
+        text = surface._card_render(key, card)
+        self._send(message.chat, text,
+                   buttons=[[("✅ Check me again", "recheck")]],
+                   parse_mode=self._rendered_mode(message, text))
+
+    def _send_acceptance_queue_note(self, surface, key, message,  # type: ignore[no-untyped-def]
+                                    record: dict,
+                                    reasons: list) -> None:
+        """The admin queue notice for one held request (§28):
+        who, what their evaluation said, and Approve / Decline
+        buttons authored from the request itself.  The request
+        id rides the buttons only — never the visible text
+        (internal ids don't print)."""
+        from ...social.chat.typography import Card
+
+        label = (record.get("name")
+                 or (f"@{record['username']}"
+                     if record.get("username") else "")
+                 or record.get("user_id") or "someone")
+        card = Card("moderation", title="Join request waiting",
+                    icon="🚪")
+        lines = [f"{label} wants in."]
+        if reasons:
+            lines.append("their check: " + "; ".join(reasons))
+        elif record.get("unknown"):
+            lines.append("one check couldn't be verified — "
+                         "a human decides.")
+        else:
+            lines.append("they meet every rule — auto-approve "
+                         "is off, so this one's yours.")
+        lines.append("requests stay open until an admin decides "
+                     "or the invite link is revoked.")
+        card.lines(lines)
+        text = surface._card_render(key, card)
+        rid = str(record.get("id") or "")
+        self._send(message.chat, text, buttons=[
+            [("✅ Approve", f"joinq approve {rid}"),
+             ("🚫 Decline", f"joinq decline {rid}")],
+            [("📋 The queue", "joinq")]],
+            parse_mode=self._rendered_mode(message, text))
+
     def _group_adapter(self, platform: str):  # type: ignore[no-untyped-def]
         gateway = getattr(self, "gateway", None)
         adapters = getattr(gateway, "adapters", {}) or {}
@@ -114,23 +275,134 @@ class RuntimeGroupMixin:
         service = str(meta.get("service") or "")
 
         if service == "join":
+            adapter = self._group_adapter(message.chat.platform)
+            acc_cfg = (surface.store.settings(key)
+                       .get("acceptance") or {})
+            criteria = acc_cfg.get("criteria") or {}
+            # Acceptance is INERT when no criterion is on and
+            # the mode is open: the standing P1 path, byte for
+            # byte.  The moment a group configures a rule, every
+            # arrival is judged (§28).
+            inert = (str(acc_cfg.get("mode") or "open") == "open"
+                     and not any(criteria.values()))
             welcomed = []
             for member in meta.get("new_members") or []:
                 if not isinstance(member, dict):
                     continue
-                text = surface.record_join(
-                    key, str(member.get("id") or ""),
-                    username=str(member.get("username") or ""),
-                    name=str(member.get("name") or ""),
-                    group_name=str(message.chat.title or ""))
-                if text:
-                    welcomed.append(text)
+                user_id = str(member.get("id") or "")
+                if not user_id:
+                    continue
+                if inert:
+                    text = surface.record_join(
+                        key, user_id,
+                        username=str(member.get("username") or ""),
+                        name=str(member.get("name") or ""),
+                        group_name=str(message.chat.title or ""))
+                    if text:
+                        welcomed.append(text)
+                    continue
+                facts = self._acceptance_facts(member)
+                has_photo = member.get("has_photo")
+                if criteria.get("photo") and has_photo is None:
+                    has_photo = self._acceptance_photo(
+                        adapter, message.chat, user_id)
+                out = surface.acceptance_on_join(
+                    key, facts, has_photo=has_photo)
+                for action in out.get("actions") or []:
+                    self._execute_group_action(
+                        surface, key, adapter, message, action)
+                if out.get("welcome"):
+                    text = surface.welcome_text_for(
+                        key, name=facts["name"],
+                        username=facts["username"],
+                        group_name=str(message.chat.title or ""))
+                    if text:
+                        welcomed.append(text)
+                elif out.get("verdict") == "restricted":
+                    label = (facts["name"]
+                             or (f"@{facts['username']}"
+                                 if facts["username"] else "")
+                             or user_id)
+                    self._send_acceptance_note(
+                        surface, key, message, label,
+                        out.get("reasons") or [],
+                        grace_minutes=out.get("grace_minutes"),
+                        pending_kick=bool(out.get("pending_kick")))
             for text in welcomed:
                 self._send(
                     message.chat, text,
                     buttons=self._welcome_buttons(surface, key),
                     parse_mode=self._rendered_mode(message, text))
             self._clean_service_message(surface, message)
+            return True
+        if service == "join_request":
+            # Telegram's approval-mode invite flow (DESIGN §28):
+            # the candidate is not in the group — the surface
+            # judges, this branch performs the decision through
+            # the adapter, and held requests surface ONE queue
+            # notice with the decision on its buttons.
+            adapter = self._group_adapter(message.chat.platform)
+            requester = meta.get("requester") or {}
+            if isinstance(requester, dict) and requester.get("id"):
+                facts = self._acceptance_facts(requester)
+                user_id = facts["user_id"]
+                acc_cfg = (surface.store.settings(key)
+                           .get("acceptance") or {})
+                criteria = acc_cfg.get("criteria") or {}
+                has_photo = requester.get("has_photo")
+                if criteria.get("photo") and has_photo is None:
+                    has_photo = self._acceptance_photo(
+                        adapter, message.chat, user_id)
+                out = surface.acceptance_on_request(
+                    key, facts, has_photo=has_photo)
+                verdict = out.get("verdict")
+                if verdict in ("approve", "approve_restricted"):
+                    done = self._acceptance_join_request(
+                        surface, key, adapter, message.chat,
+                        user_id, approve=True)
+                    if done:
+                        admitted = \
+                            surface.acceptance_request_admitted(
+                                key, str(out.get("request_id")
+                                         or ""))
+                        if admitted.get("restricted"):
+                            self._execute_group_action(
+                                surface, key, adapter, message,
+                                {"kind": "acceptance_restrict",
+                                 "user_id": user_id,
+                                 "rule": "acceptance"})
+                            label = (facts["name"]
+                                     or (f"@{facts['username']}"
+                                         if facts["username"]
+                                         else "") or user_id)
+                            self._send_acceptance_note(
+                                surface, key, message, label,
+                                admitted.get("reasons") or [],
+                                grace_minutes=admitted.get(
+                                    "grace_minutes"))
+                        elif admitted.get("welcome"):
+                            text = surface.welcome_text_for(
+                                key, name=facts["name"],
+                                username=facts["username"],
+                                group_name=str(
+                                    message.chat.title or ""))
+                            if text:
+                                self._send(
+                                    message.chat, text,
+                                    buttons=self._welcome_buttons(
+                                        surface, key),
+                                    parse_mode=self._rendered_mode(
+                                        message, text))
+                elif verdict == "decline":
+                    self._acceptance_join_request(
+                        surface, key, adapter, message.chat,
+                        user_id, approve=False)
+                else:  # queued — a human decides
+                    record = out.get("record") or {}
+                    if record:
+                        self._send_acceptance_queue_note(
+                            surface, key, message, record,
+                            out.get("reasons") or [])
             return True
         if service == "leave":
             left = meta.get("left_member") or {}
@@ -426,6 +698,9 @@ class RuntimeGroupMixin:
             "(reply to it, or /report @member why)",
             "/member [@name] — a member's card: tenure, activity, "
             "username/name changes",
+            "/recheck — if the door rules let you in restricted "
+            "(muted until you fix what's missing), tap this after "
+            "fixing it and the checks re-run live",
             "/ping — check I'm alive, and how fast I answered",
             "🎮 games — /ttt /connect4 /reversi /checkers /mines "
             "and the rest of the board; /game lists them, moves are "
@@ -483,6 +758,10 @@ class RuntimeGroupMixin:
             "it when an admin asks)",
             "/strikes — the defense strike ledger: who is on "
             "the ladder, and how close the rungs are",
+            "/joinq — the join queue: requests the acceptance "
+            "rules held for a human, decided here or on the "
+            "notice's buttons; the door rules themselves live "
+            "in /gsettings (acceptance block)",
             "I moderate on my own: floods, repeat spam and "
             "off-allowlist links get deleted; crash payloads are "
             "quarantined, channel injections and mass tags are "
@@ -711,6 +990,28 @@ class RuntimeGroupMixin:
                    f"{', '.join(pres.get('stamp_classes') or [])})"
                    if pres.get("stamp_classes") else ""),
             ], title="Presentation")
+            # Acceptance block (DESIGN §28): the door rules as
+            # the evaluator reads them + the live queue depth +
+            # the raid posture right now.
+            acc = s.get("acceptance") or {}
+            acc_crit = acc.get("criteria") or {}
+            crit_on = [name for name in (
+                "username", "photo", "firstname", "lastname",
+                "hygiene", "banned", "bots") if acc_crit.get(name)]
+            _acc_cfg, raid_now = surface.acceptance_cfg(key)
+            queue_n = len(surface.acceptance_queue(key))
+            card.block_lines([
+                f"mode: {acc.get('mode', 'open')} · action on a "
+                f"failed check: {acc.get('action', 'restricted')}"
+                f" · grace {int(acc.get('grace_minutes') or 60)}m"
+                f" · auto-approve "
+                f"{'on' if acc.get('auto_approve', True) else 'off'}",
+                "criteria on: "
+                + (", ".join(crit_on) if crit_on
+                   else "none — the door is open"),
+                f"queue: {queue_n} waiting · raid posture: "
+                f"{'ACTIVE (tightened)' if raid_now else 'calm'}",
+            ], title="Acceptance")
             card.block_lines([
                 "`/gsettings welcome on|off` · "
                 "`/gsettings goodbye on|off` · "
@@ -741,6 +1042,16 @@ class RuntimeGroupMixin:
                 "`/gsettings stamp on|off` · "
                 "`/gsettings stamp text TEXT|default` · "
                 "`/gsettings stamp classes a,b|default`",
+                "`/gsettings acceptance mode open|request|invite`",
+                "`/gsettings acceptance username|photo|firstname"
+                "|lastname|hygiene|banned|bots on|off`",
+                "`/gsettings acceptance action decline|restricted"
+                "|kick` · `/gsettings acceptance grace MIN`",
+                "`/gsettings acceptance auto on|off` · "
+                "`/gsettings acceptance override CRITERION "
+                "decline|restricted|kick|default`",
+                "`/gsettings acceptance whitelist add|remove "
+                "@name|id`",
             ], title="Change it")
             card.note("tap a button to flip a switch, or type a "
                       "command")
@@ -952,8 +1263,328 @@ class RuntimeGroupMixin:
             self._presentation_update(surface, key,
                                       stamp_classes=wanted)
             return f"stamp shows on: {', '.join(wanted)}."
+        # ── acceptance grammar (DESIGN §28) ─────────────────────
+        if head == "acceptance":
+            sub = rest.lower()
+            if sub == "mode" and rest2.lower() in (
+                    "open", "request", "invite"):
+                self._acceptance_update(surface, key,
+                                         mode=rest2.lower())
+                return (f"join mode: {rest2.lower()} — "
+                        + {"open": "anyone can walk in; the "
+                                   "criteria judge them at the "
+                                   "door.",
+                           "request": "approval-mode invite "
+                                      "links produce requests "
+                                      "the rules judge first.",
+                           "invite": "joins arrive by invite; "
+                                     "the criteria still judge "
+                                     "them on arrival."}
+                        [rest2.lower()])
+            if sub in ("username", "photo", "firstname",
+                       "lastname", "hygiene", "banned", "bots") \
+                    and rest2.lower() in ("on", "off"):
+                current = surface.store.settings(key)
+                crit = dict((current.get("acceptance") or {})
+                            .get("criteria") or {})
+                crit[sub] = (rest2.lower() == "on")
+                self._acceptance_update(surface, key,
+                                        criteria=crit)
+                return (f"acceptance criterion {sub}: "
+                        f"{rest2.lower()}.")
+            if sub == "action" and rest2.lower() in (
+                    "decline", "restricted", "kick"):
+                self._acceptance_update(surface, key,
+                                         action=rest2.lower())
+                explain = {
+                    "decline": "the request is refused / the "
+                               "join is removed, reason on the "
+                               "record",
+                    "restricted": "they come in muted with a "
+                                  "fix-it note and a "
+                                  "check-me-again button",
+                    "kick": "they come in muted for the grace "
+                            "window, then are removed if still "
+                            "unfixed"}[rest2.lower()]
+                return (f"a failed check now means: "
+                        f"{rest2.lower()} ({explain}).")
+            if sub == "grace" and rest2.rstrip("m").isdigit():
+                minutes = max(1, min(10080,
+                                     int(rest2.rstrip("m"))))
+                self._acceptance_update(surface, key,
+                                         grace_minutes=minutes)
+                return (f"acceptance grace: {minutes} minutes "
+                        f"before a kick-action escalates.")
+            if sub == "auto" and rest2.lower() in ("on", "off"):
+                self._acceptance_update(
+                    surface, key,
+                    auto_approve=(rest2.lower() == "on"))
+                return (f"auto-approve of clean requests: "
+                        f"{rest2.lower()}.")
+            if sub == "override" and rest2:
+                bits = rest2.split(None, 1)
+                crit_name = bits[0].lower()
+                act = bits[1].lower() if len(bits) > 1 else ""
+                if crit_name in ("username", "photo", "firstname",
+                                 "lastname", "hygiene", "banned",
+                                 "bots") and act in (
+                        "decline", "restricted", "kick",
+                        "default"):
+                    current = surface.store.settings(key)
+                    overrides = dict(
+                        (current.get("acceptance") or {})
+                        .get("overrides") or {})
+                    if act == "default":
+                        overrides.pop(crit_name, None)
+                    else:
+                        overrides[crit_name] = act
+                    self._acceptance_update(surface, key,
+                                            overrides=overrides)
+                    return (f"{crit_name} failures now take: "
+                            f"{act if act != 'default' else 'the group action'}.")
+                return ("usage: /gsettings acceptance override "
+                        "username|photo|firstname|lastname|hygiene"
+                        "|banned|bots decline|restricted|kick"
+                        "|default")
+            if sub == "whitelist" and rest2:
+                bits = rest2.split(None, 1)
+                verb = bits[0].lower()
+                token = bits[1].strip() if len(bits) > 1 else ""
+                if verb in ("add", "remove") and token:
+                    current = surface.store.settings(key)
+                    wl = [str(w) for w in (
+                        (current.get("acceptance") or {})
+                        .get("bot_whitelist") or [])]
+                    if verb == "add" and token not in wl:
+                        wl.append(token)
+                    if verb == "remove":
+                        wl = [w for w in wl if w != token]
+                    self._acceptance_update(surface, key,
+                                            bot_whitelist=wl)
+                    return (f"bot whitelist: "
+                            f"{', '.join(wl) or 'empty'}.")
+                return ("usage: /gsettings acceptance whitelist "
+                        "add|remove @name|id")
+            return ("acceptance grammar: mode, the criterion "
+                    "names, action, grace, auto, override, "
+                    "whitelist — /gsettings shows the block.")
         return ("I didn't follow that — /gsettings alone shows the "
                 "current settings and the change grammar.")
+
+    # ---- join acceptance commands (DESIGN §28) --------------------
+    def _acceptance_update(self, surface, key, **fields):  # type: ignore[no-untyped-def]
+        """Mutate the acceptance settings block through the
+        store's own settings machinery (defaults-merged,
+        persisted) — the _defense_update shape."""
+        import copy as _copy
+
+        current = surface.store.settings(key)
+        block = _copy.deepcopy(current.get("acceptance") or {})
+        block.update(fields)
+        surface.update_settings(key, acceptance=block)
+        return block
+
+    def _control_recheck(self, message) -> str:  # type: ignore[no-untyped-def]
+        """“Check me again” (§28): the restricted member's own
+        button/command.  Re-runs the criteria live; a pass
+        releases them on the spot and the welcome finally
+        fires."""
+        key = self._group_key_or_none(message)
+        if key is None:
+            return "that's a group thing — tap it in the group."
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        if not user_id:
+            return "I couldn't tell who tapped that."
+        adapter = self._group_adapter(message.chat.platform)
+        acc_cfg = (surface.store.settings(key)
+                   .get("acceptance") or {})
+        has_photo = None
+        if (acc_cfg.get("criteria") or {}).get("photo"):
+            has_photo = self._acceptance_photo(
+                adapter, message.chat, user_id)
+        res = surface.acceptance_recheck(
+            key, user_id,
+            username=str(message.sender_username or ""),
+            name=str(message.sender or ""), has_photo=has_photo)
+        if res.get("state") == "not_restricted":
+            return "you're not on the acceptance list — nothing to check."
+        if res.get("state") == "passed":
+            if res.get("was_restricted"):
+                self._execute_group_action(
+                    surface, key, adapter, message,
+                    {"kind": "acceptance_unrestrict",
+                     "user_id": user_id, "rule": "acceptance"})
+            if res.get("welcome"):
+                member = surface.store.group(key)["members"].get(
+                    user_id) or {}
+                text = surface.welcome_text_for(
+                    key, name=str(member.get("name") or ""),
+                    username=str(member.get("username") or ""),
+                    group_name=str(message.chat.title or ""))
+                if text:
+                    return text
+            return "✅ all checks pass — you're in. Welcome!"
+        from ...social.chat.group_acceptance import fix_it_text
+        from ...social.chat.typography import Card
+
+        card = Card("moderation", title="Not quite yet", icon="🚪")
+        card.lines(fix_it_text(res.get("reasons") or []).splitlines())
+        return self._card(message, card,
+                          [[("✅ Check me again", "recheck")]])
+
+    def _joinq_label(self, surface, key, record) -> str:  # type: ignore[no-untyped-def]
+        return (record.get("name")
+                or (f"@{record['username']}"
+                    if record.get("username") else "")
+                or surface._member_label(
+                    key, str(record.get("user_id") or ""))
+                or "someone")
+
+    def _joinq_execute(self, surface, key, adapter, message,  # type: ignore[no-untyped-def]
+                       decided: dict, *, approve: bool) -> str:
+        """Perform one decided queue record; returns the outcome
+        line for the admin.  Execution failures are audited by
+        the executors themselves and reported here plainly."""
+        record = decided.get("record") or {}
+        user_id = str(record.get("user_id") or "")
+        label = self._joinq_label(surface, key, record)
+        execute = decided.get("execute")
+        if execute == "join_request":
+            done = self._acceptance_join_request(
+                surface, key, adapter, message.chat, user_id,
+                approve=approve)
+            if not done:
+                return (f"{label}: Telegram wouldn't carry that "
+                        f"out — the request may have expired or "
+                        f"been decided already (see /glog).")
+            if not approve:
+                return f"🚫 {label}'s request declined."
+            admitted = surface.acceptance_request_admitted(
+                key, str(record.get("id") or ""))
+            if admitted.get("restricted"):
+                self._execute_group_action(
+                    surface, key, adapter, message,
+                    {"kind": "acceptance_restrict",
+                     "user_id": user_id, "rule": "acceptance"})
+                self._send_acceptance_note(
+                    surface, key, message, label,
+                    admitted.get("reasons") or [],
+                    grace_minutes=admitted.get("grace_minutes"))
+                return (f"✅ {label} approved — in, restricted "
+                        f"until they fix: "
+                        f"{'; '.join(admitted.get('reasons') or [])}")
+            if admitted.get("welcome"):
+                text = surface.welcome_text_for(
+                    key, name=str(record.get("name") or ""),
+                    username=str(record.get("username") or ""),
+                    group_name=str(message.chat.title or ""))
+                if text:
+                    self._send(
+                        message.chat, text,
+                        buttons=self._welcome_buttons(surface, key),
+                        parse_mode=self._rendered_mode(message,
+                                                       text))
+            return f"✅ {label} approved — they're in."
+        if execute == "release":
+            done = self._execute_group_action(
+                surface, key, adapter, message,
+                {"kind": "acceptance_unrestrict",
+                 "user_id": user_id, "rule": "acceptance"})
+            if record.get("welcome"):
+                text = surface.welcome_text_for(
+                    key, name=str(record.get("name") or ""),
+                    username=str(record.get("username") or ""),
+                    group_name=str(message.chat.title or ""))
+                if text:
+                    self._send(
+                        message.chat, text,
+                        buttons=self._welcome_buttons(surface, key),
+                        parse_mode=self._rendered_mode(message,
+                                                       text))
+            return (f"✅ {label} released — full member."
+                    if done else
+                    f"{label} released on the books — the "
+                    f"platform didn't lift the restriction "
+                    f"(see /glog).")
+        if execute == "kick":
+            done = self._execute_group_action(
+                surface, key, adapter, message,
+                {"kind": "kick", "user_id": user_id,
+                 "rule": "acceptance"})
+            return (f"🚫 {label} removed from the queue."
+                    if done else
+                    f"{label}: the removal didn't go through "
+                    f"(see /glog).")
+        return f"{label}: nothing to do."
+
+    def _control_joinq(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        """The admin join queue (§28): who's waiting, what their
+        evaluation said, and the decisions — typed or tapped."""
+        key, err = self._mod_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        adapter = self._group_adapter(message.chat.platform)
+        text = str(tail or "").strip()
+        parts = text.split()
+        by = str(message.sender_id or message.sender or "")
+        if parts and parts[0].lower() in ("approve", "decline") \
+                and len(parts) >= 2:
+            approve = parts[0].lower() == "approve"
+            if parts[1].lower() == "all":
+                lines = []
+                for record in surface.acceptance_queue(key):
+                    decided = surface.acceptance_decide(
+                        key, str(record.get("id") or ""),
+                        approve=approve, by=by)
+                    if decided.get("ok"):
+                        lines.append(self._joinq_execute(
+                            surface, key, adapter, message,
+                            decided, approve=approve))
+                if not lines:
+                    return "the join queue is empty."
+                return "\n".join(lines)
+            decided = surface.acceptance_decide(
+                key, parts[1], approve=approve, by=by)
+            if not decided.get("ok"):
+                return ("that request isn't waiting anymore — "
+                        "/joinq shows what's live.")
+            return self._joinq_execute(
+                surface, key, adapter, message, decided,
+                approve=approve)
+        pending = surface.acceptance_queue(key)
+        if not pending:
+            return ("the join queue is empty — nobody's waiting "
+                    "on a decision.")
+        from ...social.chat.typography import Card
+
+        now = time.time()
+        card = Card("moderation", title="Join queue", icon="🚪")
+        lines = []
+        buttons = []
+        for record in pending:
+            label = self._joinq_label(surface, key, record)
+            waited = max(0, int((now - float(
+                record.get("ts") or now)) // 60))
+            detail = "; ".join(record.get("reasons") or [])
+            if not detail and record.get("unknown"):
+                detail = ("couldn't verify: "
+                          + ", ".join(record["unknown"]))
+            if not detail:
+                detail = ("meets every rule"
+                          if record.get("kind") == "request"
+                          else "held by the raid posture")
+            lines.append(f"{label} — {detail} "
+                         f"· waiting {waited}m")
+            rid = str(record.get("id") or "")
+            buttons.append(
+                [(f"✅ {label}"[:24], f"joinq approve {rid}"),
+                 (f"🚫 {label}"[:24], f"joinq decline {rid}")])
+        card.lines(lines)
+        card.note("requests stay open until decided or the "
+                  "invite link is revoked")
+        return self._card(message, card, buttons)
 
     # ---- manual moderation (DESIGN §4: the admin command set) ------
     def _mod_gate(self, message):  # type: ignore[no-untyped-def]
@@ -1593,8 +2224,7 @@ class RuntimeGroupMixin:
                             f"governance gifts — never from "
                             f"sparks.")
                 return (f"💎 {grant['name']} is yours — granted "
-                        f"for gems and ledgered "
-                        f"({grant['ledger_id']}).")
+                        f"for gems and ledgered.")
             grant = surface.economy.buy_status(key, user_id, item_id)
             if grant is None:
                 item = STATUS_SHOP.get(item_id)
@@ -1614,7 +2244,7 @@ class RuntimeGroupMixin:
                 return (f"📣 SHOUT-OUT for {who}! bought with "
                         f"sparks, heard by the whole group.")
             return (f"✨ {grant['name']} is yours — granted and "
-                    f"ledgered ({grant['ledger_id']}).")
+                    f"ledgered.")
         from ...social.chat.typography import Card, sparks
 
         balance = surface.economy.balance(key, user_id)
@@ -3195,6 +3825,23 @@ class RuntimeGroupMixin:
                            rule=action.get("rule"), user_id=user_id)
             surface.store.save()
             return True
+        if kind in ("acceptance_restrict", "acceptance_unrestrict"):
+            # §28's restriction is INDEFINITE (until the member
+            # fixes the miss or an admin releases them) — it has
+            # its own executor because a timed mute's grammar
+            # would quietly turn it into an hour.
+            ok = self._acceptance_restrict(
+                adapter, message.chat, user_id,
+                on=(kind == "acceptance_restrict"))
+            surface._audit(
+                key, "moderation_executed" if ok
+                else "moderation_unexecuted",
+                action=kind, rule=action.get("rule"),
+                user_id=user_id,
+                reason="" if ok else
+                "adapter restrict surface refused or missing")
+            surface.store.save()
+            return ok
         method = {"delete": "admin_delete", "ban": "admin_ban",
                   "mute": "admin_restrict"}.get(kind)
         if method is None:

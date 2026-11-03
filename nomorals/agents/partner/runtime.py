@@ -3675,6 +3675,12 @@ class PartnerRuntime(
         if kind == "strikes":
             return self._control_strikes(arg, message)
 
+        if kind == "recheck":
+            return self._control_recheck(message)
+
+        if kind == "joinq":
+            return self._control_joinq(command.tail, message)
+
         if kind == "gsettings":
             return self._control_gsettings(command.tail, message)
 

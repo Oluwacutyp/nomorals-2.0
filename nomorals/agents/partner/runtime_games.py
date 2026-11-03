@@ -1414,9 +1414,11 @@ class RuntimeGamesMixin:
                 return ""
             head = (f"{prefix} [{problem.get('tier', '?')}] "
                     f"{problem.get('topic', '')} — {problem.get('question', '')}")
+            # The problem_id stays in state/journal only: the
+            # open problem is held per member, so /math answer
+            # matches without anyone quoting an id — internal
+            # ids never print (owner, 2026-11-03).
             meta = f"⏱ {problem.get('time_limit_s', 60)}s"
-            if problem.get("problem_id"):
-                meta += f" · id {problem.get('problem_id')}"
             return f"{head}\n{meta}"
 
         if kind == "problem":
@@ -1484,7 +1486,11 @@ class RuntimeGamesMixin:
                     f"{result.get('wins', 0)}W / {result.get('losses', 0)}L\n"
                     f"{result.get('next', '')}")
         if kind == "duel":
-            lines = [f"⚔️ Duel {result.get('duel_id')} — "
+            # No duel_id in the header (internal ids never
+            # print); it survives only in the answer grammar
+            # below, where today's duel_answer command still
+            # takes it as an argument.
+            lines = [f"⚔️ Duel — "
                      f"{' vs '.join(result.get('players') or [])}"]
             for i, problem in enumerate(result.get("problems") or []):
                 lines.append(f"Round {i + 1}: {problem.get('question', '')}")
