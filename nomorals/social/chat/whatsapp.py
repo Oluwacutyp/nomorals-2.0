@@ -377,9 +377,11 @@ class WhatsAppAdapter(ChatAdapter):
             except Exception as exc:  # noqa: BLE001 - same best-effort as send()
                 record_failure('whatsapp.WhatsAppAdapter._deliver_entry', exc)
             reply_to = str(entry.get("reply_to") or "")
+            entry_buttons = entry.get("buttons") or None
             for i, chunk in enumerate(_split_text(text)):
                 result = self._send_with_retry(
-                    chat, chunk, reply_to=reply_to if i == 0 else "")
+                    chat, chunk, reply_to=reply_to if i == 0 else "",
+                    buttons=entry_buttons if i == 0 else None)
                 if not result.ok:
                     return False
             return True
@@ -654,15 +656,24 @@ class WhatsAppAdapter(ChatAdapter):
 
     # ── outbound ─────────────────────────────────────────────────────────────
     def _send_with_retry(self, chat: ChatRef, text: str,
-                         *, reply_to: str = "") -> SendResult:
+                         *, reply_to: str = "",
+                         buttons: Any = None) -> SendResult:
         """One text send with a single retry on transient bridge failure."""
         started = time.perf_counter()
         jid = self._jid(chat)
         last_error = "bridge rejected send"
+        request: dict[str, Any] = {"cmd": "send", "chat": jid,
+                                   "text": text, "reply_to": reply_to}
+        if buttons:
+            # The bridge renders what WhatsApp supports natively
+            # and degrades the rest to text action lines — the
+            # keyboard is never silently dropped (presentation
+            # contract, same as every other platform).
+            request["buttons"] = [
+                [[str(label), str(data)] for label, data in row]
+                for row in buttons if row]
         for attempt in (1, 2):
-            response = self._send_cmd(
-                {"cmd": "send", "chat": jid, "text": text,
-                 "reply_to": reply_to})
+            response = self._send_cmd(request)
             if response.get("ok"):
                 self.stats["sent"] += 1
                 # The bridge's reply id is OUR request id — the real
@@ -697,6 +708,10 @@ class WhatsAppAdapter(ChatAdapter):
                 "thread_id": chat.thread_id,
                 "text": text,
                 "reply_to": reply_to,
+                "buttons": [[[str(label), str(data)]
+                             for label, data in row]
+                            for row in buttons if row]
+                           if buttons else None,
             })
         # Convert Telegram HTML / canonical markdown to WhatsApp markdown
         # (game output and styled menus are authored Telegram-first).
@@ -712,7 +727,8 @@ class WhatsAppAdapter(ChatAdapter):
         for i, chunk in enumerate(chunks):
             result = self._send_with_retry(
                 chat, chunk,
-                reply_to=reply_to if i == 0 else "")
+                reply_to=reply_to if i == 0 else "",
+                buttons=buttons if i == 0 else None)
             if not result.ok:
                 return result
         assert result is not None

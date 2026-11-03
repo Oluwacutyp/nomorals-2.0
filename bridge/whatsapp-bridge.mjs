@@ -21,7 +21,9 @@
  *      (send/send_media replies add "message_id": the real WA message id)
  *
  *   python -> bridge
- *     {"id":"<req>","cmd":"send","chat":"<jid>","text":"...","reply_to":""}
+ *     {"id":"<req>","cmd":"send","chat":"<jid>","text":"...","reply_to":"",
+ *      "buttons":[[["label","command"],…],…] (optional; rendered natively
+ *      up to WhatsApp's 3-button cap, the rest as text action lines)}
  *     {"id":"<req>","cmd":"send_media","chat":"<jid>","path":"...","caption":"...","ptt":false}
  *     {"id":"<req>","cmd":"typing","chat":"<jid>","seconds":3,
  *      "presence":"composing|recording"}
@@ -327,6 +329,22 @@ const kindOf = (jid) => (jid.endsWith('@g.us') ? 'group' : 'dm');
 
 function textOf(m) {
   const msg = m.message || {};
+  // Button/list taps re-enter as the command they carry — the
+  // same contract as Telegram callback taps ("/" + data), so a
+  // keyboard authored once works on both platforms.
+  const btnId = msg.buttonsResponseMessage?.selectedButtonId
+    || msg.templateButtonReplyMessage?.selectedId
+    || msg.listResponseMessage?.singleSelectReply?.selectedRowId
+    || '';
+  if (btnId) return `/${btnId}`;
+  const flow = msg.interactiveResponseMessage
+    ?.nativeFlowResponseMessage?.paramsJson;
+  if (flow) {
+    try {
+      const parsed = JSON.parse(flow);
+      if (parsed && parsed.id) return `/${parsed.id}`;
+    } catch { /* not a button payload — fall through to text */ }
+  }
   return (
     msg.conversation ||
     msg.extendedTextMessage?.text ||
@@ -543,13 +561,48 @@ function extOf(p) {
   return i >= 0 ? p.slice(i).toLowerCase() : '';
 }
 
-async function cmdSend({ chat, text, reply_to }) {
-  const content = { text: text || '' };
+async function cmdSend({ chat, text, reply_to, buttons }) {
   const opts = {};
   if (reply_to && msgCache.has(reply_to)) {
     opts.quoted = msgCache.get(reply_to); // raw WAMessage -> quoted reply
   }
-  return wa.sendMessage(chat, content, opts);
+  // Inline buttons ride the same contract as Telegram: rows of
+  // [label, command]. WhatsApp's legacy button messages cap at 3
+  // buttons — the first three render natively, the rest degrade
+  // to text action lines in the same message; if WhatsApp refuses
+  // the button message entirely (increasingly common), ALL of
+  // them degrade to text. The actions are never silently dropped.
+  const flat = [];
+  for (const row of buttons || []) {
+    for (const b of row || []) {
+      if (Array.isArray(b) && b.length >= 2) {
+        flat.push([String(b[0]), String(b[1])]);
+      }
+    }
+  }
+  if (flat.length) {
+    const asLines = (items) => items
+      .map(([label, id]) => `• ${label} — /${id}`).join('\n');
+    const native = flat.slice(0, 3).map(([label, id]) => ({
+      buttonId: id,
+      buttonText: { displayText: label.slice(0, 25) },
+      type: 1,
+    }));
+    let body = text || '';
+    if (flat.length > 3) {
+      body += (body ? '\n' : '') + asLines(flat.slice(3));
+    }
+    try {
+      return await wa.sendMessage(
+        chat, { text: body, buttons: native, headerType: 1 }, opts);
+    } catch {
+      const lines = asLines(flat);
+      return wa.sendMessage(
+        chat, { text: (text || '') + (text ? '\n' : '') + lines },
+        opts);
+    }
+  }
+  return wa.sendMessage(chat, { text: text || '' }, opts);
 }
 
 async function cmdSendMedia({ chat, path: p, caption, ptt }) {

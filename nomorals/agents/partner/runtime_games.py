@@ -134,7 +134,20 @@ class RuntimeGamesMixin:
             lines.append("  /game queue <game> — matchmaking: get paired for a duel")
             lines.append("  /game ratings [game] — the ELO boards")
             lines.append("  /game delete — delete your profile (48h to undo)")
-            return "\n".join(lines)
+            # Buttons authored from THIS chat's live state + the
+            # actions the list itself documents (presentation
+            # build): a live room offers its own rematch/quit;
+            # the boards and lobby are one tap from here.
+            from ...social.chat.tgbot_buttons import actionable
+            rows = []
+            if live is not None:
+                rows.append([("🔁 Rematch", "game rematch"),
+                             ("🚪 Quit game", "game quit")])
+            rows.append([("🏆 Leaderboard", "game leaderboard"),
+                         ("📊 My stats", "game stats")])
+            rows.append([("⚔️ PvP lobby", "pvp"),
+                         ("🎉 Events", "game events")])
+            return actionable("\n".join(lines), rows)
         if verb == "quit":
             # capture the relay (if any) BEFORE quitting — the engine
             # tears it down, and the opponent deserves to hear about it
@@ -148,10 +161,17 @@ class RuntimeGamesMixin:
             if doomed is not None:
                 who = player.name if player is not None else "your opponent"
                 msg = (f"🏁 {who} closed the {doomed.game_name} duel.")
+                relay_buttons = None
                 if rematch is not None:
                     msg += (f"\n🔁 rematch? /game accept {rematch.code} "
                             f"(1 hour)")
-                self._relay_send(doomed.other_chat(chat_key), msg)
+                    # The button carries THIS invite's code — it
+                    # exists exactly because this duel just ended.
+                    relay_buttons = [[(
+                        "🔁 Rematch — accept",
+                        f"game accept {rematch.code}")]]
+                self._relay_send(doomed.other_chat(chat_key), msg,
+                                 buttons=relay_buttons)
             return "\n".join(out)
         if verb == "rematch":
             # /game rematch [easy|normal|hard|expert] — same difficulty
@@ -1784,12 +1804,16 @@ class RuntimeGamesMixin:
         expired invites and every platform shares the same relay table."""
         return self._game_engine().relay
 
-    def _relay_send(self, chat_key: str, text: str) -> bool:
+    def _relay_send(self, chat_key: str, text: str, *,
+                    buttons=None) -> bool:
         """Send to a relay chat on its own platform. Chat keys are
-        ``platform:chat_id`` — never assume telegram."""
+        ``platform:chat_id`` — never assume telegram.  Buttons ride
+        the same gateway contract as any surface (platforms
+        without them ignore the keyboard)."""
         platform = (chat_key or "").partition(":")[0].strip() or "telegram"
         try:
-            result = self.gateway.send(platform, chat_key, text)
+            result = self.gateway.send(platform, chat_key, text,
+                                       buttons=buttons)
             return bool(getattr(result, "ok", False))
         except Exception:  # noqa: BLE001
             _log.warning("relay send failed for %s", chat_key,

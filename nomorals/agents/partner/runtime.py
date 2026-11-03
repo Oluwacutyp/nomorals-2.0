@@ -1261,7 +1261,9 @@ class PartnerRuntime(
                             player=self._game_player(message),
                             kind=message.chat.kind,
                             is_owner=self._is_operator(message))
-                    _log.debug("game command reply: %r", reply[:100] if reply else "")
+                    _log.debug("game command reply: %r",
+                               str(getattr(reply, "text", reply))[:100]
+                               if reply else "")
                 except Exception as exc:  # noqa: BLE001
                     _log.exception("game command failed: %s", exc)
                     reply = (f"that move broke something on my end: {exc} — "
@@ -1269,9 +1271,8 @@ class PartnerRuntime(
                              f"or /game quit and start it fresh")
                 if reply:
                     try:
-                        self._typing_for(message.chat, reply)
-                        result = self.gateway.send(message.chat.platform, message.chat, reply)
-                        if not result.ok:
+                        result = self._send_control_reply(message, reply)
+                        if result is not None and not result.ok:
                             _log.warning("game reply send failed in %s: %s",
                                          message.chat.key, result.error)
                         else:
@@ -3409,7 +3410,7 @@ class PartnerRuntime(
         return "\n".join(parts)
 
     def _send_control_reply(self, message, reply, *,  # type: ignore[no-untyped-def]
-                            reply_keyboard=None) -> None:
+                            reply_keyboard=None):
         """The ONE send channel for control-command replies, on
         every bot and surface (presentation build, owner order
         2026-11-03: buttons + formatting are platform-wide, not a
@@ -3430,14 +3431,14 @@ class PartnerRuntime(
             text, buttons = str(reply.text), reply.buttons
         text = str(text or "")
         if not text and not buttons:
-            return
+            return None
         self._typing_for(message.chat, text)
         parse_mode = "HTML" if ("<b>" in text or "<code>" in text) \
             else ""
-        self.gateway.send(message.chat.platform, message.chat,
-                          text, buttons=buttons,
-                          parse_mode=parse_mode,
-                          reply_keyboard=reply_keyboard)
+        return self.gateway.send(message.chat.platform, message.chat,
+                                 text, buttons=buttons,
+                                 parse_mode=parse_mode,
+                                 reply_keyboard=reply_keyboard)
 
     def handle_control(self, text: str, chat_key: str,
                        message: Any = None, _no_stack: bool = False) -> str:
