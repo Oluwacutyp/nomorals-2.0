@@ -320,16 +320,67 @@ def test_monetary_policy_throttles_the_faucet(tmp_path):
                            text="hi")
     econ = surface.economy
     now = time.time()
+    # Seed HOT ISSUANCE through a channel the policy counts and the
+    # earn caps do not bind: conversion-in (§25).  issuance_state
+    # counts positive convert legs as earned BY DESIGN (the policy
+    # counts the whole supply), and convert legs are the member's
+    # own money moving, so no cap applies.  The old fixture seeded
+    # through award() — the capped faucet itself — so the seeded
+    # total was whatever the caps, the wall clock's period
+    # boundaries, and leaked process state happened to allow
+    # (800/1200/1600 landed at different hours), and this throttle
+    # assertion flipped pass/fail with the calendar and the chunk
+    # composition.  A throttle test must seed issuance, not grind.
+    seeded = 0
     for member in ("55", "77"):
-        for day in range(4):
-            econ.award(KEY, member, 200, "grind",
-                       now=now - day * 86400)
+        entry = econ.convert_credit(KEY, member, 700,
+                                    "seed: conversion in",
+                                    ref="test:throttle-seed", now=now)
+        assert entry is not None  # a silent seed failure fails HERE
+        seeded += entry.amount
     state = econ.issuance_state(KEY, now=now)
-    assert state["earned"] >= 1000 and state["throttled"], state
+    assert state["earned"] >= seeded and state["throttled"], state
     entry = econ.record_activity(KEY, "55", "streak_day", now=now)
     assert entry is not None and entry.amount == 2  # 5 halved
     out = rt._control_tax(_msg())
     assert "throttled" in out, out
+
+
+def test_monetary_policy_seed_does_not_ride_the_faucet(tmp_path):
+    """Regression pin for the fixture above, at the exact seam
+    that flipped: with a member's faucet for today SATURATED,
+    award() refuses a seed-sized earn outright — the channel the
+    old fixture seeded through — while conversion-in still lands
+    whole and issuance_state's earned rises by exactly the
+    converted sum.  If throttle seeding (or the convert legs
+    themselves) ever routes through the earn caps again, this
+    fails loudly instead of flipping with the calendar."""
+    rt, surface = _rig(tmp_path)
+    surface.handle_message(KEY, "55", username="bola", name="Bola",
+                           text="hi")
+    surface.handle_message(KEY, "77", username="crim", name="Crim",
+                           text="hi")
+    econ = surface.economy
+    now = time.time()
+    # Saturate member 55's faucet for today: the message earn (5)
+    # + a 195 grind award fills the 200 daily cap exactly.
+    assert econ.award(KEY, "55", 195, "grind", now=now) is not None
+    # The faucet cannot seed a throttle scenario for her:
+    assert econ.award(KEY, "55", 700, "grind", now=now) is None
+    before = econ.issuance_state(KEY, now=now)["earned"]
+    # Conversion-in can — for BOTH members, whole amounts:
+    for member in ("55", "77"):
+        entry = econ.convert_credit(KEY, member, 700,
+                                    "seed: conversion in",
+                                    ref="test:throttle-seed", now=now)
+        assert entry is not None and entry.amount == 700
+    state = econ.issuance_state(KEY, now=now)
+    assert state["earned"] - before == 1400, state
+    assert state["throttled"], state
+    # …and the throttle's halving still lands for a member whose
+    # own faucet has room (77: only her message earn today):
+    entry = econ.record_activity(KEY, "77", "streak_day", now=now)
+    assert entry is not None and entry.amount == 2  # 5 halved
 
 
 def test_auto_mute_fine_moves_to_treasury(tmp_path):
