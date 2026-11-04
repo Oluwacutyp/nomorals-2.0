@@ -98,7 +98,7 @@ func (b *bridge) handleCommand(cc *clientConn, req request) {
 		if b.cli.IsLoggedIn() {
 			state = "open"
 		}
-		b.reply(cc, id, map[string]any{"ok": true, "user": b.meJID, "state": state})
+		b.reply(cc, id, map[string]any{"ok": true, "user": b.meJID, "lid": b.myLID(), "state": state})
 	default:
 		if b.handleGroupCommand(ctx, cc, id, req) {
 			return

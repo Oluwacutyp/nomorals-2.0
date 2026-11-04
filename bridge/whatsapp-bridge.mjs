@@ -10,7 +10,7 @@
  * Protocol (one JSON object per line):
  *
  *   bridge -> python
- *     {"type":"status","state":"open|closed","user":"<jid>"}
+ *     {"type":"status","state":"open|closed","user":"<jid>","lid":"<lid>@lid"}
  *     {"type":"qr","data":"<qr string>"}
  *     {"type":"pairing_code","data":"<8-char code>"}   (when WA_PAIRING_CODE=1)
  *     {"type":"message","id":"<wa message id>","chat":{"id","kind","title"},
@@ -191,14 +191,16 @@ function reconnectDelayS() {
 }
 
 // Rich status broadcast. Additive fields only — the Python adapter
-// (nomorals/social/chat/whatsapp.py, kind == "status") reads only
-// "user"/"state" and ignores the rest, so this stays backward compatible.
+// (nomorals/social/chat/whatsapp.py, kind == "status") reads
+// "user"/"state"/"lid" and ignores the rest, so this stays
+// backward compatible.
 function statusPayload(state) {
   const nextInS = nextRetryAt > Date.now() ? Math.round((nextRetryAt - Date.now()) / 1000) : 0;
   return {
     type: 'status',
     state,                 // open | closed | reconnecting | parked
     user: meJid,
+    lid: meLid,            // "" when the account has no LID
     reconnect_attempt: reconnectAttempt,
     next_retry_in_s: nextInS,
     last_disconnect_code: lastDisconnectCode,
@@ -431,6 +433,7 @@ async function downloadInbound(m) {
 // ── WhatsApp connection ──────────────────────────────────────────────────────
 let wa = null;
 let meJid = '';
+let meLid = ''; // the account's own LID (<lid>@lid) when it has one
 
 async function connect() {
   const { state, saveCreds } = await useMultiFileAuthState(CREDS_DIR);
@@ -462,6 +465,11 @@ async function connect() {
     }
     if (connection === 'open') {
       meJid = jidNormalizedUser(wa.user?.id || '');
+      // Baileys exposes the account's own LID on the same user
+      // object (creds.me.lid) for LID-migrated accounts — the
+      // adapter needs it to recognise the self-chat, which
+      // WhatsApp addresses by LID there, not by phone JID.
+      meLid = wa.user?.lid ? jidNormalizedUser(wa.user.lid) : '';
       connState = 'open';
       lastOpenAt = Date.now();
       if (terminalReason) {
@@ -742,7 +750,7 @@ async function handleCommand(sock, req) {
         return reply(sock, id, { ok: true, chats: list });
       }
       case 'status': {
-        return reply(sock, id, { ok: true, user: meJid, state: wa ? 'open' : 'closed' });
+        return reply(sock, id, { ok: true, user: meJid, lid: meLid, state: wa ? 'open' : 'closed' });
       }
       default:
         // workstream 3: group/community commands (read-only) before "unknown cmd",

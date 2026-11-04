@@ -96,6 +96,7 @@ type bridge struct {
 	stateMu             sync.Mutex
 	connState           string // closed | open | reconnecting | parked
 	meJID               string
+	meLID               string // the account's LID (<lid>@lid), "" until known
 	lastQR              string // latest login QR — replayed to new clients
 	lastDisconnectCode  *int
 	lastDisconnectLabel string
@@ -265,6 +266,25 @@ func (b *bridge) setConnState(state string) {
 	b.stateMu.Unlock()
 }
 
+// myLID returns the account's own LID in non-AD form
+// ("<lid>@lid"), or "" when the account has none (not migrated)
+// or it isn't known yet. Accounts migrated to LID addressing
+// deliver the "Message yourself" chat under this JID, not the
+// phone JID in "user" — the adapter needs both identities to
+// recognise the self-chat. Read live from the device store so a
+// LID learned after connect (migration) is picked up on the next
+// status broadcast; meLID is the cached copy from connect time.
+func (b *bridge) myLID() string {
+	if b.cli != nil && b.cli.Store != nil {
+		if lid := b.cli.Store.GetLID(); !lid.IsEmpty() {
+			return lid.ToNonAD().String()
+		}
+	}
+	// Unlocked read, like meJID's uses: statusPayload calls this
+	// while holding stateMu, and Go mutexes are not reentrant.
+	return b.meLID
+}
+
 func (b *bridge) statusPayload() map[string]any {
 	b.stateMu.Lock()
 	defer b.stateMu.Unlock()
@@ -276,6 +296,7 @@ func (b *bridge) statusPayload() map[string]any {
 		"type":                  "status",
 		"state":                 b.connState,
 		"user":                  b.meJID,
+		"lid":                   b.myLID(),
 		"reconnect_attempt":     b.cli.AutoReconnectErrors,
 		"next_retry_in_s":       0,
 		"last_disconnect_code":  code,
@@ -474,11 +495,16 @@ func (b *bridge) handleEvent(evt any) {
 
 func (b *bridge) onConnected() {
 	me := ""
+	lid := ""
 	if b.cli.Store.ID != nil {
 		me = b.cli.Store.ID.ToNonAD().String()
 	}
+	if l := b.cli.Store.GetLID(); !l.IsEmpty() {
+		lid = l.ToNonAD().String()
+	}
 	b.stateMu.Lock()
 	b.meJID = me
+	b.meLID = lid
 	b.connState = "open"
 	b.lastQR = ""
 	wasParked := b.terminalReason

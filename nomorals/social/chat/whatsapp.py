@@ -12,7 +12,10 @@ Node/Baileys bridge (``bridge/whatsapp-bridge.mjs``) as the second rung.
 Protocol (one JSON object per line):
 
   bridge -> python
-    {"type":"status","state":"open|closed","user":"<jid>"}
+    {"type":"status","state":"open|closed","user":"<jid>","lid":"<lid>@lid"}
+    # "lid" is the account's own LID on LID-migrated accounts (""
+    # or absent when the account has none) — the self-chat may
+    # live under it instead of the phone JID in "user".
     {"type":"qr","data":"<qr string>"}
     {"type":"message","id":"<wa message id>","chat":{"id","kind","title"},
      "from":{"id","name"},"text":"...",
@@ -419,6 +422,12 @@ class WhatsAppAdapter(ChatAdapter):
         self._responses_lock = threading.Lock()
         self.connected = threading.Event()
         self.user_jid: str = ""
+        # The account's own LID ("<lid>@lid") on LID-migrated
+        # accounts, from the bridge's status events; "" while the
+        # bridge hasn't reported one (older bridge, or the account
+        # has no LID). The self-chat may be addressed by it instead
+        # of the phone JID — see _is_self_chat.
+        self.user_lid: str = ""
         # last QR login code, so the owner/app can surface it without
         # watching stdout (the bridge re-emits a QR whenever the session
         # needs re-linking)
@@ -609,19 +618,30 @@ class WhatsAppAdapter(ChatAdapter):
 
     def _is_self_chat(self, chat_id: str, kind: str) -> bool:
         """True when *chat_id* is this account's own "Message
-        yourself" chat: a DM whose JID is the account's own JID
-        (the ``user`` the bridge reports in its status events).
-        Groups and broadcasts are never the self-chat, and while
-        the account's own JID is unknown (no status event yet)
-        nothing is — the persist-only default is the safe side."""
-        if not chat_id or not self.user_jid:
+        yourself" chat: a DM whose JID is one of the account's own
+        identities — the phone JID (the ``user`` the bridge reports
+        in its status events) or, on LID-migrated accounts, the
+        account's LID (``lid`` in the same events): WhatsApp
+        addresses the self-chat by whichever identity the account
+        lives under, and the LID's user part never equals the
+        phone number, so both must be accepted. Groups and
+        broadcasts are never the self-chat, and while neither of
+        the account's own identities is known (no status event
+        yet, or a bridge that reports no LID) an @lid chat matches
+        nothing — the persist-only default is the safe side."""
+        if not chat_id or not (self.user_jid or self.user_lid):
             return False
         if (kind or "").strip().lower() == str(ChatKind.GROUP):
             return False
         if chat_id.endswith("@g.us") or chat_id == "status@broadcast":
             return False
-        mine = _jid_user_part(self.user_jid)
-        return bool(mine) and _jid_user_part(chat_id) == mine
+        chat_user = _jid_user_part(chat_id)
+        if not chat_user:
+            return False
+        return any(
+            mine and chat_user == mine
+            for mine in (_jid_user_part(self.user_jid),
+                         _jid_user_part(self.user_lid)))
 
     # ── outbox ───────────────────────────────────────────────────────────
     def _chat_from_entry(self, entry: dict[str, Any]) -> ChatRef:
@@ -819,6 +839,7 @@ class WhatsAppAdapter(ChatAdapter):
             return
         if kind == "status":
             self.user_jid = str(obj.get("user") or "")
+            self.user_lid = str(obj.get("lid") or "")
             state = str(obj.get("state") or "")
             self.bridge_state = state
             if state == "open":

@@ -289,6 +289,136 @@ class InboundTests(unittest.TestCase):
             bridge.close()
 
 
+class SelfChatLidTests(unittest.TestCase):
+    """The self-chat under LID addressing (lidfix).
+
+    On LID-migrated accounts WhatsApp delivers the "Message
+    yourself" chat — and the owner's own_message events in it —
+    under the account's LID (``<lid>@lid``), whose user part never
+    equals the phone number in the status payload's ``user``. The
+    bridge therefore also reports ``lid`` in its status events,
+    and the adapter must recognise EITHER identity as the
+    self-chat — and nothing else.
+    """
+
+    OWNER = "2348012345678@s.whatsapp.net"
+    LID = "105382746195847@lid"
+    STRANGER_LID = "998877665544332211@lid"
+
+    def _adapter(self, status):
+        adapter = WhatsAppAdapter()
+        msgs: list = []
+        adapter._dispatch(status, msgs.append)
+        return adapter, msgs
+
+    @staticmethod
+    def _own(chat_id, kind="dm", text="/help", mid="m1"):
+        return {"type": "own_message", "id": mid,
+                "chat": {"id": chat_id, "kind": kind, "title": ""},
+                "text": text, "ts": 1_700_000_000_000}
+
+    def test_status_stores_user_lid(self):
+        adapter, _ = self._adapter(
+            {"type": "status", "state": "open", "user": self.OWNER,
+             "lid": self.LID})
+        self.assertEqual(adapter.user_jid, self.OWNER)
+        self.assertEqual(adapter.user_lid, self.LID)
+
+    def test_lid_self_chat_message_is_an_incoming_owner_turn(self):
+        adapter, msgs = self._adapter(
+            {"type": "status", "state": "open", "user": self.OWNER,
+             "lid": self.LID})
+        adapter._dispatch(self._own(self.LID), msgs.append)
+        self.assertEqual(len(msgs), 1)
+        msg = msgs[0]
+        self.assertTrue(msg.incoming)
+        self.assertEqual(msg.text, "/help")
+        # The turn keeps the chat id AS DELIVERED — WhatsApp
+        # addresses this self-chat by its LID, and the reply path
+        # must answer on the same address.
+        self.assertEqual(msg.chat.chat_id, self.LID)
+        self.assertEqual(msg.meta.get("from_owner"), True)
+        self.assertEqual(msg.meta.get("self_chat"), True)
+        self.assertNotIn("own_message", msg.meta)
+
+    def test_phone_self_chat_still_matches_when_lid_known(self):
+        adapter, msgs = self._adapter(
+            {"type": "status", "state": "open", "user": self.OWNER,
+             "lid": self.LID})
+        adapter._dispatch(self._own(self.OWNER, mid="m2"), msgs.append)
+        self.assertEqual(len(msgs), 1)
+        self.assertTrue(msgs[0].incoming)
+        self.assertEqual(msgs[0].meta.get("self_chat"), True)
+
+    def test_stranger_lid_chat_stays_persist_only(self):
+        """An @lid chat that is neither of the account's own
+        identities is somebody else's DM — persist-only."""
+        adapter, msgs = self._adapter(
+            {"type": "status", "state": "open", "user": self.OWNER,
+             "lid": self.LID})
+        adapter._dispatch(self._own(self.STRANGER_LID, text="hi"),
+                          msgs.append)
+        self.assertEqual(len(msgs), 1)
+        self.assertFalse(msgs[0].incoming)
+        self.assertEqual(msgs[0].meta.get("own_message"), True)
+        self.assertNotIn("self_chat", msgs[0].meta)
+
+    def test_group_kind_lid_chat_is_never_self_chat(self):
+        adapter, msgs = self._adapter(
+            {"type": "status", "state": "open", "user": self.OWNER,
+             "lid": self.LID})
+        adapter._dispatch(
+            self._own(self.LID, kind="group", text="gm all"),
+            msgs.append)
+        self.assertEqual(len(msgs), 1)
+        self.assertFalse(msgs[0].incoming)
+        self.assertEqual(msgs[0].meta.get("own_message"), True)
+        self.assertNotIn("self_chat", msgs[0].meta)
+
+    def test_lid_self_chat_unknown_when_bridge_reports_no_lid(self):
+        """Safe default pinned: a bridge that reports no ``lid``
+        (older build, or the account has none) leaves @lid chats
+        persist-only — the adapter never guesses an identity."""
+        adapter, msgs = self._adapter(
+            {"type": "status", "state": "open", "user": self.OWNER})
+        self.assertEqual(adapter.user_lid, "")
+        adapter._dispatch(self._own(self.LID), msgs.append)
+        self.assertEqual(len(msgs), 1)
+        self.assertFalse(msgs[0].incoming)
+        self.assertEqual(msgs[0].meta.get("own_message"), True)
+        self.assertNotIn("self_chat", msgs[0].meta)
+
+    def test_own_send_echo_in_lid_self_chat_stays_persist_only(self):
+        """Devon's reply into the LID self-chat echoes back as an
+        own_message carrying the id her send was assigned — the
+        sent-id registry suppresses it exactly as on the phone
+        form, while the owner's own typing (an id she never sent)
+        is a turn."""
+        adapter, msgs = self._adapter(
+            {"type": "status", "state": "open", "user": self.OWNER,
+             "lid": self.LID})
+        adapter.connected.set()
+        adapter._send_cmd = lambda cmd, timeout=25.0: {
+            "id": cmd.get("id"), "ok": True, "message_id": "ECHO-L"}
+        chat = ChatRef(platform="whatsapp", chat_id=self.LID,
+                       kind=ChatKind.DM, peer=self.LID)
+        result = adapter.send(chat, "the help menu")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.message_id, "ECHO-L")
+        adapter._dispatch(
+            self._own(self.LID, text="the help menu", mid="ECHO-L"),
+            msgs.append)
+        self.assertEqual(len(msgs), 1)
+        self.assertFalse(msgs[0].incoming)
+        self.assertEqual(msgs[0].meta.get("own_message"), True)
+        adapter._dispatch(
+            self._own(self.LID, text="/pair", mid="OWN-L9"),
+            msgs.append)
+        self.assertEqual(len(msgs), 2)
+        self.assertTrue(msgs[1].incoming)
+        self.assertEqual(msgs[1].meta.get("self_chat"), True)
+
+
 class HistoryTests(unittest.TestCase):
     def test_history_parses_media_and_direction(self):
         bridge = FakeBridge({"history": {"ok": True, "messages": [
