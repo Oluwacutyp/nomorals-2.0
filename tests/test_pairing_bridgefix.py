@@ -100,6 +100,7 @@ def make_sup(tmp_path, proc_factory, **kw):
     sup = BridgeSupervisor(
         registry, bridge_path=bare_bridge(tmp_path),
         sessions_root=tmp_path / "sessions", spawn=fake_spawn,
+        engine="node",
         node_resolver=lambda: "/staged/node", **kw)
     return sup, registry, spawns
 
@@ -283,6 +284,7 @@ def deps_sup(tmp_path, runner, *, lock=True, modules=False,
         bridge_path=stage_bridge_pkg(tmp_path, lock=lock,
                                      modules=modules),
         sessions_root=tmp_path / "sessions", spawn=fake_spawn,
+        engine="node",
         node_resolver=lambda: "/staged/node",
         npm_resolver=lambda node: npm,
         deps_runner=runner)
@@ -552,6 +554,7 @@ def test_provisioned_node_is_used_for_the_launch(tmp_path,
     sup = BridgeSupervisor(
         registry, bridge_path=bare_bridge(tmp_path),
         sessions_root=tmp_path / "sessions", spawn=fake_spawn,
+        engine="node",
         node_provisioner=provisioner)
     sup.pair_whatsapp("2348012345678")
     assert calls == [1]
@@ -577,6 +580,7 @@ def test_provision_failure_lists_attempts_attempted_once(
         registry, bridge_path=bare_bridge(tmp_path),
         sessions_root=tmp_path / "sessions",
         spawn=lambda argv, env: FakeProc(),
+        engine="node",
         node_provisioner=provisioner)
     with pytest.raises(PairingUnavailable) as err:
         sup.pair_whatsapp("2348012345678")
@@ -593,3 +597,158 @@ def test_provision_failure_lists_attempts_attempted_once(
     assert str(err2.value) == message
     assert calls == [1]
     assert registry.all() == []
+
+
+# ── the Go rung: same drain truth, its own failure shapes ──────────
+
+GO_DEATH_LINES = [
+    "panic: runtime error: invalid memory address or nil "
+    "pointer dereference",
+    "[signal SIGSEGV: segmentation violation code=0x1 addr=0x0]",
+    "",
+    "goroutine 1 [running]:",
+    "main.(*bridge).onQR(0xc0000)",
+    "\tbridge/gobridge/main.go:560 +0x1f3",
+    "exit status 2",
+]
+
+
+def make_sup_go(tmp_path, proc_factory, **kw):
+    registry = PairingRegistry(tmp_path / "paired.json")
+    spawns = []
+
+    def fake_spawn(argv, env):
+        proc = proc_factory()
+        spawns.append((argv, env, proc))
+        return proc
+
+    sup = BridgeSupervisor(
+        registry, bridge_path=bare_bridge(tmp_path),
+        sessions_root=tmp_path / "sessions", spawn=fake_spawn,
+        binary_resolver=kw.pop(
+            "binary_resolver",
+            lambda: "/staged/whatsapp-bridge"),
+        **kw)
+    return sup, registry, spawns
+
+
+def test_go_rung_launches_the_binary_not_a_script(tmp_path):
+    sup, _registry, spawns = make_sup_go(
+        tmp_path, lambda: FakeProc(block=True))
+    assert sup.engine == "go"  # the binary is the default rung
+    sup.pair_whatsapp("2348012345678")
+    argv, env, _proc = spawns[0]
+    assert argv[0] == "/staged/whatsapp-bridge"
+    assert not any(a.endswith(".mjs") for a in argv)
+    assert "--creds" in argv and "--port" in argv
+    assert env["WA_PAIRING_CODE"] == "1"
+    assert env["WA_PAIRING_NUMBER"] == "2348012345678"
+
+
+def test_node_rung_still_launches_node_and_script(tmp_path):
+    sup, _registry, spawns = make_sup(
+        tmp_path, lambda: FakeProc(block=True))
+    sup.pair_whatsapp("2348012345678")
+    argv, _env, _proc = spawns[0]
+    assert argv[0] == "/staged/node"
+    assert argv[1].endswith("whatsapp-bridge.mjs")
+
+
+def test_go_bridge_death_speaks_with_its_panic_line(tmp_path):
+    sup, registry, _ = make_sup_go(
+        tmp_path, lambda: FakeProc(GO_DEATH_LINES, die=True))
+    rec = sup.pair_whatsapp("2348012345678")
+    assert wait_for(lambda: registry.get(rec.id).status == "down")
+    reason = sup.pairing_error(rec.id)
+    assert reason.startswith("bridge exited:")
+    assert "panic: runtime error" in reason
+    assert registry.get(rec.id).last_error == reason
+    assert sup.pairing_code(rec.id) is None
+
+
+def test_go_pairing_refused_line_speaks(tmp_path):
+    lines = ["2026-11-04T01:00:00.000Z [bridge] PAIRING REFUSED: "
+             "too many attempts"]
+    sup, registry, _ = make_sup_go(
+        tmp_path, lambda: FakeProc(lines, block=True))
+    rec = sup.pair_whatsapp("2348012345678")
+    assert wait_for(lambda: bool(sup.pairing_error(rec.id)))
+    assert sup.pairing_error(rec.id) == (
+        "WhatsApp refused the code request: too many attempts")
+    assert registry.get(rec.id).status == "pairing"
+    assert sup.pairing_code(rec.id) is None
+
+
+def test_go_pairing_link_failed_line_speaks(tmp_path):
+    lines = [CODE_LINE,
+             "2026-11-04T01:00:09.000Z [bridge] PAIRING LINK "
+             "FAILED: disconnected while pairing"]
+    sup, registry, _ = make_sup_go(
+        tmp_path, lambda: FakeProc(lines, block=True))
+    rec = sup.pair_whatsapp("2348012345678")
+    assert wait_for(lambda: bool(sup.pairing_error(rec.id)))
+    assert sup.pairing_error(rec.id) == (
+        "WhatsApp closed the pairing: disconnected while pairing")
+
+
+def test_no_code_ever_comes_from_chatter_or_refusal(tmp_path):
+    # Phantom-code pin: bridge output mentioning a code outside
+    # the confirmed line shape must never become the displayed
+    # code — a code exists only when the PAIRING CODE line (the
+    # one a bridge prints after the server confirmed) lands.
+    lines = [
+        "2026-11-04T01:00:00.000Z [bridge] your code is 483920",
+        "2026-11-04T01:00:01.000Z [bridge] code: ABCD-EFGH",
+        "2026-11-04T01:00:02.000Z [bridge] PAIRING REFUSED: "
+        "rate limited",
+    ]
+    sup, registry, _ = make_sup_go(
+        tmp_path, lambda: FakeProc(lines, block=True))
+    rec = sup.pair_whatsapp("2348012345678")
+    assert wait_for(lambda: bool(sup.pairing_error(rec.id)))
+    assert sup.pairing_code(rec.id) is None
+    assert registry.get(rec.id).last_error.startswith(
+        "WhatsApp refused the code request:")
+
+
+# ── the Go rung's provisioning: present + runs, nothing installed ──
+
+def test_probe_runs_once_across_pairs(tmp_path):
+    probes = []
+
+    def probe(binary):
+        probes.append(binary)
+        return 0, "devon-whatsapp-bridge gobridge/1.0.0"
+
+    sup, _registry, spawns = make_sup_go(
+        tmp_path, lambda: FakeProc(block=True), probe_runner=probe)
+    sup.pair_whatsapp("2348012345678")
+    sup.pair_whatsapp("2349098765432")
+    assert probes == ["/staged/whatsapp-bridge"]  # cached verdict
+    assert len(spawns) == 2
+
+
+def test_probe_failure_unavailable_no_zombie(tmp_path):
+    def probe(binary):
+        return 3, "exec format error"
+
+    sup, registry, spawns = make_sup_go(
+        tmp_path, lambda: FakeProc(block=True), probe_runner=probe)
+    with pytest.raises(PairingUnavailable) as err:
+        sup.pair_whatsapp("2348012345678")
+    message = str(err.value)
+    assert "does not run" in message
+    assert "exec format error" in message  # the probe's own tail
+    assert registry.all() == []
+    assert spawns == []
+
+
+def test_missing_binary_unavailable_no_zombie(tmp_path):
+    sup, registry, spawns = make_sup_go(
+        tmp_path, lambda: FakeProc(block=True),
+        binary_resolver=lambda: None)
+    with pytest.raises(PairingUnavailable) as err:
+        sup.pair_whatsapp("2348012345678")
+    assert "bridge program is missing" in str(err.value)
+    assert registry.all() == []
+    assert spawns == []

@@ -745,8 +745,9 @@ class RuntimeProvisionMixin:
                 rec = sup.pair_whatsapp(parts[1], label)
             except (PairingUnavailable, ValueError) as exc:
                 # PairingUnavailable's text is plain guidance
-                # (install Node, re-run) — a normal reply, never
-                # the runtime's "blew up" traceback digest.
+                # (restore the bridge program, re-run) — a normal
+                # reply, never the runtime's "blew up" traceback
+                # digest.
                 return f"⚠️ {exc}"
             import time as _time
 

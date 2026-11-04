@@ -12,7 +12,7 @@ The companion's three (or four) faces:
   call, no credit spend
 * ``discord``   — the owner's own Discord *account* (user client): DMs,
   servers, threads; opens first DMs, reports new server members
-* ``whatsapp``  — Node/Baileys bridge (``bridge/whatsapp-bridge.mjs``)
+* ``whatsapp``  — bridge protocol: Go/whatsmeow program (``bridge/bin/whatsapp-bridge-*``, default) or Node/Baileys (``bridge/whatsapp-bridge.mjs``)
 * ``local``     — console, for development and tests
 * ``sms``         — Twilio SMS fallback (opt-in, costs money): text a number,
   get Devon; restricted command set, DM-only

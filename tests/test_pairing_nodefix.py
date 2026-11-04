@@ -12,6 +12,11 @@ exists, the surface renders that guidance as a normal reply, the
 supervision sweep records the named reason instead of
 crash-looping, and Telegram pairing — which never needed node —
 is untouched by all of it.
+
+The node rung above is now the SECOND engine: the sections at
+the end of this file pin the Go rung (the default) the same
+way — the bridge program is present-and-probed, never
+installed, and its absence fails with the same honesty.
 """
 from __future__ import annotations
 
@@ -152,6 +157,7 @@ def nodeless_supervisor(tmp_path):
     sup = BridgeSupervisor(
         registry, bridge_path=bridge,
         sessions_root=tmp_path / "sessions",
+        engine="node",
         node_resolver=lambda: None)
     return sup, registry
 
@@ -190,6 +196,7 @@ def test_missing_bridge_names_the_bridge_not_node(tmp_path):
     sup = BridgeSupervisor(
         registry, bridge_path=tmp_path / "whatsapp-bridge.mjs",
         sessions_root=tmp_path / "sessions",
+        engine="node",
         node_resolver=lambda: sys.executable)
     with pytest.raises(PairingUnavailable) as err:
         sup.pair_whatsapp("2348012345678")
@@ -208,6 +215,7 @@ def test_spawn_oserror_becomes_unavailable_and_rolls_back(tmp_path):
     sup = BridgeSupervisor(
         registry, bridge_path=tmp_path / "bridge.mjs",
         sessions_root=tmp_path / "sessions", spawn=bad_spawn,
+        engine="node",
         node_resolver=lambda: "/resolved/node")
     with pytest.raises(PairingUnavailable):
         sup.pair_whatsapp("2348012345678")
@@ -233,6 +241,7 @@ def test_launch_argv_carries_resolved_absolute_node(tmp_path):
     sup = BridgeSupervisor(
         registry, bridge_path=tmp_path / "bridge.mjs",
         sessions_root=tmp_path / "sessions", spawn=fake_spawn,
+        engine="node",
         node_resolver=lambda: str(fake_node))
     sup.pair_whatsapp("2348012345678")
     assert spawns and spawns[0][0] == str(fake_node)
@@ -340,3 +349,171 @@ def test_sweep_records_blocked_reason_when_node_missing(tmp_path):
     # throttled: a second pass at the same beat stays quiet rather
     # than re-recording (or raising) on every sweep
     assert sweep.sweep() == []
+
+
+# ── the Go rung: the default engine needs no node at all ───────────
+
+from nomorals.social.pairing import (  # noqa: E402
+    bridge_binary_name, bridge_binary_path)
+
+
+def test_bridge_binary_name_per_platform():
+    assert bridge_binary_name("nt") == "whatsapp-bridge.exe"
+    assert bridge_binary_name("posix") == "whatsapp-bridge-linux"
+    path = bridge_binary_path(repo_root="/repo", os_name="nt")
+    assert path == Path("/repo/bridge/bin/whatsapp-bridge.exe")
+
+
+def test_default_engine_is_go_and_env_selects_node(tmp_path,
+                                                    monkeypatch):
+    registry = PairingRegistry(tmp_path / "paired.json")
+    sup = BridgeSupervisor(
+        registry, bridge_path=tmp_path / "bridge.mjs",
+        sessions_root=tmp_path / "sessions")
+    assert sup.engine == "go"
+    monkeypatch.setenv("NM_WHATSAPP_BRIDGE_ENGINE", "node")
+    sup2 = BridgeSupervisor(
+        registry, bridge_path=tmp_path / "bridge.mjs",
+        sessions_root=tmp_path / "sessions")
+    assert sup2.engine == "node"
+    sup3 = BridgeSupervisor(
+        registry, bridge_path=tmp_path / "bridge.mjs",
+        sessions_root=tmp_path / "sessions", engine="node")
+    assert sup3.engine == "node"  # explicit arg beats the default
+
+
+def binaryless_supervisor(tmp_path):
+    """Production-shaped supervisor (real default spawn) on a
+    machine where the bridge program is absent."""
+    registry = PairingRegistry(tmp_path / "paired.json")
+    sup = BridgeSupervisor(
+        registry, bridge_path=tmp_path / "whatsapp-bridge.mjs",
+        sessions_root=tmp_path / "sessions",
+        binary_resolver=lambda: None)
+    return sup, registry
+
+
+def test_pair_whatsapp_no_binary_raises_guidance_no_zombie(tmp_path):
+    sup, registry = binaryless_supervisor(tmp_path)
+    with pytest.raises(PairingUnavailable) as err:
+        sup.pair_whatsapp("2348012345678", "personal")
+    message = str(err.value)
+    assert "bridge program is missing" in message
+    assert "/pair again" in message
+    assert registry.all() == []
+    assert sup.counts(probe=False) == {
+        "registered": 0, "connected": 0, "dropped": 0}
+    with pytest.raises(PairingUnavailable):
+        sup.pair_whatsapp("2348012345678", "personal")
+    assert registry.all() == []
+
+
+def test_pair_command_binary_guidance_not_digest(tmp_path):
+    sup, _registry = binaryless_supervisor(tmp_path)
+    reply = bare_runtime(sup)._control_pair(
+        "whatsapp 2348012345678 personal", chat_key="owner")
+    assert "bridge program is missing" in reply
+    assert "blew up" not in reply
+    assert "FileNotFoundError" not in reply
+    assert "Traceback" not in reply
+
+
+def test_binary_resolution_rechecked_while_missing_then_cached(
+        tmp_path):
+    calls = []
+
+    def resolver():
+        calls.append(1)
+        return None if len(calls) == 1 else "/resolved/bridge"
+
+    registry = PairingRegistry(tmp_path / "paired.json")
+    sup = BridgeSupervisor(
+        registry, bridge_path=tmp_path / "bridge.mjs",
+        sessions_root=tmp_path / "sessions",
+        spawn=lambda argv, env: None, binary_resolver=resolver)
+    assert sup.resolve_bridge_binary() is None      # miss: open
+    assert sup.resolve_bridge_binary() == "/resolved/bridge"
+    assert sup.resolve_bridge_binary() == "/resolved/bridge"
+    assert len(calls) == 2                          # hit: cached
+
+
+def test_go_launch_argv_carries_the_binary(tmp_path):
+    registry = PairingRegistry(tmp_path / "paired.json")
+    spawns = []
+
+    class _Proc:
+        stdout = iter(())
+        def poll(self):
+            return None
+        def terminate(self):
+            pass
+
+    def fake_spawn(argv, env):
+        spawns.append(argv)
+        return _Proc()
+
+    staged = tmp_path / "bridge-bin" / "whatsapp-bridge"
+    sup = BridgeSupervisor(
+        registry, bridge_path=tmp_path / "bridge.mjs",
+        sessions_root=tmp_path / "sessions", spawn=fake_spawn,
+        binary_resolver=lambda: str(staged))
+    sup.pair_whatsapp("2348012345678")
+    assert spawns and spawns[0][0] == str(staged)
+    assert Path(spawns[0][0]).is_absolute()
+    assert not any(a.endswith(".mjs") for a in spawns[0])
+
+
+def test_per_pair_engine_override_uses_node_rung(tmp_path):
+    registry = PairingRegistry(tmp_path / "paired.json")
+    fake_node = make_node_file(tmp_path / "nodejs" / NODE_NAME)
+    spawns = []
+
+    class _Proc:
+        stdout = iter(())
+        def poll(self):
+            return None
+        def terminate(self):
+            pass
+
+    def fake_spawn(argv, env):
+        spawns.append(argv)
+        return _Proc()
+
+    sup = BridgeSupervisor(
+        registry, bridge_path=tmp_path / "bridge.mjs",
+        sessions_root=tmp_path / "sessions", spawn=fake_spawn,
+        node_resolver=lambda: str(fake_node),
+        binary_resolver=lambda: "/staged/whatsapp-bridge")
+    assert sup.engine == "go"
+    sup.pair_whatsapp("2348012345678", engine="node")
+    assert spawns[0][0] == str(fake_node)
+    assert spawns[0][1].endswith("bridge.mjs")
+
+
+def test_live_entry_engine_sticks_for_relaunch(tmp_path):
+    registry = PairingRegistry(tmp_path / "paired.json")
+    fake_node = make_node_file(tmp_path / "nodejs" / NODE_NAME)
+    spawns = []
+
+    class _DeadProc:
+        stdout = iter(())
+        def poll(self):
+            return 0
+        def terminate(self):
+            pass
+
+    def fake_spawn(argv, env):
+        spawns.append(argv)
+        return _DeadProc()
+
+    sup = BridgeSupervisor(
+        registry, bridge_path=tmp_path / "bridge.mjs",
+        sessions_root=tmp_path / "sessions", spawn=fake_spawn,
+        node_resolver=lambda: str(fake_node),
+        binary_resolver=lambda: "/staged/whatsapp-bridge")
+    sup.pair_whatsapp("2348012345678", engine="node")
+    # the process died but its live entry remains — a relaunch
+    # through start() keeps the account's engine, not the default
+    sup.start("whatsapp:2348012345678")
+    assert len(spawns) == 2
+    assert spawns[-1][0] == str(fake_node)

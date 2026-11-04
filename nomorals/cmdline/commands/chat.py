@@ -51,7 +51,7 @@ CAPABILITY_MATRIX: list[dict[str, Any]] = [
     },
     {
         "platform": "whatsapp",
-        "label": "your own account (Node/Baileys bridge)",
+        "label": "your own account (bridge — Go program by default, Node/Baileys rung)",
         "typing": True, "recording": True, "media": True,
         "voice_notes": True, "buttons": False, "groups": True,
         "threads": False, "receipts": True, "history": True, "outbox": True,
@@ -154,11 +154,15 @@ def _doctor(settings: Any) -> list[dict[str, Any]]:
     if chat is not None and getattr(chat, "whatsapp_enabled", False):
         host = str(getattr(chat, "whatsapp_host", "127.0.0.1") or "127.0.0.1")
         port = int(getattr(chat, "whatsapp_port", 8787) or 8787)
+        repo = os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__))))
+        bridge_name = "whatsapp-bridge.exe" if os.name == "nt" \
+            else "whatsapp-bridge-linux"
+        go_bridge = os.path.isfile(
+            os.path.join(repo, "bridge", "bin", bridge_name))
         node = shutil.which("node") is not None
-        bridge = os.path.isfile(
-            os.path.join(os.path.dirname(os.path.dirname(
-                os.path.dirname(os.path.abspath(__file__)))),
-                         "bridge", "whatsapp-bridge.mjs"))
+        node_bridge = os.path.isfile(
+            os.path.join(repo, "bridge", "whatsapp-bridge.mjs"))
         reachable = False
         try:
             sock = socket.create_connection((host, port), timeout=2)
@@ -166,9 +170,13 @@ def _doctor(settings: Any) -> list[dict[str, Any]]:
             reachable = True
         except OSError:
             pass
-        detail = (f"node={'yes' if node else 'NO'}, bridge={'yes' if bridge else 'NO'}, "
+        detail = (f"go_bridge={'yes' if go_bridge else 'NO'}, "
+                  f"node={'yes' if node else 'NO'}, "
+                  f"node_bridge={'yes' if node_bridge else 'NO'}, "
                   f"bridge@ {host}:{port}={'up' if reachable else 'DOWN'}")
-        _row("whatsapp", node and bridge and reachable, detail)
+        _row("whatsapp",
+             (go_bridge or (node and node_bridge)) and reachable,
+             detail)
     else:
         _row("whatsapp", True, "disabled (NM_CHAT_WHATSAPP_ENABLED)")
 

@@ -17,6 +17,13 @@ a time:
   surface read.
 - Supervision is per account: start / stop / restart from chat,
   health probed over the bridge's own protocol.
+- TWO bridge engines speak that one protocol: the Go program
+  (``bridge/bin/whatsapp-bridge-*``, whatsmeow — the default)
+  and the Node/Baileys bridge (``bridge/whatsapp-bridge.mjs``)
+  as the second rung.  The supervisor's ``engine`` (or
+  ``NM_WHATSAPP_BRIDGE_ENGINE``) picks which one launches; each
+  live entry remembers its engine.  Both engines may only ever
+  display a pairing code the server confirmed.
 
 Store discipline: the registry is a JSON file written atomically;
 an unreadable registry RAISES (quarantined aside) — it is never
@@ -45,6 +52,14 @@ _CODE_LINE_RE = re.compile(r"PAIRING CODE for \+(\d+):\s*(\S+)")
 #: (bridge/whatsapp-bridge.mjs) — the refusal reason rides the
 #: line, and the drain captures it instead of swallowing it.
 _REFUSAL_RE = re.compile(r"pairing code request failed:\s*(.+)$")
+#: The confirmed-code bridges (the Go/whatsmeow program, and the
+#: hardened Node bridge) report a refusal in this shape instead:
+#: the code request was answered by WhatsApp's server and the
+#: answer was no — printed only when no code was registered.
+_REFUSED_RE = re.compile(r"PAIRING REFUSED:\s*(.+)$")
+#: …and a pairing that was issued but died before the link
+#: completed (disconnect / pair failure) in this shape.
+_LINK_FAILED_RE = re.compile(r"PAIRING LINK FAILED:\s*(.+)$")
 #: The bridge's log() prefixes an ISO timestamp; display cleaning
 #: strips it (and the [bridge] tag) from lines shown to the owner.
 _TS_PREFIX_RE = re.compile(
@@ -62,6 +77,65 @@ NODE_INSTALL_TIMEOUT_S = 600.0
 NODE_LTS_VERSION = "22.14.0"
 NODE_MSI_URL = (f"https://nodejs.org/dist/v{NODE_LTS_VERSION}/"
                 f"node-v{NODE_LTS_VERSION}-x64.msi")
+
+
+#: How long the bridge-program probe (``--version``) may take
+#: before the Go rung is declared not-runnable on this machine.
+BRIDGE_PROBE_TIMEOUT_S = 10.0
+
+
+def bridge_binary_name(os_name: str | None = None) -> str:
+    """The committed bridge program for a platform: the Windows
+    build for the EC2 host, the Linux build everywhere else.
+    (Termux/arm64 is a later rung — not built yet.)"""
+    return "whatsapp-bridge.exe" if (os_name or os.name) == "nt" \
+        else "whatsapp-bridge-linux"
+
+
+def bridge_binary_path(repo_root: str | Path | None = None,
+                       os_name: str | None = None) -> Path:
+    """``<repo>/bridge/bin/<binary>`` — the Go bridge ships as
+    ONE self-contained program per platform, committed in the
+    repo: no Node, no npm, no install step, nothing to resolve
+    at runtime beyond "the file is there and it runs"."""
+    root = Path(repo_root) if repo_root is not None else Path(
+        __file__).resolve().parents[2]
+    return root / "bridge" / "bin" / bridge_binary_name(os_name)
+
+
+def _binary_missing_message(binary: str | Path) -> str:
+    return (
+        "WhatsApp pairing is unavailable on this machine: the "
+        f"bridge program is missing ({binary}) — it ships "
+        "inside Devon as one self-contained file (no Node.js, "
+        "no npm, nothing to install). Restore bridge/bin/ "
+        "(re-pull the repo) and run /pair again. Telegram "
+        "pairing does not need the bridge and still works.")
+
+
+def _binary_probe_failed_message(binary: str | Path,
+                                 detail: str) -> str:
+    return (
+        "WhatsApp pairing is unavailable on this machine: the "
+        f"bridge program exists but does not run here "
+        f"({detail}) — {binary}. It is one self-contained file; "
+        "if it was damaged in transit, re-pull the repo and run "
+        "/pair again. Telegram pairing does not need the bridge "
+        "and still works.")
+
+
+def _default_probe_runner(binary: str) -> tuple[int, str]:
+    """Run the bridge program's ``--version`` once: exit code +
+    combined output.  Never raises — a spawn failure is a probe
+    failure with the OS error as its text."""
+    try:
+        done = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True,
+            timeout=BRIDGE_PROBE_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 - the failure IS the
+        return 1, f"{type(exc).__name__}: {exc}"  # probe's answer
+    return done.returncode, (done.stdout or "") + (done.stderr
+                                                  or "")
 
 
 class PairingStoreError(RuntimeError):
@@ -411,10 +485,14 @@ def _pick_error_line(lines: list[str]) -> str:
                 or "Cannot find package" in cand:
             return _trim_line(cand)
     for cand in reversed(cleaned):
+        if cand.startswith("panic:"):
+            return _trim_line(cand)
+    for cand in reversed(cleaned):
         if cand.startswith("Error"):
             return _trim_line(cand)
     for cand in reversed(cleaned):
-        if cand.startswith(("at ", "node:", "Node.js v")):
+        if cand.startswith(("at ", "goroutine ", "node:",
+                            "Node.js v")):
             continue
         return _trim_line(cand)
     return ""
@@ -625,6 +703,9 @@ class _Live:
     proc: Any = None
     code: str = ""
     code_at: float = 0.0
+    #: Which bridge engine this process is ("go" | "node") —
+    #: relaunches of a live account keep its engine.
+    bridge_engine: str = "go"
     reader: threading.Thread | None = field(default=None, repr=False)
     # ── bridgefix: the bridge speaks, the supervisor remembers ──
     #: Bounded tail of the bridge's own output lines — when the
@@ -666,7 +747,22 @@ class BridgeSupervisor:
     own last line as the reason, and a WhatsApp refusal of the
     code request is recorded verbatim — ``pairing_error`` is
     how surfaces answer with the truth.
+
+    Engines: ``engine`` picks the bridge program — "go" (the
+    default: the self-contained whatsmeow binary under
+    bridge/bin/, gated by presence + a ``--version`` probe) or
+    "node" (the Node/Baileys bridge, gated by everything above).
+    ``NM_WHATSAPP_BRIDGE_ENGINE`` sets the default when no
+    engine is passed; a single pairing can override per call.
     """
+
+    #: The bridge engines a launch can use.
+    ENGINES = ("go", "node")
+
+    @staticmethod
+    def _clean_engine(engine: str | None) -> str:
+        eng = (engine or "").strip().lower()
+        return eng if eng in BridgeSupervisor.ENGINES else ""
 
     def __init__(self, registry: PairingRegistry, *,
                  bridge_path: str | Path,
@@ -681,12 +777,30 @@ class BridgeSupervisor:
                  npm_resolver: Callable[[str], str | None] | None
                  = None,
                  node_provisioner: Callable[[], str] | None
-                 = None) -> None:
+                 = None,
+                 engine: str | None = None,
+                 binary_resolver: Callable[[], str | None] | None
+                 = None,
+                 probe_runner: Callable[..., tuple[int, str]]
+                 | None = None) -> None:
         self.registry = registry
         self.bridge_path = Path(bridge_path)
         self.sessions_root = Path(sessions_root)
         self.base_port = int(base_port)
         self.node = node
+        # ── engine selection (gobridge) ──
+        # The default engine for launches: explicit arg, else
+        # the env default, else "go" (the self-contained binary
+        # is the primary rung; node is the alternate).
+        self.engine = self._clean_engine(engine) \
+            or self._clean_engine(
+                os.environ.get("NM_WHATSAPP_BRIDGE_ENGINE")) \
+            or "go"
+        self._binary_resolver = binary_resolver
+        self._probe_runner = probe_runner
+        self._binary_cache: str | None = None
+        self._binary_probe_ok: bool | None = None
+        self._binary_probe_detail = ""
         self._spawn = spawn or self._default_spawn
         self._spawn_is_default = spawn is None
         self._node_resolver = node_resolver
@@ -762,7 +876,90 @@ class BridgeSupervisor:
                     "leaving a node Devon can find"]
         return None
 
-    def _require_launchable(self) -> str:
+    # ── go rung: the bridge program ──────────────────────────────
+    def resolve_bridge_binary(self) -> str | None:
+        """The bridge program launches will use — re-checked on
+        every call while missing (restoring bridge/bin/ fixes
+        /pair without restarting Devon), cached once found:
+        the same resolution contract the node ladder has."""
+        if self._binary_cache:
+            return self._binary_cache
+        if self._binary_resolver is not None:
+            found = self._binary_resolver()
+        else:
+            path = bridge_binary_path()
+            found = str(path) if path.is_file() else None
+        if found:
+            self._binary_cache = str(found)
+            return self._binary_cache
+        return None
+
+    def _probe_binary(self, binary: str) -> bool:
+        """The program runs: one ``--version`` invocation, its
+        verdict cached for the supervisor's life (a program that
+        ran once is not re-probed per account).  Production
+        (default spawn) always probes; with an injected spawn
+        the caller owns the process layer (the test seam) and
+        the probe runs only when a probe_runner is injected
+        explicitly — the same seam logic as node provisioning."""
+        if self._binary_probe_ok is not None:
+            return self._binary_probe_ok
+        if not self._spawn_is_default and self._probe_runner is None:
+            return True
+        runner = self._probe_runner or _default_probe_runner
+        code, output = runner(binary)
+        self._binary_probe_ok = code == 0
+        if code != 0:
+            tail = _output_tail(output) or f"exit code {code}"
+            self._binary_probe_detail = tail
+        return self._binary_probe_ok
+
+    def _require_launchable_go(self) -> str:
+        """The bridge program argv[0] for a Go launch, or
+        PairingUnavailable naming the true blocker: the program
+        is missing, or it exists but does not run here.  No
+        install step exists to attempt — the binary IS the
+        provisioning.  With an injected spawn and no binary
+        resolver the caller owns the process layer (the test
+        seam): the staged bridge_path stands in as argv[0]."""
+        binary = self.resolve_bridge_binary()
+        if binary is None:
+            if not self._spawn_is_default \
+                    and self._binary_resolver is None:
+                return str(self.bridge_path)
+            raise PairingUnavailable(
+                _binary_missing_message(bridge_binary_path()))
+        if self._spawn_is_default \
+                and not Path(binary).is_file():
+            raise PairingUnavailable(
+                _binary_missing_message(binary))
+        if not self._probe_binary(binary):
+            raise PairingUnavailable(_binary_probe_failed_message(
+                binary, self._binary_probe_detail))
+        return binary
+
+    def _engine_of(self, account_id: str) -> str:
+        """The engine a (re)launch of this account uses: the
+        live entry's engine while one exists, else the
+        supervisor's default."""
+        with self._lock:
+            live = self._live.get(account_id)
+        if live is not None and live.bridge_engine:
+            return live.bridge_engine
+        return self.engine
+
+    def _require_launchable(self, engine: str | None = None) -> str:
+        """The argv[0] for a launch on ``engine`` (the account's
+        engine, else the supervisor default), or
+        PairingUnavailable naming the true blocker in plain
+        words.  Called BEFORE any account record claims to be
+        pairing, and again at launch."""
+        eng = self._clean_engine(engine) or self.engine
+        if eng == "node":
+            return self._require_launchable_node()
+        return self._require_launchable_go()
+
+    def _require_launchable_node(self) -> str:
         """The node argv[0] for a launch, or PairingUnavailable
         naming the true blocker in plain words.
 
@@ -894,16 +1091,28 @@ class BridgeSupervisor:
             port += 1
         return port
 
-    def _launch(self, rec: AccountRecord, *, pairing_number: str = "") -> _Live:
-        node = self._require_launchable()
-        self._ensure_bridge_deps(node)
+    def _launch(self, rec: AccountRecord, *, pairing_number: str = "",
+                engine: str | None = None) -> _Live:
+        eng = self._clean_engine(engine) or self._engine_of(rec.id)
+        program = self._require_launchable(eng)
         creds = Path(rec.creds_dir)
         creds.mkdir(parents=True, exist_ok=True)
         media = creds.parent / (creds.name + "-media")
-        argv = [node, str(self.bridge_path),
-                "--port", str(rec.port),
-                "--creds", str(creds),
-                "--media", str(media)]
+        if eng == "node":
+            # The Node rung keeps its self-provisioning: npm
+            # packages installed by Devon before the launch.
+            self._ensure_bridge_deps(program)
+            argv = [program, str(self.bridge_path),
+                    "--port", str(rec.port),
+                    "--creds", str(creds),
+                    "--media", str(media)]
+        else:
+            # The Go rung IS the program: same flags, same env,
+            # same JSON-lines contract — nothing to install.
+            argv = [program,
+                    "--port", str(rec.port),
+                    "--creds", str(creds),
+                    "--media", str(media)]
         env = dict(os.environ)
         if pairing_number:
             env["WA_PAIRING_CODE"] = "1"
@@ -911,12 +1120,19 @@ class BridgeSupervisor:
         try:
             proc = self._spawn(argv, env)
         except OSError as exc:  # noqa: BLE001 - named, not a digest
+            if eng == "node":
+                raise PairingUnavailable(
+                    "the WhatsApp bridge process could not be "
+                    f"started ({exc}) — node resolved to "
+                    f"{program}, bridge at {self.bridge_path}. "
+                    "Nothing was paired; fix the cause and run "
+                    "/pair again.") from exc
             raise PairingUnavailable(
-                "the WhatsApp bridge process could not be started "
-                f"({exc}) — node resolved to {node}, bridge at "
-                f"{self.bridge_path}. Nothing was paired; fix the "
-                "cause and run /pair again.") from exc
-        live = _Live(proc=proc)
+                "the WhatsApp bridge process could not be "
+                f"started ({exc}) — bridge program at {program}. "
+                "Nothing was paired; fix the cause and run "
+                "/pair again.") from exc
+        live = _Live(proc=proc, bridge_engine=eng)
         # register BEFORE the reader starts: a fast bridge can emit
         # its pairing code immediately, and a code that arrives before
         # the live entry exists would be dropped on the floor.
@@ -953,7 +1169,8 @@ class BridgeSupervisor:
                             live.code = m.group(2)
                             live.code_at = time.time()
                     self.registry.set_status(account_id, "pairing")
-                f = _REFUSAL_RE.search(text)
+                f = _REFUSED_RE.search(text) \
+                    or _REFUSAL_RE.search(text)
                 if f:
                     # WhatsApp said no — the reason is the answer
                     # /pair code owes the owner, not "no live
@@ -964,6 +1181,16 @@ class BridgeSupervisor:
                         account_id, proc,
                         "WhatsApp refused the code request: "
                         + f.group(1).strip())
+                lf = _LINK_FAILED_RE.search(text)
+                if lf:
+                    # The code was issued but the link died
+                    # before WhatsApp confirmed it — the pairing
+                    # is over; the reason rides the record the
+                    # same way.
+                    self._note_live_error(
+                        account_id, proc,
+                        "WhatsApp closed the pairing: "
+                        + lf.group(1).strip())
                 if "connected as" in text:
                     self.registry.set_status(account_id, "linked")
         except Exception:  # noqa: BLE001 - a dead stream ends the
@@ -987,7 +1214,8 @@ class BridgeSupervisor:
         The record flips to "down" and the bridge's own last
         meaningful line becomes the stored reason — "bridge
         exited: Error: Cannot find package '@whiskeysockets/
-        baileys'…" — instead of a silent record and a bare
+        baileys'…", "bridge exited: panic: …" — instead of a
+        silent record and a bare
         "no live code".  A stream that merely ended while the
         process lives on (poll says so) changes nothing.  A
         LINKED account's dead bridge is supervision's domain
@@ -1075,17 +1303,19 @@ class BridgeSupervisor:
         return self._alive(account_id)
 
     # ── pairing ─────────────────────────────────────────────────────
-    def pair_whatsapp(self, number: str, label: str = "") -> AccountRecord:
+    def pair_whatsapp(self, number: str, label: str = "",
+                      *, engine: str | None = None) -> AccountRecord:
         digits = re.sub(r"\D", "", number or "")
         if len(digits) < 7:
             raise ValueError(
                 "that doesn't look like a phone number — give the "
                 "number in international format, e.g. 2348012345678")
+        eng = self._clean_engine(engine) or self.engine
         # Preflight BEFORE the record exists: a machine that cannot
-        # launch the bridge (no node, missing script) fails here,
-        # so the registry never gains a record claiming "pairing"
-        # with no process behind it.
-        self._require_launchable()
+        # launch the chosen bridge engine fails here, so the
+        # registry never gains a record claiming "pairing" with
+        # no process behind it.
+        self._require_launchable(eng)
         rec_id = account_id_for("whatsapp", digits)
         rec = self.registry.get(rec_id)
         created = rec is None
@@ -1107,7 +1337,7 @@ class BridgeSupervisor:
         if was_running:
             self.stop(rec.id)
         try:
-            self._launch(rec, pairing_number=digits)
+            self._launch(rec, pairing_number=digits, engine=eng)
         except PairingUnavailable:
             # Roll the record back to the truth: a brand-new pairing
             # that never launched leaves no record at all; an

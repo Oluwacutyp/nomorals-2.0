@@ -75,7 +75,8 @@ actually use.)
 |---|---|---|
 | Telegram bot API + userbot | `pip install telethon` | `nomorals/social/chat/telegram.py` (Bot API over HTTP via stdlib `nomorals/core/http.py` — no `requests` needed; MTProto userbot via `telethon`), `nomorals/exporter.py` |
 | Discord | `pip install discord.py` | `nomorals/social/chat/discord.py` |
-| WhatsApp bridge | `cd bridge && npm install` (needs **Node ≥ 18**) | `bridge/whatsapp-bridge.mjs` — npm deps `@whiskeysockets/baileys`, `qrcode-terminal`; speaks JSON-lines to Devon's WhatsApp adapter over localhost TCP |
+| WhatsApp bridge (Go rung, default) | *(nothing to install)* | `bridge/bin/whatsapp-bridge.exe` / `bridge/bin/whatsapp-bridge-linux` — one self-contained Go program (whatsmeow, source in `bridge/gobridge/`); speaks JSON-lines to Devon's WhatsApp adapter over localhost TCP |
+| WhatsApp bridge (Node rung) | `cd bridge && npm install` (needs **Node ≥ 18**) | `bridge/whatsapp-bridge.mjs` — npm deps `@whiskeysockets/baileys`, `qrcode-terminal`; same JSON-lines protocol, alternate engine |
 
 ### Web search
 
@@ -239,7 +240,7 @@ provide them.
 | `bwrap` / `unshare` | `nomorals/execbox.py` sandbox isolation (bubblewrap preferred, namespaces fallback) | `sudo apt install bubblewrap` (`unshare` ships with `util-linux`) | not applicable — Linux-only |
 | `espeak-ng` / `pico2wave` | `nomorals/tools/audio.py` offline TTS fallback | `sudo apt install espeak-ng` / `libttspico-utils` | `say` is built in |
 | PortAudio (`libportaudio2`) | `sounddevice` mic I/O (`voice/session.py`) | `sudo apt install libportaudio2` (`portaudio19-dev` if building) | `brew install portaudio` |
-| `node` ≥ 18 + `npm` | `bridge/whatsapp-bridge.mjs` (WhatsApp) | [nodejs.org](https://nodejs.org) or `sudo apt install nodejs npm` | `brew install node` |
+| `node` ≥ 18 + `npm` | `bridge/whatsapp-bridge.mjs` (WhatsApp Node rung; the default Go rung needs neither) | [nodejs.org](https://nodejs.org) or `sudo apt install nodejs npm` | `brew install node` |
 | `whisper.cpp` binary (optional) | Local STT alternative; paths via `NM_WHISPER_CPP_BIN` / `NM_WHISPER_CPP_MODEL` | [whisper.cpp releases](https://github.com/ggerganov/whisper.cpp/releases) | same |
 
 ## API keys / env vars

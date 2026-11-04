@@ -1,10 +1,13 @@
-"""WhatsApp adapter — Python client for the Node/Baileys bridge.
+"""WhatsApp adapter — Python client for the WhatsApp bridge.
 
 WhatsApp has no friendly official API for a personal account (the Cloud API
 is business-oriented and cannot do the userbot-style companionship), so this
-system talks to the *bridge* in ``bridge/whatsapp-bridge.mjs`` — a small Node
-process that holds the WhatsApp Web session (QR login, media, presence) and
-speaks a JSON-lines protocol over localhost TCP.
+system talks to the *bridge* — a per-account process that holds the
+WhatsApp Web session (pairing-code/QR login, media, presence) and speaks a
+JSON-lines protocol over localhost TCP. Two engines implement that one
+protocol: the Go program (``bridge/bin/whatsapp-bridge-*``, whatsmeow —
+the default, one self-contained file, nothing to install) and the
+Node/Baileys bridge (``bridge/whatsapp-bridge.mjs``) as the second rung.
 
 Protocol (one JSON object per line):
 
@@ -28,7 +31,7 @@ Protocol (one JSON object per line):
     {"id":"<req>","cmd":"read","chat":"<jid>"}            # best-effort receipts
     {"id":"<req>","cmd":"chats","limit":30}               # best-effort listing
     {"id":"<req>","cmd":"status"}
-    # group/community depth (bridge/whatsapp-groups.mjs — read-only):
+    # group/community depth (bridge read-only set):
     {"id":"<req>","cmd":"group_list"}                   # all groups: id/subject/size/isCommunity
     {"id":"<req>","cmd":"group_info","chat":"<@g.us>"}  # metadata + admins + invite link (if permitted)
     {"id":"<req>","cmd":"group_participants","chat":"<@g.us>"}  # roster with admin roles
@@ -64,7 +67,7 @@ __all__ = ["WhatsAppAdapter", "Outbox", "GROUP_CAPABILITIES"]
 _log = get_logger(__name__)
 
 #: Group/community capabilities exposed over the bridge JSON-lines protocol
-#: (bridge/whatsapp-groups.mjs — read-only). One source of truth: the
+#: (the bridge program's read-only group set). One source of truth: the
 #: WhatsApp-native menu (control.whatsapp_menu) renders its
 #: "groups & communities" section from this table, and the adapter methods
 #: below implement it. ``(key, plain_words, what_it_does)``.
@@ -247,7 +250,7 @@ def _split_text(text: str, *, limit: int | None = None) -> list[str]:
 
 def _wa_envelope(obj: dict[str, Any], text: str) -> dict[str, Any]:
     """The defense envelope (brief §1.3) from a bridge event —
-    PASS-THROUGH ONLY: the bridge is an external Node process
+    PASS-THROUGH ONLY: the bridge is an external process
     whose event schema this repo does not own, so every field is
     read defensively under its plausible names and stays absent
     when the bridge doesn't send it.  Nothing is invented."""
@@ -301,7 +304,8 @@ def _wa_envelope(obj: dict[str, Any], text: str) -> dict[str, Any]:
 
 
 class WhatsAppAdapter(ChatAdapter):
-    """Client for the local WhatsApp bridge (bridge/whatsapp-bridge.mjs)."""
+    """Client for the local WhatsApp bridge (bridge/bin/ Go program
+    by default, or the Node bridge/whatsapp-bridge.mjs)."""
 
     name = "whatsapp"
     supported_kinds = (ChatKind.DM, ChatKind.GROUP)
@@ -793,8 +797,9 @@ class WhatsAppAdapter(ChatAdapter):
         """One-time setup check: is the bridge reachable at all?
 
         Unlike Telethon's interactive login this never prompts — it just
-        fails fast with a clear message when the Node bridge isn't running,
-        instead of letting ``run()`` spin on reconnect backoff silently.
+        fails fast with a clear message when the bridge program isn't
+        running, instead of letting ``run()`` spin on reconnect backoff
+        silently.
         """
         try:
             sock = socket.create_connection((self.host, self.port), timeout=5)
@@ -802,7 +807,10 @@ class WhatsAppAdapter(ChatAdapter):
         except OSError as exc:
             raise RuntimeError(
                 f"whatsapp bridge not reachable at {self.host}:{self.port} "
-                f"({exc}); start bridge/whatsapp-bridge.mjs first") from exc
+                f"({exc}); start a bridge first — Devon's pairing "
+                "supervisor launches one per paired account (the Go "
+                "program under bridge/bin/ by default, or the Node "
+                "bridge/whatsapp-bridge.mjs)") from exc
 
     # ── outbound ─────────────────────────────────────────────────────────────
     def _send_with_retry(self, chat: ChatRef, text: str,
@@ -968,7 +976,7 @@ class WhatsAppAdapter(ChatAdapter):
             })
         return [c for c in out if c["id"]]
 
-    # ── groups & communities (bridge/whatsapp-groups.mjs — read-only) ────────
+    # ── groups & communities (bridge read-only set) ────────
     def _group_jid(self, chat: ChatRef | str) -> str:
         """Normalize a chat ref or raw string to a group JID for group calls."""
         if isinstance(chat, ChatRef):
@@ -1089,7 +1097,7 @@ class WhatsAppAdapter(ChatAdapter):
                 continue
         return [c for c in out if c["id"]]
 
-    # ── group administration (bridge/whatsapp-groups-admin.mjs) ──────────
+    # ── group administration (bridge admin set) ──────────
     # Mutating ops on the owner's personal account. WhatsApp may flag
     # aggressive automation — every one of these is owner-confirmed on the
     # spine-tool side (capability-gated, denied to outsiders by the
