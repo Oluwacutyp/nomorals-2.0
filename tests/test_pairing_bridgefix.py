@@ -20,6 +20,14 @@ with the bridge's own last line as the reason, and a WhatsApp
 refusal of the code request is what ``/pair code`` reports.
 All installs run through injected seams here — no real install
 ever runs in a test.
+
+Pairhold (the stability section below): the bridge used to
+request a fresh pairing code on every rotated qr ref, killing
+the code the owner was mid-typing; it now requests once per
+socket, and a pairing WhatsApp terminates mid-flight reports
+PAIRING LINK FAILED — the drain lands the reason, drops the
+corpse code, flips the record to "down", and ``/pair code``
+ages its answer honestly instead of blessing a dead code.
 """
 from __future__ import annotations
 
@@ -519,6 +527,132 @@ def test_provision_posix_termux_pkg_needs_no_root(tmp_path):
         "com.termux/files/usr/bin/node", euid=1000)
     assert found.endswith("/bin/node")
     assert calls and calls[0][0].endswith("pkg")
+
+
+# ── pairing stability: one code per socket, dead codes speak ──────
+
+LINK_FAILED_LINE = ("2026-11-04T01:02:00.000Z [bridge] PAIRING LINK "
+                    "FAILED: forbidden (code 403)")
+
+CODE_LINE_2 = ("2026-11-04T01:05:00.000Z [bridge] PAIRING CODE for "
+               "+2348012345678: ZXCV-9876 (type into WhatsApp > "
+               "Linked Devices)")
+
+
+def test_link_failed_lands_reason_down_and_kills_the_code(tmp_path):
+    lines = [CODE_LINE, LINK_FAILED_LINE]
+    sup, registry, _ = make_sup(
+        tmp_path, lambda: FakeProc(lines, block=True))
+    rec = sup.pair_whatsapp("2348012345678")
+    assert wait_for(lambda: registry.get(rec.id).status == "down")
+    reason = sup.pairing_error(rec.id)
+    assert reason == ("WhatsApp closed the pairing: "
+                      "forbidden (code 403)")
+    assert registry.get(rec.id).last_error == reason
+    # the corpse code no longer answers /pair code…
+    assert sup.pairing_code(rec.id) is None
+    reply = bare_runtime(sup)._control_pair(
+        "code whatsapp:2348012345678", chat_key="owner")
+    assert "WhatsApp closed the pairing" in reply
+    assert "forbidden (code 403)" in reply
+    assert "issues a fresh one" in reply
+    assert "WXYZ-1234" not in reply
+    assert "no live code" not in reply
+    # …and the pool row tells the same story
+    row = [r for r in sup.status_all(probe=False)
+           if r["id"] == rec.id][0]
+    assert row["status"] == "down"
+    assert "WhatsApp closed the pairing" in row["last_error"]
+
+
+def test_plain_close_and_park_lines_do_not_trigger_link_failure(
+        tmp_path):
+    # The bridge's ordinary vocabulary around a close — its own
+    # classified close line, its PARKED notice — is NOT the
+    # failure pattern: no error, still pairing, code still live.
+    lines = [CODE_LINE,
+             "2026-11-04T01:02:00.000Z [bridge] connection closed "
+             "(code 401 / logged-out)",
+             "2026-11-04T01:02:00.000Z [bridge] PARKED: logged-out "
+             "— re-auth required — session invalidated — delete "
+             ".creds/ and re-scan/re-pair (owner action required)"]
+    sup, registry, _ = make_sup(
+        tmp_path, lambda: FakeProc(lines, block=True))
+    rec = sup.pair_whatsapp("2348012345678")
+    assert wait_for(lambda: sup.pairing_code(rec.id) is not None)
+    time.sleep(0.5)  # let the drain consume the remaining lines
+    assert sup.pairing_error(rec.id) == ""
+    assert registry.get(rec.id).status == "pairing"
+    assert registry.get(rec.id).last_error == ""
+    code, _age = sup.pairing_code(rec.id)
+    assert code == "WXYZ-1234"
+
+
+def test_fresh_pair_after_link_failure_recovers(tmp_path):
+    procs = [FakeProc([CODE_LINE, LINK_FAILED_LINE], block=True),
+             FakeProc([CODE_LINE_2], block=True)]
+
+    def factory():
+        return procs.pop(0)
+
+    sup, registry, _ = make_sup(tmp_path, factory)
+    rec = sup.pair_whatsapp("2348012345678")
+    assert wait_for(lambda: registry.get(rec.id).status == "down")
+    assert sup.pairing_error(rec.id)
+    # the recovery the reply promises: a fresh /pair whatsapp
+    # stops the parked bridge and relaunches from scratch —
+    # "request once" is per socket/process, never a dead end.
+    rec = sup.pair_whatsapp("2348012345678")
+    assert wait_for(lambda: sup.pairing_code(rec.id) is not None)
+    code, _age = sup.pairing_code(rec.id)
+    assert code == "ZXCV-9876"
+    assert sup.pairing_error(rec.id) == ""
+    assert registry.get(rec.id).last_error == ""
+    assert registry.get(rec.id).status == "pairing"
+
+
+def _age_the_code(sup, rec, seconds):
+    with sup._lock:
+        sup._live[rec.id].code_at = time.time() - seconds
+
+
+def test_fresh_code_reply_says_type_it_in(tmp_path):
+    sup, _registry, _ = make_sup(
+        tmp_path, lambda: FakeProc([CODE_LINE], block=True))
+    rec = sup.pair_whatsapp("2348012345678")
+    assert wait_for(lambda: sup.pairing_code(rec.id) is not None)
+    reply = bare_runtime(sup)._control_pair(
+        "code whatsapp:2348012345678", chat_key="owner")
+    assert "WXYZ-1234" in reply
+    assert "type it into Linked Devices" in reply
+
+
+def test_aging_code_reply_warns_it_is_dying(tmp_path):
+    sup, _registry, _ = make_sup(
+        tmp_path, lambda: FakeProc([CODE_LINE], block=True))
+    rec = sup.pair_whatsapp("2348012345678")
+    assert wait_for(lambda: sup.pairing_code(rec.id) is not None)
+    _age_the_code(sup, rec, 150)
+    reply = bare_runtime(sup)._control_pair(
+        "code whatsapp:2348012345678", chat_key="owner")
+    assert "150s old" in reply
+    assert "die within a few minutes" in reply
+    assert "/pair whatsapp 2348012345678" in reply
+
+
+def test_corpse_code_reply_says_get_a_fresh_one(tmp_path):
+    sup, _registry, _ = make_sup(
+        tmp_path, lambda: FakeProc([CODE_LINE], block=True))
+    rec = sup.pair_whatsapp("2348012345678")
+    assert wait_for(lambda: sup.pairing_code(rec.id) is not None)
+    _age_the_code(sup, rec, 600)
+    reply = bare_runtime(sup)._control_pair(
+        "code whatsapp:2348012345678", chat_key="owner")
+    assert "10 minutes ago" in reply
+    assert "almost certainly dead" in reply
+    assert "/pair whatsapp 2348012345678" in reply
+    # never send the owner to type in a corpse as if it were live
+    assert "type it into Linked Devices" not in reply
 
 
 # ── supervisor: provisioning wired into resolution ──────────────────

@@ -58,7 +58,12 @@ _REFUSAL_RE = re.compile(r"pairing code request failed:\s*(.+)$")
 #: answer was no — printed only when no code was registered.
 _REFUSED_RE = re.compile(r"PAIRING REFUSED:\s*(.+)$")
 #: …and a pairing that was issued but died before the link
-#: completed (disconnect / pair failure) in this shape.
+#: completed (disconnect / pair failure) in this shape: the
+#: confirmed-code bridges print it when an issued code's link
+#: dies, and the Node bridge prints it when a socket with a
+#: code outstanding closes terminally — the classified reason
+#: rides the line, and the drain captures it instead of
+#: leaving a corpse code live.
 _LINK_FAILED_RE = re.compile(r"PAIRING LINK FAILED:\s*(.+)$")
 #: The bridge's log() prefixes an ISO timestamp; display cleaning
 #: strips it (and the [bridge] tag) from lines shown to the owner.
@@ -796,8 +801,17 @@ class BridgeSupervisor:
     is never swallowed: the drain keeps a bounded tail, a death
     before linking flips the record to "down" with the bridge's
     own last line as the reason, and a WhatsApp refusal of the
-    code request is recorded verbatim — ``pairing_error`` is
-    how surfaces answer with the truth.
+    code request is recorded verbatim; a pairing WhatsApp
+    terminates mid-flight (its PAIRING LINK FAILED line) drops
+    the dead code and flips the record to "down" with the
+    classified reason — ``pairing_error`` is how surfaces
+    answer with the truth.  The Node bridge's pairing codes are
+    server-confirmed before they are ever printed (the bridge
+    sends the stage-1 request through an awaited query, not
+    Baileys' fire-and-forget requestPairingCode — see
+    bridge/whatsapp-bridge.mjs), and a stage-1 refusal clears
+    any buffered code here too, so a code a surface shows is
+    a code WhatsApp accepted.
 
     Engines: ``engine`` picks the bridge program — "go" (the
     default: the self-contained whatsmeow binary under
@@ -805,6 +819,8 @@ class BridgeSupervisor:
     "node" (the Node/Baileys bridge, gated by everything above).
     ``NM_WHATSAPP_BRIDGE_ENGINE`` sets the default when no
     engine is passed; a single pairing can override per call.
+    Each live entry names the engine that launched it
+    (``bridge_engine``).
     """
 
     #: The bridge engines a launch can use.
@@ -1224,22 +1240,31 @@ class BridgeSupervisor:
                 f = _REFUSED_RE.search(text) \
                     or _REFUSAL_RE.search(text)
                 if f:
-                    # WhatsApp said no — the reason is the answer
-                    # /pair code owes the owner, not "no live
-                    # code".  Recorded on the live entry AND the
-                    # registry; the status stays "pairing" (the
-                    # bridge lives; a fresh /pair retries).
-                    self._note_live_error(
+                    # WhatsApp said no at stage 1 — the reason is
+                    # the answer /pair code owes the owner, not
+                    # "no live code".  Recorded on the live entry
+                    # AND the registry, and any code this attempt
+                    # buffered is dropped with it: a refusal means
+                    # no code from this attempt is valid.  The
+                    # status stays "pairing" (the bridge lives;
+                    # a fresh /pair retries).
+                    self._note_request_refused(
                         account_id, proc,
                         "WhatsApp refused the code request: "
                         + f.group(1).strip())
                 lf = _LINK_FAILED_RE.search(text)
                 if lf:
                     # The code was issued but the link died
-                    # before WhatsApp confirmed it — the pairing
-                    # is over; the reason rides the record the
-                    # same way.
-                    self._note_live_error(
+                    # before WhatsApp confirmed it: WhatsApp
+                    # closed the pairing itself, the issued code
+                    # died with the session, and the bridge
+                    # parks — no fresh code is coming from this
+                    # attempt.  Record the reason verbatim, drop
+                    # the corpse code, flip the record to "down"
+                    # (linked/stopped records untouched); a
+                    # fresh /pair whatsapp relaunches the bridge
+                    # and is the recovery.
+                    self._note_pairing_dead(
                         account_id, proc,
                         "WhatsApp closed the pairing: "
                         + lf.group(1).strip())
@@ -1258,6 +1283,47 @@ class BridgeSupervisor:
             if live is not None and live.proc is proc:
                 live.last_error = text
         self.registry.set_error(account_id, text)
+
+    def _note_request_refused(self, account_id: str, proc: Any,
+                              text: str) -> None:
+        """A stage-1 code-request refusal: WhatsApp evaluated the
+        request and said no, so NO code from this attempt is
+        valid — clear any buffered code from the live entry
+        before recording the reason, so a later /pair code can
+        never display one.  The bridge's confirmed request path
+        never prints a code ahead of the server's answer, so in
+        the normal run there is nothing to clear; this is the
+        supervisor-side half of the same guarantee, and it also
+        covers a refusal that lands on an attempt which somehow
+        did show one.  The record stays "pairing" — the bridge
+        lives and a fresh /pair retries."""
+        with self._lock:
+            live = self._live.get(account_id)
+            if live is not None and live.proc is proc:
+                live.code = ""
+                live.code_at = 0.0
+        self._note_live_error(account_id, proc, text)
+
+    def _note_pairing_dead(self, account_id: str, proc: Any,
+                           text: str) -> None:
+        """A pairing WhatsApp terminated mid-flight: the issued
+        code is a corpse, so clear it from the live entry (a
+        /pair code consult must fall through to the reason, not
+        re-show the dead code), record the reason, and flip the
+        record to "down" — the bridge is parked, so nothing
+        about this attempt is still in flight.  A record that
+        meanwhile linked or was stopped is not this line's
+        business and keeps its state."""
+        with self._lock:
+            live = self._live.get(account_id)
+            if live is not None and live.proc is proc:
+                live.code = ""
+                live.code_at = 0.0
+        self._note_live_error(account_id, proc, text)
+        rec = self.registry.get(account_id)
+        if rec is not None and rec.status not in ("linked",
+                                                  "stopped"):
+            self.registry.set_status(account_id, "down")
 
     def _finish_dead(self, account_id: str, proc: Any) -> None:
         """The drain ended: if the process really exited before

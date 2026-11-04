@@ -1126,6 +1126,21 @@ class RuntimeProvisionMixin:
                         f"minutes. /pair whatsapp {rec.identity} "
                         "issues a fresh one.")
             code, age = got
+            if age >= 300:
+                # Codes die in minutes — a five-minute-old code is
+                # a corpse, and saying "type it in" would send the
+                # owner to a guaranteed "couldn't link" wall.
+                return (f"📟 {rec.id}: **{code}** — issued "
+                        f"{int(age // 60)} minutes ago. WhatsApp "
+                        "codes die within a few minutes, so this "
+                        "one is almost certainly dead. /pair "
+                        f"whatsapp {rec.identity} issues a fresh "
+                        "one — type THAT one in right away.")
+            if age >= 120:
+                return (f"📟 {rec.id}: **{code}** "
+                        f"({int(age)}s old — codes die within a "
+                        "few minutes, so type it in NOW, or /pair "
+                        f"whatsapp {rec.identity} for a fresh one)")
             return (f"📟 {rec.id}: **{code}** "
                     f"({int(age)}s old — type it into Linked Devices)")
         if sub == "telegram":

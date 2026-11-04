@@ -45,11 +45,16 @@
  * restart does not reset the attempt ladder.
  * Alternatively set WA_PAIRING_CODE=1 + WA_PAIRING_NUMBER=<int'l digits,
  * no +> for an 8-char code you type into the phone instead of scanning.
+ * Pairing codes are SERVER-CONFIRMED before they are printed (see
+ * requestPairingCodeConfirmed below): a code you see is a code
+ * WhatsApp accepted at stage 1; a refusal prints as a refusal
+ * instead of a code that never existed server-side.
  */
 
 import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import qrcode from 'qrcode-terminal';
 import makeWASocket, {
@@ -58,6 +63,11 @@ import makeWASocket, {
   downloadMediaMessage,
   fetchLatestBaileysVersion,
   jidNormalizedUser,
+  aesEncryptCTR,
+  bytesToCrockford,
+  derivePairingCodeKey,
+  getPlatformId,
+  jidEncode,
 } from '@whiskeysockets/baileys';
 import registerGroupCommands from './whatsapp-groups.mjs';
 import registerGroupAdminCommands from './whatsapp-groups-admin.mjs';
@@ -430,6 +440,106 @@ async function downloadInbound(m) {
   }
 }
 
+// ── server-confirmed pairing codes ───────────────────────────────────
+// Baileys' requestPairingCode() is a phantom-code machine (upstream
+// issue #2737; verified 2026-11-04 against the newest published
+// builds — 6.7.24 legacy and 7.0.0-rc14 both still do this, and
+// master has no fix): lib/Socket/socket.js builds the code locally,
+// fires the companion_hello IQ with sendNode — write-only, it
+// resolves when the frame is WRITTEN, not when the server answers —
+// and returns the code immediately.  A server refusal (the issue's
+// captured 400 bad-request) lands afterwards, observed by nobody:
+// the owner is handed a code WhatsApp never registered and the
+// phone answers "Couldn't link device".
+//
+// So this bridge sends stage 1 itself: the node below is
+// byte-identical to the one 6.7.24's requestPairingCode builds
+// (same children, same order, same creds mutations — pairingCode
+// + me set and persisted BEFORE the send, exactly as the library
+// does), but it goes through sock.query(), which awaits the
+// server's IQ result and throws on an error IQ
+// (assertNodeErrorFree).  The returned promise therefore resolves
+// ONLY with a code the server accepted at stage 1, and rejects
+// with the server's own refusal text otherwise — the caller
+// prints/broadcasts the code strictly after that resolution, so
+// a refused request can never produce a displayable code.
+// Stage 2 needs nothing from stage 1's response: when the phone
+// enters the code, the server pushes the link_code_companion_reg
+// notification that messages-recv.js completes from creds alone
+// (pairingCode + pairingEphemeralKeyPair + signedIdentityKey) —
+// all set here exactly as the library sets them.
+// The platform triple is Baileys' own default for a socket
+// created without a browser override (Browsers.ubuntu('Chrome'))
+// — the same values 6.7.24's requestPairingCode reads out of its
+// config for companion_platform_id / companion_platform_display.
+const PAIRING_BROWSER = ['Ubuntu', 'Chrome', '22.04.4'];
+
+async function requestPairingCodeConfirmed(sock, state, saveCreds,
+                                           phoneNumber) {
+  const { creds } = state;
+  const pairingCode = bytesToCrockford(randomBytes(5));
+  creds.pairingCode = pairingCode;
+  creds.me = {
+    id: jidEncode(phoneNumber, 's.whatsapp.net'),
+    name: '~',
+  };
+  await saveCreds();
+  // generatePairingKey, mirrored from 6.7.24: the code-derived
+  // key wraps our pairing ephemeral public key, salt‖iv‖cipher.
+  const salt = randomBytes(32);
+  const randomIv = randomBytes(16);
+  const key = await derivePairingCodeKey(pairingCode, salt);
+  const ciphered = aesEncryptCTR(
+    creds.pairingEphemeralKeyPair.public, key, randomIv);
+  const wrappedEphemeralPub = Buffer.concat([salt, randomIv, ciphered]);
+  await sock.query({
+    tag: 'iq',
+    attrs: {
+      to: 's.whatsapp.net',
+      type: 'set',
+      xmlns: 'md',
+    },
+    content: [
+      {
+        tag: 'link_code_companion_reg',
+        attrs: {
+          jid: creds.me.id,
+          stage: 'companion_hello',
+          should_show_push_notification: 'true',
+        },
+        content: [
+          {
+            tag: 'link_code_pairing_wrapped_companion_ephemeral_pub',
+            attrs: {},
+            content: wrappedEphemeralPub,
+          },
+          {
+            tag: 'companion_server_auth_key_pub',
+            attrs: {},
+            content: creds.noiseKey.public,
+          },
+          {
+            tag: 'companion_platform_id',
+            attrs: {},
+            content: getPlatformId(PAIRING_BROWSER[1]),
+          },
+          {
+            tag: 'companion_platform_display',
+            attrs: {},
+            content: `${PAIRING_BROWSER[1]} (${PAIRING_BROWSER[0]})`,
+          },
+          {
+            tag: 'link_code_pairing_nonce',
+            attrs: {},
+            content: '0',
+          },
+        ],
+      },
+    ],
+  });
+  return pairingCode;
+}
+
 // ── WhatsApp connection ──────────────────────────────────────────────────────
 let wa = null;
 let meJid = '';
@@ -445,18 +555,40 @@ async function connect() {
   });
   wa.ev.on('creds.update', saveCreds);
 
+  // Pairing-code stability: Baileys rotates the qr ref roughly every
+  // 20s while unregistered, and EVERY pairing-code request mints a
+  // new code and kills the previous one.  Requesting on every qr
+  // event therefore invalidated the code the owner was typing
+  // mid-entry (WhatsApp: "Couldn't link device").  One request per
+  // socket session: these flags live in this connect() closure, so a
+  // reconnect (new socket) re-arms exactly one request, and 'open'
+  // or 'close' clears them — never a second request while a code
+  // is outstanding on this socket.  And the one request is the
+  // server-confirmed one above, never Baileys' phantom-returning
+  // requestPairingCode: nothing is printed until WhatsApp has
+  // accepted the code at stage 1.
+  let pairingCodeRequested = false;
+  let pairingCodeIssued = false;
+
   wa.ev.on('connection.update', (u) => {
     const { connection, lastDisconnect, qr } = u;
     if (qr) {
       if (PAIRING_CODE && PAIRING_NUMBER) {
         // Pairing-code login: an 8-char code the owner types into the phone.
-        wa.requestPairingCode(PAIRING_NUMBER).then(
-          (code) => {
-            log(`PAIRING CODE for +${PAIRING_NUMBER}: ${code} (type into WhatsApp > Linked Devices)`);
-            broadcast({ type: 'pairing_code', data: code });
-          },
-          (e) => log('pairing code request failed:', e?.message || e),
-        );
+        if (!pairingCodeRequested) {
+          pairingCodeRequested = true;
+          requestPairingCodeConfirmed(wa, state, saveCreds,
+                                      PAIRING_NUMBER).then(
+            (code) => {
+              pairingCodeIssued = true;
+              log(`PAIRING CODE for +${PAIRING_NUMBER}: ${code} (type into WhatsApp > Linked Devices)`);
+              broadcast({ type: 'pairing_code', data: code });
+            },
+            (e) => log('pairing code request failed:', e?.message || e),
+          );
+        }
+        // else: a code is already outstanding on this socket — the
+        // rotating qr ref is NOT a reason to mint a replacement.
       } else {
         log('QR received — scan with WhatsApp (Linked Devices).');
         try { qrcode.generate(qr, { small: true }); } catch { /* ignore */ }
@@ -464,6 +596,8 @@ async function connect() {
       }
     }
     if (connection === 'open') {
+      pairingCodeRequested = false;
+      pairingCodeIssued = false;
       meJid = jidNormalizedUser(wa.user?.id || '');
       // Baileys exposes the account's own LID on the same user
       // object (creds.me.lid) for LID-migrated accounts — the
@@ -487,6 +621,24 @@ async function connect() {
     }
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
+      // A pairing WhatsApp itself ended: a code was issued on this
+      // socket, the link never landed (creds unregistered — a
+      // registered socket's routine 515 restart / later logout is
+      // not this), and the close is terminal under the policy
+      // table (STOP: 401/500/440/411/403 — the bridge parks, no
+      // fresh code is coming).  Name it on its own line so the
+      // supervisor can tell the owner the truth and stop showing
+      // the dead code.  Transient closes (RETRY: 428/408/503 and
+      // 515 restartRequired) stay silent here — the reconnect
+      // issues a fresh code on the new socket, which supersedes.
+      if (PAIRING_CODE && pairingCodeIssued && !state.creds.registered) {
+        const verdict = classifyDisconnect(code);
+        if (verdict.action === ACTION.STOP) {
+          log(`PAIRING LINK FAILED: ${verdict.label} (code ${code ?? 'n/a'})`);
+        }
+      }
+      pairingCodeRequested = false;
+      pairingCodeIssued = false;
       onConnectionClosed(code, lastDisconnect?.error);
     }
   });
