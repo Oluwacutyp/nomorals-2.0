@@ -771,6 +771,15 @@ class RuntimeGroupMixin:
                     fire = getattr(self, "_fire_expression", None)
                     if fire is not None:
                         fire(message, moment)
+        # §34 closes ride the same cycle: a timed math round
+        # that expired in this room posts its answer + working
+        # here, on the cycle's pass — not on the member's next
+        # /math. (RuntimeGamesMixin owns the drain; §33/§31 are
+        # evaluated inside, at send time.)
+        post_closes = getattr(self, "_post_math_round_closes",
+                              None)
+        if post_closes is not None:
+            post_closes(surface, key, message)
         self._execute_pending_pin(surface, message)
         actions = result.get("actions") or []
         if not actions:

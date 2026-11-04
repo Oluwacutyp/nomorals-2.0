@@ -1406,6 +1406,57 @@ class RuntimeGamesMixin:
         except Exception:  # noqa: BLE001 - persistence never breaks chat
             _log.warning("math state save failed", exc_info=True)
 
+    def _post_math_round_closes(self, surface, key, message) -> None:  # type: ignore[no-untyped-def]
+        """§34 PUSH: on a group cycle pass, post timed-round
+        closes into the room the round ran in — on the cycle's
+        next pass after the clock died, NOT on the member's next
+        /math. One message per close, the same board the
+        held-note path renders (_render_math_note). §33 gate at
+        send time, like every system output — an unclaimed room
+        gets no post; §31 quiet (defense autonomy off) stays
+        silent the same way. Both diversions fall back to held
+        notes, so the members still get their closes."""
+        try:
+            handler = self._math_handler()
+            payloads = handler.peek_room_closes(key)
+        except Exception:  # noqa: BLE001 - closes never break a turn
+            _log.warning("math close drain failed", exc_info=True)
+            return
+        if not payloads:
+            return
+        settings = surface.store.settings(key)
+        quiet = (settings.get("defense") or {}).get(
+            "autonomy", True) is False
+        if quiet or not self._system_send_ok(
+                surface, key, message, "math close"):
+            try:
+                handler.fallback_room_closes(key)
+                self._math_save(handler)
+            except Exception:  # noqa: BLE001
+                _log.warning("math close fallback failed",
+                             exc_info=True)
+            return
+        posted: list = []
+        for record in payloads:
+            text = self._render_math_note(record)
+            if not text:
+                # Nothing renderable — ack it away rather than
+                # retrying an empty post on every cycle pass.
+                posted.append(record)
+                continue
+            try:
+                self._send(message.chat, text)
+                posted.append(record)
+            except Exception:  # noqa: BLE001 - stays buffered;
+                _log.warning("math close post failed",  # next pass retries
+                             exc_info=True)
+        if posted:
+            try:
+                handler.ack_room_closes(key, posted)
+                self._math_save(handler)
+            except Exception:  # noqa: BLE001
+                _log.warning("math close ack failed", exc_info=True)
+
     def _control_math(self, tail: str, chat_key: str, *,
                       player: Any = None, kind: str = "dm",
                       is_owner: bool = True) -> str | None:
@@ -1426,6 +1477,14 @@ class RuntimeGamesMixin:
         player_key = getattr(player, "key", "") or ""
         if not player_key:
             player_key = self._game_player_for_key(chat_key).key
+        if str(kind).lower() == "group":
+            # §34: stamp the room this member is playing in, so a
+            # timed round started here can be closed back INTO
+            # this room by the group cycle when its clock dies.
+            try:
+                handler.note_room(player_key, chat_key)
+            except Exception:  # noqa: BLE001 - stamping never blocks play
+                _log.warning("math room stamp failed", exc_info=True)
         # Verification gates math earning (credit() returns None for
         # unverified players). A chat sender IS a verified participant
         # — mark them so rewards aren't silently blocked.
@@ -1434,10 +1493,12 @@ class RuntimeGamesMixin:
         except Exception:  # noqa: BLE001 - verification never blocks play
             _log.warning("math verify_member failed for %s", player_key)
         # §34: settle any timed rounds/duels whose clocks ran out
-        # BEFORE this command is handled — the closes become held
-        # notices, and this member's own notices ride this reply
-        # (handle() delivers them). Other members' closes wait for
-        # their next interaction; math has no background poster.
+        # BEFORE this command is handled — on this pull path the
+        # closes become held notices, and this member's own
+        # notices ride this reply (handle() delivers them). The
+        # group cycle drains the same settlement as room posts
+        # (_post_math_round_closes): a room's close posts there
+        # on the cycle's next pass, whichever path settles first.
         try:
             handler.sweep_rounds()
         except Exception:  # noqa: BLE001 - the sweep never blocks play

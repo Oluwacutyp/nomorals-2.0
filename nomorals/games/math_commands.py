@@ -132,6 +132,20 @@ class MathCommandHandler:
         # closes swept by the clock, a queue match that filled
         # while they were away. Delivered (once) by handle().
         self._pending_notes: dict[str, list[dict[str, Any]]] = {}
+        # ── §34 room closes: where rounds run ──
+        # The last GROUP room each member played math in, stamped
+        # by the runtime on every group /math (note_room). Rounds
+        # and duels snapshot it when they start (an explicit ""
+        # snapshot means the round runs in a DM), so the group
+        # cycle can post a close back into the room the round ran
+        # in instead of waiting for the member's next /math.
+        self._player_rooms: dict[str, str] = {}
+        self._problem_rooms: dict[str, str] = {}  # problem_id -> room
+        # duel_id -> {player: room}
+        self._duel_rooms: dict[str, dict[str, str]] = {}
+        # Settled closes buffered per room for the cycle to post:
+        # room -> [{"record": close, "players": [audience there]}].
+        self._room_closes: dict[str, list[dict[str, Any]]] = {}
 
     # ── router ──
     def handle(self, text: str, player: str,
@@ -178,13 +192,88 @@ class MathCommandHandler:
             if self._open_duels.get(p) == duel.duel_id:
                 self._open_duels.pop(p, None)
 
-    # ── §34 sweep: post round/duel closes as held notices ──
-    def sweep_rounds(self, now: float | None = None) -> list[dict[str, Any]]:
+    # ── room stamps (§34 push) ──
+    def note_room(self, player: str, room_key: str) -> None:
+        """Stamp the group room this member is playing math in
+        (the runtime calls this on every group /math). Rounds and
+        duels started afterwards snapshot it, so their closes can
+        be posted back into that room by the group cycle."""
+        if player and room_key:
+            self._player_rooms[player] = room_key
+
+    def _stamp_problem(self, player: str, problem_id: str) -> None:
+        """Snapshot the room a problem runs in ("" = a DM round:
+        its close can only ever be a held note)."""
+        if problem_id:
+            self._problem_rooms[problem_id] = \
+                self._player_rooms.get(player) or ""
+
+    def _hold_duel(self, duel: Any) -> None:
+        """Hold a duel in front of both seats, and snapshot the
+        room each seat is playing from for its §34 close."""
+        rooms = self._duel_rooms.setdefault(duel.duel_id, {})
+        for p in duel.players:
+            self._open_duels[p] = duel.duel_id
+            rooms[p] = self._player_rooms.get(p) or ""
+
+    # ── §34 sweep: settle the clock; delivery is the caller's ──
+    @staticmethod
+    def _close_audience(record: dict[str, Any]) -> list[str]:
+        """The members a close record belongs to."""
+        if record.get("kind") in ("round_close", "set_close"):
+            player = str(record.get("player") or "")
+            return [player] if player else []
+        return [str(p) for p in record.get("players") or []]
+
+    def _close_room(self, record: dict[str, Any],
+                    player: str) -> str:
+        """The room this member's part of the close ran in: the
+        start-of-round snapshot (an explicit "" is a DM round and
+        stays roomless), else the member's latest room stamp —
+        the best attribution for rounds started before snapshots
+        existed (persisted state)."""
+        kind = record.get("kind")
+        if kind == "round_close":
+            pid = str((record.get("problem") or {}).get(
+                "problem_id") or "")
+            if pid in self._problem_rooms:
+                return self._problem_rooms[pid]
+        elif kind == "set_close":
+            for prob in record.get("problems") or []:
+                pid = str(prob.get("problem_id") or "")
+                if pid in self._problem_rooms:
+                    return self._problem_rooms[pid]
+        elif kind in ("duel_close", "duel_invite_expired"):
+            duel_id = self._open_duels.get(player) or ""
+            rooms = self._duel_rooms.get(duel_id) or {}
+            if player in rooms:
+                return rooms[player]
+        return self._player_rooms.get(player) or ""
+
+    def _prune_room_stamps(self) -> None:
+        """Room stamps live exactly as long as their round/duel:
+        a settled or vanished round keeps no stamp behind."""
+        live_problems = set(self.math.store["active"].keys())
+        live_duels = set()
+        for duel in self.math.store["duels"].values():
+            if duel.status in ("open", "waiting"):
+                live_duels.add(duel.duel_id)
+                for p in duel.problems:
+                    live_problems.add(p.problem_id)
+        self._problem_rooms = {
+            pid: r for pid, r in self._problem_rooms.items()
+            if pid in live_problems}
+        self._duel_rooms = {
+            did: rooms for did, rooms in self._duel_rooms.items()
+            if did in live_duels}
+
+    def _settle_expired(self, now: float) -> list[dict[str, Any]]:
         """Settle every expired timed round/duel (MathClass sweep)
-        and queue the closes as held notices for the members they
-        belong to. Also expires stale matchmaking queue spots.
-        Returns the close records."""
-        now = now if now is not None else time.time()
+        and resolve where each close belongs. Also expires stale
+        matchmaking queue spots. Settlement happens exactly once,
+        here — delivery (held notes via sweep_rounds, room posts
+        via the room drain) is the caller's choice, and whichever
+        path runs first consumes the close."""
         alive = []
         for entry in self._duel_queue:
             if now - float(entry.get("at") or now) > QUEUE_TTL_S:
@@ -194,14 +283,82 @@ class MathCommandHandler:
         self._duel_queue = alive
         closes = self.math.sweep_expired(now)
         for record in closes:
-            kind = record.get("kind")
-            if kind in ("round_close", "set_close"):
-                self._note(record["player"], record)
-            elif kind in ("duel_close", "duel_invite_expired"):
+            record["_room_by_player"] = {
+                p: self._close_room(record, p)
+                for p in self._close_audience(record)}
+            if record.get("kind") in ("duel_close",
+                                      "duel_invite_expired"):
                 for p in record.get("players") or []:
-                    self._note(p, record)
                     self._open_duels.pop(p, None)
+        self._prune_room_stamps()
         return closes
+
+    def sweep_rounds(self, now: float | None = None) -> list[dict[str, Any]]:
+        """Settle every expired timed round/duel and queue the
+        closes as held notices for the members they belong to.
+        Returns the close records."""
+        now = now if now is not None else time.time()
+        closes = self._settle_expired(now)
+        for record in closes:
+            for p in self._close_audience(record):
+                self._note(p, record)
+        return closes
+
+    # ── §34 room drain: the group cycle posts the closes ──
+    def _partition_close(self, record: dict[str, Any]) -> None:
+        """Route ONE settled close: a buffered room payload for
+        each room its audience played from, a held note for every
+        member with no room (DM play). Each audience member is
+        covered exactly once — a room-posted close never also
+        lands as that member's held note, and vice versa."""
+        by_room: dict[str, list[str]] = {}
+        roomless: list[str] = []
+        rooms = record.get("_room_by_player") or {}
+        for p in self._close_audience(record):
+            room = rooms.get(p) or ""
+            if room:
+                by_room.setdefault(room, []).append(p)
+            else:
+                roomless.append(p)
+        for room, players in by_room.items():
+            self._room_closes.setdefault(room, []).append(
+                {"record": record, "players": players})
+        for p in roomless:
+            self._note(p, record)
+
+    def peek_room_closes(self, room_key: str,
+                         now: float | None = None
+                         ) -> list[dict[str, Any]]:
+        """Settle the clock and return THIS room's close records,
+        undelivered — the group cycle posts them, then acks.
+        Closes for other rooms stay buffered for their own cycle
+        pass; roomless closes fall back to held notes at settle
+        time."""
+        now = now if now is not None else time.time()
+        for record in self._settle_expired(now):
+            self._partition_close(record)
+        return [e["record"] for e in
+                self._room_closes.get(room_key) or []]
+
+    def ack_room_closes(self, room_key: str,
+                        records: list[dict[str, Any]]) -> None:
+        """Mark room closes delivered (the cycle posted them);
+        anything not acked stays buffered for the next pass."""
+        done = {id(r) for r in records}
+        entries = self._room_closes.get(room_key) or []
+        keep = [e for e in entries if id(e["record"]) not in done]
+        if keep:
+            self._room_closes[room_key] = keep
+        else:
+            self._room_closes.pop(room_key, None)
+
+    def fallback_room_closes(self, room_key: str) -> None:
+        """This room cannot take the post right now (unclaimed,
+        or §31 quiet): its buffered closes become held notes for
+        the members they belong to — nobody loses their close."""
+        for entry in self._room_closes.pop(room_key, []):
+            for p in entry["players"]:
+                self._note(p, entry["record"])
 
     # ── commands ──
     def _cmd_start(self, player: str, args: list[str],
@@ -215,6 +372,7 @@ class MathCommandHandler:
                                 else "Daily attempt cap for this tier reached.")}
         problem = self.math.generate(player, tier, "quickfire", now=now)
         self._active[player] = problem.problem_id
+        self._stamp_problem(player, problem.problem_id)
         self._last_problem[player] = problem.problem_id
         # A fresh problem abandons any in-progress timed set.
         self._sets.pop(player, None)
@@ -284,6 +442,7 @@ class MathCommandHandler:
                 set_state["idx"] = idx
                 next_id = problems[idx]
                 self._active[player] = next_id
+                self._stamp_problem(player, next_id)
                 self._last_problem[player] = next_id
                 next_problem = self.math.store["active"].get(next_id)
                 out["set_progress"] = f"{idx + 1}/{len(problems)}"
@@ -374,8 +533,7 @@ class MathCommandHandler:
                                "with /math duel_answer <answer>."}
         tier = args[1] if len(args) > 1 else ""
         duel = self.math.create_duel(player, opponent, tier, now=now)
-        self._open_duels[player] = duel.duel_id
-        self._open_duels[opponent] = duel.duel_id
+        self._hold_duel(duel)
         return self._duel_started(duel)
 
     def _duel_open(self, player: str, tier: str,
@@ -396,7 +554,7 @@ class MathCommandHandler:
                     "message": "You're already in a duel — answer it "
                                "with /math duel_answer <answer>."}
         duel = self.math.create_open_duel(player, tier, now=now)
-        self._open_duels[player] = duel.duel_id
+        self._hold_duel(duel)
         return {"ok": True, "kind": "duel_open",
                 "duel_id": duel.duel_id, "join_code": duel.join_code,
                 "players": list(duel.players),
@@ -463,8 +621,7 @@ class MathCommandHandler:
                     self._duel_queue.remove(my_entry)
                 duel = self.math.create_duel(waiter, player,
                                              entry["tier"], now=now)
-                self._open_duels[waiter] = duel.duel_id
-                self._open_duels[player] = duel.duel_id
+                self._hold_duel(duel)
                 self._note(waiter, {
                     "kind": "duel_filled", "opponent": player,
                     "problems": [p.public() for p in duel.problems]})
@@ -509,8 +666,7 @@ class MathCommandHandler:
         self._join_fails.pop(player, None)
         duel = res["duel"]
         creator = duel.players[0]
-        self._open_duels[player] = duel.duel_id
-        self._open_duels[creator] = duel.duel_id
+        self._hold_duel(duel)
         self._note(creator, {
             "kind": "duel_filled", "opponent": player,
             "problems": [p.public() for p in duel.problems]})
@@ -579,6 +735,8 @@ class MathCommandHandler:
                 "idx": 0,
             }
             self._active[player] = problems[0].get("problem_id", "")
+            for p in problems:
+                self._stamp_problem(player, p.get("problem_id", ""))
             self._last_problem[player] = problems[0].get("problem_id", "")
             result["set_progress"] = f"1/{len(problems)}"
         return {"ok": True, "kind": "timed_set", **result}

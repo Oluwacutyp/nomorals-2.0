@@ -218,6 +218,16 @@ def dump_state(handler: MathCommandHandler) -> dict[str, Any]:
                            getattr(handler, "_join_fails", {}).items()},
             "pending_notes": {p: list(ns) for p, ns in
                               getattr(handler, "_pending_notes", {}).items()},
+            "player_rooms": dict(getattr(handler, "_player_rooms",
+                                         {})),
+            "problem_rooms": dict(getattr(handler, "_problem_rooms",
+                                          {})),
+            "duel_rooms": {d: dict(r) for d, r in
+                           getattr(handler, "_duel_rooms",
+                                   {}).items()},
+            "room_closes": {k: list(v) for k, v in
+                            getattr(handler, "_room_closes",
+                                    {}).items()},
         },
     }
 
@@ -305,6 +315,19 @@ def load_state(data: Any) -> MathCommandHandler:
         handler._pending_notes = {
             str(k): list(v or []) for k, v in
             (raw_handler.get("pending_notes") or {}).items()}
+        handler._player_rooms = {
+            str(k): str(v) for k, v in
+            (raw_handler.get("player_rooms") or {}).items()}
+        handler._problem_rooms = {
+            str(k): str(v) for k, v in
+            (raw_handler.get("problem_rooms") or {}).items()}
+        handler._duel_rooms = {
+            str(d): {str(p): str(r) for p, r in (rooms or {}).items()}
+            for d, rooms in
+            (raw_handler.get("duel_rooms") or {}).items()}
+        handler._room_closes = {
+            str(k): list(v or []) for k, v in
+            (raw_handler.get("room_closes") or {}).items()}
     return handler
 
 
