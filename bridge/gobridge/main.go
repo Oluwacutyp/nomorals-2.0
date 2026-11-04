@@ -718,6 +718,9 @@ func kindOf(jid types.JID) string {
 	if jid.Server == types.GroupServer {
 		return "group"
 	}
+	if jid.Server == types.NewsletterServer {
+		return "channel"
+	}
 	return "dm"
 }
 

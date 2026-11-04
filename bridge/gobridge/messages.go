@@ -431,6 +431,23 @@ func (b *bridge) titleFor(ctx context.Context, chat types.JID, kind, pushName st
 			b.memMu.Unlock()
 		}
 	}
+	if title == "" && kind == "channel" {
+		// A channel post's sender IS the channel — there is no
+		// push name to fall back to. The newsletter metadata
+		// carries the channel's real name; cache it like a
+		// group's, so the registry note names the channel
+		// instead of filing it under its numeric JID.
+		gctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if meta, err := b.cli.GetNewsletterInfo(gctx, chat); err == nil && meta.ThreadMeta.Name.Text != "" {
+			title = meta.ThreadMeta.Name.Text
+		}
+		cancel()
+		if title != "" {
+			b.memMu.Lock()
+			b.titles[key] = title
+			b.memMu.Unlock()
+		}
+	}
 	if title == "" {
 		title = pushName
 	}

@@ -337,7 +337,8 @@ function remember(jid, msg) {
 }
 
 // ── Baileys helpers ──────────────────────────────────────────────────────────
-const kindOf = (jid) => (jid.endsWith('@g.us') ? 'group' : 'dm');
+const kindOf = (jid) => (jid.endsWith('@g.us') ? 'group'
+  : jid.endsWith('@newsletter') ? 'channel' : 'dm');
 
 function textOf(m) {
   const msg = m.message || {};
@@ -744,6 +745,20 @@ async function connect() {
             const meta = await wa.groupMetadata(jid);
             title = meta.subject || '';
             chatTitles.set(jid, title);
+          } catch { /* ignore */ }
+        }
+        if (kind === 'channel' && !title) {
+          // A channel post's author IS the channel — no push
+          // name to fall back to. The newsletter metadata
+          // carries the channel's real name; cache it like a
+          // group's subject. Guarded: a Baileys build without
+          // the verb leaves the title to the JID fallback.
+          try {
+            if (typeof wa.newsletterMetadata === 'function') {
+              const meta = await wa.newsletterMetadata('jid', jid);
+              title = (meta && meta.name) || '';
+              if (title) chatTitles.set(jid, title);
+            }
           } catch { /* ignore */ }
         }
         if (!title) title = m.pushName || senderId.split('@')[0];

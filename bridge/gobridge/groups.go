@@ -829,6 +829,27 @@ func (b *bridge) handleGroupAdminCommand(ctx context.Context, cc *clientConn, id
 		ok(map[string]any{"chat": jid.String(), "name": meta.ThreadMeta.Name.Text})
 		return true
 
+	case "channel_info":
+		jid, err := newsletterJID(req.str("chat"))
+		if err != nil {
+			bad(err)
+			return true
+		}
+		meta, err := b.cli.GetNewsletterInfo(ctx, jid)
+		if err != nil {
+			fail(err)
+			return true
+		}
+		// The follower count is the one number WhatsApp exposes
+		// for a channel (the follower list is never enumerable).
+		// Name/description ride along for the registry + console.
+		ok(map[string]any{
+			"name":        meta.ThreadMeta.Name.Text,
+			"description": meta.ThreadMeta.Description.Text,
+			"subscribers": meta.ThreadMeta.SubscriberCount,
+		})
+		return true
+
 	case "channel_react":
 		jid, err := newsletterJID(req.str("chat"))
 		if err != nil {

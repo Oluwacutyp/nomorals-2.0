@@ -347,6 +347,25 @@ export function registerGroupAdminCommands(ctx) {
       return { ok: true, chat: jid, name: (meta && meta.name) || '' };
     },
 
+    channel_info: async (req) => {
+      // The count half of the channel system: a channel's
+      // follower count comes from its newsletter metadata
+      // ('jid' form) — the follower LIST is never enumerable
+      // on WhatsApp, a count is all the platform exposes.
+      // Guarded like channel_resolve: a build without the
+      // verb gets an honest error, never a guessed number.
+      const jid = newsletterJid(req.chat);
+      if (typeof sock().newsletterMetadata !== 'function') {
+        throw new Error('this Baileys build has no newsletterMetadata verb — channel info is unavailable');
+      }
+      const meta = await sock().newsletterMetadata('jid', jid);
+      if (!meta) throw new Error('channel metadata came back empty');
+      const subs = meta.subscribers ?? meta.subscriber_count ?? null;
+      return { ok: true, name: meta.name || '',
+               description: meta.description || '',
+               subscribers: subs === null ? null : Number(subs) };
+    },
+
     channel_react: async (req) => {
       // The §14 mass-react mechanism for WhatsApp channels
       // (DESIGN §16): followers interact with a channel ONLY by

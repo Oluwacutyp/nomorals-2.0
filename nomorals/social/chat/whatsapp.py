@@ -20,6 +20,12 @@ Protocol (one JSON object per line):
     {"type":"message","id":"<wa message id>","chat":{"id","kind","title"},
      "from":{"id","name"},"text":"...",
      "media":[{"path","mime","kind"}],"reply_to":"","mentioned":false,"ts":<ms>}
+    # a chat whose id ends in "@newsletter" is a CHANNEL (kind
+    # "channel"); "@g.us" is a group.  The adapter derives the
+    # kind from the JID (see _kind_for_jid), so a bridge build
+    # that still calls newsletter traffic "dm" cannot get a
+    # channel post conversed with — channels stay silent and are
+    # only noted into the channel registry (§16/P4).
     {"type":"receipt","chat":"<jid>","ids":["<msg id>",...],"kind":"delivered|read"}
     {"id":"<req>","ok":true,"error":""}          # response to a command
     # send/send_media responses also carry "message_id": the real
@@ -41,6 +47,7 @@ Protocol (one JSON object per line):
     {"id":"<req>","cmd":"group_info","chat":"<@g.us>"}  # metadata + admins + invite link (if permitted)
     {"id":"<req>","cmd":"group_participants","chat":"<@g.us>"}  # roster with admin roles
     {"id":"<req>","cmd":"community_list"}              # communities + their linked groups
+    {"id":"<req>","cmd":"channel_info","chat":"<@newsletter>"}  # channel name/description + follower count (newsletter metadata)
 
 Offline resilience: when the bridge is down, ``send``/``send_media`` queue
 to a persistent outbox (``data/chat/outbox/whatsapp.jsonl``) and flush FIFO
@@ -423,12 +430,34 @@ def _jid_user_part(jid: str) -> str:
     return local.split(":", 1)[0].strip()
 
 
+def _kind_for_jid(chat_id: str, claimed: str = "",
+                  *, default: str = ChatKind.DM) -> str:
+    """The chat kind a JID *is*, whatever the bridge called it.
+
+    The JID's server suffix is protocol truth on every WhatsApp
+    engine: ``…@newsletter`` is a channel and ``…@g.us`` is a
+    group.  Bridges older than the channel build label
+    newsletter traffic "dm" (their kindOf knew two shapes), and
+    a channel post filed as a DM would be conversed with — the
+    one thing a channel must never get (§16 posture).  The
+    adapter therefore derives the kind from the JID and only
+    falls back to the bridge's claim for the shapes the JID
+    itself doesn't decide (DMs, status)."""
+    cid = (chat_id or "").strip()
+    if cid.endswith("@newsletter"):
+        return ChatKind.CHANNEL
+    if cid.endswith("@g.us"):
+        return ChatKind.GROUP
+    kind = str(claimed or "").strip().lower()
+    return kind if kind in ChatKind.ALL else default
+
+
 class WhatsAppAdapter(ChatAdapter):
     """Client for the local WhatsApp bridge (bridge/bin/ Go program
     by default, or the Node bridge/whatsapp-bridge.mjs)."""
 
     name = "whatsapp"
-    supported_kinds = (ChatKind.DM, ChatKind.GROUP)
+    supported_kinds = (ChatKind.DM, ChatKind.GROUP, ChatKind.CHANNEL)
 
     def __init__(
         self,
@@ -676,7 +705,8 @@ class WhatsAppAdapter(ChatAdapter):
         return ChatRef(
             platform=self.name,
             chat_id=str(entry.get("chat_id") or ""),
-            kind=str(entry.get("chat_kind") or ChatKind.DM),
+            kind=_kind_for_jid(str(entry.get("chat_id") or ""),
+                               str(entry.get("chat_kind") or "")),
             thread_id=str(entry.get("thread_id") or ""),
         )
 
@@ -930,7 +960,8 @@ class WhatsAppAdapter(ChatAdapter):
                 ts = float(ts) / 1000.0
             except (TypeError, ValueError):
                 ts = time.time()
-            chat_kind = str(chat.get("kind") or ChatKind.DM)
+            chat_kind = _kind_for_jid(
+                chat_id, str(chat.get("kind") or ""))
             message_id = str(obj.get("id") or "")
             if not self._was_sent_by_me(message_id) and \
                     self._is_self_chat(chat_id, chat_kind):
@@ -1043,7 +1074,9 @@ class WhatsAppAdapter(ChatAdapter):
                 ts = time.time()
             ref = ChatRef(
                 platform=self.name, chat_id=chat_id,
-                kind=str(chat.get("kind") or ChatKind.GROUP),
+                kind=_kind_for_jid(
+                    chat_id, str(chat.get("kind") or ""),
+                    default=ChatKind.GROUP),
                 title=str(chat.get("title") or ""), peer=chat_id)
             if kind == "revoke":
                 self._deliver(handler, ChatMessage(
@@ -1083,7 +1116,8 @@ class WhatsAppAdapter(ChatAdapter):
                     chat=ChatRef(
                         platform=self.name,
                         chat_id=chat_id,
-                        kind=str(chat.get("kind") or ChatKind.DM),
+                        kind=_kind_for_jid(
+                            chat_id, str(chat.get("kind") or "")),
                         title=str(chat.get("title") or ""),
                         peer=str((obj.get("from") or {}).get("id") or chat_id),
                     ),
@@ -1479,7 +1513,9 @@ class WhatsAppAdapter(ChatAdapter):
             out.append({
                 "id": str(entry.get("id") or ""),
                 "title": str(entry.get("title") or ""),
-                "kind": str(entry.get("kind") or ChatKind.DM),
+                "kind": _kind_for_jid(
+                    str(entry.get("id") or ""),
+                    str(entry.get("kind") or "")),
                 "last_ts": float(entry.get("ts") or 0) / 1000.0,
             })
         return [c for c in out if c["id"]]
@@ -2097,6 +2133,56 @@ class WhatsAppAdapter(ChatAdapter):
         result = self.send(chat_ref, text)
         return {"ok": result.ok, "message_id": result.message_id,
                 "error": result.error or ""}
+
+    def channel_info(self, chat: ChatRef | str) -> dict[str, Any]:
+        """Read a channel's newsletter metadata through the
+        bridge's ``channel_info``: name, description, and the
+        follower count the platform exposes.  ``subscribers``
+        is an int when the metadata carries one and stays None
+        when it doesn't — absence, never a fabricated 0.  A
+        bridge without the verb (an older build) answers
+        ok:false, and that refusal is the result."""
+        res = self._admin_cmd("channel_info",
+                              {"chat": self._newsletter_jid(chat)})
+        if not res.get("ok"):
+            return {"ok": False,
+                    "error": str(res.get("error")
+                                 or "channel_info failed")}
+        subs = res.get("subscribers")
+        try:
+            subs = int(subs) if subs is not None else None
+        except (TypeError, ValueError):
+            subs = None
+        return {"ok": True,
+                "name": str(res.get("name") or ""),
+                "description": str(res.get("description") or ""),
+                "subscribers": subs}
+
+    def admin_member_count(self, chat: ChatRef) -> dict[str, Any]:
+        """The runtime's channel-sampling contract (the same
+        ``{"ok", "count"}`` shape the Telegram bot adapter
+        answers): the one count WhatsApp exposes to a surface
+        is a channel's follower count, read from its newsletter
+        metadata.  The follower LIST is never enumerable on
+        WhatsApp (platform fact) — a count is all there is.
+        Groups expose no count verb (their rosters are read
+        member by member) and DMs have nothing to count, so
+        both answer ok:False and callers render ABSENCE —
+        sampled-never is not a 0."""
+        if not self._jid(chat).endswith("@newsletter"):
+            return {"ok": False,
+                    "error": "whatsapp exposes a member count "
+                             "only for channels (newsletter "
+                             "metadata)"}
+        info = self.channel_info(chat)
+        if not info.get("ok"):
+            return {"ok": False,
+                    "error": str(info.get("error") or "")}
+        if info.get("subscribers") is None:
+            return {"ok": False,
+                    "error": "the channel metadata carried no "
+                             "follower count"}
+        return {"ok": True, "count": int(info["subscribers"])}
 
     def _newsletter_jid(self, chat: ChatRef | str) -> str:
         """Normalize a chat ref or raw string to a newsletter JID."""
