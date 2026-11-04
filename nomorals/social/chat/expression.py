@@ -74,6 +74,8 @@ __all__ = [
     "describe_sequence",
     "CustomEmojiRegistry",
     "ExpressionLibrary",
+    "CaptureError", "capture_library_sticker",
+    "AUTO_COLLECT_ROOM_CAP", "auto_collected_from",
     "ProviderHealth", "TenorProvider", "GiphyProvider",
     "default_providers", "download_to_library",
     "MOMENT_TAGS", "DRY_MOMENTS", "ExpressionService",
@@ -186,6 +188,13 @@ EXPRESSION_DEFAULTS: dict[str, Any] = {
     "gifs": "normal",
     "welcome_media": True,
     "ban_theatre": True,
+    # §21 sticker stealer, second capture mode: stickers
+    # landing in the room join her library passively.  The
+    # design names it "an auto-collect mode a group admin
+    # enables" — so it is OFF until an admin turns it on
+    # (/gsettings expression collect on|off), and the §33
+    # claimed-room gate applies on top, always.
+    "auto_collect": False,
 }
 
 
@@ -663,15 +672,24 @@ class ExpressionLibrary:
     def add_item(self, *, kind: str, path: str = "",
                  file_ids: dict[str, str] | None = None,
                  tags: Any = (), moods: Any = (),
-                 source: str = "", origin: str = ""
+                 source: str = "", origin: str = "",
+                 sha: str = "", note: str = "",
+                 by_reference: bool = False
                  ) -> dict[str, Any]:
         """Add one item (or return the existing twin: same path,
-        or a shared platform file_id — her library never holds
-        the same media twice)."""
+        a shared platform file_id, or the same content hash —
+        her library never holds the same media twice).  ``sha``
+        / ``note`` / ``by_reference`` are additive: captures
+        that hold bytes record the hash (the dedupe key for
+        media whose path changes between downloads), and
+        captures that could only hold a platform handle say
+        so, with the reason in ``note``."""
         file_ids = {str(k): str(v) for k, v in
                     (file_ids or {}).items() if v}
         for item in self.data["items"]:
             if path and item.get("path") == path:
+                return item
+            if sha and item.get("sha") == sha:
                 return item
             held = item.get("file_ids") or {}
             if any(held.get(k) == v for k, v in file_ids.items()):
@@ -682,6 +700,8 @@ class ExpressionLibrary:
             "tags": [str(t).lower() for t in tags or () if str(t).strip()],
             "moods": [str(m).lower() for m in moods or () if str(m).strip()],
             "source": str(source or ""), "origin": str(origin or ""),
+            "sha": str(sha or ""), "note": str(note or ""),
+            "by_reference": bool(by_reference),
             "uses": 0, "created": time.time(),
         }
         self.data["items"].append(item)
@@ -788,6 +808,158 @@ class ExpressionLibrary:
     def save_custom_emoji(self, registry: CustomEmojiRegistry) -> None:
         self.data["custom_emoji"] = registry.to_dict()
         self.save()
+
+
+# ── auto-collect (§21: the stealer's passive mode) ─────────────
+
+#: Per-room bound on PASSIVE collection: one room may grow
+#: the library by at most this many stickers on its own.
+#: /steal is a human's deliberate claim and is not bounded
+#: by this; the bound exists so an ordinary busy (or sticker-
+#: happy) room cannot grow the shared library without limit
+#: just by existing.  At the bound, further captures from
+#: that room are plain no-ops.
+AUTO_COLLECT_ROOM_CAP = 300
+
+
+class CaptureError(RuntimeError):
+    """A passive capture that could not honestly land."""
+
+
+def auto_collected_from(library: ExpressionLibrary,
+                        origin: str) -> int:
+    """How many items one room has passively contributed."""
+    return sum(1 for item in library.items
+               if item.get("source") == "auto-collect"
+               and item.get("origin") == origin)
+
+
+def capture_library_sticker(library: ExpressionLibrary, *,
+                            path: str = "",
+                            file_ids: dict[str, str] | None = None,
+                            media_dir: Path | str = "",
+                            origin: str = "", name: str = ""
+                            ) -> dict[str, Any]:
+    """Land one passively-seen sticker in her library, under
+    the same capture discipline as the packs (§21 media2):
+    format is read from magic bytes, never the filename —
+    WebP stays WebP, WebM stays WebM (copied into the
+    library's own media dir, content-named, so the same
+    sticker always lands at the same path), another raster
+    shape is normalized to a real WebP through the
+    conversion organ, a .tgs (Lottie) is held BY REFERENCE
+    with the reason named, and media whose bytes never
+    reached us is held by reference too.  Dedupe is by
+    content hash first (the library's path/file_id twin
+    rules ride along inside add_item): a sticker already
+    held is a no-op returning the held item.  Provenance is
+    the library's own shape — source "auto-collect", origin
+    the room key.  Raises CaptureError when there is
+    honestly nothing to hold, and when the room has reached
+    AUTO_COLLECT_ROOM_CAP passive contributions."""
+    from .sticker_packs import _sniff
+
+    file_ids = {str(k): str(v) for k, v in
+                (file_ids or {}).items() if v}
+
+    def _twin() -> dict[str, Any] | None:
+        """The held item for these platform handles, if any
+        (the add_item twin rule, readable before the cap:
+        a duplicate is a no-op, never a cap casualty)."""
+        for item in library.items:
+            held = item.get("file_ids") or {}
+            if any(held.get(k) == v for k, v in file_ids.items()):
+                return item
+        return None
+
+    def _cap_gate() -> None:
+        if auto_collected_from(library, origin) >= AUTO_COLLECT_ROOM_CAP:
+            raise CaptureError(
+                "this room has already auto-collected "
+                f"{AUTO_COLLECT_ROOM_CAP} stickers — the "
+                "passive bound; /steal still claims "
+                "deliberately")
+
+    src = Path(path) if path else None
+    if src is not None and not src.exists():
+        src = None
+    if src is None:
+        if file_ids:
+            twin = _twin()
+            if twin is not None:
+                return twin
+            _cap_gate()
+            return library.add_item(
+                kind="sticker", path="", file_ids=file_ids,
+                tags=["sticker"], source="auto-collect",
+                origin=origin, by_reference=True,
+                note=("held by platform reference — this "
+                      "surface couldn't hand me the bytes, so "
+                      "re-sends go by the platform's own handle"))
+        raise CaptureError(
+            "nothing to collect — no bytes and no platform "
+            "handle reached me for that sticker")
+
+    raw = src.read_bytes()
+    if not raw:
+        raise CaptureError("that sticker download came back "
+                           "empty — nothing to collect")
+    sha = hashlib.sha256(raw).hexdigest()
+    for item in library.items:
+        if item.get("sha") == sha:
+            return item
+    fmt = _sniff(raw[:16]) or src.suffix.lower().lstrip(".")
+    if fmt == "tgs":
+        if not file_ids:
+            raise CaptureError(
+                "a .tgs (Lottie) sticker with no platform "
+                "handle — nothing honest to hold")
+        twin = _twin()
+        if twin is not None:
+            return twin
+        _cap_gate()
+        return library.add_item(
+            kind="sticker", path="", file_ids=file_ids,
+            tags=["sticker"], source="auto-collect",
+            origin=origin, sha=sha, by_reference=True,
+            note=("a .tgs (Lottie) sticker — held by platform "
+                  "reference; I don't render Lottie, so the "
+                  "handle is the honest copy"))
+    _cap_gate()
+
+    dest_dir = Path(media_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    note = ""
+    if fmt in ("webp", "webm"):
+        dest = dest_dir / f"stk_{sha[:16]}.{fmt}"
+        if not dest.exists():
+            import shutil
+
+            shutil.copyfile(src, dest)
+    else:
+        # Another raster shape (png/jpg photo-sticker): the
+        # conversion organ normalizes it to a real WebP.
+        from . import media_convert
+
+        try:
+            made = media_convert.image_to_sticker(
+                src, out_dir=dest_dir)
+        except media_convert.ConversionError as exc:
+            raise CaptureError(
+                "that media isn't a sticker I can keep: "
+                f"{exc}") from exc
+        dest = dest_dir / f"stk_{sha[:16]}.webp"
+        made = Path(made)
+        if made != dest:
+            import shutil
+
+            shutil.move(str(made), str(dest))
+        fmt = "webp"
+        note = "normalized to WebP from the original image"
+    return library.add_item(
+        kind="sticker", path=str(dest), file_ids=file_ids,
+        tags=["sticker"], source="auto-collect", origin=origin,
+        sha=sha, note=note)
 
 
 # ── GIF providers (seed sources, health-checked) ─────────────────

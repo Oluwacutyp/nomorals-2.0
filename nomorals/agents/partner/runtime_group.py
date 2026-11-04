@@ -1183,6 +1183,18 @@ class RuntimeGroupMixin:
         # surface checks each channel's claim before posting.
         self._drive_all_channels(surface)
         actions = result.get("actions") or []
+        # §21 auto-collect rides the same cycle: a sticker
+        # that landed in a claimed room whose admin enabled
+        # it joins her library, passively.  A message the
+        # pipeline deleted is never collected from — the
+        # room removed it; she doesn't keep its media.
+        # (RuntimeExpressionMixin owns the beat; scope,
+        # toggle and capture discipline live there.)
+        collect = getattr(self, "_auto_collect_media", None)
+        if collect is not None and not any(
+                str(a.get("kind") or "") == "delete"
+                for a in actions):
+            collect(surface, key, message)
         if not actions:
             return False
         adapter = self._group_adapter(message.chat.platform)
@@ -1478,7 +1490,7 @@ class RuntimeGroupMixin:
         expression section (bare words). Returns the reply line,
         or None when the words aren't expression grammar.
         Forms: `on|off` · `gifs off|low|normal` ·
-        `welcome on|off` · `ban on|off`."""
+        `welcome on|off` · `ban on|off` · `collect on|off`."""
         w = [str(x).lower() for x in words or []]
         if w == ["on"] or w == ["off"]:
             on = w[0] == "on"
@@ -1509,6 +1521,15 @@ class RuntimeGroupMixin:
             self._expression_update(surface, key, ban_theatre=on)
             return (f"ban theatre {'on' if on else 'off'} — "
                     "warnings stay dry either way.")
+        if len(w) == 2 and w[0] == "collect" \
+                and w[1] in ("on", "off"):
+            on = w[1] == "on"
+            self._expression_update(surface, key, auto_collect=on)
+            return (f"auto-collect {'on' if on else 'off'} — "
+                    + ("stickers landing here join my library "
+                       "as they pass." if on else
+                       "I only take stickers I'm handed here "
+                       "(/steal)."))
         return None
 
     def _reputation_update(self, surface, key, **fields):  # type: ignore[no-untyped-def]
@@ -2806,6 +2827,8 @@ class RuntimeGroupMixin:
                 f"{'on' if expr.get('welcome_media', True) else 'off'}"
                 f" · ban theatre "
                 f"{'on' if expr.get('ban_theatre', True) else 'off'}"
+                f" · auto-collect "
+                f"{'on' if expr.get('auto_collect', False) else 'off'}"
                 f"{lib_n}",
                 "warnings stay dry at every setting — a warning "
                 "is a record, not a show",
@@ -2931,7 +2954,8 @@ class RuntimeGroupMixin:
                 "`/gsettings expression on|off` · "
                 "`/gsettings expression gifs off|low|normal`",
                 "`/gsettings expression welcome on|off` · "
-                "`/gsettings expression ban on|off`",
+                "`/gsettings expression ban on|off` · "
+                "`/gsettings expression collect on|off`",
                 "`/gsettings reputation public|admins|restricted"
                 "|off` — join warnings for flagged members (§32)",
                 "`/gsettings conflict off|crime|warfare` · "
@@ -2997,7 +3021,8 @@ class RuntimeGroupMixin:
             return ("usage: /gsettings expression on|off · "
                     "expression gifs off|low|normal · "
                     "expression welcome on|off · "
-                    "expression ban on|off")
+                    "expression ban on|off · "
+                    "expression collect on|off")
         if head == "reputation":
             # Cross-group reputation (§32): the join-warning
             # mode — the same helper the DM console's reputation
@@ -4850,6 +4875,10 @@ class RuntimeGroupMixin:
                 f" · ban theatre "
                 f"{'on' if expr.get('ban_theatre', True) else 'off'}"
                 f" · {lib_line}",
+                f"auto-collect "
+                f"{'on' if expr.get('auto_collect', False) else 'off'}"
+                f" — stickers landing here join the library "
+                f"passively, when on (claimed rooms only)",
                 "moments: welcome · quest complete · jackpot · "
                 "season podium · duel wins · estate milestones · "
                 "bans (theatre) — warnings stay dry, always",
@@ -4868,10 +4897,13 @@ class RuntimeGroupMixin:
                          bool(expr.get("welcome_media", True))),
                  _toggle("ban", "Ban theatre", "ban",
                          bool(expr.get("ban_theatre", True)))],
+                [_toggle("collect", "Auto-collect", "collect",
+                         bool(expr.get("auto_collect", False)))],
             ]
             card.block_lines([
                 "`on|off` · `gifs off|low|normal`",
-                "`welcome on|off` · `ban on|off`",
+                "`welcome on|off` · `ban on|off` · "
+                "`collect on|off`",
             ], title="Grammar")
         elif section == "reputation":
             rep = s.get("reputation") or {}

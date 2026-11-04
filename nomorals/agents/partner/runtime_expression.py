@@ -35,6 +35,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .failures import record_failure
+
 _log = logging.getLogger(__name__)
 
 _CELEBRATIONS = frozenset({
@@ -250,6 +252,87 @@ class RuntimeExpressionMixin:
         surface = self._group_surface()
         return self._system_send_ok(surface, message.chat.key,
                                     message, what)
+
+    # ---- auto-collect (§21: the stealer's passive mode) --------
+    def _auto_collect_media(self, surface, key, message) -> None:  # type: ignore[no-untyped-def]
+        """Passively collect stickers landing in this room
+        into her library — the auto-collect mode §21 names
+        ("an auto-collect mode a group admin enables"), run
+        as one beat of the group message cycle.
+
+        Scope is the §33 posture applied to collecting:
+        groups only (never DMs), the room must be claimed
+        for her bot systems (checked quietly through the
+        surface's own predicate — a passive beat journals
+        no suppression per sticker), and the group's
+        expression settings must carry the admin-enabled
+        ``auto_collect`` toggle.  Foreign rooms collect
+        nothing and hold no state from this.  The kind
+        check runs first, so non-sticker traffic costs one
+        comparison.  Never raises: a capture failure is
+        recorded in the failure ledger and the room's
+        message handling proceeds untouched."""
+        try:
+            from ...social.chat.base import ChatKind
+
+            if getattr(message.chat, "kind", None) != ChatKind.GROUP:
+                return
+            stickers = [
+                m for m in (getattr(message, "media", None) or [])
+                if str(getattr(m, "kind", "") or "") == "sticker"]
+            if not stickers:
+                return
+            settings = surface.store.settings(key)
+            expr = settings.get("expression") or {}
+            if not expr.get("auto_collect"):
+                return
+            platform = str(getattr(message.chat, "platform", "")
+                           or "")
+            if not surface.system_output_allowed(
+                    key, via_platform=platform):
+                return
+            from ...social.chat.expression import (
+                CaptureError, capture_library_sticker)
+
+            library = self._expression_library()
+            media_dir = (self._expression_root()
+                         / "expression_media")
+            adapter = self._group_adapter(platform)
+            download = getattr(adapter, "download_file", None) \
+                if adapter else None
+            for entry in stickers:
+                try:
+                    path = str(getattr(entry, "path", "") or "")
+                    file_id = str(getattr(entry, "file_id", "")
+                                  or "")
+                    file_ids = ({platform: file_id}
+                                if file_id else {})
+                    if not path and file_id \
+                            and download is not None:
+                        path = str(download(
+                            file_id,
+                            str(getattr(entry, "name", "")
+                                or "sticker")) or "")
+                    capture_library_sticker(
+                        library, path=path, file_ids=file_ids,
+                        media_dir=media_dir, origin=key,
+                        name=str(getattr(entry, "name", "")
+                                 or ""))
+                except CaptureError as exc:
+                    # An honest refusal (the room's passive
+                    # bound, or nothing holdable): a held
+                    # audit line, never a failure — and the
+                    # next sticker in the room is unaffected.
+                    surface._audit(key, "auto_collect_refused",
+                                   reason=str(exc))
+                except Exception as exc:  # noqa: BLE001 - collection never breaks the room
+                    record_failure("expression.auto_collect",
+                                   exc)
+                    _log.debug("auto-collect failed",
+                               exc_info=True)
+        except Exception as exc:  # noqa: BLE001 - the beat never breaks the turn
+            record_failure("expression.auto_collect", exc)
+            _log.debug("auto-collect beat failed", exc_info=True)
 
     # ---- /steal ------------------------------------------------------
     def _control_steal(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
