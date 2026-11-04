@@ -240,12 +240,20 @@ class SendResult:
     #: file_id). The expression library caches it per item so the
     #: next send of the same media goes by handle, no re-upload.
     media_file_id: str = ""
+    #: The view count the platform reported for the message just
+    #: sent, when it reported one at all (a Telegram channel post
+    #: carries views; most sends on most platforms report none).
+    #: None means "not returned" — never a fabricated 0.  The
+    #: durable series is the channel drive's views re-read; this
+    #: is only the send-time seed.
+    views: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {"ok": self.ok, "platform": self.platform, "message_id": self.message_id,
                 "error": self.error, "seconds": round(self.seconds, 3),
                 "delivery_degraded": self.delivery_degraded,
-                "media_file_id": self.media_file_id}
+                "media_file_id": self.media_file_id,
+                "views": self.views}
 
 
 class ChatAdapter(ABC):

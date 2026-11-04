@@ -4525,11 +4525,14 @@ class RuntimeGroupMixin:
 
     def _channel_drive(self, key, *, now=None, force=False):  # type: ignore[no-untyped-def]
         """Drive one channel's posting cycle: sample the
-        subscriber count when the platform's adapter actually
-        exposes one, then post due queue entries through the
-        gateway.  The surface checks the claim before anything
-        posts; a platform that exposes no count is sampled
-        never — absence stays absence, never a fabricated 0."""
+        analytics the platform's adapter actually exposes
+        (subscriber count, published-post views re-read,
+        broadcast stats), then post due queue entries through
+        the gateway.  The surface checks the claim before
+        anything posts; a platform that exposes a metric is
+        sampled on the sample cadence, a platform that exposes
+        none is sampled never — absence stays absence, never
+        a fabricated 0."""
         from types import SimpleNamespace
 
         from ...social.chat.base import ChatKind, ChatRef
@@ -4546,18 +4549,54 @@ class RuntimeGroupMixin:
         # series-built (§33).
         if adapter is not None and cfg.get("analytics", True) \
                 and surface.claim_state(key)["claimed"]:
+            ref = ChatRef.parse(str(key), kind=ChatKind.CHANNEL)
             counter = getattr(adapter, "admin_member_count",
                               None)
             if callable(counter):
                 try:
-                    res = counter(ChatRef.parse(
-                        str(key), kind=ChatKind.CHANNEL))
+                    res = counter(ref)
                 except Exception:  # noqa: BLE001 - a failed
                     res = None              # read is absence
                 if isinstance(res, dict) and res.get("ok") \
                         and res.get("count") is not None:
                     surface.note_channel_count(
                         key, int(res["count"]), now=now)
+            # Views re-read: the counters live on the published
+            # posts and grow after posting, so the beat fetches
+            # their CURRENT values for every post in the ring —
+            # the send receipt's number was only ever a seed.
+            viewer = getattr(adapter, "channel_post_views", None)
+            if callable(viewer) \
+                    and surface.channel_views_due(key, now=now):
+                published = surface.channel_published_ids(key)
+                if published:
+                    try:
+                        res = viewer(ref, published)
+                    except Exception:  # noqa: BLE001 - a failed
+                        res = None              # read is absence
+                    if isinstance(res, dict) and res.get("ok"):
+                        surface.note_channel_views_read(
+                            key, res.get("views") or {}, now=now)
+            # Broadcast stats (Telegram via the userbot): a
+            # grant lands as a sample; a refusal lands as the
+            # absence-with-reason state — and stamps the beat
+            # either way, so a too-small channel is re-asked on
+            # the sample cadence, never per turn.
+            statser = getattr(adapter, "channel_broadcast_stats",
+                              None)
+            if callable(statser) \
+                    and surface.channel_stats_due(key, now=now):
+                try:
+                    res = statser(ref)
+                except Exception as exc:  # noqa: BLE001
+                    res = {"ok": False, "error": str(exc)}
+                if isinstance(res, dict) and res.get("ok"):
+                    surface.note_channel_stats(key, res, now=now)
+                elif isinstance(res, dict):
+                    surface.note_channel_stats_unavailable(
+                        key, str(res.get("error")
+                                 or "broadcast stats refused"),
+                        now=now)
         gateway = getattr(self, "gateway", None)
         if gateway is None \
                 or not callable(getattr(gateway, "send", None)):
@@ -6098,13 +6137,62 @@ class RuntimeGroupMixin:
         else:
             lines.append("posts: none posted yet")
         if analytics["views_total"] is not None:
-            lines.append(f"post views: "
-                         f"{analytics['views_total']:,} total "
-                         "where the platform returned them")
+            line = (f"post views: "
+                    f"{analytics['views_total']:,} total "
+                    "where the platform returned them")
+            if analytics["views_sampled_at"]:
+                line += (f" · last read "
+                         f"{time.strftime('%Y-%m-%d %H:%M', time.gmtime(analytics['views_sampled_at']))} UTC")
+            lines.append(line)
         else:
             lines.append(
                 "post views: not returned by any connected "
                 "platform — not estimated, not guessed")
+        stats = analytics["stats"]
+        can_stats = adapter is not None and callable(
+            getattr(adapter, "channel_broadcast_stats", None))
+        if stats is not None:
+            bits = []
+            if stats["followers"] is not None:
+                bit = f"followers {stats['followers']:,}"
+                if stats["followers_delta"] is not None:
+                    bit += (f" ({stats['followers_delta']:+,} "
+                            "over the stats period)")
+                bits.append(bit)
+            if stats["views_per_post"] is not None:
+                bits.append(f"{stats['views_per_post']:,.0f} "
+                            "views/post")
+            if stats["shares_per_post"] is not None:
+                bits.append(f"{stats['shares_per_post']:,.0f} "
+                            "shares/post")
+            if stats["reactions_per_post"] is not None:
+                bits.append(
+                    f"{stats['reactions_per_post']:,.0f} "
+                    "reactions/post")
+            lines.append(
+                "broadcast stats (Telegram's own, sampled "
+                f"{time.strftime('%Y-%m-%d %H:%M', time.gmtime(stats['sampled_at']))} UTC): "
+                + " · ".join(bits))
+            if analytics["stats_unavailable"]:
+                lines.append(
+                    "the latest stats check was refused ("
+                    f"{analytics['stats_unavailable']}) — the "
+                    "sample above is the last one granted")
+        elif analytics["stats_unavailable"]:
+            lines.append(
+                "broadcast stats: Telegram does not grant "
+                f"them for this channel — "
+                f"{analytics['stats_unavailable']} (checked "
+                f"{time.strftime('%Y-%m-%d %H:%M', time.gmtime(analytics['stats_checked_at']))} UTC) "
+                "— not a zero, and not retried off-cycle")
+        elif can_stats:
+            lines.append(
+                "broadcast stats: not sampled yet — they ride "
+                "the same cycle as the counts")
+        else:
+            lines.append(
+                "broadcast stats: this platform exposes none "
+                "to me — nothing is invented in their place")
         return lines
 
     def _console_channel_apply(self, surface, key, message,  # type: ignore[no-untyped-def]

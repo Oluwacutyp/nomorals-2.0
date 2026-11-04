@@ -7460,9 +7460,12 @@ class GroupSurface:
                            views: int, *,
                            now: float | None = None) -> None:
         """Record a post view count where a platform actually
-        returned one.  No adapter currently surfaces views, so
-        in practice this stays empty and the analytics card
-        says views are not exposed — the honest state."""
+        returned one (a send receipt that carried the counter).
+        Counts the platform never returned stay absent, and
+        the analytics card says views are not exposed — the
+        honest state.  The durable series is the re-read beat
+        (:meth:`note_channel_views_read`); this is the
+        send-time seed for it."""
         if not message_id:
             return
         extras = self._extras(key)
@@ -7471,18 +7474,144 @@ class GroupSurface:
         extras["channel_views"] = seen
         self.store.save()
 
+    def channel_published_ids(self, key: str) -> list[str]:
+        """The platform message ids of posts this channel's
+        queue has published (the posts ring) — the ids a views
+        re-read asks the platform about."""
+        extras = self._extras(key)
+        return [str(p.get("message_id") or "")
+                for p in (extras.get("channel_posts") or [])
+                if p.get("message_id")]
+
+    def channel_views_due(self, key: str, *,
+                          now: float | None = None) -> bool:
+        """Is a views re-read beat due?  Views ride the same
+        sample discipline as counts (≤1 per sample gap), so a
+        busy message cycle never turns into a platform poll."""
+        now = now if now is not None else time.time()
+        extras = self._extras(key)
+        last = float(extras.get("channel_views_at") or 0)
+        return now - last >= self._CHANNEL_SAMPLE_GAP_S
+
+    def note_channel_views_read(self, key: str,
+                                views_by_id: dict[str, int], *,
+                                now: float | None = None) -> int:
+        """Record one views re-read beat: the platform's CURRENT
+        counters for published posts, fetched long after send
+        time (views grow; a send receipt's number is stale the
+        moment it lands).  Only ids the platform actually
+        returned a count for are recorded — an id missing from
+        the mapping keeps whatever it had, and a channel whose
+        posts were never counted keeps views absent.  The beat
+        stamps even when every count came back already-known:
+        the read happened.  Returns how many counts landed."""
+        now = now if now is not None else time.time()
+        extras = self._extras(key)
+        seen = dict(extras.get("channel_views") or {})
+        landed = 0
+        for message_id, views in (views_by_id or {}).items():
+            if not message_id or views is None:
+                continue
+            seen[str(message_id)] = int(views)
+            landed += 1
+        extras["channel_views"] = seen
+        extras["channel_views_at"] = now
+        self.store.save()
+        return landed
+
+    def channel_stats_due(self, key: str, *,
+                          now: float | None = None) -> bool:
+        """Is a broadcast-stats sample due?  Same ≤1-per-gap
+        discipline as counts — a refused sample (a channel too
+        small for Telegram stats) stamps the attempt too, so
+        refusal never becomes a per-turn retry storm."""
+        now = now if now is not None else time.time()
+        extras = self._extras(key)
+        last = float(extras.get("channel_stats_at") or 0)
+        return now - last >= self._CHANNEL_SAMPLE_GAP_S
+
+    def note_channel_stats(self, key: str,
+                           stats: dict[str, Any], *,
+                           now: float | None = None) -> None:
+        """Record one broadcast-stats sample the platform
+        actually returned (Telegram stats.getBroadcastStats via
+        the userbot): follower level + previous-period level
+        and per-post averages.  A landed sample clears any
+        recorded refusal — the latest attempt is the state."""
+        now = now if now is not None else time.time()
+        extras = self._extras(key)
+        extras["channel_stats"] = {
+            "ts": now,
+            "followers": stats.get("followers"),
+            "followers_prev": stats.get("followers_prev"),
+            "views_per_post": stats.get("views_per_post"),
+            "views_per_post_prev": stats.get(
+                "views_per_post_prev"),
+            "shares_per_post": stats.get("shares_per_post"),
+            "reactions_per_post": stats.get(
+                "reactions_per_post"),
+            "enabled_notifications_pct": stats.get(
+                "enabled_notifications_pct"),
+        }
+        extras["channel_stats_at"] = now
+        extras.pop("channel_stats_state", None)
+        self.store.save()
+
+    def note_channel_stats_unavailable(self, key: str,
+                                       reason: str, *,
+                                       now: float | None = None
+                                       ) -> None:
+        """Record that the platform REFUSED a broadcast-stats
+        sample (channel too small, account not admin — Telegram
+        says why).  The refusal is a state with a reason and a
+        stamp, rendered as absence-with-reason: not a zero,
+        not a silent blank, and stamped so the next attempt
+        waits for the next sample beat."""
+        now = now if now is not None else time.time()
+        extras = self._extras(key)
+        extras["channel_stats_state"] = {
+            "reason": str(reason or "")[:200], "ts": now}
+        extras["channel_stats_at"] = now
+        self.store.save()
+
     def channel_analytics(self, key: str) -> dict[str, Any]:
         """The analytics truth for one channel, from recorded
         samples only: subscriber level + growth deltas when
         samples exist, post counts from the journal, view
-        totals only when a platform returned views.  Absence
+        totals only when a platform returned views, broadcast
+        stats only when a platform granted them.  Absence
         is reported as absence (``subscribers: None``), never
         as zero — "cannot read" and "0 subscribers" are
-        different facts and the card keeps them apart."""
+        different facts and the card keeps them apart.  A
+        stats refusal is reported as its reason
+        (``stats_unavailable``), distinct from both a sample
+        and from never having asked."""
         extras = self._extras(key)
         counts = list(extras.get("channel_counts") or [])
         posts = list(extras.get("channel_posts") or [])
         views = dict(extras.get("channel_views") or {})
+        raw_stats = extras.get("channel_stats") or None
+        stats = None
+        if raw_stats:
+            followers = raw_stats.get("followers")
+            prev = raw_stats.get("followers_prev")
+            stats = {
+                "followers": followers,
+                "followers_delta": (
+                    int(followers) - int(prev)
+                    if followers is not None
+                    and prev is not None else None),
+                "views_per_post": raw_stats.get(
+                    "views_per_post"),
+                "shares_per_post": raw_stats.get(
+                    "shares_per_post"),
+                "reactions_per_post": raw_stats.get(
+                    "reactions_per_post"),
+                "enabled_notifications_pct": raw_stats.get(
+                    "enabled_notifications_pct"),
+                "sampled_at": float(raw_stats.get("ts") or 0),
+            }
+        stats_state = extras.get("channel_stats_state") or {}
 
         def _delta(window: float) -> int | None:
             if len(counts) < 2:
@@ -7509,6 +7638,14 @@ class GroupSurface:
                              if posts else 0.0),
             "views_total": (sum(int(v) for v in views.values())
                             if views else None),
+            "views_sampled_at": float(
+                extras.get("channel_views_at") or 0),
+            "stats": stats,
+            "stats_unavailable": (
+                str(stats_state.get("reason"))
+                if stats_state.get("reason") else None),
+            "stats_checked_at": float(
+                extras.get("channel_stats_at") or 0),
         }
 
     # -- leaderboards (§14): one organ, many boards --------------

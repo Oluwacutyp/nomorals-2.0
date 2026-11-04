@@ -1749,9 +1749,14 @@ class TelegramAdapter(ChatAdapter):
                 heartbeat("telegram", True)
             except Exception as exc:  # noqa: BLE001 - telemetry never breaks sends
                 record_failure('telegram.TelegramAdapter.send', exc)
+            _views = getattr(result, "views", None)
             return SendResult(
                 ok=True, platform=self.name, message_id=str(getattr(result, "id", "")),
                 seconds=time.perf_counter() - started,
+                # a channel post's Telethon message carries its
+                # view count when Telegram reports one; anything
+                # else stays None ("not returned"), never 0
+                views=_views if isinstance(_views, int) else None,
             )
         except Exception as exc:  # noqa: BLE001 - ordinary failure, report as result
             self.stats["send_errors"] += 1
@@ -1929,9 +1934,12 @@ class TelegramAdapter(ChatAdapter):
 
         try:
             result = self._run_on_loop(_do())
+            _views = getattr(result, "views", None)
             return SendResult(ok=True, platform=self.name,
                               message_id=str(getattr(result, "id", "")),
-                              seconds=time.perf_counter() - started)
+                              seconds=time.perf_counter() - started,
+                              views=_views if isinstance(_views, int)
+                              else None)
         except Exception as exc:  # noqa: BLE001
             self.stats["send_errors"] += 1
             return SendResult(ok=False, platform=self.name, error=str(exc),
@@ -2512,6 +2520,185 @@ class TelegramAdapter(ChatAdapter):
             members = members[:cap]
         return {"ok": True, "members": members,
                 "count": len(members), "truncated": truncated}
+
+    # ── channel analytics reads (groups/channels census #3) ─────
+    #
+    # The MTProto route to the numbers the Bot API cannot give:
+    # full-chat member counts, per-post view counts re-read from
+    # the posts themselves, and the broadcast statistics Telegram
+    # grants admin accounts on channels large enough to have
+    # them.  Every read is honest: a number Telegram returned,
+    # or ok=False with the reason — absence is never dressed
+    # as 0.
+
+    async def _member_count_coro(self, chat: ChatRef) -> int:
+        from telethon.tl.functions.channels import \
+            GetFullChannelRequest
+        from telethon.tl.functions.messages import \
+            GetFullChatRequest
+
+        entity = await self._resolve(chat)
+        count = None
+        if getattr(entity, "broadcast", False) or getattr(
+                entity, "megagroup", False):
+            full = await self._client(
+                GetFullChannelRequest(channel=entity))
+            count = getattr(getattr(full, "full_chat", None),
+                            "participants_count", None)
+        else:
+            full = await self._client(GetFullChatRequest(
+                chat_id=int(getattr(entity, "id", 0) or 0)))
+            count = getattr(getattr(full, "full_chat", None),
+                            "participants_count", None)
+            if count is None:
+                chats = getattr(full, "chats", None) or []
+                if chats:
+                    count = getattr(chats[0],
+                                    "participants_count", None)
+        if count is None:
+            count = getattr(entity, "participants_count", None)
+        if count is None:
+            raise ValueError(
+                "telegram did not expose a member count here")
+        return int(count)
+
+    def admin_member_count(self, chat: ChatRef) -> dict[str, Any]:
+        """Subscriber/member count over MTProto — the same
+        result shape as the bot adapter's getChatMemberCount,
+        for the surface the bot cannot ride (channels and
+        groups the userbot holds).  A chat whose count Telegram
+        will not expose reads ok=False, never a fabricated 0
+        sample (the drive checks ``ok`` before recording)."""
+        try:
+            count = self._run_on_loop(
+                self._member_count_coro(chat), timeout=30.0)
+            return {"ok": True, "count": int(count), "error": ""}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "count": 0,
+                    "error": f"member count failed: {exc}"}
+
+    async def _post_views_coro(self, chat: ChatRef,
+                               message_ids: list[str]
+                               ) -> dict[str, int]:
+        from telethon.tl.functions.messages import \
+            GetMessagesViewsRequest
+
+        entity = await self._resolve(chat)
+        out: dict[str, int] = {}
+        ids = [int(m) for m in message_ids]
+        # getMessagesViews answers at most 100 ids per call.
+        for start in range(0, len(ids), 100):
+            batch = ids[start:start + 100]
+            result = await self._client(
+                GetMessagesViewsRequest(
+                    peer=entity, id=batch, increment=False))
+            rows = list(getattr(result, "views", None) or [])
+            if len(rows) == len(batch):
+                for mid, row in zip(batch, rows):
+                    views = getattr(row, "views", None)
+                    if views is not None:
+                        out[str(mid)] = int(views)
+                continue
+            # The vector came back a different length than the
+            # ask — positional pairing would be a guess.  Re-read
+            # the batch by id instead: each returned message
+            # names itself and carries its own counter.
+            msgs = await self._client.get_messages(
+                entity, ids=batch)
+            if not isinstance(msgs, list):
+                msgs = [msgs]
+            for msg in msgs:
+                if msg is None:
+                    continue
+                views = getattr(msg, "views", None)
+                if views is not None:
+                    out[str(getattr(msg, "id"))] = int(views)
+        return out
+
+    def channel_post_views(self, chat: ChatRef,
+                           message_ids: list[str]
+                           ) -> dict[str, Any]:
+        """Current view counts for published channel posts,
+        re-read from Telegram (messages.getMessagesViews — the
+        counters live on the posts, not on the send receipt,
+        and they grow after posting).  Ids the platform returns
+        no count for are simply absent from the mapping; the
+        caller records only what is here."""
+        ids = [str(m) for m in message_ids or [] if str(m)]
+        if not ids:
+            return {"ok": True, "views": {}}
+        try:
+            views = self._run_on_loop(
+                self._post_views_coro(chat, ids), timeout=60.0)
+            return {"ok": True, "views": views}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False,
+                    "error": f"post views failed: {exc}"}
+
+    async def _broadcast_stats_coro(self, chat: ChatRef
+                                    ) -> dict[str, Any]:
+        from telethon.tl.functions.stats import \
+            GetBroadcastStatsRequest
+
+        entity = await self._resolve(chat)
+        stats = await self._client(
+            GetBroadcastStatsRequest(channel=entity))
+
+        def _pair(value: Any) -> tuple[Any, Any]:
+            return (getattr(value, "current", None),
+                    getattr(value, "previous", None))
+
+        followers, followers_prev = _pair(
+            getattr(stats, "followers", None))
+        views_pp, views_pp_prev = _pair(
+            getattr(stats, "views_per_post", None))
+        shares_pp, _shares_prev = _pair(
+            getattr(stats, "shares_per_post", None))
+        reactions_pp, _reactions_prev = _pair(
+            getattr(stats, "reactions_per_post", None))
+        notif = getattr(stats, "enabled_notifications", None)
+        part = getattr(notif, "part", None)
+        total = getattr(notif, "total", None)
+        pct = None
+        if part is not None and total:
+            pct = round(100.0 * float(part) / float(total), 1)
+        return {
+            "followers": (int(followers)
+                          if followers is not None else None),
+            "followers_prev": (int(followers_prev)
+                               if followers_prev is not None
+                               else None),
+            "views_per_post": (float(views_pp)
+                               if views_pp is not None else None),
+            "views_per_post_prev": (float(views_pp_prev)
+                                    if views_pp_prev is not None
+                                    else None),
+            "shares_per_post": (float(shares_pp)
+                                if shares_pp is not None else None),
+            "reactions_per_post": (float(reactions_pp)
+                                   if reactions_pp is not None
+                                   else None),
+            "enabled_notifications_pct": pct,
+        }
+
+    def channel_broadcast_stats(self, chat: ChatRef
+                                ) -> dict[str, Any]:
+        """Telegram's own broadcast statistics for a channel
+        (stats.getBroadcastStats): follower level + growth and
+        per-post view/share/reaction averages over the stats
+        period.  Telegram grants this only to admins of
+        channels with enough subscribers (500+); everywhere
+        else the request refuses, and the refusal IS the
+        result — ok=False with Telegram's reason, no zeros,
+        no retry storm (the drive samples on the count
+        cadence and records the refusal as the state)."""
+        try:
+            stats = self._run_on_loop(
+                self._broadcast_stats_coro(chat), timeout=60.0)
+            return {"ok": True, **stats}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False,
+                    "error": f"broadcast stats failed: {exc}"}
 
     def member_by_username(self, chat: ChatRef, username: str
                            ) -> dict[str, Any] | None:
