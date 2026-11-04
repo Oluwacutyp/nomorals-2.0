@@ -117,6 +117,8 @@ def _enc_duel(duel: Duel) -> dict[str, Any]:
         "status": duel.status,
         "winner": duel.winner,
         "created_at": duel.created_at,
+        "join_code": duel.join_code,
+        "expires_at": duel.expires_at,
     }
 
 
@@ -142,6 +144,8 @@ def _dec_duel(data: Any) -> Duel | None:
             status=str(data.get("status", "open")),
             winner=data.get("winner"),
             created_at=float(data.get("created_at") or 0.0),
+            join_code=str(data.get("join_code") or ""),
+            expires_at=float(data.get("expires_at") or 0.0),
         )
     except (TypeError, ValueError, KeyError) as exc:
         _log.warning("math state: skipping undecodable duel: %s", exc)
@@ -187,6 +191,8 @@ def dump_state(handler: MathCommandHandler) -> dict[str, Any]:
             "counters": _enc_tuple_map(store.get("counters", {})),
             "streaks": store.get("streaks", {}),
             "daily_best": _enc_tuple_map(store.get("daily_best", {})),
+            "owners": dict(store.get("owners", {})),
+            "settled": dict(store.get("settled", {})),
         },
         "economy": {
             "entries": [asdict(e) for e in economy._entries],
@@ -204,6 +210,14 @@ def dump_state(handler: MathCommandHandler) -> dict[str, Any]:
             "tier_clears": {p: sorted(t)
                             for p, t in getattr(handler, "_tier_clears", {}).items()},
             "sets": dict(getattr(handler, "_sets", {})),
+            "open_duels": dict(getattr(handler, "_open_duels", {})),
+            "last_problem": dict(getattr(handler, "_last_problem", {})),
+            "held_expl": dict(getattr(handler, "_held_expl", {})),
+            "duel_queue": list(getattr(handler, "_duel_queue", [])),
+            "join_fails": {p: list(ts) for p, ts in
+                           getattr(handler, "_join_fails", {}).items()},
+            "pending_notes": {p: list(ns) for p, ns in
+                              getattr(handler, "_pending_notes", {}).items()},
         },
     }
 
@@ -244,6 +258,9 @@ def load_state(data: Any) -> MathCommandHandler:
         store["counters"] = _dec_tuple_map(raw_store.get("counters"))
         store["streaks"] = raw_store.get("streaks") or {}
         store["daily_best"] = _dec_tuple_map(raw_store.get("daily_best"))
+        store["owners"] = {str(k): str(v) for k, v in
+                           (raw_store.get("owners") or {}).items()}
+        store["settled"] = raw_store.get("settled") or {}
 
     raw_econ = data.get("economy")
     if isinstance(raw_econ, dict):
@@ -274,6 +291,20 @@ def load_state(data: Any) -> MathCommandHandler:
                                 for p, t in (raw_handler.get("tier_clears") or {}).items()}
         sets = raw_handler.get("sets")
         handler._sets = sets if isinstance(sets, dict) else {}
+        handler._open_duels = {str(k): str(v) for k, v in
+                               (raw_handler.get("open_duels") or {}).items()}
+        handler._last_problem = {str(k): str(v) for k, v in
+                                 (raw_handler.get("last_problem") or {}).items()}
+        handler._held_expl = {str(k): str(v) for k, v in
+                              (raw_handler.get("held_expl") or {}).items()}
+        queue = raw_handler.get("duel_queue")
+        handler._duel_queue = queue if isinstance(queue, list) else []
+        handler._join_fails = {str(k): [float(t) for t in (v or [])]
+                               for k, v in
+                               (raw_handler.get("join_fails") or {}).items()}
+        handler._pending_notes = {
+            str(k): list(v or []) for k, v in
+            (raw_handler.get("pending_notes") or {}).items()}
     return handler
 
 

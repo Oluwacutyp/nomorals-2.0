@@ -792,14 +792,12 @@ def test_duel_header_prints_no_duel_id():
               "problems": [{"question": "3 × 7 = ?"}]}
     text = _render_math(result)
     header = text.splitlines()[0]
-    assert "duel_abc" not in header
     assert header.startswith("⚔️ Duel — ada vs bob")
-    # The one surviving print is the answer grammar itself:
-    # today's duel_answer command takes the id as an argument
-    # (an id a human must quote back to act — the stated
-    # exception), so the instruction line keeps carrying it
-    # until the matching itself is state-held.
-    assert "/math duel_answer duel_abc" in text
+    # The games-engine pass landed the follow-up this test used to
+    # wait on: duel matching is state-held now, so the id prints
+    # NOWHERE — not even in the answer grammar.
+    assert "duel_abc" not in text
+    assert "/math duel_answer <your answer>" in text
 
 
 def test_audit_trail_covers_the_decision_chain(tmp_path):

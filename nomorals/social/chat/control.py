@@ -1660,10 +1660,12 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                      "for everyone, in DMs for the owner.",
              "usage": "/math · /math easy|medium|hard|expert|master|impossible · "
                       "/math answer <answer> · /math leaderboard · /math streak · "
-                      "/math daily · /math duel <opponent> · "
-                      "/math duel_answer <id> <round> <answer> · /math set · "
-                      "/math teach <problem_id> <explanation> · "
-                      "/math upvote <explanation_id> · /math balance",
+                      "/math daily · /math duel <opponent> · /math duel "
+                      "(matchmaking queue) · /math duel open · "
+                      "/math join <code> · "
+                      "/math duel_answer <answer> · /math set · "
+                      "/math teach <explanation> · "
+                      "/math upvote · /math balance",
              "example": "/math  ·  /math answer 42  ·  /math duel @ada",
              "related": "/game · /duel"},
     "npc": {"what": "the living cast — NPCs with personality, memory, mood "

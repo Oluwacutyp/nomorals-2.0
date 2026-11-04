@@ -44,8 +44,8 @@ _log = get_logger(__name__)
 
 __all__ = [
     "TIERS", "TIER_TOPICS", "FORMAT_CONFIG", "ATTEMPT_CAPS",
-    "COOLDOWN_SECONDS", "Problem", "MathClass", "Duel",
-    "check_answer", "parse_answer", "daily_seed",
+    "COOLDOWN_SECONDS", "OPEN_DUEL_TTL", "Problem", "MathClass",
+    "Duel", "check_answer", "parse_answer", "daily_seed",
 ]
 
 #: Tier order, easiest first.
@@ -716,6 +716,12 @@ def daily_seed(date_iso: str) -> int:
 
 # ── engine: per-player streams, adaptive tier, anti-cheat, formats ────────
 
+#: Seconds an open (coded) duel waits for its second seat before
+#: the invite dies. The play clock (FORMAT_CONFIG duel seconds)
+#: starts when the seat fills, not when the code is minted.
+OPEN_DUEL_TTL = 3600.0
+
+
 @dataclass
 class Duel:
     """Head-to-head duel: both players answer the SAME seeded problems;
@@ -726,9 +732,16 @@ class Duel:
     problems: list[Problem] = field(default_factory=list)
     round_winners: list[str | None] = field(default_factory=list)
     answers: dict[str, dict[int, Any]] = field(default_factory=dict)
-    status: str = "open"  # open | finished
+    status: str = "open"  # waiting | open | finished
     winner: str | None = None
     created_at: float = 0.0
+    #: Shareable join code for an open duel (join_codes alphabet) —
+    #: a human handle by design, NOT the internal duel_id. Cleared
+    #: the moment the second seat fills (single-use).
+    join_code: str = ""
+    #: Absolute expiry: for a waiting duel, when the invite dies;
+    #: for an open duel, when the play clock (§34) settles it.
+    expires_at: float = 0.0
 
     def current_round(self) -> int:
         return len(self.round_winners)
@@ -757,6 +770,13 @@ class MathClass:
         self.store.setdefault("counters", {})    # (player, tier) -> int
         self.store.setdefault("streaks", {})     # player -> current run streak
         self.store.setdefault("daily_best", {})  # (player, date) -> best
+        # §34 timed rounds: problem_id -> the player it was served to
+        # (duel problems belong to their duel; the daily is shared).
+        self.store.setdefault("owners", {})      # problem_id -> player
+        # §34 settlement ledger: "<player>|<problem_id>" -> close
+        # record. A settled round never scores again — late answers
+        # and repeat answers alike.
+        self.store.setdefault("settled", {})     # key -> close record
 
     # ── adaptive tier ──
     def _player_state(self, player: str) -> dict[str, Any]:
@@ -828,6 +848,51 @@ class MathClass:
             self.store["cooldowns"][(player, tier)] = (
                 now + COOLDOWN_SECONDS[tier])
 
+    # ── §34 timed rounds: settlement ──
+    @staticmethod
+    def _settle_key(player: str, problem_id: str) -> str:
+        return f"{player}|{problem_id}"
+
+    @staticmethod
+    def round_expires_at(problem: "Problem") -> float | None:
+        """When this problem's round clock runs out, or None when
+        the format carries no clock (streak: seconds=0 by design)."""
+        seconds = int(FORMAT_CONFIG.get(problem.format, {})
+                      .get("seconds") or 0)
+        if seconds <= 0 or problem.created_at <= 0:
+            return None
+        return problem.created_at + seconds
+
+    def round_settled(self, player: str, problem_id: str) -> dict | None:
+        """The close record for a settled round, or None while live."""
+        return self.store["settled"].get(self._settle_key(player, problem_id))
+
+    def _settle_round(self, player: str, problem: "Problem", *,
+                      reason: str, correct: bool = False,
+                      now: float) -> dict[str, Any]:
+        record = {"reason": reason, "by": player if reason == "answered"
+                  else "", "correct": bool(correct), "at": now,
+                  "problem_id": problem.problem_id}
+        self.store["settled"][self._settle_key(player, problem.problem_id)] \
+            = record
+        return record
+
+    def _closed_result(self, problem: "Problem", *,
+                       reason: str) -> dict[str, Any]:
+        """A scoreless close: the round is over; the reply carries
+        the answer WITH the generator's own working (the reveal),
+        exactly as the §34 close posts it."""
+        out: dict[str, Any] = {
+            "ok": True, "closed": True, "scored": False,
+            "correct": False, "tier": problem.tier,
+            "close_reason": reason,
+            "message": ("⏰ Time's up — that round is closed."
+                        if reason == "expired"
+                        else "That round is already settled."),
+        }
+        out.update(problem.reveal())
+        return out
+
     # ── generation ──
     def _next_seed(self, player: str, tier: str) -> int:
         key = (player, tier)
@@ -883,6 +948,7 @@ class MathClass:
             time_limit_s=FORMAT_CONFIG[fmt]["seconds"] or 60,
             created_at=now)
         self.store["active"][problem.problem_id] = problem
+        self.store["owners"][problem.problem_id] = player
         return problem
 
     def public_problem(self, problem: Problem) -> dict[str, Any]:
@@ -910,12 +976,25 @@ class MathClass:
     def submit(self, player: str, problem_id: str, submitted: Any,
                now: float | None = None) -> dict[str, Any]:
         """Grade an attempt. Wrong answers earn nothing; the worked
-        solution is returned either way so the attempt teaches."""
+        solution is returned either way so the attempt teaches.
+
+        §34: a timed round SETTLES at the first graded answer or at
+        expiry, whichever comes first. A settled round never scores
+        again — a late (or repeat) submit gets the scoreless close
+        with the answer and its working, never a grade."""
         now = now if now is not None else time.time()
         problem = self.store["active"].get(problem_id)
         if problem is None:
             return {"ok": False, "error": "unknown_problem",
                     "message": "That problem is not active. Ask for a new one."}
+        settled = self.round_settled(player, problem_id)
+        if settled is not None:
+            return self._closed_result(
+                problem, reason=str(settled.get("reason") or "answered"))
+        expires = self.round_expires_at(problem)
+        if expires is not None and now > expires:
+            self._settle_round(player, problem, reason="expired", now=now)
+            return self._closed_result(problem, reason="expired")
         allowed, reason, wait = self.attempt_allowed(player, problem.tier, now)
         if not allowed:
             return {"ok": False, "error": reason, "wait_s": round(wait, 1),
@@ -923,6 +1002,8 @@ class MathClass:
                                 if reason == "cooldown"
                                 else "Daily attempt cap for this tier reached.")}
         correct = check_answer(problem, submitted)
+        self._settle_round(player, problem, reason="answered",
+                           correct=correct, now=now)
         self._note_attempt(player, problem.tier, correct, now)
         adaptive = self.record_result(player, problem.tier, correct, now)
         scores = self.store["scores"].setdefault(
@@ -937,7 +1018,8 @@ class MathClass:
             scores["losses"] += 1
             self.store["streaks"][player] = 0
         out: dict[str, Any] = {
-            "ok": True, "correct": correct, "tier": problem.tier,
+            "ok": True, "correct": correct, "scored": True,
+            "tier": problem.tier,
             "problem_id": problem_id, "adaptive": adaptive,
             "streak": self.store["streaks"].get(player, 0),
         }
@@ -983,14 +1065,13 @@ class MathClass:
                 "problem": problem.public()}
 
     # ── duels ──
-    def create_duel(self, player_a: str, player_b: str,
-                    tier: str = "", now: float | None = None) -> Duel:
-        """A duel: both players get the SAME seeded problems, so the
-        contest is fair — first correct answer per round wins it."""
-        now = now if now is not None else time.time()
-        tier = tier or self.adaptive_tier(player_a)
+    def _duel_problems(self, player_a: str, player_b: str, tier: str,
+                       now: float,
+                       salt: int = 0) -> tuple[str, list[Problem]]:
+        """The seeded problem set both duelists share (fair contest)."""
         seed_base = int(hashlib.sha256(
-            f"duel:{player_a}:{player_b}:{int(now)}".encode()).hexdigest()[:12], 16)
+            f"duel:{player_a}:{player_b}:{int(now)}:{salt}".encode()
+        ).hexdigest()[:12], 16)
         problems = []
         for i in range(FORMAT_CONFIG["duel"]["problems"]):
             rng = random.Random(seed_base + i)
@@ -1005,20 +1086,119 @@ class MathClass:
                 time_limit_s=FORMAT_CONFIG["duel"]["seconds"],
                 created_at=now))
             self.store["active"][problems[-1].problem_id] = problems[-1]
-        duel = Duel(duel_id=f"duel_{seed_base:x}",
+        return f"duel_{seed_base:x}", problems
+
+    def create_duel(self, player_a: str, player_b: str,
+                    tier: str = "", now: float | None = None) -> Duel:
+        """A duel: both players get the SAME seeded problems, so the
+        contest is fair — first correct answer per round wins it."""
+        now = now if now is not None else time.time()
+        tier = tier or self.adaptive_tier(player_a)
+        duel_id, problems = self._duel_problems(player_a, player_b,
+                                                tier, now)
+        duel = Duel(duel_id=duel_id,
                     players=[player_a, player_b], problems=problems,
                     answers={player_a: {}, player_b: {}},
-                    created_at=now)
+                    created_at=now,
+                    expires_at=now + FORMAT_CONFIG["duel"]["seconds"])
         self.store["duels"][duel.duel_id] = duel
         return duel
+
+    def create_open_duel(self, player_a: str, tier: str = "",
+                         now: float | None = None) -> Duel:
+        """An open duel: seat 2 is filled later by whoever presents
+        the join code — a stranger on any platform included. The
+        problems are seeded from the creator alone; the play clock
+        starts at the join, not at the minting."""
+        from .join_codes import new_join_code
+
+        now = now if now is not None else time.time()
+        tier = tier or self.adaptive_tier(player_a)
+        # salt per creator so two open duels minted in the same
+        # second never collide on the seeded duel id
+        key = ("duel_open", player_a)
+        salt = int(self.store["counters"].get(key, 0)) + 1
+        self.store["counters"][key] = salt
+        duel_id, problems = self._duel_problems(player_a, "?", tier,
+                                                now, salt=salt)
+        taken = [d.join_code for d in self.store["duels"].values()
+                 if d.status == "waiting" and d.join_code]
+        duel = Duel(duel_id=duel_id, players=[player_a],
+                    problems=problems, answers={player_a: {}},
+                    status="waiting", created_at=now,
+                    join_code=new_join_code(taken),
+                    expires_at=now + OPEN_DUEL_TTL)
+        self.store["duels"][duel.duel_id] = duel
+        return duel
+
+    def join_open_duel(self, code: str, player_b: str,
+                       now: float | None = None) -> dict[str, Any]:
+        """Fill seat 2 of a waiting duel by its join code. Codes are
+        single-use: the code dies the moment the seat fills."""
+        now = now if now is not None else time.time()
+        code = (code or "").strip().upper()
+        duel = next((d for d in self.store["duels"].values()
+                     if d.join_code and d.join_code == code
+                     and d.status == "waiting"), None)
+        if duel is None:
+            return {"ok": False, "error": "bad_code"}
+        if now > duel.expires_at:
+            duel.status = "finished"
+            duel.join_code = ""
+            return {"ok": False, "error": "code_expired"}
+        if player_b in duel.players:
+            return {"ok": False, "error": "own_duel"}
+        duel.players.append(player_b)
+        duel.answers[player_b] = {}
+        duel.status = "open"
+        duel.join_code = ""  # single-use: spent
+        # The play clock starts now, with both seats filled.
+        duel.created_at = now
+        for problem in duel.problems:
+            problem.created_at = now
+        duel.expires_at = now + FORMAT_CONFIG["duel"]["seconds"]
+        return {"ok": True, "duel": duel}
+
+    def duel_expired(self, duel: Duel, now: float) -> bool:
+        return bool(duel.expires_at) and now > duel.expires_at
+
+    def _settle_duel(self, duel: Duel) -> None:
+        """Close a duel on its current score (the §34 clock settle)."""
+        duel.status = "finished"
+        if len(duel.players) >= 2:
+            sa = duel.score(duel.players[0])
+            sb = duel.score(duel.players[1])
+            duel.winner = (duel.players[0] if sa > sb
+                           else duel.players[1] if sb > sa else None)
 
     def duel_answer(self, duel_id: str, player: str, round_idx: int,
                     submitted: Any, now: float | None = None) -> dict[str, Any]:
         """Answer one duel round. First correct answer wins the round;
         a later correct answer does not steal it."""
+        now = now if now is not None else time.time()
         duel = self.store["duels"].get(duel_id)
-        if duel is None or duel.status != "open":
+        if duel is None or duel.status == "finished":
             return {"ok": False, "error": "no_duel"}
+        if duel.status == "waiting":
+            return {"ok": False, "error": "waiting_for_opponent",
+                    "message": "Still waiting for an opponent — share "
+                               "the join code and the duel starts."}
+        if self.duel_expired(duel, now):
+            # §34: the duel's clock ran out — it settles on the
+            # current score and this answer scores nothing. The
+            # close carries the live round's answer + working.
+            self._settle_duel(duel)
+            out: dict[str, Any] = {
+                "ok": False, "error": "duel_expired", "closed": True,
+                "duel_winner": duel.winner,
+                "score": {p: duel.score(p) for p in duel.players},
+                "status": duel.status,
+                "message": "⏰ The duel's clock ran out — it settles "
+                           "on the score as it stands."}
+            idx = duel.current_round()
+            if idx < len(duel.problems):
+                out["reveal"] = duel.problems[idx].reveal()
+            return out
         if player not in duel.players:
             return {"ok": False, "error": "not_in_duel"}
         if not (0 <= round_idx < len(duel.problems)):
@@ -1039,16 +1219,66 @@ class MathClass:
             return {"ok": True, "correct": False, "round": round_idx,
                     "message": "Not quite — your opponent can still take this round."}
         if len(duel.round_winners) >= len(duel.problems):
-            duel.status = "finished"
-            sa = duel.score(duel.players[0])
-            sb = duel.score(duel.players[1])
-            duel.winner = (duel.players[0] if sa > sb
-                           else duel.players[1] if sb > sa else None)
+            self._settle_duel(duel)
         return {"ok": True, "correct": True, "round": round_idx,
                 "tier": duel.problems[round_idx].tier,
                 "round_winner": player, "duel_winner": duel.winner,
                 "score": {p: duel.score(p) for p in duel.players},
                 "status": duel.status}
+
+    # ── §34 sweep: closes for rounds/duels whose clocks ran out ──
+    def sweep_expired(self, now: float | None = None) -> list[dict[str, Any]]:
+        """Settle every timed round and duel whose clock has run
+        out; return the close records (the caller posts them).
+
+        Solo rounds close per owner; a timed set closes as ONE
+        record carrying every unanswered problem's reveal. Duel
+        closes carry the final score, the winner, and the live
+        round's reveal. Waiting (open) duels that never filled
+        close as expired invites. Nothing here scores anything —
+        settlement only."""
+        now = now if now is not None else time.time()
+        closes: list[dict[str, Any]] = []
+        set_reveals: dict[str, list[dict[str, Any]]] = {}
+        for problem_id, problem in list(self.store["active"].items()):
+            if problem.format in ("duel", "daily"):
+                continue  # duels settle below; the daily is shared
+            owner = self.store["owners"].get(problem_id)
+            if not owner:
+                continue
+            expires = self.round_expires_at(problem)
+            if expires is None or now <= expires:
+                continue
+            if self.round_settled(owner, problem_id) is not None:
+                continue
+            self._settle_round(owner, problem, reason="expired", now=now)
+            if problem.format == "timed_set":
+                set_reveals.setdefault(owner, []).append(problem.reveal())
+            else:
+                closes.append({"kind": "round_close", "player": owner,
+                               "problem": problem.reveal(),
+                               "tier": problem.tier})
+        for owner, reveals in set_reveals.items():
+            closes.append({"kind": "set_close", "player": owner,
+                           "problems": reveals})
+        for duel in list(self.store["duels"].values()):
+            if duel.status == "waiting" and self.duel_expired(duel, now):
+                duel.status = "finished"
+                duel.join_code = ""
+                closes.append({"kind": "duel_invite_expired",
+                               "players": list(duel.players)})
+            elif duel.status == "open" and self.duel_expired(duel, now):
+                self._settle_duel(duel)
+                record: dict[str, Any] = {
+                    "kind": "duel_close",
+                    "players": list(duel.players),
+                    "duel_winner": duel.winner,
+                    "score": {p: duel.score(p) for p in duel.players}}
+                idx = duel.current_round()
+                if idx < len(duel.problems):
+                    record["reveal"] = duel.problems[idx].reveal()
+                closes.append(record)
+        return closes
 
     # ── leaderboard ──
     def leaderboard(self, limit: int = 10) -> list[dict[str, Any]]:

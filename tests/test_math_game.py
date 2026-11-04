@@ -202,15 +202,25 @@ class HandlerTest(unittest.TestCase):
         self.assertTrue(res["correct"])
 
     def test_teach_and_upvote(self) -> None:
+        # Games-engine pass: teach/upvote are state-held — the
+        # teacher explains the problem in front of them (no id
+        # quoted back), and the voter upvotes the explanation held
+        # for them when they answered the same (daily) problem.
         self.handler.economy.verify_member(self.player)
         self.handler.economy.verify_member("telegram:ada")
-        self.handler.handle("/math", self.player)
-        pid = self.handler._active[self.player]
+        self.handler.handle("/math daily", self.player)
+        self.handler.handle(
+            f"/math answer {_correct_answer(self.handler, self.player)}",
+            self.player)
         taught = self.handler.handle(
-            f"/math teach {pid} Because the fractions cancel.", self.player)
+            "/math teach Because the fractions cancel.", self.player)
         self.assertTrue(taught["ok"])
-        expl_id = taught["explanation_id"]
-        voted = self.handler.handle(f"/math upvote {expl_id}", "telegram:ada")
+        self.handler.handle("/math daily", "telegram:ada")
+        answered = self.handler.handle(
+            f"/math answer {_correct_answer(self.handler, 'telegram:ada')}",
+            "telegram:ada")
+        self.assertIn("held_explanation", answered)
+        voted = self.handler.handle("/math upvote", "telegram:ada")
         self.assertTrue(voted["ok"])
         self.assertTrue(voted["paid"])
 

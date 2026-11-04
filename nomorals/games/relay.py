@@ -19,15 +19,21 @@ relay rooms persist in SQLite so a restart doesn't strand players;
 
 from __future__ import annotations
 
-import secrets
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from .engine import GameEngine, Player, Room
+from .join_codes import new_join_code
 
 __all__ = ["GameInvite", "RelayRoom", "GameRelay"]
+
+#: Failed invite accepts (unknown/expired code) tolerated per chat
+#: before the relay stops listening for a while. Codes are short and
+#: human by design (see join_codes) — guessing must stay pointless.
+_ACCEPT_FAIL_LIMIT = 5
+_ACCEPT_FAIL_WINDOW = 600.0
 
 
 @dataclass
@@ -85,6 +91,8 @@ class GameRelay:
         self.invites: dict[str, GameInvite] = {}  # code -> invite
         self.relays: dict[str, RelayRoom] = {}  # code -> relay
         self.chat_to_relay: dict[str, str] = {}  # chat_key -> code
+        #: chat_key -> [timestamps of failed accepts] (rate limit)
+        self._accept_fails: dict[str, list[float]] = {}
         self._lock = threading.RLock()
         self._last_cleanup = 0.0
         self._ensure_tables()
@@ -219,9 +227,11 @@ class GameRelay:
             raise ValueError(
                 f"{game_name} is solo — relays need a 2+ player game")
         with self._lock:
-            code = secrets.token_urlsafe(8)
-            while code in self.invites:
-                code = secrets.token_urlsafe(8)
+            # The invite code IS the shareable join code: short,
+            # unambiguous alphabet, designed for people (join_codes)
+            # — it doubles as the room key, never an internal id.
+            code = new_join_code(
+                list(self.invites) + list(self.relays))
             invite = GameInvite(
                 code=code, game_name=game_name, from_chat=from_chat,
                 from_player=from_player, to_label=(to_label or "")[:60])
@@ -229,17 +239,41 @@ class GameRelay:
             self._save_invite(invite)
             return invite
 
+    def _accept_blocked(self, chat_key: str) -> bool:
+        """True when this chat has burned its failed-accept budget."""
+        now = time.time()
+        fails = [t for t in self._accept_fails.get(chat_key, [])
+                 if now - t < _ACCEPT_FAIL_WINDOW]
+        self._accept_fails[chat_key] = fails
+        return len(fails) >= _ACCEPT_FAIL_LIMIT
+
+    def _note_accept_fail(self, chat_key: str) -> None:
+        self._accept_fails.setdefault(chat_key, []).append(time.time())
+
     def accept_invite(self, code: str, to_chat: str,
                       to_player: Player) -> RelayRoom:
         """Accept a game invite and create a relay room."""
-        code = (code or "").strip()
+        raw = (code or "").strip()
+        code = raw.upper()
         with self._lock:
-            invite = self.invites.get(code)
+            if self._accept_blocked(to_chat):
+                raise ValueError(
+                    "too many wrong codes from this chat — "
+                    "give it a few minutes, then try the real one.")
+            # exact first: invites persisted before the short-code
+            # switch carry mixed-case token codes; new codes are
+            # uppercase by construction, so the normalized lookup
+            # covers everything minted since.
+            invite = self.invites.get(raw) or self.invites.get(code)
+            if invite is not None:
+                code = invite.code
             if invite is None:
+                self._note_accept_fail(to_chat)
                 raise ValueError("invalid or expired invite code")
             if invite.is_expired():
                 del self.invites[code]
                 self._delete_invite(code)
+                self._note_accept_fail(to_chat)
                 raise ValueError("invite has expired — ask for a fresh one")
             if to_chat == invite.from_chat:
                 raise ValueError(

@@ -1433,6 +1433,15 @@ class RuntimeGamesMixin:
             handler.economy.verify_member(player_key)
         except Exception:  # noqa: BLE001 - verification never blocks play
             _log.warning("math verify_member failed for %s", player_key)
+        # §34: settle any timed rounds/duels whose clocks ran out
+        # BEFORE this command is handled — the closes become held
+        # notices, and this member's own notices ride this reply
+        # (handle() delivers them). Other members' closes wait for
+        # their next interaction; math has no background poster.
+        try:
+            handler.sweep_rounds()
+        except Exception:  # noqa: BLE001 - the sweep never blocks play
+            _log.warning("math round sweep failed", exc_info=True)
         result = handler.handle(f"/math {tail or ''}".strip(), player_key)
         self._math_save(handler)
         if kind != "dm" and isinstance(result, dict) \
@@ -1458,6 +1467,90 @@ class RuntimeGamesMixin:
 
     @staticmethod
     def _render_math(result: Any) -> str:
+        """Render a MathCommandHandler dict to a chat reply.
+
+        Held notices (games-engine pass) ride the member's next
+        reply — §34 round/duel closes swept by the clock, a duel
+        that filled while they were away — rendered first, then
+        the reply itself. The body renderer never returns empty.
+        """
+        body = RuntimeGamesMixin._render_math_body(result)
+        notes = result.get("notes") if isinstance(result, dict) else None
+        if not notes:
+            return body
+        blocks = [RuntimeGamesMixin._render_math_note(n)
+                  for n in notes if isinstance(n, dict)]
+        blocks = [b for b in blocks if b]
+        if not blocks:
+            return body
+        return "\n\n".join(blocks + [body])
+
+    @staticmethod
+    def _render_math_note(note: dict) -> str:
+        """One held notice → its board block (answer + working for
+        closes, per §34 — the generator's own derivation, carried
+        in the close record from creation)."""
+        kind = note.get("kind")
+
+        def _working(reveal: Any) -> list[str]:
+            if not isinstance(reveal, dict):
+                return []
+            lines = []
+            if reveal.get("solution"):
+                lines.append(f"Worked solution: {reveal['solution']}")
+            steps = reveal.get("solution_steps") or []
+            for i, s in enumerate(steps[:10]):
+                lines.append(f"  {i + 1}. {s}")
+            return lines
+
+        if kind == "round_close":
+            p = note.get("problem") or {}
+            lines = [f"⏰ Timed round closed — {p.get('question', '')}",
+                     f"The answer was {p.get('answer')}."]
+            lines.extend(_working(p))
+            return "\n".join(lines)
+        if kind == "set_close":
+            lines = ["⏰ Your timed set closed — the unanswered "
+                     "problems, with their working:"]
+            for p in note.get("problems") or []:
+                lines.append(f"• {p.get('question', '')} → "
+                             f"{p.get('answer')}")
+                lines.extend(_working(p))
+            return "\n".join(lines)
+        if kind == "duel_close":
+            score = note.get("score") or {}
+            lines = ["⏰ Your duel's clock ran out — it settles on "
+                     "the score as it stands."]
+            if score:
+                lines.append("score: " + ", ".join(
+                    f"{p} {s}" for p, s in score.items()))
+            lines.append(f"🏁 winner: {note.get('duel_winner') or 'tie'}")
+            reveal = note.get("reveal") or {}
+            if reveal:
+                lines.append(f"The live round was: "
+                             f"{reveal.get('question', '')} → "
+                             f"{reveal.get('answer')}")
+                lines.extend(_working(reveal))
+            return "\n".join(lines)
+        if kind == "duel_filled":
+            lines = [f"⚔️ {note.get('opponent', 'someone')} joined "
+                     f"your duel — it's live! Same problems for both "
+                     f"of you:"]
+            for i, problem in enumerate(note.get("problems") or []):
+                lines.append(f"Round {i + 1}: "
+                             f"{problem.get('question', '')}")
+            lines.append("Answer with /math duel_answer <your answer>.")
+            return "\n".join(lines)
+        if kind == "duel_invite_expired":
+            return ("⌛ Your open duel expired before anyone joined "
+                    "— /math duel open for a fresh code.")
+        if kind == "queue_expired":
+            return ("⌛ Your duel queue spot expired — /math duel "
+                    "to queue again.")
+        return ""
+
+    @staticmethod
+    def _render_math_body(result: Any) -> str:
         """Render a MathCommandHandler dict to a chat reply.
 
         Never returns empty — an unknown shape falls back to the
@@ -1496,7 +1589,17 @@ class RuntimeGamesMixin:
             return "\n".join(lines)
         if kind == "result":
             lines = []
-            if result.get("correct"):
+            if result.get("closed"):
+                # §34 close: settled by the clock (or an earlier
+                # answer) — this answer scored nothing; the close
+                # states the answer with its working.
+                lines.append(
+                    "⏰ Round closed — time's up. "
+                    f"The answer was {result.get('answer')}."
+                    if result.get("expired") else
+                    f"⏰ That round already settled. "
+                    f"The answer was {result.get('answer')}.")
+            elif result.get("correct"):
                 lines.append(f"✅ Correct! The answer was {result.get('answer')}.")
             else:
                 lines.append(f"❌ Not quite — the answer was {result.get('answer')}.")
@@ -1529,6 +1632,12 @@ class RuntimeGamesMixin:
                 lines.append(_fmt_problem(result["next_problem"],
                                           prefix="➡️ next"))
                 lines.append("Answer with /math answer <your answer>.")
+            held = result.get("held_explanation") or {}
+            if held:
+                lines.append(f"💡 {held.get('author', 'someone')} "
+                             f"explained this one: "
+                             f"{held.get('text', '')}")
+                lines.append("If it helped: /math upvote")
             return "\n".join(lines)
         if kind == "leaderboard":
             lines = ["🏆 Math leaderboard"]
@@ -1551,18 +1660,33 @@ class RuntimeGamesMixin:
                     f"{result.get('wins', 0)}W / {result.get('losses', 0)}L\n"
                     f"{result.get('next', '')}")
         if kind == "duel":
-            # No duel_id in the header (internal ids never
-            # print); it survives only in the answer grammar
-            # below, where today's duel_answer command still
-            # takes it as an argument.
+            # No duel_id anywhere in member text (internal ids
+            # never print): matching is state-held — the bot holds
+            # each member's open duel and current round, so answers
+            # quote nothing back (games-engine pass).
             lines = [f"⚔️ Duel — "
                      f"{' vs '.join(result.get('players') or [])}"]
             for i, problem in enumerate(result.get("problems") or []):
                 lines.append(f"Round {i + 1}: {problem.get('question', '')}")
-            lines.append("Answer with /math duel_answer "
-                         f"{result.get('duel_id')} <round> <answer> — "
+            lines.append("Answer with /math duel_answer <your answer> — "
                          "first correct answer wins each round.")
             return "\n".join(lines)
+        if kind == "duel_open":
+            # The join CODE is the one human handle a member ever
+            # quotes — short, unambiguous, single-use, by design.
+            lines = ["⚔️ Open duel — anyone can take seat 2, from "
+                     "any chat on any platform:"]
+            lines.append(f"  /math join {result.get('join_code', '')}")
+            for i, problem in enumerate(result.get("problems") or []):
+                lines.append(f"Round {i + 1}: {problem.get('question', '')}")
+            lines.append("Share the code — the duel clock starts "
+                         "when someone joins (the code lives 1 hour).")
+            return "\n".join(lines)
+        if kind == "duel_queue":
+            return ("⏳ You're in the duel queue — the first "
+                    "compatible player, on any platform, pairs with "
+                    "you and the duel opens here. "
+                    "/math duel cancel to leave.")
         if kind == "timed_set":
             lines = [f"⏱ Timed set — {result.get('tier', '?')} · "
                      f"{result.get('seconds', 300)}s for "
@@ -1575,8 +1699,10 @@ class RuntimeGamesMixin:
                          "I'll advance through the set.")
             return "\n".join(lines)
         if kind == "teaching":
-            return (f"📝 {result.get('message', 'Explanation posted.')} "
-                    f"(id {result.get('explanation_id', '')})")
+            # No explanation_id in member text (internal ids never
+            # print): upvotes resolve through the held explanation
+            # a member has in front of them.
+            return f"📝 {result.get('message', 'Explanation posted.')}"
         if kind == "upvote":
             if result.get("paid"):
                 return (f"👍 Upvoted — author earned +{result.get('coins', 0)} "

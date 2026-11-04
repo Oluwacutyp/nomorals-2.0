@@ -222,6 +222,12 @@ class MultiGame:
     channel_mode: str = "house"  # house|block — channel play style
     turn_based: bool = True
     move_timeout: float = 90.0  # seconds; 0 disables the turn clock
+    #: consecutive expired turns (stalls) after which the engine
+    #: forfeits the staller (DESIGN §34 turn-clock law). Applies to
+    #: games that ride the DEFAULT on_timeout pass; games with their
+    #: own on_timeout own their timeout semantics (pvp counts its
+    #: own misses to the same end). 0 = never forfeit on stalls.
+    stall_limit: int = 3
     #: how long a room may sit with no human move before the scheduler
     #: closes it. None = the engine default (IDLE_ROOM_TTL). Inbox games
     #: (one message per turn, days between moves) set this to days.
@@ -299,7 +305,12 @@ class MultiGame:
 
     def on_timeout(self, room: Room, player: Player,
                    mind: GameMind) -> list[str]:
-        """The current human's clock ran out. Default: pass the turn."""
+        """The current human's clock ran out. Default: pass the turn.
+
+        Games that keep this default ride the engine's §34 clock
+        law: consecutive stalls are counted per player and reaching
+        ``stall_limit`` forfeits — the game itself only ever sees
+        the pass."""
         room.advance_turn()
         return [f"⏰ {player.name} took too long — turn passes."]
 

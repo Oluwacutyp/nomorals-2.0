@@ -912,6 +912,8 @@ class GameEngine:
             if not self._is_turn(room, sender):
                 return [f"it's not your turn — waiting on "
                         f"{room.current.name if room.current else '…'}."]
+            # a deliberate pass is presence, not a stall (§34)
+            (room.state.get("_stalls") or {}).pop(sender.key, None)
             room.state["passes"] = int(room.state.get("passes") or 0) + 1
             self._emit(room, f"{sender.name} passes.")
             room.advance_turn()
@@ -988,6 +990,9 @@ class GameEngine:
                 return []
             return []
         out: list[str] = []
+        # the current player showed up and played — their §34
+        # consecutive-stall count resets (presence, not absence).
+        (room.state.get("_stalls") or {}).pop(sender.key, None)
         try:
             out.extend(game.on_move(room, sender, text, self._mind))
         except Exception as exc:  # noqa: BLE001
@@ -1094,6 +1099,25 @@ class GameEngine:
                 out.append("the house got stuck — closing the table.")
                 return
 
+    @staticmethod
+    def _journal_clock(room: Room, event: str, player: Player,
+                       **fields: Any) -> None:
+        """Append one turn-clock event to the room's held journal.
+
+        The journal rides ``room.state`` (persisted with the room,
+        capped) — stall / pass / forfeit facts live in state, never
+        in member-visible text beyond the board lines themselves.
+        """
+        try:
+            journal = room.state.setdefault("_clock_events", [])
+            entry = {"event": event, "player": player.key,
+                     "ts": time.time()}
+            entry.update(fields)
+            journal.append(entry)
+            del journal[:-50]
+        except Exception:  # noqa: BLE001 - journaling never breaks a tick
+            _log.debug("clock journal failed", exc_info=True)
+
     def _handle_timeout(self, room: Room) -> None:
         # Narrow the engine lock to the liveness check: the sweep selected
         # this room before the tick ran, so it may have been quit/finished
@@ -1112,7 +1136,33 @@ class GameEngine:
             cur = room.current
             if game is None or cur is None or cur.is_ai:
                 return
+            self._journal_clock(room, "timeout", cur)
+            # §34 turn-clock law: games riding the DEFAULT on_timeout
+            # get engine-counted consecutive stalls and a forfeit at
+            # the game's stall_limit. Games with their own on_timeout
+            # own their timeout semantics (pvp counts misses to a
+            # forfeit itself; the raid auto-plays) — untouched here.
+            law = (type(game).on_timeout is MultiGame.on_timeout
+                   and int(getattr(game, "stall_limit", 0) or 0) > 0)
+            stalls: dict[str, Any] = {}
+            count = 0
+            if law:
+                stalls = room.state.setdefault("_stalls", {})
+                count = int(stalls.get(cur.key, 0)) + 1
+                stalls[cur.key] = count
+                self._journal_clock(room, "stall", cur, n=count)
+                if count >= int(game.stall_limit):
+                    for m in self._forfeit_staller(room, game, cur,
+                                                   count):
+                        self._emit(room, m)
+                    return
             msgs = game.on_timeout(room, cur, self._mind)
+            if law:
+                self._journal_clock(room, "pass", cur, n=count)
+                msgs.append(
+                    f"⏳ stall {count}/{int(game.stall_limit)} for "
+                    f"{cur.name} — reach the limit and the game is "
+                    f"forfeited.")
             if self.is_over(room):
                 msgs.extend(self._finish(room))
             else:
@@ -1120,9 +1170,59 @@ class GameEngine:
                 if self.is_over(room):
                     msgs.extend(self._finish(room))
                 else:
+                    # the board re-renders on a pass: whose turn it
+                    # is now, in the game's own surface words.
+                    nxt = room.current
+                    if nxt is not None and not nxt.is_ai:
+                        try:
+                            board = game.describe_state(room)
+                        except Exception:  # noqa: BLE001
+                            _log.debug("timeout board render failed",
+                                       exc_info=True)
+                            board = ""
+                        msgs.append(board or game.status_line(room))
                     self._persist(room)
             for m in msgs:
                 self._emit(room, m)
+
+    def _forfeit_staller(self, room: Room, game: MultiGame,
+                         staller: Player, count: int) -> list[str]:
+        """§34 forfeit: a player who stalled ``stall_limit`` turns in
+        a row loses. Caller holds ``room.guard``; returns the lines
+        to emit (a finish composes its own single settle message).
+
+        With 2+ other humans at the table the staller is eliminated
+        and play continues; otherwise the game ends — the remaining
+        human (or the house seat) takes it, recorded in room state
+        so the settle honors the forfeit over the game's own
+        winner() read.
+        """
+        self._journal_clock(room, "forfeit", staller, n=count)
+        line = (f"⏰ {staller.name} stalled {count} turns in a row — "
+                f"forfeit.")
+        others = [p for p in room.players if p.key != staller.key]
+        other_humans = [p for p in others if not p.is_ai]
+        if len(other_humans) >= 2:
+            idx = room.players.index(staller)
+            room.players = others
+            if room.turn > idx:
+                room.turn -= 1
+            if room.turn >= len(room.players):
+                room.turn = 0
+            room.turn_started = time.time()
+            out = [line + f" {staller.name} is out of the game."]
+            self._pump_ai(room, out)
+            if self.is_over(room):
+                out.extend(self._finish(room))
+            else:
+                self._persist(room)
+            return out
+        room.state["forfeit_loser"] = staller.key
+        if len(other_humans) == 1:
+            room.state["forfeit_winner"] = other_humans[0].key
+        elif others:
+            room.state["forfeit_winner"] = others[0].key
+        return self._finish(room, line)
 
     def _finish_idle(self, room: Room) -> None:
         """Close a table the players abandoned: re-check liveness under
@@ -1239,6 +1339,14 @@ class GameEngine:
                 _log.debug("victory loot failed", exc_info=True)
             try:
                 winner = game.winner(room)
+                # §34 forfeit: the turn-clock law already decided
+                # this table (see _forfeit_staller) — the settle
+                # honors the forfeit over the game's winner() read.
+                fw = (room.state or {}).get("forfeit_winner")
+                if fw:
+                    fp = room.player(str(fw))
+                    if fp is not None:
+                        winner = fp
                 winner_label = getattr(winner, "name", None) or (
                     str(winner) if winner not in (None, "draw") else "")
                 # ranked 1v1: move the ELO board (queue matches and
@@ -1254,6 +1362,8 @@ class GameEngine:
                     if p.is_ai:
                         continue
                     won = self._settle_won(game, room, p, winner)
+                    if (room.state or {}).get("forfeit_loser") == p.key:
+                        won = False  # a forfeit is a loss, full stop
                     points = GameEconomy.reward_points(won, game.score(room, p))
                     score = game.score(room, p)
                     card_scores[p.key] = score

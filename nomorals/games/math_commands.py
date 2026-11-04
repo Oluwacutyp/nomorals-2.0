@@ -14,15 +14,30 @@ Commands:
     /math leaderboard            — top solvers
     /math streak                 — your streak + adaptive tier
     /math daily                  — today's challenge
-    /math duel <opponent>        — head-to-head duel
-    /math duel_answer <id> <round> <answer>
-                                 — answer one duel round
+    /math duel <opponent>        — head-to-head duel with someone here
+    /math duel                   — matchmaking: queue for a duel with
+                                   the first compatible player waiting,
+                                   on any platform
+    /math duel open              — open a duel anyone can join with
+                                   the short code it hands you
+    /math duel cancel            — leave the queue / cancel your open duel
+    /math join <code>            — take seat 2 of an open duel by code
+    /math duel_answer <answer>   — answer the current round of the
+                                   duel in front of you (held state —
+                                   no ids are ever quoted back)
     /math set                    — timed set: 10 in 5 min
-    /math teach <problem_id> <explanation>
-                                 — post a solution explanation
-    /math upvote <explanation_id>
-                                 — upvote an explanation
+    /math teach <explanation>    — explain the problem in front of you
+    /math upvote                 — upvote the explanation in front of you
     /math balance                — your math ledger balance + statement
+
+Matching is state-held throughout (games-engine pass): the handler
+remembers each member's open duel, current problem, teachable
+problem and held explanation, so no member ever quotes an internal
+id back. The old id-carrying grammars still parse, but they resolve
+through the held state — an id that is not the member's held one
+scores/teaches/votes nothing. Timed rounds settle at the first
+graded answer or at expiry (§34): late answers get the scoreless
+close with the answer and its working.
 
 Wire points — hook functions at the bottom expose Math Class to the
 rest of the system: quests (daily math quest), tournaments (math
@@ -53,6 +68,17 @@ DIFFICULTY_ALIASES: dict[str, str] = {
     "master": "master", "mast": "master",
     "impossible": "impossible", "imp": "impossible",
 }
+
+#: Matchmaking queue entries expire after this long unfilled (§13:
+#: nobody waits forever — a stale spot is dropped, with a note).
+QUEUE_TTL_S = 600.0
+#: A waiting entry older than this pairs with ANY tier — the
+#: tolerance widening the engine matchmaker uses, in math clothes.
+QUEUE_WIDEN_S = 120.0
+#: Failed /math join attempts tolerated per member per window —
+#: join codes are short by design, so guessing must stay pointless.
+JOIN_FAIL_LIMIT = 5
+JOIN_FAIL_WINDOW_S = 600.0
 
 
 def parse_math_command(text: str) -> tuple[str, list[str]]:
@@ -85,6 +111,27 @@ class MathCommandHandler:
         # One active track at a time — starting a fresh problem or the
         # daily challenge abandons the set (see _cmd_start / _cmd_daily).
         self._sets: dict[str, dict[str, Any]] = {}
+        # ── state-held matching (games-engine pass) ──
+        # The duel in front of each member: player -> duel_id. Set
+        # when a duel starts (direct, queued, or by join code) for
+        # BOTH seats; cleared when the duel settles.
+        self._open_duels: dict[str, str] = {}
+        # The problem in front of each member for /math teach: the
+        # one they just started or just answered.
+        self._last_problem: dict[str, str] = {}
+        # The explanation in front of each member for /math upvote:
+        # the newest explanation (by someone else) of the problem
+        # they just answered. One-shot — consumed by the upvote.
+        self._held_expl: dict[str, str] = {}
+        # Matchmaking queue (§13): [{player, tier, at}] in FIFO
+        # order, global to the handler — every platform it serves.
+        self._duel_queue: list[dict[str, Any]] = []
+        # /math join rate limiting: player -> [failure timestamps].
+        self._join_fails: dict[str, list[float]] = {}
+        # Held notices for a member's next interaction: round/duel
+        # closes swept by the clock, a queue match that filled
+        # while they were away. Delivered (once) by handle().
+        self._pending_notes: dict[str, list[dict[str, Any]]] = {}
 
     # ── router ──
     def handle(self, text: str, player: str,
@@ -98,11 +145,63 @@ class MathCommandHandler:
                                f"/math easy|medium|hard|expert|master|impossible, "
                                f"/math leaderboard, /math streak, /math daily, "
                                f"/math duel <opponent>."}
+        notes = self._pending_notes.pop(player, [])
         try:
-            return fn(player, args, now)
+            result = fn(player, args, now)
         except Exception as exc:  # noqa: BLE001
             _log.warning("math command %s failed: %s", sub, exc)
-            return {"ok": False, "error": "internal", "message": str(exc)}
+            result = {"ok": False, "error": "internal",
+                      "message": str(exc)}
+        if notes and isinstance(result, dict):
+            result["notes"] = notes
+        return result
+
+    # ── held-state helpers ──
+    def _note(self, player: str, note: dict[str, Any]) -> None:
+        """Queue a held notice for a member's next interaction."""
+        self._pending_notes.setdefault(player, []).append(note)
+
+    def _held_duel(self, player: str):
+        """The member's open duel object, or None (stale holds are
+        cleared as they're found)."""
+        duel_id = self._open_duels.get(player)
+        if not duel_id:
+            return None
+        duel = self.math.store["duels"].get(duel_id)
+        if duel is None or duel.status == "finished":
+            self._open_duels.pop(player, None)
+            return None
+        return duel
+
+    def _clear_duel_holds(self, duel: Any) -> None:
+        for p in duel.players:
+            if self._open_duels.get(p) == duel.duel_id:
+                self._open_duels.pop(p, None)
+
+    # ── §34 sweep: post round/duel closes as held notices ──
+    def sweep_rounds(self, now: float | None = None) -> list[dict[str, Any]]:
+        """Settle every expired timed round/duel (MathClass sweep)
+        and queue the closes as held notices for the members they
+        belong to. Also expires stale matchmaking queue spots.
+        Returns the close records."""
+        now = now if now is not None else time.time()
+        alive = []
+        for entry in self._duel_queue:
+            if now - float(entry.get("at") or now) > QUEUE_TTL_S:
+                self._note(entry["player"], {"kind": "queue_expired"})
+            else:
+                alive.append(entry)
+        self._duel_queue = alive
+        closes = self.math.sweep_expired(now)
+        for record in closes:
+            kind = record.get("kind")
+            if kind in ("round_close", "set_close"):
+                self._note(record["player"], record)
+            elif kind in ("duel_close", "duel_invite_expired"):
+                for p in record.get("players") or []:
+                    self._note(p, record)
+                    self._open_duels.pop(p, None)
+        return closes
 
     # ── commands ──
     def _cmd_start(self, player: str, args: list[str],
@@ -116,6 +215,7 @@ class MathCommandHandler:
                                 else "Daily attempt cap for this tier reached.")}
         problem = self.math.generate(player, tier, "quickfire", now=now)
         self._active[player] = problem.problem_id
+        self._last_problem[player] = problem.problem_id
         # A fresh problem abandons any in-progress timed set.
         self._sets.pop(player, None)
         return {"ok": True, "kind": "problem",
@@ -136,6 +236,27 @@ class MathCommandHandler:
         res = self.math.submit(player, problem_id, submitted, now=now)
         if not res.get("ok"):
             return res
+        if res.get("closed"):
+            # §34 close: the round settled (expiry, or an earlier
+            # answer) — this answer scores nothing. The reply IS
+            # the close: answer + the generator's own working.
+            if self._active.get(player) == problem_id:
+                self._active.pop(player, None)
+            set_state = self._sets.get(player)
+            if set_state and problem_id in set_state.get("problems", []):
+                self._sets.pop(player, None)
+            return {"ok": True, "kind": "result", "closed": True,
+                    "expired": res.get("close_reason") == "expired",
+                    "correct": False, "tier": res["tier"],
+                    "answer": res["answer"],
+                    "solution": res["solution"],
+                    "solution_steps": res.get("solution_steps", []),
+                    "reward": {"coins": 0, "xp": 0, "paid": False},
+                    "reward_text": ""}
+        # The problem just answered is the one in front of the
+        # member now — for /math teach, and for the explanation it
+        # may carry (held for /math upvote).
+        self._last_problem[player] = problem_id
         out: dict[str, Any] = {"ok": True, "kind": "result",
                                "correct": res["correct"],
                                "tier": res["tier"],
@@ -144,6 +265,15 @@ class MathCommandHandler:
                                "solution_steps": res.get("solution_steps", []),
                                "adaptive": res.get("adaptive", {}),
                                "streak": res.get("streak", 0)}
+        expl = self.economy.latest_explanation_for(problem_id,
+                                                   exclude=player)
+        if expl is not None:
+            self._held_expl[player] = str(expl.get("id") or "")
+            out["held_explanation"] = {
+                "author": expl.get("author", ""),
+                "text": str(expl.get("text") or "")[:200]}
+        else:
+            self._held_expl.pop(player, None)
         # Timed-set advance: answering the current set problem moves the
         # active pointer to the next one (or closes the set).
         set_state = self._sets.get(player)
@@ -154,6 +284,7 @@ class MathCommandHandler:
                 set_state["idx"] = idx
                 next_id = problems[idx]
                 self._active[player] = next_id
+                self._last_problem[player] = next_id
                 next_problem = self.math.store["active"].get(next_id)
                 out["set_progress"] = f"{idx + 1}/{len(problems)}"
                 if next_problem is not None:
@@ -200,6 +331,7 @@ class MathCommandHandler:
         date_iso = args[0] if args else time.strftime("%Y-%m-%d", time.gmtime(now))
         problem = self.math.daily_challenge(date_iso)
         self._active[player] = problem.problem_id
+        self._last_problem[player] = problem.problem_id
         # The daily challenge is its own track — it abandons a set.
         self._sets.pop(player, None)
         # Daily problems are not in the active store (same for everyone),
@@ -208,34 +340,229 @@ class MathCommandHandler:
         return {"ok": True, "kind": "problem", "daily": True,
                 "problem": problem.public()}
 
+    def _duel_started(self, duel: Any, *, matched: bool = False,
+                      joined: bool = False) -> dict[str, Any]:
+        """The duel-start result (internal duel_id included for
+        state/journal — renders never print it)."""
+        return {"ok": True, "kind": "duel", "duel_id": duel.duel_id,
+                "players": list(duel.players),
+                "matched": matched, "joined": joined,
+                "problems": [p.public() for p in duel.problems],
+                "message": "Same problems for both players — first "
+                           "correct answer wins each round."}
+
     def _cmd_duel(self, player: str, args: list[str],
                   now: float) -> dict[str, Any]:
+        head = args[0].lower() if args else ""
+        if head in ("open", "code"):
+            return self._duel_open(player,
+                                   args[1] if len(args) > 1 else "", now)
+        if head == "cancel":
+            return self._duel_cancel(player, now)
+        if head == "queue":
+            return self._duel_enqueue(player,
+                                    args[1] if len(args) > 1 else "", now)
         if not args:
-            return {"ok": False, "error": "no_opponent",
-                    "message": "Usage: /math duel <opponent>"}
+            return self._duel_enqueue(player, "", now)
         opponent = args[0].lstrip("@")
         if opponent == player:
             return {"ok": False, "error": "self_duel",
                     "message": "You cannot duel yourself."}
+        if self._held_duel(player) is not None:
+            return {"ok": False, "error": "already_in_duel",
+                    "message": "You're already in a duel — answer it "
+                               "with /math duel_answer <answer>."}
         tier = args[1] if len(args) > 1 else ""
         duel = self.math.create_duel(player, opponent, tier, now=now)
-        return {"ok": True, "kind": "duel", "duel_id": duel.duel_id,
-                "players": duel.players,
+        self._open_duels[player] = duel.duel_id
+        self._open_duels[opponent] = duel.duel_id
+        return self._duel_started(duel)
+
+    def _duel_open(self, player: str, tier: str,
+                   now: float) -> dict[str, Any]:
+        """Open a coded duel: anyone, on any platform, takes seat 2
+        with /math join <code>."""
+        held = self._held_duel(player)
+        if held is not None:
+            if held.status == "waiting":
+                return {"ok": True, "kind": "duel_open",
+                        "duel_id": held.duel_id,
+                        "join_code": held.join_code,
+                        "players": list(held.players),
+                        "problems": [p.public() for p in held.problems],
+                        "message": "Your open duel is still waiting — "
+                                   "share the code."}
+            return {"ok": False, "error": "already_in_duel",
+                    "message": "You're already in a duel — answer it "
+                               "with /math duel_answer <answer>."}
+        duel = self.math.create_open_duel(player, tier, now=now)
+        self._open_duels[player] = duel.duel_id
+        return {"ok": True, "kind": "duel_open",
+                "duel_id": duel.duel_id, "join_code": duel.join_code,
+                "players": list(duel.players),
                 "problems": [p.public() for p in duel.problems],
-                "message": "Same problems for both players — first correct answer wins each round."}
+                "message": "Open duel — share the code; the clock "
+                           "starts when someone joins."}
+
+    def _duel_cancel(self, player: str, now: float) -> dict[str, Any]:
+        before = len(self._duel_queue)
+        self._duel_queue = [e for e in self._duel_queue
+                            if e["player"] != player]
+        did = []
+        if len(self._duel_queue) < before:
+            did.append("left the duel queue")
+        held = self._held_duel(player)
+        if held is not None and held.status == "waiting":
+            held.status = "finished"
+            held.join_code = ""
+            self._clear_duel_holds(held)
+            did.append("open duel cancelled")
+        return {"ok": True, "kind": "duel_cancel",
+                "message": (" · ".join(did) + ".") if did
+                else "Nothing to cancel — no queue spot, no open duel."}
+
+    def _duel_enqueue(self, player: str, tier: str,
+                    now: float) -> dict[str, Any]:
+        """§13 matchmaking for math duels: the global queue pairs
+        the first compatible waiters — same tier, or any tier once
+        a waiter has been patient (QUEUE_WIDEN_S). Player keys are
+        platform-scoped, so the queue pairs strangers across every
+        platform the handler serves."""
+        held = self._held_duel(player)
+        if held is not None:
+            if held.status == "waiting":
+                return {"ok": True, "kind": "duel_open",
+                        "duel_id": held.duel_id,
+                        "join_code": held.join_code,
+                        "players": list(held.players),
+                        "problems": [p.public() for p in held.problems],
+                        "message": "Your open duel is still waiting — "
+                                   "share the code."}
+            return {"ok": False, "error": "already_in_duel",
+                    "message": "You're already in a duel — answer it "
+                               "with /math duel_answer <answer>."}
+        tier = tier.strip().lower()
+        if tier in DIFFICULTY_ALIASES:
+            tier = DIFFICULTY_ALIASES[tier]
+        if tier and tier not in TIERS:
+            tier = ""
+        mine = tier or self.math.adaptive_tier(player)
+        my_entry = next((e for e in self._duel_queue
+                         if e["player"] == player), None)
+        my_wait = (now - float(my_entry.get("at") or now)
+                   if my_entry else 0.0)
+        for entry in list(self._duel_queue):
+            waiter = entry["player"]
+            if waiter == player:
+                continue
+            waited = now - float(entry.get("at") or now)
+            if entry["tier"] == mine or waited > QUEUE_WIDEN_S \
+                    or my_wait > QUEUE_WIDEN_S:
+                self._duel_queue.remove(entry)
+                if my_entry is not None:
+                    self._duel_queue.remove(my_entry)
+                duel = self.math.create_duel(waiter, player,
+                                             entry["tier"], now=now)
+                self._open_duels[waiter] = duel.duel_id
+                self._open_duels[player] = duel.duel_id
+                self._note(waiter, {
+                    "kind": "duel_filled", "opponent": player,
+                    "problems": [p.public() for p in duel.problems]})
+                return self._duel_started(duel, matched=True)
+        if my_entry is not None:
+            return {"ok": True, "kind": "duel_queue",
+                    "tier": my_entry["tier"],
+                    "message": "You're in the duel queue — first "
+                               "compatible player pairs with you."}
+        self._duel_queue.append({"player": player, "tier": mine,
+                                 "at": now})
+        return {"ok": True, "kind": "duel_queue", "tier": mine,
+                "message": "You're in the duel queue — first "
+                           "compatible player pairs with you, on "
+                           "any platform."}
+
+    def _cmd_join(self, player: str, args: list[str],
+                  now: float) -> dict[str, Any]:
+        """Take seat 2 of an open duel by its short join code."""
+        if not args:
+            return {"ok": False, "error": "usage",
+                    "message": "Usage: /math join <code> — the code "
+                               "from an open duel post."}
+        fails = [t for t in self._join_fails.get(player, [])
+                 if now - t < JOIN_FAIL_WINDOW_S]
+        self._join_fails[player] = fails
+        if len(fails) >= JOIN_FAIL_LIMIT:
+            return {"ok": False, "error": "too_many_attempts",
+                    "message": "Too many wrong codes — give it a few "
+                               "minutes, then try the real one."}
+        res = self.math.join_open_duel(args[0], player, now=now)
+        if not res.get("ok"):
+            fails.append(now)
+            self._join_fails[player] = fails
+            msg = {"bad_code": "That code doesn't match an open duel.",
+                   "code_expired": "That duel's code has expired — "
+                                   "ask for a fresh one.",
+                   "own_duel": "That's your own duel — share the "
+                               "code with someone else."}.get(
+                        str(res.get("error")), "Couldn't join that duel.")
+            return {"ok": False, "error": res.get("error"), "message": msg}
+        self._join_fails.pop(player, None)
+        duel = res["duel"]
+        creator = duel.players[0]
+        self._open_duels[player] = duel.duel_id
+        self._open_duels[creator] = duel.duel_id
+        self._note(creator, {
+            "kind": "duel_filled", "opponent": player,
+            "problems": [p.public() for p in duel.problems]})
+        return self._duel_started(duel, joined=True)
 
     def _cmd_duel_answer(self, player: str, args: list[str],
                          now: float) -> dict[str, Any]:
-        if len(args) < 3:
+        """Answer the current round of the duel in front of you.
+
+        State-held: the duel and the round come from the handler's
+        held state, never from the message. The legacy grammar
+        (``duel_answer <duel_id> <round> <answer>``) still parses
+        but resolves through the held duel — a quoted id that is
+        not the member's held duel scores nothing."""
+        if not args:
             return {"ok": False, "error": "usage",
-                    "message": "Usage: /math duel_answer <duel_id> <round> <answer>"}
-        try:
-            round_idx = int(args[1])
-        except ValueError:
-            return {"ok": False, "error": "bad_round"}
-        res = self.math.duel_answer(args[0], player, round_idx, " ".join(args[2:]), now=now)
+                    "message": "Usage: /math duel_answer <your answer>"}
+        round_idx: int | None = None
+        if args[0].startswith("duel_"):
+            claimed = args[0]
+            rest = args[1:]
+            if len(rest) >= 2:
+                try:
+                    round_idx = int(rest[0])
+                    rest = rest[1:]
+                except ValueError:
+                    round_idx = None
+            held = self._held_duel(player)
+            if held is None or claimed != held.duel_id:
+                return {"ok": False, "error": "stale_duel",
+                        "message": "That duel isn't the one in front "
+                                   "of you — your open duel answers "
+                                   "with /math duel_answer <answer>."}
+            if not rest:
+                return {"ok": False, "error": "usage",
+                        "message": "Usage: /math duel_answer <your answer>"}
+            args = rest
+        duel = self._held_duel(player)
+        if duel is None:
+            return {"ok": False, "error": "no_open_duel",
+                    "message": "No duel in front of you — start one "
+                               "with /math duel, /math duel "
+                               "<opponent>, or /math duel open."}
+        if round_idx is None:
+            round_idx = duel.current_round()
+        res = self.math.duel_answer(duel.duel_id, player, round_idx,
+                                    " ".join(args), now=now)
+        if res.get("status") == "finished" or res.get("closed"):
+            self._clear_duel_holds(duel)
         if res.get("ok") and res.get("correct"):
-            reward = self._pay(player, res.get("tier", "medium"), now, reason="duel round win")
+            reward = self._pay(player, res.get("tier", "medium"), now,
+                               reason="duel round win")
             res["reward"] = reward
         return res
 
@@ -252,24 +579,71 @@ class MathCommandHandler:
                 "idx": 0,
             }
             self._active[player] = problems[0].get("problem_id", "")
+            self._last_problem[player] = problems[0].get("problem_id", "")
             result["set_progress"] = f"1/{len(problems)}"
         return {"ok": True, "kind": "timed_set", **result}
 
+    def _teach_target(self, player: str) -> str:
+        """The problem in front of the member: the one they just
+        started or just answered."""
+        return self._last_problem.get(player) \
+            or self._active.get(player) or ""
+
     def _cmd_teach(self, player: str, args: list[str],
                    now: float) -> dict[str, Any]:
-        if len(args) < 2:
-            return {"ok": False, "error": "usage",
-                    "message": "Usage: /math teach <problem_id> <explanation>"}
-        return {"ok": True, "kind": "teaching",
-                **self.economy.explain_solution(player, args[0], " ".join(args[1:]))}
-
-    def _cmd_upvote(self, player: str, args: list[str],
-                   now: float) -> dict[str, Any]:
+        """Teach the problem in front of you. The legacy grammar
+        (``teach <problem_id> <text>``) still parses but resolves
+        through the held problem — a quoted id that is not the
+        member's held problem teaches nothing."""
         if not args:
             return {"ok": False, "error": "usage",
-                    "message": "Usage: /math upvote <explanation_id>"}
-        return {"ok": True, "kind": "upvote",
-                **self.economy.upvote_explanation(args[0], player, now=now)}
+                    "message": "Usage: /math teach <your explanation> "
+                               "— it attaches to the problem in "
+                               "front of you."}
+        target = self._teach_target(player)
+        if args[0] in self.math.store["active"] \
+                or args[0].startswith("math_"):
+            if args[0] != target:
+                return {"ok": False, "error": "stale_problem",
+                        "message": "That problem isn't the one in "
+                                   "front of you — explanations "
+                                   "attach to your current problem."}
+            args = args[1:]
+            if not args:
+                return {"ok": False, "error": "usage",
+                        "message": "Usage: /math teach <your explanation>"}
+        if not target:
+            return {"ok": False, "error": "no_problem",
+                    "message": "No problem in front of you — start "
+                               "one with /math, then teach it."}
+        return {"ok": True, "kind": "teaching",
+                **self.economy.explain_solution(player, target,
+                                                " ".join(args))}
+
+    def _cmd_upvote(self, player: str, args: list[str],
+                    now: float) -> dict[str, Any]:
+        """Upvote the explanation in front of you (held when you
+        answered its problem). The legacy grammar (``upvote
+        <explanation_id>``) still parses but resolves through the
+        held explanation — a quoted id that is not the member's
+        held one votes nothing. One-shot: the hold is consumed."""
+        held = self._held_expl.get(player) or ""
+        if args:
+            if not held or args[0] != held:
+                return {"ok": False, "error": "stale_explanation",
+                        "message": "That explanation isn't the one "
+                                   "in front of you — answer a "
+                                   "problem someone explained, then "
+                                   "/math upvote."}
+        if not held:
+            return {"ok": False, "error": "no_held_explanation",
+                    "message": "No explanation in front of you — "
+                               "answer a problem someone has "
+                               "explained, then /math upvote."}
+        res = self.economy.upvote_explanation(held, player, now=now)
+        if res.get("ok") or res.get("error") == "unknown_explanation":
+            self._held_expl.pop(player, None)
+        return {"ok": True, "kind": "upvote", **res}
 
     def _cmd_balance(self, player: str, args: list[str],
                      now: float) -> dict[str, Any]:

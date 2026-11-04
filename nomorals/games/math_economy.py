@@ -320,6 +320,27 @@ class MathEconomy:
         return {"ok": True, "explanation_id": expl_id,
                 "message": "Explanation posted — upvotes from other members earn bonuses."}
 
+    def explanations_for(self, problem_id: str) -> list[dict[str, Any]]:
+        """Every explanation posted for one problem, oldest first."""
+        return [e for e in self._explanations.values()
+                if e.get("problem_id") == problem_id]
+
+    def latest_explanation_for(self, problem_id: str,
+                               exclude: str = "") -> dict[str, Any] | None:
+        """The newest explanation of a problem by someone other than
+        ``exclude`` — the one a member who just attempted the problem
+        has in front of them (the held explanation for /math upvote)."""
+        found: dict[str, Any] | None = None
+        for expl in self._explanations.values():
+            if expl.get("problem_id") != problem_id:
+                continue
+            if exclude and expl.get("author") == exclude:
+                continue
+            if found is None or float(expl.get("at") or 0) \
+                    >= float(found.get("at") or 0):
+                found = expl
+        return found
+
     def upvote_explanation(self, expl_id: str, voter: str,
                            now: float | None = None) -> dict[str, Any]:
         """Upvote someone else's explanation. Pays the author the
