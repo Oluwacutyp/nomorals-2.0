@@ -431,11 +431,26 @@ class RuntimeGamesMixin:
                 (w for w in words
                  if w in getattr(game_def, "variants", {})),
                 "")
+            # One-command wager starts (owner ask, live 2026-11-04):
+            # "/slots 2000" / "/blackjack 500" — a lone positive-
+            # integer word in the tail is the stake.  Only the casino
+            # wager games read a tail word this way; junk words never
+            # parse as an amount, so "/slots abc" plays exactly as
+            # "/slots" always has.
+            amount = 0
+            if verb in ("slots", "blackjack"):
+                amount = next(
+                    (int(w) for w in words
+                     if w.isdigit() and int(w) > 0), 0)
+            if verb == "slots" and amount:
+                return self._slots_quickstart(
+                    engine, chat_key, player, kind=kind, amount=amount)
             try:
                 room, msgs = engine.start(chat_key, verb, player, kind=kind,
                                           daily=daily, timed=timed,
                                           difficulty=difficulty,
-                                          variant=variant)
+                                          variant=variant,
+                                          bet=amount)
             except ValueError as exc:
                 return str(exc)
             if msgs and not msgs[0].startswith("🎮"):
@@ -498,6 +513,62 @@ class RuntimeGamesMixin:
                 f"/game delete confirm — do it\n"
                 f"/game delete cancel — keep everything")
         return (f"unknown game {verb!r} — /game list to see the table.")
+
+    def _slots_quickstart(self, engine: Any, chat_key: str,
+                          player: Any, *, kind: str,
+                          amount: int) -> str:
+        """``/slots <amount>`` — the whole bet-and-spin dance in one
+        command (owner ask, live 2026-11-04).
+
+        Drives the exact seams a player drives by hand: open the
+        table (``engine.start``), place the wager (the ``bet`` move —
+        the game's own purse path escrows it), pull the lever (the
+        ``spin`` move — settles from that escrow as always).  A table
+        already open is played in place: the caller is seated first
+        when a seat is free.
+
+        Refusals stay honest and leave no zombie state: when the
+        purse won't cover the stake, a table THIS command opened is
+        closed again and only the refusal is posted; a table that was
+        already open keeps its exact prior state and is never spun at
+        a different amount than the one asked for.
+        """
+        live = engine.live(chat_key)
+        if live is not None and live.game != "slots":
+            # another table is live: today's start refusal, verbatim —
+            # engine.start raises it before touching any state.
+            try:
+                engine.start(chat_key, "slots", player, kind=kind)
+            except ValueError as exc:
+                return str(exc)
+            return "slots is live."  # pragma: no cover - start raises
+        lines: list[str] = []
+        fresh = False
+        if live is None:
+            room, msgs = engine.start(chat_key, "slots", player,
+                                      kind=kind)
+            fresh = True
+            # the fairness commitment must be public BEFORE the draw;
+            # the how-to card is the dance this command exists to skip.
+            lines.extend(m for m in msgs if m.startswith("🔒"))
+        else:
+            room = live
+            if room.player(player.key) is None:
+                joined = engine.join(chat_key, player)
+                if room.player(player.key) is None:
+                    return "\n".join(joined)
+                lines.extend(joined)
+        bet_out = engine.move(chat_key, f"bet {amount}", player,
+                              kind=kind)
+        if int(room.state.get("escrow", 0)) != amount:
+            # the stake did not land at the asked amount (the purse
+            # refused it): never spin on a different wager.
+            if fresh:
+                engine.quit(chat_key)
+            return "\n".join(bet_out) or "bet refused."
+        lines.extend(bet_out)
+        lines.extend(engine.move(chat_key, "spin", player, kind=kind))
+        return "\n".join(lines)
 
     def _challenge_player(self, game_name: str, to_label: str,
                           chat_key: str, player: Any) -> str:

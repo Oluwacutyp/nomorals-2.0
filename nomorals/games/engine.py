@@ -554,7 +554,8 @@ class GameEngine:
               platform: str = "", daily: bool = False,
               timed: bool = False,
               difficulty: str = "normal",
-              variant: str = "") -> tuple[Room, list[str]]:
+              variant: str = "",
+              bet: int = 0) -> tuple[Room, list[str]]:
         """Open a room and seat the host (plus AI seats).
 
         Returns (room, messages_to_send). Raises ValueError when the
@@ -564,7 +565,10 @@ class GameEngine:
         game-specific mode word (gomoku "big"/"huge", hangman "long",
         trivia "sudden", 2048 "big") — only games that declare it get
         it. ``mastery`` (the host's current tier index for this game)
-        lets games gate their unlockables.
+        lets games gate their unlockables. ``bet`` is the one-command
+        wager for casino starts (``/blackjack 500``): handed through
+        the same opt-in kwargs, so only games whose ``new_state``
+        declares it (blackjack) ever see it.
         """
         name = (game_name or "").strip().lower()
         game = self.games.get(name)
@@ -618,6 +622,7 @@ class GameEngine:
                     game, daily=daily, timed=timed,
                     difficulty=difficulty, variant=variant,
                     mastery=mastery_idx, history=history,
+                    bet=bet,
                     trivia_forge=self.forge))
             # stash difficulty on the room so start/status messages can show it
             room.state["_difficulty"] = difficulty

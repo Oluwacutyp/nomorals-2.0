@@ -61,13 +61,18 @@ class BlackjackGame(MultiGame):
              "stands on 17. Blackjack pays 3:2, wins pay 1:1. "
              "🔒 the deck is provably fair — commitment shown at deal.")
 
-    def new_state(self, rng: random.Random) -> dict[str, Any]:
+    def new_state(self, rng: random.Random,
+                  bet: int = 0) -> dict[str, Any]:
         # the deck is ordered here; the engine opens the fair table right
         # after new_state, and setup() fair-shuffles + deals from the
         # committed sequence — nothing is drawn before the commitment.
+        # ``bet`` is the one-command stake (/blackjack <amount>): the
+        # hand setup() stakes and escrows before the deal; 0/absent
+        # keeps the house default.
         deck = [v for v in range(2, 15) for _ in range(4)]
         return {"deck": deck, "player": [], "dealer": [],
-                "bet": 10, "done": False, "result": "", "split": None,
+                "bet": bet if bet > 0 else 10,
+                "done": False, "result": "", "split": None,
                 "dealt": False,
                 # wager state: coins escrowed from the purse for this
                 # hand, the split hand's stake + result, the dealer's
@@ -616,6 +621,8 @@ class SlotsGame(MultiGame):
         text = ("slots — bet and spin:\n"
                 "  bet <amount> — set your wager\n"
                 "  spin — pull the lever\n"
+                "  /slots <amount> — new table: bet + first spin in "
+                "one command\n"
                 "pays: 🍒🍒🍒 2x, 🔔🔔🔔 5x, 7️⃣7️⃣7️⃣ 10x, 💎💎💎 100x")
         bal = _balance_line(room)
         return text + (f"\n{bal}" if bal else "")

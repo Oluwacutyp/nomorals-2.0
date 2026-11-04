@@ -368,7 +368,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # arcade (wave 97)
     "2048": (0, 0), "snake": (0, 0), "connect4": (0, 0), "battleship": (0, 0),
     # casino (wave 98)
-    "blackjack": (0, 0), "roulette": (0, 0), "slots": (0, 1),  # optional bet arg — the DM game ignores it; in a group /slots is the purse casino
+    "blackjack": (0, 1), "roulette": (0, 0), "slots": (0, 1),  # optional bet arg — /slots <amount> quick-starts (bet + first spin in one command); /blackjack <amount> deals at that stake
     # inbox (wave F2): async, one message per turn, no clock
     "gomoku": (0, 0), "reversi": (0, 0), "checkers": (0, 0),
     # puzzles (gamesbooks-1.0)
@@ -3017,9 +3017,9 @@ _GAME_HELP: dict[str, str] = {
     "snake": "snake — eat, grow, don\'t bite yourself.",
     "connect4": "connect four — drop discs, line four up.",
     "battleship": "battleship — your fleet vs hers, 10×10.",
-    "blackjack": "blackjack vs the dealer, insurance off, double allowed.",
+    "blackjack": "blackjack vs the dealer, insurance off, double allowed. /blackjack <amount> deals a hand at that stake.",
     "roulette": "roulette — red/black/odd/even/straight-up bets.",
-    "slots": "three-reel slots — spin for combos, jackpot pays big.",
+    "slots": "three-reel slots — spin for combos, jackpot pays big. /slots <amount> places that bet and spins in one command.",
     "gomoku": "gomoku — five in a row on 15×15, async, no clock.",
     "reversi": "reversi (othello) — outflank and flip, most discs wins.",
     "checkers": "english draughts — forced jumps, kings, async.",
