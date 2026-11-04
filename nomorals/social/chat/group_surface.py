@@ -39,7 +39,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ...community.group_conflict import (
+    CONFLICT_DEFAULTS,
+    GroupConflict,
+    GroupConflictError,
+    WarBook,
+)
 from ...community.group_real_estate import (
+    DISTRICTS,
     ESTATE_DEFAULTS,
     GroupRealEstate,
     GroupRealEstateError,
@@ -208,6 +215,15 @@ def _default_settings() -> dict[str, Any]:
                                         # admin clears / off.  The
                                         # record never decides
                                         # admission itself.
+        "conflict": copy.deepcopy(CONFLICT_DEFAULTS),
+                                        # the conflict layer
+                                        # (§23/§24/§35): mode
+                                        # off|crime|warfare, the
+                                        # system-drop budget,
+                                        # heist/crime cooldowns,
+                                        # war escrow + round
+                                        # clock, territory rates,
+                                        # the police faction
         "state": "discovered",          # discovered|configured|
                                         # active|dormant
     }
@@ -274,7 +290,8 @@ class GroupStore:
                        and k not in ("defense", "presentation",
                                      "estate", "acceptance",
                                      "escalation", "system_claim",
-                                     "expression", "reputation")})
+                                     "expression", "reputation",
+                                     "conflict")})
         mod = dict(merged["moderation"])
         mod.update((stored.get("moderation") or {}))
         merged["moderation"] = mod
@@ -302,6 +319,9 @@ class GroupStore:
         merged["reputation"] = _deep_merge(
             copy.deepcopy(REPUTATION_DEFAULTS),
             stored.get("reputation") or {})
+        merged["conflict"] = _deep_merge(
+            copy.deepcopy(CONFLICT_DEFAULTS),
+            stored.get("conflict") or {})
         return merged
 
 
@@ -327,6 +347,8 @@ class GroupSurface:
         self._msg_cache: dict[str, deque] = {}
         self._signatures: SignatureStore | None = None
         self._reputation: ReputationBook | None = None
+        self._conflict: GroupConflict | None = None
+        self._war_book: WarBook | None = None
 
     @property
     def signatures(self) -> SignatureStore:
@@ -1464,6 +1486,12 @@ class GroupSurface:
                         f"treasury!"))
                 notices.extend(self.estate_cycle(group_key,
                                                  now=now))
+                # The conflict beat (§23/§24/§35): system
+                # drops, war rounds, territory income and the
+                # police ride the same cycle — the organ
+                # self-gates on mode, claim and freeze.
+                notices.extend(self.conflict_cycle(group_key,
+                                                   now=now))
                 # Acceptance grace expiries ride the same cycle:
                 # kick-action graces remove, profile warnings
                 # engage their restriction.  (When autonomy is
@@ -2217,6 +2245,10 @@ class GroupSurface:
         now = now if now is not None else time.time()
         if not self.economy_on(group_key):
             return {"ok": False, "reason": "off"}
+        if self.hospital_state(group_key, user_id, now=now):
+            return {"ok": False, "reason": "hospital",
+                    "hospital": self.hospital_state(
+                        group_key, user_id, now=now)}
         state = self._extras(group_key).setdefault("work", {})
         mine = state.get(user_id) or {}
         last = float(mine.get("last") or 0)
@@ -2255,6 +2287,17 @@ class GroupSurface:
             return {"ok": False, "reason": "funds"}
         pct = int(self.store.settings(
             group_key).get("transfer_tax_pct") or 0)
+        # Governance capture (§23): while a gang holds power
+        # and has SET its tax, the gang's rate — inside the
+        # hard 0–10 range — is the group's transfer tax.  The
+        # mechanism (this fee leg) never changes; who sets
+        # the number does.
+        try:
+            power = self.conflict.power_gang(group_key, now=now)
+        except GroupConflictError:
+            power = None
+        if power is not None and power.get("tax_pct") is not None:
+            pct = int(power["tax_pct"])
         fee = (amount * pct) // 100
         if fee:
             if not econ.contribute_treasury(group_key, sender, fee,
@@ -2369,6 +2412,14 @@ class GroupSurface:
             # the treasury holds is UNKNOWN, so it is treated
             # as unspendable rather than guessed at (estate
             # commands surface the freeze itself).
+            total += 10 ** 12
+        try:
+            total += self.conflict.reservations(group_key)
+        except GroupConflictError:
+            # Gang treasuries, war pots and bounties live in
+            # the conflict state: unreadable = unknown escrow,
+            # unspendable rather than guessed at (the estate
+            # precedent above).
             total += 10 ** 12
         return total
 
@@ -2589,6 +2640,92 @@ class GroupSurface:
             return None
         return record
 
+    def jail_member(self, group_key: str, user_id: str,
+                    minutes: int, *, reason: str,
+                    now: float | None = None) -> dict[str, Any]:
+        """Put a member in the group's jail — THE jail, shared
+        by rob failures, the conflict verbs, heist busts and
+        the police (one consequence, every road leads here).
+        Bail follows the rob shape: a quarter of the wallet,
+        floored and capped."""
+        now = now if now is not None else time.time()
+        wallet = self.economy.balance(group_key, user_id)
+        bail = max(10, min(150, wallet // 4)) if wallet else 10
+        jail = self._extras(group_key).setdefault("jail", {})
+        record = {"until": now + int(minutes) * 60, "bail": bail,
+                  "at": now, "reason": str(reason)[:120]}
+        jail[user_id] = record
+        self._audit(group_key, "jailed", user_id=user_id,
+                    reason=str(reason)[:120], bail=bail,
+                    minutes=int(minutes))
+        self.store.save()
+        return record
+
+    def jail_clear(self, group_key: str, user_id: str) -> bool:
+        """Lift a jail record (the undo of a jail notice)."""
+        jail = self._extras(group_key).setdefault("jail", {})
+        if user_id not in jail:
+            return False
+        jail.pop(user_id, None)
+        self.store.save()
+        return True
+
+    def hospital_state(self, group_key: str, user_id: str, *,
+                       now: float | None = None
+                       ) -> dict[str, Any] | None:
+        """The member's live hospital record (§23 hit verbs put
+        their targets here), or None — expired stays clear
+        themselves on read, like jail."""
+        now = now if now is not None else time.time()
+        ward = self._extras(group_key).setdefault("hospital", {})
+        record = ward.get(user_id)
+        if not record:
+            return None
+        if float(record.get("until") or 0) <= now:
+            ward.pop(user_id, None)
+            self.store.save()
+            return None
+        return record
+
+    def hospital_member(self, group_key: str, user_id: str,
+                        minutes: int, *, bill: int,
+                        by: str = "",
+                        now: float | None = None
+                        ) -> dict[str, Any]:
+        """Put a member in hospital with a bill: /bail pays the
+        bill to walk out early, a medkit discharges free, or
+        the stay simply runs out."""
+        now = now if now is not None else time.time()
+        ward = self._extras(group_key).setdefault("hospital", {})
+        record = {"until": now + int(minutes) * 60,
+                  "bill": int(bill), "at": now, "by": by}
+        ward[user_id] = record
+        self._audit(group_key, "hospitalized", user_id=user_id,
+                    bill=int(bill), minutes=int(minutes), by=by)
+        self.store.save()
+        return record
+
+    def hospital_clear(self, group_key: str, user_id: str) -> bool:
+        ward = self._extras(group_key).setdefault("hospital", {})
+        if user_id not in ward:
+            return False
+        ward.pop(user_id, None)
+        self.store.save()
+        return True
+
+    def _shielded(self, group_key: str, user_id: str, *,
+                  now: float) -> bool:
+        """Inside their first 24h here?  The bully index
+        weighs hitting a newcomer hardest (§24) — the shield
+        is read from the member ledger's own stamps: the
+        join stamp when a join event was seen, else the
+        first-seen stamp (a member already in the room when
+        Devon arrived is new TO THE SYSTEM either way)."""
+        record = self.member(group_key, user_id) or {}
+        joined = float(record.get("joined_ts")
+                       or record.get("first_seen") or 0)
+        return bool(joined and 0 <= now - joined < 86400)
+
     def rob(self, group_key: str, actor: str, target: str, *,
             rng: Any, now: float | None = None) -> dict[str, Any]:
         """/rob: steal from a member's WALLET.  Failure means
@@ -2601,6 +2738,10 @@ class GroupSurface:
             return {"ok": False, "reason": "jailed",
                     "jail": self.jail_state(group_key, actor,
                                             now=now)}
+        if self.hospital_state(group_key, actor, now=now):
+            return {"ok": False, "reason": "hospital",
+                    "hospital": self.hospital_state(
+                        group_key, actor, now=now)}
         state = self._extras(group_key).setdefault("rob", {})
         last = float((state.get(actor) or {}).get("last") or 0)
         if now - last < 600:
@@ -2613,6 +2754,18 @@ class GroupSurface:
             return {"ok": False, "reason": out.get("reason",
                                                    "target")}
         state[actor] = {"last": now}
+        if self._conflict_mode(group_key) != "off":
+            try:
+                self.conflict.note_crime(
+                    group_key, actor=actor, target=target,
+                    verb="rob", success=bool(out.get("success")),
+                    take=int(out.get("amount") or 0),
+                    shielded=self._shielded(group_key, target,
+                                            now=now),
+                    now=now)
+            except GroupConflictError:
+                pass  # a frozen conflict organ never blocks rob;
+                # the freeze itself surfaces on conflict paths
         if out.get("success"):
             self.store.save()
             return {"ok": True, "success": True,
@@ -2637,7 +2790,28 @@ class GroupSurface:
             return {"ok": False, "reason": "off"}
         record = self.jail_state(group_key, user_id, now=now)
         if not record:
-            return {"ok": False, "reason": "free"}
+            # Not jailed — but a hospital bill is also a door
+            # /bail opens (§23): pay it and walk out early.
+            ward = self.hospital_state(group_key, user_id,
+                                       now=now)
+            if not ward:
+                return {"ok": False, "reason": "free"}
+            bill = int(ward.get("bill") or 0)
+            if bill <= 0:
+                return {"ok": False, "reason": "hospital",
+                        "hospital": ward}
+            if not self.economy._move(
+                    group_key, user_id, "", bill, "fine",
+                    "hospital bill paid", now):
+                return {"ok": False, "reason": "funds",
+                        "cost": bill}
+            self.hospital_clear(group_key, user_id)
+            self._audit(group_key, "hospital_paid",
+                        user_id=user_id, cost=bill)
+            self.store.save()
+            return {"ok": True, "cost": bill, "hospital": True,
+                    "balance": self.economy.balance(
+                        group_key, user_id)}
         cost = int(record.get("bail") or 10)
         econ = self.economy
         if not econ._move(group_key, user_id, "", cost, "fine",
@@ -3371,6 +3545,1157 @@ class GroupSurface:
                     by=by, refunded=refunded)
         self.store.save()
         return {"ok": True, "refunded": refunded, "drop": drop}
+
+    # ---- the conflict layer (§23/§24/§35) -------------------------
+    @property
+    def conflict(self) -> GroupConflict:
+        if self._conflict is None:
+            self._conflict = GroupConflict(self.economy)
+        return self._conflict
+
+    @property
+    def war_book(self) -> WarBook:
+        """The inter-group war book: ONE global ledger beside
+        the group store (the reputation book's shape)."""
+        if self._war_book is None:
+            self._war_book = WarBook(
+                self.store.path.parent / "conflict_wars.json")
+        return self._war_book
+
+    def conflict_cfg(self, group_key: str) -> dict[str, Any]:
+        return dict(self.store.settings(group_key)["conflict"])
+
+    def _conflict_mode(self, group_key: str) -> str:
+        mode = str(self.conflict_cfg(group_key).get("mode")
+                   or "off")
+        return mode if mode in ("off", "crime", "warfare") \
+            else "off"
+
+    def conflict_frozen(self, group_key: str) -> str | None:
+        """Freeze reason when the conflict state is unreadable
+        (the economy_frozen discipline, probed once per group
+        per day): an unreadable gang/war state is never read
+        as empty street."""
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        probe = getattr(self, "_conflict_probe", None)
+        if probe is None:
+            probe = self._conflict_probe = {}
+        cached = probe.get(group_key)
+        if cached and cached[0] == day:
+            return cached[1]
+        reason: str | None = None
+        try:
+            health = self.conflict.health(group_key)
+            if not health.get("ok"):
+                reason = str(health.get("error") or "unreadable")
+        except GroupConflictError as exc:
+            reason = str(exc)
+        if reason:
+            self._audit(group_key, "conflict_frozen",
+                        reason=reason)
+        probe[group_key] = (day, reason)
+        return reason
+
+    def _conflict_gate(self, group_key: str, need: str = "crime"
+                       ) -> dict[str, Any] | None:
+        """None when the conflict layer runs at the needed
+        level here, else a refusal dict.  Levels: crime verbs,
+        heists, gangs and drops need ``crime``; wars and
+        territory need ``warfare`` (§23's per-group mode)."""
+        if not self.store.settings(group_key)["economy_enabled"]:
+            return {"ok": False, "reason": "off"}
+        if self.conflict_frozen(group_key) is not None:
+            return {"ok": False, "reason": "frozen"}
+        rank = {"off": 0, "crime": 1, "warfare": 2}
+        mode = self._conflict_mode(group_key)
+        if rank[mode] < rank[need]:
+            return {"ok": False, "reason": "mode", "mode": mode,
+                    "need": need}
+        return None
+
+    # ── gear ──
+
+    def gear_buy(self, group_key: str, user_id: str, item_id: str,
+                 *, is_admin: bool = False,
+                 now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        out = self.conflict.buy_gear(group_key, user_id, item_id,
+                                     now=now, is_admin=is_admin)
+        if out.get("ok"):
+            self._audit(group_key, "gear_buy", user_id=user_id,
+                        item=item_id)
+            self.store.save()
+        return out
+
+    def gear_install(self, group_key: str, user_id: str,
+                     item_id: str, scope: str, *,
+                     can_shared: bool = False,
+                     now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        if scope.startswith("vault:") and scope != (
+                f"vault:{user_id}") and not can_shared:
+            return {"ok": False, "reason": "scope"}
+        if not scope.startswith("vault:") and not can_shared:
+            return {"ok": False, "reason": "scope"}
+        out = self.conflict.install_defense(
+            group_key, user_id, item_id, scope, now=now)
+        if out.get("ok"):
+            self._audit(group_key, "defense_install",
+                        user_id=user_id, item=item_id, scope=scope)
+            self.store.save()
+        return out
+
+    def gear_use(self, group_key: str, user_id: str, item_id: str,
+                 *, now: float | None = None) -> dict[str, Any]:
+        """Use a held support item: a medkit discharges you
+        from hospital; a repair kit restores your most-worn
+        tool.  (Bribe envelopes are spent by /bribe itself.)"""
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        if item_id == "medkit":
+            if not self.hospital_state(group_key, user_id,
+                                       now=now):
+                return {"ok": False, "reason": "not_hospital"}
+            if not self.conflict.use_consumable(
+                    group_key, user_id, "medkit", now=now):
+                return {"ok": False, "reason": "not_owned"}
+            self.hospital_clear(group_key, user_id)
+            self._audit(group_key, "medkit_used",
+                        user_id=user_id)
+            self.store.save()
+            return {"ok": True, "item": "medkit"}
+        if item_id == "repair_kit":
+            return self.conflict.repair_item(group_key, user_id,
+                                             now=now)
+        return {"ok": False, "reason": "not_usable"}
+
+    def loadout_view(self, group_key: str, user_id: str, *,
+                     now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        organ = self.conflict
+        state = organ._load_state(group_key)
+        stars, index, _ = organ.wanted_stars(
+            group_key, user_id, state=state, now=now)
+        return {"items": organ.loadout(group_key, user_id,
+                                       state=state),
+                "power": organ.member_power(
+                    group_key, user_id, state=state, now=now),
+                "rep": int((state.get("rep") or {}).get(
+                    user_id, 0)),
+                "stars": stars, "index": index,
+                "defenses": {scope: items for scope, items in
+                             (state.get("defenses") or {}).items()
+                             if scope == f"vault:{user_id}"}}
+
+    # ── crime verbs + heists ──
+
+    def _crime_ready(self, group_key: str, actor: str, *,
+                     now: float) -> dict[str, Any] | None:
+        if self.jail_state(group_key, actor, now=now):
+            return {"ok": False, "reason": "jailed",
+                    "jail": self.jail_state(group_key, actor,
+                                            now=now)}
+        if self.hospital_state(group_key, actor, now=now):
+            return {"ok": False, "reason": "hospital",
+                    "hospital": self.hospital_state(
+                        group_key, actor, now=now)}
+        cfg = self.conflict_cfg(group_key)
+        cd = self._extras(group_key).setdefault("crime_cd", {})
+        last = float((cd.get(actor) or {}).get("last") or 0)
+        wait = int(cfg.get("crime_cooldown_s") or 0) - (now - last)
+        if wait > 0:
+            return {"ok": False, "reason": "cooldown",
+                    "wait_s": int(wait)}
+        return None
+
+    def crime_verb(self, group_key: str, actor: str, target: str,
+                   verb: str, *, rng: Any,
+                   now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        if actor == target:
+            return {"ok": False, "reason": "self"}
+        ready = self._crime_ready(group_key, actor, now=now)
+        if ready:
+            return ready
+        if self.jail_state(group_key, target, now=now):
+            return {"ok": False, "reason": "target_jailed"}
+        organ = self.conflict
+        out = organ.hit_verb(
+            group_key, actor, target, verb, rng=rng, now=now,
+            shielded=self._shielded(group_key, target, now=now))
+        if not out.get("ok"):
+            return out
+        cd = self._extras(group_key).setdefault("crime_cd", {})
+        cd[actor] = {"last": now}
+        if out.get("success"):
+            if int(out.get("hospital_min") or 0):
+                bill = 40 if verb == "kill" else 70
+                self.hospital_member(
+                    group_key, target, int(out["hospital_min"]),
+                    bill=bill, by=actor, now=now)
+            claimed = organ.claim_bounties(
+                group_key, actor, target, now=now, via=verb)
+            out["bounty"] = int(claimed.get("amount") or 0)
+        elif int(out.get("jail_min") or 0):
+            self.jail_member(group_key, actor,
+                             int(out["jail_min"]),
+                             reason=f"failed {verb}", now=now)
+            out["jailed"] = True
+        self._audit(group_key, f"crime_{verb}", user_id=actor,
+                    target=target,
+                    success=bool(out.get("success")),
+                    take=int(out.get("take") or 0))
+        self.store.save()
+        return out
+
+    def crime_sabotage(self, group_key: str, actor: str,
+                       target: str, *, rng: Any,
+                       now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        if actor == target:
+            return {"ok": False, "reason": "self"}
+        ready = self._crime_ready(group_key, actor, now=now)
+        if ready:
+            return ready
+        out = self.conflict.sabotage(
+            group_key, actor, target, rng=rng, now=now,
+            shielded=self._shielded(group_key, target, now=now))
+        if not out.get("ok"):
+            return out
+        cd = self._extras(group_key).setdefault("crime_cd", {})
+        cd[actor] = {"last": now}
+        if not out.get("success"):
+            self.jail_member(group_key, actor, 20,
+                             reason="caught sabotaging", now=now)
+            out["jailed"] = True
+        self._audit(group_key, "crime_sabotage", user_id=actor,
+                    target=target,
+                    success=bool(out.get("success")),
+                    bill=int(out.get("bill") or 0))
+        self.store.save()
+        return out
+
+    def heist_start(self, group_key: str, leader: str,
+                    target_kind: str, target_id: str, *,
+                    now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        ready = self._crime_ready(group_key, leader, now=now)
+        if ready:
+            return ready
+        cfg = self.conflict_cfg(group_key)
+        cd = self._extras(group_key).setdefault("heist_cd", {})
+        last = float((cd.get(leader) or {}).get("last") or 0)
+        wait = int(cfg.get("heist_cooldown_s") or 0) - (now - last)
+        if wait > 0:
+            return {"ok": False, "reason": "cooldown",
+                    "wait_s": int(wait)}
+        if target_kind == "bank" and target_id not in DISTRICTS:
+            return {"ok": False, "reason": "district"}
+        if target_kind == "vault":
+            if target_id == leader:
+                return {"ok": False, "reason": "self"}
+            if not self.member(group_key, target_id):
+                return {"ok": False, "reason": "target"}
+        gang = self.conflict.gang_of(group_key, leader)
+        if target_kind in ("treasury", "bank") and (
+                gang is None or len(gang.get("members") or [])
+                < 5):
+            return {"ok": False, "reason": "tier",
+                    "need": "a gang of 5+ runs the big scores"}
+        out = self.conflict.start_heist(
+            group_key, leader, target_kind, target_id, now=now)
+        if out.get("ok"):
+            self._audit(group_key, "heist_start", user_id=leader,
+                        target=f"{target_kind}:{target_id}")
+            self.store.save()
+        return out
+
+    def heist_join(self, group_key: str, member: str, *,
+                   now: float | None = None) -> dict[str, Any]:
+        """Join the open heist lobby (one at a time per
+        group — the lobby is found, never named by id)."""
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        ready = self._crime_ready(group_key, member, now=now)
+        if ready:
+            return ready
+        organ = self.conflict
+        state = organ._load_state(group_key)
+        for lobby in (state.get("heists") or {}).values():
+            if lobby.get("status") == "open":
+                return organ.join_heist(group_key, member,
+                                        str(lobby["id"]), now=now)
+        return {"ok": False, "reason": "not_found"}
+
+    def heist_go(self, group_key: str, leader: str, *, rng: Any,
+                 now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        organ = self.conflict
+        state = organ._load_state(group_key)
+        lobby = next((h for h in (state.get("heists") or {})
+                      .values()
+                      if h.get("status") == "open"
+                      and h.get("leader") == leader), None)
+        if lobby is None:
+            return {"ok": False, "reason": "not_found"}
+        available = self.economy.treasury_balance(group_key) \
+            - self.reserved_treasury(group_key)
+        out = organ.resolve_heist(
+            group_key, str(lobby["id"]), rng=rng, now=now,
+            available_treasury=max(0, available))
+        if not out.get("ok"):
+            return out
+        cd = self._extras(group_key).setdefault("heist_cd", {})
+        for member in out.get("crew") or []:
+            cd[member] = {"last": now}
+        if out.get("outcome") == "bust":
+            for member in out.get("crew") or []:
+                self.jail_member(group_key, member, 45,
+                                 reason="heist bust", now=now)
+            out["jailed"] = list(out.get("crew") or [])
+        self._audit(group_key, "heist_done", user_id=leader,
+                    outcome=out.get("outcome"),
+                    take=int(out.get("take") or 0))
+        self.store.save()
+        return out
+
+    def heist_open(self, group_key: str) -> dict[str, Any] | None:
+        state = self.conflict._load_state(group_key)
+        for lobby in (state.get("heists") or {}).values():
+            if lobby.get("status") == "open":
+                return lobby
+        return None
+
+    # ── gangs ──
+
+    def gang_create(self, group_key: str, user_id: str,
+                    name: str, lifestyle: str, *,
+                    now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        out = self.conflict.create_gang(group_key, user_id, name,
+                                        lifestyle, now=now)
+        if out.get("ok"):
+            try:
+                self.war_book.register_gang(
+                    group_key, str(self.store.path), out["gang"])
+            except GroupConflictError:
+                pass  # index is a directory, not the gang —
+                # a broken book never blocks the street forming
+            self._audit(group_key, "gang_create", user_id=user_id,
+                        gang=str(out["gang"].get("name") or ""))
+            self.store.save()
+        return out
+
+    def gang_join(self, group_key: str, user_id: str, name: str,
+                  *, now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        out = self.conflict.join_gang(group_key, user_id, name,
+                                      now=now)
+        if out.get("ok"):
+            self.store.save()
+        return out
+
+    def gang_leave(self, group_key: str, user_id: str, *,
+                   now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        out = self.conflict.leave_gang(group_key, user_id,
+                                       now=now)
+        if out.get("ok"):
+            if out.get("dissolved"):
+                try:
+                    self.war_book.unregister_gang(
+                        group_key, str(out["gang"].get("id")
+                                       or ""))
+                except GroupConflictError:
+                    pass
+            self.store.save()
+        return out
+
+    def gang_card(self, group_key: str, user_id: str, *,
+                  now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        organ = self.conflict
+        state = organ._load_state(group_key)
+        gang = organ.gang_of(group_key, user_id, state=state)
+        if gang is None:
+            return {"ok": False, "reason": "no_gang"}
+        from ...community.group_conflict import gang_tier
+        strength = organ.gang_strength(group_key, gang,
+                                       state=state, now=now)
+        held = [d for d, h in state["territory"].items()
+                if h.get("gang") == gang.get("id")]
+        return {"ok": True, "gang": gang,
+                "tier": gang_tier(len(gang.get("members") or [])),
+                "strength": strength, "territory": held,
+                "power": organ.power_gang(
+                    group_key, state=state, now=now) is gang
+                or (organ.power_gang(group_key, state=state,
+                                     now=now) or {}).get(
+                    "id") == gang.get("id")}
+
+    def gang_list(self, group_key: str, *,
+                  now: float | None = None) -> list[dict[str, Any]]:
+        now = now if now is not None else time.time()
+        organ = self.conflict
+        state = organ._load_state(group_key)
+        out = []
+        for gang in (state.get("gangs") or {}).values():
+            out.append({"gang": gang, "strength":
+                        organ.gang_strength(
+                            group_key, gang, state=state,
+                            now=now)["total"]})
+        out.sort(key=lambda r: -r["strength"])
+        return out
+
+    def gang_power_actor(self, group_key: str, user_id: str, *,
+                         now: float | None = None
+                         ) -> dict[str, Any] | None:
+        """The power gang when this member may drive it
+        (governance capture, §23) — leader/officers only."""
+        now = now if now is not None else time.time()
+        if self._conflict_mode(group_key) != "warfare":
+            return None
+        try:
+            return self.conflict.power_actor(group_key, user_id,
+                                             now=now)
+        except GroupConflictError:
+            return None
+
+    def territory_map(self, group_key: str) -> dict[str, str]:
+        try:
+            return self.conflict.territory_map(group_key)
+        except GroupConflictError:
+            return {}
+
+    # ── the police + bounties ──
+
+    def police_board(self, group_key: str, user_id: str, *,
+                     now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        organ = self.conflict
+        state = organ._load_state(group_key)
+        wanted = []
+        members = set((state.get("rep") or {}).keys())
+        for event in state.get("journal") or []:
+            if event.get("kind") == "crime":
+                members.add(str(event.get("actor") or ""))
+        for member in sorted(m for m in members if m):
+            stars, index, inputs = organ.wanted_stars(
+                group_key, member, state=state, now=now)
+            if stars > 0 or index >= 6.0:
+                wanted.append({"member": member, "stars": stars,
+                               "index": index,
+                               "inputs": inputs[-3:]})
+        wanted.sort(key=lambda r: -r["index"])
+        stars, index, inputs = organ.wanted_stars(
+            group_key, user_id, state=state, now=now)
+        return {"wanted": wanted[:10],
+                "bounties": organ.open_bounties(group_key,
+                                                state=state),
+                "me": {"stars": stars, "index": index,
+                       "inputs": inputs}}
+
+    def police_bribe(self, group_key: str, user_id: str, *,
+                     rng: Any, now: float | None = None,
+                     use_envelope: bool = False
+                     ) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        out = self.conflict.bribe(group_key, user_id, rng=rng,
+                                  now=now,
+                                  use_envelope=use_envelope)
+        if out.get("ok") and int(out.get("jail_min") or 0):
+            self.jail_member(group_key, user_id,
+                             int(out["jail_min"]),
+                             reason="bribe went wrong", now=now)
+            out["jailed"] = True
+        if out.get("ok"):
+            self._audit(group_key, "bribe", user_id=user_id,
+                        success=bool(out.get("success")))
+            self.store.save()
+        return out
+
+    def bounty_post(self, group_key: str, user_id: str,
+                    target: str, amount: int, *,
+                    now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        if user_id == target:
+            return {"ok": False, "reason": "self"}
+        out = self.conflict.post_bounty(group_key, user_id,
+                                        target, amount, now=now)
+        if out.get("ok"):
+            self._audit(group_key, "bounty_post",
+                        user_id=user_id, target=target,
+                        amount=int(amount))
+            self.store.save()
+        return out
+
+    def bounty_hunt(self, group_key: str, hunter: str,
+                    target: str, *, rng: Any,
+                    now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        if hunter == target:
+            return {"ok": False, "reason": "self"}
+        ready = self._crime_ready(group_key, hunter, now=now)
+        if ready:
+            return ready
+        out = self.conflict.hunt(group_key, hunter, target,
+                                 rng=rng, now=now)
+        if not out.get("ok"):
+            return out
+        if out.get("success"):
+            self.jail_member(group_key, target, 30,
+                             reason="brought in by a bounty "
+                                    "hunter", now=now)
+            out["jailed_target"] = True
+        else:
+            fine = int(out.get("fine_due") or 0)
+            econ = self.economy
+            if fine and econ.balance(group_key, hunter) >= fine:
+                econ._move(group_key, hunter, "", fine, "fine",
+                           "failed bounty hunt", now)
+                out["fine"] = fine
+            else:
+                self.jail_member(group_key, hunter, 10,
+                                 reason="hunt went wrong",
+                                 now=now)
+                out["jailed"] = True
+        self._audit(group_key, "bounty_hunt", user_id=hunter,
+                    target=target,
+                    success=bool(out.get("success")))
+        self.store.save()
+        return out
+
+    # ── wars (in-group) ──
+
+    def war_declare(self, group_key: str, user_id: str,
+                    target_name: str, *,
+                    now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "warfare")
+        if gate:
+            return gate
+        out = self.conflict.declare_war(
+            group_key, user_id, target_name, now=now,
+            cfg=self.conflict_cfg(group_key))
+        if out.get("ok"):
+            self._audit(group_key, "war_declare",
+                        user_id=user_id,
+                        target=str(out["theirs"].get("name")
+                                   or ""))
+            self.store.save()
+        return out
+
+    def war_answer(self, group_key: str, user_id: str,
+                   accept: bool, *,
+                   now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "warfare")
+        if gate:
+            return gate
+        organ = self.conflict
+        gang = organ.gang_of(group_key, user_id)
+        if gang is None:
+            return {"ok": False, "reason": "no_gang"}
+        state = organ._load_state(group_key)
+        war = next((w for w in (state.get("wars") or {}).values()
+                    if w.get("status") == "declared"
+                    and w.get("b") == gang.get("id")), None)
+        if war is None:
+            return {"ok": False, "reason": "no_war"}
+        out = organ.answer_war(group_key, user_id,
+                               str(war["id"]), accept, now=now,
+                               cfg=self.conflict_cfg(group_key))
+        if out.get("ok"):
+            self.store.save()
+        return out
+
+    def war_join(self, group_key: str, user_id: str, *,
+                 now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "warfare")
+        if gate:
+            return gate
+        out = self.conflict.war_join(group_key, user_id, now=now)
+        if out.get("ok"):
+            self.store.save()
+        return out
+
+    def war_status(self, group_key: str, user_id: str, *,
+                   now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        organ = self.conflict
+        state = organ._load_state(group_key)
+        gang = organ.gang_of(group_key, user_id, state=state)
+        if gang is None:
+            return {"ok": False, "reason": "no_gang"}
+        war = organ.war_for_gang(group_key, gang["id"],
+                                 state=state)
+        inter = [w for w in self.war_book.wars_for_group(
+            group_key) if w.get("status") in (
+                "declared", "active")
+            and ((w.get("a") or {}).get("gang") == gang.get("id")
+                 or (w.get("b") or {}).get("gang")
+                 == gang.get("id"))]
+        return {"ok": True, "war": war,
+                "inter": inter[0] if inter else None,
+                "gang": gang}
+
+    def war_spoils(self, group_key: str, user_id: str,
+                   district: str, *,
+                   now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "warfare")
+        if gate:
+            return gate
+        out = self.conflict.war_claim_spoils(
+            group_key, user_id, district, now=now)
+        if out.get("ok"):
+            self._audit(group_key, "territory_spoils",
+                        user_id=user_id, district=district)
+            self.store.save()
+        return out
+
+    def territory_claim(self, group_key: str, user_id: str,
+                        district: str, *,
+                        now: float | None = None
+                        ) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "warfare")
+        if gate:
+            return gate
+        out = self.conflict.claim_territory(
+            group_key, user_id, district, now=now)
+        if out.get("ok"):
+            self._audit(group_key, "territory_claim",
+                        user_id=user_id, district=district)
+            self.store.save()
+        return out
+
+    # ── wars (inter-group, through the book) ──
+
+    def _conflict_for_store(self, store_path: str
+                            ) -> GroupConflict:
+        from ...community.group_economy import GroupEconomy
+        econ = GroupEconomy(
+            data_dir=Path(store_path).parent / "group_economy")
+        return GroupConflict(econ)
+
+    def _war_side(self, group_key: str, gang: dict[str, Any], *,
+                  now: float) -> dict[str, Any]:
+        from ...community.group_conflict import gear_power
+        organ = self.conflict
+        state = organ._load_state(group_key)
+        return {"group": group_key,
+                "store": str(self.store.path),
+                "gang": str(gang.get("id") or ""),
+                "gang_name": str(gang.get("name") or ""),
+                "lifestyle": str(gang.get("lifestyle")
+                                 or "street"),
+                "strength": organ.gang_strength(
+                    group_key, gang, state=state,
+                    now=now)["total"],
+                "armory_power": gear_power(
+                    list(gang.get("armory") or []), "war",
+                    now=now),
+                "leader_power": organ.member_power(
+                    group_key, str(gang.get("leader") or ""),
+                    state=state, now=now)}
+
+    def war_declare_inter(self, group_key: str, user_id: str,
+                          target_name: str, *,
+                          now: float | None = None
+                          ) -> dict[str, Any]:
+        """Declare on a gang in ANOTHER claimed group: both
+        gangs must be gang-tier or better, the escrow leaves
+        this gang's treasury up front, and the war lives in
+        the shared book until the other side answers."""
+        from ...community.group_conflict import gang_tier
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "warfare")
+        if gate:
+            return gate
+        organ = self.conflict
+        mine = organ.gang_of(group_key, user_id)
+        if mine is None:
+            return {"ok": False, "reason": "no_gang"}
+        if gang_tier(len(mine.get("members") or [])) == "crew":
+            return {"ok": False, "reason": "tier"}
+        try:
+            self.war_book.register_gang(
+                group_key, str(self.store.path), mine)
+            found = [f for f in self.war_book.find_gangs(
+                target_name) if f["group"] != group_key]
+        except GroupConflictError:
+            return {"ok": False, "reason": "book"}
+        if not found:
+            return {"ok": False, "reason": "not_found"}
+        target = found[0]
+        try:
+            other = self._conflict_for_store(
+                str(target["store"]))
+            theirs = other.gang_by_name(str(target["group"]),
+                                        target_name)
+        except GroupConflictError:
+            return {"ok": False, "reason": "frozen"}
+        if theirs is None:
+            return {"ok": False, "reason": "not_found"}
+        if gang_tier(len(theirs.get("members") or [])) == "crew":
+            return {"ok": False, "reason": "tier_target"}
+        for war in self.war_book.wars_for_group(group_key):
+            if war.get("status") in ("declared", "active"):
+                return {"ok": False, "reason": "busy"}
+        cfg = self.conflict_cfg(group_key)
+        escrow = int(cfg.get("war_escrow") or 0)
+        side_a = self._war_side(group_key, mine, now=now)
+        other_surface_note = str(target["group"])
+        side_b = {"group": other_surface_note,
+                  "store": str(target["store"]),
+                  "gang": str(theirs.get("id") or ""),
+                  "gang_name": str(theirs.get("name") or ""),
+                  "lifestyle": str(theirs.get("lifestyle")
+                                   or "street"),
+                  "strength": 0, "armory_power": 0,
+                  "leader_power": 10}
+        try:
+            other_state = other._load_state(other_surface_note)
+            from ...community.group_conflict import gear_power
+            side_b["strength"] = other.gang_strength(
+                other_surface_note, theirs, state=other_state,
+                now=now)["total"]
+            side_b["armory_power"] = gear_power(
+                list(theirs.get("armory") or []), "war", now=now)
+            side_b["leader_power"] = other.member_power(
+                other_surface_note,
+                str(theirs.get("leader") or ""),
+                state=other_state, now=now)
+        except GroupConflictError:
+            return {"ok": False, "reason": "frozen"}
+        war = self.war_book.create_war(side_a, side_b,
+                                       escrow=escrow, now=now,
+                                       cfg=cfg)
+        paid = organ.escrow_for_inter_war(
+            group_key, user_id, str(war["id"]), escrow, now=now)
+        if not paid.get("ok"):
+            war["status"] = "void"
+            self.war_book.update(war)
+            return paid
+        self._audit(group_key, "war_inter_declare",
+                    user_id=user_id,
+                    target=str(theirs.get("name") or ""))
+        self.store.save()
+        return {"ok": True, "war": war, "mine": mine,
+                "theirs": theirs}
+
+    def war_answer_inter(self, group_key: str, user_id: str,
+                         accept: bool, *,
+                         now: float | None = None
+                         ) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "warfare")
+        if gate:
+            return gate
+        organ = self.conflict
+        gang = organ.gang_of(group_key, user_id)
+        if gang is None:
+            return {"ok": False, "reason": "no_gang"}
+        war = next((w for w in self.war_book.wars_for_group(
+            group_key) if w.get("status") == "declared"
+            and (w.get("b") or {}).get("gang") == gang.get("id")),
+            None)
+        if war is None:
+            return {"ok": False, "reason": "no_war"}
+        cfg = self.conflict_cfg(group_key)
+        if accept:
+            paid = organ.escrow_for_inter_war(
+                group_key, user_id, str(war["id"]),
+                int(war.get("escrow") or 0), now=now)
+            if not paid.get("ok"):
+                return paid
+            war["status"] = "active"
+            war["next_round_at"] = now + float(
+                cfg.get("war_round_s") or 3600)
+        else:
+            war["status"] = "declined"
+        self.war_book.update(war)
+        self.store.save()
+        return {"ok": True, "war": war}
+
+    def war_join_inter(self, group_key: str, user_id: str, *,
+                       now: float | None = None
+                       ) -> dict[str, Any]:
+        """Opt into your gang's inter-group war: your CURRENT
+        power is snapshotted into the book (the book is the
+        only place both sides' strength can meet)."""
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "warfare")
+        if gate:
+            return gate
+        organ = self.conflict
+        gang = organ.gang_of(group_key, user_id)
+        if gang is None:
+            return {"ok": False, "reason": "no_gang"}
+        war = next((w for w in self.war_book.wars_for_group(
+            group_key) if w.get("status") == "active"
+            and ((w.get("a") or {}).get("gang") == gang.get("id")
+                 or (w.get("b") or {}).get("gang")
+                 == gang.get("id"))), None)
+        if war is None:
+            return {"ok": False, "reason": "no_war"}
+        side = "a" if (war.get("a") or {}).get(
+            "gang") == gang.get("id") else "b"
+        parts = dict((war.get("participants") or {}).get(
+            side) or {})
+        if user_id in parts:
+            return {"ok": False, "reason": "already"}
+        parts[user_id] = organ.member_power(group_key, user_id,
+                                            now=now)
+        war.setdefault("participants", {})[side] = parts
+        self.war_book.update(war)
+        return {"ok": True, "war": war, "side": side}
+
+    # ── system drops (§35) ──
+
+    def sysdrop_claim(self, group_key: str, user_id: str,
+                      drop_id: str, *,
+                      now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        if self._conflict_mode(group_key) == "off":
+            return {"ok": False, "reason": "mode"}
+        if self.conflict_frozen(group_key) is not None:
+            return {"ok": False, "reason": "frozen"}
+        out = self.conflict.claim_sysdrop(group_key, user_id,
+                                          drop_id, now=now)
+        if out.get("ok"):
+            self._audit(group_key, "sysdrop_claim",
+                        user_id=user_id, drop=drop_id,
+                        loot=str((out.get("got") or {}).get(
+                            "kind") or ""))
+            self.store.save()
+        return out
+
+    def conflict_feed_take(self, group_key: str
+                           ) -> list[dict[str, Any]]:
+        """Drain the queued button-carrying announcements
+        (system-drop openings) for the runtime to post."""
+        extras = self._extras(group_key)
+        feed = list(extras.get("conflict_feed") or [])
+        if feed:
+            extras["conflict_feed"] = []
+            self.store.save()
+        return feed
+
+    def _report_tallies(self, group_key: str, *, now: float
+                        ) -> dict[str, int]:
+        """Distinct reporters per target over 7 days, counted
+        from the audit journal /report already writes."""
+        since = now - 7 * 86400
+        seen: dict[str, set] = {}
+        for entry in self.audit(group_key, limit=AUDIT_RING):
+            if entry.get("kind") != "report":
+                continue
+            if float(entry.get("ts") or 0) < since:
+                continue
+            target = str(entry.get("user_id") or "")
+            reporter = str(entry.get("by") or "")
+            if target and reporter and target != reporter:
+                seen.setdefault(target, set()).add(reporter)
+        return {t: len(r) for t, r in seen.items() if len(r) >= 3}
+
+    def conflict_cycle(self, group_key: str, *, rng: Any = None,
+                       now: float | None = None) -> list[str]:
+        """The conflict beat on the message cycle (§23/§24/
+        §35): drop openings roll against the admin's daily
+        budget, war rounds fall due, territory pays, expired
+        drops close quietly, and the police sweep the bully
+        index — each action journaled with its evidence, the
+        reversible one (jail) posted as a §31 notice with an
+        Undo, the settlements (fines, raids, bounties) posted
+        plainly as final.  Claimed rooms only (§33): in a
+        foreign room the conflict layer neither speaks nor
+        accrues."""
+        import random as _random
+        now = now if now is not None else time.time()
+        rng = rng if rng is not None else _random
+        notices: list[str] = []
+        if self._conflict_mode(group_key) == "off" \
+                or not self.economy_on(group_key) \
+                or not self.system_output_allowed(group_key):
+            return notices
+        if self.conflict_frozen(group_key) is not None:
+            return notices
+        cfg = self.conflict_cfg(group_key)
+        organ = self.conflict
+        extras = self._extras(group_key)
+        state = organ._load_state(group_key)
+        # drops expire quietly — audit only, never a post
+        for drop in organ.expire_sysdrops(group_key, now=now):
+            self._audit(group_key, "sysdrop_expired",
+                        drop=str(drop.get("id") or ""))
+        # hourly-throttled machinery: wars, territory, police
+        last = float(extras.get("conflict_cycle_at") or 0)
+        if now - last >= 900:
+            extras["conflict_cycle_at"] = now
+            free = self.economy.treasury_balance(group_key) \
+                - self.reserved_treasury(group_key)
+            for event in organ.cycle_wars(
+                    group_key, rng=rng, now=now, cfg=cfg):
+                war = event.get("war") or {}
+                gangs = state.get("gangs") or {}
+                name_a = (gangs.get(str(war.get("a"))) or {}).get(
+                    "name", "a crew")
+                name_b = (gangs.get(str(war.get("b"))) or {}).get(
+                    "name", "a crew")
+                if event.get("kind") == "war_expired":
+                    notices.append(notice_line(
+                        "🏳️", f"the war between <b>{name_a}</b> "
+                        f"and <b>{name_b}</b> was never answered "
+                        f"— escrow returned."))
+                elif event.get("finished"):
+                    notices.append(notice_line(
+                        "⚔️", f"<b>{event['winner_gang']['name']}"
+                        f"</b> wins the war against "
+                        f"<b>{event['loser_gang']['name']}</b> "
+                        f"and takes the "
+                        f"{sparks(int(event.get('pot') or 0))} "
+                        f"pot!"
+                        + (" A district can be claimed with "
+                           "/war spoils <district>."
+                           if event.get("spoils_pending")
+                           else "")))
+                else:
+                    notices.append(notice_line(
+                        "⚔️", f"war round {event.get('round')}: "
+                        f"<b>{event['winner_gang']['name']}</b> "
+                        f"takes it "
+                        f"({event.get('power_a', 0):.0f} vs "
+                        f"{event.get('power_b', 0):.0f})."))
+            state = organ._load_state(group_key)
+            for event in organ.cycle_territory(
+                    group_key, now=now, cfg=cfg,
+                    free_treasury=max(0, free)):
+                if event.get("kind") == "territory_lost":
+                    notices.append(notice_line(
+                        "🏚️", f"<b>{event['gang']}</b> lost "
+                        f"<b>{DISTRICTS.get(event['district'], event['district'])}</b>"
+                        f" — the upkeep went unpaid."))
+                elif int(event.get("amount") or 0) > 0:
+                    notices.append(notice_line(
+                        "🏙️", f"<b>{event['gang']}</b> collects "
+                        f"{sparks(int(event['amount']))} from "
+                        f"<b>{DISTRICTS.get(event['district'], event['district'])}</b>"
+                        f" today."))
+            self._conflict_cycle_inter(group_key, notices,
+                                       rng=rng, now=now, cfg=cfg)
+            if cfg.get("police"):
+                tallies = self._report_tallies(group_key, now=now)
+                if tallies:
+                    organ.note_report_attention(
+                        group_key, reports=tallies, now=now)
+                free = self.economy.treasury_balance(group_key) \
+                    - self.reserved_treasury(group_key)
+                for action in organ.police_sweep(
+                        group_key, now=now,
+                        free_treasury=max(0, free)):
+                    notices.append(self._police_notice(
+                        group_key, action, now=now))
+            state = organ._load_state(group_key)
+        # system drops: the budget roll (§35)
+        state = organ._load_state(group_key)
+        budget = int(cfg.get("drops_per_day") or 0)
+        open_now = sum(1 for d in (state.get("drops") or {})
+                       .values() if d.get("status") == "open")
+        if budget > 0 and open_now == 0 and float(
+                rng.random()) < float(cfg.get("drop_chance")
+                                      or 0.25):
+            drop = organ.open_drop(group_key, rng=rng, now=now,
+                                   cfg=cfg)
+            if drop is not None:
+                feed = list(extras.get("conflict_feed") or [])
+                feed.append({"kind": "sysdrop", "drop": drop})
+                extras["conflict_feed"] = feed[-10:]
+                self._audit(group_key, "sysdrop_opened",
+                            drop=str(drop.get("id") or ""),
+                            loot=str(drop.get("kind") or ""))
+        self.store.save()
+        return notices
+
+    def _police_notice(self, group_key: str,
+                       action: dict[str, Any], *,
+                       now: float) -> str:
+        """Render one police action: apply its jail here (the
+        surface owns jail), record the §31 notice — Undo
+        reverses the JAIL only; fines, raids and bounties are
+        settlements and the notice says so by carrying no
+        reversible flag for them."""
+        member = str(action.get("member") or "")
+        record = self.member(group_key, member) or {}
+        label = record.get("name") or (
+            f"@{record['username']}" if record.get("username")
+            else member)
+        bits = []
+        if action.get("fine"):
+            bits.append(f"fined {sparks(int(action['fine']))}")
+        if action.get("raid"):
+            bits.append(f"vault raided for "
+                        f"{sparks(int(action['raid']))}")
+        if action.get("bounty"):
+            bits.append(f"a {sparks(int(action['bounty']))} "
+                        f"bounty posted")
+        jailed = int(action.get("jail_min") or 0)
+        if jailed:
+            self.jail_member(group_key, member, jailed,
+                             reason=f"police ({action['stars']}★ "
+                                    "wanted)", now=now)
+            bits.append(f"jailed for {jailed}m")
+        if not bits:
+            bits.append("is being watched")
+        text = (f"🚔 <b>{label}</b> is {action['stars']}★ "
+                f"wanted — " + ", ".join(bits) + ".")
+        # NB: the fine is deliberately NOT the record's `fine`
+        # field — that field is the notice layer's refundable
+        # slot, and a police fine is a settlement.  It rides
+        # in extra, where an undo can read it but never pay
+        # it back.
+        self.record_notice(
+            group_key, user_id=member, mention=str(label),
+            rule="police",
+            action="police_jail" if jailed else "police",
+            minutes=jailed, fine=0,
+            text=text,
+            extra={"reversible": bool(jailed),
+                   "settlement": bool(action.get("fine")
+                                      or action.get("raid")
+                                      or action.get("bounty")),
+                   "fine_paid": int(action.get("fine") or 0),
+                   "raid_paid": int(action.get("raid") or 0),
+                   "index": action.get("index"),
+                   "inputs": action.get("inputs")},
+            now=now)
+        self._audit(group_key, "police_action", user_id=member,
+                    stars=action.get("stars"),
+                    action=action.get("action"),
+                    index=action.get("index"))
+        return notice_line("🚔", text)
+
+    def _conflict_cycle_inter(self, group_key: str,
+                              notices: list[str], *, rng: Any,
+                              now: float,
+                              cfg: dict[str, Any]) -> None:
+        """Inter-group wars on this group's beat: rounds fall
+        due in the book, declarations arrive as feed lines,
+        finished wars settle this side exactly once."""
+        from ...community.group_conflict import inter_war_round
+        try:
+            wars = self.war_book.wars_for_group(group_key)
+        except GroupConflictError:
+            return
+        organ = self.conflict
+        gang = None
+        extras = self._extras(group_key)
+        for war in wars:
+            mine_a = (war.get("a") or {}).get("group") == group_key
+            side = "a" if mine_a else "b"
+            enemy = (war.get("b") if mine_a else war.get("a")
+                     ) or {}
+            if war.get("status") == "declared" and side == "b" \
+                    and not war.get("notified_b"):
+                war["notified_b"] = True
+                self.war_book.update(war)
+                feed = list(extras.get("conflict_feed") or [])
+                feed.append({
+                    "kind": "line",
+                    "text": notice_line(
+                        "⚔️", f"<b>{(war.get('a') or {}).get('gang_name', 'a gang')}</b>"
+                        f" has declared war on your gang "
+                        f"<b>{(war.get('b') or {}).get('gang_name', '')}</b>"
+                        f" — leadership answers with /war "
+                        f"accept or /war decline.")})
+                extras["conflict_feed"] = feed[-10:]
+            if war.get("status") == "declared" and now - float(
+                    war.get("declared_at") or now) > 2 * 86400:
+                war["status"] = "expired"
+                self.war_book.update(war)
+                if side == "a":
+                    state = organ._load_state(group_key)
+                    escrow = int((state.get("escrow_inter")
+                                  or {}).pop(str(war["id"]), 0))
+                    if escrow:
+                        mine = (state.get("gangs") or {}).get(
+                            str((war.get("a") or {}).get("gang")
+                                or ""))
+                        if mine is not None:
+                            mine["treasury"] = int(
+                                mine.get("treasury") or 0) + escrow
+                        organ._save_state(group_key, state)
+            if war.get("status") == "active" and float(
+                    war.get("next_round_at") or 0) <= now:
+                event = inter_war_round(war, rng=rng, now=now,
+                                        cfg=cfg)
+                self.war_book.update(war)
+                winner = (war.get("a") if event["winner_side"]
+                          == "a" else war.get("b") or {})
+                notices.append(notice_line(
+                    "⚔️", f"inter-group war round "
+                    f"{event['round']}: <b>{winner.get('gang_name', 'a gang')}</b>"
+                    f" takes it ({event['power_a']:.0f} vs "
+                    f"{event['power_b']:.0f})."))
+                if event.get("finished"):
+                    notices.append(notice_line(
+                        "🏆", f"<b>{(war.get(war.get('winner') or 'a') or {}).get('gang_name', 'a gang')}</b>"
+                        f" wins the inter-group war against "
+                        f"<b>{enemy.get('gang_name', 'the enemy')}</b>!"))
+            if war.get("status") == "done" and not (
+                    war.get("settled") or {}).get(side):
+                settled = organ.settle_inter_war(group_key, war,
+                                                 now=now)
+                flags = dict(war.get("settled") or {})
+                flags[side] = True
+                war["settled"] = flags
+                self.war_book.update(war)
+                if settled and settled.get("won"):
+                    notices.append(notice_line(
+                        "💰", f"<b>{settled.get('gang', 'your gang')}</b>"
+                        f" collects the war spoils: "
+                        f"{sparks(int(settled.get('escrow') or 0))}"
+                        f" escrow returned, and the same again "
+                        f"paid to its leader as spoils."))
 
     # ---- read models ----------------------------------------------
     def member(self, group_key: str, user_id: str

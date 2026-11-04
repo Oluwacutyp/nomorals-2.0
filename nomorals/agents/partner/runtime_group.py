@@ -780,6 +780,11 @@ class RuntimeGroupMixin:
                               None)
         if post_closes is not None:
             post_closes(surface, key, message)
+        # §35 drop announcements ride the same cycle: the
+        # surface queued them (with their claim buttons) when
+        # the conflict cycle opened them; this drains the
+        # queue under the same §33/§31 rules.
+        self._post_conflict_feed(surface, key, message)
         self._execute_pending_pin(surface, message)
         actions = result.get("actions") or []
         if not actions:
@@ -1135,6 +1140,143 @@ class RuntimeGroupMixin:
             }[w[0]]
         return None
 
+    def _conflict_update(self, surface, key, **fields):  # type: ignore[no-untyped-def]
+        """Mutate the conflict settings block (§23) through
+        the store's own settings machinery — the one write
+        path behind both /gsettings and the console."""
+        import copy as _copy
+
+        current = surface.store.settings(key)
+        block = _copy.deepcopy(current.get("conflict") or {})
+        block.update(fields)
+        surface.update_settings(key, conflict=block)
+        return block
+
+    def _apply_conflict_grammar(self, surface, key, words):  # type: ignore[no-untyped-def]
+        """The conflict grammar, shared by /gsettings (words
+        after the `conflict` head) and the console's conflict
+        section (bare words).  Returns the reply line, or None
+        when the words aren't conflict grammar.  Forms:
+        `off|crime|warfare` · `drops N` · `police on|off` ·
+        `escrow N`."""
+        w = [str(x).lower() for x in words or []]
+        if len(w) == 1 and w[0] in ("off", "crime", "warfare"):
+            self._conflict_update(surface, key, mode=w[0])
+            return {
+                "off": "conflict: off — the street sleeps; "
+                       "crime, gangs, wars and system drops "
+                       "don't run here.",
+                "crime": "conflict: crime — geared crime, "
+                         "heists, gangs, the police and "
+                         "system drops run here.",
+                "warfare": "conflict: warfare — everything in "
+                           "crime, plus gang wars, territory "
+                           "and governance capture.",
+            }[w[0]]
+        if len(w) == 2 and w[0] == "drops" and w[1].isdigit():
+            n = max(0, min(20, int(w[1])))
+            self._conflict_update(surface, key, drops_per_day=n)
+            return (f"system drops: {n} per day budget"
+                    + (" — drops are off." if n == 0 else
+                       " — contents roll fresh every time "
+                       "(sparks, gems, gear)."))
+        if len(w) == 2 and w[0] == "police" \
+                and w[1] in ("on", "off"):
+            on = w[1] == "on"
+            self._conflict_update(surface, key, police=on)
+            return (f"police {'on' if on else 'off'}"
+                    + (" — the precinct watches the bully "
+                       "index." if on else
+                       " — nobody hunts the bullies here."))
+        if len(w) == 2 and w[0] == "escrow" and w[1].isdigit():
+            n = max(0, int(w[1]))
+            self._conflict_update(surface, key, war_escrow=n)
+            return (f"war escrow: {n} sparks a side, from the "
+                    "gang treasuries.")
+        return None
+
+    # ---- the conflict feed (§35 announcements) -------------------
+    def _post_conflict_feed(self, surface, key, message) -> None:  # type: ignore[no-untyped-def]
+        """Drain the surface's queued conflict announcements
+        (system-drop openings carry Claim buttons; inter-group
+        war declarations arrive as lines).  §33 at send time
+        and §31 quiet, like every system output: a refused
+        room keeps its queue — and a drop whose announcement
+        never posted stays claimable by /claimdrop, because
+        the drop is state, not the post."""
+        extras = surface._extras(key)
+        if not (extras.get("conflict_feed") or []):
+            return
+        settings = surface.store.settings(key)
+        quiet = (settings.get("defense") or {}).get(
+            "autonomy", True) is False
+        if quiet or not self._system_send_ok(
+                surface, key, message, "conflict feed"):
+            return
+        items = surface.conflict_feed_take(key)
+        for item in items:
+            try:
+                if item.get("kind") == "line":
+                    self._send(message.chat, str(item.get("text")
+                                                 or ""))
+                elif item.get("kind") == "sysdrop":
+                    drop = item.get("drop") or {}
+                    text, buttons = self._sysdrop_render(
+                        surface, key, message, drop)
+                    result = self._send(
+                        message.chat, text, buttons=buttons,
+                        parse_mode=self._rendered_mode(
+                            message, text))
+                    mid = getattr(result, "message_id", "") \
+                        or ""
+                    if mid:
+                        msgs = dict(extras.get("sysdrop_msgs")
+                                    or {})
+                        msgs[str(drop.get("id"))] = str(mid)
+                        extras["sysdrop_msgs"] = msgs
+                        surface.store.save()
+            except Exception:  # noqa: BLE001 - one bad item
+                _log.warning("conflict feed item failed",  # never
+                             exc_info=True)  # breaks the turn
+
+    def _sysdrop_render(self, surface, key, message, drop):  # type: ignore[no-untyped-def]
+        """The system-drop announcement: contents named (never
+        an id), claim slots counted, the Claim button carrying
+        this drop's own reference — a settlement affordance,
+        not a notice, so no Undo rides it (§35 + the brief's
+        settlements rule)."""
+        from ...social.chat.expression import buttons_from_spec
+        from ...social.chat.typography import Card, sparks
+
+        settings = surface.store.settings(key)
+        card = Card("announcement", title="Supply drop",
+                    icon="🪂")
+        kind = str(drop.get("kind") or "")
+        if kind in ("sparks", "sparks_big"):
+            card.line(f"**{sparks(int(drop.get('amount') or 0))}**"
+                      f" scattered in the open.")
+            card.stats([("Per claim",
+                         sparks(int(drop.get("per_claim") or 0)),
+                         True),
+                        ("Claims", str(drop.get("slots") or 1))])
+        elif kind == "gems":
+            card.line(f"**{int(drop.get('amount') or 0)} 💎** "
+                      f"glinting in the open — one claim takes "
+                      f"them.")
+        elif kind in ("gear", "gear_rare"):
+            from ...community.group_conflict import ARSENAL
+
+            spec = ARSENAL.get(str(drop.get("item") or "")) or {}
+            card.line(f"a **{spec.get('icon', '🎁')} "
+                      f"{spec.get('name', 'piece of gear')}** "
+                      f"lies in the open — one claim takes it.")
+        card.note("first come, first served — claims are final")
+        buttons = buttons_from_spec(
+            [[("claim", "Claim", f"claimdrop {drop.get('id')}")]],
+            settings=settings)
+        rendered = self._card(message, card, buttons)
+        return rendered.text, rendered.buttons
+
     # ---- group commands (P1 slice 2) --------------------------------
     def _control_group_help(self, message):  # type: ignore[no-untyped-def]
         """Bare /help INSIDE a group (owner order 2026-11-03):
@@ -1199,6 +1341,48 @@ class RuntimeGroupMixin:
                 "waves). Gems buy the premium shelf in /gshop "
                 "and the penthouse/tower tiers — they never "
                 "come from sparks.")
+        conflict_mode = surface._conflict_mode(key)
+        if eco and conflict_mode != "off":
+            everyone.append(
+                "🧰 the arsenal — /gshop carries the conflict "
+                "shelf (breach gear, defenses, armor, support); "
+                "/gear is your loadout, /gear install <item> "
+                "treasury|bank <district>|vault puts a defense "
+                "on guard. Gear also falls from 🪂 supply drops "
+                "— tap Claim when one lands (claims are final).")
+            everyone.append(
+                "💰 crime, geared — /shoot · /kill (a real "
+                "weapon) · /assassinate (a heavy one) · "
+                "/sabotage @member (wrecks their best property) "
+                "· /heist start treasury|bank <district>|vault "
+                "@member, /heist join, /heist go — crews of 2–5 "
+                "against installed defenses, odds printed up "
+                "front. Failure is jail; a kill puts them in "
+                "hospital (/bail pays the bill, a medkit "
+                "discharges free).")
+            everyone.append(
+                "🏴 gangs — /gang create <lifestyle> <name> "
+                "(syndicate · cartel · bikers · street · mafia "
+                "· vigilantes) · /gang join · /gang job · /gang "
+                "deposit — crews grow into gangs (5+) and "
+                "syndicates (15+); strength is members + armory "
+                "+ territory. 🚔 /police is the precinct board: "
+                "the wanted list, open bounties, your heat — "
+                "the police hunt members who farm the weak and "
+                "the new, never ordinary play. /bounty post "
+                "@member 200 · /bounty hunt @member.")
+            if conflict_mode == "warfare":
+                everyone.append(
+                    "⚔️ warfare — /war declare <gang> (in this "
+                    "group, or across claimed groups) · /war "
+                    "accept · /war join — escrowed pots, rounds "
+                    "on the cycle, the winner takes the pot and "
+                    "can claim a district: /gang claim "
+                    "<district> holds ground that pays daily. "
+                    "The gang holding 2+ districts and the "
+                    "strength crown RULES: its leaders drive "
+                    "/grant and /approve like admins, and set "
+                    "the transfer tax with /gang tax N.")
         everyone.append(
             "/help /balance — the full page for any command")
         card.block_lines(everyone, title="for everyone:")
@@ -1240,6 +1424,15 @@ class RuntimeGroupMixin:
             "/flag retract @member clears this group's records",
             "/rep @member — their reputation file: live records, "
             "sources, and what became of them",
+            "/gsettings conflict off|crime|warfare — the "
+            "conflict layer (§23): crime needs crime mode; "
+            "wars, territory and governance capture need "
+            "warfare. `/gsettings conflict drops N` sets the "
+            "daily system-drop budget (§35, 0 = none); "
+            "`conflict police on|off` stands the precinct up "
+            "or down. Police actions land in /glog with their "
+            "evidence; a police jail's Undo lifts the jail "
+            "only — fines, raids and bounties are settlements.",
             "I moderate on my own: floods, repeat spam and "
             "off-allowlist links get deleted; crash payloads are "
             "quarantined, channel injections and mass tags are "
@@ -1518,6 +1711,28 @@ class RuntimeGroupMixin:
                 f"mortgage LTV {est.get('ltv_pct', 60)}% at "
                 f"{est.get('mortgage_rate_pct', 5)}%",
             ], title="Estate")
+            # Conflict block (§23/§24/§35): the mode IS the
+            # layer's existence; the drop budget and the
+            # precinct read from the same settings the organs
+            # read.
+            con = s.get("conflict") or {}
+            con_health = surface.conflict.health(key)
+            card.block_lines([
+                f"mode: {con.get('mode', 'off')} — crime verbs, "
+                f"heists, gangs and drops need crime; wars, "
+                f"territory and capture need warfare",
+                f"system drops: {con.get('drops_per_day', 2)}"
+                f"/day budget · police: "
+                f"{'on' if con.get('police', True) else 'off'}"
+                f" · war escrow {con.get('war_escrow', 200)}",
+                (f"street now: {con_health.get('gangs', 0)} "
+                 f"gangs · {con_health.get('wars', 0)} wars · "
+                 f"{con_health.get('wanted', 0)} wanted · "
+                 f"{con_health.get('open_bounties', 0)} bounties"
+                 if con_health.get("ok") else
+                 "street now: the conflict state is unreadable "
+                 "— the layer is frozen (see /glog)"),
+            ], title="Conflict")
             # System-output claim (§33): where Devon's bot
             # systems may speak and accrue in this room — the
             # two-hats law, read from the same state the gate
@@ -1639,6 +1854,11 @@ class RuntimeGroupMixin:
                 "`/gsettings expression ban on|off`",
                 "`/gsettings reputation public|admins|restricted"
                 "|off` — join warnings for flagged members (§32)",
+                "`/gsettings conflict off|crime|warfare` · "
+                "`/gsettings conflict drops N` (system drops "
+                "per day, §35) · `/gsettings conflict police "
+                "on|off` · `/gsettings conflict escrow N` (war "
+                "escrow from gang treasuries)",
             ], title="Change it")
             card.note("tap a button to flip a switch, or type a "
                       "command")
@@ -1690,6 +1910,17 @@ class RuntimeGroupMixin:
                 return out
             return ("usage: /gsettings reputation "
                     "public|admins|restricted|off")
+        if head == "conflict":
+            # The conflict layer (§23/§24/§35): mode, the drop
+            # budget, the precinct, the war escrow — the same
+            # helper the DM console's conflict section applies.
+            out = self._apply_conflict_grammar(
+                surface, key, text.split()[1:])
+            if out is not None:
+                return out
+            return ("usage: /gsettings conflict "
+                    "off|crime|warfare · conflict drops N · "
+                    "conflict police on|off · conflict escrow N")
         if head == "warns" and rest.isdigit():
             surface.update_settings(
                 key, warn_threshold=max(1, int(rest)))
@@ -2157,7 +2388,7 @@ class RuntimeGroupMixin:
     _CONSOLE_TTL_S = 1800
     _CONSOLE_SECTIONS = ("defense", "acceptance", "economy",
                          "estate", "presentation", "welcome",
-                         "expression", "reputation")
+                         "expression", "reputation", "conflict")
 
     def _console_session_map(self) -> dict:  # type: ignore[no-untyped-def]
         sessions = getattr(self, "_console_sessions", None)
@@ -2385,6 +2616,12 @@ class RuntimeGroupMixin:
             f"{(s.get('reputation') or {}).get('warning', 'public')}"
             f" · flag proposals waiting "
             f"{len(surface.flag_proposals(key))}",
+            f"conflict mode "
+            f"{(s.get('conflict') or {}).get('mode', 'off')}"
+            f" · system drops "
+            f"{(s.get('conflict') or {}).get('drops_per_day', 2)}/day"
+            f" · police "
+            f"{'on' if (s.get('conflict') or {}).get('police', True) else 'off'}",
         ])
         from ...social.chat.expression import buttons_from_spec
 
@@ -2403,7 +2640,9 @@ class RuntimeGroupMixin:
               f"console {token} welcome"),
              ("rep", "Reputation",
               f"console {token} reputation")],
-            [("back", "All groups", "console")],
+            [("conflict", "Conflict",
+              f"console {token} conflict"),
+             ("back", "All groups", "console")],
         ], settings=s)
         card.note("tap a section, or type its grammar — every "
                   "change lands in the group's /glog with your "
@@ -2652,6 +2891,34 @@ class RuntimeGroupMixin:
             ])
             card.block_lines([
                 "`public|admins|restricted|off`",
+            ], title="Grammar")
+        elif section == "conflict":
+            con = s.get("conflict") or {}
+            health = surface.conflict.health(key)
+            card.block_lines([
+                f"mode: {con.get('mode', 'off')} — off sleeps "
+                f"the whole layer · crime runs geared crime, "
+                f"heists, gangs, police and drops · warfare "
+                f"adds wars, territory and governance capture",
+                f"system drops: {con.get('drops_per_day', 2)}"
+                f"/day · war escrow {con.get('war_escrow', 200)}"
+                f" · police "
+                f"{'on' if con.get('police', True) else 'off'}",
+                (f"the street: {health.get('gangs', 0)} gangs "
+                 f"· {health.get('wars', 0)} wars · "
+                 f"{health.get('territory', 0)} districts held "
+                 f"· {health.get('wanted', 0)} wanted · "
+                 f"{health.get('open_bounties', 0)} bounties "
+                 f"open" if health.get("ok") else
+                 "the street: conflict state unreadable — the "
+                 "layer is frozen until it's repaired"),
+                "police actions journal their evidence (the "
+                "bully index's inputs) — /glog shows exactly "
+                "why the precinct moved",
+            ])
+            card.block_lines([
+                "`off|crime|warfare` · `drops N` · "
+                "`police on|off` · `escrow N`",
             ], title="Grammar")
         buttons += buttons_from_spec(
             [[("back", "Sections", f"console {token}"),
@@ -2959,6 +3226,11 @@ class RuntimeGroupMixin:
             # gsettings grammar.
             return self._apply_reputation_grammar(
                 surface, key, list(words))
+        if section == "conflict":
+            # Same rule (§23): the console's words are the
+            # gsettings grammar.
+            return self._apply_conflict_grammar(
+                surface, key, list(words))
         return None
 
     # ---- the notice undo (DESIGN §31) ---------------------------
@@ -3044,6 +3316,30 @@ class RuntimeGroupMixin:
                                "refunded" if refund else ""))
             else:
                 bits.append("the drop was already closed")
+        elif action == "police_jail":
+            # §24: an undo reverses the JAIL — the one
+            # reversible piece of a police action.  The fine,
+            # the vault raid and any bounty are settlements
+            # and stand, exactly as the notice's own extra
+            # recorded them.
+            if surface.jail_clear(key, user_id):
+                bits.append("the jail time is lifted")
+            else:
+                bits.append("the jail time had already run out")
+            settled = []
+            if extra.get("fine_paid"):
+                settled.append(f"the {extra['fine_paid']}-spark "
+                               "fine stands")
+            if extra.get("raid_paid"):
+                settled.append(f"the {extra['raid_paid']}-spark "
+                               "vault raid stands")
+            if settled:
+                bits.append("; ".join(settled)
+                            + " (settlements aren't reversible)")
+        elif action == "police":
+            bits.append("a police fine, raid or bounty is a "
+                        "settlement — it stands; only jail time "
+                        "can be undone, from its own notice")
         outcome = "; ".join(bits) if bits else "the record is reversed"
         surface.mark_notice_undone(key, nid, by=actor)
         if self._edit_notice_in_place(surface, key, message,
@@ -4415,8 +4711,12 @@ class RuntimeGroupMixin:
         text = str(tail or "").strip()
         if text.lower().startswith("buy "):
             item_id = text[4:].strip().lower()
+            from ...community.group_conflict import ARSENAL
             from ...community.group_real_estate import PREMIUM_SHELF
 
+            if item_id in ARSENAL:
+                return self._gear_buy_reply(surface, key, message,
+                                            user_id, item_id)
             if item_id in PREMIUM_SHELF:
                 grant = surface.estate_premium_buy(key, user_id,
                                                    item_id)
@@ -4503,6 +4803,49 @@ class RuntimeGroupMixin:
         if premium_row:
             buttons.append(premium_row)
         card.block_lines(premium, title="Premium shelf — gems 💎")
+        # The arsenal shelf (§23 addendum): gear for the
+        # conflict layer, sold through this same shop — shown
+        # only where the conflict layer runs, priced in sparks
+        # and/or gems, rated by job so the gamble stays
+        # readable before anyone pays.
+        if surface._conflict_mode(key) != "off":
+            from ...community.group_conflict import ARSENAL
+
+            gear = []
+            gear_row: list = []
+            for item_id, item in ARSENAL.items():
+                price = dict(item.get("price") or {})
+                cost_bits = []
+                if price.get("sparks"):
+                    cost_bits.append(sparks(price["sparks"]))
+                if price.get("gems"):
+                    cost_bits.append(f"{price['gems']} 💎")
+                afford = (not price.get("sparks")
+                          or balance >= int(price["sparks"])) \
+                    and (not price.get("gems")
+                         or gems >= int(price["gems"]))
+                ratings = ", ".join(
+                    f"{job} {val}" for job, val in
+                    (item.get("ratings") or {}).items() if val)
+                gear.append(
+                    f"`{item_id}` — {item.get('icon', '•')} "
+                    f"**{item['name']}** · "
+                    f"{' + '.join(cost_bits) or '—'} · "
+                    f"{ratings} · {item['blurb']}"
+                    + ("" if afford else " · *not yet*"))
+                if afford and not item.get("admin_mint"):
+                    gear_row.append(
+                        (f"Buy {item['name']}",
+                         f"gshop buy {item_id}"))
+                    if len(gear_row) == 2:
+                        buttons.append(gear_row)
+                        gear_row = []
+            if gear_row:
+                buttons.append(gear_row)
+            card.block_lines(gear, title="Arsenal — conflict gear")
+            card.note("gear wears, breaks and drops — /gear "
+                      "shows your loadout; defenses install "
+                      "with /gear install")
         buttons.append([("🪙 My balance", "balance")])
         return self._card(message, card, buttons)
 
@@ -4938,6 +5281,1180 @@ class RuntimeGroupMixin:
         card.stats([("Balance", sparks(result["balance"]), True)])
         return self._card(message, card)
 
+    # ---- the conflict layer (§23/§24/§35) -------------------------
+    def _conflict_refusal(self, surface, key, result,  # type: ignore[no-untyped-def]
+                          fallback: str = "that doesn't work "
+                                            "as written."):
+        """One refusal voice for the conflict facade's reasons
+        — the mode gate speaks first (nothing in this class
+        exists while the group's conflict mode is off)."""
+        reason = str(result.get("reason") or "")
+        if reason == "mode":
+            need = result.get("need") or "crime"
+            mode = result.get("mode") or "off"
+            return (f"the streets are quiet here — conflict "
+                    f"mode is {mode}, and that needs {need}. An "
+                    f"admin sets it: /gsettings conflict "
+                    f"crime|warfare.")
+        if reason == "off":
+            return "the group economy is off here."
+        if reason == "frozen":
+            return ("the conflict state is frozen — its records "
+                    "need an admin's eyes before the street "
+                    "moves again (see /glog).")
+        if reason == "jailed":
+            jail = result.get("jail") or {}
+            from ...social.chat.tgbot_buttons import actionable
+            return actionable(
+                f"🔒 you're in jail — bail is "
+                f"<b>{jail.get('bail', 0)} sparks</b> to the "
+                "treasury, or wait it out.",
+                [[("🔓 Pay bail", "bail")]])
+        if reason == "hospital":
+            ward = result.get("hospital") or {}
+            bill = int(ward.get("bill") or 0)
+            return (f"🏥 you're in hospital"
+                    + (f" — the bill is {bill} sparks (/bail "
+                       "pays it, a medkit discharges you free)"
+                       if bill else
+                       " — a medkit discharges you, or wait "
+                       "it out")
+                    + ".")
+        if reason == "cooldown":
+            return (f"🥷 too soon — the heat dies down in "
+                    f"~{max(1, int(result.get('wait_s') or 0) // 60)}"
+                    " min.")
+        if reason == "self":
+            return "not against yourself."
+        if reason == "target_jailed":
+            return "they're in jail — out of reach for now."
+        return fallback
+
+    def _conflict_target(self, surface, key, tail, message):  # type: ignore[no-untyped-def]
+        """(user_id, label) for a crime target — the same
+        every-path resolution /rob uses (§29)."""
+        target = self._rob_target(surface, key, tail, message)
+        if not target:
+            return None, ""
+        return target, self._estate_member_label(surface, key,
+                                                 target)
+
+    def _control_gear(self, tail, message):  # type: ignore[no-untyped-def]
+        """``/gear`` — your loadout; ``/gear buy <item>``,
+        ``/gear install <item> treasury|bank <district>|vault``,
+        ``/gear use <item>``.  The shelf itself lives in
+        /gshop (the arsenal shelf)."""
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        gate = surface._conflict_gate(key, "crime")
+        if gate:
+            return self._conflict_refusal(surface, key, gate)
+        words = str(tail or "").split()
+        head = words[0].lower() if words else ""
+        if head == "buy" and len(words) >= 2:
+            return self._gear_buy_reply(surface, key, message,
+                                        user_id, words[1].lower())
+        if head == "install" and len(words) >= 3:
+            item_id = words[1].lower()
+            scope_word = words[2].lower()
+            if scope_word == "treasury":
+                scope = "treasury"
+            elif scope_word == "bank" and len(words) >= 4:
+                scope = f"bank:{words[3].lower()}"
+            elif scope_word == "vault":
+                scope = f"vault:{user_id}"
+            else:
+                return ("usage: /gear install <item> treasury · "
+                        "/gear install <item> bank <district> · "
+                        "/gear install <item> vault (your own)")
+            can_shared = self._group_admin_ok(message) or bool(
+                surface.gang_power_actor(key, user_id))
+            out = surface.gear_install(key, user_id, item_id,
+                                       scope,
+                                       can_shared=can_shared)
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    "you don't hold that, or it isn't a defense "
+                    "item — defenses install; breach gear is "
+                    "carried.")
+            from ...community.group_conflict import ARSENAL
+            spec = ARSENAL.get(item_id) or {}
+            where = {"treasury": "the group treasury"}.get(
+                scope, scope.replace("bank:", "the bank in ")
+                .replace("vault:", "your vault"))
+            return (f"{spec.get('icon', '🛡️')} {spec.get('name', item_id)} "
+                    f"installed on {where} — it stands guard "
+                    "until a job wears it down.")
+        if head == "use" and len(words) >= 2:
+            out = surface.gear_use(key, user_id, words[1].lower())
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"not_hospital": "you're not in hospital.",
+                     "not_owned": "you don't hold one of those.",
+                     "nothing_worn": "nothing you carry is worn "
+                                     "— no repair needed.",
+                     "no_kit": "you don't hold a repair kit."}.get(
+                        out.get("reason") or "",
+                        "that item isn't used that way."))
+            if out.get("item") == "medkit":
+                return ("🧰 medkit used — you're discharged and "
+                        "back on the street.")
+            from ...community.group_conflict import ARSENAL
+            spec = ARSENAL.get(str(out.get("item") or "")) or {}
+            return (f"🔧 {spec.get('name', 'your tool')} restored "
+                    "to full durability.")
+        # bare /gear: the loadout card
+        from ...community.group_conflict import ARSENAL
+        from ...social.chat.expression import buttons_from_spec
+        from ...social.chat.typography import Card, sparks
+
+        view = surface.loadout_view(key, user_id)
+        card = Card("economy", title="Your gear", icon="🧰")
+        card.stats([("Street power", str(view["power"])),
+                    ("Street rep", str(view["rep"])),
+                    ("Wanted", "★" * view["stars"] if view["stars"]
+                     else "clean")])
+        lines = []
+        for inst in view["items"]:
+            spec = ARSENAL.get(str(inst.get("item") or "")) or {}
+            dur = inst.get("durability")
+            state = ("single-use" if spec.get("single_use")
+                     else "ready" if dur is None
+                     else f"{dur} uses left")
+            ratings = ", ".join(
+                f"{job} {val}" for job, val in
+                (spec.get("ratings") or {}).items() if val)
+            lines.append(f"{spec.get('icon', '•')} "
+                         f"**{spec.get('name', inst.get('item'))}**"
+                         f" · {state}"
+                         + (f" · {ratings}" if ratings else ""))
+        if lines:
+            card.block_lines(lines, title="Loadout")
+        else:
+            card.line("empty hands — the arsenal shelf is in "
+                      "/gshop.")
+        for scope, items in (view.get("defenses") or {}).items():
+            names = ", ".join(
+                (ARSENAL.get(str(i.get("item") or "")) or {}).get(
+                    "name", str(i.get("item")))
+                for i in items)
+            card.line(f"🛡️ guarding your vault: {names}")
+        buttons = buttons_from_spec(
+            [[("gear", "Arsenal shelf", "gshop"),
+              ("balance", "My balance", "balance")]],
+            settings=surface.store.settings(key))
+        return self._card(message, card, buttons)
+
+    def _gear_buy_reply(self, surface, key, message, user_id,  # type: ignore[no-untyped-def]
+                        item_id):
+        from ...community.group_conflict import ARSENAL
+
+        spec = ARSENAL.get(item_id)
+        if spec is None:
+            return "no such item — the arsenal shelf is in /gshop."
+        is_admin = self._group_admin_ok(message) \
+            or self._operator_or_false(message)
+        out = surface.gear_buy(key, user_id, item_id,
+                               is_admin=is_admin)
+        if not out.get("ok"):
+            reason = out.get("reason")
+            if reason == "sparks":
+                return (f"not enough sparks — {spec['name']} "
+                        f"costs {out.get('sparks')} and you hold "
+                        f"{surface.economy.balance(key, user_id)}.")
+            if reason == "gems":
+                return (f"not enough gems — {spec['name']} costs "
+                        f"{out.get('gems')} 💎 and you hold "
+                        f"{surface.estate.gems_balance(key, user_id)} 💎.")
+            if reason == "admin_only":
+                return ("the Nuke is minted on an admin's word "
+                        "only — some things stay scarce.")
+            if reason == "one_per_group":
+                return ("this group's economy already holds its "
+                        "one Nuke.")
+            return self._conflict_refusal(surface, key, out)
+        price = []
+        if out.get("sparks"):
+            price.append(f"{out['sparks']} sparks")
+        if out.get("gems"):
+            price.append(f"{out['gems']} 💎")
+        return (f"{spec.get('icon', '🎁')} **{spec['name']}** is "
+                f"yours — {' + '.join(price) or 'free'}, "
+                "ledgered. /gear shows your loadout.")
+
+    def _control_hit_verb(self, tail, message, verb):  # type: ignore[no-untyped-def]
+        """``/shoot`` · ``/kill`` · ``/assassinate`` @member —
+        the geared hit verbs beside /rob (§23): gear decides
+        the odds, the odds print on the result, failure is
+        jail, success can put the target in hospital."""
+        import random
+
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        actor = str(message.sender_id or message.sender or "")
+        target, label = self._conflict_target(surface, key, tail,
+                                              message)
+        if not target:
+            return (f"usage: reply to a member with /{verb}, or "
+                    f"/{verb} @member")
+        out = surface.crime_verb(key, actor, target, verb,
+                                 rng=random.Random())
+        if not out.get("ok"):
+            if out.get("reason") == "weapon":
+                need = {0: "", 10: "a real weapon (street pistol "
+                        "or better)", 14: "a heavy weapon (hunting "
+                        "rifle, strike drone or better)"}.get(
+                    int(out.get("need") or 0), "a weapon")
+                return (f"you need {need} for that — the arsenal "
+                        "shelf is in /gshop.")
+            return self._conflict_refusal(surface, key, out)
+        from ...social.chat.typography import Card, sparks
+
+        odds = int(round(float(out.get("odds") or 0) * 100))
+        if out.get("success"):
+            card = Card("economy", title="It lands",
+                        icon="🎯")
+            card.line(f"**{label}** goes down — you lift "
+                      f"**{sparks(int(out.get('take') or 0))}** "
+                      f"from their wallet.")
+            if verb in ("kill", "assassinate"):
+                card.line(f"🏥 they're in hospital — a bill, a "
+                          f"medkit, or time gets them out.")
+            if out.get("bounty"):
+                card.line(f"🎯 bounty collected: "
+                          f"**{sparks(int(out['bounty']))}**.")
+            card.stats([("The odds were", f"{odds}%")])
+            return self._card(message, card)
+        card = Card("economy", title="It goes wrong", icon="🚔")
+        card.line(f"**{label}** gets away — and you're in jail "
+                  f"for {int(out.get('jail_min') or 0)} minutes.")
+        card.stats([("The odds were", f"{odds}%")])
+        return self._card(message, card,
+                          [[("🔓 Pay bail", "bail")]])
+
+    def _control_shoot(self, tail, message):  # type: ignore[no-untyped-def]
+        return self._control_hit_verb(tail, message, "shoot")
+
+    def _control_kill(self, tail, message):  # type: ignore[no-untyped-def]
+        return self._control_hit_verb(tail, message, "kill")
+
+    def _control_assassinate(self, tail, message):  # type: ignore[no-untyped-def]
+        return self._control_hit_verb(tail, message, "assassinate")
+
+    def _control_sabotage(self, tail, message):  # type: ignore[no-untyped-def]
+        """``/sabotage @member`` — wreck their best property;
+        the estate organ bills the damage through its own
+        repair machinery (insurance answers first)."""
+        import random
+
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        actor = str(message.sender_id or message.sender or "")
+        target, label = self._conflict_target(surface, key, tail,
+                                              message)
+        if not target:
+            return ("usage: reply to a member with /sabotage, or "
+                    "/sabotage @member")
+        out = surface.crime_sabotage(key, actor, target,
+                                     rng=random.Random())
+        if not out.get("ok"):
+            if out.get("reason") == "no_property":
+                return f"{label} owns no property to wreck."
+            return self._conflict_refusal(surface, key, out)
+        from ...social.chat.typography import Card, sparks
+
+        if out.get("success"):
+            card = Card("economy", title="Wrecked", icon="🔨")
+            card.line(f"**{label}**'s {out.get('property') or 'property'}"
+                      f" is wrecked — a "
+                      f"**{sparks(int(out.get('bill') or 0))}** "
+                      "repair bill lands on them (insurance "
+                      "answers first, if they hold a policy).")
+            return self._card(message, card)
+        card = Card("economy", title="Caught", icon="🚔")
+        card.line("caught in the act — 20 minutes in jail.")
+        return self._card(message, card,
+                          [[("🔓 Pay bail", "bail")]])
+
+    def _control_heist(self, tail, message):  # type: ignore[no-untyped-def]
+        """``/heist start treasury|bank <district>|vault
+        @member`` · ``/heist join`` · ``/heist go`` — the crew
+        score (§23): the crew's combined loadout against the
+        target's installed defenses, odds printed before and
+        after."""
+        import random
+
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        gate = surface._conflict_gate(key, "crime")
+        if gate:
+            return self._conflict_refusal(surface, key, gate)
+        words = str(tail or "").split()
+        head = words[0].lower() if words else ""
+        if head == "start" and len(words) >= 2:
+            kind = words[1].lower()
+            if kind == "treasury":
+                out = surface.heist_start(key, user_id,
+                                          "treasury", "")
+            elif kind == "bank" and len(words) >= 3:
+                out = surface.heist_start(key, user_id, "bank",
+                                          words[2].lower())
+            elif kind == "vault":
+                target, _label = self._conflict_target(
+                    surface, key, " ".join(words[2:]), message)
+                if not target:
+                    return ("usage: /heist start vault @member")
+                out = surface.heist_start(key, user_id, "vault",
+                                          target)
+            else:
+                return ("usage: /heist start treasury · /heist "
+                        "start bank <district> · /heist start "
+                        "vault @member")
+            if not out.get("ok"):
+                if out.get("reason") == "tier":
+                    return ("the big scores — the treasury and "
+                            "the banks — are gang work: they need "
+                            "a gang of 5+ behind the crew. Member "
+                            "vaults take any crew of 2–5.")
+                if out.get("reason") == "district":
+                    from ...community.group_real_estate import \
+                        DISTRICTS
+                    return ("which bank? districts: "
+                            + ", ".join(
+                                f"{d} ({v['name']})"
+                                for d, v in DISTRICTS.items()))
+                return self._conflict_refusal(surface, key, out)
+            lobby = out["heist"]
+            return self._heist_card(surface, key, message, lobby,
+                                    lead="crew forming — /heist "
+                                         "join to ride, /heist go "
+                                         "when ready (2–5).")
+        if head == "join":
+            out = surface.heist_join(key, user_id)
+            if not out.get("ok"):
+                if out.get("reason") == "not_found":
+                    return "no heist is forming right now."
+                if out.get("reason") == "full":
+                    return "that crew is full (5 ride at most)."
+                if out.get("reason") in ("already", "already_crew"):
+                    return "you're already on this crew."
+                if out.get("reason") == "expired":
+                    return "that crew waited too long — it broke up."
+                return self._conflict_refusal(surface, key, out)
+            return self._heist_card(surface, key, message,
+                                    out["heist"],
+                                    lead="you're on the crew.")
+        if head == "go":
+            out = surface.heist_go(key, user_id,
+                                   rng=random.Random())
+            if not out.get("ok"):
+                if out.get("reason") == "not_found":
+                    return ("you're not leading an open crew — "
+                            "/heist start one first.")
+                if out.get("reason") == "crew_small":
+                    return ("a heist needs a crew of 2–5 — "
+                            "/heist join brings riders.")
+                return self._conflict_refusal(surface, key, out)
+            return self._heist_result(surface, key, message, out)
+        lobby = surface.heist_open(key)
+        if lobby is None:
+            return ("no heist is forming. Start one: /heist "
+                    "start treasury · /heist start bank "
+                    "<district> · /heist start vault @member — "
+                    "crews of 2–5, gear decides the odds.")
+        return self._heist_card(surface, key, message, lobby,
+                                lead="a crew is forming:")
+
+    def _heist_card(self, surface, key, message, lobby, *, lead):  # type: ignore[no-untyped-def]
+        from ...social.chat.expression import buttons_from_spec
+        from ...social.chat.typography import Card
+
+        target = lobby.get("target") or {}
+        kind = str(target.get("kind") or "")
+        if kind == "treasury":
+            where = "the group treasury"
+        elif kind == "bank":
+            from ...community.group_real_estate import DISTRICTS
+            where = f"the bank in {DISTRICTS.get(str(target.get('id')), {}).get('name', target.get('id'))}"
+        else:
+            where = f"{self._estate_member_label(surface, key, str(target.get('id') or ''))}'s vault"
+        preview = surface.conflict.heist_preview(
+            key, str(lobby.get("id") or ""))
+        card = Card("economy", title="Heist", icon="💰")
+        card.line(lead)
+        card.line(f"target: **{where}** · crew: "
+                  + ", ".join(self._estate_member_label(
+                      surface, key, m)
+                      for m in lobby.get("crew") or []))
+        if preview:
+            card.stats([
+                ("Crew offense", str(preview["offense"])),
+                ("Target defense", str(preview["defense"])),
+                ("Success odds",
+                 f"{int(round(preview['odds'] * 100))}%")])
+            for note in preview.get("notes") or []:
+                card.line(f"⚡ {note}")
+            if preview.get("heat_stars"):
+                card.line(f"🚔 police heat on this crew: "
+                          f"{preview['heat_stars']:.0f}★ — heat "
+                          "hardens the target.")
+        buttons = buttons_from_spec(
+            [[("heist", "Join the crew", "heist join"),
+              ("heist", "Run it", "heist go")]],
+            settings=surface.store.settings(key))
+        return self._card(message, card, buttons)
+
+    def _heist_result(self, surface, key, message, out):  # type: ignore[no-untyped-def]
+        from ...social.chat.typography import Card, sparks
+
+        outcome = str(out.get("outcome") or "")
+        target = out.get("target") or {}
+        kind = str(target.get("kind") or "")
+        where = {"treasury": "the treasury",
+                 "bank": "the bank"}.get(
+                     kind,
+                     f"{self._estate_member_label(surface, key, str(target.get('id') or ''))}'s vault")
+        odds = int(round(float(out.get("odds") or 0) * 100))
+        card = Card("economy", title="Heist", icon="💰")
+        if outcome == "success":
+            card.line(f"✅ the crew cracks {where} — "
+                      f"**{sparks(int(out.get('take') or 0))}** "
+                      "split between them.")
+        elif outcome == "partial":
+            card.line(f"🌓 the crew gets into {where} but has "
+                      f"to run early — "
+                      f"**{sparks(int(out.get('take') or 0))}** "
+                      "grabbed, nobody caught.")
+        elif outcome == "decoy":
+            card.line(f"🎁 the crew cracks {where}… and finds a "
+                      "decoy vault full of confetti. The real "
+                      "money never moved.")
+        elif outcome == "empty":
+            card.line(f"🕳️ the crew gets in — {where} holds "
+                      "nothing worth taking.")
+        else:
+            card.line(f"🚔 BUSTED at {where} — the whole crew "
+                      "is in jail for 45 minutes.")
+        card.stats([("Offense", str(out.get("offense"))),
+                    ("Defense", str(out.get("defense"))),
+                    ("The odds were", f"{odds}%")])
+        for note in out.get("notes") or []:
+            card.line(f"⚡ {note}")
+        buttons = [[("🔓 Pay bail", "bail")]] \
+            if outcome == "bust" else None
+        return self._card(message, card, buttons)
+
+    def _control_gang(self, tail, message):  # type: ignore[no-untyped-def]
+        """``/gang`` — the whole gang life (§24): create
+        <lifestyle> <name> · join <name> · leave · promote/
+        demote @member · deposit/withdraw · job · armory add
+        <item> · claim <district> · tax N (the power gang) ·
+        list."""
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        gate = surface._conflict_gate(key, "crime")
+        if gate:
+            return self._conflict_refusal(surface, key, gate)
+        words = str(tail or "").split()
+        head = words[0].lower() if words else ""
+        organ = surface.conflict
+        if head == "create" and len(words) >= 3:
+            from ...community.group_conflict import LIFESTYLES
+            lifestyle = words[1].lower()
+            if lifestyle not in LIFESTYLES:
+                return ("pick a lifestyle: "
+                        + " · ".join(
+                            f"{k} ({v['name']})"
+                            for k, v in LIFESTYLES.items())
+                        + " — usage: /gang create <lifestyle> "
+                          "<name>")
+            name = " ".join(words[2:])
+            out = surface.gang_create(key, user_id, name,
+                                      lifestyle)
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"name": "gang names run 3–32 characters.",
+                     "already_in": "you're already in a gang — "
+                                   "leave it first.",
+                     "taken": "that name is taken in this group.",
+                     "lifestyle": "unknown lifestyle."}.get(
+                        out.get("reason") or "",
+                        "that gang doesn't form."))
+            return self._gang_card(surface, key, message, user_id,
+                                   lead=f"🏴 **{name}** is formed "
+                                        "— recruit with /gang "
+                                        "join; crews grow: 5+ is a "
+                                        "gang, 15+ a syndicate.")
+        if head == "join" and len(words) >= 2:
+            out = surface.gang_join(key, user_id,
+                                    " ".join(words[1:]))
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"not_found": "no gang by that name here — "
+                                  "/gang list shows them.",
+                     "already_in": "you're already in a gang."}.get(
+                        out.get("reason") or "", "can't join."))
+            return self._gang_card(surface, key, message, user_id,
+                                   lead="you're in. 🏴")
+        if head == "leave":
+            out = surface.gang_leave(key, user_id)
+            if not out.get("ok"):
+                return "you're not in a gang."
+            if out.get("dissolved"):
+                return ("the gang is dissolved — its treasury "
+                        "went to its last leader, its districts "
+                        "are open ground again.")
+            return "you've left the gang."
+        if head == "list":
+            rows = surface.gang_list(key)
+            if not rows:
+                return ("no gangs here yet — /gang create "
+                        "<lifestyle> <name> starts one.")
+            from ...social.chat.typography import Card, sparks
+
+            card = Card("economy", title="The gangs", icon="🏴")
+            lines = []
+            for row in rows:
+                gang = row["gang"]
+                from ...community.group_conflict import (
+                    LIFESTYLES, gang_tier)
+                life = LIFESTYLES.get(gang["lifestyle"]) or {}
+                lines.append(
+                    f"{life.get('icon', '🏴')} **{gang['name']}** "
+                    f"· {life.get('name', gang['lifestyle'])} · "
+                    f"{gang_tier(len(gang.get('members') or []))} "
+                    f"of {len(gang.get('members') or [])} · "
+                    f"strength {row['strength']} · treasury "
+                    f"{sparks(int(gang.get('treasury') or 0))}")
+            card.block_lines(lines)
+            return self._card(message, card)
+        if head in ("promote", "demote") and len(words) >= 2:
+            target, _label = self._conflict_target(
+                surface, key, " ".join(words[1:]), message)
+            if not target:
+                return f"usage: /gang {head} @member"
+            out = organ.gang_set_role(
+                key, user_id, target,
+                "officer" if head == "promote" else "member",
+                now=time.time())
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"not_leader": "only the leader moves ranks.",
+                     "not_member": "they're not in your gang.",
+                     "self": "not yourself."}.get(
+                        out.get("reason") or "", "no."))
+            return (f"{'⬆️' if head == 'promote' else '⬇️'} "
+                    f"{self._estate_member_label(surface, key, target)}"
+                    f" is now "
+                    f"{'an officer' if head == 'promote' else 'a member'}"
+                    " of the gang.")
+        if head == "deposit":
+            amount = self._amount_arg(
+                words[1] if len(words) > 1 else "",
+                surface.economy.balance(key, user_id))
+            if amount is not None and amount < 0:
+                return "usage: /gang deposit 100 — or all"
+            if amount is None:
+                amount = surface.economy.balance(key, user_id)
+            out = organ.gang_deposit(key, user_id, amount,
+                                     now=time.time())
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"no_gang": "you're not in a gang.",
+                     "funds": "your wallet can't cover that."}.get(
+                        out.get("reason") or "", "can't deposit."))
+            from ...social.chat.typography import sparks
+            return (f"🏦 {sparks(out['amount'])} into the gang "
+                    f"treasury — it now holds "
+                    f"{sparks(int(out['gang'].get('treasury') or 0))}.")
+        if head == "withdraw" and len(words) >= 2 \
+                and words[1].isdigit():
+            out = organ.gang_withdraw(
+                key, user_id, int(words[1]),
+                now=time.time())
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"no_gang": "you're not in a gang.",
+                     "rank": "the gang treasury moves on the "
+                             "leader's or an officer's word.",
+                     "funds": "the gang treasury doesn't hold "
+                              "that."}.get(out.get("reason") or "",
+                                           "can't withdraw."))
+            from ...social.chat.typography import sparks
+            return f"💵 {sparks(out['amount'])} from the gang treasury to you."
+        if head == "job":
+            import random
+
+            out = organ.gang_job(key, user_id,
+                                 rng=random.Random(),
+                                 now=time.time())
+            if not out.get("ok"):
+                if out.get("reason") == "cooldown":
+                    return ("the crew rests — gang work pays "
+                            "hourly.")
+                return self._conflict_refusal(
+                    surface, key, out,
+                    "you're not in a gang — gang work is members' "
+                    "work.")
+            from ...social.chat.typography import sparks
+            return (f"💼 {out['job']} — "
+                    f"**+{sparks(int(out['amount']))}** for the "
+                    f"{out['gang']['name']}.")
+        if head == "armory" and len(words) >= 3 \
+                and words[1].lower() == "add":
+            out = organ.gang_armory_add(
+                key, user_id, words[2].lower(),
+                now=time.time())
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"no_gang": "you're not in a gang.",
+                     "not_owned": "you don't hold that item."}.get(
+                        out.get("reason") or "", "can't donate."))
+            from ...community.group_conflict import ARSENAL
+            spec = ARSENAL.get(words[2].lower()) or {}
+            return (f"{spec.get('icon', '🎁')} {spec.get('name', words[2])}"
+                    " joins the gang armory — it fights the "
+                    "gang's wars now.")
+        if head == "claim" and len(words) >= 2:
+            out = surface.territory_claim(key, user_id,
+                                          words[1].lower())
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"no_gang": "you're not in a gang.",
+                     "tier": "territory is gang work — crews "
+                             "(under 5) can't hold districts.",
+                     "rank": "district claims are the leader's "
+                             "or an officer's call.",
+                     "held": "that district is held — districts "
+                             "change hands by war, not by "
+                             "asking.",
+                     "funds": "claiming costs 100 sparks from "
+                              "the gang treasury.",
+                     "district": "districts: old_town, "
+                                 "market_mile, harbour, heights."}
+                    .get(out.get("reason") or "", "can't claim."))
+            from ...community.group_real_estate import DISTRICTS
+            return (f"🚩 **{out['gang']['name']}** claims "
+                    f"**{DISTRICTS[words[1].lower()]['name']}** — "
+                    "it pays the gang daily while the upkeep is "
+                    "paid.")
+        if head == "tax" and len(words) >= 2 \
+                and words[1].rstrip("%").isdigit():
+            out = organ.set_gang_tax(
+                key, user_id, int(words[1].rstrip("%")),
+                now=time.time())
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"not_power": "only the gang IN POWER sets "
+                                  "the tax — hold 2+ districts "
+                                  "and be the strongest to rule.",
+                     "range": "the transfer tax lives between "
+                              "0% and 10% — even a ruling gang "
+                              "can't strangle the economy."}.get(
+                        out.get("reason") or "", "can't set tax."))
+            return (f"🏛️ {out['gang']['name']} sets the group's "
+                    f"transfer tax to {out['pct']}% — /pay fees "
+                    "follow it while they hold power.")
+        gang = organ.gang_of(key, user_id)
+        if gang is None:
+            from ...community.group_conflict import LIFESTYLES
+            return ("you're not in a gang. Form one: /gang "
+                    "create <lifestyle> <name> — lifestyles: "
+                    + " · ".join(f"{k}" for k in LIFESTYLES)
+                    + ". Or /gang list to see who's hiring.")
+        return self._gang_card(surface, key, message, user_id)
+
+    def _gang_card(self, surface, key, message, user_id, *,  # type: ignore[no-untyped-def]
+                   lead: str = ""):
+        from ...community.group_conflict import LIFESTYLES
+        from ...social.chat.expression import buttons_from_spec
+        from ...social.chat.typography import Card, sparks
+
+        view = surface.gang_card(key, user_id)
+        gang = view["gang"]
+        life = LIFESTYLES.get(gang["lifestyle"]) or {}
+        ranks = life.get("ranks") or ("Leader", "Officer",
+                                      "Member")
+        role = (ranks[0] if gang.get("leader") == user_id else
+                ranks[1] if user_id in (gang.get("officers") or [])
+                else ranks[2])
+        card = Card("economy",
+                    title=f"{life.get('icon', '🏴')} {gang['name']}",
+                    icon="🏴")
+        if lead:
+            card.line(lead)
+        card.line(f"*{life.get('blurb', '')}*")
+        strength = view["strength"]
+        card.stats([
+            ("Lifestyle", str(life.get("name",
+                                       gang["lifestyle"]))),
+            ("Tier", f"{view['tier']} · "
+                     f"{len(gang.get('members') or [])} members"),
+            ("Your rank", role),
+            ("Gang treasury",
+             sparks(int(gang.get("treasury") or 0)), True),
+            ("Strength", str(strength["total"])),
+            ("Territory",
+             ", ".join(view["territory"]) or "none"),
+            ("War record",
+             f"{int(gang.get('wins') or 0)}W · "
+             f"{int(gang.get('losses') or 0)}L"),
+            ("In power", "yes — /gang tax N sets the group's "
+                         "transfer tax" if view["power"]
+             else "no"),
+        ])
+        card.note("strength = members' power + armory + "
+                  "territory + treasury depth + war record")
+        buttons = buttons_from_spec(
+            [[("gang", "Gang work", "gang job"),
+              ("treasury", "Deposit 100", "gang deposit 100")],
+             [("war", "War status", "war"),
+              ("gang", "All gangs", "gang list")]],
+            settings=surface.store.settings(key))
+        return self._card(message, card, buttons)
+
+    def _control_war(self, tail, message):  # type: ignore[no-untyped-def]
+        """``/war`` — wars between gangs (§23): declare
+        <gang> (here, or in another claimed group) · accept ·
+        decline · join · spoils <district>.  Rounds fight
+        themselves on the group cycle."""
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        gate = surface._conflict_gate(key, "crime")
+        if gate:
+            return self._conflict_refusal(surface, key, gate)
+        words = str(tail or "").split()
+        head = words[0].lower() if words else ""
+        if head == "declare" and len(words) >= 2:
+            name = " ".join(words[1:])
+            out = surface.war_declare(key, user_id, name)
+            if out.get("ok"):
+                war = out["war"]
+                return (f"⚔️ **{out['mine']['name']}** declares "
+                        f"war on **{out['theirs']['name']}** — "
+                        f"{int(war.get('escrow') or 0)} sparks "
+                        "escrowed from your gang treasury. Their "
+                        "leadership answers with /war accept.")
+            if out.get("reason") == "not_found":
+                inter = surface.war_declare_inter(key, user_id,
+                                                  name)
+                if inter.get("ok"):
+                    war = inter["war"]
+                    return (f"⚔️ **{inter['mine']['name']}** "
+                            f"declares war across groups — on "
+                            f"**{inter['theirs']['name']}** in "
+                            "another claimed group. Escrow is "
+                            "down; their leadership answers "
+                            "there with /war accept.")
+                return self._conflict_refusal(
+                    surface, key, inter,
+                    {"tier": "inter-group wars are gang-tier "
+                             "work (5+ members) on both sides.",
+                     "tier_target": "that gang is still a crew "
+                                    "— too small for an "
+                                    "inter-group war.",
+                     "busy": "your gang is already at war.",
+                     "funds": "the war escrow comes from your "
+                              "gang treasury — it can't cover "
+                              "it.",
+                     "book": "the war book is unreadable — "
+                             "inter-group wars pause until an "
+                             "admin looks (see /glog).",
+                     "frozen": "that group's conflict state is "
+                               "frozen."}.get(
+                        inter.get("reason") or "",
+                        f"no gang called {name} here or in any "
+                        "claimed group."))
+            return self._conflict_refusal(
+                surface, key, out,
+                {"no_gang": "you're not in a gang.",
+                 "rank": "war is declared by the leader or an "
+                         "officer.",
+                 "self": "not on your own gang.",
+                 "busy": "a gang in this war can't start or "
+                         "take another until it ends.",
+                 "funds": "the war escrow comes from your gang "
+                          "treasury — it can't cover it."}.get(
+                    out.get("reason") or "", "can't declare."))
+        if head in ("accept", "decline"):
+            accept = head == "accept"
+            out = surface.war_answer(key, user_id, accept)
+            if not out.get("ok") and out.get("reason") == "no_war":
+                out = surface.war_answer_inter(key, user_id,
+                                               accept)
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"no_war": "no declared war is waiting on "
+                               "your gang.",
+                     "no_gang": "you're not in a gang.",
+                     "rank": "the answer comes from the leader "
+                             "or an officer.",
+                     "funds": "matching the escrow takes gang "
+                              "treasury funds you don't have."}
+                    .get(out.get("reason") or "", "can't answer."))
+            if accept:
+                return ("⚔️ the war is ON — members opt in with "
+                        "/war join; rounds fight on the cycle "
+                        "until one side takes the best of it.")
+            return ("🏳️ war declined — the challenger's escrow "
+                    "is returned.")
+        if head == "join":
+            out = surface.war_join(key, user_id)
+            if not out.get("ok") and out.get("reason") \
+                    in ("no_war", "no_gang"):
+                inter = surface.war_join_inter(key, user_id)
+                if inter.get("ok"):
+                    return ("⚔️ you're in — your strength rides "
+                            "with your gang across groups.")
+                if inter.get("reason") == "already":
+                    return "you're already in."
+                out = inter
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"no_war": "your gang isn't at war.",
+                     "no_gang": "you're not in a gang.",
+                     "already": "you're already in."}.get(
+                        out.get("reason") or "", "can't join."))
+            return ("⚔️ you're in — your power fights with "
+                    "your gang's.")
+        if head == "spoils" and len(words) >= 2:
+            out = surface.war_spoils(key, user_id,
+                                     words[1].lower())
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"no_spoils": "no won war is holding spoils "
+                                  "for your gang.",
+                     "district": "name a district the LOSER "
+                                 "holds — it changes hands.",
+                     "rank": "spoils are claimed by the leader "
+                             "or an officer.",
+                     "no_gang": "you're not in a gang."}.get(
+                        out.get("reason") or "", "can't claim."))
+            from ...community.group_real_estate import DISTRICTS
+            return (f"🚩 **{out['gang']['name']}** takes "
+                    f"**{DISTRICTS[words[1].lower()]['name']}** "
+                    "as war spoils.")
+        # bare /war: the status board
+        view = surface.war_status(key, user_id)
+        if not view.get("ok"):
+            return "you're not in a gang — wars are gang business."
+        from ...social.chat.typography import Card
+
+        card = Card("economy", title="War", icon="⚔️")
+        war = view.get("war")
+        inter = view.get("inter")
+        if war:
+            gangs = surface.conflict._load_state(key).get(
+                "gangs") or {}
+            a = (gangs.get(str(war.get("a"))) or {}).get(
+                "name", "?")
+            b = (gangs.get(str(war.get("b"))) or {}).get(
+                "name", "?")
+            score = war.get("score") or {}
+            card.line(f"**{a}** vs **{b}** — "
+                      f"{war.get('status')}")
+            card.stats([("Rounds", f"{score.get('a', 0)} – "
+                                    f"{score.get('b', 0)}"),
+                        ("Pot", f"{int(war.get('pot') or 0)} "
+                                "sparks")])
+            if war.get("status") == "declared":
+                card.line("waiting on the defenders' answer "
+                          "(/war accept · /war decline).")
+            elif war.get("status") == "active":
+                card.line("rounds fight on the cycle — /war "
+                          "join adds your power.")
+        elif inter:
+            a = (inter.get("a") or {}).get("gang_name", "?")
+            b = (inter.get("b") or {}).get("gang_name", "?")
+            score = inter.get("score") or {}
+            card.line(f"🌍 **{a}** vs **{b}** — an inter-group "
+                      f"war, {inter.get('status')}")
+            card.stats([("Rounds", f"{score.get('a', 0)} – "
+                                    f"{score.get('b', 0)}")])
+        else:
+            card.line("your gang is at peace. /war declare "
+                      "<gang> starts one — escrow from the "
+                      "gang treasury, best of rounds, the "
+                      "winner takes the pot (and, at home, a "
+                      "district).")
+        return self._card(message, card)
+
+    def _control_police(self, tail, message):  # type: ignore[no-untyped-def]
+        """``/police`` — the precinct board (§24): who's
+        wanted, which bounties stand, and your own heat.
+        ``/police bribe`` buys the precinct off — a sink with
+        real risk."""
+        import random
+
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        gate = surface._conflict_gate(key, "crime")
+        if gate:
+            return self._conflict_refusal(surface, key, gate)
+        words = str(tail or "").split()
+        if words and words[0].lower() == "bribe":
+            out = surface.police_bribe(
+                key, user_id, rng=random.Random(),
+                use_envelope=len(words) > 1
+                and words[1].lower() == "envelope")
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"not_wanted": "you're not wanted — no "
+                                   "precinct to pay off.",
+                     "funds": "a bribe costs 40 sparks a star — "
+                              "your wallet can't cover it (a "
+                              "bribe envelope from /gshop "
+                              "works instead)."}.get(
+                        out.get("reason") or "", "no bribe."))
+            if out.get("success"):
+                return ("🤫 the envelope changes hands. Some of "
+                        "your heat is forgotten — the journal "
+                        "shows less of you now.")
+            if out.get("jailed"):
+                return ("🚔 the bribe blows up in your face — "
+                        "more heat, and 15 minutes in jail for "
+                        "trying.")
+            return ("🚔 the officer pockets nothing and "
+                    "remembers your face — the attempt itself "
+                    "is heat now.")
+        board = surface.police_board(key, user_id)
+        from ...social.chat.expression import buttons_from_spec
+        from ...social.chat.typography import Card, sparks
+
+        card = Card("economy", title="The precinct", icon="🚔")
+        me = board["me"]
+        card.stats([("Your heat",
+                     f"{'★' * me['stars'] if me['stars'] else 'clean'}"
+                     f" (index {me['index']:.0f})")])
+        if board["wanted"]:
+            lines = []
+            for row in board["wanted"]:
+                label = self._estate_member_label(
+                    surface, key, row["member"])
+                lines.append(f"{'★' * row['stars']} **{label}**"
+                             f" — index {row['index']:.0f}"
+                             + (f" · {'; '.join(row['inputs'])}"
+                                if row["inputs"] else ""))
+            card.block_lines(lines, title="Wanted")
+        else:
+            card.line("nobody is wanted right now — the "
+                      "precinct watches excess, not play.")
+        if board["bounties"]:
+            lines = []
+            for bounty in board["bounties"]:
+                label = self._estate_member_label(
+                    surface, key, str(bounty.get("target") or ""))
+                lines.append(
+                    f"🎯 **{label}** — "
+                    f"{sparks(int(bounty.get('amount') or 0))} "
+                    f"({'the precinct' if bounty.get('source') == 'police' else 'a member'}"
+                    " put it up)")
+            card.block_lines(lines, title="Open bounties")
+        card.note("the police hunt the bully index — farming "
+                  "the weak and the new; ordinary scores are "
+                  "just the game. /glog shows the evidence "
+                  "behind every action.")
+        buttons = buttons_from_spec(
+            [[("police", "Bribe (40★/star)", "police bribe"),
+              ("bounty", "Bounties", "bounty")]],
+            settings=surface.store.settings(key))
+        return self._card(message, card, buttons)
+
+    def _control_bounty(self, tail, message):  # type: ignore[no-untyped-def]
+        """``/bounty`` — the board; ``/bounty post @member
+        200`` puts your own sparks on a head; ``/bounty hunt
+        @member`` is the citizen action (§24)."""
+        import random
+
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        words = str(tail or "").split()
+        head = words[0].lower() if words else ""
+        if head == "post":
+            amount = None
+            token = ""
+            for part in words[1:]:
+                if part.isdigit() and amount is None:
+                    amount = int(part)
+                elif not token:
+                    token = part
+            if amount is None or not token:
+                return "usage: /bounty post @member 200"
+            target, label = self._conflict_target(
+                surface, key, token, message)
+            if not target:
+                return "who? name a member of this group."
+            out = surface.bounty_post(key, user_id, target,
+                                      amount)
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"funds": "your wallet can't cover that "
+                              "bounty.",
+                     "amount": "bounties start at 10 sparks.",
+                     "self": "not on your own head."}.get(
+                        out.get("reason") or "", "can't post."))
+            from ...social.chat.typography import sparks
+            return (f"🎯 **{sparks(amount)}** on **{label}**'s "
+                    "head — whoever brings them down (a geared "
+                    "hit, or /bounty hunt) collects.")
+        if head == "hunt":
+            target, label = self._conflict_target(
+                surface, key, " ".join(words[1:]), message)
+            if not target:
+                return "usage: /bounty hunt @member"
+            out = surface.bounty_hunt(key, user_id, target,
+                                      rng=random.Random())
+            if not out.get("ok"):
+                if out.get("reason") == "not_wanted":
+                    return (f"{label} isn't wanted and carries "
+                            "no bounty — the hunt needs a mark.")
+                return self._conflict_refusal(surface, key, out)
+            from ...social.chat.typography import Card, sparks
+
+            odds = int(round(float(out.get("odds") or 0) * 100))
+            if out.get("success"):
+                card = Card("economy", title="Brought in",
+                            icon="🎯")
+                card.line(f"**{label}** is brought in — 30 "
+                          "minutes in jail.")
+                if out.get("bounty"):
+                    card.line(f"🎯 bounty paid: "
+                              f"**{sparks(int(out['bounty']))}**.")
+                card.stats([("The odds were", f"{odds}%")])
+                return self._card(message, card)
+            if out.get("jailed"):
+                return ("🚔 the hunt goes wrong — no fine money "
+                        "in your wallet, so it's 10 minutes in "
+                        "jail instead.")
+            return (f"**{label}** slips the hunt — a "
+                    f"{int(out.get('fine') or 25)}-spark fine "
+                    "for the trouble.")
+        return self._control_police("", message)
+
+    def _control_claimdrop(self, tail, message):  # type: ignore[no-untyped-def]
+        """``/claimdrop [ref]`` — claim a §35 system drop.
+        The button carries the drop's reference; bare text
+        claims the live drop when exactly one is open.
+        Claims are settlements: final, journaled, and the
+        drop edits closed when its slots fill."""
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        ref = str(tail or "").strip().split()[0] \
+            if str(tail or "").strip() else ""
+        if not ref:
+            state = surface.conflict._load_state(key)
+            open_drops = [d for d in (state.get("drops")
+                                      or {}).values()
+                          if d.get("status") == "open"]
+            if len(open_drops) != 1:
+                return ("no single live drop to claim — when "
+                        "one is announced, tap its Claim "
+                        "button.")
+            ref = str(open_drops[0].get("id") or "")
+        out = surface.sysdrop_claim(key, user_id, ref)
+        if not out.get("ok"):
+            return {"gone": "that drop is gone — claimed out "
+                            "or expired.",
+                    "expired": "too late — that drop expired.",
+                    "already": "you already claimed from this "
+                               "drop.",
+                    "full": "the last slot just went — the "
+                            "drop is full.",
+                    "cap": "your daily earn cap is full — the "
+                           "slot stays open for someone else.",
+                    "mode": "the conflict layer is off here.",
+                    "frozen": "the conflict state is frozen "
+                              "— see /glog."}.get(
+                        out.get("reason") or "",
+                        "can't claim that drop.")
+        got = out.get("got") or {}
+        from ...social.chat.typography import Card, sparks
+
+        card = Card("economy", title="Drop claimed", icon="🎁")
+        if got.get("kind") in ("sparks", "sparks_big"):
+            card.line(f"**+{sparks(int(got.get('amount') or 0))}**"
+                      " — yours, ledgered.")
+        elif got.get("kind") == "gems":
+            card.line(f"**+{int(got.get('amount') or 0)} 💎** — "
+                      "straight into your premium purse.")
+        elif got.get("kind") in ("gear", "gear_rare"):
+            from ...community.group_conflict import ARSENAL
+            spec = ARSENAL.get(str(got.get("item") or "")) or {}
+            card.line(f"**{spec.get('icon', '🎁')} "
+                      f"{spec.get('name', 'gear')}** — into "
+                      "your loadout (/gear).")
+        if out.get("closed"):
+            card.note("that was the last slot — the drop is "
+                      "closed")
+            self._close_sysdrop_message(surface, key, message,
+                                        ref)
+        return self._card(message, card,
+                          [[("🪙 My balance", "balance")]])
+
+    def _close_sysdrop_message(self, surface, key, message,  # type: ignore[no-untyped-def]
+                               drop_id: str) -> None:
+        """A filled drop edits its announcement closed (§35),
+        where the platform supports editing — the state (the
+        organ's record) already closed; this is presentation
+        catching up with it."""
+        msgs = (surface._extras(key).get("sysdrop_msgs") or {})
+        message_id = str(msgs.get(drop_id) or "")
+        if not message_id:
+            return
+        adapter = self._group_adapter(message.chat.platform)
+        edit = getattr(adapter, "edit_message", None) \
+            if adapter else None
+        if edit is None:
+            return
+        try:
+            edit(message.chat, message_id,
+                 "🎁 **the drop is claimed in full** — every "
+                 "slot went. Watch the sky; the budget rolls "
+                 "again tomorrow.", buttons=[])
+        except Exception:  # noqa: BLE001 - presentation only
+            _log.debug("sysdrop close edit failed",
+                       exc_info=True)
+
     def _bet_arg(self, tail, default: int = 10) -> int:  # type: ignore[no-untyped-def]
         for part in str(tail or "").split():
             if part.isdigit():
@@ -5100,12 +6617,18 @@ class RuntimeGroupMixin:
         key = self._group_key_or_none(message)
         if key is None:
             return "that's a group command — run it inside the group."
-        if not self._group_admin_ok(message):
+        surface = self._group_surface()
+        sender = str(message.sender_id or message.sender or "")
+        # Governance capture (§23): the gang IN POWER drives
+        # the same governance organ — proposals, thresholds
+        # and second-approver all unchanged; capture changes
+        # WHO may drive, never the mechanism.
+        if not self._group_admin_ok(message) \
+                and not surface.gang_power_actor(key, sender):
             return "treasury grants are for admins."
         key, err = self._economy_gate(message)
         if err:
             return err
-        surface = self._group_surface()
         raw = str(tail or "").strip()
         if raw.lower().startswith("gems "):
             return self._control_grant_gems(raw[5:].strip(),
@@ -5212,12 +6735,14 @@ class RuntimeGroupMixin:
         key = self._group_key_or_none(message)
         if key is None:
             return "that's a group command — run it inside the group."
-        if not self._group_admin_ok(message):
+        surface = self._group_surface()
+        sender = str(message.sender_id or message.sender or "")
+        if not self._group_admin_ok(message) \
+                and not surface.gang_power_actor(key, sender):
             return "approvals are for admins."
         key, err = self._economy_gate(message)
         if err:
             return err
-        surface = self._group_surface()
         pid = str(tail or "").strip().split()[0] \
             if str(tail or "").strip() else ""
         if not pid:
@@ -5356,9 +6881,13 @@ class RuntimeGroupMixin:
             trend = row["trend_pct"]
             arrow = "▲" if trend > 0 else (
                 "▼" if trend < 0 else "▬")
+            holder = surface.territory_map(key).get(
+                row["district"])
             card.block_lines([
                 f"**{row['name']}** · index {row['value']} "
-                f"({arrow} {abs(trend)}% this week)",
+                f"({arrow} {abs(trend)}% this week)"
+                + (f" · 🚩 held by **{holder}**" if holder
+                   else ""),
                 " · ".join(prices),
             ])
             afford = [(t, row["tiers"][t]) for t in TIERS

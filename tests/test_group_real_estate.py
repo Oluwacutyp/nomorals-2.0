@@ -192,7 +192,11 @@ def test_manager_raises_cap_and_yield_and_autocollects(tmp_path):
 def test_gems_have_no_spark_conversion_path(tmp_path):
     econ, estate = _organ(tmp_path)
     _fund(econ, "ada", 5000)
-    assert GEM_SOURCES == ("rent", "season", "governance")
+    # §35 amendment: system drops are a fourth faucet (rare,
+    # budget-capped by the group's drops-per-day) — the set
+    # stays CLOSED; nothing else may issue gems
+    assert GEM_SOURCES == ("rent", "season", "governance",
+                           "drop")
     for source in ("admin", "sparks", "exchange", "buy", ""):
         assert estate.credit_gems(
             G, "ada", 50, source=source, reason="sneak") is None

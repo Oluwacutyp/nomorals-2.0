@@ -202,7 +202,10 @@ SEASON_GEM_REWARDS: dict[int, int] = {1: 30, 2: 20, 3: 10}
 
 #: Gem faucets — the whole list.  ``credit_gems`` refuses any
 #: other source tag; there is deliberately no "admin" source.
-GEM_SOURCES = ("rent", "season", "governance")
+#: ``drop`` joined the list with §35 (system drops): the loot
+#: table rolls 1–3 gems rarely, budget-capped per group per
+#: day by the conflict organ's drop budget.
+GEM_SOURCES = ("rent", "season", "governance", "drop")
 
 #: Display-only wealth weight of one gem in sparks for the
 #: /top board (§25's one wealth picture).  NEVER a conversion
@@ -310,11 +313,11 @@ class GroupRealEstate:
                     now: float | None = None) -> dict[str, Any] | None:
         """Issue gems from a STATED premium source only.
 
-        The source tag is the whole law: rent, season rewards
-        and governance gifts are the faucets that exist; any
-        other tag is refused here, in the one place gems are
-        minted, so no caller can grow a fourth faucet by
-        accident."""
+        The source tag is the whole law: rent, season rewards,
+        governance gifts and §35 system drops are the faucets
+        that exist; any other tag is refused here, in the one
+        place gems are minted, so no caller can grow another
+        faucet by accident."""
         now = now if now is not None else time.time()
         amount = int(amount)
         if source not in GEM_SOURCES or amount <= 0 or not member:
@@ -340,6 +343,26 @@ class GroupRealEstate:
                  "kind": kind, "amount": -amount,
                  "reason": (reason or "")[:300],
                  "ref": (ref or "")[:120], "ts": now}
+        rows.append(entry)
+        self._save_gems(group_id, rows)
+        return entry
+
+    def refund_gems(self, group_id: str, member: str, amount: int,
+                    *, reason: str, now: float | None = None
+                    ) -> dict[str, Any] | None:
+        """Return a member's own gems after a paired purchase
+        leg failed (the arsenal's two-currency buys).  NOT a
+        faucet: the entry is kind ``refund`` and only ever
+        reverses a spend the same operation just made."""
+        now = now if now is not None else time.time()
+        amount = int(amount)
+        if amount <= 0 or not member:
+            return None
+        rows = self._gems_ledger(group_id)
+        entry = {"id": "gem_" + new_short_id(), "member": member,
+                 "kind": "refund", "amount": amount,
+                 "reason": (reason or "")[:300],
+                 "ref": "", "ts": now}
         rows.append(entry)
         self._save_gems(group_id, rows)
         return entry
@@ -1308,6 +1331,60 @@ class GroupRealEstate:
         self._save_state(group_id, state)
         return {"ok": True, "paid": pay,
                 "remaining": debt - pay}
+
+    def assess_repair_bill(self, group_id: str, pid: str,
+                           amount: int, *, cause: str,
+                           now: float | None = None
+                           ) -> dict[str, Any]:
+        """Bill ONE property a stated repair amount through
+        the same machinery the repair wave uses (the conflict
+        organ's sabotage lands here): a live policy covers it
+        in full; otherwise bank, then wallet, then repair
+        debt — every leg journaled with the cause."""
+        now = now if now is not None else time.time()
+        state = self._load_state(group_id)
+        prop = (state.get("properties") or {}).get(pid)
+        if prop is None:
+            return {"ok": False, "reason": "not_found"}
+        bill = max(1, int(amount))
+        owner = str(prop.get("owner") or "")
+        if float(prop.get("insured_until") or 0) > now:
+            self._journal(state, "insurance_claim", now,
+                          member=owner, property=pid,
+                          amount=bill, cause=cause)
+            self._save_state(group_id, state)
+            return {"ok": True, "bill": bill, "covered": bill,
+                    "paid": 0, "debt": 0}
+        level = self.manager_level(group_id, owner, state=state)
+        if level and MANAGER_LEVELS[level]["repair_half"]:
+            bill = max(1, bill // 2)
+        econ = self.economy
+        paid = 0
+        bank = econ.bank_member(owner)
+        from_bank = min(bill, econ.balance(group_id, bank))
+        if from_bank and econ._move(
+                group_id, bank, PUBLIC_OWNER, from_bank,
+                "estate_repair", f"repair bill {pid} ({cause})",
+                now):
+            paid += from_bank
+        rest = bill - paid
+        if rest:
+            from_wallet = min(rest, econ.balance(group_id, owner))
+            if from_wallet and econ._move(
+                    group_id, owner, PUBLIC_OWNER, from_wallet,
+                    "estate_repair",
+                    f"repair bill {pid} ({cause})", now):
+                paid += from_wallet
+        shortfall = bill - paid
+        if shortfall:
+            prop["repair_debt"] = int(
+                prop.get("repair_debt") or 0) + shortfall
+        self._journal(state, "repair_bill", now, member=owner,
+                      property=pid, bill=bill, paid=paid,
+                      debt=shortfall, cause=cause)
+        self._save_state(group_id, state)
+        return {"ok": True, "bill": bill, "covered": 0,
+                "paid": paid, "debt": shortfall}
 
     # ── district events ──
     def _district_event(self, state: dict[str, Any], group_id: str,

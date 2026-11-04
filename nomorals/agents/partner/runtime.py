@@ -3746,6 +3746,43 @@ class PartnerRuntime(
         if kind == "bail":
             return self._control_bail(message)
 
+        # The conflict layer (§23/§24/§35): group-only kinds —
+        # in DM they meet the economy gate's group text like
+        # every other group kind.
+        if kind == "gear":
+            return self._control_gear(command.tail, message)
+
+        if kind == "heist":
+            return self._control_heist(command.tail, message)
+
+        if kind == "shoot":
+            return self._control_shoot(command.tail, message)
+
+        if kind == "kill":
+            return self._control_kill(command.tail, message)
+
+        if kind == "assassinate":
+            return self._control_assassinate(command.tail,
+                                             message)
+
+        if kind == "sabotage":
+            return self._control_sabotage(command.tail, message)
+
+        if kind == "gang":
+            return self._control_gang(command.tail, message)
+
+        if kind == "war":
+            return self._control_war(command.tail, message)
+
+        if kind == "police":
+            return self._control_police(command.tail, message)
+
+        if kind == "bounty":
+            return self._control_bounty(command.tail, message)
+
+        if kind == "claimdrop":
+            return self._control_claimdrop(command.tail, message)
+
         if kind == "slots" \
                 and self._group_key_or_none(message) is not None:
             return self._control_slots(command.tail, message)

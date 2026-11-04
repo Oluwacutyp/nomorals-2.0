@@ -111,6 +111,8 @@ BUTTON_EMOJI: dict[str, str] = {
     "dismiss": "🔕", "flag": "🚩", "rep": "🗂️",
     "spin": "🎰", "flip": "🪙", "quit": "🚪", "pvp": "⚔️",
     "events": "🎉", "save": "💾", "research": "🔬",
+    "gang": "🏴", "heist": "💰", "war": "⚔️", "bounty": "🎯",
+    "gear": "🧰", "police": "🚔", "conflict": "⚔️",
 }
 
 

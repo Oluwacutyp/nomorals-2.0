@@ -167,6 +167,8 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "balance", "mine", "work", "pay", "gshop", "quests", "treasury",
     "deposit", "withdraw", "rob", "bail", "coinflip",
     "top", "tax", "grant",
+    "gear", "heist", "shoot", "kill", "assassinate", "sabotage",
+    "gang", "war", "police", "bounty", "claimdrop",
     "property", "buyproperty", "sellproperty", "rent",
     "listproperty", "auctions", "mortgage", "insure",
     "drop", "claim",
@@ -217,6 +219,8 @@ def public_menu_text() -> str:
         "/coinflip /top /tax /grant /property /buyproperty "
         "/sellproperty /rent /listproperty /auctions /mortgage "
         "/insure /drop /claim\n"
+        "conflict — /gear /heist /shoot /kill /assassinate "
+        "/sabotage /gang /war /police /bounty /claimdrop\n"
         f"play — /game {games}\n"
         "\n"
         "tap a button below to run it · /help for what each one does"
@@ -491,7 +495,18 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "deposit": (0, 1),        # /deposit 50|all — wallet → bank vault, safe from robbery
     "withdraw": (0, 1),       # /withdraw 50|all — bank vault → wallet
     "rob": (0, 1),            # /rob @member (or reply) — steal wallet sparks; failure is jail
-    "bail": (0, 0),           # /bail — pay the treasury to leave jail now
+    "bail": (0, 0),           # /bail — pay the treasury to leave jail now (or pay a hospital bill)
+    "gear": (0, None),        # /gear [buy|install|use <item> ...] — your conflict loadout; the arsenal shelf is in /gshop (§23 addendum)
+    "heist": (0, None),       # /heist [start treasury|bank <district>|vault @member | join | go] — crew scores vs installed defenses (§23)
+    "shoot": (0, 1),          # /shoot @member (or reply) — geared hit verb: small take, failure is jail (§23)
+    "kill": (0, 1),           # /kill @member — needs a real weapon; bigger take + hospital for the target (§23)
+    "assassinate": (0, 1),    # /assassinate @member — needs a heavy weapon; the biggest hit (§23)
+    "sabotage": (0, 1),       # /sabotage @member — wreck their best property; the estate bills the damage (§23)
+    "gang": (0, None),        # /gang [create <lifestyle> <name>|join|leave|job|deposit|withdraw|claim|tax|list] — gang life (§24)
+    "war": (0, None),         # /war [declare <gang>|accept|decline|join|spoils <district>] — gang wars, in-group + inter-group (§23)
+    "police": (0, None),      # /police [bribe [envelope]] — the precinct board: wanted, bounties, your heat (§24)
+    "bounty": (0, None),      # /bounty [post @member <n>|hunt @member] — heads and hunters (§24)
+    "claimdrop": (0, 1),      # /claimdrop [ref] — claim a system drop (§35); claims are settlements
     "coinflip": (0, 2),       # /coinflip 10 heads — casino sink at 1.9×
     "top": (0, 0),            # /top — the richest board (wallet + bank)
     "tax": (0, 0),            # /tax — the group's monetary policy, stated
@@ -2244,10 +2259,54 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/rob @member, or reply to their message with /rob",
             "example": "/rob @ada",
             "related": "/bail /deposit /balance"},
-    "bail": {"what": "pay your bail to the group treasury and leave jail immediately (robbery failures land you there).",
+    "bail": {"what": "pay your bail to the group treasury and leave jail immediately (robbery failures land you there). Not jailed but in hospital? /bail pays the hospital bill instead and discharges you.",
             "usage": "/bail",
             "example": "/bail",
             "related": "/rob"},
+    "gear": {"what": "your conflict loadout: the arsenal you carry (breach gear, weapons, armor, support), your street power and rep, and what guards your vault. Buy on the arsenal shelf in /gshop; install defenses on the treasury, a district bank or your own vault; use a medkit to leave hospital or a repair kit to restore a worn tool.",
+            "usage": "/gear | /gear buy <item> | /gear install <item> treasury|bank <district>|vault | /gear use <item>",
+            "example": "/gear install vault_plating vault",
+            "related": "/gshop /heist /gang"},
+    "heist": {"what": "a crew score: 2–5 members combine their gear against a target's installed defenses (the group treasury, a district bank, or a member's banked vault). The odds print before you run it — ratings, counter-pairs and police heat, never a bare coin flip. Success splits the take; partial pays less; a bust jails the whole crew. Big targets need a gang of 5+ behind the crew.",
+            "usage": "/heist start treasury|bank <district>|vault @member · /heist join · /heist go",
+            "example": "/heist start bank harbour",
+            "related": "/gear /gang /rob"},
+    "shoot": {"what": "the light hit verb: shoot a member and lift 5–10% of their wallet (cap 100). Your gear against their armor sets the odds, printed on the result. Failure: 10 minutes in jail.",
+            "usage": "/shoot @member, or reply to their message with /shoot",
+            "example": "/shoot @ada",
+            "related": "/kill /rob /bail"},
+    "kill": {"what": "the heavy hit verb: needs a real weapon (street pistol or better). Lifts 15–25% of the target's wallet (cap 250) and puts them in hospital for 20 minutes. Failure: 45 minutes in jail.",
+            "usage": "/kill @member, or reply to their message with /kill",
+            "example": "/kill @ada",
+            "related": "/shoot /assassinate /gear"},
+    "assassinate": {"what": "the contract kill: needs a heavy weapon (hunting rifle, strike drone or better). Lifts up to 28% of the target's wallet (cap 400) and puts them in hospital for 45 minutes. Failure: an hour in jail — and the police notice everything.",
+            "usage": "/assassinate @member, or reply with /assassinate",
+            "example": "/assassinate @ada",
+            "related": "/kill /police /gear"},
+    "sabotage": {"what": "wreck a member's best property: the estate organ bills them the damage through its own repair machinery — insurance answers first, then bank, wallet, repair debt. Failure: 20 minutes in jail.",
+            "usage": "/sabotage @member, or reply with /sabotage",
+            "example": "/sabotage @ada",
+            "related": "/property /insure /heist"},
+    "gang": {"what": "gang life: form or join a gang under a lifestyle (syndicate, cartel, bikers, street, mafia, vigilantes — each with its own income, gear affinities, war style and heat profile). Crews grow into gangs at 5 members and syndicates at 15. Gangs hold a treasury, an armory and territory; the strongest gang holding 2+ districts rules the group — its leaders drive treasury governance and set the transfer tax.",
+            "usage": "/gang | /gang create <lifestyle> <name> | /gang join <name> | /gang job | /gang deposit <n> | /gang claim <district> | /gang tax <pct> | /gang list",
+            "example": "/gang create cartel Night Runners",
+            "related": "/war /gear /heist"},
+    "war": {"what": "gang wars: declare on a gang here or in another claimed group; the other side matches the escrow from its gang treasury and accepts; members opt in, rounds fight on the group's cycle with gear and strength deciding. Winner takes the pot — and at home, one of the loser's districts as spoils.",
+            "usage": "/war | /war declare <gang> | /war accept|decline | /war join | /war spoils <district>",
+            "example": "/war declare Night Runners",
+            "related": "/gang /gear"},
+    "police": {"what": "the precinct board: the wanted list (driven by the bully index — farming the weak, the new and the same victim, heist heat, war stomps, community reports), open bounties, and your own heat. At the star thresholds the police fine, raid vaults, post bounties and jail. /police bribe buys heat off — a sink with real risk.",
+            "usage": "/police | /police bribe [envelope]",
+            "example": "/police bribe",
+            "related": "/bounty /glog /bail"},
+    "bounty": {"what": "put your own sparks on a member's head (escrowed in the treasury while it stands), or hunt a wanted member down: defeat them with a geared hit or a /bounty hunt and the bounty pays you whole. Vigilante gangs earn street rep for claims.",
+            "usage": "/bounty | /bounty post @member <amount> | /bounty hunt @member",
+            "example": "/bounty post @ada 200",
+            "related": "/police /shoot /kill"},
+    "claimdrop": {"what": "claim a system drop (🪂): contents roll fresh every time — sparks, gems or gear — across 1–5 first-come slots set by the group's daily drop budget. Claims are settlements: final and journaled, no undo.",
+            "usage": "/claimdrop (or tap the drop's Claim button)",
+            "example": "/claimdrop",
+            "related": "/gear /balance /drop"},
     "coinflip": {"what": "flip a coin against the house at 1.9×: call heads or tails. Losses feed the treasury and the jackpot pot.",
             "usage": "/coinflip <bet> heads|tails",
             "example": "/coinflip 10 heads",
@@ -2788,6 +2847,9 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "property", "buyproperty", "sellproperty",
                             "rent", "listproperty", "auctions",
                             "mortgage", "insure",
+                            "gear", "heist", "shoot", "kill",
+                            "assassinate", "sabotage", "gang", "war",
+                            "police", "bounty", "claimdrop",
                             "mute", "unmute", "ban", "unban", "kick",
                             "warn", "pin", "unpin", "purge", "report"]),
     ("discovery", ["list", "commands", "menu", "help", "tour", "heal"]),
@@ -3056,6 +3118,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "top", "tax", "grant", "drop", "claim",
       "property", "buyproperty", "sellproperty", "rent",
       "listproperty", "auctions", "mortgage", "insure",
+      "gear", "heist", "shoot", "kill", "assassinate", "sabotage",
+      "gang", "war", "police", "bounty", "claimdrop",
       "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
       "unpin", "purge", "report"]),
     ("discovery",
