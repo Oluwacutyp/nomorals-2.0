@@ -548,10 +548,68 @@ class RuntimeProvisionMixin:
                 return []  # adapter exposes no story feed — absence
             return list(fetch() or [])
 
+        def _presence_setter(platform: str, rec: Any,
+                             online: bool) -> bool:
+            """The always-online verb for one platform (§15
+            presence pack): the live adapter's set_presence —
+            bridge presence on WhatsApp, Telethon account status
+            on Telegram.  No adapter / no verb / a refused verdict
+            all read as not-landed, never as success."""
+            adapter = self._adapter_for(platform)
+            fn = getattr(adapter, "set_presence", None)
+            if not callable(fn):
+                return False
+            try:
+                res = fn(online)
+            except Exception as exc:  # noqa: BLE001
+                record_failure(
+                    "runtime_provision.presence_setter", exc)
+                return False
+            if isinstance(res, dict):
+                return bool(res.get("ok"))
+            return bool(res)
+
+        def _status_viewer(rec: Any, item: dict[str, Any]) -> bool:
+            """Mark one WhatsApp status viewed as the owner: the
+            adapter's view_status (bridge status_view verb)."""
+            adapter = self._adapter_for("whatsapp")
+            fn = getattr(adapter, "view_status", None)
+            if not callable(fn):
+                return False
+            try:
+                res = fn(str(item.get("poster_id") or ""),
+                         str(item.get("source_id") or ""),
+                         float(item.get("ts") or 0.0))
+            except Exception as exc:  # noqa: BLE001
+                record_failure(
+                    "runtime_provision.status_viewer", exc)
+                return False
+            if isinstance(res, dict):
+                return bool(res.get("ok"))
+            return bool(res)
+
+        def _story_viewer(rec: Any, poster_id: str,
+                          max_story_id: int) -> bool:
+            """Mark a Telegram peer's stories viewed: the
+            adapter's view_stories (ReadStories)."""
+            adapter = self._adapter_for("telegram")
+            fn = getattr(adapter, "view_stories", None)
+            if not callable(fn):
+                return False
+            try:
+                return bool(fn(poster_id, max_story_id))
+            except Exception as exc:  # noqa: BLE001
+                record_failure(
+                    "runtime_provision.story_viewer", exc)
+                return False
+
         personal = PersonalSurfaces(
             sup.registry,
             PersonalVault(ws / "data" / "social" / "personal"),
-            story_fetcher=_story_fetcher)
+            story_fetcher=_story_fetcher,
+            presence_setter=_presence_setter,
+            status_viewer=_status_viewer,
+            story_viewer=_story_viewer)
         svc = {
             "supervisor": sup, "registry": sup.registry,
             "pairer": pairer, "personal": personal,
@@ -608,6 +666,25 @@ class RuntimeProvisionMixin:
             _log.warning("whatsapp surface not attached for %s: %s",
                          rec.id, note)
         return self._wa_surface_note(sup, rec.id, note)
+
+    def _presence_suffix(self, platform: str) -> str:
+        """The /platforms suffix for always-online (§15 presence
+        pack): when the platform's resolved account carries the
+        owner's always_online flag, the line says the presence
+        truth the last beat computed — "online", or why not.
+        No flag → no suffix.  Never raises: a listing must not
+        die on a presence read."""
+        try:
+            from ...social.pairing import resolve_account
+
+            svc = self._pairing_personal()
+            rec = resolve_account(svc["registry"], platform)
+            if rec is None or not rec.toggle("always_online"):
+                return ""
+            state = svc["personal"].presence_state(rec.id)
+            return f" — always-online: {state or 'on'}"
+        except Exception:  # noqa: BLE001 - listing never dies
+            return ""
 
     def _set_platform_owner_stopped(self, platform: str,
                                     stopped: bool) -> None:
@@ -878,6 +955,14 @@ class RuntimeProvisionMixin:
         except Exception as e:  # noqa: BLE001
             record_failure(
                 "runtime_provision.story_cycle", e)
+        # Same beat: always-online keepalive (§15 presence pack) —
+        # re-asserts presence for the accounts the owner flagged,
+        # releases it where the flag/stop/liveness says otherwise.
+        try:
+            svc["personal"].cycle_presence()
+        except Exception as e:  # noqa: BLE001
+            record_failure(
+                "runtime_provision.presence_cycle", e)
 
     def _personal_surface_turn(self, message: Any) -> bool:
         """Observe one inbound message for the §15 personal surfaces.
@@ -966,6 +1051,8 @@ class RuntimeProvisionMixin:
                 media=media,
                 view_once=bool(meta.get("view_once")),
                 ttl_seconds=int(meta.get("ttl_seconds") or 0),
+                media_missing=bool(
+                    meta.get("view_once_media_missing")),
                 incoming=bool(getattr(message, "incoming", False)),
                 ts=ts)
         return False
@@ -991,7 +1078,9 @@ class RuntimeProvisionMixin:
         /pair route [platform]             show routing resolution
         /pair toggle <id> <name> <on|off>  personal surfaces per
                                            account: status_saving |
-                                           view_once | antidelete
+                                           view_once | antidelete |
+                                           always_online |
+                                           status_viewing
         /pair saved [id]                   saved statuses/view-once
         /pair recovered [id]               DM delete/edit recoveries
         /pair page                         the pairing page (same
@@ -1025,8 +1114,9 @@ class RuntimeProvisionMixin:
                 if rec is not None:
                     if rec.primary:
                         extra += " · primary"
-                    on = [name for name in
-                          ("status_saving", "view_once", "antidelete")
+                    from ...social.pairing import PERSONAL_TOGGLES
+
+                    on = [name for name in PERSONAL_TOGGLES
                           if rec.toggle(name)]
                     if on:
                         extra += f" · surfaces: {', '.join(on)}"
@@ -1307,7 +1397,8 @@ class RuntimeProvisionMixin:
         if sub == "toggle":
             if len(parts) < 4:
                 return ("usage: /pair toggle <id> <status_saving|"
-                        "view_once|antidelete> <on|off>")
+                        "view_once|antidelete|always_online|"
+                        "status_viewing> <on|off>")
             name = parts[2].lower()
             on = parts[3].lower() in ("on", "true", "yes", "1")
             try:

@@ -926,7 +926,63 @@ class TelegramAdapter(ChatAdapter):
                     "ts": ts,
                 })
         return out
-        
+
+    # ── presence + story viewing (§15 presence pack) ───────────────
+    def set_presence(self, online: bool) -> bool:
+        """Set the account's online status (Telethon
+        ``account.UpdateStatusRequest`` — offline=False shows the
+        account online).  Re-sent on the housekeeping beat while
+        the owner wants the account held online; Telegram expires
+        the assertion on its own when the calls stop.  False when
+        not connected or the call fails — never a fake success."""
+        client = self._client
+        if client is None or self._loop is None:
+            return False
+        try:
+            return bool(self._run_on_loop(
+                self._set_presence_async(client, bool(online)),
+                timeout=30.0))
+        except Exception as exc:  # noqa: BLE001 - presence is a
+            _log.debug("telegram: presence set failed: %s", exc)
+            return False               # beat, not a user action
+
+    async def _set_presence_async(self, client: Any,
+                                  online: bool) -> bool:
+        from telethon.tl.functions.account import UpdateStatusRequest
+
+        await client(UpdateStatusRequest(offline=not online))
+        return True
+
+    def view_stories(self, poster_id: str, max_story_id: int) -> bool:
+        """Mark a peer's stories as viewed by this account
+        (Telethon ``stories.ReadStoriesRequest`` — everything of
+        that peer's up to ``max_story_id``).  Viewing only.  False
+        when not connected, the peer can't be resolved, or the
+        call fails."""
+        client = self._client
+        if client is None or self._loop is None:
+            return False
+        try:
+            return bool(self._run_on_loop(
+                self._view_stories_async(client, str(poster_id),
+                                         int(max_story_id)),
+                timeout=30.0))
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("telegram: story view failed: %s", exc)
+            return False
+
+    async def _view_stories_async(self, client: Any, poster_id: str,
+                                  max_story_id: int) -> bool:
+        from telethon.tl.functions.stories import ReadStoriesRequest
+
+        try:
+            peer_ref: Any = int(poster_id)
+        except (TypeError, ValueError):
+            peer_ref = poster_id
+        peer = await client.get_input_entity(peer_ref)
+        await client(ReadStoriesRequest(peer, max_id=max_story_id))
+        return True
+
         raise ValueError(f"cannot resolve chat_id={chat_id!r}")
 
     # ── inbound ──────────────────────────────────────────────────────────────
@@ -1426,7 +1482,21 @@ class TelegramAdapter(ChatAdapter):
                         )
                 except Exception as exc:  # noqa: BLE001 - media is best-effort
                     _log.debug("telegram media download failed: %s", exc)
-        if not text and not media:
+        # Self-destruct TTL, read early: a view-once DM whose media
+        # could not be downloaded (expired file reference, a gated
+        # download) must NOT die at the drop below — the §15
+        # personal surface needs the message to journal the miss,
+        # the same honest record WhatsApp keeps.  Groups keep the
+        # drop: the personal surface is DM-only.
+        _ttl_early = 0
+        try:
+            _ttl_early = int(getattr(
+                getattr(message, "media", None), "ttl_seconds", 0)
+                or 0)
+        except (TypeError, ValueError):
+            _ttl_early = 0
+        if not text and not media and not (
+                _ttl_early and kind == ChatKind.DM):
             _log.info("telegram: DROPPED inbound chat_id=%s — message has no text or media", chat_id)
             return
         title = getattr(entity, "title", None) or getattr(entity, "first_name", None) or ""
@@ -1596,6 +1666,10 @@ class TelegramAdapter(ChatAdapter):
                            "ttl_seconds", None)
             if _ttl:
                 service_meta["ttl_seconds"] = int(_ttl)
+                if not media:
+                    # TTL media that never reached disk: the
+                    # personal surface journals the miss.
+                    service_meta["view_once_media_missing"] = True
         except Exception:  # noqa: BLE001 - a stamp, never a failure
             pass
         handler_msg = ChatMessage(

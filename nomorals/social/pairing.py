@@ -508,11 +508,13 @@ def account_id_for(platform: str, identity: str) -> str:
     return f"{platform}:{slug}"
 
 
-#: Personal-surface toggles every account carries (§15 slices 2–3).
-#: All default OFF — the owner enables each surface per account;
-#: Devon never starts saving a man's statuses or shadowing his DMs
-#: because a default said so.
-PERSONAL_TOGGLES = ("status_saving", "view_once", "antidelete")
+#: Personal-surface toggles every account carries (§15 slices 2–3,
+#: plus the presence pack).  All default OFF — the owner enables
+#: each surface per account; Devon never starts saving a man's
+#: statuses, holding his account online, or reading his contacts'
+#: statuses as him because a default said so.
+PERSONAL_TOGGLES = ("status_saving", "view_once", "antidelete",
+                    "always_online", "status_viewing")
 
 
 def default_toggles() -> dict[str, bool]:

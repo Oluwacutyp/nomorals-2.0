@@ -32,6 +32,8 @@ Protocol (one JSON object per line):
     {"id":"<req>","cmd":"typing","chat":"<jid>","seconds":3,"presence":"composing|recording"}
     {"id":"<req>","cmd":"history","chat":"<jid>","limit":20}
     {"id":"<req>","cmd":"read","chat":"<jid>"}            # best-effort receipts
+    {"id":"<req>","cmd":"presence","state":"available|unavailable"}   # account presence (§15)
+    {"id":"<req>","cmd":"status_view","id":"<msg id>","from":"<poster jid>","ts":<ms>}  # view one status (§15)
     {"id":"<req>","cmd":"chats","limit":30}               # best-effort listing
     {"id":"<req>","cmd":"status"}
     # group/community depth (bridge read-only set):
@@ -1120,6 +1122,11 @@ class WhatsAppAdapter(ChatAdapter):
                 # the personal surface preserves the downloaded
                 # media before WhatsApp vanishes it.
                 wa_msg.meta["view_once"] = True
+                if not wa_msg.media:
+                    # The bridge could not download it in time —
+                    # the personal surface journals the miss
+                    # instead of the message passing silently.
+                    wa_msg.meta["view_once_media_missing"] = True
             self._deliver(handler, wa_msg)
 
     # ── lifecycle ────────────────────────────────────────────────────────────
@@ -1427,6 +1434,36 @@ class WhatsAppAdapter(ChatAdapter):
         response = self._send_cmd(
             {"cmd": "read", "chat": self._jid(chat)}, timeout=10)
         return bool(response.get("ok"))
+
+    def set_presence(self, online: bool) -> dict[str, Any]:
+        """Assert the account's global presence (§15 always-online).
+
+        The bridge's ``presence`` verb: whatsmeow SendPresence on
+        the Go engine, Baileys sendPresenceUpdate with no chat on
+        the Node engine.  Returns the bridge's verdict dict — a
+        bridge that doesn't implement the verb answers ok:false
+        with that reason, never a fake success."""
+        return self._admin_cmd("presence", {
+            "state": "available" if online else "unavailable"},
+            timeout=10)
+
+    def view_status(self, poster_id: str, message_id: str,
+                    ts: float = 0.0) -> dict[str, Any]:
+        """Mark one contact status as viewed by this account (§15
+        status viewing): the bridge's ``status_view`` verb sends
+        the read receipt for that status post (whatsmeow MarkRead
+        on status@broadcast / Baileys readMessages with the
+        status key).  The bridge's verdict dict comes back —
+        ok:false carries the honest reason."""
+        poster_id = str(poster_id or "").strip()
+        message_id = str(message_id or "").strip()
+        if not poster_id or not message_id:
+            return {"ok": False,
+                    "error": "status_view needs the poster's jid "
+                             "and the status message id"}
+        return self._admin_cmd("status_view", {
+            "id": message_id, "from": poster_id,
+            "ts": int(float(ts or 0) * 1000)}, timeout=10)
 
     def chats(self, limit: int = 30) -> list[dict[str, Any]]:
         """Recent chats (id, title, kind, last_ts). Best-effort: returns []

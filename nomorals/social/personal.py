@@ -9,7 +9,7 @@ keeps what the owner told it to keep, and answers the owner in his
 DM (via ``/pair saved`` / ``/pair recovered``).  A counterpart never
 sees any of it; nothing is reposted into a conversation, ever.
 
-Three surfaces, each behind a PER-ACCOUNT toggle in the pairing
+Five surfaces, each behind a PER-ACCOUNT toggle in the pairing
 registry (all default OFF — the owner enables them account by
 account):
 
@@ -25,6 +25,24 @@ account):
   owner to read.  (Group antidelete evidence is the group defense
   organ's job — this is the DM/personal surface only, and it does
   not touch group chats at all.)
+- **Always online** (``always_online``) — while the account's
+  surface is live, its presence is asserted "available" through
+  the platform's real verb (bridge presence on WhatsApp, Telethon
+  account status on Telegram) and re-asserted on the housekeeping
+  beat.  An owner stop order defeats it absolutely; a surface
+  that is down asserts nothing.  Episodes (online asserted /
+  released) are journaled once per transition.
+- **Status viewing** (``status_viewing``) — statuses/stories the
+  account can see are marked VIEWED as the owner (WhatsApp read
+  receipts on status@broadcast, Telegram ReadStories) — viewing
+  only: no replies, no reactions, each post viewed at most once
+  per process.  Independent of saving: a man can have his
+  statuses read without Devon keeping copies, and vice versa.
+
+The acting half (presence + viewing) rides injected callables —
+the same absence-honesty as ``story_fetcher``: no callable wired
+(the adapter exposes no verb) means the surface reports exactly
+that, and nothing is ever faked as done.
 
 Store discipline, matching the registry's: the DM cache is a JSON
 file written atomically; an unreadable cache raises (quarantined
@@ -304,20 +322,43 @@ class PersonalSurfaces:
     Every method is gated on the account's own toggles and returns
     what it DID (entries written), so callers and tests can see the
     truth.  Nothing here sends a message anywhere — recovery is
-    pull-only, in the owner's DM, by his command.
+    pull-only, in the owner's DM, by his command.  The presence
+    pack's acting seams (presence assertion, status viewing) post
+    nothing either: they flip the account's own presence and read
+    receipts, through the injected callables, only where the
+    owner's toggles say so.
     """
 
     def __init__(self, registry: PairingRegistry, vault: PersonalVault,
                  *, story_fetcher: Callable[[AccountRecord],
                                             list[dict[str, Any]]] | None
                  = None,
+                 presence_setter: Callable[[str, AccountRecord, bool],
+                                           bool] | None = None,
+                 status_viewer: Callable[[AccountRecord,
+                                          dict[str, Any]], bool] | None
+                 = None,
+                 story_viewer: Callable[[AccountRecord, str, int],
+                                        bool] | None = None,
                  clock: Callable[[], float] = time.time) -> None:
         self.registry = registry
         self.vault = vault
         self.story_fetcher = story_fetcher
+        #: The acting seams (presence pack).  Each returns True only
+        #: when the platform verb actually landed; None = the
+        #: surface has no such verb wired, which the state surfaces
+        #: report as absence, never as success.
+        self.presence_setter = presence_setter
+        self.status_viewer = status_viewer
+        self.story_viewer = story_viewer
         self._clock = clock
         self._seen_status: set[tuple[str, str]] = set()
         self._seen_stories: set[tuple[str, str]] = set()
+        self._viewed_status: set[tuple[str, str]] = set()
+        self._viewed_stories: set[tuple[str, str]] = set()
+        #: account_id -> {"asserted": bool, "state": str} — the
+        #: presence truth the last cycle_presence computed.
+        self._presence: dict[str, dict[str, Any]] = {}
         for row in vault.journal():
             sid = str(row.get("source_id") or "")
             if sid and row.get("kind") == "status":
@@ -373,13 +414,17 @@ class PersonalSurfaces:
                         message_id: str = "", text: str = "",
                         media: list[dict[str, Any]] | None = None,
                         view_once: bool = False, ttl_seconds: int = 0,
+                        media_missing: bool = False,
                         incoming: bool = True,
                         account_id: str = "",
                         ts: float = 0.0) -> list[dict[str, Any]]:
         """One DM message the account saw.  Caches it when the
         antidelete toggle is on; preserves its media when the
         view-once toggle is on and the message is view-once /
-        self-destruct.  Returns the vault entries written."""
+        self-destruct.  ``media_missing`` is the adapter saying
+        the ephemeral media could not be downloaded in time —
+        the miss is journaled, exactly like a vanished file.
+        Returns the vault entries written."""
         rec = self.resolve_event_account(platform, account_id)
         out: list[dict[str, Any]] = []
         media = media or []
@@ -414,6 +459,21 @@ class PersonalSurfaces:
                         "bytes": 0,
                         "note": "media was gone before it could be "
                                 "preserved"})
+        if ephemeral and media_missing and not media \
+                and rec.toggle("view_once"):
+            # The adapter saw the ephemeral message but its media
+            # never made it to disk (expired file reference, a
+            # failed download) — the same honest miss as a vanished
+            # file, journaled instead of silently dropped.
+            _append_jsonl(self.vault.journal_path, {
+                "ts": ts, "kind": "view_once_missed",
+                "account": rec.id, "platform": platform,
+                "counterpart_id": counterpart_id or sender_id,
+                "poster_name": sender_name,
+                "media_kind": "", "source_id": message_id,
+                "path": "", "bytes": 0,
+                "note": "media could not be downloaded before it "
+                        "expired"})
         return out
 
     def observe_delete(self, platform: str, *, chat_key: str,
@@ -504,12 +564,27 @@ class PersonalSurfaces:
         """One status post the account can see (WhatsApp
         status@broadcast feed).  Saved when the account's
         status-saving toggle is on; the same post never saves
-        twice."""
+        twice.  Marked viewed as the owner when the status-viewing
+        toggle is on — independently of saving, at most once per
+        post per process."""
         rec = self.resolve_event_account(platform, account_id)
         out: list[dict[str, Any]] = []
+        ts = float(ts or self._clock())
+        if source_id and rec.toggle("status_viewing") \
+                and self.status_viewer is not None:
+            vkey = (rec.id, str(source_id))
+            if vkey not in self._viewed_status:
+                try:
+                    viewed = bool(self.status_viewer(rec, {
+                        "poster_id": poster_id,
+                        "poster_name": poster_name,
+                        "source_id": str(source_id), "ts": ts}))
+                except Exception:  # noqa: BLE001 - the wired seam
+                    viewed = False     # records its own failures;
+                if viewed:             # a miss just stays unviewed
+                    self._viewed_status.add(vkey)
         if not rec.toggle("status_saving"):
             return out
-        ts = float(ts or self._clock())
         dedupe_key = (rec.id, str(source_id or ""))
         if source_id and dedupe_key in self._seen_status:
             return out
@@ -540,40 +615,160 @@ class PersonalSurfaces:
     def cycle_stories(self, platform: str = "telegram",
                       account_id: str = "") -> list[dict[str, Any]]:
         """One story sweep: ask the fetcher for the account's
-        currently-visible stories and save the new ones.  No
-        fetcher (adapter exposes none) → nothing happens and the
-        caller can say exactly that."""
+        currently-visible stories, save the new ones (saving
+        toggle), and mark the unseen ones viewed as the owner
+        (viewing toggle — ReadStories per peer at its newest
+        story id).  The two toggles are independent.  No fetcher
+        (adapter exposes none) → nothing happens and the caller
+        can say exactly that."""
         if self.story_fetcher is None:
             return []
         rec = self.resolve_event_account(platform, account_id)
-        if not rec.toggle("status_saving"):
+        saving = rec.toggle("status_saving")
+        viewing = rec.toggle("status_viewing") \
+            and self.story_viewer is not None
+        if not saving and not viewing:
             return []
         out: list[dict[str, Any]] = []
-        for story in self.story_fetcher(rec) or []:
-            sid = str(story.get("story_id") or "")
-            dedupe_key = (rec.id, sid)
-            if sid and dedupe_key in self._seen_stories:
-                continue
-            path = str(story.get("path") or "")
-            ts = float(story.get("ts") or self._clock())
-            entry = None
-            if path:
+        stories = self.story_fetcher(rec) or []
+        if saving:
+            for story in stories:
+                sid = str(story.get("story_id") or "")
+                dedupe_key = (rec.id, sid)
+                if sid and dedupe_key in self._seen_stories:
+                    continue
+                path = str(story.get("path") or "")
+                ts = float(story.get("ts") or self._clock())
+                entry = None
+                if path:
+                    try:
+                        entry = self.vault.save_media(
+                            rec.id, "story", path, platform=platform,
+                            counterpart_id=str(story.get("poster_id")
+                                               or ""),
+                            poster_name=str(story.get("poster_name")
+                                            or ""),
+                            media_kind=str(story.get("kind") or ""),
+                            source_id=sid, ts=ts)
+                    except FileNotFoundError:
+                        entry = None
+                if entry is not None:
+                    out.append(entry)
+                    if sid:
+                        self._seen_stories.add(dedupe_key)
+        if viewing:
+            # ReadStories marks everything up to a peer's newest
+            # story id as read — one call per peer per sweep, for
+            # peers with stories this process has not viewed yet.
+            newest: dict[str, tuple[int, list[str]]] = {}
+            for story in stories:
+                sid = str(story.get("story_id") or "")
+                poster = str(story.get("poster_id") or "")
+                if not sid or not poster:
+                    continue
+                if (rec.id, sid) in self._viewed_stories:
+                    continue
                 try:
-                    entry = self.vault.save_media(
-                        rec.id, "story", path, platform=platform,
-                        counterpart_id=str(story.get("poster_id")
-                                           or ""),
-                        poster_name=str(story.get("poster_name")
-                                        or ""),
-                        media_kind=str(story.get("kind") or ""),
-                        source_id=sid, ts=ts)
-                except FileNotFoundError:
-                    entry = None
-            if entry is not None:
-                out.append(entry)
-                if sid:
-                    self._seen_stories.add(dedupe_key)
+                    sid_int = int(sid)
+                except ValueError:
+                    continue
+                cur = newest.get(poster)
+                if cur is None or sid_int > cur[0]:
+                    newest[poster] = (sid_int,
+                                      (cur[1] if cur else []) + [sid])
+                elif cur is not None:
+                    cur[1].append(sid)
+            for poster, (max_id, sids) in newest.items():
+                try:
+                    viewed = bool(self.story_viewer(rec, poster,
+                                                    max_id))
+                except Exception:  # noqa: BLE001 - the wired seam
+                    viewed = False     # records its own failures
+                if viewed:
+                    for sid in sids:
+                        self._viewed_stories.add((rec.id, sid))
         return out
+
+    # ── presence (always online) ────────────────────────────────
+    def presence_state(self, account_id: str) -> str:
+        """The presence truth for one account as of the last
+        cycle ("" when no cycle has considered it)."""
+        row = self._presence.get(account_id) or {}
+        return str(row.get("state") or "")
+
+    def _journal_presence(self, rec: AccountRecord, online: bool,
+                          reason: str) -> None:
+        _append_jsonl(self.vault.journal_path, {
+            "ts": self._clock(), "kind": "presence",
+            "account": rec.id, "platform": rec.platform,
+            "counterpart_id": "", "poster_name": "",
+            "media_kind": "", "source_id": "", "path": "",
+            "bytes": 0,
+            "note": ("online asserted" if online
+                     else f"online released — {reason}")})
+
+    def cycle_presence(self) -> dict[str, str]:
+        """One presence beat: for every registered account, hold
+        its presence online iff the owner asked for exactly that
+        (always_online on, account linked, NO owner stop order
+        standing for the platform, and the wired verb lands).
+        Asserting is a keepalive — the verb is re-sent every beat
+        while wanted — but journal episodes record TRANSITIONS
+        only, once each.  A stopped or down surface asserts
+        nothing and resurrects nothing.  Returns account_id →
+        plain state text (also kept for presence_state())."""
+        states: dict[str, str] = {}
+        for rec in self.registry.all():
+            cur = self._presence.get(rec.id) or {
+                "asserted": False, "state": "off"}
+            asserted = bool(cur.get("asserted"))
+            toggle_on = rec.toggle("always_online")
+            stopped = self.registry.owner_stopped(rec.platform)
+            linked = rec.status == "linked"
+            if not toggle_on:
+                reason, want = "toggle off", False
+            elif stopped:
+                reason, want = "stopped by the owner", False
+            elif not linked:
+                reason, want = f"account {rec.status}", False
+            else:
+                reason, want = "", True
+            if self.presence_setter is None:
+                state = ("on — but no presence verb is wired for "
+                         "this surface" if toggle_on else "off")
+                self._presence[rec.id] = {
+                    "asserted": False, "state": state}
+                states[rec.id] = state
+                continue
+            if want:
+                try:
+                    landed = bool(self.presence_setter(
+                        rec.platform, rec, True))
+                except Exception:  # noqa: BLE001 - the wired seam
+                    landed = False     # records its own failures
+                if landed:
+                    if not asserted:
+                        self._journal_presence(rec, True, "")
+                    self._presence[rec.id] = {
+                        "asserted": True, "state": "online"}
+                    states[rec.id] = "online"
+                else:
+                    self._presence[rec.id] = {
+                        "asserted": False,
+                        "state": "wanted, but the surface is not "
+                                 "live to assert it"}
+                    states[rec.id] = self._presence[rec.id]["state"]
+                continue
+            if asserted:
+                try:
+                    self.presence_setter(rec.platform, rec, False)
+                except Exception:  # noqa: BLE001 - releasing is
+                    pass               # best-effort by contract
+                self._journal_presence(rec, False, reason)
+            self._presence[rec.id] = {
+                "asserted": False, "state": f"off — {reason}"}
+            states[rec.id] = self._presence[rec.id]["state"]
+        return states
 
     # ── toggles ─────────────────────────────────────────────────────
     def set_toggle(self, account_id: str, name: str,

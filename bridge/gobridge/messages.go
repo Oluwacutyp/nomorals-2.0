@@ -91,6 +91,10 @@ func (b *bridge) handleCommand(cc *clientConn, req request) {
 		b.cmdHistory(cc, id, req)
 	case "read":
 		b.cmdRead(ctx, cc, id, req)
+	case "presence":
+		b.cmdPresence(ctx, cc, id, req)
+	case "status_view":
+		b.cmdStatusView(ctx, cc, id, req)
 	case "chats":
 		b.cmdChats(cc, id, req)
 	case "status":
@@ -818,6 +822,47 @@ func (b *bridge) cmdRead(ctx context.Context, cc *clientConn, id string, req req
 				time.UnixMilli(arr[i].tsMs), arr[i].chatJID, arr[i].senderJID)
 			break
 		}
+	}
+	b.reply(cc, id, map[string]any{"ok": true})
+}
+
+// cmdPresence asserts the account's global presence (§15
+// always-online): whatsmeow SendPresence with available /
+// unavailable. One-shot — the Python side re-sends on its
+// housekeeping beat while the owner wants the account online.
+func (b *bridge) cmdPresence(ctx context.Context, cc *clientConn, id string, req request) {
+	state := types.PresenceAvailable
+	if req.str("state") == "unavailable" {
+		state = types.PresenceUnavailable
+	}
+	if err := b.cli.SendPresence(ctx, state); err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	b.reply(cc, id, map[string]any{"ok": true})
+}
+
+// cmdStatusView marks one contact status as viewed by this
+// account (§15 status viewing): a read receipt for the status
+// post — MarkRead addressed to status@broadcast with the poster
+// as sender, the same receipt the phone sends when the owner
+// opens the status.
+func (b *bridge) cmdStatusView(ctx context.Context, cc *clientConn, id string, req request) {
+	msgID := req.str("id")
+	sender, err := parseJID(req.str("from"))
+	if err != nil || msgID == "" {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "status_view needs the status message id and the poster's jid"})
+		return
+	}
+	tsMs := int64(req.num("ts", 0))
+	if tsMs <= 0 {
+		tsMs = time.Now().UnixMilli()
+	}
+	if err := b.cli.MarkRead(ctx, []types.MessageID{types.MessageID(msgID)},
+		time.UnixMilli(tsMs), types.StatusBroadcastJID, sender); err != nil {
+		b.fail(cc, id, err)
+		return
 	}
 	b.reply(cc, id, map[string]any{"ok": true})
 }

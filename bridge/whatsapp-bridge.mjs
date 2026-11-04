@@ -888,6 +888,27 @@ async function handleCommand(sock, req) {
         if (last) await wa.readMessages([last.key]).catch(() => {});
         return reply(sock, id, { ok: true });
       }
+      case 'presence': {
+        // Account presence (§15 always-online): Baileys
+        // sendPresenceUpdate with NO chat jid sets the global
+        // presence ('available' holds the account online;
+        // 'unavailable' releases it).  Errors surface honestly —
+        // unlike 'read', a presence that didn't land must not ack.
+        const state = req.state === 'unavailable' ? 'unavailable' : 'available';
+        await wa.sendPresenceUpdate(state);
+        return reply(sock, id, { ok: true });
+      }
+      case 'status_view': {
+        // Mark one contact status viewed (§15 status viewing):
+        // the read receipt for a status post is a readMessages
+        // call with the status key — status@broadcast remoteJid,
+        // the poster as participant.
+        if (!req.id || !req.from) {
+          return reply(sock, id, { ok: false, error: 'status_view needs the status message id and the poster jid' });
+        }
+        await wa.readMessages([{ remoteJid: 'status@broadcast', id: String(req.id), participant: String(req.from), fromMe: false }]);
+        return reply(sock, id, { ok: true });
+      }
       case 'chats': {
         const limit = Math.max(1, parseInt(req.limit || '30', 10));
         const list = [...recentByChat.entries()]

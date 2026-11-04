@@ -4194,6 +4194,14 @@ class PartnerRuntime(
                     # the platform runs, but personal replies are held
                     # while no model rung answers (brain_gate).
                     suffix += " — observe-only (brain unavailable)"
+                if is_personal_platform(name):
+                    # Always-online truth (§15 presence pack) rides
+                    # the same line when the owner flagged the
+                    # platform's account — asserted, or why not.
+                    presence_suffix = getattr(
+                        self, "_presence_suffix", None)
+                    if callable(presence_suffix):
+                        suffix += presence_suffix(name)
                 lines.append(f"  {name}: {state}{suffix}")
             # Known-but-never-built platforms (not in the boot set,
             # never hot-started) are invisible in gateway.status()
