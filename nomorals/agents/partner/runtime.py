@@ -46,6 +46,7 @@ from .runtime_search import RuntimeSearchMixin
 from .runtime_wisdom import RuntimeWisdomMixin
 from .runtime_reach import RuntimeReachMixin
 from .failures import failure_count, recent_failures, record_failure
+from .reply_guard import guard_reply_parts
 _log = get_logger(__name__)
 
 
@@ -1886,6 +1887,18 @@ class PartnerRuntime(
         return sent_any
 
     def _send_reply(self, message: ChatMessage, parts: list[str]) -> None:
+        # Send-boundary scaffold guard (reply_guard): the model's raw
+        # analysis of the incoming message is not a reply and must
+        # never reach a chat — least of all a personal-account surface
+        # where she posts AS the owner. Runs before EVERY outbound
+        # branch below (voice included: a scaffold must not be spoken
+        # either). Clean parts pass untouched; a fully-scaffolded turn
+        # resolves to one in-character reaction, journaled in the
+        # partner failure ledger.
+        parts = guard_reply_parts(
+            parts, kind=message.chat.kind, rng=self.brain.presence_rng)
+        if not parts:
+            return
         # Voice-note ping-pong (outbound): the user spoke, so Devon answers
         # in voice.  Best-effort — any TTS/ffmpeg failure falls back to the
         # normal text path below. Per-chat voice toggle wins: with voice
