@@ -501,6 +501,23 @@ class RuntimeProvisionMixin:
                    if r.identity == digits or r.id.endswith(ref)]
         return matches[0] if len(matches) == 1 else None
 
+    @staticmethod
+    def _pair_launch_note(sup: Any, rec: Any) -> str | None:
+        """The beat after a bridge (re)start: if the process died
+        on the spot (missing packages, a crash on launch), the
+        bridge's own last line is the reply — not a cheerful
+        "started".  A healthy bridge says nothing inside the
+        beat and the caller answers as before; a death that takes
+        longer belongs to the summary / supervision, not here."""
+        import time as _time
+
+        for _ in range(6):
+            reason = sup.pairing_error(rec.id)
+            if reason:
+                return f"⚠️ {reason}"
+            _time.sleep(0.1)
+        return None
+
     def _pairing_personal(self) -> dict[str, Any]:
         """The §15 slices 2–3 service bundle: registry + bridge
         supervisor (slice 1), the Telegram pairer, the personal
@@ -709,6 +726,8 @@ class RuntimeProvisionMixin:
                                   f"({pending['state']}, "
                                   f"{int(pending['expires_in_s'])}s "
                                   "left)")
+                if row.get("last_error"):
+                    extra += f" · ⚠️ {row['last_error']}"
                 lines.append(
                     f"  {row['id']}{label} — {row['status']}"
                     f" (bridge {row['process']}){extra}")
@@ -742,6 +761,12 @@ class RuntimeProvisionMixin:
                         "phone number instead” → enter the code. It "
                         "expires in a few minutes — once linked, the "
                         "account is a live Devon session.")
+                reason = sup.pairing_error(rec.id)
+                if reason:
+                    # The bridge died or WhatsApp refused during
+                    # the wait — that IS the answer, not "hasn't
+                    # issued the code yet".
+                    return f"⚠️ {reason}"
                 _time.sleep(0.5)
             return (f"bridge started for +{rec.identity} "
                     f"({rec.id}) — WhatsApp hasn't issued the code "
@@ -752,6 +777,10 @@ class RuntimeProvisionMixin:
                 return "which account? /pair lists them."
             got = sup.pairing_code(rec.id)
             if not got:
+                reason = sup.pairing_error(rec.id)
+                if reason:
+                    return (f"⚠️ {reason}\n/pair whatsapp "
+                            f"{rec.identity} issues a fresh one.")
                 return (f"no live code for {rec.id} — codes expire in "
                         f"minutes. /pair whatsapp {rec.identity} "
                         "issues a fresh one.")
@@ -841,6 +870,9 @@ class RuntimeProvisionMixin:
                     sup.start(rec.id)
                 except PairingUnavailable as exc:
                     return f"⚠️ {exc}"
+                note = self._pair_launch_note(sup, rec)
+                if note:
+                    return note
                 return f"▶️ bridge starting for {rec.id}."
             if sub == "stop":
                 sup.stop(rec.id)
@@ -851,6 +883,9 @@ class RuntimeProvisionMixin:
                     sup.start(rec.id)
                 except PairingUnavailable as exc:
                     return f"⚠️ {exc}"
+                note = self._pair_launch_note(sup, rec)
+                if note:
+                    return note
                 return f"🔁 bridge restarted for {rec.id}."
             sup.remove(rec.id)
             return (f"🗑️ {rec.id} removed from the pool. Its saved "

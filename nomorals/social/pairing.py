@@ -31,14 +31,37 @@ import re
 import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 _ACCOUNT_ID_RE = re.compile(r"[^a-z0-9]+")
 _CODE_LINE_RE = re.compile(r"PAIRING CODE for \+(\d+):\s*(\S+)")
+#: The bridge logs a refused pairing-code request in this shape
+#: (bridge/whatsapp-bridge.mjs) — the refusal reason rides the
+#: line, and the drain captures it instead of swallowing it.
+_REFUSAL_RE = re.compile(r"pairing code request failed:\s*(.+)$")
+#: The bridge's log() prefixes an ISO timestamp; display cleaning
+#: strips it (and the [bridge] tag) from lines shown to the owner.
+_TS_PREFIX_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?"
+    r"(?:Z|[+-]\d{2}:?\d{2})?\s+")
+
+#: Bounded waits for Devon's self-provisioning: installing the
+#: bridge's npm packages gets five minutes; installing Node.js
+#: itself (a ~30 MB download plus a system installer) gets ten.
+BRIDGE_DEPS_TIMEOUT_S = 300.0
+NODE_INSTALL_TIMEOUT_S = 600.0
+
+#: The Node.js LTS the self-installer falls back to when winget
+#: cannot do it: a version-pinned official dist build (v22 Jod).
+NODE_LTS_VERSION = "22.14.0"
+NODE_MSI_URL = (f"https://nodejs.org/dist/v{NODE_LTS_VERSION}/"
+                f"node-v{NODE_LTS_VERSION}-x64.msi")
 
 
 class PairingStoreError(RuntimeError):
@@ -61,6 +84,207 @@ NODE_MISSING_MESSAGE = (
     "locations. Install Node.js LTS (https://nodejs.org) and run "
     "/pair again. Telegram pairing does not need Node and still "
     "works.")
+
+
+class NodeProvisionFailed(RuntimeError):
+    """Devon tried to install Node.js herself and every route
+    failed.  ``attempts`` is the plain list of what was tried and
+    how each route ended — the supervisor folds it into the
+    PairingUnavailable guidance, so the owner is pinged only at
+    this genuine wall, with the receipts attached."""
+
+    def __init__(self, attempts: list[str]) -> None:
+        self.attempts = list(attempts)
+        super().__init__("; ".join(self.attempts))
+
+
+def _node_install_failed_message(attempts: list[str]) -> str:
+    """PairingUnavailable text for a machine with no node where
+    the self-install was attempted and failed: what was tried is
+    stated, because 'install Node' as a bare chore is exactly
+    what the self-provisioning doctrine forbids handing back."""
+    tried = "; ".join(attempts) if attempts else \
+        "no install route applies on this machine"
+    return (
+        "WhatsApp pairing needs Node.js on this machine. Devon "
+        f"tried to install it herself and could not: {tried}. "
+        "Install Node.js LTS (https://nodejs.org) by hand and "
+        "run /pair again. Telegram pairing does not need Node "
+        "and still works.")
+
+
+def _output_tail(output: str, limit: int = 280) -> str:
+    """The last meaningful lines of a captured command output,
+    trimmed for a chat reply — enough to name the failure,
+    never a dump."""
+    lines = [ln.strip() for ln in (output or "").splitlines()
+             if ln.strip()]
+    tail = " · ".join(lines[-3:]) if lines else "no output"
+    if len(tail) > limit:
+        tail = "…" + tail[-(limit - 1):]
+    return tail
+
+
+def _run_capture(argv: list[str], cwd: str | Path | None,
+                 timeout: float) -> tuple[int, str]:
+    """Run a provisioning command to completion, output captured.
+    TimeoutExpired and OSError propagate — callers turn them
+    into named attempts / guidance."""
+    done = subprocess.run(
+        argv, cwd=str(cwd) if cwd else None,
+        capture_output=True, text=True, timeout=timeout)
+    return done.returncode, (done.stdout or "") + (done.stderr or "")
+
+
+def _default_deps_runner(argv: list[str],
+                         cwd: Path) -> tuple[int, str]:
+    return _run_capture(argv, cwd, BRIDGE_DEPS_TIMEOUT_S)
+
+
+def _default_install_runner(argv: list[str],
+                            cwd: Path | None) -> tuple[int, str]:
+    return _run_capture(argv, cwd, NODE_INSTALL_TIMEOUT_S)
+
+
+def _download_file(url: str, dest: Path) -> None:
+    import urllib.request
+
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "devon-pairing"})
+    with urllib.request.urlopen(req, timeout=180) as resp, \
+            open(dest, "wb") as fh:
+        shutil.copyfileobj(resp, fh)
+
+
+def provision_node(*, env: dict | None = None,
+                   platform: str | None = None,
+                   home: str | Path | None = None,
+                   runner: Callable[..., tuple[int, str]] | None
+                   = None,
+                   downloader: Callable[[str, Path], None] | None
+                   = None,
+                   resolver: Callable[..., str | None] | None
+                   = None,
+                   euid: Any = None) -> str:
+    """Install Node.js on this machine — Devon's job, not a chore
+    handed to the owner (self-provisioning doctrine).
+
+    Routes, in order.  Windows: winget when it resolves, then the
+    official version-pinned LTS MSI run silently.  POSIX: Termux
+    ``pkg`` on a Termux profile (no root needed); ``apt-get`` only
+    when the process already runs as root — without privilege the
+    route is SKIPPED and recorded, never a sudo prompt.  After
+    any successful install the node ladder is re-resolved (the
+    MSI lands in C:\\Program Files\\nodejs, ladder location #1)
+    and the found path returned.  Every route that fails or does
+    not apply is recorded; when none lands a node,
+    NodeProvisionFailed carries the attempts.  ``runner`` /
+    ``downloader`` / ``resolver`` / ``euid`` are injectable so
+    tests stage whole machines — no real install ever runs in a
+    test."""
+    env = os.environ if env is None else env
+    platform = ("windows" if os.name == "nt" else "posix") \
+        if platform is None else platform
+    home = Path.home() if home is None else Path(home)
+    runner = runner or _default_install_runner
+    downloader = downloader or _download_file
+    resolver = resolver or resolve_node
+    attempts: list[str] = []
+
+    def _reresolve() -> str | None:
+        try:
+            return resolver("", env=env, platform=platform,
+                            home=home)
+        except Exception:  # noqa: BLE001 - a resolver quirk is
+            return None     # not an install verdict
+
+    def _attempt(label: str, argv: list[str]) -> str | None:
+        try:
+            rc, output = runner(argv, None)
+        except subprocess.TimeoutExpired:
+            attempts.append(
+                f"{label} timed out after "
+                f"{NODE_INSTALL_TIMEOUT_S:.0f}s")
+            return None
+        except OSError as exc:  # noqa: BLE001 - named attempt
+            attempts.append(f"{label} could not run ({exc})")
+            return None
+        if rc != 0:
+            attempts.append(
+                f"{label} failed (exit {rc}): "
+                f"{_output_tail(output)}")
+            return None
+        found = _reresolve()
+        if found:
+            return found
+        attempts.append(
+            f"{label} ran, but node is still not in PATH or any "
+            "standard install location")
+        return None
+
+    if platform.startswith("win"):
+        winget = shutil.which("winget", path=env.get("PATH"))
+        if winget:
+            found = _attempt(
+                "winget install of Node.js LTS "
+                "(OpenJS.NodeJS.LTS)",
+                [winget, "install", "-e", "--id",
+                 "OpenJS.NodeJS.LTS",
+                 "--accept-source-agreements",
+                 "--accept-package-agreements"])
+            if found:
+                return found
+        else:
+            attempts.append("winget is not available on this "
+                            "machine")
+        label = (f"the official Node.js installer "
+                 f"(node-v{NODE_LTS_VERSION}-x64.msi)")
+        msi = Path(tempfile.gettempdir()) / \
+            f"node-v{NODE_LTS_VERSION}-x64.msi"
+        try:
+            downloader(NODE_MSI_URL, msi)
+        except Exception as exc:  # noqa: BLE001 - named attempt
+            attempts.append(
+                f"{label} could not be downloaded ({exc})")
+        else:
+            found = _attempt(
+                label, ["msiexec", "/i", str(msi), "/quiet",
+                        "/norestart"])
+            if found:
+                return found
+    else:
+        prefix = env.get("PREFIX", "")
+        if prefix.startswith("/data/data/com.termux") \
+                or "TERMUX_VERSION" in env:
+            pkg = shutil.which("pkg", path=env.get("PATH"))
+            if pkg:
+                found = _attempt(
+                    "pkg install of nodejs",
+                    [pkg, "install", "-y", "nodejs"])
+                if found:
+                    return found
+            else:
+                attempts.append("pkg is not available on this "
+                                "machine")
+        apt = shutil.which("apt-get", path=env.get("PATH"))
+        if apt:
+            uid = euid() if callable(euid) else euid
+            if uid is None and hasattr(os, "geteuid"):
+                uid = os.geteuid()
+            if uid == 0:
+                found = _attempt(
+                    "apt-get install of nodejs",
+                    [apt, "install", "-y", "nodejs"])
+                if found:
+                    return found
+            else:
+                attempts.append(
+                    "apt-get install was skipped: Devon is not "
+                    "running as root and never asks for a sudo "
+                    "password")
+    if not attempts:
+        attempts.append("no install route applies on this machine")
+    raise NodeProvisionFailed(attempts)
 
 
 def _node_ladder_paths(env: dict, platform: str,
@@ -139,6 +363,63 @@ def resolve_node(explicit: str = "", *,
     return None
 
 
+def resolve_npm(node_path: str = "", *,
+                env: dict | None = None) -> str | None:
+    """Resolve npm for the bridge dependency install: beside the
+    resolved node binary first (npm.cmd / npm.exe / npm — the
+    nodejs.org installers always ship npm next to node), then
+    PATH.  None when this machine has no npm anywhere we looked."""
+    env = os.environ if env is None else env
+    node_path = (node_path or "").strip()
+    if node_path:
+        bindir = Path(node_path).parent
+        for name in ("npm.cmd", "npm.exe", "npm"):
+            cand = bindir / name
+            try:
+                if cand.is_file():
+                    return str(cand)
+            except OSError:
+                continue
+    return shutil.which("npm", path=env.get("PATH"))
+
+
+def _clean_bridge_line(line: str) -> str:
+    """A bridge output line as the owner should see it: no ISO
+    timestamp, no [bridge] tag, no surrounding whitespace."""
+    text = _TS_PREFIX_RE.sub("", (line or "").strip())
+    if text.startswith("[bridge]"):
+        text = text[len("[bridge]"):].strip()
+    return text
+
+
+def _trim_line(text: str, limit: int = 220) -> str:
+    if len(text) > limit:
+        return text[:limit - 1].rstrip() + "…"
+    return text
+
+
+def _pick_error_line(lines: list[str]) -> str:
+    """The one bridge line that names why the process died —
+    the module-resolution error when there is one (a fresh
+    checkout's missing node_modules speaks exactly this), else
+    the last Error line, else the last line that is not stack
+    noise.  Cleaned and trimmed; '' when nothing speaks."""
+    cleaned = [c for c in (_clean_bridge_line(ln) for ln in lines)
+               if c]
+    for cand in reversed(cleaned):
+        if "Cannot find module" in cand \
+                or "Cannot find package" in cand:
+            return _trim_line(cand)
+    for cand in reversed(cleaned):
+        if cand.startswith("Error"):
+            return _trim_line(cand)
+    for cand in reversed(cleaned):
+        if cand.startswith(("at ", "node:", "Node.js v")):
+            continue
+        return _trim_line(cand)
+    return ""
+
+
 def account_id_for(platform: str, identity: str) -> str:
     slug = _ACCOUNT_ID_RE.sub("-", identity.strip().lower()).strip("-")
     return f"{platform}:{slug}"
@@ -171,6 +452,13 @@ class AccountRecord:
     remote_id: str = ""      # TG: numeric user id once linked
     primary: bool = False    # routing: the platform's named default
     toggles: dict[str, bool] = field(default_factory=default_toggles)
+    # ── bridgefix ──
+    #: The last bridge failure in plain words ("bridge exited:
+    #: Error: Cannot find package …", "WhatsApp refused the code
+    #: request: …").  Additive with a default — registries written
+    #: before this field load unchanged, and older code reading a
+    #: newer file filters it out (from_dict keeps known keys).
+    last_error: str = ""
 
     def toggle(self, name: str) -> bool:
         return bool((self.toggles or {}).get(name, False))
@@ -257,6 +545,18 @@ class PairingRegistry:
             rec.last_seen = time.time()
             self._save()
 
+    def set_error(self, account_id: str, message: str) -> None:
+        """Record (or clear, with '') the account's last bridge
+        failure in plain words.  Deliberately separate from
+        set_status: an error is evidence about the last attempt,
+        not a lifecycle state, and it must not bump last_seen."""
+        with self._lock:
+            rec = self._accounts.get(account_id)
+            if rec is None or rec.last_error == message:
+                return
+            rec.last_error = message
+            self._save()
+
     def accounts_for(self, platform: str) -> list[AccountRecord]:
         with self._lock:
             return [r for r in self.all() if r.platform == platform]
@@ -326,6 +626,15 @@ class _Live:
     code: str = ""
     code_at: float = 0.0
     reader: threading.Thread | None = field(default=None, repr=False)
+    # ── bridgefix: the bridge speaks, the supervisor remembers ──
+    #: Bounded tail of the bridge's own output lines — when the
+    #: process dies, its last meaningful line is in here.
+    lines: deque = field(default_factory=lambda: deque(maxlen=20))
+    #: The last failure in display form ("bridge exited: …" /
+    #: "WhatsApp refused the code request: …"), '' while healthy.
+    last_error: str = ""
+    #: The drain saw this process end (set once, under the lock).
+    exited: bool = False
 
 
 class BridgeSupervisor:
@@ -345,6 +654,18 @@ class BridgeSupervisor:
     re-checked on every launch, so installing Node fixes /pair
     without restarting Devon.  ``node_resolver`` is injectable
     beside ``spawn`` so tests can stage node-less machines.
+
+    Self-provisioning (the owner's doctrine: a missing tool is
+    Devon's job to fix, never a chore handed back): when no node
+    resolves, Devon installs Node.js herself once per missing
+    state (``provision_node``); before every bridge launch she
+    installs the bridge's npm packages when node_modules is
+    absent (``_ensure_bridge_deps``).  And the bridge's output
+    is never swallowed: the drain keeps a bounded tail, a death
+    before linking flips the record to "down" with the bridge's
+    own last line as the reason, and a WhatsApp refusal of the
+    code request is recorded verbatim — ``pairing_error`` is
+    how surfaces answer with the truth.
     """
 
     def __init__(self, registry: PairingRegistry, *,
@@ -354,6 +675,12 @@ class BridgeSupervisor:
                  node: str = "node",
                  spawn: Callable[..., Any] | None = None,
                  node_resolver: Callable[[], str | None] | None
+                 = None,
+                 deps_runner: Callable[..., tuple[int, str]] | None
+                 = None,
+                 npm_resolver: Callable[[str], str | None] | None
+                 = None,
+                 node_provisioner: Callable[[], str] | None
                  = None) -> None:
         self.registry = registry
         self.bridge_path = Path(bridge_path)
@@ -366,11 +693,49 @@ class BridgeSupervisor:
         self._node_cache: str | None = None
         self._live: dict[str, _Live] = {}
         self._lock = threading.RLock()
+        # ── self-provisioning seams (bridgefix) ──
+        # deps_runner / npm_resolver stage the npm dependency
+        # install; node_provisioner stages the Node.js install.
+        # Injected seams opt INTO provisioning under an injected
+        # spawn; production (all defaults) provisions for real.
+        self._deps_runner = deps_runner
+        self._npm_resolver = npm_resolver
+        self._node_provisioner = node_provisioner
+        self._deps_lock = threading.Lock()
+        # One Node install attempt per supervisor per missing
+        # state — a broken environment must not reinstall-loop
+        # on every /pair; the recorded attempts ride the failure
+        # message from then on.
+        self._provision_tried = False
+        self._provision_attempts: list[str] = []
 
     # ── node + launch preflight ─────────────────────────────────────
+    def _provisioning_applies(self) -> bool:
+        """Whether a missing node triggers Devon's self-install.
+
+        Never over an explicit node configuration (a configured
+        path that does not exist is a configuration fact, not a
+        missing runtime).  An injected node_provisioner opts in
+        explicitly (the test seam).  Otherwise production only:
+        default spawn AND the default resolution machinery — an
+        injected node_resolver stages the whole machine, install
+        attempts included."""
+        if (self.node or "").strip() not in ("", "node"):
+            return False
+        if self._node_provisioner is not None:
+            return True
+        return self._spawn_is_default and self._node_resolver is None
+
     def resolve_node_path(self) -> str | None:
         """The node executable launches will use — resolved fresh
-        until it succeeds, cached from then on."""
+        until it succeeds, cached from then on.
+
+        A resolution miss is not the end: when provisioning
+        applies, Devon installs Node.js herself ONCE
+        (``provision_node`` — winget / official MSI / package
+        manager) and the installed path is used from then on.
+        A failed attempt is recorded, not retried on every call:
+        its attempts ride the PairingUnavailable guidance."""
         if self._node_cache:
             return self._node_cache
         if self._node_resolver is not None:
@@ -380,23 +745,39 @@ class BridgeSupervisor:
         if found:
             self._node_cache = str(found)
             return self._node_cache
+        if not self._provision_tried and self._provisioning_applies():
+            self._provision_tried = True
+            provisioner = self._node_provisioner or provision_node
+            try:
+                installed = provisioner()
+            except NodeProvisionFailed as exc:
+                self._provision_attempts = list(exc.attempts)
+                installed = None
+            if installed:
+                self._node_cache = str(installed)
+                return self._node_cache
+            if not self._provision_attempts:
+                self._provision_attempts = [
+                    "the Node.js installer finished without "
+                    "leaving a node Devon can find"]
         return None
 
     def _require_launchable(self) -> str:
         """The node argv[0] for a launch, or PairingUnavailable
         naming the true blocker in plain words.
 
-        Production (default spawn) is strict: no resolvable node,
-        or a missing bridge script, fails HERE — before any
-        account record claims to be pairing.  With an injected
-        spawn the caller owns the process layer (the test seam):
-        the resolved path still lands in argv when one is found,
-        but a miss falls back to the configured name rather than
-        raising, exactly as launches behaved before resolution
-        existed."""
+        Production (default spawn) is strict: no resolvable node
+        even after the self-install attempt, or a missing bridge
+        script, fails HERE — before any account record claims to
+        be pairing.  With an injected spawn the caller owns the
+        process layer (the test seam): the resolved path still
+        lands in argv when one is found, but a miss falls back to
+        the configured name rather than raising, exactly as
+        launches behaved before resolution existed."""
         node = self.resolve_node_path()
         if node is None:
-            if not self._spawn_is_default:
+            if not self._spawn_is_default \
+                    and self._node_provisioner is None:
                 return self.node
             explicit = (self.node or "").strip()
             if explicit and explicit != "node":
@@ -408,6 +789,10 @@ class BridgeSupervisor:
                     "Node.js LTS (https://nodejs.org) and run "
                     "/pair again. Telegram pairing does not need "
                     "Node and still works.")
+            if self._provision_attempts:
+                raise PairingUnavailable(
+                    _node_install_failed_message(
+                        self._provision_attempts))
             raise PairingUnavailable(NODE_MISSING_MESSAGE)
         if self._spawn_is_default and not self.bridge_path.is_file():
             raise PairingUnavailable(
@@ -417,6 +802,83 @@ class BridgeSupervisor:
                 "Node problem. Restore bridge/whatsapp-bridge.mjs "
                 "(re-pull the repo) and run /pair again.")
         return node
+
+    # ── bridge dependencies (self-provisioned) ─────────────────────
+    def _ensure_bridge_deps(self, node: str) -> None:
+        """The bridge's npm packages, installed by Devon herself.
+
+        bridge/node_modules is gitignored, so a fresh checkout
+        has none and the bridge dies on its first import — the
+        silent death this fixes at the root.  When node_modules
+        is absent (and the bridge dir carries a package.json to
+        install from), npm runs ONCE per missing state: ``npm
+        ci`` when the lockfile exists, else ``npm install``,
+        serialized on the deps lock so concurrent launches never
+        double-install.  npm unresolvable, a timeout, or a failed
+        install raises PairingUnavailable naming what failed
+        plus the tail of npm's own output.  With an injected
+        spawn and no injected deps_runner, the caller owns its
+        staging and this is skipped — the same seam contract as
+        node resolution."""
+        bridge_dir = self.bridge_path.parent
+        if (bridge_dir / "node_modules").is_dir():
+            return
+        if not (bridge_dir / "package.json").is_file():
+            return
+        if self._deps_runner is None and not self._spawn_is_default:
+            return
+        with self._deps_lock:
+            if (bridge_dir / "node_modules").is_dir():
+                return  # a concurrent launch installed them
+            npm = self._npm_resolver(node) \
+                if self._npm_resolver is not None \
+                else resolve_npm(node)
+            if not npm:
+                raise PairingUnavailable(
+                    "WhatsApp pairing is unavailable on this "
+                    "machine: the bridge's packages are not "
+                    "installed and npm was not found beside node "
+                    f"({node}) or on PATH, so Devon cannot "
+                    "install them herself. Run `npm ci` in "
+                    f"{bridge_dir} by hand, or reinstall Node.js "
+                    "LTS (https://nodejs.org), then run /pair "
+                    "again. Telegram pairing does not need the "
+                    "bridge and still works.")
+            argv = [npm, "ci"] \
+                if (bridge_dir / "package-lock.json").is_file() \
+                else [npm, "install"]
+            runner = self._deps_runner or _default_deps_runner
+            try:
+                rc, output = runner(argv, bridge_dir)
+            except subprocess.TimeoutExpired:
+                raise PairingUnavailable(
+                    "WhatsApp pairing is unavailable on this "
+                    "machine: installing the bridge's packages "
+                    f"(`{' '.join(argv)}` in {bridge_dir}) timed "
+                    f"out after {BRIDGE_DEPS_TIMEOUT_S:.0f}s. "
+                    "Check the machine's network and run /pair "
+                    "again. Telegram pairing does not need the "
+                    "bridge and still works.") from None
+            except OSError as exc:  # noqa: BLE001 - named, plain
+                raise PairingUnavailable(
+                    "WhatsApp pairing is unavailable on this "
+                    "machine: Devon could not run npm to install "
+                    f"the bridge's packages ({exc}). Run "
+                    f"`{' '.join(argv)}` in {bridge_dir} by "
+                    "hand, then run /pair again. Telegram "
+                    "pairing does not need the bridge and still "
+                    "works.") from exc
+            if rc != 0 or not (bridge_dir / "node_modules").is_dir():
+                raise PairingUnavailable(
+                    "WhatsApp pairing is unavailable on this "
+                    "machine: the bridge's packages are not "
+                    "installed, and Devon's own install — "
+                    f"`{' '.join(argv)}` in {bridge_dir} — "
+                    f"failed (exit {rc}): {_output_tail(output)}. "
+                    "Check the machine's network, or run that "
+                    "command by hand, then run /pair again. "
+                    "Telegram pairing does not need the bridge "
+                    "and still works.")
 
     # ── process plumbing ────────────────────────────────────────────
     @staticmethod
@@ -434,6 +896,7 @@ class BridgeSupervisor:
 
     def _launch(self, rec: AccountRecord, *, pairing_number: str = "") -> _Live:
         node = self._require_launchable()
+        self._ensure_bridge_deps(node)
         creds = Path(rec.creds_dir)
         creds.mkdir(parents=True, exist_ok=True)
         media = creds.parent / (creds.name + "-media")
@@ -459,6 +922,11 @@ class BridgeSupervisor:
         # the live entry exists would be dropped on the floor.
         with self._lock:
             self._live[rec.id] = live
+        # A fresh launch supersedes the last attempt's failure —
+        # the stored error clears so surfaces report THIS attempt.
+        current = self.registry.get(rec.id)
+        if current is not None and current.last_error:
+            self.registry.set_error(rec.id, "")
         reader = threading.Thread(
             target=self._drain, args=(rec.id, proc),
             name=f"pair-reader-{rec.id}", daemon=True)
@@ -472,7 +940,12 @@ class BridgeSupervisor:
             return
         try:
             for line in stream:
-                m = _CODE_LINE_RE.search(line or "")
+                text = (line or "").rstrip("\n")
+                with self._lock:
+                    live = self._live.get(account_id)
+                    if live is not None and live.proc is proc:
+                        live.lines.append(text)
+                m = _CODE_LINE_RE.search(text)
                 if m:
                     with self._lock:
                         live = self._live.get(account_id)
@@ -480,10 +953,112 @@ class BridgeSupervisor:
                             live.code = m.group(2)
                             live.code_at = time.time()
                     self.registry.set_status(account_id, "pairing")
-                if "connected as" in (line or ""):
+                f = _REFUSAL_RE.search(text)
+                if f:
+                    # WhatsApp said no — the reason is the answer
+                    # /pair code owes the owner, not "no live
+                    # code".  Recorded on the live entry AND the
+                    # registry; the status stays "pairing" (the
+                    # bridge lives; a fresh /pair retries).
+                    self._note_live_error(
+                        account_id, proc,
+                        "WhatsApp refused the code request: "
+                        + f.group(1).strip())
+                if "connected as" in text:
                     self.registry.set_status(account_id, "linked")
-        except Exception:  # noqa: BLE001 - a dead stream just ends it
+        except Exception:  # noqa: BLE001 - a dead stream ends the
+            pass                    # drain; the exit is handled
+        self._finish_dead(account_id, proc)
+
+    def _note_live_error(self, account_id: str, proc: Any,
+                         text: str) -> None:
+        """Record a bridge-reported failure on the live entry and
+        the registry (surfaces read whichever survives)."""
+        with self._lock:
+            live = self._live.get(account_id)
+            if live is not None and live.proc is proc:
+                live.last_error = text
+        self.registry.set_error(account_id, text)
+
+    def _finish_dead(self, account_id: str, proc: Any) -> None:
+        """The drain ended: if the process really exited before
+        the account linked, stop pretending it is pairing.
+
+        The record flips to "down" and the bridge's own last
+        meaningful line becomes the stored reason — "bridge
+        exited: Error: Cannot find package '@whiskeysockets/
+        baileys'…" — instead of a silent record and a bare
+        "no live code".  A stream that merely ended while the
+        process lives on (poll says so) changes nothing.  A
+        LINKED account's dead bridge is supervision's domain
+        (probe + relaunch); its state and error are left alone
+        here.  Stopped/replaced entries are not this proc's
+        business — the identity check sees to that."""
+        with self._lock:
+            live = self._live.get(account_id)
+            if live is None or live.proc is not proc \
+                    or live.exited:
+                return
+        # The pipe closing precedes the exit code by a hair on
+        # real processes; give poll() a short grace before
+        # believing the process is gone.
+        exited = False
+        for _ in range(25):
+            try:
+                exited = proc.poll() is not None
+            except Exception:  # noqa: BLE001 - unpollable = gone
+                exited = True
+            if exited:
+                break
+            time.sleep(0.02)
+        if not exited:
             return
+        with self._lock:
+            live = self._live.get(account_id)
+            if live is None or live.proc is not proc \
+                    or live.exited:
+                return
+            live.exited = True
+            lines = list(live.lines)
+            have_error = bool(live.last_error)
+        rec = self.registry.get(account_id)
+        if rec is None or rec.status == "linked":
+            return
+        if not have_error:
+            line = _pick_error_line(lines)
+            if line:
+                self._note_live_error(
+                    account_id, proc, f"bridge exited: {line}")
+        if rec.status != "down":
+            self.registry.set_status(account_id, "down")
+
+    def _reap(self, account_id: str) -> None:
+        """Consult-time death check: a bridge found dead when its
+        code/status is asked after gets the same truth-telling as
+        a drain-observed death.  Idempotent — the exited flag and
+        the proc identity check do the guarding."""
+        with self._lock:
+            live = self._live.get(account_id)
+        if live is None or live.proc is None or live.exited:
+            return
+        try:
+            if live.proc.poll() is None:
+                return
+        except Exception:  # noqa: BLE001
+            return
+        self._finish_dead(account_id, live.proc)
+
+    def pairing_error(self, account_id: str) -> str:
+        """The account's last bridge failure in plain words, or
+        '' — the live entry's word first (freshest), then the
+        registry's stored one (survives restarts)."""
+        self._reap(account_id)
+        with self._lock:
+            live = self._live.get(account_id)
+            if live is not None and live.last_error:
+                return live.last_error
+        rec = self.registry.get(account_id)
+        return rec.last_error if rec is not None else ""
 
     def _alive(self, account_id: str) -> bool:
         with self._lock:
@@ -551,6 +1126,7 @@ class BridgeSupervisor:
 
     def pairing_code(self, account_id: str) -> tuple[str, float] | None:
         """(code, age_seconds) once the bridge has issued one."""
+        self._reap(account_id)
         with self._lock:
             live = self._live.get(account_id)
             if live is None or not live.code:
@@ -620,9 +1196,18 @@ class BridgeSupervisor:
             return "down"
 
     def status_all(self, *, probe: bool = True) -> list[dict[str, Any]]:
+        for rec in self.registry.all():
+            if rec.platform == "whatsapp":
+                self._reap(rec.id)
         out = []
         for rec in self.registry.all():
             row = rec.to_dict()
+            with self._lock:
+                live = self._live.get(rec.id)
+                if live is not None and live.last_error:
+                    # the live entry's word is fresher than the
+                    # stored one (a death this process witnessed)
+                    row["last_error"] = live.last_error
             row["process"] = "running" if self._alive(rec.id) else "—"
             if probe and rec.platform == "whatsapp" \
                     and row["process"] == "running":
