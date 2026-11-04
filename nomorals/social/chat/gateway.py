@@ -610,6 +610,7 @@ class ChatGateway:
         buttons: list[list[tuple[str, str]]] | None = None,
         reply_keyboard: list[list[str]] | None = None,
         parse_mode: str = "",
+        fresh: bool = False,
     ) -> tuple[SendResult, int]:
         """Send one already-sized chunk. Returns ``(result, attempts)``.
 
@@ -617,6 +618,12 @@ class ChatGateway:
         platforms that cannot render them never receive them (previously
         they were forwarded and silently ignored). Retries are classified
         (transient → backoff+jitter, terminal → 1 attempt).
+
+        ``fresh`` reaches the adapter on the FIRST attempt only, and
+        only when the adapter's ``send`` declares it — the retry
+        wrapper below re-enters ``_call`` for later attempts, and a
+        retry must never present itself as a fresh solicited reply
+        (that distinction is what send-once guards key on).
         """
         limits = for_platform(chat.platform)
         kwargs: dict[str, Any] = {"reply_to": reply_to}
@@ -626,9 +633,24 @@ class ChatGateway:
             kwargs["parse_mode"] = parse_mode
         if reply_keyboard is not None and limits.supports_buttons:
             kwargs["reply_keyboard"] = reply_keyboard
+        adapter_accepts_fresh = False
+        if fresh:
+            try:
+                import inspect
+
+                adapter_accepts_fresh = (
+                    "fresh" in inspect.signature(adapter.send).parameters)
+            except (TypeError, ValueError):
+                adapter_accepts_fresh = False
+        attempts = 0
 
         def _call() -> SendResult:
-            result = adapter.send(chat, chunk, **kwargs)
+            nonlocal attempts
+            attempts += 1
+            call_kwargs = kwargs
+            if adapter_accepts_fresh:
+                call_kwargs = {**kwargs, "fresh": fresh and attempts == 1}
+            result = adapter.send(chat, chunk, **call_kwargs)
             if result.ok:
                 self.touch(chat)
             return result
@@ -727,6 +749,13 @@ class ChatGateway:
             buttons=buttons,
             reply_keyboard=payload.get("reply_keyboard"),
             parse_mode=str(payload.get("parse_mode") or ""),
+            # The row's fresh mark counts only on its first delivery
+            # attempt (deliver_chat stamps _attempts from the job;
+            # the queue's lease increments it before the send, so a
+            # first delivery reads 1). A redelivery is a retry and
+            # re-enters unmarked.
+            fresh=bool(payload.get("fresh"))
+            and int(payload.get("_attempts") or 0) <= 1,
         )
 
     def _chunked(self, chat: ChatRef, text: str, *,
@@ -771,6 +800,7 @@ class ChatGateway:
         buttons: list[list[tuple[str, str]]] | None = None,
         reply_keyboard: list[list[str]] | None = None,
         parse_mode: str = "",
+        fresh: bool = False,
     ) -> SendResult:
         """Synchronous path: chunk, then send chunk-by-chunk in order.
         Stops at the first failed chunk — later chunks must never overtake
@@ -796,6 +826,7 @@ class ChatGateway:
                     # to the last chunk only left chunks 1..n-1 of a
                     # formatted send rendering literally.
                     parse_mode=parse_mode,
+                    fresh=fresh,
                 )
                 if not result.ok:
                     return SendResult(
@@ -821,11 +852,16 @@ class ChatGateway:
         reply_keyboard: list[list[str]] | None = None,
         parse_mode: str = "",
         durable_kind: str = "chat",
+        fresh: bool = False,
     ) -> SendResult:
         """Durable path: every chunk becomes a row, then the chat's queue
         drains in order. Returns the delivery verdict when
         ``durable_drain_sync`` is on, else a receipt handle (the first
-        job id) for ``nm sent``."""
+        job id) for ``nm sent``.
+
+        ``fresh`` rides the row: the drain delivers it to the adapter
+        on the row's FIRST delivery attempt only — a redelivery of a
+        failed row is a retry, and retries are never fresh."""
         assert self.outbox is not None  # noqa: S101 - caller checked
         chunks = self._chunked(chat, text, formatted=bool(parse_mode))
         total = len(chunks)
@@ -844,6 +880,7 @@ class ChatGateway:
                     # _send_direct) — the drain sends each row as-is.
                     parse_mode=parse_mode,
                     durable_kind=durable_kind, group_id=group_id,
+                    fresh=fresh,
                 ))
             return job_ids
 
@@ -927,6 +964,7 @@ class ChatGateway:
         parse_mode: str = "",
         durable: bool | None = None,
         durable_kind: str = "chat",
+        fresh: bool = False,
     ) -> SendResult:
         """Send one message on one platform. Ordered per chat by default.
 
@@ -936,6 +974,13 @@ class ChatGateway:
         ``[[text, ...], ...]`` — a persistent bottom keyboard, rendered
         by the Telegram adapters, stripped elsewhere. When both are
         passed, ``reply_keyboard`` wins.
+
+        ``fresh`` marks the first dispatch attempt of a reply composed
+        for a live inbound turn. It is forwarded to adapters that
+        declare it (WhatsApp's send-once guard releases for a fresh
+        solicited reply) on the FIRST attempt of each chunk only —
+        this gateway's own retry layer re-enters without it, so a
+        retry can never masquerade as a fresh ask.
 
         ``durable`` routes the send through the durable outbox (row
         first, then network call; receipts via :meth:`receipts` /
@@ -978,7 +1023,8 @@ class ChatGateway:
             return self._send_durable(
                 platform, chat, text, ordered=ordered, reply_to=reply_to,
                 buttons=buttons, reply_keyboard=reply_keyboard,
-                parse_mode=parse_mode, durable_kind=durable_kind)
+                parse_mode=parse_mode, durable_kind=durable_kind,
+                fresh=fresh)
         if use_durable and self.outbox is None:
             _log.warning(
                 "gateway.send: durable requested for %s but no outbox "
@@ -986,13 +1032,13 @@ class ChatGateway:
             degraded = self._send_direct(
                 platform, chat, text, ordered=ordered, reply_to=reply_to,
                 buttons=buttons, reply_keyboard=reply_keyboard,
-                parse_mode=parse_mode)
+                parse_mode=parse_mode, fresh=fresh)
             degraded.delivery_degraded = True
             return degraded
         return self._send_direct(
             platform, chat, text, ordered=ordered, reply_to=reply_to,
             buttons=buttons, reply_keyboard=reply_keyboard,
-            parse_mode=parse_mode)
+            parse_mode=parse_mode, fresh=fresh)
 
     def send_file(
         self,

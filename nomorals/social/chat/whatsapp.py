@@ -114,9 +114,24 @@ GROUP_CAPABILITIES: tuple[tuple[str, str, str], ...] = (
 
 #: How many unsent messages the outbox holds (oldest dropped past this).
 OUTBOX_MAX_ENTRIES = 200
-#: Entries older than this are dropped on flush — a day-old "typing…"
-#: reply is worse than silence.
-OUTBOX_TTL_S = 24 * 3600.0
+#: Entries older than this are dropped on flush, never delivered. A
+#: queued entry is a reply to a moment — a bridge flap or a restart —
+#: and past a few minutes the moment is gone: replaying it at the
+#: next attach presents a stale send as a fresh one (the 2026-11-04
+#: boot flood: a full command catalog landing in the owner's
+#: self-chat at startup). Five minutes covers reconnect backoff
+#: (capped at 60s) and a bridge-supervisor restart with room to
+#: spare; anything older is aged out and journaled, not sent.
+OUTBOX_TTL_S = 300.0
+#: Inbound messages older than this on arrival are replays, not live
+#: turns: WhatsApp delivers everything composed while a linked
+#: device was offline the moment the bridge (re)connects, and a
+#: history sync can re-surface older messages still. The adapter
+#: still delivers them (persistence, the antidelete cache and the
+#: journals must see them) but stamps ``meta["stale_replay"]`` —
+#: the runtime observes them and never answers or executes them, so
+#: a /help typed during a restart cannot detonate as a boot flood.
+STALE_INBOUND_S = 180.0
 
 
 def _jittered_backoff(base: float, attempt: int, *, cap: float = 60.0,
@@ -247,9 +262,20 @@ class Outbox:
                 self._write_all(rows)
 
             for entry in list(rows):
-                if now - float(entry.get("enqueued_at", now)) > self.ttl_s:
+                age = now - float(entry.get("enqueued_at", now))
+                if age > self.ttl_s:
                     rows.remove(entry)
                     dropped += 1
+                    # Journaled, never silent: an aged-out entry is a
+                    # reply that will never be sent, and the record
+                    # (kind + chat + age — never the text) is how a
+                    # "she never answered" report gets explained.
+                    _log.warning(
+                        "whatsapp outbox: aged out %s entry for %s "
+                        "(%.0fs old, past the %.0fs reply window) — "
+                        "dropped, not delivered stale",
+                        entry.get("kind"), entry.get("chat_id"),
+                        age, self.ttl_s)
                     persist()
                     continue
                 if entry.get("held"):
@@ -923,6 +949,13 @@ class WhatsAppAdapter(ChatAdapter):
                 )
                 turn.meta["from_owner"] = True
                 turn.meta["self_chat"] = True
+                if ts and (time.time() - ts) > STALE_INBOUND_S:
+                    # Offline-delivered at (re)connect: the owner
+                    # typed this while the surface was down. It is
+                    # observed, never answered — a stale self-chat
+                    # command detonating at boot is the flood this
+                    # stamp exists to prevent.
+                    turn.meta["stale_replay"] = True
                 self._deliver(handler, turn)
                 return
             msg = ChatMessage(
@@ -1077,6 +1110,11 @@ class WhatsAppAdapter(ChatAdapter):
                     ts=ts,
                 )
             wa_msg.meta["envelope"] = _wa_envelope(obj, wa_msg.text)
+            if ts and (time.time() - ts) > STALE_INBOUND_S:
+                # Offline-delivered / history-replayed on (re)connect:
+                # observed by the runtime, never answered or executed
+                # (see STALE_INBOUND_S).
+                wa_msg.meta["stale_replay"] = True
             if obj.get("view_once"):
                 # The bridge unwrapped a view-once payload (§15):
                 # the personal surface preserves the downloaded
@@ -1158,7 +1196,8 @@ class WhatsAppAdapter(ChatAdapter):
     # ── outbound ─────────────────────────────────────────────────────────────
     def _send_text_outcome(self, chat: ChatRef, text: str,
                            *, reply_to: str = "",
-                           buttons: Any = None) -> tuple[SendResult, bool]:
+                           buttons: Any = None,
+                           fresh: bool = False) -> tuple[SendResult, bool]:
         """One text send; returns ``(result, outcome_known)``.
 
         ``outcome_known`` is False ONLY when a dispatch's ack was
@@ -1173,11 +1212,28 @@ class WhatsAppAdapter(ChatAdapter):
         history carries no message id, so the result's id is empty
         rather than invented). Not visible means it stays
         unconfirmed and held.
+
+        ``fresh`` marks the first dispatch attempt of a reply the
+        runtime composed for a LIVE inbound turn (the gateway sets
+        it on that attempt only — its retry layers re-enter with
+        fresh=False). A fresh solicited reply is never swallowed by
+        the guard: the owner asked again, so the guard entry is
+        released and the reply dispatches. Without this, a menu
+        whose chunks lost their acks in a boot flap made every
+        later identical /help unanswerable for the whole window
+        (2026-11-04: the flood, then silence).
         """
         started = time.perf_counter()
         jid = self._jid(chat)
         key = (jid, text)
         prior = self._unconfirmed_at(key)
+        if prior is not None and fresh:
+            self._clear_unconfirmed(key)
+            _log.warning(
+                "whatsapp: releasing a guarded identical send to %s "
+                "for a fresh solicited reply (the earlier dispatch's "
+                "ack was lost; a new live turn asked again)", jid)
+            prior = None
         if prior is not None:
             if self._history_find_own(chat, text, since=prior):
                 self._clear_unconfirmed(key)
@@ -1239,17 +1295,19 @@ class WhatsAppAdapter(ChatAdapter):
 
     def _send_with_retry(self, chat: ChatRef, text: str,
                          *, reply_to: str = "",
-                         buttons: Any = None) -> SendResult:
+                         buttons: Any = None,
+                         fresh: bool = False) -> SendResult:
         """One text send with a single retry on transient bridge failure."""
         result, _outcome_known = self._send_text_outcome(
-            chat, text, reply_to=reply_to, buttons=buttons)
+            chat, text, reply_to=reply_to, buttons=buttons, fresh=fresh)
         return result
 
     def send(self, chat: ChatRef, text: str, *,
              reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
              reply_keyboard: list[list[str]] | None = None,
-             parse_mode: str = "") -> SendResult:
+             parse_mode: str = "",
+             fresh: bool = False) -> SendResult:
         started = time.perf_counter()
         if not self.connected.is_set():
             return self._enqueue({
@@ -1279,7 +1337,8 @@ class WhatsAppAdapter(ChatAdapter):
             result = self._send_with_retry(
                 chat, chunk,
                 reply_to=reply_to if i == 0 else "",
-                buttons=buttons if i == 0 else None)
+                buttons=buttons if i == 0 else None,
+                fresh=fresh)
             if not result.ok:
                 return result
         assert result is not None

@@ -88,11 +88,16 @@ _LIMITS: dict[str, PlatformLimits] = {
         rate_per_hour=0, cost_model="free",
         utf16_lengths=True,
     ),
-    # WhatsApp via the local Baileys bridge. max_text is the bridge-effective
-    # cap the adapter already split at (4000), not the protocol maximum.
+    # WhatsApp via the local bridges. max_text is the protocol cap:
+    # WhatsApp text messages allow 65,536 characters, and neither
+    # bridge imposes a lower limit (the Go/whatsmeow send handler and
+    # the Node/Baileys sendMessage path both pass text through
+    # untouched — verified 2026-11-04). The old 4000 here was a
+    # Devon-invented "bridge-effective" cap that shredded ordinary
+    # long replies (the full WhatsApp menu went out as ~13 chunks).
     "whatsapp": PlatformLimits(
         platform="whatsapp",
-        max_text=4000, max_caption=1024, max_file_mb=16,
+        max_text=65536, max_caption=1024, max_file_mb=16,
         supports_buttons=False, supports_html=False, supports_media_edit=False,
         rate_per_hour=0, cost_model="free",
         utf16_lengths=True,

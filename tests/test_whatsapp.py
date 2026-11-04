@@ -176,11 +176,14 @@ class SendTests(unittest.TestCase):
         try:
             adapter, _ = make_adapter(bridge)
             chat = ChatRef(platform="whatsapp", chat_id="123", kind=ChatKind.DM)
-            res = adapter.send(chat, "x" * 9000)
+            # Splitting happens only past the real WhatsApp cap
+            # (65,536) — at the old invented 4000 cap this used 9000
+            # chars, which is now correctly a single message.
+            res = adapter.send(chat, "x" * 70000)
             self.assertTrue(res.ok)
             self.assertGreater(len(bridge.received), 1)
             total = sum(len(m["text"]) for m in bridge.received)
-            self.assertEqual(total, 9000)
+            self.assertEqual(total, 70000)
         finally:
             bridge.close()
 

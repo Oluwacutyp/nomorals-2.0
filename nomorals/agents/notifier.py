@@ -27,9 +27,10 @@ from .failures import record_failure
 _log = get_logger(__name__)
 
 __all__ = ["Notifier", "notify", "notify_doc", "resolve_gateway",
+           "resolve_brain_gate",
            "DeliveryOutcome",
            "ATTEMPT_SENT", "ATTEMPT_FAILED", "ATTEMPT_SKIPPED",
-           "STATE_DIGEST", "STATE_LOGGED"]
+           "STATE_DIGEST", "STATE_LOGGED", "STATE_HELD_BRAIN"]
 
 
 def resolve_gateway(context: Any) -> Any | None:
@@ -53,6 +54,28 @@ def resolve_gateway(context: Any) -> Any | None:
     return None
 
 
+def resolve_brain_gate(context: Any) -> Any | None:
+    """Find the runtime's competence gate (``brain_gate.BrainGate``).
+
+    The runtime stores it in ``context.extras["brain_gate"]`` next to
+    the gateway (see ``PartnerRuntime``).  Returns ``None`` when no
+    runtime owns this context (CLI, offline tests) — the degraded
+    hold then simply does not apply, exactly like a missing gateway
+    degrading delivery to persist-only.
+    """
+    gate = getattr(context, "brain_gate", None)
+    if gate is not None:
+        return gate
+    try:
+        extras = getattr(context, "extras", None)
+        if isinstance(extras, dict):
+            return extras.get("brain_gate")
+    except Exception as exc:  # noqa: BLE001 - best-effort, like the gateway
+        record_failure("notifier.resolve_brain_gate", exc)
+        pass
+    return None
+
+
 #: proactive notification kinds -> PartnerSettings toggle each one obeys.
 #: Only these kinds go through the proactive gate; every other kind keeps
 #: the historical behavior (feature flag ``notifier`` only).
@@ -66,6 +89,11 @@ STATE_SENT = "sent"
 STATE_FAILED = "failed"            # gateway live, but no owner channel reached
 STATE_PENDING = "pending"          # stored; no live gateway (redeliver later)
 STATE_HELD_QUIET = "held-quiet-hours"
+#: Brain competence gate: a proactive push is an UNSOLICITED send —
+#: while the brain is degraded (no model rung answering), it does
+#: not go out on the owner's personal surfaces.  Stored, visible on
+#: /notify like every other held state, never redelivered stale.
+STATE_HELD_BRAIN = "held-brain-degraded"
 STATE_DISABLED = "disabled"        # proactive master/kind switch off
 STATE_MUTED = "muted"              # feature flag ``notifier`` off
 STATE_DEDUPED = "deduped"
@@ -413,6 +441,27 @@ class Notifier:
                                              doc_json=doc_json)
                         result["attempts"] = []
                         return result
+                    # Competence gate (brain_gate): a proactive push
+                    # is an unsolicited send to the owner's own chats.
+                    # While the brain is degraded — no model rung
+                    # answering — it is held like a held reply, not
+                    # sent as the owner on a personal surface.  The
+                    # row is stored with its reason, visible on
+                    # /notify, and never redelivered stale; critical
+                    # sends never reach this block (they bypass the
+                    # proactive gates above by design).
+                    if kind in PROACTIVE_KIND_SETTINGS:
+                        brain_gate = resolve_brain_gate(self.context)
+                        if brain_gate is not None and brain_gate.hold_unsolicited(
+                                platform="notifier",
+                                chat_key=f"proactive:{kind}",
+                                note="proactive push", personal=True):
+                            result = self._store(
+                                kind, title, body, delivered=0,
+                                delivery_state=STATE_HELD_BRAIN,
+                                doc_json=doc_json)
+                            result["attempts"] = []
+                            return result
         nid = new_id()
         if self.gateway is None:
             # no chat gateway at all — still try the Termux system

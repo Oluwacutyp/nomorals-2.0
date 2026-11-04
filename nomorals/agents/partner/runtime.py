@@ -329,6 +329,10 @@ class PartnerRuntime(
         # Tools that deliver files into chats (file_send, report_publish)
         # reach the live gateway through the context, not a second wire.
         context.extras["gateway"] = self.gateway
+        # Unsolicited-send paths that deliver outside a live turn (the
+        # Notifier above all) consult the competence gate through the
+        # context the same way — one gate instance, the runtime's own.
+        context.extras["brain_gate"] = self._get_brain_gate()
         # Degradation-ladder drain: messages the telegram ladder queued
         # into the KV store while no gateway existed (gateway-less
         # processes) move into this gateway's durable outbox now that a
@@ -549,7 +553,15 @@ class PartnerRuntime(
             return
         if outcome.parts:
             self._bump("replies")
-            self._send_reply(message, outcome.parts)
+            # A first-DM greeting is an UNSOLICITED send — Devon
+            # speaks first, from a synthetic turn. Its degraded
+            # state rides through like any other outcome's, so the
+            # competence gate judges it by the same provenance as a
+            # live reply (before this, the flag was dropped here and
+            # a fallback greeting could go out ungated).
+            self._send_reply(message, outcome.parts,
+                             degraded=outcome.degraded,
+                             degraded_note=outcome.degraded_note)
 
     # ── inbound fan-in: per-chat FIFO, cross-chat parallel ──────────────────
     def _bump(self, key: str, amount: int = 1) -> None:
@@ -840,6 +852,23 @@ class PartnerRuntime(
         except Exception as e:  # noqa: BLE001 - the personal
             record_failure(           # surfaces never break intake
                 "runtime.PartnerRuntime._personal_surface_turn", e)
+        # Stale replays (adapters stamp meta["stale_replay"]): a
+        # message composed while a surface was offline, delivered at
+        # (re)connect as if fresh. Everything above has already
+        # observed it — housekeeping, the personal-surface hooks,
+        # persistence — and that is ALL that happens: no command
+        # executes, no reply is composed, no game moves. A stale
+        # /help detonating as a 13-chunk catalog at boot (owner's
+        # WhatsApp self-chat, 2026-11-04) is the incident this ends;
+        # silence over stale performance is the owner's standing law.
+        if message.meta.get("stale_replay"):
+            self._bump("stale_held")
+            _log.info(
+                "stale replay observed, not answered: %s in %s "
+                "(message ts %.0f, arrived %.0f)",
+                (message.text or "")[:40], message.chat.key,
+                float(message.ts or 0), time.time())
+            return
         # Page-watch beat (§20b): due webshot watches re-shoot
         # on the message cycle (throttled inside; no daemon).
         # The driver owns its sends (§33 re-checked per alert);
@@ -1949,6 +1978,10 @@ class PartnerRuntime(
         # replies are out of scope (theirs is degraded liveness, not
         # impersonation) and pass regardless of brain state.
         gate = self._get_brain_gate()
+        # Every observed outcome feeds the gate's degraded state —
+        # unsolicited-send paths (Notifier pushes, greetings) consult
+        # it before speaking as the owner between live turns.
+        gate.observe_outcome(degraded)
         if degraded and is_personal_platform(message.chat.platform):
             gate.note_hold(platform=message.chat.platform,
                            chat_key=message.chat.key,
@@ -2035,6 +2068,9 @@ class PartnerRuntime(
                 result = self.gateway.send(
                     message.chat.platform, message.chat, part,
                     reply_to=message.reply_to if message.chat.kind == ChatKind.GROUP else "",
+                    # A live turn's reply, first dispatch attempt:
+                    # send-once guards must never swallow it.
+                    fresh=True,
                 )
                 _log.info("_send_reply: send part %d/%d, ok=%s", i+1, len(parts), result.ok)
                 if not result.ok:
@@ -3588,7 +3624,12 @@ class PartnerRuntime(
         return self.gateway.send(message.chat.platform, message.chat,
                                  text, buttons=buttons,
                                  parse_mode=parse_mode,
-                                 reply_keyboard=reply_keyboard)
+                                 reply_keyboard=reply_keyboard,
+                                 # Solicited control reply to a live
+                                 # turn: its first dispatch attempt is
+                                 # fresh — a send-once guard may hold
+                                 # retries, never the answer itself.
+                                 fresh=True)
 
     def handle_control(self, text: str, chat_key: str,
                        message: Any = None, _no_stack: bool = False) -> str:

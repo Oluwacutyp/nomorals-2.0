@@ -449,7 +449,8 @@ class ChatAdapter(ABC):
     def send(self, chat: ChatRef, text: str, *, reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
              reply_keyboard: list[list[str]] | None = None,
-             parse_mode: str = "") -> SendResult:
+             parse_mode: str = "",
+             fresh: bool = False) -> SendResult:
         """Send one text message. Returns a result, never raises for ordinary failure.
 
         ``buttons`` is ``[[(label, callback_data), ...], ...]`` — an inline
@@ -465,6 +466,14 @@ class ChatAdapter(ABC):
 
         ``parse_mode`` (e.g. "HTML") enables rich formatting — opt-in per
         message so plain-text messages are never accidentally parsed.
+
+        ``fresh`` marks the first dispatch attempt of a reply composed
+        for a live inbound turn (the gateway sets it on that attempt
+        only; retry layers re-enter without it). Adapters with a
+        send-once guard (WhatsApp) release the guard for a fresh
+        solicited reply — a repeated question must always be
+        answerable — while unmarked repeats stay guarded. Adapters
+        without such a guard ignore it.
         """
 
     def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "",

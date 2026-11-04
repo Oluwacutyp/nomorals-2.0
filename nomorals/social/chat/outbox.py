@@ -195,6 +195,7 @@ class Outbox:
         idempotency_key: str = "",
         media: dict[str, Any] | None = None,
         caption_rest: list[str] | None = None,
+        fresh: bool = False,
     ) -> str:
         """Enqueue one send. Returns the job id (the receipt handle).
 
@@ -239,6 +240,11 @@ class Outbox:
             payload["media"] = media
         if caption_rest:
             payload["caption_rest"] = list(caption_rest)
+        if fresh:
+            # First-dispatch mark for a live turn's reply (see
+            # gateway.send): the drain forwards it to the adapter on
+            # this row's first delivery attempt only.
+            payload["fresh"] = True
         job_id = self.queue.enqueue(
             topic, payload,
             max_attempts=self.max_attempts,
@@ -346,6 +352,10 @@ class Outbox:
                     record_failure('outbox.Outbox.deliver_chat', exc)
                 break
             payload = dict(job.payload or {})
+            # The job's delivery-attempt count rides the payload copy
+            # (never persisted back): send functions key first-attempt
+            # semantics (the gateway's fresh mark) on it.
+            payload["_attempts"] = int(getattr(job, "attempts", 0) or 0)
             try:
                 raw = send_fn(payload)
             except Exception as exc:  # noqa: BLE001 - send_fn failure is a send failure

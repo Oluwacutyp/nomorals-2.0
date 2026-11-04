@@ -34,6 +34,15 @@ the console) never cross the conversational seam and are never
 gated — the owner must never lose command of his own bot because
 the model is down.
 
+Unsolicited sends are the second gated class: the gate tracks the
+brain's last observed health from every outcome
+(:meth:`BrainGate.observe_outcome`), and an unsolicited send bound
+for a personal surface — a Notifier proactive push, a first-DM
+greeting — is held while that state is degraded
+(:meth:`BrainGate.hold_unsolicited`), journaled through the same
+episode bookkeeping. A push composed in a healthy moment must not
+fire in a degraded one merely because it was queued.
+
 Surface taxonomy (owner's model, partner/gating.py): the gated
 public bot is ``telegram-bot`` — out of scope, its template replies
 are the bot's own degraded liveness, not impersonation. The
@@ -97,6 +106,14 @@ class BrainGate:
         self._opened_at = 0.0
         self._opened_platform = ""
         self._held = 0
+        #: The brain's last observed health, from ANY surface's
+        #: outcome (fed by :meth:`observe_outcome`). An episode opens
+        #: only when a personal reply is actually held; this flag is
+        #: the prior fact unsolicited-send paths consult — a push
+        #: composed earlier must not go out as the owner while the
+        #: brain is known-degraded, even if no conversational reply
+        #: has been held yet this episode.
+        self._degraded = False
 
     @property
     def episode_open(self) -> bool:
@@ -107,6 +124,48 @@ class BrainGate:
     def held_count(self) -> int:
         with self._lock:
             return self._held
+
+    @property
+    def degraded_now(self) -> bool:
+        """True while the brain's last observed outcome was the
+        no-model fallback. False until any outcome is observed —
+        no evidence of degradation is not degradation."""
+        with self._lock:
+            return self._degraded
+
+    def observe_outcome(self, degraded: bool) -> None:
+        """Record the brain health one outcome just proved.
+
+        Called by the runtime for every brain-composed reply on
+        every surface, so the degraded fact exists before any
+        unsolicited path needs it. Pure bookkeeping — journaling
+        stays with the hold/recovery entries."""
+        with self._lock:
+            self._degraded = bool(degraded)
+
+    def hold_unsolicited(self, *, platform: str, chat_key: str,
+                         note: str = "", personal: bool = False) -> bool:
+        """Hold one unsolicited personal-surface send, if degraded.
+
+        An unsolicited send — a proactive push, a first-DM greeting,
+        anything that is not a reply to a live inbound turn — bound
+        for a personal surface is held while the brain is degraded,
+        with the same one-entry-per-episode journaling as a held
+        reply (:meth:`note_hold`). Solicited replies never come
+        through here and are never held by this path. Returns True
+        when the send was held (caller must not send).
+
+        ``personal=True`` is for callers whose destination is the
+        owner's own chats by construction (the Notifier's owner
+        channels) rather than a single named platform — ``platform``
+        then names the sending path in the journal entry."""
+        if not personal and not is_personal_platform(platform):
+            return False
+        if not self.degraded_now:
+            return False
+        self.note_hold(platform=platform, chat_key=chat_key,
+                       note=note or "unsolicited send")
+        return True
 
     def note_hold(self, *, platform: str, chat_key: str,
                   note: str = "") -> bool:
@@ -119,6 +178,7 @@ class BrainGate:
         """
         with self._lock:
             self._held += 1
+            self._degraded = True
             if self._open:
                 return False
             self._open = True
@@ -139,6 +199,7 @@ class BrainGate:
         open, so callers can invoke it on every healthy send.
         """
         with self._lock:
+            self._degraded = False
             if not self._open:
                 return False
             held = self._held

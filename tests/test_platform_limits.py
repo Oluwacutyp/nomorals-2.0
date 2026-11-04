@@ -23,7 +23,7 @@ class TestPlatformLimits(unittest.TestCase):
         self.assertEqual(for_platform("telegram-bot").supports_media_edit, True)
         self.assertEqual(for_platform("telegram").supports_media_edit, False)
         self.assertEqual(for_platform("discord").max_text, 2000)
-        self.assertEqual(for_platform("whatsapp").max_text, 4000)
+        self.assertEqual(for_platform("whatsapp").max_text, 65536)
         sms = for_platform("sms")
         self.assertEqual(sms.max_text, 160)
         self.assertEqual(sms.cost_model, "per_segment")

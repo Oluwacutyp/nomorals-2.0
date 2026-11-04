@@ -64,11 +64,16 @@ class TestWhatsAppFlushRendering:
         adapter.connected.set()
         sent: list[tuple[str, str]] = []
 
-        def _record(chat, text, *, reply_to=""):
+        def _record(chat, text, *, reply_to="", buttons=None, fresh=False):
             sent.append((chat.chat_id, text))
-            return SendResult(ok=True, platform="whatsapp", message_id="m1")
+            return (SendResult(ok=True, platform="whatsapp",
+                               message_id="m1"), True)
 
-        adapter._send_with_retry = _record  # type: ignore[method-assign]
+        # _deliver_entry sends through _send_text_outcome (the seam
+        # that reports outcome_known for the flush's send-once
+        # bookkeeping); stubbing _send_with_retry left the flush on
+        # the real bridge path and both tests failed on pristine.
+        adapter._send_text_outcome = _record  # type: ignore[method-assign]
         return adapter, sent
 
     def test_flush_converts_telegram_html_to_whatsapp(self):
@@ -85,14 +90,17 @@ class TestWhatsAppFlushRendering:
 
     def test_flush_splits_long_text(self):
         adapter, sent = self._adapter_with_recorder()
-        long_text = ("lorem ipsum dolor sit amet " * 200).strip()  # ~5400 chars
+        # Past the real WhatsApp cap (65,536): the flush must split.
+        # (At the old invented 4000 cap this used a ~5400-char text;
+        # that text is now correctly a single message.)
+        long_text = ("lorem ipsum dolor sit amet " * 3000).strip()  # ~81k chars
         ok = adapter._deliver_entry({
             "kind": "text", "chat_id": "2348012345678@c.us",
             "chat_kind": "dm", "text": long_text,
         })
         assert ok is True
         assert len(sent) >= 2
-        assert all(len(t) <= 4000 for _, t in sent)
+        assert all(len(t) <= 65536 for _, t in sent)
 
 
 # ── WhatsApp: bridge fake (send replies carry the real message id) ─────────
