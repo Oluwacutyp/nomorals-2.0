@@ -253,10 +253,18 @@ class HelpMenuTests(unittest.TestCase):
         self.assertIn("<b>SEARCH</b>", out)
 
     def test_help_menu_coverage_matches_help_text(self):
-        from nomorals.social.chat.control import help_menu, help_text, CONTROL_COMMANDS
+        from nomorals.social.chat.control import (
+            WHATSAPP_UNSUPPORTED_KINDS, help_menu, help_text,
+            CONTROL_COMMANDS)
         menu = help_menu("whatsapp")
         missing = [k for k in CONTROL_COMMANDS if f"/{k}" not in menu and f"/{k}" in help_text()]
-        self.assertEqual(missing, [], f"menu dropped commands: {missing[:5]}")
+        # Coverage is total EXCEPT the kinds WhatsApp cannot
+        # execute at all (owner ruling 2026-11-04 — no
+        # per-person mute on WhatsApp): those are absent from
+        # this surface by law, and nothing else may drift out.
+        self.assertEqual(sorted(missing),
+                         sorted(WHATSAPP_UNSUPPORTED_KINDS),
+                         f"menu dropped commands: {missing[:5]}")
 
     def test_help_text_unchanged(self):
         from nomorals.social.chat.control import help_text

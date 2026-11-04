@@ -2289,6 +2289,50 @@ class RuntimeGroupMixin:
         settings = surface.store.settings(key)
         members = surface.members(key)
         eco = surface.economy_on(key)
+        # WhatsApp claim state (command census, gaps #2/#5):
+        # WhatsApp has no Devon bot, so a room here runs her
+        # group systems only when the owner designated it (§33)
+        # — and until this block existed, nothing in the room
+        # said so: the economy sections below simply vanished
+        # and every refused command had to explain the wall
+        # after the fact.  Stated here, in the room, before
+        # anyone hits a refusal — read from the same
+        # claim_state the §33 gate itself reads.  Telegram
+        # rooms are claimed by her bot's presence; their help
+        # is unchanged.
+        wa_claim_lines: list[str] | None = None
+        on_whatsapp = key.partition(":")[0].strip().lower() \
+            in ("whatsapp", "wa")
+        if on_whatsapp:
+            claim = surface.claim_state(key)
+            if claim["claimed"]:
+                wa_claim_lines = [
+                    "✅ switched on — the owner designated this "
+                    "group, so my group systems run here: the "
+                    "purse, games, polls, quests and the rest "
+                    "below.",
+                    "the switch is the owner's: "
+                    "`/gsettings system output off` lifts the "
+                    "designation.",
+                ]
+            else:
+                wa_claim_lines = [
+                    "⏸️ not switched on yet — WhatsApp has no "
+                    "Devon bot, so I'm in this group on the "
+                    "owner's own account, and my group systems "
+                    "stay off in a room until the owner "
+                    "designates it.",
+                    "what works here today: /math, the group "
+                    "pages — /rules · /member · /glog · "
+                    "/boards · /milestones · /contributions — "
+                    "and /gsettings for admins.",
+                    "designation switches on the rest: the "
+                    "purse (sparks — /balance · /work · /pay "
+                    "· /gshop), the engine games, /poll, "
+                    "property and gangs.  Switching a room on "
+                    "is the owner's call: "
+                    "`/gsettings system output on`.",
+                ]
         card = Card("settings",
                     title=f"{message.chat.title or 'this group'} "
                           f"— what I do here",
@@ -2386,6 +2430,9 @@ class RuntimeGroupMixin:
             "/milestones is the group's memory book.")
         everyone.append(
             "/help /balance — the full page for any command")
+        if wa_claim_lines is not None:
+            card.block_lines(wa_claim_lines,
+                             title="this room, on WhatsApp:")
         card.block_lines(everyone, title="for everyone:")
         card.block_lines([
             "/gsettings — welcome & goodbye, the rules list, "
@@ -2403,11 +2450,23 @@ class RuntimeGroupMixin:
             "buys a public building; its rent funds drops and "
             "prizes (large buys go through /approve like any "
             "treasury spend)",
-            "moderation, by hand: reply to a member's message "
-            "with /warn, /mute 10m|2h|1d, /ban or /kick — or name "
-            "@member instead. /unmute /unban undo them; /pin and "
-            "/purge work on the message you reply to; warns pile "
-            "up to an automatic mute (limit in /gsettings).",
+            # The mute family is not listed on WhatsApp: the
+            # platform has no per-person mute to execute it
+            # (owner ruling 2026-11-04 — a command the platform
+            # cannot run does not sit on its surface).
+            ("moderation, by hand: reply to a member's message "
+             "with /warn, /ban or /kick — or name @member "
+             "instead. /unban undoes a ban; /pin and /purge "
+             "work on the message you reply to; warns pile up "
+             "the ladder toward its final step (limit in "
+             "/gsettings). WhatsApp has no per-person mute — "
+             "removal is the strongest step there is."
+             if on_whatsapp else
+             "moderation, by hand: reply to a member's message "
+             "with /warn, /mute 10m|2h|1d, /ban or /kick — or name "
+             "@member instead. /unmute /unban undo them; /pin and "
+             "/purge work on the message you reply to; warns pile "
+             "up to an automatic mute (limit in /gsettings)."),
             "/glog — the group audit log (I keep it; I only show "
             "it when an admin asks)",
             "/strikes — the defense strike ledger: who is on "
@@ -2897,6 +2956,20 @@ class RuntimeGroupMixin:
                 "published snapshot — /boards peeks never move "
                 "the baseline",
             ], title="Boards")
+            # The ladder's step menu (§30): on WhatsApp the
+            # mute/restrict steps are not offered — the
+            # platform cannot fire them (see
+            # _apply_escalation_grammar).
+            escalation_steps_offer = (
+                "`/gsettings escalation at N fine AMOUNT` · "
+                "`… at N kick` · `… clear N` · `… reset` — no "
+                "mute or restrict step on WhatsApp: there is "
+                "no per-person mute for the ladder to fire"
+                if key.partition(":")[0].strip().lower()
+                in ("whatsapp", "wa") else
+                "`/gsettings escalation at N mute [10m|2h]` · "
+                "`… at N fine AMOUNT` · `… at N restrict|kick` · "
+                "`… clear N` · `… reset`")
             card.block_lines([
                 "`/gsettings welcome on|off` · "
                 "`/gsettings goodbye on|off` · "
@@ -2940,9 +3013,7 @@ class RuntimeGroupMixin:
                 "`/gsettings escalation limit N` · "
                 "`/gsettings escalation final kick|ban` · "
                 "`/gsettings escalation window DAYS`",
-                "`/gsettings escalation at N mute [10m|2h]` · "
-                "`… at N fine AMOUNT` · `… at N restrict|kick` · "
-                "`… clear N` · `… reset`",
+                escalation_steps_offer,
                 "`/gsettings estate cut PCT` · "
                 "`/gsettings estate sellback PCT` · "
                 "`/gsettings estate cap N` · "
@@ -3353,6 +3424,18 @@ class RuntimeGroupMixin:
                 surface, key, text.split()[1:])
             if reply is not None:
                 return reply
+            if key.partition(":")[0].strip().lower() \
+                    in ("whatsapp", "wa"):
+                # The step menu offered here matches what the
+                # grammar will accept for this group: no mute
+                # or restrict step on WhatsApp.
+                return ("escalation grammar: limit N · final "
+                        "kick|ban · window DAYS · at N fine "
+                        "AMOUNT · at N kick · clear N · reset "
+                        "— no mute or restrict step on "
+                        "WhatsApp: there's no per-person mute "
+                        "for the ladder to fire. /gsettings "
+                        "shows the ladder.")
             return ("escalation grammar: limit N · final "
                     "kick|ban · window DAYS · at N mute [10m] · "
                     "at N fine AMOUNT · at N restrict|kick · "
@@ -3513,6 +3596,14 @@ class RuntimeGroupMixin:
         if not words:
             return None
         esc = surface.escalation_config(key)
+        # WhatsApp groups cannot take a mute or restrict step:
+        # both fire admin_restrict at warn time, and WhatsApp
+        # has no per-person mute to fire (owner ruling
+        # 2026-11-04).  This gates NEW selection only — a
+        # ladder already stored with such a step keeps its
+        # data; its execution refuses honestly, as before.
+        on_whatsapp = str(key).partition(":")[0].strip().lower() \
+            in ("whatsapp", "wa")
 
         def ladder() -> str:
             return ("ladder now: "
@@ -3544,9 +3635,17 @@ class RuntimeGroupMixin:
         if head == "reset" and len(words) == 1:
             import copy as _copy
 
-            self._escalation_update(
-                surface, key,
-                **_copy.deepcopy(ESCALATION_DEFAULTS))
+            fields = _copy.deepcopy(ESCALATION_DEFAULTS)
+            if on_whatsapp:
+                # The house ladder's mute step cannot be newly
+                # installed on WhatsApp (see above): the reset
+                # lands the same ladder minus its
+                # restrict-bottomed steps, and ladder() below
+                # shows exactly what was installed.
+                fields["intervals"] = [
+                    s for s in fields["intervals"]
+                    if s.get("action") not in ("mute", "restrict")]
+            self._escalation_update(surface, key, **fields)
             return ("escalation reset to the house ladder. "
                     f"{ladder()}")
         if head == "clear" and len(words) == 2 \
@@ -3560,6 +3659,12 @@ class RuntimeGroupMixin:
         if head == "at" and len(words) >= 3 and words[1].isdigit():
             at = int(words[1])
             action = words[2].lower()
+            if on_whatsapp and action in ("mute", "restrict"):
+                return ("that step can't be designed here: "
+                        "WhatsApp has no per-person mute for "
+                        "the ladder to fire — fine and kick "
+                        "are the steps this platform carries "
+                        "out.")
             steps = [s for s in esc.intervals if s["at"] != at]
             if action == "mute":
                 minutes = 60
@@ -4743,6 +4848,20 @@ class RuntimeGroupMixin:
                          bool((d.get('antitag') or {})
                               .get('enabled', True)))],
             ]
+            # The ladder's step menu (§30): on WhatsApp the
+            # mute/restrict steps are not offered — the
+            # platform cannot fire them (see
+            # _apply_escalation_grammar).
+            escalation_steps_offer = (
+                "`escalation at N fine AMOUNT` · `escalation "
+                "at N kick` · `escalation clear N` · "
+                "`escalation reset` — no mute/restrict step "
+                "on WhatsApp (no per-person mute)"
+                if key.partition(":")[0].strip().lower()
+                in ("whatsapp", "wa") else
+                "`escalation at N mute [10m]` · `escalation at N "
+                "fine AMOUNT` · `escalation at N restrict|kick` "
+                "· `escalation clear N` · `escalation reset`")
             card.block_lines([
                 "`autonomy on|off` · `anticrash on|off|delete|flag`",
                 "`antichannel|antitag|antidelete|antiedit on|off`"
@@ -4753,9 +4872,7 @@ class RuntimeGroupMixin:
                 "`warns N` · `mute default 2h|off` · `fine N`",
                 "`escalation limit N` · `escalation final "
                 "kick|ban` · `escalation window DAYS`",
-                "`escalation at N mute [10m]` · `escalation at N "
-                "fine AMOUNT` · `escalation at N restrict|kick` "
-                "· `escalation clear N` · `escalation reset`",
+                escalation_steps_offer,
             ], title="Grammar")
         elif section == "acceptance":
             acc = s.get("acceptance") or {}

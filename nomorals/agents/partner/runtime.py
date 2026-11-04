@@ -3608,7 +3608,8 @@ class PartnerRuntime(
         """
         from ...social.chat.control import (
             CONFIRMABLE_COMMANDS, ControlCommand, GAME_START_COMMANDS,
-            caller_may_run, detailed_help, parse_control, public_menu_text)
+            WHATSAPP_UNSUPPORTED_KINDS, caller_may_run, detailed_help,
+            parse_control, public_menu_text)
         from ..power import power_mode_for
 
         # Bare /start is a menu trigger, not the /start <platform>
@@ -3624,6 +3625,13 @@ class PartnerRuntime(
             if _platform == "telegram-personal":
                 from ...social.chat.hub import hub_text
                 return hub_text()
+            if _platform in ("whatsapp", "wa"):
+                # WhatsApp gets its OWN menu (owner rule): the
+                # public menu is the Telegram-shaped one — wrong
+                # command set for this surface, and it tells the
+                # reader to tap a button WhatsApp doesn't have.
+                from ...social.chat.control import help_menu
+                return help_menu("whatsapp")
             return public_menu_text()
 
         # Natural phrasing for the representation review: "/how did I do"
@@ -3663,6 +3671,13 @@ class PartnerRuntime(
         # owner-only catalog to non-owners). /menu <group> still goes to
         # list_catalog below — and the telegram-bot gate redirects it.
         if kind == "menu" and not command.tail:
+            # WhatsApp gets its OWN menu (owner rule) — same
+            # reasoning as bare /start above: never the
+            # Telegram-shaped public menu on this surface.
+            if (chat_key or "").partition(":")[0].strip().lower() \
+                    in ("whatsapp", "wa"):
+                from ...social.chat.control import help_menu
+                return help_menu("whatsapp")
             return public_menu_text()
 
         # The originating surface, from the chat key — one computation,
@@ -3724,6 +3739,21 @@ class PartnerRuntime(
         if locked is not None:
             return locked
 
+        # WhatsApp has no per-person mute (owner ruling
+        # 2026-11-04): the mute family's handlers bottom out in
+        # admin_restrict / admin_unrestrict, which WhatsApp
+        # cannot execute — a command the platform can't run
+        # doesn't sit on its surface.  Typed anyway (group or
+        # DM), it gets the platform truth in one line, here at
+        # dispatch: it never enters _mod_run or the warn
+        # machinery, and no moderation attempt is audited for
+        # an execution the platform cannot perform.
+        if platform in ("whatsapp", "wa") \
+                and kind in WHATSAPP_UNSUPPORTED_KINDS:
+            return ("WhatsApp has no per-person mute — a "
+                    "member here can only be removed, or left "
+                    "as they are.")
+
         # SMS fallback surface (build-map #19): restricted command set over
         # SMS — games, media, exec and everything heavy get an honest
         # "needs the app" reply instead of running.
@@ -3752,6 +3782,17 @@ class PartnerRuntime(
             # wave 67: detailed help — /help for the catalog,
             # /help <command> for one command's full page, /help budget
             # etc. for topic pages.
+            # Bare /help inside a GROUP lists what is available in
+            # that group — member and admin surfaces alike, from the
+            # group's live state (owner order 2026-11-03).  A topic
+            # still gets its full command page.  The group check
+            # comes FIRST on every surface: on WhatsApp the
+            # platform check below used to pre-empt it, so a
+            # WhatsApp group got the DM menu and group help was
+            # unreachable there (command census, gap #5).
+            if not (arg or command.tail) \
+                    and self._group_key_or_none(message) is not None:
+                return self._control_group_help(message)
             # WhatsApp gets its OWN menu (owner rule): the bare catalog
             # on WhatsApp serves the WhatsApp-native, text-first menu —
             # control.help_menu existed for exactly this but had no
@@ -3761,13 +3802,6 @@ class PartnerRuntime(
             if platform in ("whatsapp", "wa") and not (arg or command.tail):
                 from ...social.chat.control import help_menu
                 return help_menu("whatsapp")
-            # Bare /help inside a GROUP lists what is available in
-            # that group — member and admin surfaces alike, from the
-            # group's live state (owner order 2026-11-03).  A topic
-            # still gets its full command page.
-            if not (arg or command.tail) \
-                    and self._group_key_or_none(message) is not None:
-                return self._control_group_help(message)
             return detailed_help(arg or command.tail,
                                  public_only=is_gated_surface(platform))
 

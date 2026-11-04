@@ -61,9 +61,24 @@ __all__ = ["CONTROL_COMMANDS", "COMMAND_DETAILS", "ControlCommand",
            "PUBLIC_COMMANDS", "PUBLIC_GAME_COMMANDS", "caller_may_run",
            "public_menu_text",
            "MAX_STACK_DEPTH", "NON_STACKABLE_COMMANDS", "STACK_DENIAL_REPLY",
-           "split_command_stack", "expand_prev_placeholders", "stack_header"]
+           "split_command_stack", "expand_prev_placeholders", "stack_header",
+           "WHATSAPP_UNSUPPORTED_KINDS"]
 
 PLATFORMS = ("telegram", "discord", "whatsapp", "local")
+
+#: Kinds WhatsApp cannot execute at all (owner ruling 2026-11-04:
+#: a command the platform cannot run must not sit on that
+#: platform's surface).  The mute family's handlers bottom out in
+#: the adapter's admin_restrict / admin_unrestrict verbs, and
+#: WhatsApp has NO per-person mute — the adapter refuses honestly
+#: (the only silences are removing the member, or the whole group
+#: set to admins-only; neither is a mute).  So on WhatsApp these
+#: kinds are absent from the menu and from group help, and typing
+#: one gets the platform truth at dispatch instead of a failed
+#: execution (runtime.handle_control).  Telegram executes both
+#: fine; the global catalog is untouched.
+WHATSAPP_UNSUPPORTED_KINDS: frozenset[str] = frozenset(
+    {"mute", "unmute"})
 
 #: wave 87: the commands that start a game directly.  The Social Operator
 #: lets these through in EVERY chat (games are social); the Core Mind only
@@ -1294,6 +1309,12 @@ def _whatsapp_sections() -> list[tuple[str, str, list[tuple[str, str]]]]:
         for kind in by_name[group]:
             if kind not in CONTROL_COMMANDS:
                 continue
+            if kind in WHATSAPP_UNSUPPORTED_KINDS:
+                # Not on this surface at all: WhatsApp cannot
+                # execute it (no per-person mute — see the
+                # constant).  Absent from the menu, and from
+                # the coverage sweep below.
+                continue
             one = LIST_ONELINERS.get(
                 kind, COMMAND_DETAILS.get(kind, {}).get("what", ""))
             items.append(("/" + kind, one))
@@ -1302,7 +1323,8 @@ def _whatsapp_sections() -> list[tuple[str, str, list[tuple[str, str]]]]:
     shown = {cmd for _, _, items in sections for cmd, _ in items}
     missing = sorted(
         kind for kind in CONTROL_COMMANDS
-        if f"/{kind}" not in shown and f"/{kind}" in help_text())
+        if kind not in WHATSAPP_UNSUPPORTED_KINDS
+        and f"/{kind}" not in shown and f"/{kind}" in help_text())
     if missing:
         sections.append((
             "📌", "more",
