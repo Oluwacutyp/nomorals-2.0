@@ -3986,11 +3986,31 @@ class PartnerRuntime(
 
         if kind == "platforms":
             lines = ["platforms:"]
+            status = self.gateway.status()
+            # Platforms under an owner stop order render AS stopped
+            # — a distinct truth from merely "not running": the
+            # reconcile is holding them down on purpose, and only
+            # an owner start lifts it.
+            stopped_by_owner: set[str] = set()
+            try:
+                registry = self._pairing_supervisor().registry
+                for pname in status:
+                    if not pname.startswith("_") and \
+                            registry.owner_stopped(pname):
+                        stopped_by_owner.add(pname)
+            except Exception:  # noqa: BLE001 - listing never dies
+                stopped_by_owner = set()
             seen: set[str] = set()
-            for name, info in sorted(self.gateway.status().items()):
+            for name, info in sorted(status.items()):
                 if name.startswith("_") or not isinstance(info, dict):
                     continue
                 seen.add(name)
+                if name in stopped_by_owner and \
+                        not info.get("running_in_session"):
+                    lines.append(
+                        f"  {name}: stopped (by you) — "
+                        f"/start {name} to resume")
+                    continue
                 state = "running" if info.get("running_in_session") else "not running"
                 suffix = "" if info.get("running") else " (adapter thread down)"
                 lines.append(f"  {name}: {state}{suffix}")
@@ -4002,10 +4022,23 @@ class PartnerRuntime(
                 known = self.gateway.known_platforms()
             except Exception:  # noqa: BLE001 - listing never dies
                 known = []
+            try:
+                registry = self._pairing_supervisor().registry
+                for pname in known:
+                    if registry.owner_stopped(pname):
+                        stopped_by_owner.add(pname)
+            except Exception:  # noqa: BLE001 - listing never dies
+                pass
             for name in known:
                 if name not in seen:
-                    lines.append(
-                        f"  {name}: not running — start with /start {name}")
+                    if name in stopped_by_owner:
+                        lines.append(
+                            f"  {name}: stopped (by you) — "
+                            f"/start {name} to resume")
+                    else:
+                        lines.append(
+                            f"  {name}: not running — "
+                            f"start with /start {name}")
             return "\n".join(lines)
 
         if kind == "start":
@@ -5330,10 +5363,22 @@ class PartnerRuntime(
             record_failure("runtime.PartnerRuntime._notify", e)
 
     def start_platform(self, name: str) -> dict[str, Any]:
-        return self.gateway.start_one(name.strip().lower(), self.on_message)
+        name = name.strip().lower()
+        # An owner start revokes any standing owner stop order for
+        # the platform (durable intent, pairing registry) BEFORE
+        # the gateway moves — a reconcile beat landing between the
+        # two must already see the order lifted.
+        self._set_platform_owner_stopped(name, False)
+        return self.gateway.start_one(name, self.on_message)
 
     def stop_platform(self, name: str) -> dict[str, Any]:
-        return self.gateway.stop_one(name.strip().lower())
+        name = name.strip().lower()
+        # Record the owner's stop order FIRST, durably: the
+        # WhatsApp live-attach reconcile (and its startup twin)
+        # honor it, so this stop sticks across beats and restarts
+        # instead of lasting only until the pool next looks live.
+        self._set_platform_owner_stopped(name, True)
+        return self.gateway.stop_one(name)
 
     # ── agent modes: one persistent engine for /agent, /proposals, ticks ──
 

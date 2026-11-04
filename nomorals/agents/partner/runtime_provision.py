@@ -588,6 +588,22 @@ class RuntimeProvisionMixin:
         except Exception as exc:  # noqa: BLE001
             record_failure("runtime_provision.wa_surface_clear", exc)
 
+    def _set_platform_owner_stopped(self, platform: str,
+                                    stopped: bool) -> None:
+        """Record the owner's start/stop order for a platform in
+        the durable pairing registry (see
+        :meth:`PairingRegistry.set_owner_stopped`) — the input the
+        live-attach reconcile was missing when an owner's
+        /stop whatsapp resurrected within a beat (2026-11-04):
+        the pool said "linked, bridge live", nothing anywhere said
+        "the owner told it to stay down".  Never raises: recording
+        intent must not break the stop/start it rides on."""
+        try:
+            sup = self._pairing_supervisor()
+            sup.registry.set_owner_stopped(platform, stopped)
+        except Exception as exc:  # noqa: BLE001 - noting never dies
+            record_failure("runtime_provision.owner_stopped", exc)
+
     def _sync_whatsapp_surface(self) -> str:
         """Live-attach the WhatsApp conversational surface to the pool.
 
@@ -610,6 +626,14 @@ class RuntimeProvisionMixin:
         the pool has no qualifying account: the reconcile only ever
         stops what it owns (``_wa_surface_account``).
 
+        One hard exception outranks the pool: an owner stop order
+        (``registry.owner_stopped("whatsapp")``, recorded by /stop
+        and /pair stop, cleared by /start, /pair start and a fresh
+        pair).  While it stands, the desired state is DOWN no
+        matter how live the account looks — any WhatsApp adapter
+        found up is stopped and nothing is ever attached.  Without
+        this term a manual /stop lasted only until the next beat.
+
         Returns "" on success/no-op, else a plain-words note naming
         why the surface did not come up; the note is ALSO recorded
         on the account's ``last_error`` (tagged, see
@@ -624,6 +648,16 @@ class RuntimeProvisionMixin:
             from ...social.pairing import resolve_account
 
             sup = self._pairing_supervisor()
+            if sup.registry.owner_stopped("whatsapp"):
+                # The owner ordered this surface down; the order
+                # stands until an owner start path clears it.  Keep
+                # it down — stop any adapter that is somehow up
+                # (a beat that raced the stop, a boot-time builder)
+                # — and never attach.
+                if gateway.adapters.get("whatsapp") is not None:
+                    gateway.stop_one("whatsapp")
+                self._wa_surface_account = ""
+                return ""
             rec = resolve_account(sup.registry, "whatsapp")
             desired_port = 0
             if rec is not None and rec.port and (
@@ -935,6 +969,9 @@ class RuntimeProvisionMixin:
                 # reply, never the runtime's "blew up" traceback
                 # digest.
                 return f"⚠️ {exc}"
+            # A fresh pair is an owner start: any earlier stop
+            # order for the platform is revoked.
+            self._set_platform_owner_stopped("whatsapp", False)
             # The bridge is launched: attach the conversational
             # surface to it NOW, so the moment the link completes
             # the account is live in this process (live-attach).
@@ -1039,6 +1076,8 @@ class RuntimeProvisionMixin:
                 return "which account? /pair lists them."
             if rec.platform == "telegram":
                 if sub == "remove":
+                    self._set_platform_owner_stopped(
+                        rec.platform, False)
                     sup.remove(rec.id)
                     return (f"🗑️ {rec.id} removed from the pool. "
                             "Its session file stays on disk; the "
@@ -1064,6 +1103,7 @@ class RuntimeProvisionMixin:
                         "authorizes. Re-pair it: /pair telegram "
                         f"{rec.identity}")
             if sub == "start":
+                self._set_platform_owner_stopped("whatsapp", False)
                 try:
                     sup.start(rec.id)
                 except PairingUnavailable as exc:
@@ -1077,10 +1117,15 @@ class RuntimeProvisionMixin:
                             f"\n⚠️ {surface_note}")
                 return f"▶️ bridge starting for {rec.id}."
             if sub == "stop":
+                # An account-level stop is an owner stop of the
+                # surface too: record the intent so the reconcile
+                # never resurrects it behind the owner's back.
+                self._set_platform_owner_stopped("whatsapp", True)
                 sup.stop(rec.id)
                 self._sync_whatsapp_surface()
                 return f"⏸️ bridge stopped for {rec.id}."
             if sub == "restart":
+                self._set_platform_owner_stopped("whatsapp", False)
                 sup.stop(rec.id)
                 try:
                     sup.start(rec.id)
@@ -1094,6 +1139,9 @@ class RuntimeProvisionMixin:
                     return (f"🔁 bridge restarted for {rec.id}."
                             f"\n⚠️ {surface_note}")
                 return f"🔁 bridge restarted for {rec.id}."
+            # Removal retires the account AND any stop order that
+            # named its platform — a future pair starts clean.
+            self._set_platform_owner_stopped(rec.platform, False)
             sup.remove(rec.id)
             self._sync_whatsapp_surface()
             return (f"🗑️ {rec.id} removed from the pool. Its saved "

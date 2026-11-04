@@ -557,6 +557,17 @@ class PairingRegistry:
         self.path = Path(path)
         self._lock = threading.RLock()
         self._accounts: dict[str, AccountRecord] = {}
+        #: Owner stop orders, per platform: platform → when the
+        #: owner stopped it.  An account's liveness (linked, bridge
+        #: running) is a fact about the pool; this is a fact about
+        #: the OWNER's intent, and the two must never be conflated —
+        #: the WhatsApp live-attach reconcile resurrecting a surface
+        #: the owner had /stop'd (2026-11-04) is what happens when
+        #: the reconcile can only see the pool.  Additive top-level
+        #: payload key: registries written before it load with no
+        #: stops recorded, and older code reading a newer file
+        #: ignores it (only "accounts" is ever required).
+        self._owner_stopped: dict[str, float] = {}
         self._load()
 
     def _load(self) -> None:
@@ -570,6 +581,14 @@ class PairingRegistry:
             for row in rows:
                 rec = AccountRecord.from_dict(row)
                 self._accounts[rec.id] = rec
+            stops = data.get("owner_stopped")
+            if isinstance(stops, dict):
+                for platform, ts in stops.items():
+                    try:
+                        self._owner_stopped[str(platform).strip(
+                            ).lower()] = float(ts)
+                    except (TypeError, ValueError):
+                        continue
         except Exception as exc:  # noqa: BLE001 - quarantine, never reset
             aside = self.path.with_suffix(
                 f".corrupt-{int(time.time())}.json")
@@ -586,7 +605,8 @@ class PairingRegistry:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"accounts": [r.to_dict() for r in
                                 sorted(self._accounts.values(),
-                                       key=lambda r: r.created_at)]}
+                                       key=lambda r: r.created_at)],
+                   "owner_stopped": dict(self._owner_stopped)}
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, indent=1), encoding="utf-8")
         os.replace(tmp, self.path)
@@ -634,6 +654,32 @@ class PairingRegistry:
                 return
             rec.last_error = message
             self._save()
+
+    def set_owner_stopped(self, platform: str, stopped: bool) -> None:
+        """Record (or clear) the owner's explicit stop order for a
+        platform.  Set by every owner stop path (/stop <platform>,
+        /pair stop) and cleared by every owner start path — the
+        durable intent the live-attach reconcile must honor so an
+        owner's /stop STICKS across beats and restarts instead of
+        being silently undone the next time the pool looks live.
+        Persisted with the registry; a no-op write is skipped."""
+        platform = (platform or "").strip().lower()
+        if not platform:
+            return
+        with self._lock:
+            if stopped:
+                if platform not in self._owner_stopped:
+                    self._owner_stopped[platform] = time.time()
+                    self._save()
+            elif platform in self._owner_stopped:
+                del self._owner_stopped[platform]
+                self._save()
+
+    def owner_stopped(self, platform: str) -> bool:
+        """True while an owner stop order stands for *platform*."""
+        with self._lock:
+            return (platform or "").strip().lower() in \
+                self._owner_stopped
 
     def accounts_for(self, platform: str) -> list[AccountRecord]:
         with self._lock:
