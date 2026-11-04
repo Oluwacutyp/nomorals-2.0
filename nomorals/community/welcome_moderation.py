@@ -471,8 +471,29 @@ class Moderator:
 
     def check_message(
         self, group_id: str, user_id: str, text: str, ts: float | None = None,
+        *, exempt: bool = False, uncounted: bool = False,
     ) -> list[ModerationAction]:
-        """Evaluate one message. Returns actions (empty = allow)."""
+        """Evaluate one message. Returns actions (empty = allow).
+
+        ``exempt`` — a privileged sender (owner / operator /
+        group admin, as judged by the calling surface): the
+        automated stages never run for them — no counting, no
+        warn/delete/mute from flood, links, word filters or
+        repeats.  Only the ban check above stands: it enforces a
+        manual decision, it is not an automated stage.  (The
+        anticrash organ is a separate pipeline and keeps its own
+        rules for staff payloads.)
+
+        ``uncounted`` — the message is solicited input to
+        something the bot itself is running (a seated player's
+        move in a live game room, as judged by the caller from
+        real room state): the counting stages (flood, repeats)
+        neither count it nor act on it — playing a game REQUIRES
+        repeated short inputs, and they are interaction, not
+        spam.  The content stages (links, word filters) still
+        evaluate it.  Both flags default off, so every other
+        caller keeps the historical behaviour byte-for-byte.
+        """
         now = ts if ts is not None else time.time()
         cfg = self.config
         actions: list[ModerationAction] = []
@@ -485,20 +506,23 @@ class Moderator:
             actions.append(act)
             self._log(act)
             return actions
+        if exempt:
+            return actions
         # Flood: sliding window per (group, user).
         key = (group_id, user_id)
-        window = self._recent[key]
-        window.append(now)
-        while window and window[0] < now - cfg.flood_window_s:
-            window.popleft()
-        if len(window) > cfg.flood_max:
-            act = ModerationAction(
-                kind="mute", reason=f"flood: {len(window)} msgs in {cfg.flood_window_s:.0f}s",
-                rule="flood", user_id=user_id, group_id=group_id,
-            )
-            actions.append(act)
-            self._log(act)
-            return actions
+        if not uncounted:
+            window = self._recent[key]
+            window.append(now)
+            while window and window[0] < now - cfg.flood_window_s:
+                window.popleft()
+            if len(window) > cfg.flood_max:
+                act = ModerationAction(
+                    kind="mute", reason=f"flood: {len(window)} msgs in {cfg.flood_window_s:.0f}s",
+                    rule="flood", user_id=user_id, group_id=group_id,
+                )
+                actions.append(act)
+                self._log(act)
+                return actions
         # Links: any URL whose domain is not allowlisted.
         for domain in _URL_RE.findall(text or ""):
             domain = domain.lower().lstrip("www.")
@@ -534,8 +558,10 @@ class Moderator:
                 self._log(act)
                 return actions
         # Repeated: same normalised text threshold times in window.
+        # The rule key is "repeat" — the canonical key the warning
+        # phrases and the §32 flag-proposal map are keyed on.
         norm = _normalise(text)
-        if norm:
+        if norm and not uncounted:
             bucket = self._recent_text[key]
             bucket.append((now, norm))
             while bucket and bucket[0][0] < now - cfg.repeat_window_s:
@@ -546,12 +572,12 @@ class Moderator:
                     self._warned.add(key)
                     act = ModerationAction(
                         kind="warn", reason=f"repeated message ×{same}",
-                        rule="repeated", user_id=user_id, group_id=group_id,
+                        rule="repeat", user_id=user_id, group_id=group_id,
                     )
                 else:
                     act = ModerationAction(
                         kind="delete", reason=f"repeated message ×{same}",
-                        rule="repeated", user_id=user_id, group_id=group_id,
+                        rule="repeat", user_id=user_id, group_id=group_id,
                     )
                 actions.append(act)
                 self._log(act)

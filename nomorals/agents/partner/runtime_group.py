@@ -779,6 +779,25 @@ class RuntimeGroupMixin:
             surface.handle_edit(
                 key, message_id=str(message.message_id or ""),
                 new_text=str(message.text or ""))
+        # Solicited game input is play, not spam: the games seam
+        # judges from real room state (live room + seated sender
+        # + a move the game recognises) whether this message is
+        # an input to the game running in this room, and the
+        # surface forwards the verdict to the Moderator's
+        # counting stages.  Without the games mixin (partial
+        # rigs) or on any probe failure the verdict is False —
+        # moderation behaves exactly as it always has.
+        game_input = False
+        probe = getattr(self, "_is_game_input", None)
+        player_of = getattr(self, "_game_player", None)
+        if probe is not None and player_of is not None:
+            try:
+                game_input = bool(probe(
+                    key, str(message.text or ""),
+                    player=player_of(message),
+                    kind=str(message.chat.kind or "")))
+            except Exception:  # noqa: BLE001 - no verdict, no exemption
+                game_input = False
         result = surface.handle_message(
             key, user_id,
             username=str(message.sender_username or ""),
@@ -787,7 +806,8 @@ class RuntimeGroupMixin:
             message_id=str(message.message_id or ""),
             envelope=meta.get("envelope"),
             sender_is_admin=self._group_admin_ok(message),
-            sender_is_operator=self._operator_or_false(message))
+            sender_is_operator=self._operator_or_false(message),
+            game_input=game_input)
         notices = result.get("notices") or []
         if notices and self._system_send_ok(
                 surface, key, message, "notice"):

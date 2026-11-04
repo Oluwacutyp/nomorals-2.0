@@ -1269,6 +1269,70 @@ class RuntimeGamesMixin:
             record_failure("runtime_games.RuntimeGamesMixin._is_relay_move", e)
         return True
 
+    def _is_game_input(self, chat_key: str, text: str, *,
+                       player: Any = None, kind: str = "") -> bool:
+        """Would the router treat this message as a seated player's
+        input to the game live in this chat?
+
+        The side-effect-free twin of :meth:`_route_game_move`'s
+        ownership decision.  The group surface asks it BEFORE the
+        defense pipeline runs (the surface turn precedes game
+        routing), so a solicited game input is never counted as
+        spam by the Moderator's flood/repeat stages — playing
+        slots REQUIRES repeated short inputs ("bet 20000",
+        "spin", "spin"), and striking a player for them is the
+        moderation self-strike defect this probe exists to kill.
+
+        Mirrors the router, with one deliberate narrowing: the
+        router AUTO-SEATS a group member the moment they speak
+        into a live room, but the exemption requires the sender
+        already seated — a non-seated member's text still counts
+        as ordinary chat until they are actually at the table.
+        Beyond that the verdict is the router's own: games
+        feature on, no channel posts, no §33-frozen rooms; a
+        relay room defers to :meth:`_is_relay_move`; a live room
+        takes the engine's slash commands (never /game, the
+        control plane) and any plain text the room's game
+        recognises as a move (``is_move_text``).  No seats are
+        taken, no moves are made, no state moves — and a probe
+        failure answers False: an exemption must be earned, never
+        assumed.
+        """
+        try:
+            from ..features import feature_enabled
+
+            if not text or player is None:
+                return False
+            if not feature_enabled(self.context, "games"):
+                return False
+            if str(kind).lower() == ChatKind.CHANNEL:
+                return False
+            if str(kind).lower() == ChatKind.GROUP \
+                    and self._group_system_blocked(chat_key):
+                return False
+            relay = self._game_relay()
+            relay_room = relay.get_relay_for_chat(chat_key)
+            if relay_room is not None:
+                return self._is_relay_move(relay_room, text)
+            engine = self._game_engine()
+            room = engine.live(chat_key)
+            if room is None:
+                return False
+            if room.player(player.key) is None:
+                return False
+            if text.startswith("/"):
+                from ...games.games.base import parse_command
+
+                cmd, _rest = parse_command(text)
+                return cmd not in ("", "game")
+            game = engine.games.get(room.game)
+            if game is None:
+                return False
+            return bool(game.is_move_text(text))
+        except Exception:  # noqa: BLE001 - a probe failure never exempts
+            _log.exception("game input probe failed")
+            return False
+
     def _route_game_move(self, chat_key: str, text: str, *,
                          player: Any = None, kind: str = "dm") -> str | None:
         """While a game is live in this chat, plain messages are game moves.

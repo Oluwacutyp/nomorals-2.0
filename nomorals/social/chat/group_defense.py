@@ -510,6 +510,10 @@ RULE_PHRASES: dict[str, str] = {
     "words": "that word is filtered here",
     "word_filter": "that word is filtered here",
     "repeat": "repeating the same message isn't allowed",
+    # legacy alias: records and notices stored before the
+    # Moderator's rule key was aligned to "repeat" carry
+    # "repeated" — they must render the same house phrase.
+    "repeated": "repeating the same message isn't allowed",
     "banlist": "you're on this group's ban list",
     "manual_warn": "an admin warned you",
     "acceptance": "your profile doesn't meet this group's "

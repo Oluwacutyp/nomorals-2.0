@@ -1378,7 +1378,8 @@ class GroupSurface:
                        ts: float | None = None,
                        envelope: Any = None,
                        sender_is_admin: bool = False,
-                       sender_is_operator: bool = False
+                       sender_is_operator: bool = False,
+                       game_input: bool = False
                        ) -> dict[str, Any]:
         """One ordinary group message: ledger observation, then
         the DEFENSE pipeline in its fixed order (brief §1.4) —
@@ -1387,7 +1388,11 @@ class GroupSurface:
         Returns ``{"changes", "actions", "notices"}``; actions
         are dicts for the caller to execute (delete / warn / mute
         / kick / ban).  A message any stage deletes earns NO
-        economy credit and fires no quest/season notices."""
+        economy credit and fires no quest/season notices.
+        ``game_input`` is the caller's verdict (from real game
+        room state) that this message is a seated player's input
+        to a live game — it exempts the message from the
+        Moderator's counting stages only."""
         now = ts if ts is not None else time.time()
         changes = self._observe_identity(
             group_key, user_id, username=username, name=name, ts=now)
@@ -1718,9 +1723,22 @@ class GroupSurface:
                                         now=now)
 
         # ── stage 2: the Moderator (unchanged organ) ───────────
+        # Two verdicts ride in from the caller and are forwarded
+        # verbatim — the Moderator stays text-only and dumb:
+        # * privileged (owner/operator/admin, resolved above from
+        #   the adapter's own role answer): staff are NEVER
+        #   auto-moderated — no warn/delete/mute out of the
+        #   automated stages.  (Stage 1 anticrash keeps its own
+        #   shipped rule for staff payloads: deleted for safety,
+        #   never struck.)
+        # * game_input (the runtime's games seam, judged from
+        #   real room state — a live room, the sender seated, the
+        #   text a move the game recognises): solicited play is
+        #   not spam, so the counting stages do not count it.
         if text:
             for action in self._moderator(group_key).check_message(
-                    group_key, user_id, text, ts=now):
+                    group_key, user_id, text, ts=now,
+                    exempt=privileged, uncounted=game_input):
                 actions.append(action.to_dict())
                 self._audit(group_key, "moderation",
                             action=action.kind, rule=action.rule,
