@@ -672,7 +672,8 @@ class RuntimeProvisionMixin:
         Owner-only (not a public command): pairing an account in is
         the owner's explicit act, and the pool is his accounts.
         """
-        from ...social.pairing import PairingStoreError
+        from ...social.pairing import PairingStoreError, \
+            PairingUnavailable
 
         try:
             sup = self._pairing_supervisor()
@@ -723,7 +724,10 @@ class RuntimeProvisionMixin:
             label = " ".join(parts[2:])
             try:
                 rec = sup.pair_whatsapp(parts[1], label)
-            except ValueError as exc:
+            except (PairingUnavailable, ValueError) as exc:
+                # PairingUnavailable's text is plain guidance
+                # (install Node, re-run) — a normal reply, never
+                # the runtime's "blew up" traceback digest.
                 return f"⚠️ {exc}"
             import time as _time
 
@@ -833,14 +837,20 @@ class RuntimeProvisionMixin:
                         "authorizes. Re-pair it: /pair telegram "
                         f"{rec.identity}")
             if sub == "start":
-                sup.start(rec.id)
+                try:
+                    sup.start(rec.id)
+                except PairingUnavailable as exc:
+                    return f"⚠️ {exc}"
                 return f"▶️ bridge starting for {rec.id}."
             if sub == "stop":
                 sup.stop(rec.id)
                 return f"⏸️ bridge stopped for {rec.id}."
             if sub == "restart":
                 sup.stop(rec.id)
-                sup.start(rec.id)
+                try:
+                    sup.start(rec.id)
+                except PairingUnavailable as exc:
+                    return f"⚠️ {exc}"
                 return f"🔁 bridge restarted for {rec.id}."
             sup.remove(rec.id)
             return (f"🗑️ {rec.id} removed from the pool. Its saved "

@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import threading
@@ -42,6 +43,100 @@ _CODE_LINE_RE = re.compile(r"PAIRING CODE for \+(\d+):\s*(\S+)")
 
 class PairingStoreError(RuntimeError):
     """The registry file exists but cannot be read — never a reset."""
+
+
+class PairingUnavailable(RuntimeError):
+    """WhatsApp pairing cannot run on this machine right now — the
+    message IS the user-facing guidance (what is missing, how to
+    fix it), so surfaces render it as a plain reply, never as a
+    traceback digest.  Raised BEFORE any account record claims to
+    be pairing, so the pool never shows a phantom session."""
+
+
+#: The one plain sentence every surface may show when the bridge
+#: cannot launch for want of Node.js.
+NODE_MISSING_MESSAGE = (
+    "WhatsApp pairing needs Node.js on this machine — no node "
+    "executable was found in PATH or in the standard install "
+    "locations. Install Node.js LTS (https://nodejs.org) and run "
+    "/pair again. Telegram pairing does not need Node and still "
+    "works.")
+
+
+def _node_ladder_paths(env: dict, platform: str,
+                       home: Path) -> list[Path]:
+    """Absolute node candidates outside PATH, most standard first.
+
+    Windows: the nodejs.org installer dirs, the per-user install,
+    nvm-windows' ``current`` dir and the ``NVM_SYMLINK`` target.
+    POSIX: system package dirs, the nvm shim under the user's
+    home, and Termux's prefix (Devon also lives on phones)."""
+    if platform.startswith("win"):
+        out: list[Path] = []
+        pf = env.get("ProgramFiles")
+        if pf:
+            out.append(Path(pf) / "nodejs" / "node.exe")
+        pfx = env.get("ProgramFiles(x86)")
+        if pfx:
+            out.append(Path(pfx) / "nodejs" / "node.exe")
+        local = env.get("LOCALAPPDATA")
+        if local:
+            out.append(Path(local) / "Programs" / "nodejs"
+                       / "node.exe")
+        appdata = env.get("APPDATA")
+        if appdata:
+            out.append(Path(appdata) / "nvm" / "current"
+                       / "node.exe")
+        symlink = env.get("NVM_SYMLINK")
+        if symlink:
+            out.append(Path(symlink) / "node.exe")
+        return out
+    return [
+        Path("/usr/local/bin/node"),
+        Path("/usr/bin/node"),
+        home / ".nvm" / "current" / "bin" / "node",
+        Path("/data/data/com.termux/files/usr/bin/node"),
+    ]
+
+
+def resolve_node(explicit: str = "", *,
+                 env: dict | None = None,
+                 platform: str | None = None,
+                 home: str | Path | None = None,
+                 ladder: list[Path] | None = None) -> str | None:
+    """Resolve the node executable the bridge will launch with.
+
+    An explicit (non-default) ``explicit`` wins outright: it is
+    used when it names a real file or resolves on PATH, and the
+    resolution fails (None) when it does not — a configured node
+    that does not exist is a configuration fact to report, not a
+    reason to silently fall back.  Otherwise: ``node`` on PATH,
+    then the platform install ladder.  Returns an absolute path,
+    or None when this machine has no node anywhere we looked —
+    the caller turns that into PairingUnavailable guidance.
+    ``env`` / ``platform`` / ``home`` / ``ladder`` are injectable
+    so tests can stage a whole machine in a tmp dir."""
+    env = os.environ if env is None else env
+    explicit = (explicit or "").strip()
+    if explicit and explicit != "node":
+        if Path(explicit).is_file():
+            return str(Path(explicit).absolute())
+        return shutil.which(explicit, path=env.get("PATH"))
+    found = shutil.which("node", path=env.get("PATH"))
+    if found:
+        return found
+    if ladder is None:
+        platform = ("windows" if os.name == "nt" else "posix") \
+            if platform is None else platform
+        home = Path.home() if home is None else Path(home)
+        ladder = _node_ladder_paths(env, platform, home)
+    for cand in ladder:
+        try:
+            if cand.is_file():
+                return str(cand)
+        except OSError:
+            continue
+    return None
 
 
 def account_id_for(platform: str, identity: str) -> str:
@@ -240,6 +335,16 @@ class BridgeSupervisor:
     lifecycle without node; production uses subprocess.Popen with
     the bridge's stdout drained on a reader thread (the pairing
     code arrives on stdout and on the bridge protocol alike).
+
+    The node executable is RESOLVED, never assumed: PATH first,
+    then the platform install ladder (``resolve_node``) — a Devon
+    process whose PATH lacks node (a service account, a scheduled
+    task) still finds a standard install.  A ``node`` constructor
+    arg other than the default overrides the ladder outright.
+    Resolution is cached once it succeeds; while it fails it is
+    re-checked on every launch, so installing Node fixes /pair
+    without restarting Devon.  ``node_resolver`` is injectable
+    beside ``spawn`` so tests can stage node-less machines.
     """
 
     def __init__(self, registry: PairingRegistry, *,
@@ -247,15 +352,71 @@ class BridgeSupervisor:
                  sessions_root: str | Path,
                  base_port: int = 8787,
                  node: str = "node",
-                 spawn: Callable[..., Any] | None = None) -> None:
+                 spawn: Callable[..., Any] | None = None,
+                 node_resolver: Callable[[], str | None] | None
+                 = None) -> None:
         self.registry = registry
         self.bridge_path = Path(bridge_path)
         self.sessions_root = Path(sessions_root)
         self.base_port = int(base_port)
         self.node = node
         self._spawn = spawn or self._default_spawn
+        self._spawn_is_default = spawn is None
+        self._node_resolver = node_resolver
+        self._node_cache: str | None = None
         self._live: dict[str, _Live] = {}
         self._lock = threading.RLock()
+
+    # ── node + launch preflight ─────────────────────────────────────
+    def resolve_node_path(self) -> str | None:
+        """The node executable launches will use — resolved fresh
+        until it succeeds, cached from then on."""
+        if self._node_cache:
+            return self._node_cache
+        if self._node_resolver is not None:
+            found = self._node_resolver()
+        else:
+            found = resolve_node(self.node)
+        if found:
+            self._node_cache = str(found)
+            return self._node_cache
+        return None
+
+    def _require_launchable(self) -> str:
+        """The node argv[0] for a launch, or PairingUnavailable
+        naming the true blocker in plain words.
+
+        Production (default spawn) is strict: no resolvable node,
+        or a missing bridge script, fails HERE — before any
+        account record claims to be pairing.  With an injected
+        spawn the caller owns the process layer (the test seam):
+        the resolved path still lands in argv when one is found,
+        but a miss falls back to the configured name rather than
+        raising, exactly as launches behaved before resolution
+        existed."""
+        node = self.resolve_node_path()
+        if node is None:
+            if not self._spawn_is_default:
+                return self.node
+            explicit = (self.node or "").strip()
+            if explicit and explicit != "node":
+                raise PairingUnavailable(
+                    "WhatsApp pairing is unavailable on this "
+                    f"machine: the bridge is configured to run "
+                    f"with '{explicit}', and that executable was "
+                    "not found. Fix the configured path or install "
+                    "Node.js LTS (https://nodejs.org) and run "
+                    "/pair again. Telegram pairing does not need "
+                    "Node and still works.")
+            raise PairingUnavailable(NODE_MISSING_MESSAGE)
+        if self._spawn_is_default and not self.bridge_path.is_file():
+            raise PairingUnavailable(
+                "WhatsApp pairing is unavailable on this machine: "
+                f"the bridge script is missing ({self.bridge_path}) "
+                "— the Devon install is incomplete, this is not a "
+                "Node problem. Restore bridge/whatsapp-bridge.mjs "
+                "(re-pull the repo) and run /pair again.")
+        return node
 
     # ── process plumbing ────────────────────────────────────────────
     @staticmethod
@@ -272,10 +433,11 @@ class BridgeSupervisor:
         return port
 
     def _launch(self, rec: AccountRecord, *, pairing_number: str = "") -> _Live:
+        node = self._require_launchable()
         creds = Path(rec.creds_dir)
         creds.mkdir(parents=True, exist_ok=True)
         media = creds.parent / (creds.name + "-media")
-        argv = [self.node, str(self.bridge_path),
+        argv = [node, str(self.bridge_path),
                 "--port", str(rec.port),
                 "--creds", str(creds),
                 "--media", str(media)]
@@ -283,7 +445,14 @@ class BridgeSupervisor:
         if pairing_number:
             env["WA_PAIRING_CODE"] = "1"
             env["WA_PAIRING_NUMBER"] = pairing_number
-        proc = self._spawn(argv, env)
+        try:
+            proc = self._spawn(argv, env)
+        except OSError as exc:  # noqa: BLE001 - named, not a digest
+            raise PairingUnavailable(
+                "the WhatsApp bridge process could not be started "
+                f"({exc}) — node resolved to {node}, bridge at "
+                f"{self.bridge_path}. Nothing was paired; fix the "
+                "cause and run /pair again.") from exc
         live = _Live(proc=proc)
         # register BEFORE the reader starts: a fast bridge can emit
         # its pairing code immediately, and a code that arrives before
@@ -337,9 +506,16 @@ class BridgeSupervisor:
             raise ValueError(
                 "that doesn't look like a phone number — give the "
                 "number in international format, e.g. 2348012345678")
+        # Preflight BEFORE the record exists: a machine that cannot
+        # launch the bridge (no node, missing script) fails here,
+        # so the registry never gains a record claiming "pairing"
+        # with no process behind it.
+        self._require_launchable()
         rec_id = account_id_for("whatsapp", digits)
         rec = self.registry.get(rec_id)
-        if rec is None:
+        created = rec is None
+        prior_status = "" if created else rec.status
+        if created:
             creds = self.sessions_root / f"wa-{digits}"
             rec = AccountRecord(
                 id=rec_id, platform="whatsapp", identity=digits,
@@ -352,9 +528,25 @@ class BridgeSupervisor:
             if label:
                 rec.label = label.strip()
             self.registry.upsert(rec)
-        if self._alive(rec.id):
+        was_running = self._alive(rec.id)
+        if was_running:
             self.stop(rec.id)
-        self._launch(rec, pairing_number=digits)
+        try:
+            self._launch(rec, pairing_number=digits)
+        except PairingUnavailable:
+            # Roll the record back to the truth: a brand-new pairing
+            # that never launched leaves no record at all; an
+            # existing account returns to its prior state ("down"
+            # when this attempt stopped its live bridge to re-pair
+            # — the sweep's probes own its state from there).
+            if created:
+                self.registry.remove(rec.id)
+            elif was_running:
+                self.registry.set_status(rec.id, "down")
+            else:
+                self.registry.set_status(rec.id,
+                                         prior_status or "registered")
+            raise
         return rec
 
     def pairing_code(self, account_id: str) -> tuple[str, float] | None:
@@ -543,6 +735,12 @@ class PoolSupervision:
                                     "its reconnect policy owns the "
                                     "session until a probe earns "
                                     "'linked' back"}
+            except PairingUnavailable as exc:  # noqa: BLE001
+                # The machine cannot run the bridge at all (no
+                # node): say so by name, once per throttled attempt
+                # — never a crash-loop, never a bare "failed".
+                change = {"account": rec.id,
+                          "change": f"relaunch blocked: {exc}"}
             except Exception as exc:  # noqa: BLE001
                 change = {"account": rec.id,
                           "change": f"relaunch failed: {exc}"}
