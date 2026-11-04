@@ -561,6 +561,137 @@ class RuntimeProvisionMixin:
         self._pair_personal_svc = svc
         return svc
 
+    #: Tag on last_error values THIS reconcile wrote, so a later
+    #: successful attach clears exactly its own notes and never a
+    #: bridge error the supervisor recorded.
+    _WA_SURFACE_NOTE_PREFIX = "chat surface: "
+
+    def _wa_surface_note(self, sup: Any, rec_id: str, note: str) -> str:
+        """Record a surface failure on the account (visible in
+        /pair) and return it for the caller's reply. Never raises."""
+        try:
+            if rec_id:
+                sup.registry.set_error(
+                    rec_id, self._WA_SURFACE_NOTE_PREFIX + note)
+        except Exception as exc:  # noqa: BLE001 - noting never dies
+            record_failure("runtime_provision.wa_surface_note", exc)
+        return note
+
+    def _wa_surface_clear_note(self, sup: Any, rec: Any) -> None:
+        """A successful attach retires this reconcile's own earlier
+        failure note on the account. Never raises."""
+        try:
+            if rec is not None and str(
+                    getattr(rec, "last_error", "") or "").startswith(
+                    self._WA_SURFACE_NOTE_PREFIX):
+                sup.registry.set_error(rec.id, "")
+        except Exception as exc:  # noqa: BLE001
+            record_failure("runtime_provision.wa_surface_clear", exc)
+
+    def _sync_whatsapp_surface(self) -> str:
+        """Live-attach the WhatsApp conversational surface to the pool.
+
+        The gateway's whatsapp adapter is built ONCE at boot against
+        the static config endpoint, and gateway start drops it when
+        no bridge is listening yet (the adapter's preflight) — so an
+        account paired mid-session used to stay conversationally
+        dark until a restart that happened to coincide with a live
+        bridge.  This reconcile runs on the pairing lifecycle points
+        (/pair whatsapp|start|stop|restart|remove|use) and on the
+        supervision beat, and keeps exactly one truth: the resolved
+        WhatsApp account (the §15 routing primitive: primary → first
+        linked → first registered) whose bridge is live gets an
+        adapter pointed at ITS bridge port, started in the running
+        process via the gateway's own ``start_one`` — the same path
+        /start whatsapp takes; when no account qualifies any more,
+        an adapter this reconcile attached (or adopted — one already
+        serving that very bridge) is stopped again.  An adapter
+        running for a bridge outside the pool is left alone whenever
+        the pool has no qualifying account: the reconcile only ever
+        stops what it owns (``_wa_surface_account``).
+
+        Returns "" on success/no-op, else a plain-words note naming
+        why the surface did not come up; the note is ALSO recorded
+        on the account's ``last_error`` (tagged, see
+        ``_WA_SURFACE_NOTE_PREFIX``) so the supervision-beat caller —
+        which has no reply to append to — still surfaces it in
+        /pair, never silently.  Never raises."""
+        desired_id = ""
+        try:
+            gateway = getattr(self, "gateway", None)
+            if gateway is None:
+                return ""
+            from ...social.pairing import resolve_account
+
+            sup = self._pairing_supervisor()
+            rec = resolve_account(sup.registry, "whatsapp")
+            desired_port = 0
+            if rec is not None and rec.port and (
+                    rec.status == "linked" or sup.is_running(rec.id)):
+                desired_id = rec.id
+                desired_port = int(rec.port)
+            attached = getattr(self, "_wa_surface_account", "") or ""
+            running = gateway.adapters.get("whatsapp")
+            running_live = bool(
+                running is not None
+                and getattr(running, "_thread", None) is not None
+                and running._thread.is_alive())
+            if not desired_id:
+                if attached:
+                    gateway.stop_one("whatsapp")
+                    self._wa_surface_account = ""
+                return ""
+            if running_live and int(
+                    getattr(running, "port", 0) or 0) == desired_port:
+                # Already serving this account's bridge (boot start
+                # or an earlier attach): adopt it so a later removal
+                # of the account still tears the surface down.
+                self._wa_surface_account = desired_id
+                self._wa_surface_clear_note(sup, rec)
+                return ""
+            if running is not None:
+                gateway.stop_one("whatsapp")
+            from ...social.chat import build_adapter
+
+            adapter = build_adapter(self.settings, "whatsapp",
+                                    whatsapp_port=desired_port)
+            if adapter is None:
+                # chat.whatsapp_enabled is off — paired but
+                # surfaceless; say so on the record AND the reply.
+                self._wa_surface_account = ""
+                return self._wa_surface_note(
+                    sup, desired_id,
+                    "the WhatsApp platform is disabled in config "
+                    "(chat.whatsapp_enabled=false) — this account "
+                    "has no live chat surface until it's enabled")
+            result = gateway.start_one("whatsapp", self.on_message,
+                                       adapter=adapter)
+            if result.get("ok") or "already running" in str(
+                    result.get("error") or ""):
+                self._wa_surface_account = desired_id
+                self._wa_surface_clear_note(sup, rec)
+                _log.info("whatsapp surface live-attached to %s "
+                          "(bridge port %s)", desired_id, desired_port)
+                return ""
+            _log.warning("whatsapp surface attach for %s failed: %s",
+                         desired_id, result.get("error"))
+            return self._wa_surface_note(
+                sup, desired_id,
+                "the WhatsApp chat surface didn't start: "
+                f"{result.get('error') or 'unknown error'}")
+        except Exception as e:  # noqa: BLE001 - reconcile never
+            record_failure(       # breaks intake or a /pair reply
+                "runtime_provision.wa_surface_sync", e)
+            if desired_id:
+                try:
+                    sup = self._pairing_supervisor()
+                    return self._wa_surface_note(
+                        sup, desired_id,
+                        f"the WhatsApp chat surface didn't start: {e}")
+                except Exception:  # noqa: BLE001 - noting is best-effort
+                    pass
+            return ""
+
     def _personal_surface_turn(self, message: Any) -> bool:
         """Observe one inbound message for the §15 personal surfaces.
 
@@ -594,6 +725,10 @@ class RuntimeProvisionMixin:
             except Exception as e:  # noqa: BLE001 - housekeeping
                 record_failure(           # never breaks intake
                     "runtime_provision.supervision_sweep", e)
+            # Same beat: a bridge the sweep just relaunched, or a
+            # probe-earned "linked", raises the conversational
+            # surface in this process — no restart (live-attach).
+            self._sync_whatsapp_surface()
             try:
                 personal.cycle_stories("telegram")
             except Exception as e:  # noqa: BLE001
@@ -731,6 +866,21 @@ class RuntimeProvisionMixin:
                 lines.append(
                     f"  {row['id']}{label} — {row['status']}"
                     f" (bridge {row['process']}){extra}")
+            # Paired-and-linked but surfaceless is a state the owner
+            # must be able to SEE: the platform config gates the
+            # conversational adapter, never the pairing itself.
+            _ctx = getattr(self, "context", None)
+            chat_cfg = getattr(
+                getattr(_ctx, "settings", None), "chat", None)
+            if chat_cfg is not None and not getattr(
+                    chat_cfg, "whatsapp_enabled", True) and any(
+                    r.platform == "whatsapp" and r.status == "linked"
+                    for r in sup.registry.all()):
+                lines.append(
+                    "⚠️ WhatsApp is paired and linked, but the "
+                    "WhatsApp platform is disabled in config "
+                    "(chat.whatsapp_enabled=false) — paired accounts "
+                    "have no live chat surface until it's enabled.")
             lines.append("pair one: /pair whatsapp <number> [label] "
                          "· /pair telegram <number> [label]")
             return "\n".join(lines)
@@ -749,19 +899,27 @@ class RuntimeProvisionMixin:
                 # reply, never the runtime's "blew up" traceback
                 # digest.
                 return f"⚠️ {exc}"
+            # The bridge is launched: attach the conversational
+            # surface to it NOW, so the moment the link completes
+            # the account is live in this process (live-attach).
+            # A surface failure rides THIS reply — never silent.
+            surface_note = self._sync_whatsapp_surface()
             import time as _time
 
             for _ in range(50):  # up to ~25s for WhatsApp to issue it
                 got = sup.pairing_code(rec.id)
                 if got:
                     code, _age = got
-                    return (
+                    reply = (
                         f"📟 pairing code for +{rec.identity}: "
                         f"**{code}**\nOn that phone: WhatsApp → "
                         "Linked Devices → Link a device → “Link with "
                         "phone number instead” → enter the code. It "
                         "expires in a few minutes — once linked, the "
                         "account is a live Devon session.")
+                    if surface_note:
+                        reply += f"\n⚠️ {surface_note}"
+                    return reply
                 reason = sup.pairing_error(rec.id)
                 if reason:
                     # The bridge died or WhatsApp refused during
@@ -769,9 +927,12 @@ class RuntimeProvisionMixin:
                     # issued the code yet".
                     return f"⚠️ {reason}"
                 _time.sleep(0.5)
-            return (f"bridge started for +{rec.identity} "
-                    f"({rec.id}) — WhatsApp hasn't issued the code "
-                    f"yet. /pair code {rec.id} in a few seconds.")
+            reply = (f"bridge started for +{rec.identity} "
+                     f"({rec.id}) — WhatsApp hasn't issued the code "
+                     f"yet. /pair code {rec.id} in a few seconds.")
+            if surface_note:
+                reply += f"\n⚠️ {surface_note}"
+            return reply
         if sub == "code":
             rec = self._pair_find(sup, parts[1] if len(parts) > 1 else "")
             if rec is None:
@@ -871,12 +1032,17 @@ class RuntimeProvisionMixin:
                     sup.start(rec.id)
                 except PairingUnavailable as exc:
                     return f"⚠️ {exc}"
+                surface_note = self._sync_whatsapp_surface()
                 note = self._pair_launch_note(sup, rec)
                 if note:
                     return note
+                if surface_note:
+                    return (f"▶️ bridge starting for {rec.id}."
+                            f"\n⚠️ {surface_note}")
                 return f"▶️ bridge starting for {rec.id}."
             if sub == "stop":
                 sup.stop(rec.id)
+                self._sync_whatsapp_surface()
                 return f"⏸️ bridge stopped for {rec.id}."
             if sub == "restart":
                 sup.stop(rec.id)
@@ -884,11 +1050,16 @@ class RuntimeProvisionMixin:
                     sup.start(rec.id)
                 except PairingUnavailable as exc:
                     return f"⚠️ {exc}"
+                surface_note = self._sync_whatsapp_surface()
                 note = self._pair_launch_note(sup, rec)
                 if note:
                     return note
+                if surface_note:
+                    return (f"🔁 bridge restarted for {rec.id}."
+                            f"\n⚠️ {surface_note}")
                 return f"🔁 bridge restarted for {rec.id}."
             sup.remove(rec.id)
+            self._sync_whatsapp_surface()
             return (f"🗑️ {rec.id} removed from the pool. Its saved "
                     "session stays on disk; the number can be paired "
                     "again any time.")
@@ -898,9 +1069,17 @@ class RuntimeProvisionMixin:
             if rec is None:
                 return "which account? /pair lists them."
             sup.registry.set_primary(rec.id)
-            return (f"🎯 {rec.id} is now the default {rec.platform} "
-                    "account — surfaces that act as you on "
-                    f"{rec.platform} use it unless they name another.")
+            surface_note = ""
+            if rec.platform == "whatsapp":
+                # The conversational surface serves the resolved
+                # (primary-first) account — follow the switch.
+                surface_note = self._sync_whatsapp_surface()
+            reply = (f"🎯 {rec.id} is now the default {rec.platform} "
+                     "account — surfaces that act as you on "
+                     f"{rec.platform} use it unless they name another.")
+            if surface_note:
+                reply += f"\n⚠️ {surface_note}"
+            return reply
         if sub == "route":
             from ...social.pairing import resolve_account
 

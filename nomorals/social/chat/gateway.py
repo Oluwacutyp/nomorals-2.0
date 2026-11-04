@@ -54,8 +54,17 @@ from .platform_limits import for_platform
 from .send_retry import send_with_retry
 from .failures import record_failure
 
-__all__ = ["ChatGateway", "OwnerTarget", "parse_chat_keys",
-           "resolve_owner_targets"]
+__all__ = ["ChatGateway", "OwnerTarget", "PLATFORM_CATALOGUE",
+           "parse_chat_keys", "resolve_owner_targets"]
+
+#: Every platform the builder can construct, in boot order. The
+#: single catalogue behind ``build_adapters`` and the /platforms
+#: listing: a platform that was never built (not in the boot set,
+#: never hot-started) must still be VISIBLE as startable, or the
+#: owner cannot discover that /start <platform> exists.
+PLATFORM_CATALOGUE = (
+    "local", "telegram", "telegram-bot", "telegram-personal",
+    "discord", "whatsapp", "webhook", "sms")
 
 _log = get_logger(__name__)
 
@@ -308,7 +317,11 @@ class ChatGateway:
 
     # ── hot start/stop (control commands) ───────────────────────────────────
     def known_platforms(self) -> list[str]:
-        return sorted(self._known)
+        """Every platform the owner could start here: the ones this
+        gateway was built with PLUS the builder's whole catalogue —
+        a never-built platform is known-but-not-running, not
+        unknown."""
+        return sorted(set(self._known) | set(PLATFORM_CATALOGUE))
 
     def set_rate_limit(self, limit: int) -> None:
         """Change the per-chat hourly inbound cap live.
@@ -326,10 +339,17 @@ class ChatGateway:
         for window in windows:
             window.set_limit(self._max_per_hour)
 
-    def start_one(self, name: str, handler: IncomingHandler) -> dict[str, Any]:
+    def start_one(self, name: str, handler: IncomingHandler,
+                  adapter: ChatAdapter | None = None) -> dict[str, Any]:
+        """Hot-start one platform. An explicit *adapter* supersedes
+        the known instance and the builder — the pairing live-attach
+        reconcile builds the WhatsApp adapter against the resolved
+        account's own bridge port, which neither the boot-time known
+        instance nor the config-driven builder can know."""
         name = name.strip().lower()
-        with self._adapters_guard:
-            adapter = self._known.get(name)
+        if adapter is None:
+            with self._adapters_guard:
+                adapter = self._known.get(name)
         if adapter is None and self._adapter_builder is not None:
             try:
                 adapter = self._adapter_builder(name)
@@ -510,7 +530,12 @@ class ChatGateway:
             message.chat,
             owner_chats=self.owner_chats,
             db_is_owner=bool(row.get("is_owner")),
-        )
+        ) or (message.meta or {}).get("self_chat") is True
+        # The self_chat verdict rides alongside the single owner test:
+        # the WhatsApp adapter stamps it only for the paired account's
+        # own "Message yourself" chat — a surface only the account
+        # owner can write in. The runtime's operator test honors the
+        # same stamp, so the two can never disagree.
         # Stash the owner verdict on the message so downstream (runtime
         # command gating) uses the same answer instead of recomputing it
         # with less information.

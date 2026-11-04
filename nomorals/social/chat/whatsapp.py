@@ -303,6 +303,14 @@ def _wa_envelope(obj: dict[str, Any], text: str) -> dict[str, Any]:
             "sticker": sticker, "raw_len": len(text)}
 
 
+def _jid_user_part(jid: str) -> str:
+    """The user part of a JID: ``2348012345678:12@s.whatsapp.net``
+    → ``2348012345678``. Device parts and domains are addressing
+    detail; identity comparisons key off this."""
+    local = (jid or "").split("@", 1)[0]
+    return local.split(":", 1)[0].strip()
+
+
 class WhatsAppAdapter(ChatAdapter):
     """Client for the local WhatsApp bridge (bridge/bin/ Go program
     by default, or the Node bridge/whatsapp-bridge.mjs)."""
@@ -350,6 +358,14 @@ class WhatsAppAdapter(ChatAdapter):
         #: Bounded — only the freshest few hundred are kept.
         self._receipts: dict[str, dict[str, Any]] = {}
         self._receipts_lock = threading.Lock()
+        #: Message ids THIS adapter sent (bridge-assigned, from send
+        #: responses): the bridge echoes Devon's own sends back as
+        #: own_message events, and the self-chat carve-out below must
+        #: tell her echoes apart from the owner typing on his phone.
+        #: Bounded by count and age — an id is only meaningful while
+        #: its echo could still plausibly arrive.
+        self._sent_ids: dict[str, float] = {}
+        self._sent_ids_lock = threading.Lock()
 
     # ── delivery receipts ────────────────────────────────────────────────
     def delivery_status(self, message_id: str) -> dict[str, Any] | None:
@@ -374,6 +390,51 @@ class WhatsAppAdapter(ChatAdapter):
                                 key=lambda kv: kv[1].get("ts", 0.0))[:100]
                 for key, _ in oldest:
                     self._receipts.pop(key, None)
+
+    # ── own-send echoes + the self-chat ─────────────────────────────
+    def _note_sent_id(self, message_id: str) -> None:
+        """Remember a bridge-assigned id this adapter just sent."""
+        message_id = str(message_id or "")
+        if not message_id:
+            return
+        now = time.time()
+        with self._sent_ids_lock:
+            self._sent_ids[message_id] = now
+            if len(self._sent_ids) > 512:
+                stale = [k for k, ts in self._sent_ids.items()
+                         if now - ts > 600.0]
+                for key in stale:
+                    self._sent_ids.pop(key, None)
+                while len(self._sent_ids) > 512:
+                    oldest = min(self._sent_ids,
+                                 key=lambda k: self._sent_ids[k])
+                    self._sent_ids.pop(oldest, None)
+
+    def _was_sent_by_me(self, message_id: str) -> bool:
+        """True when *message_id* is one of this adapter's own sends
+        echoing back through the bridge's own_message feed."""
+        message_id = str(message_id or "")
+        if not message_id:
+            return False
+        with self._sent_ids_lock:
+            ts = self._sent_ids.get(message_id)
+        return ts is not None and (time.time() - ts) <= 600.0
+
+    def _is_self_chat(self, chat_id: str, kind: str) -> bool:
+        """True when *chat_id* is this account's own "Message
+        yourself" chat: a DM whose JID is the account's own JID
+        (the ``user`` the bridge reports in its status events).
+        Groups and broadcasts are never the self-chat, and while
+        the account's own JID is unknown (no status event yet)
+        nothing is — the persist-only default is the safe side."""
+        if not chat_id or not self.user_jid:
+            return False
+        if (kind or "").strip().lower() == str(ChatKind.GROUP):
+            return False
+        if chat_id.endswith("@g.us") or chat_id == "status@broadcast":
+            return False
+        mine = _jid_user_part(self.user_jid)
+        return bool(mine) and _jid_user_part(chat_id) == mine
 
     # ── outbox ───────────────────────────────────────────────────────────
     def _chat_from_entry(self, entry: dict[str, Any]) -> ChatRef:
@@ -573,6 +634,19 @@ class WhatsAppAdapter(ChatAdapter):
             # The owner's own outgoing message (shared-account mode).
             # Persist-only: the brain records it (double-reply discipline,
             # per-chat profile) and stays silent — never replies to self.
+            #
+            # ONE carve-out: the account's own self-chat ("Message
+            # yourself"). A message the owner types there is written
+            # in a chat with nobody else in it — it can only be FOR
+            # Devon — so it is delivered as an owner DM turn
+            # (incoming, from_owner, self_chat) and commands and
+            # conversation route exactly like the Telegram owner DM.
+            # The bridge echoes Devon's own sends through this same
+            # event, so ids she sent are checked first: her reply's
+            # echo stays persist-only, or she would answer herself
+            # forever. Own messages in every other chat — DMs with
+            # other people, groups — keep the persist-only discipline
+            # untouched: she never replies as the owner mid-chat.
             chat = obj.get("chat") or {}
             chat_id = str(chat.get("id") or "")
             if not chat_id:
@@ -582,18 +656,41 @@ class WhatsAppAdapter(ChatAdapter):
                 ts = float(ts) / 1000.0
             except (TypeError, ValueError):
                 ts = time.time()
+            chat_kind = str(chat.get("kind") or ChatKind.DM)
+            message_id = str(obj.get("id") or "")
+            if not self._was_sent_by_me(message_id) and \
+                    self._is_self_chat(chat_id, chat_kind):
+                turn = ChatMessage(
+                    chat=ChatRef(
+                        platform=self.name,
+                        chat_id=chat_id,
+                        kind=chat_kind,
+                        title=str(chat.get("title") or ""),
+                        peer=chat_id,
+                    ),
+                    incoming=True,
+                    text=str(obj.get("text") or ""),
+                    sender=str(obj.get("name") or ""),
+                    sender_id=self.user_jid,
+                    message_id=message_id,
+                    ts=ts,
+                )
+                turn.meta["from_owner"] = True
+                turn.meta["self_chat"] = True
+                self._deliver(handler, turn)
+                return
             msg = ChatMessage(
                 chat=ChatRef(
                     platform=self.name,
                     chat_id=chat_id,
-                    kind=str(chat.get("kind") or ChatKind.DM),
+                    kind=chat_kind,
                     title=str(chat.get("title") or ""),
                     peer=chat_id,
                 ),
                 incoming=False,
                 text=str(obj.get("text") or ""),
                 sender="",
-                message_id=str(obj.get("id") or ""),
+                message_id=message_id,
                 ts=ts,
             )
             msg.meta["own_message"] = True
@@ -838,6 +935,7 @@ class WhatsAppAdapter(ChatAdapter):
                 # WhatsApp message id rides in ``message_id`` (it is
                 # the key space delivery receipts use; the request id
                 # matched nothing and made receipts unresolvable).
+                self._note_sent_id(str(response.get("message_id") or ""))
                 return SendResult(ok=True, platform=self.name,
                                   message_id=str(response.get("message_id") or ""),
                                   seconds=time.perf_counter() - started)
@@ -933,6 +1031,7 @@ class WhatsAppAdapter(ChatAdapter):
         response = self._send_cmd(cmd, timeout=60)
         if response.get("ok"):
             self.stats["sent"] += 1
+            self._note_sent_id(str(response.get("message_id") or ""))
             return SendResult(ok=True, platform=self.name,
                               message_id=str(response.get("message_id") or ""),
                               seconds=time.perf_counter() - started)

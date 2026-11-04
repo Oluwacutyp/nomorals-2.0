@@ -3025,6 +3025,13 @@ class PartnerRuntime(
         meta = getattr(message, "meta", None)
         if isinstance(meta, dict) and meta.get("is_owner") is True:
             return True
+        # The WhatsApp self-chat verdict (adapter-stamped): the paired
+        # account's own "Message yourself" chat is an owner surface by
+        # construction — only the account owner can write there. The
+        # gateway's inbound owner test honors the same stamp, so the
+        # two can never disagree.
+        if isinstance(meta, dict) and meta.get("self_chat") is True:
+            return True
         # Sender-id allowlist: the owner's Telegram user id, same number
         # on every Telegram surface. Covers the personal bot and userbot,
         # where the chat key carries an adapter prefix the owner never
@@ -3931,12 +3938,26 @@ class PartnerRuntime(
 
         if kind == "platforms":
             lines = ["platforms:"]
+            seen: set[str] = set()
             for name, info in sorted(self.gateway.status().items()):
                 if name.startswith("_") or not isinstance(info, dict):
                     continue
+                seen.add(name)
                 state = "running" if info.get("running_in_session") else "not running"
                 suffix = "" if info.get("running") else " (adapter thread down)"
                 lines.append(f"  {name}: {state}{suffix}")
+            # Known-but-never-built platforms (not in the boot set,
+            # never hot-started) are invisible in gateway.status()
+            # — list them from the catalogue with the way to start
+            # them, so the switch is findable from this surface.
+            try:
+                known = self.gateway.known_platforms()
+            except Exception:  # noqa: BLE001 - listing never dies
+                known = []
+            for name in known:
+                if name not in seen:
+                    lines.append(
+                        f"  {name}: not running — start with /start {name}")
             return "\n".join(lines)
 
         if kind == "start":

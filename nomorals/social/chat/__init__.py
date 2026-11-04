@@ -46,7 +46,7 @@ from .conformance import (
     base_send_signature,
     check_adapter_conformance,
 )
-from .gateway import ChatGateway, parse_chat_keys
+from .gateway import PLATFORM_CATALOGUE, ChatGateway, parse_chat_keys
 from .local import LocalAdapter
 from .outbox import Outbox, parse_since
 from .platform_limits import PlatformLimits, all_limits, for_platform, register_limits
@@ -60,6 +60,7 @@ from .send_retry import (
 __all__ = [
     "ChatAdapter",
     "ChatGateway",
+    "PLATFORM_CATALOGUE",
     "ChatKind",
     "ChatMessage",
     "ChatRef",
@@ -101,9 +102,16 @@ def _split_ids(raw: Any) -> set[str]:
 
 
 def build_adapter(settings: Any, name: str, *, on_new_member: Any = None,
-                  db: Any = None) -> ChatAdapter | None:
+                  db: Any = None,
+                  whatsapp_port: int | None = None) -> ChatAdapter | None:
     """Build one adapter by name; None when unavailable (missing dependency,
-    disabled, or bad credentials). Used both at boot and for hot starts."""
+    disabled, or bad credentials). Used both at boot and for hot starts.
+
+    ``whatsapp_port`` overrides the configured bridge port for the
+    whatsapp adapter — the pairing pool launches one bridge per
+    account on its own port, and the live-attach reconcile points
+    the conversational adapter at the resolved account's bridge
+    rather than the static config endpoint."""
     name = name.strip().lower()
     chat = settings.chat
     if name == "local":
@@ -210,7 +218,7 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None,
 
             return WhatsAppAdapter(
                 host=chat.whatsapp_host,
-                port=chat.whatsapp_port,
+                port=int(whatsapp_port) if whatsapp_port else chat.whatsapp_port,
                 media_dir=str(settings.resolve("data/media/whatsapp")),
                 outbox_dir=str(settings.resolve(
                     getattr(chat, "whatsapp_outbox_dir", "")
@@ -293,8 +301,7 @@ def build_adapters(
     wanted = {p.strip().lower() for p in (partner.platforms or "").split(",") if p.strip()}
     adapters: dict[str, ChatAdapter] = {}
     skipped: list[str] = []
-    for name in ("local", "telegram", "telegram-bot", "telegram-personal",
-                 "discord", "whatsapp", "webhook", "sms"):
+    for name in PLATFORM_CATALOGUE:
         if name not in wanted and not (name == "local" and settings.chat.local_enabled):
             continue
         try:
