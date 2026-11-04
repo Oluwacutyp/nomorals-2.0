@@ -1028,6 +1028,7 @@ class BattleArenaGame(MultiGame):
         return {"you": fighter(), "house": fighter(),
                 "done": False, "consumed": {}, "gear_wear": {},
                 "combo_triggers": 0,
+                "dmg_dealt": 0,          # HP the player has taken off the house (the score)
                 "gear_base": {"atk": 10, "def": 5}, "set_bonus": None,
                 # ── achievement tracking ──
                 "turns": 0,              # player turns taken
@@ -1628,8 +1629,16 @@ class BattleArenaGame(MultiGame):
         a, d = s[src], s[dst]
         crit_bonus = (float(s.get("crit_bonus") or 0.0)
                       if src == "you" else 0.0)
+        pre_hp = int(d.get("hp", 0))
         rep = strike(a, d, mind.rng, mult=mult, ignore_def=ignore_def,
                      crit_bonus=crit_bonus)
+        if src == "you":
+            # the player's performance ledger: HP actually removed
+            # (a shielded blow counts what it burned, a kill counts
+            # the HP that was there — never the overkill excess)
+            dealt = max(0, pre_hp - max(0, int(d.get("hp", 0))))
+            if dealt:
+                s["dmg_dealt"] = int(s.get("dmg_dealt", 0)) + dealt
         if rep["dodged"]:
             return (f"{src} swings — and hits only air. "
                     f"shadow step dodged it clean.")
@@ -1683,7 +1692,12 @@ class BattleArenaGame(MultiGame):
                 if src == "you":
                     s["combo_triggers"] = int(s.get("combo_triggers", 0)) + 1
                 second = max(1, int((a["atk"] - d["def"] // 2) * 0.7))
+                pre_combo = int(d["hp"])
                 d["hp"] -= second
+                if src == "you":
+                    dealt = max(0, pre_combo - max(0, int(d["hp"])))
+                    if dealt:
+                        s["dmg_dealt"] = int(s.get("dmg_dealt", 0)) + dealt
                 msg += (f" ⚡ {a.get('combo_name', 'combo')}! "
                         f"a second strike for {second} — "
                         f"{dst} at {max(0, d['hp'])} HP.")
@@ -2316,7 +2330,13 @@ class BattleArenaGame(MultiGame):
         from ..combat import tick_fighter
         s = room.state
         house = s["house"]
+        pre_hp = int(house.get("hp", 0))
         out.extend(tick_fighter(house, s.get("house_skill_cd")))
+        # the only venom on the house is the player's — its burn is
+        # damage the player dealt, and it counts toward the score
+        burned = max(0, pre_hp - max(0, int(house.get("hp", 0))))
+        if burned:
+            s["dmg_dealt"] = int(s.get("dmg_dealt", 0)) + burned
         # venom can finish the house before it acts
         if self._check(room):
             return
@@ -2378,6 +2398,34 @@ class BattleArenaGame(MultiGame):
             return Player(key="ai:arena", platform="ai",
                           name="The House", is_ai=True)
         return None
+
+    def score(self, room, player):
+        """Performance score: the damage the player dealt this fight.
+
+        ``dmg_dealt`` accumulates where damage is actually applied
+        (strikes and skills in ``_hit``, combo second strikes, and
+        the player's venom burning in ``_house_act``), so a loss
+        still scores the beating the player gave — winning is
+        ``winner()``'s job, not the score's. Landing the kill adds a
+        finish bonus: a flat purse for the kill, more for walking
+        away with your own HP intact, and half again for a brutal
+        finish. A fight where the player did nothing scores 0.
+        """
+        if player is not None and getattr(player, "is_ai", False):
+            return 0
+        s = room.state
+        dmg = int(s.get("dmg_dealt", 0) or 0)
+        if dmg <= 0:
+            return 0
+        total = dmg
+        if int(s.get("house", {}).get("hp", 1)) <= 0:
+            you = s.get("you", {})
+            max_hp = max(1, int(you.get("max_hp", 50) or 50))
+            hp_left = max(0, int(you.get("hp", 0) or 0))
+            total += 25 + int(25 * hp_left / max_hp)
+            if s.get("brutal_finish") == "you":
+                total += dmg // 2
+        return total
 
     def describe_state(self, room):
         s = room.state

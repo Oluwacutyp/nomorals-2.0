@@ -32,6 +32,40 @@ from .purse import BoundPurse, StorePurseBackend
 from .engine_failures import record_failure
 
 
+def _collapse_dup_lines(items: list[str]) -> list[str]:
+    """Collapse identical consecutive lines across an assembled output.
+
+    Chat output is assembled from many hands — a game's own lines, the
+    settle lines, the cards. When two of them independently append the
+    same line back-to-back, the table sees it once. Two shapes count:
+    a line repeated verbatim (across or within items), and an item
+    that repeats the trailing line of the item before it (an arena
+    skill message already ends with the win line; its caller then
+    appends that same win line as its own item). Only exact,
+    non-empty, immediately repeated lines collapse — short echoes and
+    deliberate non-consecutive repeats pass through untouched.
+    """
+    out: list[str] = []
+    prev: str | None = None
+    for item in items:
+        raw = str(item)
+        lines = raw.split("\n")
+        if len(lines) == 1 and raw.strip() and len(raw.strip()) >= 12 \
+                and prev is not None and prev.strip() \
+                and (prev == raw or prev.endswith(" " + raw)):
+            continue  # the previous item already ends with this line
+        kept: list[str] = []
+        for line in lines:
+            if line.strip() and line == prev:
+                continue
+            kept.append(line)
+            prev = line
+        text = "\n".join(kept)
+        if text or not raw:
+            out.append(text)
+    return out
+
+
 def render_game_over_card(game_name: str, players: list[Player],
                           scores: dict[str, int],
                           winner_label: str = "",
@@ -278,9 +312,25 @@ class GameEngine:
         the finish drain passes ``force=True`` so the last moments
         still get their scene. Never raises — a silent DM beats a
         broken game.
+
+        One narration per moment: every event text this room narrates
+        is remembered in ``_dm_narrated`` and never narrated again,
+        and when a drain narrates while the game is already over, the
+        room is marked ``_dm_end_narrated`` — the finish path checks
+        both before letting a ``dm_finale`` game tell its ending a
+        second time.
         """
         feed = room.state.pop("_dm_feed", None)
         if not feed:
+            return
+        narrated: list[str] = room.state.setdefault("_dm_narrated", [])
+        fresh: list[Any] = []
+        for item in feed:
+            text = item.get("text") if isinstance(item, dict) else str(item)
+            if text and str(text).strip() in narrated:
+                continue  # this moment already had its narration
+            fresh.append(item)
+        if not fresh:
             return
         now = time.time()
         if not force:
@@ -297,9 +347,21 @@ class GameEngine:
                 except Exception as e:  # noqa: BLE001
                     record_failure("_drain_dm_feed:ensure_cast", e)
                     cast = None
-            line = gm.announce(game.name, feed, cast=cast)
+            line = gm.announce(game.name, fresh, cast=cast)
             if line:
                 out.append(line)
+                for item in fresh:
+                    text = item.get("text") if isinstance(item, dict) \
+                        else str(item)
+                    if text:
+                        narrated.append(str(text).strip())
+                del narrated[:-24]  # bounded room memory
+                try:
+                    over = bool(game.is_over(room))
+                except Exception:  # noqa: BLE001
+                    over = bool(room.state.get("done"))
+                if over:
+                    room.state["_dm_end_narrated"] = True
         except Exception:  # noqa: BLE001
             _log.debug("dm narration failed", exc_info=True)
 
@@ -988,7 +1050,7 @@ class GameEngine:
                 out.extend(self._finish(room))
             else:
                 self._persist(room)
-            return out or []
+            return _collapse_dup_lines(out) or []
         if cmd == "status":
             return [self.describe(room)]
         if cmd == "help":
@@ -1082,7 +1144,7 @@ class GameEngine:
                 out.extend(self._finish(room))
             else:
                 self._persist(room)
-        return out
+        return _collapse_dup_lines(out)
 
     def _is_turn(self, room: Room, sender: Player) -> bool:
         if room.kind == "dm":
@@ -1388,10 +1450,23 @@ class GameEngine:
                 try:
                     evt = game.dm_finale_event(room)
                     if evt:
-                        line = self.dm.announce(
-                            game.name, [{"text": evt, "big": True}])
-                        if line:
-                            msgs.append(line)
+                        # one narration per moment: if the move drain
+                        # (or the drain just above) already narrated
+                        # this ending — same event text, or any
+                        # narration while the game was over — the
+                        # finale does not tell it again.
+                        narrated = room.state.get("_dm_narrated") or []
+                        already = bool(room.state.get("_dm_end_narrated")) \
+                            or evt.strip() in narrated
+                        if not already:
+                            line = self.dm.announce(
+                                game.name, [{"text": evt, "big": True}])
+                            if line:
+                                msgs.append(line)
+                                narrated = list(narrated)
+                                narrated.append(evt.strip())
+                                room.state["_dm_narrated"] = narrated
+                                room.state["_dm_end_narrated"] = True
                 except Exception:  # noqa: BLE001
                     _log.debug("dm finale failed", exc_info=True)
             # victory loot: games with exclusive drops (raid bosses)
@@ -1700,7 +1775,7 @@ class GameEngine:
         # the settle leaves as ONE joined message (see docstring):
         # record it in the room history exactly as _emit would have,
         # then hand it to the caller as a single-element list.
-        settle = "\n".join(m for m in msgs if m)
+        settle = "\n".join(_collapse_dup_lines([m for m in msgs if m]))
         if settle:
             room.messages.append(settle[:4000])
             room.messages = room.messages[-40:]

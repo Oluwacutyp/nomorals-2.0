@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
+from .engine_failures import record_failure
 from .npc import NPCProfile, NPCStore
 
 _log = get_logger(__name__)
@@ -205,6 +206,118 @@ def _safe_game_id(game_id: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", game_id or "default")
 
 
+# ── narration sanitizer ─────────────────────────────────────────────────
+# A model reply is guilty until proven innocent. Small models answer a
+# narration prompt with their reasoning scaffold ("1. Analyze the
+# Request: * Role: … * Constraint Checklist & Confidence Score: …")
+# and, before this guard existed, the scaffold posted to the table
+# verbatim — the class docstring always promised junk falls back to
+# the template forge, but nothing ever checked. Now every prose reply
+# (narrate / npc_speak) passes through here first: scaffold lines are
+# extracted away, what survives is validated as narration, and anything
+# that fails — including a reply that is ALL scaffold — is rejected,
+# journaled, and the caller falls back to the template forge (the code
+# rung). The raw model text never reaches a table.
+
+#: line prefixes that mark reasoning scaffold / preamble, not prose
+_SCAFFOLD_PREFIXES = (
+    "analyze the request", "analysis:", "analysis -", "constraint",
+    "confidence score", "confidence:", "role:", "role -", "format:",
+    "event:", "tone:", "checklist", "requirements:", "requirement:",
+    "the request:", "task:", "instructions:", "instruction:",
+    "narration:", "output:", "response:", "note:", "here is the",
+    "here's the", "here is your", "here's your",
+)
+#: phrases that betray scaffold anywhere in a line
+_SCAFFOLD_ANYWHERE = (
+    "analyze the request", "constraint checklist", "confidence score",
+)
+#: phrases that must never survive into posted narration
+_META_PHRASES = (
+    "as an ai", "language model", "the prompt", "my instructions",
+    "fourth wall", "fourth-wall", "stage direction",
+    "confidence score", "constraint checklist", "analyze the request",
+    "i cannot", "i can't", "the user asked", "the event describes",
+)
+_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+•]|\d{1,2}[.)])\s+")
+_HEADER_RE = re.compile(r"^\s*#{1,6}\s+")
+_BOLD_RE = re.compile(r"\*\*([^*\n]+)\*\*")
+_SPAN_RE = re.compile(r"(?<!\w)_[^_\n]+_(?!\w)|\*[^*\n]+\*")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
+#: per-kind survival limits: (max sentences, max chars)
+_PROSE_LIMITS = {"narrate": (3, 400), "speak": (2, 180)}
+
+
+def _is_scaffold_line(line: str) -> bool:
+    low = line.lower()
+    if _HEADER_RE.match(line) or _LIST_ITEM_RE.match(line):
+        return True
+    if any(p in low for p in _SCAFFOLD_ANYWHERE):
+        return True
+    return any(low.startswith(p) for p in _SCAFFOLD_PREFIXES)
+
+
+def _extract_prose(raw: str) -> str:
+    """Strip scaffold/direction lines; keep only prose lines, joined."""
+    kept: list[str] = []
+    for line in str(raw or "").splitlines():
+        s = line.strip()
+        if not s or _is_scaffold_line(s):
+            continue
+        if _SPAN_RE.fullmatch(s):
+            continue  # a line that is only a stage direction
+        kept.append(s)
+    text = _BOLD_RE.sub(r"\1", " ".join(kept))
+    return " ".join(text.split())
+
+
+def _sanitize_model_line(raw: str, *, kind: str) -> tuple[str, str]:
+    """Validate one model reply for posting. Returns ``(clean, "")``
+    when the reply survives as narration, else ``("", reason)`` — the
+    caller falls back to the template forge, never to the raw text."""
+    max_sentences, max_chars = _PROSE_LIMITS[kind]
+    text = _extract_prose(raw)
+    if not text:
+        return "", "nothing but scaffold"
+    low = text.lower()
+    for phrase in _META_PHRASES:
+        if phrase in low:
+            return "", f"meta phrase {phrase!r}"
+    if _SPAN_RE.search(text):
+        return "", "stage-direction span"
+    sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(text)
+                 if s.strip()]
+    if not sentences:
+        return "", "no sentences"
+    if text[-1] not in '.!?…"”':
+        # cut off mid-thought (the transport caps replies): with
+        # several sentences, keep the complete ones; a lone SHORT
+        # fragment is a complete-feeling line and passes, a lone
+        # long one is a truncation and does not
+        if len(sentences) > 1:
+            sentences = sentences[:-1]
+        elif len(text) > 200:
+            return "", "truncated fragment"
+    if len(sentences) > max_sentences:
+        return "", f"{len(sentences)} sentences over the {max_sentences} cap"
+    clean = " ".join(sentences)
+    if len(clean) > max_chars:
+        return "", f"{len(clean)} chars over the {max_chars} cap"
+    if len(clean) < 10:
+        return "", "too thin to be narration"
+    return clean, ""
+
+
+def _journal_sanitize_reject(kind: str, reason: str, raw: str) -> None:
+    """Held journal entry for a rejected model reply (never posted)."""
+    try:
+        record_failure(
+            f"gamemaster.{kind}_sanitized",
+            ValueError(f"{reason}: {str(raw or '')[:80]!r}"))
+    except Exception:  # noqa: BLE001 - journaling must never break a game
+        _log.debug("sanitize journal failed", exc_info=True)
+
+
 def feed(room: Any, event_text: str, *, big: bool = False) -> None:
     """Push a bare game event onto the room's DM feed.
 
@@ -327,10 +440,20 @@ class GameMaster:
                 f"You are the dungeon master of a chat game, narrating in a "
                 f"{mood} tone. Event: {event}\n{npc_block}"
                 f"Write 1-3 vivid sentences. Stay in a {mood} voice. "
-                f"No stage directions, no fourth-wall breaks."
+                f"No stage directions, no fourth-wall breaks. "
+                f"Reply with the narration only — no analysis, no "
+                f"preamble, no list.",
+                # generous transport cap: the sanitizer bounds what
+                # posts — a tight cap here would amputate the reply
+                # mid-scaffold before extraction can recover the
+                # narration buried after it
+                max_len=1200,
             )
             if reply:
-                return reply
+                clean, reason = _sanitize_model_line(reply, kind="narrate")
+                if clean:
+                    return clean
+                _journal_sanitize_reject("narrate", reason, reply)
         # — template forge —
         with self._lock:
             bank = _NARRATE_TEMPLATES[mood]
@@ -374,11 +497,15 @@ class GameMaster:
                 + "\n".join(f"- {m['text']}"
                             for m in npc.recall(situation, limit=3))
                 + f"\n\nSpeak as {npc.name}: one or two sentences, in your "
-                f"voice. Stay in character.",
-                max_len=300,
+                f"voice. Stay in character. Reply with the line only — "
+                f"no analysis, no preamble, no stage directions.",
+                max_len=800,  # sanitizer bounds the output, not the cap
             )
             if reply:
-                return reply
+                clean, reason = _sanitize_model_line(reply, kind="speak")
+                if clean:
+                    return clean
+                _journal_sanitize_reject("npc_speak", reason, reply)
         # — template forge —
         valence = npc.mood.get("valence", 0.0)
         band = "bright" if valence >= 0.4 else "dark" if valence <= -0.4 \
