@@ -1815,6 +1815,15 @@ class GameEngine:
             return True
         if isinstance(winner, Player):
             return winner.key == player.key
+        if isinstance(winner, str):
+            # A string outside the winner() contract ("draw"/"all"
+            # returned above) — the census pin should have caught the
+            # game at build time. Journal it so the violation is
+            # visible in the logs instead of silently paying a draw;
+            # a draw stays the least-wrong runtime settle.
+            _log.debug("unknown winner value %r from game %s — "
+                       "settling as draw", winner,
+                       getattr(game, "name", "?"))
         return None
 
     @staticmethod

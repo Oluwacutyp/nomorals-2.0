@@ -1574,7 +1574,8 @@ class TwentyQuestionsGame(MultiGame):
         if done == "table":
             return room.humans[0] if room.humans else "draw"
         if done == "house":
-            return "house"
+            return Player(key="ai:20q", platform="ai", name="The House",
+                          is_ai=True)
         return None
 
     def score(self, room, player):
@@ -1633,7 +1634,8 @@ class RpsGame(MultiGame):
         if done == "table":
             return room.humans[0] if room.humans else "draw"
         if done == "house":
-            return "house"
+            return Player(key="ai:rps", platform="ai", name="The House",
+                          is_ai=True)
         return None
 
     def score(self, room, player):
@@ -1689,7 +1691,8 @@ class DigitMemoryGame(MultiGame):
         if room.state.get("done") == "table":
             return room.humans[0] if room.humans else "draw"
         if room.state.get("done") == "house":
-            return "house"
+            return Player(key="ai:digits", platform="ai", name="The House",
+                          is_ai=True)
         return None
 
     def score(self, room, player):

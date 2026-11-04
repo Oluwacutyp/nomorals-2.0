@@ -348,7 +348,19 @@ class MultiGame:
         return room.status == "finished"
 
     def winner(self, room: Room) -> Player | str | None:
-        """The winning player, "draw", or None (no winner)."""
+        """The winner, in the ONLY shapes the engine understands:
+
+        - the winning seat's ``Player`` — when the house/AI wins that
+          is the house seat's Player (``is_ai=True``), never a string;
+        - ``"draw"`` — nobody won;
+        - ``"all"`` — co-op victory: every human at the table won;
+        - ``None`` — no winner (yet, or the game names none).
+
+        Any other value is a contract violation: the settle reads it
+        as a draw, so a house win would pay out as one. The census
+        pin (tests/test_games_house_winner.py) fails the build on a
+        winner() that invents a new value.
+        """
         return None
 
     def finish_won(self, room: Room, player: Player) -> bool | None | str:
