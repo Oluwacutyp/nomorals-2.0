@@ -1152,6 +1152,30 @@ class GroupConflict:
         self._save_state(group_id, state)
         return {"ok": True, "amount": int(amount), "gang": gang}
 
+    def gang_skim_credit(self, group_id: str, gang_id: str,
+                         amount: int, *, now: float
+                         ) -> dict[str, Any]:
+        """Credit a conversion skim (§25) to a gang's treasury.
+
+        The estate leg (sparks into the group treasury) is the
+        exchange's; this is the sub-account half — the gang's
+        internal treasury number rises by the skim the exchange
+        already moved, journaled here like every gang money
+        fact.  Nothing is minted: the skim came out of a
+        member's converted amount."""
+        amount = int(amount)
+        if amount <= 0:
+            return {"ok": False, "reason": "amount"}
+        state = self._load_state(group_id)
+        gang = (state.get("gangs") or {}).get(str(gang_id))
+        if gang is None:
+            return {"ok": False, "reason": "gone"}
+        gang["treasury"] = int(gang.get("treasury") or 0) + amount
+        self._journal(state, "gang_skim", now, gang=str(gang_id),
+                      amount=amount)
+        self._save_state(group_id, state)
+        return {"ok": True, "amount": amount, "gang": gang}
+
     def gang_withdraw(self, group_id: str, actor: str,
                       amount: int, *, now: float,
                       to: str | None = None) -> dict[str, Any]:

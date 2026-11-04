@@ -381,7 +381,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "tl": (0, None),          # alias of /translate
     "steal": (0, None),       # /steal [tags] — claim replied media into her library (§21)
     "sticker": (0, None),     # /sticker [text] — the maker: text/emoji, or replied image/video
-    "convert": (0, None),     # /convert <name> — sticker/gif/mp4/mp3 conversions (§21)
+    "convert": (0, None),     # /convert <name> — sticker/gif/mp4/mp3 conversions (§21); in a group, an amount tail is the §25 currency exchange (context kind)
     "gif": (0, None),         # /gif <what> — a GIF from her library / providers
     "emoji": (0, None),       # /emoji <words|emoji> — the full Unicode table, searched (§22)
     "customemoji": (0, None), # /customemoji list|add|ref|show|remove — her own set (§22)
@@ -1894,7 +1894,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/sticker <text> · /sticker (as a reply to an image or video)",
                 "example": "/sticker no wahala",
                 "related": "/steal · /convert · /gif"},
-    "convert": {"what": "media conversions on the replied file, riding the house ffmpeg organ: sticker→MP4, GIF→MP4, MP4→GIF, MP4→MP3, MP3→video (waveform), image→sticker, video→sticker.",
+    "convert": {"what": "media conversions on the replied file, riding the house ffmpeg organ: sticker→MP4, GIF→MP4, MP4→GIF, MP4→MP3, MP3→video (waveform), image→sticker, video→sticker. In a group, /convert with an amount is the currency exchange instead: games coins ⇄ that group's sparks at the week's floating rate.",
                 "usage": "/convert <name> (as a reply to media) · /convert lists the names",
                 "example": "/convert mp4-to-mp3",
                 "related": "/sticker · /steal"},

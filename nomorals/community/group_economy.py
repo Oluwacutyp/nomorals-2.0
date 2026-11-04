@@ -230,7 +230,8 @@ class LedgerEntry:
     group_id: str = ""
     member: str = ""  # "" = the group treasury
     kind: str = ""  # earn | spend | transfer_out | transfer_in | treasury_in |
-    # treasury_out | reversal | season_close | badge | mining
+    # treasury_out | reversal | season_close | badge | mining | wager |
+    # convert
     amount: int = 0  # signed: + earns, - spends
     reason: str = ""
     ref: str = ""  # quest id / entry id / party id that caused this
@@ -465,6 +466,42 @@ class GroupEconomy:
             return None
         return self._append(group_id, self._new_entry(
             group_id, member, "wager", amount, reason, ref=ref,
+            ts=now))
+
+    # ── conversion (the §25 exchange): the member's own money ──
+    # Conversion legs journal as kind "convert" under one shared
+    # ref per conversion (convert:<id>:<side>).  Like wager legs
+    # they are NOT earns — no caps, no faucet — but conversion-IN
+    # is issuance: issuance_state counts positive convert legs
+    # as earned and negative ones as sunk, so the monetary
+    # policy sees the whole money supply (§25's amendment to
+    # the policy's kind lists, named here rather than hidden).
+
+    def convert_credit(self, group_id: str, member: str,
+                       amount: int, reason: str, ref: str = "",
+                       now: float | None = None) -> LedgerEntry | None:
+        """Credit converted sparks.  ``member`` may be the
+        treasury ("") — the territory skim leg lands there."""
+        amount = int(amount)
+        if amount <= 0:
+            return None
+        return self._append(group_id, self._new_entry(
+            group_id, member, "convert", amount, reason, ref=ref,
+            ts=now))
+
+    def convert_debit(self, group_id: str, member: str,
+                      amount: int, reason: str, ref: str = "",
+                      now: float | None = None) -> LedgerEntry | None:
+        """Debit sparks for a reverse conversion.  Balance-
+        checked: returns None — moving nothing — when the
+        wallet cannot cover it."""
+        amount = int(amount)
+        if amount <= 0 or not member:
+            return None
+        if self.balance(group_id, member) < amount:
+            return None
+        return self._append(group_id, self._new_entry(
+            group_id, member, "convert", -amount, reason, ref=ref,
             ts=now))
 
     def record_activity(self, group_id: str, member: str, kind: str,
@@ -831,10 +868,16 @@ class GroupEconomy:
         for e in self._ledger(group_id):
             if e.ts < since or self.is_pseudo_member(e.member):
                 continue
-            if e.kind in ("earn", "mining") and e.amount > 0:
+            if e.kind in ("earn", "mining", "convert") and e.amount > 0:
+                # "convert" (§25): sparks a member converted IN
+                # from games coins are issuance exactly like a
+                # faucet's — the policy counts the whole supply.
                 earned += e.amount
             elif e.amount < 0 and e.kind in (
                     "spend", "treasury_in", "gamble", "bank_deposit",
+                    # "convert" (§25): sparks converted back OUT
+                    # to games coins leave circulation — a sink.
+                    "convert",
                     # real estate (§20): every member-side estate
                     # spend is a sink the policy must see — buys,
                     # market fees, mortgage repayments, insurance

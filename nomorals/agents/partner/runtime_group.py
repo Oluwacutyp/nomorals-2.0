@@ -73,6 +73,48 @@ class _GroupWagerPurse:
             self._group_key, member, int(amount), reason, ref=ref)
 
 
+class _GamesCoinWallet:
+    """The games-wallet side of a §25 conversion, bound to one
+    member.  Coins move through the PlayerStore (the same
+    atomic spend / credit the wager purse uses), and every
+    movement is also written to the games economy ledger, so
+    that side's health picture sees conversions as what they
+    are: coins sunk out of play going forward, coins issued
+    back into play coming back."""
+
+    def __init__(self, engine, player) -> None:  # type: ignore[no-untyped-def]
+        self._store = engine.store
+        self._db = engine.db
+        self._player = player
+
+    def balance(self) -> int:
+        return int(self._store.get_for(self._player).coins)
+
+    def spend(self, amount: int, reason: str) -> bool:
+        amount = int(amount)
+        if amount <= 0:
+            return False
+        if self._store.spend_coins(
+                self._player, amount, reason=reason) is None:
+            return False
+        from ...games.economy import record_ledger
+
+        record_ledger(self._db, self._player.key, "sink", amount,
+                      "convert")
+        return True
+
+    def credit(self, amount: int, reason: str) -> int:
+        amount = int(amount)
+        if amount <= 0:
+            return 0
+        self._store.add_coins(self._player, amount, reason=reason)
+        from ...games.economy import record_ledger
+
+        record_ledger(self._db, self._player.key, "source", amount,
+                      "convert")
+        return amount
+
+
 class RuntimeGroupMixin:
     """Group-surface turn for PartnerRuntime._process_inner."""
 
@@ -2852,6 +2894,60 @@ class RuntimeGroupMixin:
             pct = max(0, min(25, int(rest.rstrip("%"))))
             surface.update_settings(key, transfer_tax_pct=pct)
             return f"transfer tax {pct}% to the treasury."
+        if head == "exchange":
+            # The §25 exchange: pool, rate, spread, skim,
+            # allowance — the same settings home as tax/fine.
+            cfg = dict(surface.store.settings(key).get(
+                "exchange") or {})
+            verb = rest.lower()
+            if verb in ("on", "off") and not rest2:
+                cfg["enabled"] = verb == "on"
+                surface.update_settings(key, exchange=cfg)
+                return (f"currency exchange "
+                        f"{'on' if cfg['enabled'] else 'off'} — "
+                        f"members convert games coins ⇄ sparks "
+                        f"with /convert.")
+            if verb == "pool" and rest2.isdigit():
+                cfg["pool_sparks"] = max(0, int(rest2))
+                surface.update_settings(key, exchange=cfg)
+                if not cfg["pool_sparks"]:
+                    return ("exchange pool set to 0 — the "
+                            "exchange is closed until an admin "
+                            "allocates a weekly pool.")
+                return (f"exchange pool "
+                        f"{cfg['pool_sparks']} sparks a week.")
+            if verb == "rate" and rest2.isdigit():
+                cfg["base_rate"] = max(1, int(rest2))
+                surface.update_settings(key, exchange=cfg)
+                return (f"exchange base rate "
+                        f"{cfg['base_rate']} sparks per 100 coins "
+                        f"(the live rate floats 60–140% of it "
+                        f"with the pool).")
+            if verb == "spread" and rest2.rstrip("%").isdigit():
+                pct = max(0, min(90, int(rest2.rstrip("%"))))
+                cfg["spread_bps"] = pct * 100
+                surface.update_settings(key, exchange=cfg)
+                return (f"reverse-door spread {pct}% — a round "
+                        f"trip always loses it.")
+            if verb == "skim" and rest2.rstrip("%").isdigit():
+                pct = max(0, min(10, int(rest2.rstrip("%"))))
+                cfg["skim_pct"] = pct
+                surface.update_settings(key, exchange=cfg)
+                return (f"territory skim {pct}% on conversions "
+                        f"while a gang holds power "
+                        f"(0 = no skim).") if pct else \
+                    "territory skim off."
+            if verb == "allowance" and rest2.isdigit():
+                cfg["allowance_base"] = max(0, int(rest2))
+                surface.update_settings(key, exchange=cfg)
+                return (f"base conversion allowance "
+                        f"{cfg['allowance_base']} sparks a week "
+                        f"(level, mastery and gang rank grow it).")
+            return ("usage: /gsettings exchange on|off · "
+                    "exchange pool <sparks a week> · exchange "
+                    "rate <sparks per 100 coins> · exchange "
+                    "spread <pct> · exchange skim <pct> · "
+                    "exchange allowance <sparks>")
         if head == "welcome" and rest.lower() in ("on", "off"):
             surface.update_settings(key, welcome_enabled=on)
             return f"welcome {'on' if on else 'off'}."
@@ -6804,6 +6900,21 @@ class RuntimeGroupMixin:
                 ("Property",
                  f"{estate['property_count']} · "
                  f"{sparks(estate['property_value'])}", True))
+        # The exchange state (§25): the live rate + the week's
+        # pool — the door between this purse and the games
+        # wallet, stated on the purse's own card.
+        exch_cfg = surface.exchange_cfg(key)
+        if exch_cfg.get("enabled", True):
+            wk = surface.exchange.week_state(key, exch_cfg)
+            if wk["capacity"]:
+                from ...community.group_exchange import rate_for
+
+                rows.append((
+                    "Exchange",
+                    f"100 🪙 → {rate_for(exch_cfg, wk['remaining'], wk['capacity'])} "
+                    f"sparks · pool {wk['remaining']:,}", True))
+            else:
+                rows.append(("Exchange", "closed this week", True))
         card.stats(rows)
         for badge in stmt.get("badges", []):
             card.line(f"🏅 {badge.get('badge')} "
@@ -6830,6 +6941,8 @@ class RuntimeGroupMixin:
             vault_row.append(("💵 Withdraw", "withdraw all"))
         if vault_row:
             buttons.append(vault_row)
+        if exch_cfg.get("enabled", True):
+            buttons.append([("🔄 Convert", "convert")])
         return self._card(message, card, buttons)
 
     def _control_mine(self, message):  # type: ignore[no-untyped-def]
@@ -7400,6 +7513,244 @@ class RuntimeGroupMixin:
                     ("Banked", sparks(result["bank"]), True)])
         return self._card(message, card,
                           [[("🪙 My balance", "balance")]])
+
+    @staticmethod
+    def _convert_tail_is_currency(tail) -> bool:  # type: ignore[no-untyped-def]
+        """Context-kind guard (the §17 daily/slots pattern):
+        /convert is the §21 media command everywhere — but in a
+        group, an amount-shaped tail is the §25 currency
+        exchange.  Media tails name a conversion (sticker-to-mp4
+        …) and never start with a number, a currency word or
+        max/all, so the two meanings never collide."""
+        text = str(tail or "").strip().lower()
+        if not text:
+            return True
+        first = text.split()[0]
+        return first.isdigit() or first in (
+            "sparks", "coins", "max", "all")
+
+    def _exchange_standing(self, player):  # type: ignore[no-untyped-def]
+        """(level, mastery_steps) for the §25 allowance: the
+        member's XP level + mastery tier steps summed across
+        their games.  Any failure reads as standing zero — the
+        base allowance is a floor, never a refusal."""
+        try:
+            engine = self._game_engine()
+            prof = engine.store.get_for(player)
+            from ...games.progression import level_for_xp
+
+            level = level_for_xp(int(prof.xp or 0))
+            steps = 0
+            try:
+                from ...games.achievements import get_game_stats
+                from ...games.mastery import mastery_tier
+
+                for row in get_game_stats(engine.db, player.key):
+                    steps += mastery_tier(
+                        str(row.get("game") or ""), row)[1]
+            except Exception:  # noqa: BLE001
+                steps = 0
+            return level, steps
+        except Exception:  # noqa: BLE001
+            _log.debug("exchange standing failed", exc_info=True)
+            return 1, 0
+
+    def _exchange_quote_card(self, message, surface, quote,  # type: ignore[no-untyped-def]
+                             wallet):
+        from ...social.chat.typography import Card, sparks
+
+        card = Card("economy", title="Currency exchange", icon="💱")
+        pool = quote["pool"]
+        if quote["closed"]:
+            card.line("the exchange is **closed this week** — "
+                      "this group has no conversion pool "
+                      "allocated. An admin opens it with "
+                      "/gsettings exchange pool <sparks>.")
+        elif not quote["enabled"]:
+            card.line("the exchange is **off** in this group.")
+        else:
+            card.stats([
+                ("Rate", f"100 coins → {quote['rate']} sparks",
+                 True),
+                ("Reverse",
+                 f"100 sparks → {quote['reverse_rate_coins']} "
+                 f"coins", True),
+                ("Pool this week",
+                 f"{pool['remaining']:,} of "
+                 f"{pool['capacity']:,} sparks left", True),
+                ("Your allowance",
+                 f"{quote['allowance_left']:,} of "
+                 f"{quote['allowance']:,} sparks left", True),
+            ])
+            if quote["skim_gang"]:
+                card.stats([(
+                    "Territory skim",
+                    f"{quote['skim_pct']}% to {quote['skim_gang']}",
+                    True)])
+            card.stats([
+                ("Your coins", f"{wallet.balance():,} 🪙", True),
+                ("Your sparks", sparks(quote["sparks"]), True),
+            ])
+            card.note("the rate floats with the pool — a fuller "
+                      "pool pays better. Unused allowance "
+                      "expires when the week resets (Monday).")
+        buttons = []
+        if quote["enabled"] and not quote["closed"]:
+            coins = wallet.balance()
+            if coins >= quote["min_coins"] \
+                    and quote["allowance_left"] > 0 \
+                    and pool["remaining"] > 0:
+                chunk = min(coins, 1000)
+                buttons.append([(f"🔄 Convert {chunk:,} coins",
+                                 f"convert {chunk}")])
+            if quote["sparks"] >= 10:
+                n = min(int(quote["sparks"]), 100)
+                buttons.append([(f"💱 Convert {n} sparks",
+                                 f"convert sparks {n}")])
+        buttons.append([("🪙 My balance", "balance")])
+        return self._card(message, card, buttons)
+
+    def _control_exchange_convert(self, tail, message):  # type: ignore[no-untyped-def]
+        """§25: /convert — games coins ⇄ this group's sparks.
+
+        Bare = the quote (rate, pool, allowance — the numbers
+        BEFORE converting).  /convert <n> converts n coins in;
+        /convert sparks <n> converts n sparks back out;
+        max/all takes the whole allowed amount either way."""
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        from ...games.players import Player
+
+        player = Player.from_sender(
+            str(getattr(message.chat, "platform", "") or ""),
+            user_id, str(message.sender or ""))
+        try:
+            engine = self._game_engine()
+        except Exception:  # noqa: BLE001
+            return "the games wallet isn't reachable from here."
+        wallet = _GamesCoinWallet(engine, player)
+        level, steps = self._exchange_standing(player)
+        tokens = str(tail or "").strip().lower().split()
+        direction, amount = "in", ...
+        if not tokens:
+            quote = surface.exchange_quote(
+                key, user_id, level=level, mastery_steps=steps)
+            return self._exchange_quote_card(
+                message, surface, quote, wallet)
+        head = tokens[0]
+        if head in ("max", "all") and len(tokens) == 1:
+            amount = None
+        elif head.isdigit() and len(tokens) == 1:
+            amount = int(head)
+        elif head in ("coins", "sparks") and len(tokens) == 2:
+            direction = "in" if head == "coins" else "out"
+            amount = None if tokens[1] in ("max", "all") \
+                else int(tokens[1]) if tokens[1].isdigit() else ...
+        if amount is ...:
+            return ("usage: /convert — the rates · /convert "
+                    "<coins> — coins → sparks · /convert sparks "
+                    "<n> — sparks → coins · /convert max — "
+                    "everything your allowance allows")
+        result = surface.exchange_convert(
+            key, user_id, direction, amount, wallet=wallet,
+            level=level, mastery_steps=steps)
+        if not result["ok"]:
+            return self._exchange_refusal(result)
+        from ...social.chat.typography import Card, sparks
+
+        after = result["quote"]
+        card = Card("economy", title="Converted", icon="💱")
+        if result["direction"] == "in":
+            card.line(f"**{result['coins']:,} coins → "
+                      f"{sparks(result['sparks'])}**")
+            rows = [("Rate", f"{result['rate']} per 100 coins",
+                     True)]
+            if result["skim"]:
+                rows.append(("Territory skim",
+                             f"{sparks(result['skim'])} to "
+                             f"{result['gang']}", True))
+            rows += [
+                ("Coins left", f"{result['coins_left']:,} 🪙",
+                 True),
+                ("Sparks now", sparks(result["sparks_left"]),
+                 True),
+                ("Allowance left",
+                 f"{after['allowance_left']:,} sparks", True),
+                ("Pool left",
+                 f"{after['pool']['remaining']:,} sparks", True),
+            ]
+        else:
+            card.line(f"**{sparks(result['sparks'])} → "
+                      f"{result['coins']:,} coins**")
+            rows = [("Rate", f"{result['rate']} per 100 coins",
+                     True)]
+            if result["skim"]:
+                rows.append(("Territory skim",
+                             f"{sparks(result['skim'])} to "
+                             f"{result['gang']}", True))
+            rows += [
+                ("Sparks left", sparks(result["sparks_left"]),
+                 True),
+                ("Coins now", f"{result['coins_left']:,} 🪙",
+                 True),
+            ]
+        card.stats(rows)
+        return self._card(message, card,
+                          [[("🔄 Exchange", "convert"),
+                            ("🪙 My balance", "balance")]])
+
+    @staticmethod
+    def _exchange_refusal(result) -> str:  # type: ignore[no-untyped-def]
+        """Plain, specific refusals (§25): what bound, how much
+        room is left, when it resets.  Nothing moved — ever."""
+        reason = result.get("reason")
+        quote = result.get("quote") or {}
+        if reason == "off":
+            return ("the currency exchange is off in this group "
+                    "(an admin can open it: /gsettings exchange "
+                    "on).")
+        if reason == "closed":
+            return ("the exchange is closed this week — this "
+                    "group has no conversion pool allocated. An "
+                    "admin opens it with /gsettings exchange "
+                    "pool <sparks>.")
+        if reason == "pool":
+            left = int(result.get("pool_left") or 0)
+            rate = max(1, int(quote.get("rate") or 1))
+            return (f"the weekly pool can't cover that — "
+                    f"{left:,} sparks left in this week's pool "
+                    f"(it refills Monday). At the current rate "
+                    f"that's about {left * 100 // rate:,} coins "
+                    f"of conversions, total.")
+        if reason == "allowance":
+            left = int(result.get("allowance_left") or 0)
+            return (f"that's past your weekly conversion "
+                    f"allowance — {left:,} sparks of allowance "
+                    f"left, and it resets Monday. Level, mastery "
+                    f"and gang rank all grow it. /convert max "
+                    f"takes exactly what's left.")
+        if reason == "funds_coins":
+            return (f"you have {int(result.get('have') or 0):,} "
+                    f"games coins — not enough for that. Win "
+                    f"coins at the tables, or convert less.")
+        if reason == "funds_sparks":
+            return (f"you have {int(result.get('have') or 0):,} "
+                    f"sparks here — not enough for that.")
+        if reason == "too_small":
+            if "min_coins" in result:
+                return (f"too few coins — at today's rate the "
+                        f"smallest conversion is "
+                        f"{result['min_coins']} coins for 1 "
+                        f"spark.")
+            return (f"too few sparks — the smallest reverse "
+                    f"conversion right now is "
+                    f"{result.get('min_sparks')} sparks.")
+        return ("usage: /convert — the rates · /convert <coins> "
+                "— coins → sparks · /convert sparks <n> — "
+                "sparks → coins · /convert max")
 
     def _control_group_daily(self, message):  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)

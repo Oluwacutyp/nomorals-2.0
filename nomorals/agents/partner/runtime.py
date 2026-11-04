@@ -3872,6 +3872,18 @@ class PartnerRuntime(
         if kind == "withdraw":
             return self._control_withdraw(command.tail, message)
 
+        # /convert is a CONTEXT kind (§17 pattern): the §21
+        # media command owns it everywhere — except in a group,
+        # where an amount-shaped tail is the §25 currency
+        # exchange (games coins ⇄ group sparks).  Media tails
+        # name a conversion and never match the guard, so the
+        # media meaning is untouched in groups too.
+        if kind == "convert" \
+                and self._group_key_or_none(message) is not None \
+                and self._convert_tail_is_currency(command.tail):
+            return self._control_exchange_convert(command.tail,
+                                                  message)
+
         # daily / slots / approve are CONTEXT kinds: in a group
         # they are the economy's (daily claim, purse slots,
         # treasury approvals); everywhere else the existing

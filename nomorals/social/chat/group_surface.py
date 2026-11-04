@@ -45,6 +45,7 @@ from ...community.group_conflict import (
     GroupConflictError,
     WarBook,
 )
+from ...community.group_exchange import EXCHANGE_DEFAULTS, GroupExchange
 from ...community.group_real_estate import (
     DISTRICTS,
     ESTATE_DEFAULTS,
@@ -240,6 +241,12 @@ def _default_settings() -> dict[str, Any]:
                                         # record never decides
                                         # admission itself.
         "conflict": copy.deepcopy(CONFLICT_DEFAULTS),
+        "exchange": copy.deepcopy(EXCHANGE_DEFAULTS),
+                                        # the §25 exchange: the
+                                        # weekly pool, the rate
+                                        # band's base, the reverse
+                                        # spread, the territory
+                                        # skim, the allowance base
         "channel": {"cadence_min": 0,
                     "links": {},
                     "analytics": True},
@@ -355,7 +362,8 @@ class GroupStore:
                                      "escalation", "system_claim",
                                      "expression", "reputation",
                                      "conflict", "rhythm",
-                                     "channel", "boards")})
+                                     "channel", "boards",
+                                     "exchange")})
         mod = dict(merged["moderation"])
         mod.update((stored.get("moderation") or {}))
         merged["moderation"] = mod
@@ -395,6 +403,9 @@ class GroupStore:
         merged["boards"] = _deep_merge(
             {"daily": [], "weekly": [], "hour": 20},
             stored.get("boards") or {})
+        merged["exchange"] = _deep_merge(
+            copy.deepcopy(EXCHANGE_DEFAULTS),
+            stored.get("exchange") or {})
         return merged
 
 
@@ -426,6 +437,7 @@ class GroupSurface:
         self._signatures: SignatureStore | None = None
         self._reputation: ReputationBook | None = None
         self._conflict: GroupConflict | None = None
+        self._exchange: GroupExchange | None = None
         self._war_book: WarBook | None = None
 
     @property
@@ -2485,6 +2497,242 @@ class GroupSurface:
             return int(entry.amount) if entry else 0
         except Exception:  # noqa: BLE001
             return 0
+
+    # ── the exchange (§25): games coins ⇄ group sparks ──
+    # One purse, two pockets.  The math lives in the exchange
+    # organ; the surface resolves what the organ cannot see —
+    # the territory skim (a power gang, through the conflict
+    # organ) and the member's gang rank — and moves both
+    # wallets: the estate through its convert legs, the games
+    # wallet through the caller-bound coin wallet (the runtime
+    # binds the real PlayerStore; the wager purse binding is
+    # untouched by any of this).  Refusals are whole: every
+    # check runs before the first movement, and no leg is
+    # partial — either the full amount converts or nothing does.
+
+    @property
+    def exchange(self) -> GroupExchange:
+        if self._exchange is None:
+            self._exchange = GroupExchange(self.economy)
+        return self._exchange
+
+    def exchange_cfg(self, group_key: str) -> dict[str, Any]:
+        return dict(self.store.settings(group_key).get(
+            "exchange") or {})
+
+    def _exchange_power(self, group_key: str,
+                        now: float) -> dict[str, Any] | None:
+        """The gang in power (§23 capture), or None — an
+        unreadable conflict state means no skim, never a guess."""
+        try:
+            return self.conflict.power_gang(group_key, now=now)
+        except GroupConflictError:
+            return None
+
+    def _gang_rank(self, group_key: str, member: str) -> int:
+        """0 none · 1 member · 2 officer · 3 leader."""
+        try:
+            gang = self.conflict.gang_of(group_key, member)
+        except GroupConflictError:
+            return 0
+        if not gang:
+            return 0
+        if member == gang.get("leader"):
+            return 3
+        if member in (gang.get("officers") or []):
+            return 2
+        return 1
+
+    def exchange_quote(self, group_key: str, user_id: str, *,
+                       level: int = 1, mastery_steps: int = 0,
+                       now: float | None = None) -> dict[str, Any]:
+        """The pre-conversion picture: live rate both ways,
+        pool state, the member's allowances, the skim in force."""
+        now = now if now is not None else time.time()
+        cfg = self.exchange_cfg(group_key)
+        power = self._exchange_power(group_key, now)
+        skim_pct = int(cfg.get("skim_pct") or 0) if power else 0
+        quote = self.exchange.quote(
+            group_key, cfg, member=user_id, level=level,
+            mastery_steps=mastery_steps,
+            gang_rank=self._gang_rank(group_key, user_id),
+            skim_pct=skim_pct, now=now)
+        quote["skim_gang"] = (str(power.get("name") or "")
+                              if power else "")
+        quote["sparks"] = self.economy.balance(group_key, user_id)
+        return quote
+
+    def exchange_convert(self, group_key: str, user_id: str,
+                         direction: str, amount: int | None, *,
+                         wallet: Any, level: int = 1,
+                         mastery_steps: int = 0,
+                         now: float | None = None) -> dict[str, Any]:
+        """Convert for one member.  ``direction``: "in" (coins
+        → sparks) or "out" (sparks → coins).  ``amount`` is in
+        the INPUT currency; None means the maximum the pool,
+        the allowance and the balance jointly allow.  ``wallet``
+        is the bound games-coin wallet: balance() / spend(n,
+        reason) -> bool / credit(n, reason) -> int."""
+        from ...core.ids import new_short_id
+
+        from ...community.group_exchange import (
+            forward_sparks,
+            min_coins_for_spark,
+            reverse_coins,
+        )
+        now = now if now is not None else time.time()
+        cfg = self.exchange_cfg(group_key)
+        if not cfg.get("enabled", True):
+            return {"ok": False, "reason": "off"}
+        econ = self.economy
+        if not econ.is_verified(group_key, user_id):
+            econ.verify_member(group_key, user_id)
+        power = self._exchange_power(group_key, now)
+        skim_pct = max(0, min(10, int(cfg.get("skim_pct") or 0))) \
+            if power else 0
+        quote = self.exchange_quote(
+            group_key, user_id, level=level,
+            mastery_steps=mastery_steps, now=now)
+        rate = quote["rate"]
+        cv = new_short_id("cv")
+        if direction == "in":
+            pool_left = quote["pool"]["remaining"]
+            if quote["closed"]:
+                return {"ok": False, "reason": "closed",
+                        "quote": quote}
+            allow_left = quote["allowance_left"]
+            coins = self._exchange_max_coins(
+                rate, pool_left, allow_left, skim_pct,
+                int(wallet.balance())) if amount is None \
+                else int(amount)
+            if coins <= 0:
+                if amount is not None:
+                    return {"ok": False, "reason": "amount",
+                            "quote": quote}
+                # "max" fitted nothing: name the binding cap.
+                if allow_left < 1:
+                    return {"ok": False, "reason": "allowance",
+                            "allowance_left": allow_left,
+                            "quote": quote}
+                if int(wallet.balance()) < min_coins_for_spark(rate):
+                    return {"ok": False, "reason": "funds_coins",
+                            "have": int(wallet.balance()),
+                            "quote": quote}
+                return {"ok": False, "reason": "pool",
+                        "pool_left": pool_left, "quote": quote}
+            gross = forward_sparks(coins, rate)
+            if gross < 1:
+                return {"ok": False, "reason": "too_small",
+                        "min_coins": min_coins_for_spark(rate),
+                        "quote": quote}
+            if gross > pool_left:
+                return {"ok": False, "reason": "pool",
+                        "pool_left": pool_left, "quote": quote}
+            skim = gross * skim_pct // 100 if skim_pct else 0
+            net = gross - skim
+            if net > allow_left:
+                return {"ok": False, "reason": "allowance",
+                        "allowance_left": allow_left, "quote": quote}
+            if int(wallet.balance()) < coins:
+                return {"ok": False, "reason": "funds_coins",
+                        "have": int(wallet.balance()), "quote": quote}
+            if not wallet.spend(coins, f"exchange: convert to "
+                                f"{group_key} sparks"):
+                return {"ok": False, "reason": "funds_coins",
+                        "have": int(wallet.balance()), "quote": quote}
+            econ.convert_credit(
+                group_key, user_id, net,
+                f"converted {coins} games coins → {net} sparks "
+                f"at {rate}/100", ref=f"convert:{cv}:in", now=now)
+            if skim:
+                econ.convert_credit(
+                    group_key, "", skim,
+                    f"exchange territory skim to "
+                    f"{power.get('name')} (conversion {cv})",
+                    ref=f"convert:{cv}:skim", now=now)
+                self.conflict.gang_skim_credit(
+                    group_key, str(power.get("id") or ""), skim,
+                    now=now)
+            return {"ok": True, "direction": "in", "coins": coins,
+                    "gross": gross, "skim": skim, "sparks": net,
+                    "rate": rate, "gang": quote["skim_gang"],
+                    "coins_left": int(wallet.balance()),
+                    "sparks_left": econ.balance(group_key, user_id),
+                    "quote": self.exchange_quote(
+                        group_key, user_id, level=level,
+                        mastery_steps=mastery_steps, now=now)}
+        # ── the reverse door: sparks → coins ──
+        allow_left = quote["reverse_left"]
+        sparks = min(int(econ.balance(group_key, user_id)),
+                     allow_left) if amount is None else int(amount)
+        if sparks <= 0:
+            return {"ok": False, "reason": "amount", "quote": quote}
+        coins = reverse_coins(sparks, rate, cfg)
+        if coins < 1:
+            need = 1
+            while reverse_coins(need, rate, cfg) < 1:
+                need += 1
+            return {"ok": False, "reason": "too_small",
+                    "min_sparks": need, "quote": quote}
+        if sparks > allow_left:
+            return {"ok": False, "reason": "allowance",
+                    "allowance_left": allow_left, "quote": quote}
+        skim = sparks * skim_pct // 100 if skim_pct else 0
+        if econ.convert_debit(
+                group_key, user_id, sparks,
+                f"converted {sparks} sparks → {coins} games coins "
+                f"at {rate}/100", ref=f"convert:{cv}:out",
+                now=now) is None:
+            return {"ok": False, "reason": "funds_sparks",
+                    "have": econ.balance(group_key, user_id),
+                    "quote": quote}
+        if skim:
+            econ.convert_credit(
+                group_key, "", skim,
+                f"exchange territory skim to "
+                f"{power.get('name')} (conversion {cv})",
+                ref=f"convert:{cv}:skimout", now=now)
+            self.conflict.gang_skim_credit(
+                group_key, str(power.get("id") or ""), skim, now=now)
+        wallet.credit(coins, f"exchange: convert from "
+                      f"{group_key} sparks")
+        return {"ok": True, "direction": "out", "sparks": sparks,
+                "skim": skim, "coins": coins, "rate": rate,
+                "gang": quote["skim_gang"],
+                "coins_left": int(wallet.balance()),
+                "sparks_left": econ.balance(group_key, user_id),
+                "quote": self.exchange_quote(
+                    group_key, user_id, level=level,
+                    mastery_steps=mastery_steps, now=now)}
+
+    @staticmethod
+    def _exchange_max_coins(rate: int, pool_left: int,
+                            allow_left: int, skim_pct: int,
+                            coin_balance: int) -> int:
+        """The largest coin amount whose conversion fits the
+        pool AND the allowance AND the member's coins."""
+        from ...community.group_exchange import forward_sparks
+
+        gross_cap = pool_left
+        if skim_pct > 0:
+            approx = allow_left * 100 // max(1, 100 - skim_pct)
+            gross_cap = min(gross_cap, approx + 1)
+        else:
+            gross_cap = min(gross_cap, allow_left)
+        coins = min(int(coin_balance),
+                    max(0, gross_cap) * 100 // max(1, rate))
+        # floor dust can overshoot the caps by a hair — walk
+        # down until the real (floored) figures fit.
+        for _ in range(1200):
+            if coins <= 0:
+                break
+            gross = forward_sparks(coins, rate)
+            net = gross - (gross * skim_pct // 100 if skim_pct
+                           else 0)
+            if gross <= pool_left and net <= allow_left:
+                break
+            coins -= 1
+        return max(0, coins)
 
     def work_shift(self, group_key: str, user_id: str, *,
                    now: float | None = None) -> dict[str, Any]:
