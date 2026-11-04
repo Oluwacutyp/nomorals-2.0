@@ -454,6 +454,39 @@ def _entity_aliases(entity: Any) -> list[str]:
     return [k for k in out if k and not (k in seen or seen.add(k))]
 
 
+#: Telethon last-seen classes → the cleanup scan's status kinds.
+_USER_STATUS_KINDS = {
+    "UserStatusOnline": "online",
+    "UserStatusOffline": "offline",
+    "UserStatusRecently": "recently",
+    "UserStatusLastWeek": "last_week",
+    "UserStatusLastMonth": "last_month",
+    "UserStatusEmpty": "unknown",
+}
+
+
+def _user_status_fields(user: Any) -> dict[str, Any]:
+    """One MTProto user's last-seen evidence for the cleanup
+    scan: the class (``status_kind``) and, when Telegram shows
+    the exact moment (UserStatusOffline), its unix stamp
+    (``was_online``).  Privacy-hidden last-seen reads as
+    ``unknown`` with no stamp — the scan abstains on those
+    members rather than guessing."""
+    status = getattr(user, "status", None)
+    kind = _USER_STATUS_KINDS.get(
+        type(status).__name__ if status is not None else "",
+        "unknown")
+    was_online: float | None = None
+    if kind == "offline":
+        raw = getattr(status, "was_online", None)
+        try:
+            was_online = float(raw.timestamp()) \
+                if raw is not None else None
+        except (AttributeError, TypeError, ValueError):
+            was_online = None
+    return {"status_kind": kind, "was_online": was_online}
+
+
 class TelegramAdapter(ChatAdapter):
     """A Telethon userbot: full account control over MTProto."""
 
@@ -2425,11 +2458,12 @@ class TelegramAdapter(ChatAdapter):
         return self._admin(self._delete_coro(chat, message_id), "delete")
 
     async def _members_coro(self, chat: ChatRef,
-                            limit: int = 100) -> list[dict[str, Any]]:
+                            limit: int = 100,
+                            cap: int = 500) -> list[dict[str, Any]]:
         entity = await self._resolve(chat)
         out: list[dict[str, Any]] = []
         async for u in self._client.iter_participants(
-                entity, limit=max(1, min(500, limit))):
+                entity, limit=max(1, min(cap, limit))):
             out.append({
                 "id": str(getattr(u, "id", "")),
                 "name": " ".join(filter(None, [
@@ -2437,6 +2471,12 @@ class TelegramAdapter(ChatAdapter):
                     getattr(u, "last_name", "")])).strip(),
                 "username": getattr(u, "username", "") or "",
                 "bot": bool(getattr(u, "bot", False)),
+                # The cleanup scan's raw material (group build,
+                # member cleanup): Telegram's own deleted flag
+                # and the account's last-seen class + exact
+                # was-online stamp when Telegram shows one.
+                "deleted": bool(getattr(u, "deleted", False)),
+                **_user_status_fields(u),
             })
         return out
 
@@ -2450,6 +2490,28 @@ class TelegramAdapter(ChatAdapter):
                     "count": len(members)}
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"member list failed: {exc}"}
+
+    def admin_members_full(self, chat: ChatRef,
+                           limit: int = 20000) -> dict[str, Any]:
+        """The FULL member list for the cleanup scan: same rows
+        as :meth:`admin_members` (deleted flags + last-seen
+        included) without the 500-row working cap.  ``truncated``
+        is honest when a group outgrows even this: the scan then
+        reports partial coverage instead of pretending it saw
+        everyone."""
+        cap = max(1, min(20000, limit))
+        try:
+            members = self._run_on_loop(
+                self._members_coro(chat, cap + 1, cap=cap + 1),
+                timeout=120.0)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False,
+                    "error": f"member list failed: {exc}"}
+        truncated = len(members) > cap
+        if truncated:
+            members = members[:cap]
+        return {"ok": True, "members": members,
+                "count": len(members), "truncated": truncated}
 
     def member_by_username(self, chat: ChatRef, username: str
                            ) -> dict[str, Any] | None:
@@ -4470,6 +4532,29 @@ class TelegramBotAdapter(ChatAdapter):
         m = out["result"] or {}
         return {"ok": True, "status": m.get("status", ""),
                 "user": (m.get("user") or {}).get("id", "")}
+
+    def admin_member_profile(self, chat: ChatRef,
+                             user_id: str) -> dict[str, Any]:
+        """One member's status AND user object (getChatMember,
+        unabridged).  The cleanup scan's probe on the Bot API
+        path: the Bot API has no member list, so a member Devon
+        knows from her ledger is checked one at a time — a
+        deleted account is visible here in Telegram's own
+        rendering (name "Deleted Account", no username)."""
+        out = self._admin("getChatMember", chat,
+                          user_id=int(user_id))
+        if not out["ok"]:
+            return out
+        m = out["result"] or {}
+        u = m.get("user") or {}
+        return {"ok": True, "status": m.get("status", ""),
+                "user": {
+                    "id": str(u.get("id", "")),
+                    "first_name": u.get("first_name", "") or "",
+                    "last_name": u.get("last_name", "") or "",
+                    "username": u.get("username", "") or "",
+                    "is_bot": bool(u.get("is_bot", False)),
+                }}
 
     def admin_administrators(self, chat: ChatRef) -> dict[str, Any]:
         """Full admin list with roles."""

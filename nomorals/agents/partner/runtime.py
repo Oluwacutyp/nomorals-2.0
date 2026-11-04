@@ -3649,8 +3649,9 @@ class PartnerRuntime(
         """
         from ...social.chat.control import (
             CONFIRMABLE_COMMANDS, ControlCommand, GAME_START_COMMANDS,
-            WHATSAPP_UNSUPPORTED_KINDS, caller_may_run, detailed_help,
-            parse_control, public_menu_text)
+            TELEGRAM_CLEANUP_KINDS, WHATSAPP_UNSUPPORTED_KINDS,
+            caller_may_run, detailed_help, parse_control,
+            public_menu_text)
         from ..power import power_mode_for
 
         # Bare /start is a menu trigger, not the /start <platform>
@@ -3791,6 +3792,16 @@ class PartnerRuntime(
         # an execution the platform cannot perform.
         if platform in ("whatsapp", "wa") \
                 and kind in WHATSAPP_UNSUPPORTED_KINDS:
+            if kind in TELEGRAM_CLEANUP_KINDS:
+                # Member cleanup is Telegram machinery: it
+                # reads Telegram's member list and its
+                # deleted-account markers.  WhatsApp exposes
+                # neither — same platform-truth treatment as
+                # the mute family, its own line.
+                return ("group cleanup is a Telegram tool — "
+                        "WhatsApp gives me no member list to "
+                        "scan and no deleted-account markers "
+                        "to find.")
             return ("WhatsApp has no per-person mute — a "
                     "member here can only be removed, or left "
                     "as they are.")
@@ -4125,6 +4136,15 @@ class PartnerRuntime(
 
         if kind == "report":
             return self._control_report(command.tail, message)
+
+        if kind == "cleanup":
+            return self._control_cleanup(command.tail, message)
+
+        if kind == "rmdeleted":
+            return self._control_rmdeleted(command.tail, message)
+
+        if kind == "rminactive":
+            return self._control_rminactive(command.tail, message)
 
         if kind == "platforms":
             lines = ["platforms:"]

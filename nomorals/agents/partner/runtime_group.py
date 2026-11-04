@@ -1182,6 +1182,12 @@ class RuntimeGroupMixin:
         # same beat as every other system (no daemon); the
         # surface checks each channel's claim before posting.
         self._drive_all_channels(surface)
+        # Member cleanup upkeep rides the same beat: in a
+        # claimed Telegram group where she holds admin power,
+        # deleted accounts are removed automatically (throttled
+        # per group inside the drive, journal-only — nothing is
+        # posted to the room).  Failure-isolated inside.
+        self._cleanup_auto_drive(surface, key, message)
         actions = result.get("actions") or []
         # §21 auto-collect rides the same cycle: a sticker
         # that landed in a claimed room whose admin enabled
@@ -2497,6 +2503,23 @@ class RuntimeGroupMixin:
              "@member instead. /unmute /unban undo them; /pin and "
              "/purge work on the message you reply to; warns pile "
              "up to an automatic mute (limit in /gsettings)."),
+            # Member cleanup is Telegram machinery (member list +
+            # deleted-account markers); on WhatsApp the line
+            # states that truth instead of listing commands the
+            # platform cannot run (owner ruling 2026-11-04).
+            ("🧹 member cleanup: deleted accounts are removed "
+             "automatically on my upkeep cycle (claimed groups "
+             "where I hold admin power; journaled, never "
+             "announced) — /cleanup scans and reports as a dry "
+             "run, /rmdeleted runs the removal now, and "
+             "/rminactive removes members inactive past the "
+             "window by command (kicked, not banned; every "
+             "outcome in /glog). The switches live in "
+             "/gsettings (cleanup)."
+             if not on_whatsapp else
+             "🧹 member cleanup is a Telegram tool — WhatsApp "
+             "gives me no member list to scan and no "
+             "deleted-account markers to find."),
             "/glog — the group audit log (I keep it; I only show "
             "it when an admin asks)",
             "/strikes — the defense strike ledger: who is on "
@@ -2986,6 +3009,27 @@ class RuntimeGroupMixin:
                 "published snapshot — /boards peeks never move "
                 "the baseline",
             ], title="Boards")
+            # Member cleanup: the deleted-account scan + the
+            # inactivity sweep — state read from the same block
+            # the commands read.
+            cln = s.get("cleanup") or {}
+            card.block_lines([
+                f"removals: "
+                f"{'on' if cln.get('enabled', True) else 'OFF'}"
+                f" · auto-remove deleted: "
+                f"{'on' if cln.get('auto_deleted', True) else 'OFF'}"
+                f" · inactivity window: "
+                f"{int(cln.get('inactive_days') or 90)} days",
+                "deleted accounts are removed automatically "
+                "on the upkeep cycle (claimed groups where I "
+                "hold admin power, under the defense autonomy "
+                "switch; journaled in /glog, never announced) · "
+                "/cleanup scans and reports · /rmdeleted runs "
+                "the removal now · /rminactive removes members "
+                "inactive past the window, by command only — "
+                "Telegram groups only; admins, bots and my own "
+                "accounts are never removed",
+            ], title="Member cleanup")
             # The ladder's step menu (§30): on WhatsApp the
             # mute/restrict steps are not offered — the
             # platform cannot fire them (see
@@ -3082,6 +3126,11 @@ class RuntimeGroupMixin:
                 "`/gsettings boards weekly contributions` · "
                 "`/gsettings boards hour N` · "
                 "`/gsettings boards off`",
+                "`/gsettings cleanup on|off` · "
+                "`/gsettings cleanup auto on|off` · "
+                "`/gsettings cleanup days N` — member cleanup "
+                "(deleted + inactive members), not the "
+                "service-message cleanup above",
             ], title="Change it")
             card.note("tap a button to flip a switch, or type a "
                       "command")
@@ -3171,6 +3220,18 @@ class RuntimeGroupMixin:
                     "sparks|gems|messages|contributions|gangs "
                     "(or full board ids) · boards weekly "
                     "<spec...> · boards hour N · boards off")
+        if head == "cleanup":
+            # Member cleanup (deleted + inactive): the removals
+            # switch and the inactivity window — the same
+            # helper the console's cleanup section applies.
+            # NOT `clean` above: that's the service-message
+            # cleanup, a different switch.
+            out = self._apply_cleanup_grammar(
+                surface, key, text.split()[1:])
+            if out is not None:
+                return out
+            return ("usage: /gsettings cleanup on|off · "
+                    "cleanup auto on|off · cleanup days N")
         if head == "review":
             # §26 contribution review: the mode and the queue —
             # the same helper the console's rhythm section
@@ -4512,7 +4573,7 @@ class RuntimeGroupMixin:
     _CONSOLE_SECTIONS = ("defense", "acceptance", "economy",
                          "estate", "presentation", "welcome",
                          "expression", "reputation", "conflict",
-                         "rhythm", "boards", "police")
+                         "rhythm", "boards", "cleanup", "police")
     _CONSOLE_CHANNEL_SECTIONS = ("queue", "post", "analytics",
                                  "settings")
 
@@ -4785,6 +4846,13 @@ class RuntimeGroupMixin:
             f"{'on' if (s.get('rhythm') or {}).get('briefing_enabled') else 'off'}"
             f" · review "
             f"{((s.get('rhythm') or {}).get('review') or {}).get('mode', 'off')}",
+            f"member cleanup: removals "
+            f"{'on' if (s.get('cleanup') or {}).get('enabled', True) else 'OFF'}"
+            f" · auto-deleted "
+            f"{'on' if (s.get('cleanup') or {}).get('auto_deleted', True) else 'OFF'}"
+            f" · inactive window "
+            f"{int((s.get('cleanup') or {}).get('inactive_days') or 90)}d"
+            f" (Telegram groups)",
         ])
         from ...social.chat.expression import buttons_from_spec
 
@@ -4807,7 +4875,9 @@ class RuntimeGroupMixin:
               f"console {token} conflict"),
              ("rhythm", "Rhythm",
               f"console {token} rhythm")],
-            [("back", "All groups", "console")],
+            [("cleanup", "Cleanup",
+              f"console {token} cleanup"),
+             ("back", "All groups", "console")],
         ], settings=s)
         card.note("tap a section, or type its grammar — every "
                   "change lands in the group's /glog with your "
@@ -5172,6 +5242,39 @@ class RuntimeGroupMixin:
                 "specs: this group's sparks · gems · messages "
                 "· contributions · gangs, or full board ids "
                 "(global:sparks, platform:…, game:chess:elo)",
+            ], title="Grammar")
+        elif section == "cleanup":
+            cln = s.get("cleanup") or {}
+            card.block_lines([
+                f"removals: "
+                f"{'on' if cln.get('enabled', True) else 'OFF'}"
+                f" — whether /rmdeleted and /rminactive may "
+                f"act in this group (the /cleanup scan always "
+                f"runs: it removes nothing)",
+                f"auto-remove deleted: "
+                f"{'on' if cln.get('auto_deleted', True) else 'OFF'}"
+                f" — the upkeep cycle removes deleted accounts "
+                f"on its own in claimed groups where she holds "
+                f"admin power (and only while defense autonomy "
+                f"is on); journaled in /glog, never announced",
+                f"inactivity window: "
+                f"{int(cln.get('inactive_days') or 90)} days — "
+                f"members with no activity past it are what "
+                f"/rminactive removes, by command only",
+                "scope, honestly: activity truth is Devon's "
+                "member ledger plus Telegram last-seen from "
+                "her userbot session; the Bot API alone has "
+                "neither a member list nor last-seen, so on "
+                "that surface a scan covers the members she "
+                "has records of. Admins, bots and her own "
+                "accounts are never removed.",
+            ])
+            card.block_lines([
+                "`on` · `off` · `auto on` · `auto off` · "
+                "`days N`",
+                "the sweep itself runs in the group: "
+                "/cleanup (scan) · /rmdeleted · /rminactive "
+                "[days]",
             ], title="Grammar")
         elif section == "police":
             # §36: the owner's override card.  OWNER-ONLY — a
@@ -5558,6 +5661,11 @@ class RuntimeGroupMixin:
             # Same rule (§14): the console's boards words are
             # the gsettings grammar.
             return self._apply_boards_grammar(
+                surface, key, list(words))
+        if section == "cleanup":
+            # Same rule: the console's cleanup words are the
+            # gsettings grammar.
+            return self._apply_cleanup_grammar(
                 surface, key, list(words))
         if section == "police":
             # §36: NOT a settings grammar — the owner's police
@@ -6886,6 +6994,720 @@ class RuntimeGroupMixin:
             except TypeError:
                 return fn(message.chat, user_id, until=0)
         return call
+
+    # ---- member cleanup: deleted accounts + inactivity --------
+    # The class the DESIGN gap list named on 2026-10-25: the
+    # ledger always KNEW who was silent (the Roster's "silent"
+    # bucket) and Telegram always marked its deleted accounts —
+    # nothing acted on either.  /cleanup is the scan (a dry run,
+    # always), /rmdeleted and /rminactive are the removals, and
+    # the analysis itself lives in social/chat/group_cleanup.py.
+    def _cleanup_update(self, surface, key, **fields):  # type: ignore[no-untyped-def]
+        """Mutate the cleanup settings block through the store's
+        own settings machinery (defaults-merged, persisted)."""
+        import copy as _copy
+
+        current = surface.store.settings(key)
+        block = _copy.deepcopy(current.get("cleanup") or {})
+        block.update(fields)
+        surface.update_settings(key, cleanup=block)
+        return block
+
+    def _apply_cleanup_grammar(self, surface, key, words):  # type: ignore[no-untyped-def]
+        """The member-cleanup grammar, shared by /gsettings
+        (words after the `cleanup` head) and the console's
+        cleanup section.  Forms: `on` · `off` · `auto on|off` ·
+        `days N`.  (Distinct from `clean` — the service-message
+        cleanup.)"""
+        w = [str(x) for x in words or []]
+        low = [x.lower() for x in w]
+        if not w:
+            return None
+        if low == ["on"]:
+            self._cleanup_update(surface, key, enabled=True)
+            return ("member cleanup removals on — /rmdeleted "
+                    "and /rminactive may act here.")
+        if low == ["off"]:
+            self._cleanup_update(surface, key, enabled=False)
+            return ("member cleanup removals off — /cleanup "
+                    "still scans; nothing is removed.")
+        if low[0] == "auto":
+            if low == ["auto", "on"]:
+                self._cleanup_update(surface, key,
+                                     auto_deleted=True)
+                return ("auto-remove deleted accounts on — "
+                        "the upkeep cycle clears them from "
+                        "claimed groups where I hold admin "
+                        "power, without waiting for a command.")
+            if low == ["auto", "off"]:
+                self._cleanup_update(surface, key,
+                                     auto_deleted=False)
+                return ("auto-remove deleted accounts off — "
+                        "deleted accounts are removed only "
+                        "when an admin runs /rmdeleted.")
+            return None
+        if low[0] == "days" and len(w) == 2 and w[1].isdigit():
+            days = max(1, min(3650, int(w[1])))
+            self._cleanup_update(surface, key,
+                                 inactive_days=days)
+            return (f"inactivity window: {days} days — the "
+                    f"sweep judges members against it.")
+        return None
+
+    def _cleanup_gate(self, message):  # type: ignore[no-untyped-def]
+        """(key, None) for an admin in a CLAIMED Telegram group,
+        else (None, text).  The scan reads Telegram's member
+        surfaces, so other platforms get the platform truth; the
+        claim requirement is §33's — her group systems act in a
+        room only where she is claimed (bot operating there, or
+        the owner's designation)."""
+        key = self._group_key_or_none(message)
+        if key is None:
+            return None, ("that's a group command — run it "
+                          "inside the group.")
+        platform = str(message.chat.platform or "")
+        if not platform.startswith("telegram"):
+            return None, ("group cleanup is a Telegram tool — "
+                          "this platform gives me no member "
+                          "list to scan and no deleted-account "
+                          "markers to find.")
+        if not self._group_admin_ok(message):
+            return None, ("that's an admin call — I'm not "
+                          "taking it from a non-admin.")
+        surface = self._group_surface()
+        if not surface.claim_state(key)["claimed"]:
+            return None, ("this room isn't switched on for my "
+                          "group systems yet — cleanup runs "
+                          "where I'm claimed (my bot operating "
+                          "here, or the owner's designation: "
+                          "/gsettings system output on).")
+        return key, None
+
+    def _cleanup_roster(self, surface, key, message):  # type: ignore[no-untyped-def]
+        """Assemble the member universe for a cleanup scan, from
+        the best enumeration this deployment actually has:
+
+        1. the userbot's FULL member list (MTProto) — every
+           member, with Telegram's deleted flags and last-seen;
+        2. any adapter's capped member list;
+        3. the Bot API path: no member list exists there, so
+           the universe is Devon's own ledger, each member
+           probed once via getChatMember (which is also where
+           a deleted account shows its marker on that surface).
+
+        Returns {rows, source, truncated, member_count,
+        protected_ids, self_ids, admins_known}."""
+        from ...social.chat.base import ChatRef
+        from ...social.chat.group_cleanup import is_deleted_row
+
+        platform = str(message.chat.platform or "")
+        chat_id = str(getattr(message.chat, "chat_id", "")
+                      or "")
+        if not chat_id and ":" in key:
+            chat_id = key.split(":", 1)[1]
+        title = str(getattr(message.chat, "title", "") or "")
+
+        def ref(plat: str) -> ChatRef:
+            return ChatRef(platform=plat, chat_id=chat_id,
+                           kind=message.chat.kind, title=title)
+
+        candidates: list = []
+        seen_ids: set = set()
+        for plat in (platform, "telegram", "telegram-bot",
+                     "telegram-personal"):
+            adapter = self._group_adapter(plat)
+            if adapter is not None and id(adapter) not in seen_ids:
+                seen_ids.add(id(adapter))
+                candidates.append((plat, adapter))
+
+        protected_ids: set = set()
+        admins_known = False
+        for plat, adapter in candidates:
+            fn = getattr(adapter, "admin_administrators", None)
+            if fn is None:
+                continue
+            try:
+                result = fn(ref(plat))
+            except Exception:  # noqa: BLE001 - a path, not a need
+                result = None
+            if isinstance(result, dict) and result.get("ok"):
+                admins_known = True
+                for row in result.get("administrators") or []:
+                    if isinstance(row, dict) and row.get("id"):
+                        protected_ids.add(str(row["id"]))
+                break
+
+        self_ids: set = set()
+        for _plat, adapter in candidates:
+            for attr in ("_me_id", "_bot_id"):
+                value = getattr(adapter, attr, None)
+                if value:
+                    self_ids.add(str(value))
+            companions = getattr(adapter, "companion_bot_ids",
+                                 None)
+            if callable(companions):
+                try:
+                    self_ids.update(
+                        str(x) for x in companions())
+                except Exception:  # noqa: BLE001 - garnish
+                    pass
+
+        def _normalise(row: dict) -> dict:
+            return {
+                "user_id": str(row.get("id")
+                               or row.get("user_id") or ""),
+                "name": str(row.get("name") or ""),
+                "username": str(row.get("username") or ""),
+                "bot": bool(row.get("bot")
+                            or row.get("is_bot")),
+                "deleted": bool(row.get("deleted")),
+                "status_kind": str(row.get("status_kind")
+                                   or ""),
+                "was_online": row.get("was_online"),
+                "last_name": str(row.get("last_name") or ""),
+            }
+
+        rows: list | None = None
+        source = ""
+        truncated = False
+        for plat, adapter in candidates:
+            fn = getattr(adapter, "admin_members_full", None)
+            if fn is None:
+                continue
+            try:
+                result = fn(ref(plat))
+            except Exception:  # noqa: BLE001 - degrade a path
+                result = None
+            if isinstance(result, dict) and result.get("ok"):
+                rows = [_normalise(r)
+                        for r in result.get("members") or []
+                        if isinstance(r, dict)]
+                source = "the userbot's full member list"
+                truncated = bool(result.get("truncated"))
+                break
+        if rows is None:
+            for plat, adapter in candidates:
+                fn = getattr(adapter, "admin_members", None)
+                if fn is None:
+                    continue
+                try:
+                    result = fn(ref(plat), limit=500)
+                except Exception:  # noqa: BLE001 - degrade
+                    result = None
+                if isinstance(result, dict) \
+                        and result.get("ok"):
+                    rows = [_normalise(r)
+                            for r in result.get("members") or []
+                            if isinstance(r, dict)]
+                    source = "the member list (first 500)"
+                    truncated = len(rows) >= 500
+                    break
+        if rows is None:
+            # Bot API path: the ledger is the universe; probe
+            # each known member once for the deleted marker and
+            # for proof they are still in the group at all.
+            probe = None
+            probe_ref = None
+            for plat, adapter in candidates:
+                fn = getattr(adapter,
+                             "admin_member_profile", None)
+                if fn is not None:
+                    probe, probe_ref = fn, ref(plat)
+                    break
+            rows = []
+            for uid, led in surface.members(key).items():
+                if led.get("left_ts"):
+                    continue
+                row = {
+                    "user_id": uid,
+                    "name": str(led.get("name") or ""),
+                    "username": str(led.get("username") or ""),
+                    "bot": bool(led.get("is_bot")),
+                    "deleted": False,
+                    "status_kind": "",
+                    "was_online": None,
+                    "last_name": str(led.get("last_name") or ""),
+                }
+                if probe is not None:
+                    try:
+                        prof = probe(probe_ref, uid)
+                    except Exception:  # noqa: BLE001 - unprobed
+                        prof = None
+                    if isinstance(prof, dict) \
+                            and prof.get("ok"):
+                        if str(prof.get("status") or "").lower() \
+                                in ("left", "kicked"):
+                            continue  # already out — no ghost
+                        user = prof.get("user") or {}
+                        row["name"] = " ".join(filter(None, [
+                            str(user.get("first_name") or ""),
+                            str(user.get("last_name") or ""),
+                        ])).strip() or row["name"]
+                        row["last_name"] = str(
+                            user.get("last_name") or "")
+                        row["username"] = str(
+                            user.get("username") or "") \
+                            or row["username"]
+                        row["bot"] = bool(user.get("is_bot"))
+                        row["deleted"] = is_deleted_row(row)
+                rows.append(row)
+            source = ("my member ledger — the Bot API has no "
+                      "member list, so this scan covers the "
+                      "members I have records of")
+        member_count = None
+        for plat, adapter in candidates:
+            fn = getattr(adapter, "admin_member_count", None)
+            if fn is None:
+                continue
+            try:
+                result = fn(ref(plat))
+            except Exception:  # noqa: BLE001 - garnish
+                result = None
+            if isinstance(result, dict) and result.get("ok"):
+                member_count = int(result.get("count") or 0)
+                break
+        return {"rows": rows, "source": source,
+                "truncated": truncated,
+                "member_count": member_count,
+                "protected_ids": protected_ids,
+                "self_ids": self_ids,
+                "admins_known": admins_known}
+
+    def _cleanup_scan(self, surface, key, message, days):  # type: ignore[no-untyped-def]
+        """Run the analysis: roster + ledger → findings."""
+        from ...social.chat.group_cleanup import analyze_cleanup
+
+        roster = self._cleanup_roster(surface, key, message)
+        findings = analyze_cleanup(
+            roster["rows"], surface.members(key),
+            inactive_days=days,
+            protected_ids=roster["protected_ids"],
+            self_ids=roster["self_ids"])
+        return findings, roster
+
+    def _control_cleanup(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        """The cleanup SCAN — a dry run by construction: it
+        enumerates, classifies and reports.  It never calls a
+        removal verb; the remove commands are separate kinds so
+        a scan can never drift into acting."""
+        key, err = self._cleanup_gate(message)
+        if err:
+            return err
+        from ...social.chat.group_cleanup import (
+            DEFAULT_INACTIVE_DAYS)
+        from ...social.chat.typography import Card
+
+        surface = self._group_surface()
+        cfg = surface.cleanup_cfg(key)
+        days = int(cfg.get("inactive_days")
+                   or DEFAULT_INACTIVE_DAYS)
+        findings, roster = self._cleanup_scan(
+            surface, key, message, days)
+        page = 1
+        tail_txt = str(tail or "").strip()
+        if tail_txt.isdigit():
+            page = max(1, int(tail_txt))
+        per_page = 10
+        cov = findings["coverage"]
+
+        def _page(rows: list) -> tuple:
+            total_pages = max(
+                1, -(-len(rows) // per_page))
+            use = min(page, total_pages)
+            return (rows[(use - 1) * per_page:use * per_page],
+                    total_pages)
+
+        card = Card("settings", title="Group cleanup — scan",
+                    icon="🧹")
+        card.block_lines([
+            f"deleted accounts: {len(findings['deleted'])} · "
+            f"inactive past {days}d: "
+            f"{len(findings['inactive'])} · couldn't judge: "
+            f"{len(findings['unknown'])} · left alone: "
+            f"{len(findings['protected'])}",
+            f"removals are "
+            f"{'ON' if cfg.get('enabled', True) else 'OFF'} "
+            f"here — /rmdeleted removes the deleted, "
+            f"/rminactive the inactive (window "
+            f"{days} days; /gsettings cleanup days N changes "
+            f"it)",
+            f"deleted accounts are also removed automatically "
+            f"on the upkeep cycle: "
+            f"{'on' if cfg.get('auto_deleted', True) else 'off'}"
+            f" (/gsettings cleanup auto on|off)",
+        ])
+        coverage = [
+            f"scanned {cov['scanned']} members from "
+            f"{roster['source']}",
+        ]
+        if roster["truncated"]:
+            coverage.append("⚠ the member list hit its cap — "
+                            "members past it are not in this "
+                            "scan")
+        if roster["member_count"]:
+            coverage.append(
+                f"Telegram counts "
+                f"{roster['member_count']} members in this "
+                f"group")
+        if cov["bots_skipped"]:
+            coverage.append(
+                f"{cov['bots_skipped']} bot(s) sit outside the "
+                f"inactivity sweep — a utility bot is quiet by "
+                f"design (a deleted bot still counts as "
+                f"deleted)")
+        if not roster["admins_known"]:
+            coverage.append(
+                "the admin list wasn't readable on any "
+                "surface — removals re-check each member's "
+                "standing before acting")
+        card.block_lines(coverage, title="Coverage")
+        if findings["deleted"]:
+            rows, pages = _page(findings["deleted"])
+            card.block_lines(
+                [f"{f['label']} — Telegram marks this "
+                 f"account deleted" for f in rows],
+                title=f"Deleted accounts "
+                      f"({len(findings['deleted'])})")
+        if findings["inactive"]:
+            rows, pages = _page(findings["inactive"])
+            lines = []
+            for f in rows:
+                basis = ("my records" if f["basis"] == "ledger"
+                         else "Telegram's last-seen")
+                lines.append(
+                    f"{f['label']} — last active "
+                    f"{f['days_inactive']}d ago ({basis})")
+            card.block_lines(
+                lines,
+                title=f"Inactive past {days} days "
+                      f"({len(findings['inactive'])})")
+        if findings["unknown"]:
+            rows, pages = _page(findings["unknown"])
+            card.block_lines(
+                [f"{f['label']} — {f['reason']}"
+                 for f in rows],
+                title=f"Couldn't judge "
+                      f"({len(findings['unknown'])}) — never "
+                      f"removed on a guess")
+        if findings["protected"]:
+            card.block_lines(
+                [f"{f['label']} — flagged, but an admin / "
+                 f"the owner: cleanup never removes them"
+                 for f in findings["protected"]],
+                title="Left alone")
+        total_pages = max(
+            1,
+            -(-max(len(findings["deleted"]),
+                    len(findings["inactive"]),
+                    len(findings["unknown"])) // per_page))
+        note = ("scan only — nothing was removed. "
+                "/rmdeleted removes the deleted · /rminactive "
+                "removes the inactive.")
+        if total_pages > 1:
+            note += (f" Page {min(page, total_pages)} of "
+                     f"{total_pages} — /cleanup <n> for more.")
+        card.note(note)
+        return self._card(message, card)
+
+    def _cleanup_standing(self, adapter, message, user_id):  # type: ignore[no-untyped-def]
+        """One removal target's standing, re-checked at removal
+        time on the acting surface: "creator" / "administrator"
+        / "member" / "left" / "unknown" (a check surface exists
+        but could not answer — never remove on a guess), or ""
+        when the surface has no member check at all (the
+        platform's own power bounds what the call can do)."""
+        fn = getattr(adapter, "admin_member", None) or getattr(
+            adapter, "admin_member_mtproto", None)
+        if fn is None:
+            return ""
+        try:
+            info = fn(message.chat, user_id)
+        except Exception:  # noqa: BLE001 - unverifiable
+            return "unknown"
+        if not isinstance(info, dict) \
+                or info.get("ok") is False:
+            return "unknown"
+        ptype = str(info.get("participant_type") or "")
+        if ptype:
+            if "Creator" in ptype:
+                return "creator"
+            if "Admin" in ptype:
+                return "administrator"
+            return "member"
+        status = str(info.get("status")
+                     or info.get("role") or "").lower()
+        if not status and isinstance(info.get("result"), dict):
+            status = str(
+                info["result"].get("status") or "").lower()
+        return status or "unknown"
+
+    def _cleanup_kick_call(self, message, user_id):  # type: ignore[no-untyped-def]
+        """A cleanup removal is a KICK (ban immediately lifted —
+        the same primitive as /kick): the member is out, never
+        banned; an inactive member who returns is free to
+        rejoin, and a deleted account has nothing to rejoin
+        with."""
+        def call(adapter):  # type: ignore[no-untyped-def]
+            ban = getattr(adapter, "admin_ban", None)
+            unban = getattr(adapter, "admin_unban", None)
+            if ban is None or unban is None:
+                raise RuntimeError(
+                    "this platform path cannot remove members")
+            out = ban(message.chat, user_id)
+            if isinstance(out, dict) and out.get("ok") is False:
+                return out
+            return unban(message.chat, user_id)
+        return call
+
+    def _cleanup_act_on(self, surface, key, message, adapter,  # type: ignore[no-untyped-def]
+                        finding, which: str) -> tuple:
+        """Act on ONE cleanup finding through the admin seam.
+        Returns (outcome, why): "removed" / "failed" /
+        "skipped" (+ the skip's plain reason).  The standing
+        re-check lives here so the commands and the automatic
+        upkeep pass share it exactly: admins/owner and
+        unverifiable standings are never removed; executions
+        journal through _mod_run, refusals-to-act journal as
+        cleanup_skip — with the acting identity read from the
+        message (the commanding admin, or the upkeep marker)."""
+        user_id = finding["user_id"]
+        actor = str(message.sender_id or message.sender or "")
+        standing = self._cleanup_standing(
+            adapter, message, user_id) if adapter else ""
+        if standing in ("creator", "administrator", "admin",
+                        "owner"):
+            surface._audit(
+                key, "cleanup_skip", user_id=user_id, by=actor,
+                target=which,
+                reason="group admin/owner — cleanup never "
+                       "removes them")
+            surface.store.save()
+            return "skipped", "an admin — never removed by cleanup"
+        if standing == "unknown":
+            surface._audit(
+                key, "cleanup_skip", user_id=user_id, by=actor,
+                target=which,
+                reason="standing unverifiable — not removed "
+                       "on a guess")
+            surface.store.save()
+            return "skipped", "standing couldn't be verified"
+        if standing in ("left", "kicked"):
+            surface.mark_removed(key, user_id)
+            return "skipped", "already out"
+        ok = self._mod_run(
+            surface, key, message, f"cleanup_{which}", user_id,
+            self._cleanup_kick_call(message, user_id))
+        if ok:
+            surface.mark_removed(key, user_id)
+            return "removed", ""
+        return "failed", ""
+
+    def _cleanup_remove(self, message, *, which: str,  # type: ignore[no-untyped-def]
+                        days_override: int | None = None) -> str:
+        """Shared removal engine for /rmdeleted and /rminactive:
+        fresh scan → per-target standing re-check → kick through
+        the admin seam (_mod_run journals every outcome) → the
+        ledger learns the member is out.  One member's failure
+        never aborts the rest and never reports as success."""
+        key, err = self._cleanup_gate(message)
+        if err:
+            return err
+        from ...social.chat.group_cleanup import (
+            DEFAULT_INACTIVE_DAYS)
+
+        surface = self._group_surface()
+        cfg = surface.cleanup_cfg(key)
+        if not cfg.get("enabled", True):
+            return ("member cleanup removals are off in this "
+                    "group — /gsettings cleanup on turns them "
+                    "back on. The scan (/cleanup) still runs.")
+        days = days_override or int(
+            cfg.get("inactive_days") or DEFAULT_INACTIVE_DAYS)
+        findings, _roster = self._cleanup_scan(
+            surface, key, message, days)
+        targets = findings["deleted" if which == "deleted"
+                           else "inactive"]
+        noun = "deleted account" if which == "deleted" \
+            else "inactive member"
+        if not targets:
+            return (f"nothing to remove — the scan found no "
+                    f"{noun}s"
+                    + (f" past {days} days." if which != "deleted"
+                       else "."))
+        adapter = self._group_adapter(message.chat.platform)
+        removed: list = []
+        failed: list = []
+        skipped: list = []
+        for finding in targets:
+            outcome, why = self._cleanup_act_on(
+                surface, key, message, adapter, finding, which)
+            if outcome == "removed":
+                removed.append(finding)
+            elif outcome == "failed":
+                failed.append(finding)
+            else:
+                skipped.append((finding, why))
+        lines = [
+            f"🧹 {noun} cleanup: {len(removed)} removed · "
+            f"{len(failed)} failed · {len(skipped)} skipped",
+        ]
+        shown = 0
+        for finding in removed:
+            if shown < 20:
+                lines.append(f"✓ {finding['label']} — removed")
+            shown += 1
+        if len(removed) > 20:
+            lines.append(f"… and {len(removed) - 20} more "
+                         f"removed (all in /glog)")
+        for finding in failed[:10]:
+            lines.append(f"✗ {finding['label']} — the "
+                         f"platform refused (in /glog)")
+        for finding, why in skipped[:10]:
+            lines.append(f"— {finding['label']} skipped: {why}")
+        lines.append("kicked, not banned — and every outcome "
+                     "is journaled in /glog.")
+        return "\n".join(lines)
+
+    #: How often one group's automatic deleted-account pass may
+    #: run: a full member enumeration is an upkeep cost, never a
+    #: per-message one (the channel analytics sampling sets the
+    #: same order of cadence, ≤1/6h).
+    _CLEANUP_AUTO_INTERVAL_S = 6 * 3600.0
+
+    def _cleanup_admin_power(self, adapter, message) -> bool:  # type: ignore[no-untyped-def]
+        """Does Devon hold member-removal power on this surface
+        right now?  Read from the adapter's own rights surface
+        where one exists (MTProto admin_my_rights / Bot API
+        admin_rights).  Where none exists, True: the platform
+        itself bounds what the removal call can do, and a
+        refusal journals honestly through _mod_run."""
+        rights = getattr(adapter, "admin_my_rights", None)
+        if callable(rights):
+            try:
+                out = rights(message.chat)
+            except Exception:  # noqa: BLE001 - unverifiable
+                return False
+            return bool(isinstance(out, dict)
+                        and out.get("is_admin"))
+        rights = getattr(adapter, "admin_rights", None)
+        if callable(rights):
+            try:
+                out = rights(message.chat)
+            except Exception:  # noqa: BLE001 - unverifiable
+                return False
+            if not isinstance(out, dict) or not out.get("ok"):
+                return False
+            return str(out.get("status") or "").lower() in (
+                "creator", "administrator") and bool(
+                    out.get("can_restrict_members", True))
+        return True
+
+    def _cleanup_auto_drive(self, surface, key, message) -> None:  # type: ignore[no-untyped-def]
+        """Automatic deleted-account removal (owner order
+        2026-11-04): on the group upkeep beat, in a claimed
+        Telegram group where Devon holds admin power, accounts
+        Telegram marks deleted are kicked WITHOUT waiting for a
+        command — dead accounts are upkeep, not a decision.
+        Journal-only: nothing is ever posted to the group about
+        a removal (no meta-narration); /glog holds every
+        outcome.
+
+        Gates, in order: Telegram surface · the group's cleanup
+        settings (removals on + auto-remove deleted on — both
+        default ON, the owner's posture) · the defense autonomy
+        switch (automatic admin acts only while it's on, like
+        every other automatic enforcement) · the §33 claim ·
+        her verified admin standing on the acting surface · a
+        per-group 6h throttle.  Inactive members are NOT swept
+        here: real people are removed by command only.  The
+        pass is failure-isolated — upkeep never breaks a group
+        turn, and one member's failure never stops the rest."""
+        try:
+            platform = str(message.chat.platform or "")
+            if not platform.startswith("telegram"):
+                return
+            cfg = surface.cleanup_cfg(key)
+            if not cfg.get("enabled", True) \
+                    or not cfg.get("auto_deleted", True):
+                return
+            settings = surface.store.settings(key)
+            if not (settings.get("defense") or {}).get(
+                    "autonomy", True):
+                return
+            if not surface.claim_state(key)["claimed"]:
+                return
+            now = time.time()
+            if not surface.cleanup_auto_due(
+                    key, now=now,
+                    interval_s=self._CLEANUP_AUTO_INTERVAL_S):
+                return
+            surface.note_cleanup_auto(key, ts=now)
+            adapter = self._group_adapter(platform)
+            if adapter is None or not self._cleanup_admin_power(
+                    adapter, message):
+                return
+            from types import SimpleNamespace
+
+            from ...social.chat.group_cleanup import (
+                DEFAULT_INACTIVE_DAYS)
+
+            # The acting identity for the journal: the upkeep
+            # itself, never whichever member's message happened
+            # to drive the beat.
+            upkeep = SimpleNamespace(
+                chat=message.chat, sender_id="",
+                sender="member cleanup (automatic)")
+            findings, _roster = self._cleanup_scan(
+                surface, key, upkeep,
+                int(cfg.get("inactive_days")
+                    or DEFAULT_INACTIVE_DAYS))
+            removed = failed = skipped = 0
+            for finding in findings["deleted"]:
+                outcome, _why = self._cleanup_act_on(
+                    surface, key, upkeep, adapter, finding,
+                    "deleted")
+                if outcome == "removed":
+                    removed += 1
+                elif outcome == "failed":
+                    failed += 1
+                else:
+                    skipped += 1
+            if removed or failed:
+                surface._audit(
+                    key, "cleanup_auto",
+                    by="member cleanup (automatic)",
+                    removed=removed, failed=failed,
+                    skipped=skipped)
+                surface.store.save()
+        except Exception:  # noqa: BLE001 - upkeep is isolated
+            _log.warning("cleanup auto drive failed for %s",
+                         key, exc_info=True)
+
+    def _control_rmdeleted(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        return self._cleanup_remove(message, which="deleted")
+
+    def _control_rminactive(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        days = None
+        tail_txt = str(tail or "").strip().lower()
+        if tail_txt:
+            digits = tail_txt.rstrip("d").strip()
+            if digits.isdigit():
+                days = max(1, min(3650, int(digits)))
+            else:
+                from ...social.chat.group_cleanup import (
+                    DEFAULT_INACTIVE_DAYS)
+
+                surface = self._group_surface()
+                key = self._group_key_or_none(message)
+                current = DEFAULT_INACTIVE_DAYS
+                if key is not None:
+                    current = int(surface.cleanup_cfg(key).get(
+                        "inactive_days") or DEFAULT_INACTIVE_DAYS)
+                return (f"usage: /rminactive [days] — bare "
+                        f"uses this group's window "
+                        f"({current} days).")
+        return self._cleanup_remove(message, which="inactive",
+                                    days_override=days)
 
     def _control_mute(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._mod_gate(message)

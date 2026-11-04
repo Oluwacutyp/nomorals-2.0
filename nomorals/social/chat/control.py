@@ -62,7 +62,7 @@ __all__ = ["CONTROL_COMMANDS", "COMMAND_DETAILS", "ControlCommand",
            "public_menu_text",
            "MAX_STACK_DEPTH", "NON_STACKABLE_COMMANDS", "STACK_DENIAL_REPLY",
            "split_command_stack", "expand_prev_placeholders", "stack_header",
-           "WHATSAPP_UNSUPPORTED_KINDS"]
+           "WHATSAPP_UNSUPPORTED_KINDS", "TELEGRAM_CLEANUP_KINDS"]
 
 PLATFORMS = ("telegram", "discord", "whatsapp", "local")
 
@@ -72,13 +72,21 @@ PLATFORMS = ("telegram", "discord", "whatsapp", "local")
 #: the adapter's admin_restrict / admin_unrestrict verbs, and
 #: WhatsApp has NO per-person mute — the adapter refuses honestly
 #: (the only silences are removing the member, or the whole group
-#: set to admins-only; neither is a mute).  So on WhatsApp these
-#: kinds are absent from the menu and from group help, and typing
-#: one gets the platform truth at dispatch instead of a failed
-#: execution (runtime.handle_control).  Telegram executes both
-#: fine; the global catalog is untouched.
+#: set to admins-only; neither is a mute).  The cleanup trio is
+#: Telegram-only machinery: it reads Telegram's member list and
+#: deleted-account markers, which WhatsApp does not expose at
+#: all.  So on WhatsApp these kinds are absent from the menu and
+#: from group help, and typing one gets the platform truth at
+#: dispatch instead of a failed execution
+#: (runtime.handle_control).  Telegram executes them fine; the
+#: global catalog is untouched.
 WHATSAPP_UNSUPPORTED_KINDS: frozenset[str] = frozenset(
-    {"mute", "unmute"})
+    {"mute", "unmute", "cleanup", "rmdeleted", "rminactive"})
+
+#: The Telegram-only member-cleanup kinds — on WhatsApp they get
+#: their own dispatch truth line (see the constant above).
+TELEGRAM_CLEANUP_KINDS: frozenset[str] = frozenset(
+    {"cleanup", "rmdeleted", "rminactive"})
 
 #: wave 87: the commands that start a game directly.  The Social Operator
 #: lets these through in EVERY chat (games are social); the Core Mind only
@@ -191,6 +199,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "drop", "claim",
     "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
     "unpin", "purge", "report",
+    "cleanup", "rmdeleted", "rminactive",
     "game",
     *PUBLIC_GAME_COMMANDS,
 ])
@@ -230,7 +239,8 @@ def public_menu_text() -> str:
         "groups — /rules /member /glog /gsettings /strikes "
         "/recheck /joinq /console /undonotice /flag /rep "
         "/repclear /repdismiss /report /mute /unmute /ban "
-        "/unban /kick /warn /pin /unpin /purge\n"
+        "/unban /kick /warn /pin /unpin /purge /cleanup "
+        "/rmdeleted /rminactive\n"
         "group purse — /balance /mine /work /pay /gshop "
         "/quests /treasury /deposit /withdraw /rob /bail "
         "/coinflip /top /tax /grant /property /buyproperty "
@@ -558,6 +568,9 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "unpin": (0, 0),          # /unpin — admin: unpin the current pin
     "purge": (0, 0),          # /purge — admin: delete the message you reply to
     "report": (0, None),      # /report [@member] [reason] — member: flag something for the admins (held log)
+    "cleanup": (0, 1),        # /cleanup [page] — admin: Telegram group cleanup SCAN (dry run, removes nothing): deleted accounts + members inactive past the window
+    "rmdeleted": (0, 0),      # /rmdeleted — admin: remove the deleted accounts the scan finds (kick, not ban; journaled per member)
+    "rminactive": (0, 1),     # /rminactive [days] — admin: remove members inactive past the window (setting, or days for this run)
     "notion": (0, None),      # /notion dbs|query|add — Notion reads + page writes
     "gcal": (0, None),        # /gcal [agenda] | add — Google Calendar
     "trello": (0, None),      # /trello boards|lists|cards|add — Trello
@@ -2473,6 +2486,18 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/report as a reply, or /report @member [reason]",
             "example": "/report @ada spamming",
             "related": "/glog"},
+    "cleanup": {"what": "scan this Telegram group for cleanup (admins, claimed groups): deleted accounts (Telegram's own marker) and members with no activity past the group's inactivity window (default 90 days, /gsettings cleanup days N). The scan is a DRY RUN — it removes nothing; it reports who, on what evidence, and what it could not judge. Activity truth is Devon's own member ledger plus Telegram last-seen from her userbot session; the Bot API alone has neither a member list nor last-seen, so on that surface the scan covers the members Devon has records of and says so. Deleted accounts do not wait for this scan: her upkeep cycle removes them automatically in claimed groups where she holds admin power (default on — /gsettings cleanup auto off stops it; the defense autonomy switch governs it like every automatic admin action). Inactive members are removed by command only, never automatically.",
+            "usage": "/cleanup [page]",
+            "example": "/cleanup",
+            "related": "/rmdeleted /rminactive /gsettings /member"},
+    "rmdeleted": {"what": "remove the deleted accounts from this Telegram group now (admins, claimed groups): the same removal her upkeep cycle runs automatically — kicks every account Telegram marks deleted, a kick not a ban, journaled per member in /glog with the outcome. Admins, the group owner and Devon's own accounts are never removed; a failure for one account never stops the rest and never reports as success.",
+            "usage": "/rmdeleted",
+            "example": "/rmdeleted",
+            "related": "/cleanup /rminactive /glog"},
+    "rminactive": {"what": "remove this Telegram group's inactive members (admins, claimed groups): members with no activity past the inactivity window — the group's setting (/gsettings cleanup days N) or the days given here for this run. Kicked, not banned (they may rejoin), journaled per member in /glog. Members whose activity Devon cannot judge (no record, hidden last-seen) are never removed on a guess; admins, bots and Devon's own accounts are exempt.",
+            "usage": "/rminactive [days]",
+            "example": "/rminactive 180",
+            "related": "/cleanup /rmdeleted /gsettings /member"},
     "notion": {"what": "Notion: list databases, query rows, create pages — through your connected Notion integration.",
             "usage": "/notion dbs [query] | /notion query <db> [text] | /notion add <page-id> <title> [| <body>]",
             "example": "/notion add <page-id> Shopping list | milk | eggs",
@@ -2934,7 +2959,8 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "poll", "vote", "milestones",
                             "contributions", "boards", "webshot",
                             "mute", "unmute", "ban", "unban", "kick",
-                            "warn", "pin", "unpin", "purge", "report"]),
+                            "warn", "pin", "unpin", "purge", "report",
+                            "cleanup", "rmdeleted", "rminactive"]),
     ("discovery", ["list", "commands", "menu", "help", "tour", "heal"]),
 ]
 
@@ -3206,7 +3232,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "poll", "vote", "milestones", "contributions", "boards",
       "webshot",
       "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
-      "unpin", "purge", "report"]),
+      "unpin", "purge", "report",
+      "cleanup", "rmdeleted", "rminactive"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]

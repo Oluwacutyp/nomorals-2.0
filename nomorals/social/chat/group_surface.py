@@ -73,6 +73,7 @@ from ...security.payload_inspection import (
 )
 from .failures import record_failure
 from .group_acceptance import ACCEPTANCE_DEFAULTS
+from .group_cleanup import CLEANUP_DEFAULTS
 from .group_reputation import (
     CATEGORIES as REPUTATION_CATEGORIES,
 )
@@ -215,6 +216,15 @@ def _default_settings() -> dict[str, Any]:
                                         # expiry window — defaults
                                         # ARE the shipped 3/5/7
         "games_enabled": True,
+        "cleanup": copy.deepcopy(CLEANUP_DEFAULTS),
+                                        # member cleanup: the
+                                        # deleted-account scan +
+                                        # the inactivity sweep
+                                        # (removals switch +
+                                        # the inactivity window
+                                        # in days) — the class
+                                        # the DESIGN gap list
+                                        # named since 2026-10-25
         "system_claim": {"designated": False,
                          "bot_admin": None},
                                         # the §33 claim: may
@@ -375,7 +385,8 @@ class GroupStore:
                                      "expression", "reputation",
                                      "conflict", "rhythm",
                                      "channel", "boards",
-                                     "exchange", "gangs")})
+                                     "exchange", "gangs",
+                                     "cleanup")})
         mod = dict(merged["moderation"])
         mod.update((stored.get("moderation") or {}))
         merged["moderation"] = mod
@@ -421,6 +432,9 @@ class GroupStore:
         merged["gangs"] = _deep_merge(
             copy.deepcopy(GANGS36_DEFAULTS),
             stored.get("gangs") or {})
+        merged["cleanup"] = _deep_merge(
+            copy.deepcopy(CLEANUP_DEFAULTS),
+            stored.get("cleanup") or {})
         return merged
 
 
@@ -769,6 +783,52 @@ class GroupSurface:
 
         card = Card("announcement", title=str(body), icon="👋")
         return self._card_render(group_key, card)
+
+    # ---- member cleanup (deleted accounts + inactivity) -------
+    def cleanup_cfg(self, group_key: str) -> dict[str, Any]:
+        """The group's member-cleanup block, defaults-merged:
+        whether the remove commands may act, and the inactivity
+        window in days the sweep judges against."""
+        return dict(self.store.settings(group_key).get(
+            "cleanup") or {})
+
+    def cleanup_auto_due(self, group_key: str, *,
+                         now: float | None = None,
+                         interval_s: float = 6 * 3600) -> bool:
+        """Is this group's automatic deleted-account pass due?
+        The stamp lives on the group entry (runtime state, not
+        a setting): a full member enumeration is an upkeep cost,
+        never a per-message one."""
+        last = float((self.store.group(group_key).get(
+            "cleanup_auto") or {}).get("last_run") or 0)
+        now = now if now is not None else time.time()
+        return now - last >= interval_s
+
+    def note_cleanup_auto(self, group_key: str, *,
+                          ts: float | None = None) -> None:
+        """Stamp the automatic pass as attempted (stamped before
+        the work, so a failing enumeration doesn't retry on
+        every message)."""
+        entry = self.store.group(group_key)
+        entry["cleanup_auto"] = {
+            "last_run": ts if ts is not None else time.time()}
+        self.store.save()
+
+    def mark_removed(self, group_key: str, user_id: str, *,
+                     ts: float | None = None) -> None:
+        """Ledger bookkeeping for a cleanup removal the runtime
+        already executed + journaled through the admin seam:
+        the member is out, so the ledger stops counting them as
+        present (a later Bot-API-path scan must not re-remove a
+        ghost).  No audit entry here — the caller's admin-action
+        journal IS the record — and no goodbye: a removal is not
+        a leave-taking."""
+        entry = self.store.group(group_key)
+        member = entry["members"].get(user_id)
+        if member is not None:
+            member["left_ts"] = ts if ts is not None \
+                else time.time()
+            self.store.save()
 
     # ---- join acceptance (DESIGN §28) -----------------------------
     # The evaluation organ lives in group_acceptance.py; the
