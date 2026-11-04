@@ -1854,6 +1854,17 @@ class WhatsAppAdapter(ChatAdapter):
     #   admin_member → the roster's word on one member's role;
     #              this is also the runtime's admin-gate source
     #              (_group_admin_ok) on this platform.
+    #   join requests → bridge group_join_requests (the door
+    #              list) + group_join_request_decide, real on
+    #              BOTH engines (whatsmeow
+    #              GetGroupRequestParticipants /
+    #              UpdateGroupRequestParticipants; Baileys
+    #              groupRequestParticipantsList /
+    #              groupRequestParticipantsUpdate).  WhatsApp
+    #              admits fully or not at all — there is no
+    #              restricted-admit state — so §28's request
+    #              decisions on this platform are approve /
+    #              reject only, and the surfaces say so.
 
     def _member_jid(self, chat: ChatRef | str, user_id: str) -> str:
         """Resolve a runtime member id to the JID the bridge
@@ -1894,6 +1905,16 @@ class WhatsAppAdapter(ChatAdapter):
         if not isinstance(out, dict) or out.get("ok") is False:
             return out if isinstance(out, dict) else \
                 {"ok": False, "error": "bridge gave no answer"}
+        return self._per_user_verdict(out, jid, action)
+
+    @staticmethod
+    def _per_user_verdict(out: dict[str, Any], jid: str,
+                          action: str) -> dict[str, Any]:
+        """One member's verdict inside a batch reply whose ok
+        was already honored: the member's OWN row decides (see
+        _members_update_checked) — a "200" (or the bridge's
+        "sent" when the server returned no rows) is success,
+        anything else is the refusal, named."""
         rows = out.get("results") or []
         mine = [r for r in rows
                 if _jid_user_part(str(r.get("jid") or ""))
@@ -2021,6 +2042,66 @@ class WhatsAppAdapter(ChatAdapter):
         return self._admin_cmd("message_unpin", {
             "chat": self._group_jid(chat), "message_id": mid,
         })
+
+    def admin_join_requests(self, chat: ChatRef) -> dict[str, Any]:
+        """Pending join requests at an approval-mode group's
+        door: ``{"ok": True, "requests": [{"jid", "name",
+        "requested_at"}]}`` — §28's discovery read.  WhatsApp
+        reports only who asked and when; the name rides along
+        only when the bridge's contact store knows one (the Go
+        engine), else "".  A group whose approval mode is off
+        simply has nobody waiting — an empty list, not an
+        error.  A refusal (bridge down, an older bridge without
+        the verb, no admin standing) is an honest ok=False: the
+        runtime reads it as "the door can't be seen", never as
+        "nobody is waiting"."""
+        if not self.connected.is_set():
+            return {"ok": False,
+                    "error": "whatsapp bridge not connected"}
+        response = self._send_cmd(
+            {"cmd": "group_join_requests",
+             "chat": self._group_jid(chat)}, timeout=20)
+        if not isinstance(response, dict) \
+                or not response.get("ok"):
+            return {"ok": False,
+                    "error": str(
+                        (response or {}).get("error")
+                        or "bridge gave no answer")}
+        out = []
+        for entry in response.get("requests") or []:
+            jid = str(entry.get("jid") or "")
+            if not jid:
+                continue
+            try:
+                ts = float(entry.get("requested_at") or 0)
+            except (TypeError, ValueError):
+                ts = 0.0
+            out.append({"jid": jid,
+                        "name": str(entry.get("name") or ""),
+                        "requested_at": ts})
+        return {"ok": True, "requests": out}
+
+    def admin_join_request(self, chat: ChatRef, user_id: str,
+                           approve: bool) -> dict[str, Any]:
+        """Decide one pending join request (DESIGN §28) — the
+        Telegram contract exactly: approve admits the requester;
+        decline refuses them (they may request again — a decline
+        is not a ban).  The requester's own per-user status
+        decides, as with member updates: a batch ok cannot hide
+        this requester's refusal."""
+        jid = self._member_jid(chat, user_id)
+        if not jid:
+            return {"ok": False,
+                    "error": f"no WhatsApp identity for {user_id!r}"}
+        action = "approve" if approve else "reject"
+        out = self._admin_cmd("group_join_request_decide", {
+            "chat": self._group_jid(chat), "action": action,
+            "participants": [jid],
+        }, timeout=45)
+        if not isinstance(out, dict) or out.get("ok") is False:
+            return out if isinstance(out, dict) else \
+                {"ok": False, "error": "bridge gave no answer"}
+        return self._per_user_verdict(out, jid, action)
 
     # ── communities ─────────────────────────────────────────────────────
 

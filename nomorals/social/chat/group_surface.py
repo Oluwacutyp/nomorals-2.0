@@ -886,6 +886,74 @@ class GroupSurface:
             raid=raid)
         return cfg, raid
 
+    def acceptance_poll_due(self, group_key: str, *,
+                            now: float | None = None,
+                            interval_s: float = 120) -> bool:
+        """Is this group's WhatsApp join-request discovery poll
+        due?  WhatsApp holds requests server-side — no event
+        ever arrives — so the §28 queue discovers them by
+        polling on the group cadence.  The stamp lives in the
+        acceptance state (runtime state, not a setting) and is
+        stamped BEFORE the work, so a failing bridge doesn't
+        retry on every message."""
+        now = now if now is not None else time.time()
+        last = float(self._acceptance_state(
+            self.store.group(group_key)).get("wa_req_poll_ts")
+            or 0)
+        return now - last >= interval_s
+
+    def note_acceptance_poll(self, group_key: str, *,
+                             ts: float | None = None) -> None:
+        """Stamp the discovery poll as attempted."""
+        entry = self.store.group(group_key)
+        self._acceptance_state(entry)["wa_req_poll_ts"] = (
+            ts if ts is not None else time.time())
+        self.store.save()
+
+    def acceptance_wa_seen(self, group_key: str) -> dict[str, float]:
+        """Requester id → requested_at for everyone the last
+        successful WhatsApp door poll saw waiting.  The dedupe
+        memory: a request already evaluated at this
+        requested_at is never evaluated twice."""
+        entry = self.store.group(group_key)
+        return dict(self._acceptance_state(entry).get(
+            "wa_req_seen") or {})
+
+    def acceptance_wa_sync(self, group_key: str,
+                           listed: dict[str, float], *,
+                           now: float | None = None
+                           ) -> list[dict[str, Any]]:
+        """Reconcile the queue with a SUCCESSFUL door poll.
+        Pending records the poll discovered (source "wa_poll")
+        whose requester is no longer listed have ended
+        WhatsApp-side — withdrawn, expired, or decided in the
+        WhatsApp app itself: they close as "gone", audited,
+        never silently dropped, and the seen map becomes the
+        live list.  Returns the closed records.  A FAILED poll
+        never calls this: absence of an answer is not absence
+        of requesters."""
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        closed: list[dict[str, Any]] = []
+        for record in (entry.get("join_requests")
+                       or {}).values():
+            if record.get("state") != "pending" \
+                    or record.get("source") != "wa_poll":
+                continue
+            if str(record.get("user_id") or "") not in listed:
+                record["state"] = "gone"
+                record["decided_by"] = "platform"
+                record["decided_ts"] = now
+                closed.append(record)
+                self._audit(
+                    group_key, "acceptance_request_gone",
+                    user_id=str(record.get("user_id") or ""),
+                    request=record.get("id"))
+        self._acceptance_state(entry)["wa_req_seen"] = dict(
+            listed)
+        self.store.save()
+        return closed
+
     def acceptance_previously_banned(self, group_key: str,
                                      user_id: str
                                      ) -> dict[str, Any] | None:

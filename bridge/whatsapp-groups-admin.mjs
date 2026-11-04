@@ -23,6 +23,7 @@
  *     {"id":"<req>","cmd":"group_set_settings","chat":"<@g.us>","announce":bool,"restrict":bool}
  *     {"id":"<req>","cmd":"group_revoke_invite","chat":"<@g.us>"}
  *     {"id":"<req>","cmd":"group_join_approval","chat":"<@g.us>","mode":"on|off"}
+ *     {"id":"<req>","cmd":"group_join_request_decide","chat":"<@g.us>","action":"approve|reject","participants":["<jid>",...]}
  *     {"id":"<req>","cmd":"group_member_add_mode","chat":"<@g.us>","mode":"admin|all"}
  *     {"id":"<req>","cmd":"message_delete","chat":"<@g.us>","message_id":"<stanza id>"}
  *     {"id":"<req>","cmd":"message_pin","chat":"<@g.us>","message_id":"<stanza id>"}   (unsupported on this engine — honest error)
@@ -50,6 +51,7 @@
  *                                groupUpdateSubject, groupUpdateDescription,
  *                                groupLeave, groupSettingUpdate,
  *                                groupRevokeInvite, groupJoinApprovalMode,
+ *                                groupRequestParticipantsUpdate,
  *                                groupMemberAddMode
  *   lib/Socket/chats.js       — updateProfilePicture (group JIDs too)
  *   lib/Socket/communities.js — communityCreate, communityLeave,
@@ -213,6 +215,26 @@ export function registerGroupAdminCommands(ctx) {
       if (!['admin', 'all'].includes(mode)) throw new Error(`bad mode: ${req.mode} (want admin|all)`);
       await sock().groupMemberAddMode(jid, mode);
       return { ok: true, member_add_mode: mode };
+    },
+
+    // Decide pending join requests (DESIGN §28): approve admits
+    // the requester, reject refuses them (they may request
+    // again — a reject is not a ban). The reply carries the
+    // per-participant rows, group_members_update-shaped, so the
+    // adapter honors each requester's own status.
+    group_join_request_decide: async (req) => {
+      const jid = groupJid(req.chat);
+      const action = String(req.action || '').trim().toLowerCase();
+      if (!['approve', 'reject'].includes(action)) {
+        throw new Error(`bad action: ${req.action} (want approve|reject)`);
+      }
+      const participants = participantJids(req.participants);
+      const res = await sock().groupRequestParticipantsUpdate(jid, participants, action);
+      const rows = (Array.isArray(res) ? res : []).map((r) => ({
+        jid: jidNormalizedUser(r.jid || ''),
+        status: String(r.status || ''),
+      }));
+      return { ok: true, action, results: rows.length ? rows : participants.map((p) => ({ jid: p, status: 'sent' })) };
     },
 
     // ── message moderation (the runtime's admin_delete / admin_pin) ──

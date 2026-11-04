@@ -12,13 +12,14 @@
  *   {"id":"<req>","cmd":"group_list"}
  *   {"id":"<req>","cmd":"group_info","chat":"<group jid>"}
  *   {"id":"<req>","cmd":"group_participants","chat":"<group jid>"}
+ *   {"id":"<req>","cmd":"group_join_requests","chat":"<group jid>"}
  *   {"id":"<req>","cmd":"community_list"}
  *
  * Replies: {"id":"<req>","ok":true, ...} or {"id":"<req>","ok":false,"error":"..."}.
  *
  * Baileys surface used (verified against @whiskeysockets/baileys 6.7.24):
  *   lib/Socket/groups.js      — groupFetchAllParticipating, groupMetadata,
- *                                groupInviteCode
+ *                                groupInviteCode, groupRequestParticipantsList
  *   lib/Socket/communities.js — communityMetadata (= groupMetadata shape)
  *   lib/Types/GroupMetadata.d.ts — GroupMetadata, GroupParticipant,
  *                                  ParticipantAction
@@ -148,6 +149,25 @@ export function registerGroupCommands(ctx) {
         admins: adminCount,
         participants,
       };
+    },
+
+    // Pending join requests (DESIGN §28's request limb): who is
+    // waiting at the door of an approval-mode group. Baileys
+    // reports only the JID and the request time — no name is
+    // exposed at request time, so none is invented. A group
+    // whose approval mode is off simply has no pending
+    // requests: an empty list, not an error.
+    group_join_requests: async (req) => {
+      const jid = groupJid(req.chat);
+      const res = await sock().groupRequestParticipantsList(jid);
+      const requests = (Array.isArray(res) ? res : [])
+        .map((a) => ({
+          jid: jidNormalizedUser(a.jid || ''),
+          name: '',
+          requested_at: Number(a.request_time) || 0,
+        }))
+        .filter((r) => r.jid);
+      return { ok: true, requests };
     },
 
     // Communities the account participates in, each with its linked groups.

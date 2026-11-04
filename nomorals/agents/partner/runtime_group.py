@@ -1188,6 +1188,12 @@ class RuntimeGroupMixin:
         # per group inside the drive, journal-only — nothing is
         # posted to the room).  Failure-isolated inside.
         self._cleanup_auto_drive(surface, key, message)
+        # §28's WhatsApp limb rides the same beat: Telegram
+        # join requests arrive as events, WhatsApp holds them
+        # server-side, so a claimed request-mode group polls
+        # its door (throttled per group inside the drive) and
+        # feeds new requesters into the same queue.
+        self._wa_join_request_drive(surface, key, message)
         actions = result.get("actions") or []
         # §21 auto-collect rides the same cycle: a sticker
         # that landed in a claimed room whose admin enabled
@@ -6638,7 +6644,10 @@ class RuntimeGroupMixin:
                 surface, key, adapter, message.chat, user_id,
                 approve=approve)
             if not done:
-                return (f"{label}: Telegram wouldn't carry that "
+                door = ("WhatsApp" if str(
+                    message.chat.platform or "") == "whatsapp"
+                    else "Telegram")
+                return (f"{label}: {door} wouldn't carry that "
                         f"out — the request may have expired or "
                         f"been decided already (see /glog).")
             if not approve:
@@ -6646,6 +6655,18 @@ class RuntimeGroupMixin:
             admitted = surface.acceptance_request_admitted(
                 key, str(record.get("id") or ""))
             if admitted.get("restricted"):
+                if str(message.chat.platform or "") == "whatsapp":
+                    # WhatsApp has no restricted-admit state:
+                    # the approval admitted them FULLY.  No
+                    # restrict is performed and no fix-it note
+                    # is sent — the unmet checks live in /glog,
+                    # and the admin who approved sees them here.
+                    return (
+                        f"✅ {label} approved — they're in. "
+                        f"WhatsApp has no restricted state, so "
+                        f"they're a full member; the unmet "
+                        f"checks stand in /glog: "
+                        f"{'; '.join(admitted.get('reasons') or [])}")
                 self._execute_group_action(
                     surface, key, adapter, message,
                     {"kind": "acceptance_restrict",
@@ -6766,6 +6787,11 @@ class RuntimeGroupMixin:
             buttons.append(
                 [(f"✅ {label}"[:24], f"joinq approve {rid}"),
                  (f"🚫 {label}"[:24], f"joinq decline {rid}")])
+        if str(message.chat.platform or "") == "whatsapp":
+            lines.append(
+                "WhatsApp admits fully or not at all — there "
+                "is no restricted state here, so every decision "
+                "is approve or decline.")
         card.lines(lines)
         card.note("requests stay open until decided or the "
                   "invite link is revoked")
@@ -7879,6 +7905,237 @@ class RuntimeGroupMixin:
         except Exception:  # noqa: BLE001 - upkeep is isolated
             _log.warning("cleanup auto drive failed for %s",
                          key, exc_info=True)
+
+    # Seconds between WhatsApp join-request discovery polls
+    # for one group: the door list is a cheap read, but it is
+    # still an upkeep cost, never a per-message one.
+    _WA_JOINREQ_POLL_INTERVAL_S = 120.0
+
+    #: §28 criteria WhatsApp never reports at request time:
+    #: the platform has no usernames, period.
+    _WA_NEVER_SEEN = ("username",)
+
+    def _wa_join_request_drive(self, surface, key, message) -> None:  # type: ignore[no-untyped-def]
+        """WhatsApp join-request discovery (DESIGN §28, census
+        gap #5).  Telegram delivers join requests as events;
+        WhatsApp holds them server-side — no event ever
+        arrives — so on the group cadence (this beat, throttled
+        per group inside) a claimed WhatsApp group in request
+        mode polls its door through the bridge and feeds every
+        NEW requester into the SAME §28 evaluation and admin
+        queue the Telegram events use: clean requests
+        auto-approve where configured, rule-declines decline,
+        the borderline queues with its notice, and /joinq (or
+        the buttons on the notice) decides — one machinery, a
+        second limb.
+
+        Platform truth, held honestly: WhatsApp admits fully
+        or not at all — no restricted-admit state exists — so
+        an evaluation whose enforcement would be "restricted"
+        queues for a human instead of being half-approved, and
+        a decline resting only on criteria WhatsApp cannot
+        report (usernames don't exist here; a name the bridge
+        doesn't know can't be judged) queues too — nobody is
+        auto-refused on evidence the platform never offered.
+        A group whose approval mode is off at WhatsApp's door
+        simply never has requests (absence, not errors); a
+        bridge that can't answer leaves the queue untouched —
+        absence of an answer is not absence of requesters.
+        Failure-isolated like every upkeep beat."""
+        try:
+            if str(message.chat.platform or "") != "whatsapp":
+                return
+            settings = surface.store.settings(key)
+            if (settings.get("acceptance") or {}).get(
+                    "mode") != "request":
+                return
+            if not surface.claim_state(key)["claimed"]:
+                return
+            adapter = self._group_adapter("whatsapp")
+            list_fn = getattr(adapter, "admin_join_requests",
+                              None)
+            if not callable(list_fn):
+                return
+            now = time.time()
+            if not surface.acceptance_poll_due(
+                    key, now=now,
+                    interval_s=self._WA_JOINREQ_POLL_INTERVAL_S):
+                return
+            surface.note_acceptance_poll(key, ts=now)
+            info: dict = {}
+            info_fn = getattr(adapter, "group_info", None)
+            if callable(info_fn):
+                try:
+                    info = info_fn(message.chat) or {}
+                except Exception:  # noqa: BLE001 - reads as off
+                    info = {}
+            if not info.get("join_approval_mode"):
+                return
+            out = list_fn(message.chat)
+            if not isinstance(out, dict) or not out.get("ok"):
+                return
+            listed: dict[str, float] = {}
+            names: dict[str, str] = {}
+            for row in out.get("requests") or []:
+                jid = str(row.get("jid") or "")
+                if not jid:
+                    continue
+                try:
+                    listed[jid] = float(
+                        row.get("requested_at") or 0)
+                except (TypeError, ValueError):
+                    listed[jid] = 0.0
+                names[jid] = str(row.get("name") or "")
+            seen = surface.acceptance_wa_seen(key)
+            pending_ids = {str(r.get("user_id") or "")
+                           for r in surface.acceptance_queue(key)}
+            surface.acceptance_wa_sync(key, listed, now=now)
+            for user_id, req_ts in listed.items():
+                if user_id in pending_ids:
+                    continue
+                if user_id in seen and seen[user_id] == req_ts:
+                    continue
+                self._wa_join_request_evaluate(
+                    surface, key, adapter, message, user_id,
+                    names.get(user_id) or "", now=now)
+        except Exception:  # noqa: BLE001 - upkeep is isolated
+            _log.warning("whatsapp join-request drive failed "
+                         "for %s", key, exc_info=True)
+
+    def _wa_join_request_evaluate(self, surface, key, adapter,  # type: ignore[no-untyped-def]
+                                  message, user_id: str,
+                                  name: str, *, now: float) -> None:
+        """One newly-seen WhatsApp requester through §28: the
+        shared evaluation (the surface judges), this limb
+        performs — with the platform-truth adjustments from
+        the drive's docstring."""
+        requester = {"id": user_id, "name": name,
+                     "first_name": name, "username": "",
+                     "is_bot": False}
+        facts = self._acceptance_facts(requester)
+        criteria = ((surface.store.settings(key)
+                     .get("acceptance") or {})
+                    .get("criteria") or {})
+        has_photo = None
+        if criteria.get("photo"):
+            has_photo = self._acceptance_photo(
+                adapter, message.chat, user_id)
+        out = surface.acceptance_on_request(
+            key, facts, has_photo=has_photo, now=now)
+        record = out.get("record") or {}
+        if record:
+            record["source"] = "wa_poll"
+            surface.store.save()
+        verdict = out.get("verdict")
+        reasons = list(out.get("reasons") or [])
+        if verdict == "approve_restricted":
+            # WhatsApp has no restricted admission: the rule's
+            # enforcement can't be performed, so the request
+            # queues for a human instead of being half-approved.
+            self._wa_request_requeue(surface, record)
+            reasons.append(
+                "WhatsApp can't admit a member restricted — "
+                "approve admits them fully, decline keeps them "
+                "out; the call is an admin's.")
+            if record:
+                self._send_acceptance_queue_note(
+                    surface, key, message, record, reasons)
+            return
+        if verdict == "approve":
+            done = self._acceptance_join_request(
+                surface, key, adapter, message.chat, user_id,
+                approve=True)
+            if not done:
+                return
+            admitted = surface.acceptance_request_admitted(
+                key, str(out.get("request_id") or ""))
+            if admitted.get("welcome"):
+                text = surface.welcome_text_for(
+                    key, name=facts["name"],
+                    username=facts["username"],
+                    group_name=str(message.chat.title or ""))
+                if text and self._system_send_ok(
+                        surface, key, message, "welcome"):
+                    if not self._rhythm_hold(
+                            surface, key, "welcome", text):
+                        self._send(
+                            message.chat, text,
+                            buttons=self._welcome_buttons(
+                                surface, key),
+                            parse_mode=self._rendered_mode(
+                                message, text))
+                        fire = getattr(self, "_fire_expression",
+                                       None)
+                        if fire is not None:
+                            fire(message, "welcome")
+                # §32: the request was admitted — the reputation
+                # hook hears about any record.
+                self._reputation_join_hook(
+                    surface, key, message, user_id=user_id,
+                    username=facts["username"],
+                    name=facts["name"], held=False)
+            return
+        if verdict == "decline":
+            if self._wa_decline_unverifiable(surface, key, out,
+                                             facts):
+                self._wa_request_requeue(surface, record)
+                reasons.append(
+                    "part of this check rests on things "
+                    "WhatsApp doesn't show at the door — "
+                    "usernames don't exist here, and a name the "
+                    "bridge doesn't know can't be judged — so "
+                    "a human decides.")
+                if record:
+                    self._send_acceptance_queue_note(
+                        surface, key, message, record, reasons)
+                return
+            self._acceptance_join_request(
+                surface, key, adapter, message.chat, user_id,
+                approve=False)
+            return
+        # queued — a human decides
+        if record:
+            self._send_acceptance_queue_note(
+                surface, key, message, record, reasons)
+
+    @staticmethod
+    def _wa_request_requeue(surface, record) -> None:  # type: ignore[no-untyped-def]
+        """Undo the rule's terminal state on a WhatsApp request
+        record: the platform can't carry the enforcement the
+        rule chose, so the request waits for a human after
+        all."""
+        if record:
+            record["state"] = "pending"
+            record["decided_by"] = ""
+            record.pop("decided_ts", None)
+            surface.store.save()
+
+    def _wa_decline_unverifiable(self, surface, key, out,  # type: ignore[no-untyped-def]
+                                 facts) -> bool:
+        """True when a rule-decline of a WhatsApp request rests
+        ONLY on criteria the platform never reported: usernames
+        don't exist on WhatsApp, and an unknown name can't fail
+        the name criteria.  The previously-banned fact (her own
+        ledger) and an explicit no-photo ARE real evidence
+        here, so a decline they drive stands."""
+        missing = [str(m) for m in (out.get("missing") or [])]
+        if not missing:
+            return False
+        unverifiable = set(self._WA_NEVER_SEEN)
+        if not str(facts.get("name") or ""):
+            unverifiable |= {"firstname", "lastname", "hygiene"}
+        cfg, _raid = surface.acceptance_cfg(key)
+        overrides = cfg.get("overrides") or {}
+        global_action = str(cfg.get("action") or "restricted")
+
+        def _drives(criterion: str) -> bool:
+            action = str(overrides.get(criterion)
+                         or global_action)
+            return action in ("decline", "kick")
+
+        drivers = [k for k in missing if _drives(k)]
+        return bool(drivers) and all(
+            k in unverifiable for k in drivers)
 
     def _control_rmdeleted(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         return self._cleanup_remove(message, which="deleted")

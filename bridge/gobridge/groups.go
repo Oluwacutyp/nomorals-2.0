@@ -1,7 +1,8 @@
 // groups.go — group / community / channel commands for the
 // adapter protocol: the read-only set (group_list, group_info,
-// group_participants, community_list) and the mutating admin set
-// (create / members / subject / description / picture / settings /
+// group_participants, group_join_requests, community_list) and
+// the mutating admin set (create / members / subject /
+// description / picture / settings / join-request decisions /
 // leave, communities, newsletters). Reply shapes are the old
 // bridges' (whatsapp-groups.mjs + whatsapp-groups-admin.mjs),
 // field for field. Where this whatsmeow build has no verb for a
@@ -272,6 +273,42 @@ func (b *bridge) handleGroupCommand(ctx context.Context, cc *clientConn, id stri
 		})
 		return true
 
+	// Pending join requests (DESIGN §28's request limb): who is
+	// waiting at the door of an approval-mode group. whatsmeow
+	// reports only the JID and the request time; the name comes
+	// from the local contact store when it knows one — never
+	// invented. A group whose approval mode is off simply has
+	// no pending requests: an empty list, not an error.
+	case "group_join_requests":
+		jid, err := groupJID(req.str("chat"))
+		if err != nil {
+			b.reply(cc, id, map[string]any{"ok": false, "error": err.Error()})
+			return true
+		}
+		reqs, err := b.cli.GetGroupRequestParticipants(ctx, jid)
+		if err != nil {
+			b.groupFail(cc, id, err)
+			return true
+		}
+		rows := make([]map[string]any, 0, len(reqs))
+		for _, r := range reqs {
+			name := ""
+			if contact, cerr := b.cli.Store.Contacts.GetContact(ctx, r.JID); cerr == nil && contact.Found {
+				if contact.FullName != "" {
+					name = contact.FullName
+				} else if contact.PushName != "" {
+					name = contact.PushName
+				}
+			}
+			rows = append(rows, map[string]any{
+				"jid":          r.JID.ToNonAD().String(),
+				"name":         name,
+				"requested_at": r.RequestedAt.Unix(),
+			})
+		}
+		b.reply(cc, id, map[string]any{"ok": true, "requests": rows})
+		return true
+
 	case "community_list":
 		all, err := b.cli.GetJoinedGroups(ctx)
 		if err != nil {
@@ -319,11 +356,11 @@ func (b *bridge) handleGroupCommand(ctx context.Context, cc *clientConn, id stri
 
 // ── mutating admin commands ───────────────────────────────────────
 
-func (b *bridge) memberUpdateRows(ctx context.Context, jid types.JID, participants []types.JID, action whatsmeow.ParticipantChange, actionName string) (map[string]any, error) {
-	res, err := b.cli.UpdateGroupParticipants(ctx, jid, participants, action)
-	if err != nil {
-		return nil, err
-	}
+// participantResultRows shapes a per-participant outcome list
+// onto the wire: the phone-number JID when known, "200" for a
+// clean outcome, the WhatsApp error code otherwise; a call the
+// server answered with no rows reads "sent" for everyone asked.
+func participantResultRows(res []types.GroupParticipant, participants []types.JID) []map[string]any {
 	rows := make([]map[string]any, 0, len(res))
 	for _, r := range res {
 		rj := r.JID
@@ -345,7 +382,15 @@ func (b *bridge) memberUpdateRows(ctx context.Context, jid types.JID, participan
 			})
 		}
 	}
-	return map[string]any{"ok": true, "action": actionName, "results": rows}, nil
+	return rows
+}
+
+func (b *bridge) memberUpdateRows(ctx context.Context, jid types.JID, participants []types.JID, action whatsmeow.ParticipantChange, actionName string) (map[string]any, error) {
+	res, err := b.cli.UpdateGroupParticipants(ctx, jid, participants, action)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "action": actionName, "results": participantResultRows(res, participants)}, nil
 }
 
 func (b *bridge) handleGroupAdminCommand(ctx context.Context, cc *clientConn, id string, req request) bool {
@@ -537,6 +582,43 @@ func (b *bridge) handleGroupAdminCommand(ctx context.Context, cc *clientConn, id
 			return true
 		}
 		ok(map[string]any{"join_approval": mode})
+		return true
+
+	// Decide pending join requests (DESIGN §28): approve admits
+	// the requester, reject refuses them (they may request
+	// again — a reject is not a ban). The reply carries the
+	// per-participant rows, memberUpdateRows-shaped, so the
+	// adapter honors each requester's own status.
+	case "group_join_request_decide":
+		jid, err := groupJID(req.str("chat"))
+		if err != nil {
+			bad(err)
+			return true
+		}
+		var action whatsmeow.ParticipantRequestChange
+		switch strings.ToLower(strings.TrimSpace(req.str("action"))) {
+		case "approve":
+			action = whatsmeow.ParticipantChangeApprove
+		case "reject":
+			action = whatsmeow.ParticipantChangeReject
+		default:
+			bad(errors.New("bad action: " + req.str("action") + " (want approve|reject)"))
+			return true
+		}
+		participants, err := participantJIDs(req["participants"])
+		if err != nil {
+			bad(err)
+			return true
+		}
+		res, err := b.cli.UpdateGroupRequestParticipants(ctx, jid, participants, action)
+		if err != nil {
+			fail(err)
+			return true
+		}
+		b.reply(cc, id, map[string]any{
+			"ok": true, "action": req.str("action"),
+			"results": participantResultRows(res, participants),
+		})
 		return true
 
 	case "group_member_add_mode":
