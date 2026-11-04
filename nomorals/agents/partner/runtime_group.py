@@ -84,7 +84,62 @@ class RuntimeGroupMixin:
             ws_dir = getattr(self.context.settings, "workspace_dir", ".")
             surface = default_surface(ws_dir)
             self._group_surface_obj = surface
+        # §19: ONE owner record per process — the surface's
+        # pipeline reads the same registry object the owner's
+        # DM surface edits (seeded once, below).
+        try:
+            registry = self._owner_registry()
+            if surface.owner_registry is not registry:
+                surface.owner_registry = registry
+        except Exception:  # noqa: BLE001 - a rig without a
+            pass               # registry keeps the surface's own
         return surface
+
+    def _owner_registry(self):  # type: ignore[no-untyped-def]
+        """The §19 owner record for this process, formed once
+        from the bindings that already exist (config sender
+        ids, the §15 account pool, the core seal's handles) —
+        seeding fills empty slots only and never overwrites an
+        edit the owner made through /owner."""
+        registry = getattr(self, "_owner_registry_obj", None)
+        if registry is None:
+            from ...social.chat.owner_system import \
+                default_registry
+
+            context = getattr(self, "context", None)
+            settings = getattr(context, "settings", None)
+            ws_dir = getattr(settings, "workspace_dir", ".")
+            registry = default_registry(ws_dir)
+            try:
+                from ...core.owner import OWNER_IDENTITIES
+
+                accounts = []
+                supervisor = getattr(self, "_pairing_supervisor",
+                                     None)
+                if supervisor is not None:
+                    accounts = supervisor().registry.all()
+                registry.seed(
+                    telegram_ids=getattr(
+                        self, "_owner_sender_ids", ()) or (),
+                    accounts=accounts,
+                    handles=OWNER_IDENTITIES)
+            except Exception:  # noqa: BLE001 - seeding is
+                _log.debug("owner registry seed failed",
+                           exc_info=True)
+            self._owner_registry_obj = registry
+        return registry
+
+    def _webshot_book(self):  # type: ignore[no-untyped-def]
+        book = getattr(self, "_webshot_book_obj", None)
+        if book is None:
+            from ...social.chat.webshot import default_book
+
+            context = getattr(self, "context", None)
+            settings = getattr(context, "settings", None)
+            ws_dir = getattr(settings, "workspace_dir", ".")
+            book = default_book(ws_dir)
+            self._webshot_book_obj = book
+        return book
 
     def _send(self, chat, text: str, *, buttons=None,  # type: ignore[no-untyped-def]
               parse_mode: str = ""):
@@ -2964,6 +3019,15 @@ class RuntimeGroupMixin:
             self._presentation_update(surface, key,
                                       stamp_classes=wanted)
             return f"stamp shows on: {', '.join(wanted)}."
+        if head == "watermark" and rest.lower() in (
+                "off", "text", "media", "both"):
+            self._presentation_update(surface, key,
+                                      watermark=rest.lower())
+            return (f"media watermark: {rest.lower()} — §19's "
+                    "modes on the one stamp: off = no media "
+                    "mark · text = the signature rides captions "
+                    "· media = generated media carries the "
+                    "image stamp · both = both.")
         # ── escalation grammar (DESIGN §30) ────────────────────
         if head == "escalation":
             reply = self._apply_escalation_grammar(
@@ -3396,6 +3460,483 @@ class RuntimeGroupMixin:
                     "what exists (a games board also needs the "
                     "games spine in this process).")
         return text
+
+    # ---- webshot (§18/§20): the capture surface --------------
+    def _webshot_vision(self, data: bytes) -> str:
+        """The §20c annotated shot: the vision organ reads the
+        image.  Injectable in tests via ``_webshot_vision_fn``;
+        an unavailable seer is an honest line, not a fake
+        description."""
+        fn = getattr(self, "_webshot_vision_fn", None)
+        if callable(fn):
+            return str(fn(data) or "")
+        from ...vision.seer import see_bytes
+
+        return str(see_bytes(
+            data,
+            "Describe this web page screenshot: what is here, "
+            "and what looks broken, changed or notable?") or "")
+
+    def _webshot_deliver(self, message, data: bytes, *,
+                         caption: str, pdf: bool) -> str:
+        """Write the shot beside the social data and send it
+        as a file (photo for images — the gateway renders by
+        kind) with its caption.  Returns the path sent."""
+        import time as _time
+        from pathlib import Path
+
+        context = getattr(self, "context", None)
+        settings = getattr(context, "settings", None)
+        ws_dir = getattr(settings, "workspace_dir", ".")
+        out_dir = Path(ws_dir) / "data" / "social" / "webshot_out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        suffix = ".pdf" if pdf else ".png"
+        path = out_dir / f"shot-{int(_time.time() * 1000)}{suffix}"
+        path.write_bytes(data)
+        self.gateway.send_file(
+            message.chat.platform, str(message.chat.key),
+            str(path), caption=caption)
+        return str(path)
+
+    def _control_webshot(self, tail, message):  # type: ignore[no-untyped-def]
+        """/webshot (§18 + §20): render a page and return the
+        shot as a photo with the URL + page title as its
+        caption (Devon's own style).  One command, the whole
+        variant space: full/viewport, phone|tablet|desktop,
+        dark, idle-wait, element clip, PDF.  In a group this is
+        system output — §33's claim gates it, at send time,
+        like every other system post; in DM it is free.  A
+        replied-to message's first link is the target when the
+        command carries none (the resolver's reply discipline).
+        ``watch`` rides the same command: page-watch re-shots
+        on the cycle and alerts only on a real change."""
+        from ...social.chat import webshot as shot_organ
+        from ...social.chat.typography import resolve_media_mark
+
+        text = str(tail or "").strip()
+        words = text.split()
+        key = self._group_key_or_none(message)
+        surface = self._group_surface() if key else None
+        requester = str(message.sender_id or message.sender
+                        or "")
+        book = self._webshot_book()
+
+        if words and words[0].lower() == "watch":
+            return self._webshot_watch(words[1:], message,
+                                       book=book, key=key,
+                                       surface=surface,
+                                       requester=requester)
+
+        reply_url = ""
+        meta = message.meta or {}
+        if meta.get("reply_to_text"):
+            reply_url = shot_organ.extract_url(
+                str(meta.get("reply_to_text") or ""))
+        try:
+            url, opts = shot_organ.parse_shot_tail(
+                text, reply_url=reply_url)
+        except shot_organ.ShotUsageError as exc:
+            return str(exc)
+        if key is not None and not self._system_send_ok(
+                surface, key, message, "webshot"):
+            # §33 before validation on purpose: an unclaimed
+            # room gets the gate answer whatever the URL was —
+            # no capture work, no DNS behaviour leaking into
+            # a room that isn't hers.
+            return ("webshot posts are system output — they "
+                    "land only in claimed rooms, and this room "
+                    "isn't claimed (my bot must be an admin "
+                    "here, or the owner designates it).")
+        try:
+            url = shot_organ.validate_url(
+                url,
+                allow_private=self._operator_or_false(message))
+        except shot_organ.ShotUsageError as exc:
+            return str(exc)
+        scope = key or str(message.chat.key or "")
+        options_line = (
+            f"{'full' if opts.full_page else 'viewport'} · "
+            f"{opts.device} · {opts.scheme}"
+            + (f" · clip {opts.clip}" if opts.clip else "")
+            + (" · pdf" if opts.pdf else ""))
+        db = getattr(getattr(self, "context", None), "db", None)
+        try:
+            result = shot_organ.capture(url, opts, db=db)
+        except shot_organ.WebshotUnavailable as exc:
+            book.record(url=url, ok=False, error=str(exc),
+                        scope=scope, requester=requester,
+                        options=options_line)
+            return (f"📸 couldn't shoot {url} — every rung "
+                    f"failed: {exc}")
+        book.record(url=url, ok=True, rung=result.rung,
+                    size=len(result.data), width=result.width,
+                    height=result.height, pdf=result.pdf,
+                    scope=scope, requester=requester,
+                    options=options_line)
+        # §19's media mark, from the one presentation home:
+        # the destination group's settings in a group, the
+        # house defaults + the owner's mark in DM.
+        settings = surface.store.settings(key) if key else None
+        registry = self._owner_registry()
+        mark = resolve_media_mark(settings, "announcement",
+                                  mark_text=registry.mark_text())
+        data = result.data
+        if mark.image and not result.pdf:
+            from ...social.chat.owner_system import \
+                apply_media_watermark
+
+            data, applied = apply_media_watermark(
+                data, mark.image_text)
+            if applied:
+                book.record(url=url, ok=True, rung="watermark",
+                            size=len(data), scope=scope,
+                            requester=requester,
+                            options=f"image stamp · {mark.mode}")
+        title = result.title or url
+        caption = f"🌐 {title}\n{url}"
+        if mark.text:
+            caption += f"\n{mark.text}"
+        try:
+            self._webshot_deliver(message, data,
+                                  caption=caption,
+                                  pdf=result.pdf)
+        except Exception as exc:  # noqa: BLE001 - the shot is
+            return (f"📸 shot {url} ({len(data)} bytes via "
+                    f"{result.rung}) but the send failed: "
+                    f"{exc}")
+        reply = (f"📸 {title} — {result.width}×{result.height}"
+                 if not result.pdf else
+                 f"📄 {title} — print PDF of the page")
+        reply += f" · {options_line} · via {result.rung}"
+        if opts.annotate and not result.pdf:
+            try:
+                note = self._webshot_vision(data)
+            except Exception as exc:  # noqa: BLE001 - vision
+                note = ""              # honesty below
+                reply += (f"\n👁 vision read unavailable on "
+                          f"this host ({type(exc).__name__})")
+            if note:
+                reply += f"\n👁 {note}"
+        return reply
+
+    def _webshot_watch(self, words, message, *, book, key,  # type: ignore[no-untyped-def]
+                       surface, requester):
+        """/webshot watch <url> [every 2h] · watch list ·
+        watch remove <id>.  A watch is a standing system
+        output: in a group it is created only where §33
+        already lets Devon post, and the driver re-checks the
+        claim before every alert."""
+        from ...social.chat import webshot as shot_organ
+
+        sub = words[0].lower() if words else ""
+        scope = key or str(message.chat.key or "")
+        if sub in ("list", ""):
+            rows = [w for w in book.watches()
+                    if w.get("scope") == scope]
+            if not rows:
+                return ("no page-watches here — /webshot watch "
+                        "<url> [every 2h] starts one.")
+            lines = ["👀 <b>page-watches</b>"]
+            for w in rows:
+                lines.append(
+                    f"{w['id']} · {w['url']} · every "
+                    f"{int(float(w.get('interval_s') or 0)) // 60}m"
+                    f" · last change "
+                    f"{_fmt_ts(w.get('last_change')) if w.get('last_change') else '—'}")
+            return "\n".join(lines)
+        if sub in ("remove", "stop", "drop"):
+            if len(words) < 2:
+                return "watch remove <id> — ids are on watch list."
+            if book.remove_watch(words[1]):
+                return f"👀 watch {words[1]} removed."
+            return f"no watch called {words[1]!r} here."
+        interval = shot_organ.WATCH_DEFAULT_INTERVAL_S
+        tail_words = list(words)
+        if len(tail_words) >= 2 and tail_words[-2].lower() \
+                == "every":
+            spec = tail_words[-1].lower()
+            tail_words = tail_words[:-2]
+            try:
+                if spec.endswith("h"):
+                    interval = float(spec[:-1]) * 3600
+                elif spec.endswith("m"):
+                    interval = float(spec[:-1]) * 60
+                else:
+                    interval = float(spec)
+            except ValueError:
+                return (f"I can't read {spec!r} as an interval "
+                        "— use 30m, 2h, or plain seconds.")
+        try:
+            url, opts = shot_organ.parse_shot_tail(
+                " ".join(tail_words))
+            url = shot_organ.validate_url(
+                url,
+                allow_private=self._operator_or_false(message))
+        except shot_organ.ShotUsageError as exc:
+            return str(exc)
+        if opts.pdf:
+            return ("a watch re-shots images — drop the pdf "
+                    "option and I'll watch the page as a shot.")
+        if key is not None and not self._system_send_ok(
+                surface, key, message, "webshot watch"):
+            return ("page-watch alerts are system output — "
+                    "they post only in claimed rooms, and this "
+                    "room isn't claimed.")
+        watch = book.add_watch(
+            url=url, options=opts, scope=scope,
+            requester=requester, interval_s=interval)
+        return (f"👀 watching {url} ({watch['id']}) — I "
+                "re-shoot it on the cycle and post here only "
+                "when the page actually changes.")
+
+    _WATCH_DRIVE_THROTTLE_S = 120.0
+
+    def _drive_webshot_watches(self):  # type: ignore[no-untyped-def]
+        """The page-watch beat (§20b): due watches re-shoot on
+        the message cycle — no daemon, the channel drive's
+        discipline.  Alerts are system output in groups
+        (§33 re-checked at send time) and free in the owner's
+        DM.  A held (silent-hours) group alert joins the
+        morning digest like every other held post."""
+        now = time.time()
+        last = getattr(self, "_webshot_watch_last", 0.0)
+        if now - last < self._WATCH_DRIVE_THROTTLE_S:
+            return
+        self._webshot_watch_last = now
+        book = self._webshot_book()
+        db = getattr(getattr(self, "context", None), "db", None)
+        try:
+            alerts = book.poll_watches(now=now, db=db)
+        except Exception:  # noqa: BLE001 - the beat never
+            _log.debug("webshot watch poll failed",
+                       exc_info=True)
+            return
+        if not alerts:
+            return
+        surface = self._group_surface()
+        from types import SimpleNamespace
+
+        for alert in alerts:
+            watch = alert["watch"]
+            result = alert["result"]
+            scope = str(watch.get("scope") or "")
+            if not scope:
+                continue
+            caption = (
+                f"👀 page changed ({alert['ratio']:.0%} of the "
+                f"frame differs)\n{result.title or watch['url']}"
+                f"\n{watch['url']}")
+            probe = SimpleNamespace(
+                chat=SimpleNamespace(
+                    platform=scope.split(":", 1)[0], key=scope))
+            if scope in surface.store.data:
+                if not self._system_send_ok(
+                        surface, scope, probe, "webshot watch"):
+                    continue
+                if self._rhythm_hold(surface, scope,
+                                     "webshot watch", caption):
+                    continue
+            try:
+                self._webshot_deliver(probe, result.data,
+                                      caption=caption, pdf=False)
+            except Exception:  # noqa: BLE001 - one bad alert
+                _log.debug("webshot watch alert send failed",
+                           exc_info=True)
+
+    # ---- the owner system (§19/§20): DM surface --------------
+    def _owner_status_card(self, registry):  # type: ignore[no-untyped-def]
+        """Compose the owner's status card from real state
+        only: runtime uptime (the console snapshot), the
+        package version, the §15 pool counts, live queue
+        depths read off the stores, the last briefing stamp."""
+        from ...social.chat.owner_system import status_card
+        from ...version import __version__
+
+        uptime = None
+        snapshot = getattr(self, "console_snapshot", None)
+        if callable(snapshot):
+            try:
+                uptime = snapshot().get("uptime_s")
+            except Exception:  # noqa: BLE001
+                uptime = None
+        accounts = None
+        supervisor = getattr(self, "_pairing_supervisor", None)
+        if supervisor is not None:
+            try:
+                accounts = supervisor().registry.counts(
+                    probe=False)
+            except Exception:  # noqa: BLE001
+                accounts = None
+        queues: dict[str, int] = {}
+        try:
+            surface = self._group_surface()
+            queued = held = 0
+            for entry in surface.store.data.values():
+                extras = entry.get("extras") or {}
+                queued += len(extras.get("channel_queue")
+                              or [])
+                held += len(extras.get("rhythm_held") or [])
+            queues["channel posts queued"] = queued
+            queues["held digest posts"] = held
+        except Exception:  # noqa: BLE001 - queues are a
+            queues = {}              # sourced field or absent
+        try:
+            queues["page-watches"] = len(
+                self._webshot_book().watches())
+        except Exception:  # noqa: BLE001
+            pass
+        last_briefing = None
+        try:
+            from ...agents.morning_briefing import \
+                _last_briefing_at
+
+            last_briefing = _last_briefing_at(self.context)
+        except Exception:  # noqa: BLE001
+            last_briefing = None
+        return status_card(
+            uptime_s=uptime, version=__version__,
+            accounts=accounts, queues=queues,
+            last_briefing_ts=last_briefing)
+
+    def _control_owner(self, tail, message):  # type: ignore[no-untyped-def]
+        """/owner (§19/§20): the owner system in DM — the
+        verification card, the status surface (uptime lives
+        here, never on /ping), and the record's edits.  The
+        organ enforces the two hard rules on every edit: the
+        actor must be the owner, and the record is NEVER
+        editable from a group.  Sudo is recognition, never
+        ownership — a sudo member's /owner meets the same
+        refusal as anyone else's."""
+        from ...social.chat.owner_system import (
+            OwnerAuthorityError, verification_card)
+
+        if not self._operator_or_false(message):
+            return ("that's the owner's surface — it answers "
+                    "only to the owner, on his own surfaces.")
+        registry = self._owner_registry()
+        in_group = self._group_key_or_none(message) is not None
+        text = str(tail or "").strip()
+        words = text.split()
+        head = words[0].lower() if words else ""
+        actor = str(message.sender_id or message.sender or "")
+
+        if head in ("", "card"):
+            accounts = []
+            supervisor = getattr(self, "_pairing_supervisor",
+                                 None)
+            if supervisor is not None:
+                try:
+                    for rec in supervisor().registry.all():
+                        accounts.append(
+                            f"{rec.platform} {rec.identity} — "
+                            f"{rec.status}")
+                except Exception:  # noqa: BLE001 - the card
+                    accounts = []      # degrades, never invents
+            sources = []
+            if getattr(self, "_owner_sender_ids", None):
+                sources.append(
+                    "telegram sender ids seeded from config "
+                    "(NM_PARTNER_OWNER_SENDER_IDS)")
+            if accounts:
+                sources.append(
+                    "whatsapp/telegram identities seeded from "
+                    "the §15 pairing registry")
+            from ...core.owner import seal_configured
+
+            return verification_card(
+                registry, seal_configured=seal_configured(),
+                account_lines=accounts, sources=sources)
+        if head == "status":
+            return self._owner_status_card(registry)
+        if head == "audit":
+            rows = registry.audit(limit=10)
+            if not rows:
+                return "the owner record's audit is empty."
+            return "\n".join(
+                ["👑 <b>owner record — recent edits</b>"]
+                + [f"{_fmt_ts(r.get('ts'))} · "
+                   f"{r.get('action')} · "
+                   f"{r.get('platform') or '—'} · "
+                   f"{r.get('target') or '—'}"
+                   for r in rows])
+
+        # ── edits: the organ judges (owner + never-in-group) ──
+        try:
+            if head == "bind" and len(words) >= 3:
+                changed = registry.bind(
+                    "owner", via_group=in_group,
+                    platform=words[1], user_id=words[2],
+                    actor=actor)
+                return (f"bound {words[1]}:{words[2]} to the "
+                        "owner record." if changed else
+                        "already bound.")
+            if head == "unbind" and len(words) >= 3:
+                changed = registry.unbind(
+                    "owner", via_group=in_group,
+                    platform=words[1], user_id=words[2],
+                    actor=actor)
+                return (f"unbound {words[1]}:{words[2]}."
+                        if changed else "that id wasn't bound.")
+            if head == "sudo" and len(words) >= 4:
+                on = words[1].lower() == "add"
+                if words[1].lower() not in ("add", "remove"):
+                    return ("sudo grammar: /owner sudo add|"
+                            "remove <platform> <id>")
+                changed = registry.set_sudo(
+                    "owner", via_group=in_group,
+                    platform=words[2], user_id=words[3], on=on,
+                    actor=actor)
+                return (f"sudo {'added' if on else 'removed'}: "
+                        f"{words[2]}:{words[3]}." if changed
+                        else "no change — check the id.")
+            if head == "deputy" and len(words) >= 4:
+                on = words[1].lower() == "add"
+                if words[1].lower() not in ("add", "remove"):
+                    return ("deputy grammar: /owner deputy "
+                            "add|remove <group key> <id>")
+                changed = registry.set_deputy(
+                    "owner", via_group=in_group,
+                    group_key=words[2], user_id=words[3],
+                    on=on, actor=actor)
+                return (f"deputy {'added' if on else 'removed'}"
+                        f": {words[3]} in {words[2]}."
+                        if changed else
+                        "no change — check the id.")
+            if head == "mark":
+                mark = text[len(words[0]):].strip()
+                if mark.lower() in ("", "clear", "default"):
+                    registry.set_mark_text(
+                        "owner", via_group=in_group, text="",
+                        actor=actor)
+                    return ("mark cleared — the house default "
+                            "signature applies.")
+                registry.set_mark_text(
+                    "owner", via_group=in_group, text=mark,
+                    actor=actor)
+                return f"owner mark: “{mark}” — it rides every platform."
+            if head == "rebind" and len(words) >= 3:
+                passphrase = text.split(None, 3)[3] \
+                    if len(text.split(None, 3)) > 3 else ""
+                if not passphrase:
+                    return ("rebind grammar: /owner rebind "
+                            "<platform> <new id> <seal "
+                            "passphrase> — the passphrase is "
+                            "verified and never stored.")
+                registry.rebind_with_seal(
+                    platform=words[1], new_id=words[2],
+                    identity_claim=str(
+                        message.sender_username or ""),
+                    passphrase=passphrase)
+                return (f"rebound: {words[1]} now points at "
+                        f"{words[2]} — sealed recovery done.")
+        except OwnerAuthorityError as exc:
+            return str(exc)
+        return ("owner grammar: /owner (verification card) · "
+                "/owner status · /owner audit · bind|unbind "
+                "<platform> <id> · sudo add|remove <platform> "
+                "<id> · deputy add|remove <group key> <id> · "
+                "mark <text> · rebind <platform> <new id> "
+                "<passphrase>")
 
     # ---- channels: settings write path + the drive (§16/P4a) ---
     def _channel_update(self, surface, key, **fields):  # type: ignore[no-untyped-def]
@@ -4433,6 +4974,13 @@ class RuntimeGroupMixin:
                 self._presentation_update(surface, key,
                                           stamp_classes=wanted)
                 return f"stamp shows on: {', '.join(wanted)}."
+            if head == "watermark" and rest in (
+                    "off", "text", "media", "both"):
+                self._presentation_update(surface, key,
+                                          watermark=rest)
+                return (f"media watermark: {rest} — off · text "
+                        "(caption signature) · media (image "
+                        "stamp) · both.")
             return None
         if section == "welcome":
             if head == "welcome" and rest in ("on", "off"):
@@ -9455,6 +10003,13 @@ def _member_card(surface, key: str, member: dict) -> str:
             ("Joined", _fmt_ts(joined)),
             ("Messages", int(member.get("message_count") or 0)),
             ("Last seen", _fmt_ts(member.get("last_seen")))]
+    # §19 recognition: the ladder rung is part of who a member
+    # is here — and a worn-face flag is shown, never hidden.
+    if member.get("role"):
+        rows.append(("Standing", str(member["role"])))
+    if member.get("impersonation_flag"):
+        rows.append(("⚠️ Flag",
+                     str(member["impersonation_flag"])))
     if member.get("left_ts"):
         rows.append(("Left", _fmt_ts(member["left_ts"])))
     card.stats(rows)

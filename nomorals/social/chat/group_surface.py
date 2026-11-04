@@ -413,9 +413,14 @@ class GroupSurface:
     """
 
     def __init__(self, store: GroupStore,
-                 ban_list: BanList | None = None) -> None:
+                 ban_list: BanList | None = None,
+                 owner_registry: Any = None) -> None:
         self.store = store
         self.bans = ban_list or BanList()
+        # The §19 owner record (identities / sudo / deputies):
+        # the pipeline reads roles from it; None = no record
+        # wired (bare rigs), roles simply never resolve.
+        self.owner_registry = owner_registry
         self._moderators: dict[str, Moderator] = {}
         self._msg_cache: dict[str, deque] = {}
         self._signatures: SignatureStore | None = None
@@ -1402,12 +1407,47 @@ class GroupSurface:
             member.get("message_count") or 0) + 1
         if message_id:
             member["last_message_id"] = str(message_id)
+        # §19/§20: the owner ladder is marked on the ledger and
+        # read by the spine below — owner, sudo and this group's
+        # deputies stand on `privileged`, so AUTOMATIC actions
+        # never target them (manual admin actions are separate
+        # handlers, and still log).  A stranger wearing the
+        # owner's face is flagged to the held audit (§20d),
+        # once per flag change — never per message.
+        role = ""
+        if self.owner_registry is not None:
+            platform = group_key.split(":", 1)[0]
+            role = self.owner_registry.role_of(
+                platform, user_id, group_key=group_key)
+            if role:
+                if member.get("role") != role:
+                    member["role"] = role
+            elif "role" in member:
+                del member["role"]
+            if not role:
+                flag = self.owner_registry.owner_elsewhere(
+                    platform, user_id, username=username,
+                    name=name)
+                if flag and member.get(
+                        "impersonation_flag") != flag:
+                    member["impersonation_flag"] = flag
+                    self._audit(group_key, "impersonation_flag",
+                                user_id=user_id, reason=flag)
+                elif not flag and "impersonation_flag" in member:
+                    del member["impersonation_flag"]
+        # §19's hard line: automatic actions NEVER target the
+        # ladder.  The stages below still AUDIT what they saw
+        # (the record is evidence) — they simply land nothing
+        # on an owner, a sudo, or this group's deputy.  Manual
+        # admin actions are other handlers entirely, and log.
+        role_exempt = bool(role)
         settings = self.store.settings(group_key)
         cfg = DefenseConfig.from_settings(settings)
         esc = EscalationConfig.from_settings(settings)
         warn_threshold = int(settings.get("warn_threshold") or 3)
         suppressed = not cfg.autonomy
-        privileged = sender_is_admin or sender_is_operator
+        privileged = sender_is_admin or sender_is_operator \
+            or bool(role)
         mention = name or (f"@{username}" if username else user_id)
         # The §31 notice identity: mention + the numeric id the
         # resolver guarantees — the same label on every surface.
@@ -1704,7 +1744,8 @@ class GroupSurface:
                        if suppressed else {}))
                 self.signatures.observe(verdict.signature, user_id,
                                         now=now)
-                if cfg.anticrash_action == "delete":
+                if cfg.anticrash_action == "delete" \
+                        and not role_exempt:
                     actions.append({
                         "kind": "delete", "rule": "anticrash",
                         "reason": verdict.reason,
@@ -1739,12 +1780,19 @@ class GroupSurface:
             for action in self._moderator(group_key).check_message(
                     group_key, user_id, text, ts=now,
                     exempt=privileged, uncounted=game_input):
-                actions.append(action.to_dict())
                 self._audit(group_key, "moderation",
                             action=action.kind, rule=action.rule,
                             reason=action.reason, user_id=user_id,
                             **({"suppressed": "autonomy_off"}
-                               if suppressed else {}))
+                               if suppressed else {}),
+                            **({"role_exempt": role}
+                               if role_exempt else {}))
+                if role_exempt:
+                    # §19: audited above, landed never — the
+                    # Moderator's verdict on the owner's own
+                    # message is a record, not an action.
+                    continue
+                actions.append(action.to_dict())
                 if action.kind in ("warn", "delete", "mute", "ban"):
                     strike("moderator", action.rule, action.kind)
 
@@ -1756,16 +1804,17 @@ class GroupSurface:
                         signal=hit.signal,
                         **({"suppressed": "autonomy_off"}
                            if suppressed else {}))
-            if "delete" in hit.action:
-                actions.append({
-                    "kind": "delete", "rule": hit.rule,
-                    "reason": hit.reason, "user_id": user_id,
-                    "group_id": group_key})
-            else:
-                actions.append({
-                    "kind": "warn", "rule": hit.rule,
-                    "reason": hit.reason, "user_id": user_id,
-                    "group_id": group_key})
+            if not role_exempt:
+                if "delete" in hit.action:
+                    actions.append({
+                        "kind": "delete", "rule": hit.rule,
+                        "reason": hit.reason, "user_id": user_id,
+                        "group_id": group_key})
+                else:
+                    actions.append({
+                        "kind": "warn", "rule": hit.rule,
+                        "reason": hit.reason, "user_id": user_id,
+                        "group_id": group_key})
             strike("antichannel", hit.rule,
                    "delete" if "delete" in hit.action else "warn")
         hit = check_antitag(env, cfg,
@@ -6650,5 +6699,9 @@ class GroupSurface:
 
 def default_surface(workspace_dir: str | Path) -> GroupSurface:
     """The runtime's surface: store under the workspace's data dir."""
+    from .owner_system import default_registry
+
     root = Path(workspace_dir) / "data" / "social"
-    return GroupSurface(GroupStore(root / "groups.json").load())
+    return GroupSurface(
+        GroupStore(root / "groups.json").load(),
+        owner_registry=default_registry(workspace_dir))

@@ -818,6 +818,19 @@ class PartnerRuntime(
         except Exception as e:  # noqa: BLE001 - the personal
             record_failure(           # surfaces never break intake
                 "runtime.PartnerRuntime._personal_surface_turn", e)
+        # Page-watch beat (§20b): due webshot watches re-shoot
+        # on the message cycle (throttled inside; no daemon).
+        # The driver owns its sends (§33 re-checked per alert);
+        # a failure here never breaks intake.
+        try:
+            watch_drive = getattr(self, "_drive_webshot_watches",
+                                  None)
+            if watch_drive is not None:
+                watch_drive()
+        except Exception as e:  # noqa: BLE001
+            record_failure(
+                "runtime.PartnerRuntime._drive_webshot_watches",
+                e)
         # Channel posture (owner order, 2026-11-02): a channel is a
         # broadcast surface, not a conversation. Devon never replies in
         # one — no commands, no catalog, no games, no persona chat, not
@@ -3830,6 +3843,12 @@ class PartnerRuntime(
 
         if kind == "boards":
             return self._control_boards(command.tail, message)
+
+        if kind == "webshot":
+            return self._control_webshot(command.tail, message)
+
+        if kind == "owner":
+            return self._control_owner(command.tail, message)
 
         if kind == "slots" \
                 and self._group_key_or_none(message) is not None:

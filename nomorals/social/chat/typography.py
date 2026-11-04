@@ -50,6 +50,8 @@ __all__ = [
     "SURFACE_CLASSES", "PRESETS", "THEMES", "CLASS_ICONS",
     "DEFAULT_PRESENTATION", "DEFAULT_STAMP_TEXT",
     "STAMP_CLASSES", "ResolvedStyle", "resolve_style",
+    "WATERMARK_MODES", "DEFAULT_WATERMARK_MODE",
+    "MediaMark", "resolve_media_mark",
     "Card", "render_card", "card_text",
     "fmt_amount", "sparks", "moderation_warning", "notice_line",
 ]
@@ -123,13 +125,28 @@ DEFAULT_THEME = "house"
 #: ``classes`` overrides one class's preset; ``stamp_classes``
 #: (when non-empty) replaces the pack's stamped classes;
 #: ``stamp_text`` replaces the signature ("" = house default).
+#: ``watermark`` is the §19 media-mark mode for the SAME
+#: signature: off | text | media | both — "" means the §19
+#: house default (``text``).  One settings home: the media
+#: watermark is not a second system, it is this block's stamp
+#: reaching images and files.
 DEFAULT_PRESENTATION: dict[str, Any] = {
     "theme": DEFAULT_THEME,
     "classes": {},
     "stamp": True,
     "stamp_text": "",
     "stamp_classes": [],
+    "watermark": "",
 }
+
+#: The §19 watermark modes.  ``text``: the signature rides the
+#: caption only.  ``media``: generated media additionally
+#: carries the image stamp.  ``both``: caption + image stamp.
+#: ``off``: no media mark at all (the text-card stamp is
+#: governed by ``stamp``/``stamp_classes`` as always).
+WATERMARK_MODES: tuple[str, ...] = ("off", "text", "media",
+                                    "both")
+DEFAULT_WATERMARK_MODE = "text"
 
 #: The house divider rule (the same vocabulary as style.py /
 #: present.py's plain header rule — a rule line, never a frame).
@@ -180,6 +197,54 @@ def resolve_style(settings: dict[str, Any] | None,
     return ResolvedStyle(theme=pack.name, preset=preset,
                          stamp=stamp, stamp_text=text,
                          surface_class=cls)
+
+
+@dataclass(frozen=True)
+class MediaMark:
+    """The §19 watermark decision for ONE piece of generated
+    media: whether the image itself is stamped, and the
+    signature text for the caption ("" = no caption line).
+    ``image_text`` is the signature the image stamp draws —
+    resolved even in ``media`` mode, where the caption stays
+    bare.  ``mode`` is the resolved mode, kept for journaling.
+    """
+
+    image: bool
+    text: str
+    mode: str
+    image_text: str = ""
+
+
+def resolve_media_mark(settings: dict[str, Any] | None,
+                       surface_class: Any, *,
+                       mark_text: str = "") -> MediaMark:
+    """Resolve the media watermark for one surface class from
+    the group's presentation block — the same home as the text
+    stamp.  Rules (§19): conversational classes are never
+    marked; the master ``stamp`` switch governs the whole mark;
+    only classes the pack stamps can carry it; the mode then
+    splits caption signature vs image stamp.  ``mark_text`` is
+    the owner's global signature (§19: set once by the owner,
+    applies everywhere) — it fills in only when the group has
+    not set its own ``stamp_text``.  Settings are data: an
+    unknown mode falls back to the house default, never raises.
+    """
+    cls = _surface_class(surface_class)
+    block = (settings or {}).get("presentation") or {}
+    style = resolve_style(settings, cls)
+    mode = str(block.get("watermark") or "").strip().lower()
+    if mode not in WATERMARK_MODES:
+        mode = DEFAULT_WATERMARK_MODE
+    if not style.stamp or mode == "off":
+        return MediaMark(image=False, text="", mode=mode)
+    text = str(block.get("stamp_text") or "").strip() \
+        or str(mark_text or "").strip() or DEFAULT_STAMP_TEXT
+    image = mode in ("media", "both")
+    return MediaMark(
+        image=image,
+        text=text if mode in ("text", "both") else "",
+        mode=mode,
+        image_text=text if image else "")
 
 
 # ── amounts ──────────────────────────────────────────────────────

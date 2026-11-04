@@ -170,6 +170,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "gear", "heist", "shoot", "kill", "assassinate", "sabotage",
     "gang", "war", "police", "bounty", "claimdrop",
     "poll", "vote", "milestones", "contributions", "boards",
+    "webshot",
     "property", "buyproperty", "sellproperty", "rent",
     "listproperty", "auctions", "mortgage", "insure",
     "drop", "claim",
@@ -223,7 +224,7 @@ def public_menu_text() -> str:
         "conflict — /gear /heist /shoot /kill /assassinate "
         "/sabotage /gang /war /police /bounty /claimdrop\n"
         "group life — /poll /vote /milestones /contributions "
-        "/boards\n"
+        "/boards /webshot\n"
         f"play — /game {games}\n"
         "\n"
         "tap a button below to run it · /help for what each one does"
@@ -518,6 +519,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "milestones": (0, None),  # /milestones — the group's memory book (P3)
     "contributions": (0, None),  # /contributions [top|appeal N] — §26 transparency + the reviewed ranker
     "boards": (0, None),         # /boards [name] — the §14 board organ: scopes × metrics, movement vs the last publish
+    "webshot": (0, None),        # /webshot [full] [phone|tablet|desktop] [dark] [idle] [pdf] [annotate] [clip <sel>] <url> — render a page, return the shot (§18/§20); watch rides it
+    "owner": (0, None),          # /owner [status|audit|bind|unbind|sudo|deputy|mark|rebind] — the §19 owner system in DM (owner only; the record is never editable from a group)
     "coinflip": (0, 2),       # /coinflip 10 heads — casino sink at 1.9×
     "top": (0, 0),            # /top — the richest board (wallet + bank)
     "tax": (0, 0),            # /tax — the group's monetary policy, stated
@@ -2170,6 +2173,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/pair | /pair whatsapp <number> [label] | /pair telegram <number> [label] | /pair tgcode <id> <code> | /pair tgpass <id> <password> | /pair code <id> | /pair start|stop|restart|remove <id> | /pair use <id> | /pair route [platform] | /pair toggle <id> <status_saving|view_once|antidelete> <on|off> | /pair saved [id] | /pair recovered [id] | /pair page",
             "example": "/pair whatsapp 2348012345678 main",
             "related": "/provision /connectors"},
+    "owner": {"what": "the owner system (§19 + §20): one record binds the owner's platform identities — every surface resolves who the owner is from it, never from display names. The ladder is owner → sudo (recognized everywhere, exempt from automatic actions, never ownership) → group-scoped deputies; every edit lands in the record's held audit. The card shows each platform's bound ids, how they were proved (config seed, the §15 pool, the seal), and the seal's state; status carries uptime (it lives here, not on /ping), the version, the pool counts, queue depths and the last briefing. If the owner's platform id ever changes, a sealed DM rebind (identity claim + passphrase against the core seal) rewrites the binding. The record is never editable from a group, by anyone. Owner only.",
+            "usage": "/owner · /owner status · /owner audit · /owner bind|unbind <platform> <id> · /owner sudo add|remove <platform> <id> · /owner deputy add|remove <group key> <id> · /owner mark <text> · /owner rebind <platform> <new id> <seal passphrase>",
+            "example": "/owner status",
+            "related": "/pair /console /gsettings"},
     "massreact": {"what": "mass react (§14): place one emoji reaction on a post from every connected account in your pairing pool at once — Telegram posts via your MTProto sessions, WhatsApp channel posts via each account's bridge. Paced with jitter, journaled per account, and arm-gated: the tool must be armed once (its warning is shown then), and its first run is a dry-run unless you say live. Your own accounts only — never the bot.",
             "usage": "/massreact <post link> | <emoji> [| count] [| live|dry] · /massreact arm|disarm|status|pacing <s>|runs",
             "example": "/massreact https://t.me/somechannel/482 | 🔥",
@@ -2350,6 +2357,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/boards · /boards <name> — sparks, global:sparks, platform:telegram-bot:messages, game:chess:elo, games:xp",
             "example": "/boards global:sparks",
             "related": "/top /contributions /milestones"},
+    "webshot": {"what": "render a web page and return the screenshot as a photo, captioned with the page title + URL (§18, expanded §20): one command carries the whole variant space — full-page or viewport, phone/tablet/desktop profiles, dark mode, wait-for-idle, a single-element clip, the print/PDF rung, and annotate (the vision organ reads the shot and answers with it). Reply to a message holding a link to shoot that link. In groups it is a safe-preview: the shot posts only in claimed rooms (§33). Page-watch turns it into a surveillance utility: a watched URL is re-shot on the cycle and posts only when the page actually changes. Shots are taken by her own headless Chromium first, with health-gated provider seeds behind it; when no rung can honor the request, the failure names every rung's reason — never a fake image. Generated shots carry the group's watermark mode (§19).",
+            "usage": "/webshot [full] [phone|tablet|desktop] [dark] [idle] [pdf] [annotate] [clip <css selector>] <url> · /webshot watch <url> [every 2h] · /webshot watch list · /webshot watch remove <id>",
+            "example": "/webshot full phone https://example.com",
+            "related": "/look /browser /owner"},
     "coinflip": {"what": "flip a coin against the house at 1.9×: call heads or tails. Losses feed the treasury and the jackpot pot.",
             "usage": "/coinflip <bet> heads|tails",
             "example": "/coinflip 10 heads",
@@ -2871,7 +2882,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                       "download", "shorts", "caption", "imggen", "sham", "musicnote",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
-    ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "pair", "massreact", "pollvote", "chfollow", "notion",
+    ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "pair", "owner", "massreact", "pollvote", "chfollow", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "desk", "apk", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
@@ -2894,7 +2905,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "assassinate", "sabotage", "gang", "war",
                             "police", "bounty", "claimdrop",
                             "poll", "vote", "milestones",
-                            "contributions", "boards",
+                            "contributions", "boards", "webshot",
                             "mute", "unmute", "ban", "unban", "kick",
                             "warn", "pin", "unpin", "purge", "report"]),
     ("discovery", ["list", "commands", "menu", "help", "tour", "heal"]),
@@ -3149,7 +3160,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["schedule", "db", "artifact", "api", "proxy", "toolhub", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "desk", "apk", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
-      "connectors", "provision", "pair", "massreact", "pollvote", "chfollow", "notion", "gcal", "trello", "exness", "stripe",
+      "connectors", "provision", "pair", "owner", "massreact", "pollvote", "chfollow", "notion", "gcal", "trello", "exness", "stripe",
       "guardrails", "content",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
     ("platform control — updates & restarts",
@@ -3166,6 +3177,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "gear", "heist", "shoot", "kill", "assassinate", "sabotage",
       "gang", "war", "police", "bounty", "claimdrop",
       "poll", "vote", "milestones", "contributions", "boards",
+      "webshot",
       "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
       "unpin", "purge", "report"]),
     ("discovery",
@@ -3410,6 +3422,7 @@ LIST_ONELINERS: dict[str, str] = {
     "browser": "the browser tool in chat: /browser open|text|links|forms|headings <url> | takeover [url] | run <url> [goal] (owner-only, background job) | run status [job] | watch [session] — attach a live view to a running browser session (owner-only)",
     "provision": "self-provisioning: /provision [service] — Devon fetches a missing API key herself (login or account creation; key validated + vaulted, request retried); /provision login <service> <username> hands her an existing login",
     "pair": "pairing-with-code pool: /pair whatsapp <number> [label] — pair a WhatsApp account by 8-char code (own bridge session each); /pair telegram <number> pairs Telegram by login code into the same pool; /pair lists the pool with Registered/Connected/Dropped counts (owner only)",
+    "owner": "the owner system: /owner — the verification card (bound ids per platform + how each was proved + the seal's state); /owner status — uptime, version, pool counts, queues, last briefing; bind/unbind/sudo/deputy/mark edits and the sealed rebind (owner only, DM only — never editable from a group)",
     "massreact": "mass react: /massreact <post link> | <emoji> [| count] [| live] — one reaction on a post from every connected account in your pool (Telegram + WhatsApp channels); arm it once first, first run dry-runs (owner only)",
     "pollvote": "mass vote: /pollvote <poll link> | <option> [| count] [| live] — vote in a poll from every connected Telegram account (MTProto; bots can't vote); arm-gated, first run dry-runs (owner only)",
     "chfollow": "channel follow: /chfollow <channel link> [| live] — every connected account in your pool follows the channel; idempotent; arm-gated, first run dry-runs (owner only)",
