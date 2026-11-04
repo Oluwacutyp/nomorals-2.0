@@ -14,11 +14,15 @@ transport-free; this mixin owns the live wiring:
   held audit as an ``expression`` entry: an unsent GIF is a
   journaled non-event, never a claimed send.
 - **Commands**: /steal (claim a replied sticker/GIF into the
-  library), /sticker (the maker), /convert (the conversion
-  organ), /gif (library + providers), /emoji (the full Unicode
-  table), /customemoji (her own set), /react (place a
-  reaction).  In groups, their media posts pass the same §33
-  gate — her library does not even GROW from a foreign room.
+  library — and a sticker also lands in the THIEF'S personal
+  pack, §21 via social/chat/sticker_packs.py), /sticker (the
+  maker; ``pack`` lists/sends the caller's pack, ``steal``
+  is the steal verb under this surface too), /convert (the
+  conversion organ), /gif (library + providers), /emoji (the
+  full Unicode table), /customemoji (her own set), /react
+  (place a reaction).  In groups, their media posts pass the
+  same §33 gate — her library does not even GROW from a
+  foreign room, and neither does any pack.
 - Expression never breaks its host: every path is guarded, and
   a failure degrades to text or silence, never to an exception
   in the message pipeline.
@@ -80,6 +84,32 @@ class RuntimeExpressionMixin:
 
     def _expression_library(self):  # type: ignore[no-untyped-def]
         return self._expression_service().library
+
+    def _sticker_pack_store(self):  # type: ignore[no-untyped-def]
+        """The per-user pack store: one JSON beside the
+        expression library, so packs travel with it."""
+        store = getattr(self, "_sticker_pack_store_obj", None)
+        if store is not None:
+            return store
+        from ...social.chat.sticker_packs import StickerPackStore
+
+        store = StickerPackStore(
+            self._expression_root() / "sticker_packs.json")
+        self._sticker_pack_store_obj = store
+        return store
+
+    def _pack_person(self, message) -> str:  # type: ignore[no-untyped-def]
+        """The pack key: the §29 person identity (canonical
+        platform + the platform's own id) — the same person
+        keeps ONE pack across the bot and userbot hats, and
+        across every room."""
+        from ...community.group_gangs import person_key
+
+        platform = str(getattr(message.chat, "platform", "")
+                       or "")
+        user_id = str(getattr(message, "sender_id", "")
+                      or getattr(message, "sender", "") or "")
+        return person_key(platform, user_id)
 
     # ---- sending -------------------------------------------------
     def _expression_send(self, message, ref):  # type: ignore[no-untyped-def]
@@ -240,6 +270,31 @@ class RuntimeExpressionMixin:
         tags = [w.lower() for w in str(tail or "").split() if w]
         if kind:
             tags.append(kind)
+        if str(kind or "") == "sticker":
+            # The thief's own copy (§21 packs): a sticker also
+            # lands in the caller's personal pack, normalized
+            # and pack-owned (or held by reference, honestly,
+            # when the bytes never reached us).  A pack refusal
+            # is the steal's refusal — nothing is claimed
+            # anywhere until both captures can happen.
+            from ...social.chat.sticker_packs import (
+                PackError, capture_sticker)
+
+            replied = (getattr(message, "meta", None) or {}).get(
+                "replied_media") or {}
+            try:
+                capture_sticker(
+                    self._sticker_pack_store(),
+                    self._pack_person(message),
+                    path=path, kind=kind, file_ids=file_ids,
+                    platform=str(message.chat.platform or ""),
+                    media_dir=self._expression_root()
+                    / "expression_media",
+                    origin=message.chat.key,
+                    name=str(replied.get("name")
+                             or "stolen sticker"))
+            except PackError as exc:
+                return str(exc)
         library = self._expression_library()
         item = library.add_item(
             kind=kind or "gif", path=path, file_ids=file_ids,
@@ -267,13 +322,22 @@ class RuntimeExpressionMixin:
     def _control_sticker(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
         """Make a sticker: text/emoji → the house maker's real
         raster sticker; a replied image → image-to-sticker; a
-        replied video/GIF → animated sticker."""
+        replied video/GIF → animated sticker.  The ``pack``
+        and ``steal`` heads route to the caller's personal
+        pack and the stealer instead of the maker."""
         if message is None:
             return "usage: /sticker <text> — or reply to an image/video."
         from ...social.chat import media_convert
         from ...social.chat.base import MediaRef
 
         text = str(tail or "").strip()
+        words = text.split()
+        head = words[0].lower() if words else ""
+        if head == "pack":
+            return self._control_sticker_pack(words[1:], message)
+        if head == "steal":
+            return self._control_steal(" ".join(words[1:]),
+                                        message)
         out_dir = self._expression_root() / "expression_media"
         produced = ""
         note = ""
@@ -311,6 +375,68 @@ class RuntimeExpressionMixin:
         if getattr(result, "ok", False):
             return ""
         return (f"sticker made, but the send failed here: "
+                f"{getattr(result, 'error', '')}")
+
+    # ---- /sticker pack --------------------------------------------------
+    def _control_sticker_pack(self, args, message=None) -> str:  # type: ignore[no-untyped-def]
+        """The caller's personal pack (§21): `/sticker pack`
+        lists it, `/sticker pack <n>` sends entry n.  Listing
+        and sending are bot-system output in a group — the
+        same §33 gate as every expression post; in DM the
+        pack is simply the owner's own shelf."""
+        if message is None:
+            return ("usage: /sticker pack — your stolen "
+                    "stickers; /sticker pack <n> sends one.")
+        if not self._group_gate(message, "sticker"):
+            return ("this room isn't claimed for my bot "
+                    "systems (§33), so packs stay shut here "
+                    "— your pack works in DM.")
+        store = self._sticker_pack_store()
+        person = self._pack_person(message)
+        items = store.pack(person)
+        if not args:
+            if not items:
+                return ("your sticker pack is empty — reply "
+                        "to a sticker with /steal and it "
+                        "lands here.")
+            lines = [f"your sticker pack ({len(items)}):"]
+            for i, item in enumerate(items, 1):
+                shape = ("by reference"
+                         if item.get("by_reference")
+                         else str(item.get("format")
+                                  or "sticker"))
+                lines.append(
+                    f"  {i}. {item.get('name') or 'sticker'}"
+                    f" — {shape}")
+            lines.append("/sticker pack <n> sends one.")
+            return "\n".join(lines)
+        if not str(args[0]).isdigit():
+            return "usage: /sticker pack [number]"
+        item = store.get(person, int(args[0]))
+        if item is None:
+            return (f"no sticker #{args[0]} in your pack — "
+                    f"/sticker pack lists them.")
+        platform = str(message.chat.platform or "")
+        held = item.get("file_ids") or {}
+        if item.get("by_reference") and platform not in held:
+            return ("that sticker lives as a reference from "
+                    "another platform — I hold its handle "
+                    "there, not bytes I can send here.")
+        from ...social.chat.base import MediaRef
+
+        ref = MediaRef(
+            path=str(item.get("path") or ""), kind="sticker",
+            file_id=str(held.get(platform) or ""),
+            name=str(item.get("name") or "sticker"))
+        if not ref.path and not ref.file_id:
+            return ("that pack entry has neither bytes nor a "
+                    "handle for this platform — it can't be "
+                    "re-sent here.")
+        result = self._expression_send(message, ref)
+        if getattr(result, "ok", False):
+            store.note_use(person, str(item.get("id")))
+            return ""
+        return (f"couldn't send that pack sticker here: "
                 f"{getattr(result, 'error', '')}")
 
     # ---- /convert -------------------------------------------------------
