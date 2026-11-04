@@ -24,6 +24,9 @@
  *     {"id":"<req>","cmd":"group_revoke_invite","chat":"<@g.us>"}
  *     {"id":"<req>","cmd":"group_join_approval","chat":"<@g.us>","mode":"on|off"}
  *     {"id":"<req>","cmd":"group_member_add_mode","chat":"<@g.us>","mode":"admin|all"}
+ *     {"id":"<req>","cmd":"message_delete","chat":"<@g.us>","message_id":"<stanza id>"}
+ *     {"id":"<req>","cmd":"message_pin","chat":"<@g.us>","message_id":"<stanza id>"}   (unsupported on this engine — honest error)
+ *     {"id":"<req>","cmd":"message_unpin","chat":"<@g.us>","message_id":"<stanza id>"} (unsupported on this engine — honest error)
  *   Communities:
  *     {"id":"<req>","cmd":"community_create","subject":"...","description":"..."}
  *     {"id":"<req>","cmd":"community_leave","chat":"<@g.us>"}
@@ -111,7 +114,7 @@ function friendlyError(e) {
 }
 
 export function registerGroupAdminCommands(ctx) {
-  const { getSocket, reply, log } = ctx;
+  const { getSocket, reply, log, getCachedMessage } = ctx;
   const sock = () => {
     const s = getSocket();
     if (!s) throw new Error('whatsapp not connected yet');
@@ -210,6 +213,35 @@ export function registerGroupAdminCommands(ctx) {
       if (!['admin', 'all'].includes(mode)) throw new Error(`bad mode: ${req.mode} (want admin|all)`);
       await sock().groupMemberAddMode(jid, mode);
       return { ok: true, member_add_mode: mode };
+    },
+
+    // ── message moderation (the runtime's admin_delete / admin_pin) ──
+    // Delete-for-everyone is Baileys' sendMessage with a delete key;
+    // the key (author, fromMe, participant) comes from the bridge's
+    // own message memory — a message it never saw is an honest
+    // refusal, never a guessed key. Message PINNING has no Baileys
+    // verb in this build (the Go/whatsmeow engine carries it), so
+    // pin/unpin answer an honest unsupported instead of faking it.
+
+    message_delete: async (req) => {
+      const jid = groupJid(req.chat);
+      const mid = String(req.message_id || '').trim();
+      if (!mid) throw new Error('missing message_id');
+      const cached = typeof getCachedMessage === 'function'
+        ? getCachedMessage(mid) : null;
+      if (!cached || !cached.key) {
+        throw new Error('message not in bridge memory — its key cannot be built');
+      }
+      await sock().sendMessage(jid, { delete: cached.key });
+      return { ok: true };
+    },
+
+    message_pin: async () => {
+      throw new Error('unsupported: this Baileys build has no message-pin verb — message pinning is available on the Go bridge engine only');
+    },
+
+    message_unpin: async () => {
+      throw new Error('unsupported: this Baileys build has no message-pin verb — message pinning is available on the Go bridge engine only');
     },
 
     // ── communities ─────────────────────────────────────────────────

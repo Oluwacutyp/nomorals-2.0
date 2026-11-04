@@ -19,7 +19,9 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/proto"
 )
 
 // ── sanitizers: the wire gets plain JSON, never library internals ──
@@ -559,6 +561,68 @@ func (b *bridge) handleGroupAdminCommand(ctx context.Context, cc *clientConn, id
 			return true
 		}
 		ok(map[string]any{"member_add_mode": mode})
+		return true
+
+	// ── message moderation (the runtime's admin_delete / admin_pin) ──
+	// The message key needs the AUTHOR for someone else's message
+	// (an admin revoke / a pin in a group). The bridge resolves the
+	// author from its own message memory (cachedSender); a message
+	// it never saw falls back to the own-message grammar for
+	// delete (the server refuses honestly if that is wrong) and is
+	// refused outright for pin, whose key cannot be guessed.
+
+	case "message_delete":
+		chat, err := parseJID(req.str("chat"))
+		if err != nil || chat.IsEmpty() {
+			bad(errors.New("missing chat: pass a chat JID"))
+			return true
+		}
+		mid := strings.TrimSpace(req.str("message_id"))
+		if mid == "" {
+			bad(errors.New("missing message_id"))
+			return true
+		}
+		sender := b.cachedSender(mid)
+		_, err = b.cli.SendMessage(ctx, chat,
+			b.cli.BuildRevoke(chat, sender, types.MessageID(mid)))
+		if err != nil {
+			fail(err)
+			return true
+		}
+		ok(nil)
+		return true
+
+	case "message_pin", "message_unpin":
+		jid, err := groupJID(req.str("chat"))
+		if err != nil {
+			bad(err)
+			return true
+		}
+		mid := strings.TrimSpace(req.str("message_id"))
+		if mid == "" {
+			bad(errors.New("missing message_id"))
+			return true
+		}
+		sender := b.cachedSender(mid)
+		if sender.IsEmpty() {
+			bad(errors.New("message not in bridge memory — " +
+				"its author is unknown, so its key cannot be built"))
+			return true
+		}
+		pinType := waE2E.PinInChatMessage_PIN_FOR_ALL
+		if cmd == "message_unpin" {
+			pinType = waE2E.PinInChatMessage_UNPIN_FOR_ALL
+		}
+		msg := &waE2E.Message{PinInChatMessage: &waE2E.PinInChatMessage{
+			Key:               b.cli.BuildMessageKey(jid, sender, types.MessageID(mid)),
+			Type:              pinType.Enum(),
+			SenderTimestampMS: proto.Int64(time.Now().UnixMilli()),
+		}}
+		if _, err := b.cli.SendMessage(ctx, jid, msg); err != nil {
+			fail(err)
+			return true
+		}
+		ok(nil)
 		return true
 
 	// ── communities ──

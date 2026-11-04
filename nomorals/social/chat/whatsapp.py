@@ -1612,6 +1612,219 @@ class WhatsAppAdapter(ChatAdapter):
             "chat": self._group_jid(chat), "mode": (mode or "").strip().lower(),
         })
 
+    # ── group moderation seam (the runtime's admin_* grammar) ──
+    # The group runtime (runtime_group._mod_run and the defense
+    # sensors) moderates through adapter verbs — admin_ban /
+    # admin_restrict / admin_delete / admin_pin … — with the
+    # Telegram contract: return {"ok": True, ...} on success,
+    # {"ok": False, "error": ...} on refusal; the runtime audits
+    # either way and never reports a refusal as success.  This
+    # section is that grammar for WhatsApp, mapped onto what the
+    # platform ACTUALLY affords — no verb fakes an affordance
+    # WhatsApp does not have:
+    #
+    #   ban      → remove the member (group_members_update).
+    #              WhatsApp keeps no ban list: removal IS the ban,
+    #              and return is possible only via a fresh invite
+    #              or re-add — the same end-state Telegram's ban
+    #              produces for a member who never rejoins.
+    #   unban    → vacuous success, deliberately NO bridge call:
+    #              with no ban list, a removed member is already
+    #              free to rejoin via the invite link.  (Kick is
+    #              ban+unban in the runtime — if unban re-added
+    #              the member, kick would undo itself.)
+    #   promote / demote → group_members_update, real.
+    #   delete   → bridge message_delete (protocol revoke; the
+    #              bridges resolve the message author's key from
+    #              their own message memory — an admin may revoke
+    #              any member's message, the owner her own).
+    #   pin      → bridge message_pin (Go/whatsmeow engine: the
+    #              protocol's pin-in-chat message).  The Baileys
+    #              engine has no message-pin verb and answers an
+    #              honest unsupported — engine asymmetry, named.
+    #   restrict (mute) → UNSUPPORTED, honestly: WhatsApp has NO
+    #              per-member mute.  The only silences are
+    #              removing the member (a kick wearing a mute's
+    #              clothes — it cannot auto-expire and unmute
+    #              cannot reliably reverse it) and setting the
+    #              WHOLE group to admins-only (punishing every
+    #              member for one member's mute).  Neither honors
+    #              the verb's contract, so the verb refuses with
+    #              the reason and the runtime audits the refusal
+    #              (admin_action_failed / moderation_unexecuted)
+    #              instead of a fake success.  Timed mutes on
+    #              WhatsApp stay a named platform gap.
+    #   admin_member → the roster's word on one member's role;
+    #              this is also the runtime's admin-gate source
+    #              (_group_admin_ok) on this platform.
+
+    def _member_jid(self, chat: ChatRef | str, user_id: str) -> str:
+        """Resolve a runtime member id to the JID the bridge
+        verbs need.  Runtime ids on this platform are usually
+        full JIDs already (the bridges emit sender ids in JID
+        form) and pass through untouched; a bare user part is
+        matched against the group roster first — that is what
+        keeps LID-addressed members (``…@lid``) reachable, since
+        a bare LID user part is indistinguishable from a phone
+        number — and only an unmatched bare number falls back to
+        the phone server."""
+        uid = str(user_id or "").strip()
+        if not uid:
+            return ""
+        if "@" in uid:
+            return uid
+        for row in self.group_participants(chat):
+            jid = str(row.get("jid") or "")
+            if _jid_user_part(jid) == uid:
+                return jid
+        digits = "".join(c for c in uid if c.isdigit())
+        return f"{digits}@s.whatsapp.net" if digits else ""
+
+    def _members_update_checked(self, chat: ChatRef | str,
+                                  action: str,
+                                  user_id: str) -> dict[str, Any]:
+        """group_members_update for ONE member, with the bridge's
+        per-user status honored: the bridge answers ok=True for
+        the batch even when WhatsApp refused this member (status
+        401/403/404…), so the member's own row decides — a "200"
+        (or the bridge's "sent" when the server returned no rows)
+        is success, anything else is the refusal, named."""
+        jid = self._member_jid(chat, user_id)
+        if not jid:
+            return {"ok": False,
+                    "error": f"no WhatsApp identity for {user_id!r}"}
+        out = self.group_members_update(chat, action, [jid])
+        if not isinstance(out, dict) or out.get("ok") is False:
+            return out if isinstance(out, dict) else \
+                {"ok": False, "error": "bridge gave no answer"}
+        rows = out.get("results") or []
+        mine = [r for r in rows
+                if _jid_user_part(str(r.get("jid") or ""))
+                == _jid_user_part(jid)]
+        row = mine[0] if mine else (rows[0] if len(rows) == 1
+                                    else None)
+        if row is None:
+            return out
+        status = str(row.get("status") or "")
+        if status in ("200", "sent"):
+            return {"ok": True, "action": action, "jid": jid,
+                    "status": status}
+        return {"ok": False, "jid": jid,
+                "error": f"WhatsApp refused the {action} for "
+                         f"{jid} (status {status or 'unknown'})"}
+
+    def admin_member(self, chat: ChatRef, user_id: str) -> dict[str, Any]:
+        """One member's standing, from the group roster:
+        ``{"status": "creator"|"administrator"|"member"}`` —
+        the shape the runtime's admin gate reads.  A member the
+        roster doesn't hold (or a bridge that can't answer) is
+        an honest ok=False, never a guessed role."""
+        uid = str(user_id or "").strip()
+        if not uid:
+            return {"ok": False, "error": "no member id given"}
+        for row in self.group_participants(chat):
+            jid = str(row.get("jid") or "")
+            if jid == uid or _jid_user_part(jid) == \
+                    _jid_user_part(uid):
+                role = str(row.get("role") or "")
+                status = {"superadmin": "creator",
+                          "admin": "administrator"}.get(
+                              role, "member")
+                return {"ok": True, "status": status,
+                        "role": role, "jid": jid,
+                        "name": str(row.get("name") or "")}
+        return {"ok": False,
+                "error": "member not in the group roster "
+                         "(or the bridge is unreachable)"}
+
+    def admin_ban(self, chat: ChatRef, user_id: str) -> dict[str, Any]:
+        """Ban = remove from the group (see the seam note above:
+        WhatsApp has no ban list; removal is the whole verb)."""
+        return self._members_update_checked(chat, "remove", user_id)
+
+    def admin_unban(self, chat: ChatRef, user_id: str) -> dict[str, Any]:
+        """Unban: nothing to lift — WhatsApp keeps no ban list,
+        so a removed member is already free to rejoin through
+        the group's invite link.  Vacuous success by design, and
+        deliberately NOT a re-add: the runtime's kick is
+        ban+unban, and a re-adding unban would undo every kick."""
+        return {"ok": True, "action": "unban",
+                "note": "WhatsApp keeps no ban list — a removed "
+                        "member may rejoin via the invite link"}
+
+    def admin_promote(self, chat: ChatRef, user_id: str) -> dict[str, Any]:
+        """Promote a member to group admin."""
+        return self._members_update_checked(chat, "promote", user_id)
+
+    def admin_demote(self, chat: ChatRef, user_id: str) -> dict[str, Any]:
+        """Demote a group admin back to member."""
+        return self._members_update_checked(chat, "demote", user_id)
+
+    def admin_restrict(self, chat: ChatRef, user_id: str,
+                       minutes: int = 60,
+                       until: int | None = None) -> dict[str, Any]:
+        """Mute — UNSUPPORTED on WhatsApp, honestly (see the seam
+        note above): there is no per-member mute to apply, and
+        neither removal nor group-wide admins-only mode honors
+        this verb's timed, per-member, reversible contract.  The
+        refusal carries the reason; the runtime audits it as a
+        non-execution, never as a mute that happened."""
+        return {"ok": False,
+                "error": "unsupported: WhatsApp has no per-member "
+                         "mute — a member can only be removed, or "
+                         "the whole group set to admins-only; "
+                         "neither is a mute, so nothing was applied"}
+
+    def admin_unrestrict(self, chat: ChatRef, user_id: str) -> dict[str, Any]:
+        """Unmute — equally unsupported: no per-member mute
+        exists on WhatsApp, so there is none to lift."""
+        return {"ok": False,
+                "error": "unsupported: WhatsApp has no per-member "
+                         "mute, so there is no mute to lift"}
+
+    def admin_delete(self, chat: ChatRef, message_id: str) -> dict[str, Any]:
+        """Delete a message for everyone (protocol revoke).  The
+        bridge resolves the author's message key from its own
+        message memory; a message it never saw is an honest
+        refusal, not a guessed key."""
+        mid = str(message_id or "").strip()
+        if not mid:
+            return {"ok": False, "error": "no message id given"}
+        return self._admin_cmd("message_delete", {
+            "chat": self._group_jid(chat), "message_id": mid,
+        })
+
+    def admin_pin(self, chat: ChatRef, message_id: str,
+                  silent: bool = True) -> dict[str, Any]:
+        """Pin a message in the group.  Real on the Go bridge
+        engine (protocol pin-in-chat); the Baileys engine has no
+        message-pin verb and the bridge answers an honest
+        unsupported, which passes through untouched."""
+        mid = str(message_id or "").strip()
+        if not mid:
+            return {"ok": False, "error": "no message id given"}
+        return self._admin_cmd("message_pin", {
+            "chat": self._group_jid(chat), "message_id": mid,
+        })
+
+    def admin_unpin(self, chat: ChatRef,
+                    message_id: str = "") -> dict[str, Any]:
+        """Unpin.  WhatsApp unpins a SPECIFIC message (there is
+        no 'unpin the pinned one' verb without its key), so the
+        bare runtime call — which names no message — is an
+        honest unsupported; with a message id the bridge
+        message_unpin verb does the real thing (Go engine)."""
+        mid = str(message_id or "").strip()
+        if not mid:
+            return {"ok": False,
+                    "error": "unsupported: WhatsApp unpins a "
+                             "specific message — no message id "
+                             "was given, so there is nothing to "
+                             "unpin"}
+        return self._admin_cmd("message_unpin", {
+            "chat": self._group_jid(chat), "message_id": mid,
+        })
+
     # ── communities ─────────────────────────────────────────────────────
 
     def community_create(self, subject: str,

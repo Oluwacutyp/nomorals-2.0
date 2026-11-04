@@ -453,6 +453,19 @@ func (b *bridge) remember(chat types.JID, rec *remembered) {
 	b.recent[key] = arr
 }
 
+// cachedSender returns the author of a remembered message, or
+// types.EmptyJID when the bridge never saw it. Message-moderation
+// verbs (revoke, pin) need the author to build the message key
+// for someone else's message.
+func (b *bridge) cachedSender(id string) types.JID {
+	b.memMu.Lock()
+	defer b.memMu.Unlock()
+	if cached, ok := b.msgCache[id]; ok && cached != nil {
+		return cached.sender
+	}
+	return types.EmptyJID
+}
+
 func (b *bridge) cacheMessage(id string, msg *waE2E.Message, sender types.JID) {
 	b.memMu.Lock()
 	defer b.memMu.Unlock()

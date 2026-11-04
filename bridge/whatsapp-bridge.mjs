@@ -908,7 +908,7 @@ async function handleCommand(sock, req) {
         // workstream 3: group/community commands (read-only) before "unknown cmd",
         // then the mutating admin commands (owner-confirmed on the Python side).
         return (await registerGroupCommands({ getSocket: () => wa, reply, log })(sock, req))
-          || (await registerGroupAdminCommands({ getSocket: () => wa, reply, log })(sock, req))
+          || (await registerGroupAdminCommands({ getSocket: () => wa, reply, log, getCachedMessage: (id) => msgCache.get(id) })(sock, req))
           || reply(sock, id, { ok: false, error: `unknown cmd: ${cmd}` });
     }
   } catch (e) {
