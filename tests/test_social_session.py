@@ -111,7 +111,7 @@ class BrainSessionScopeTests(unittest.TestCase):
         brain.mood.tick.return_value = None
         brain._chat_flags = lambda chat: {"is_owner": True, "in_us": False,
                                           "last_active": 0}
-        brain._generate_and_persist = MagicMock(return_value=["hi"])
+        brain._generate_and_persist = MagicMock(return_value=(["hi"], False, ""))
         import nomorals.agents.partner.brain as brain_mod
         orig_presence = brain_mod.decide_presence
         brain_mod.decide_presence = lambda *a, **k: SimpleNamespace(
@@ -130,7 +130,7 @@ class BrainSessionScopeTests(unittest.TestCase):
         brain.mood = MagicMock()
         brain._chat_flags = lambda chat: {"is_owner": True, "in_us": False,
                                           "last_active": 0}
-        brain._generate_and_persist = MagicMock(return_value=["hi"])
+        brain._generate_and_persist = MagicMock(return_value=(["hi"], False, ""))
         import nomorals.agents.partner.brain as brain_mod
         orig_presence = brain_mod.decide_presence
         brain_mod.decide_presence = lambda *a, **k: SimpleNamespace(

@@ -20,6 +20,7 @@ conversational send crosses on every platform) and at the detector:
 from __future__ import annotations
 
 import json
+import os
 import random
 import tempfile
 import time
@@ -49,6 +50,14 @@ from nomorals.social.chat.base import (
     SendResult,
 )
 from nomorals.social.chat.gateway import ChatGateway
+
+# Context homes in this module carry a fully migrated database;
+# they honour NM_TEST_TMPDIR so a test runner can keep them off a
+# small shared /tmp — a full tmpdir turns storage COMMITs into
+# SQLITE_FULL, the failed COMMIT is only logged (Database._safe),
+# and the half-applied schema then fails unrelated later tests
+# with "no such table: goals". Unset = tempfile's default.
+_TEST_TMPDIR = os.environ.get("NM_TEST_TMPDIR") or None
 
 #: The incident body, shape-faithful (posted lowercase by the
 #: texting-voice layer): header, analysis prose, context verdict.
@@ -221,7 +230,8 @@ class FakeRouter:
 
 
 def _make_context() -> tuple[Any, "tempfile.TemporaryDirectory"]:
-    tmp = tempfile.TemporaryDirectory(prefix="nm-test-")
+    tmp = tempfile.TemporaryDirectory(prefix="nm-test-",
+                                      dir=_TEST_TMPDIR)
     settings = load_settings(
         overrides={
             "home": tmp.name,

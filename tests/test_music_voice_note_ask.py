@@ -28,6 +28,12 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
+# Context homes here carry a fully migrated database; keep them
+# off a small shared /tmp when the runner sets NM_TEST_TMPDIR
+# (SQLITE_FULL half-applies migrations — see
+# test_partner_brain_gate). Unset = tempfile's default.
+_TEST_TMPDIR = os.environ.get("NM_TEST_TMPDIR") or None
+
 from nomorals.agents.context import build_context
 from nomorals.agents.partner_runtime import PartnerRuntime
 from nomorals.core.config import load_settings
@@ -247,7 +253,8 @@ class MusicHookProcessTest(unittest.TestCase):
     speech → never asked."""
 
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory(prefix="nm-music-ask-")
+        self.tmp = tempfile.TemporaryDirectory(
+            prefix="nm-music-ask-", dir=_TEST_TMPDIR)
         self.modes_path = os.path.join(self.tmp.name, "chat_modes.json")
         self._old = os.environ.get("NOMORALS_CHAT_MODES_PATH")
         os.environ["NOMORALS_CHAT_MODES_PATH"] = self.modes_path
@@ -395,7 +402,8 @@ class MusicHookProcessTest(unittest.TestCase):
 
 class MusicnoteControlTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory(prefix="nm-musicnote-")
+        self.tmp = tempfile.TemporaryDirectory(
+            prefix="nm-musicnote-", dir=_TEST_TMPDIR)
         settings = load_settings(overrides={
             "home": self.tmp.name,
             "partner.platforms": "telegram",
@@ -573,7 +581,7 @@ class BrainMusicNoteTest(unittest.TestCase):
         msg = _voice_msg(owner=False)
         msg.meta["music_note"] = {"path": "/tmp/note.ogg",
                                   "heard": "12s of music"}
-        parts = brain._generate_and_persist(
+        parts, _degraded, _note = brain._generate_and_persist(
             msg, {"is_owner": False, "in_us": False})
         self.assertIn("nice track", parts)
         media_notes = (brain.responder.respond_bounded.call_args.kwargs

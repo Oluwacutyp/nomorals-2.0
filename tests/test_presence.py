@@ -10,6 +10,7 @@ with the safety rule that substantive messages are delayed, never ignored.
 from __future__ import annotations
 
 import json
+import os
 import random
 import tempfile
 import time
@@ -17,6 +18,12 @@ import unittest
 from pathlib import Path
 from typing import Any
 from unittest import mock
+
+# Context homes here carry a fully migrated database; keep them
+# off a small shared /tmp when the runner sets NM_TEST_TMPDIR
+# (SQLITE_FULL half-applies migrations — see
+# test_partner_brain_gate). Unset = tempfile's default.
+_TEST_TMPDIR = os.environ.get("NM_TEST_TMPDIR") or None
 
 from nomorals.agents.context import build_context
 from nomorals.agents.partner_runtime import PartnerBrain, PresenceOutcome, PartnerRuntime
@@ -194,7 +201,8 @@ def _make_brain(tmp: str) -> tuple[PartnerBrain, _FakeRouter]:
 
 class BrainPresenceTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory(prefix="nm-presence-")
+        self.tmp = tempfile.TemporaryDirectory(
+            prefix="nm-presence-", dir=_TEST_TMPDIR)
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -256,7 +264,8 @@ class BrainPresenceTest(unittest.TestCase):
         self.assertIsNotNone(brain.mood.open_fight)
         frustration_after_first = brain.mood.value("frustration")
         # The delayed half: generate + persist only.
-        parts = brain.deliver_reply(self._message("i'm so angry, you never listen"))
+        parts = brain.deliver_reply(
+            self._message("i'm so angry, you never listen")).parts
         self.assertTrue(parts)
         self.assertEqual(router.calls, 1, "exactly one generation for the whole turn")
         self.assertLessEqual(brain.mood.value("frustration"), frustration_after_first + 1e-9,
@@ -310,7 +319,8 @@ def _wait(predicate, timeout: float = 8.0) -> bool:
 
 class RuntimePresenceE2E(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory(prefix="nm-presence-e2e-")
+        self.tmp = tempfile.TemporaryDirectory(
+            prefix="nm-presence-e2e-", dir=_TEST_TMPDIR)
         settings = load_settings(
             overrides={
                 "home": self.tmp.name,

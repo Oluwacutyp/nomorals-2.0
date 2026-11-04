@@ -17,12 +17,19 @@ Two layers are verified here:
 
 from __future__ import annotations
 
+import os
 import random
 import tempfile
 import threading
 import time
 import unittest
 from typing import Any
+
+# Context homes here carry a fully migrated database; keep them
+# off a small shared /tmp when the runner sets NM_TEST_TMPDIR
+# (SQLITE_FULL half-applies migrations — see
+# test_partner_brain_gate). Unset = tempfile's default.
+_TEST_TMPDIR = os.environ.get("NM_TEST_TMPDIR") or None
 
 from nomorals.agents.context import build_context
 from nomorals.agents.partner_runtime import PartnerBrain, PartnerRuntime
@@ -66,7 +73,8 @@ class FakeAdapter(ChatAdapter):
 
 def _make_runtime() -> tuple[PartnerRuntime, Any, tempfile.TemporaryDirectory,
                              ChatRef, FakeAdapter]:
-    tmp = tempfile.TemporaryDirectory(prefix="nm-test-drain-")
+    tmp = tempfile.TemporaryDirectory(prefix="nm-test-drain-",
+                                      dir=_TEST_TMPDIR)
     settings = load_settings(overrides={
         "home": tmp.name,
         "partner.platforms": "local",
@@ -168,7 +176,8 @@ class ShutdownDrainTest(unittest.TestCase):
                               text="hey", sender="you")
         flags = {"is_owner": True, "in_us": False, "last_active": 0.0}
 
-        parts = self.brain._generate_and_persist(message, flags)
+        parts, _degraded, _note = self.brain._generate_and_persist(
+            message, flags)
 
         self.assertTrue(parts, "reply was dropped when the DB closed mid-persist")
         self.assertTrue(any(p.strip() for p in parts))

@@ -695,19 +695,35 @@ class PartnerBrain:
                       presence.delay_seconds)
             return PresenceOutcome(presence=presence)
 
-        parts = self._generate_and_persist(message, flags)
-        return PresenceOutcome(parts=parts, presence=presence)
+        parts, degraded, degraded_note = self._generate_and_persist(
+            message, flags)
+        return PresenceOutcome(parts=parts, presence=presence,
+                               degraded=degraded,
+                               degraded_note=degraded_note)
 
-    def deliver_reply(self, message: ChatMessage) -> list[str]:
+    def deliver_reply(self, message: ChatMessage) -> PresenceOutcome:
         """The generation half of :meth:`handle_message`, for the busy case.
 
         The mood clock is NOT re-ticked and signals are NOT re-detected — she
         already heard the message when it arrived; this is just the reply
-        landing once she's free.
+        landing once she's free. Returns the turn's outcome (parts +
+        the brain-quality flag), like :meth:`handle_message`.
         """
-        return self._generate_and_persist(message, self._chat_flags(message.chat))
+        parts, degraded, degraded_note = self._generate_and_persist(
+            message, self._chat_flags(message.chat))
+        return PresenceOutcome(parts=parts, degraded=degraded,
+                               degraded_note=degraded_note)
 
-    def _generate_and_persist(self, message: ChatMessage, flags: dict[str, Any]) -> list[str]:
+    def _generate_and_persist(self, message: ChatMessage, flags: dict[str, Any]) -> tuple[list[str], bool, str]:
+        """Generate one reply; returns ``(parts, degraded, note)``.
+
+        ``degraded`` is the turn's brain-quality fact, made explicit
+        for the outcome: True when the responder's no-model template
+        fallback served the parts (``ReplyBundle.fallback``) rather
+        than any model rung. Provider failover (a real model answered
+        on a lower rung) is NOT degraded by this measure — a model
+        still produced the text.
+        """
         chat = message.chat
         # Canonical session scope (set by handle_message; deliver_reply path
         # ensures it too). Memory, history, and extraction key off this.
@@ -890,7 +906,13 @@ class PartnerBrain:
             self._refresh_profile_async(chat.key)
         except Exception as exc:  # noqa: BLE001 - persistence must never break a reply
             _log.warning("reply persist tail failed: %s", exc)
-        return parts
+        degraded = bool(getattr(bundle, "fallback", False))
+        degraded_note = ""
+        if degraded:
+            degraded_note = str(
+                getattr(bundle, "degraded_note", "") or "") \
+                or "template fallback served (no model rung)"
+        return parts, degraded, degraded_note
 
     def note_fast_turn(self, message: "ChatMessage", reply_text: str) -> None:
         """Record a Core-Mind fast-path turn without any model call.

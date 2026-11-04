@@ -47,6 +47,7 @@ from .runtime_wisdom import RuntimeWisdomMixin
 from .runtime_reach import RuntimeReachMixin
 from .failures import failure_count, recent_failures, record_failure
 from .reply_guard import guard_reply_parts
+from .brain_gate import BrainGate, is_personal_platform
 _log = get_logger(__name__)
 
 
@@ -279,6 +280,9 @@ class PartnerRuntime(
         #: on a dict value is a read-modify-write and lost increments
         #: otherwise (silent undercounting in /status).
         self._stats_lock = threading.Lock()
+        #: Competence gate state (brain_gate): degraded-episode
+        #: bookkeeping for personal-surface reply holds.
+        self._brain_gate = BrainGate()
         self._owner_chats = _key_set(partner_cfg.owner_chats)
         # Sender-id allowlist (NM_PARTNER_OWNER_SENDER_IDS): the owner's
         # Telegram user id. The chat-key test above fails when the owner
@@ -1706,7 +1710,9 @@ class PartnerRuntime(
                 self._schedule_delayed(message, outcome.presence)
             return
         self._bump("replies")
-        self._send_reply(message, outcome.parts)
+        self._send_reply(message, outcome.parts,
+                         degraded=outcome.degraded,
+                         degraded_note=outcome.degraded_note)
         # Two-tier memory (build-map #36): opt-in parallel layer. Runs AFTER
         # the reply is sent and AFTER all existing memory work — it never
         # replaces or precedes the trusted recall path.
@@ -1775,10 +1781,13 @@ class PartnerRuntime(
                 if self._stopped.is_set():
                     return
                 try:
-                    parts = self.brain.deliver_reply(message)
-                    if parts:
+                    outcome = self.brain.deliver_reply(message)
+                    if outcome.parts:
                         self._bump("replies")
-                        self._send_reply(message, parts)
+                        self._send_reply(
+                            message, outcome.parts,
+                            degraded=outcome.degraded,
+                            degraded_note=outcome.degraded_note)
                 except Exception:  # noqa: BLE001 - a late reply must not crash the thread
                     _log.exception("delayed reply for %s failed", message.chat.key)
             finally:
@@ -1903,7 +1912,38 @@ class PartnerRuntime(
                 return sent_any
         return sent_any
 
-    def _send_reply(self, message: ChatMessage, parts: list[str]) -> None:
+    def _get_brain_gate(self) -> BrainGate:
+        """The competence-gate state, built on first use.
+
+        ``__init__`` sets it; the getattr covers runtimes assembled
+        without ``__init__`` (test fixtures that hand-wire a brain).
+        """
+        gate = getattr(self, "_brain_gate", None)
+        if gate is None:
+            gate = BrainGate()
+            self._brain_gate = gate
+        return gate
+
+    def _send_reply(self, message: ChatMessage, parts: list[str], *,
+                    degraded: bool = False,
+                    degraded_note: str = "") -> None:
+        # Competence gate (brain_gate): a PERSONAL-surface reply the
+        # degraded brain produced from its template bank — no model
+        # rung answered — is never sent AS the owner. The inbound
+        # turn was already observed and persisted upstream; only the
+        # reply is held, journaled once per degraded episode, and
+        # replies resume automatically on the first healthy send.
+        # Control/command replies never cross this seam. Bot-surface
+        # replies are out of scope (theirs is degraded liveness, not
+        # impersonation) and pass regardless of brain state.
+        gate = self._get_brain_gate()
+        if degraded and is_personal_platform(message.chat.platform):
+            gate.note_hold(platform=message.chat.platform,
+                           chat_key=message.chat.key,
+                           note=degraded_note)
+            return
+        if not degraded:
+            gate.note_healthy()
         # Send-boundary scaffold guard (reply_guard): the model's raw
         # analysis of the incoming message is not a reply and must
         # never reach a chat — least of all a personal-account surface
@@ -4013,6 +4053,12 @@ class PartnerRuntime(
                     continue
                 state = "running" if info.get("running_in_session") else "not running"
                 suffix = "" if info.get("running") else " (adapter thread down)"
+                if (state == "running" and is_personal_platform(name)
+                        and self._get_brain_gate().episode_open):
+                    # Competence gate state, honestly on the surface:
+                    # the platform runs, but personal replies are held
+                    # while no model rung answers (brain_gate).
+                    suffix += " — observe-only (brain unavailable)"
                 lines.append(f"  {name}: {state}{suffix}")
             # Known-but-never-built platforms (not in the boot set,
             # never hot-started) are invisible in gateway.status()
