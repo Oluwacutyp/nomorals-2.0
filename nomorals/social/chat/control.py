@@ -161,6 +161,8 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "cipher", "wisdom", "think",
     "rules", "member", "glog", "gsettings", "strikes",
     "recheck", "joinq", "console", "undonotice",
+    "steal", "sticker", "convert", "gif", "emoji", "customemoji",
+    "react",
     "balance", "mine", "work", "pay", "gshop", "quests", "treasury",
     "deposit", "withdraw", "rob", "bail", "coinflip",
     "top", "tax", "grant",
@@ -203,6 +205,8 @@ def public_menu_text() -> str:
         "make — /music /play /video /podcast\n"
         "see & hear — /tts /stt /look /image /lens\n"
         "tools — /decode /dns /whois /cipher /wisdom /think\n"
+        "express — /steal /sticker /convert /gif /emoji "
+        "/customemoji /react\n"
         f"play — /game {games}\n"
         "\n"
         "tap a button below to run it · /help for what each one does"
@@ -357,6 +361,13 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "news": (0, 2),          # /news [run|briefing|status]
     "translate": (0, None),   # /translate [to <lang>] <text> | <url> | (as a reply) | lang <code> | status
     "tl": (0, None),          # alias of /translate
+    "steal": (0, None),       # /steal [tags] — claim replied media into her library (§21)
+    "sticker": (0, None),     # /sticker [text] — the maker: text/emoji, or replied image/video
+    "convert": (0, None),     # /convert <name> — sticker/gif/mp4/mp3 conversions (§21)
+    "gif": (0, None),         # /gif <what> — a GIF from her library / providers
+    "emoji": (0, None),       # /emoji <words|emoji> — the full Unicode table, searched (§22)
+    "customemoji": (0, None), # /customemoji list|add|ref|show|remove — her own set (§22)
+    "react": (0, None),       # /react [emoji] — react to the replied message (§22)
     "pulse": (0, None),       # /pulse [status|config|run|catchup] [slot]
     # /research is ONE command (single registry entry — a duplicate key
     # here would silently discard one meaning): ad-hoc web research on
@@ -1830,6 +1841,34 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/tl [to <lang>] <text…> — same as /translate",
             "example": "/tl es Good morning",
             "related": "/translate"},
+    "steal": {"what": "claim media into Devon's own GIF/sticker library: reply to a sticker, GIF, animation or video with /steal and she keeps it (tagged with any words you add), ready to fire back on the right moment. In groups she only collects where her bot systems are claimed (§33).",
+              "usage": "/steal [tags] (as a reply to media)",
+              "example": "/steal (replying to a sticker) funny dance",
+              "related": "/gif · /sticker · /emoji"},
+    "sticker": {"what": "the sticker maker: words or an emoji become a real 512×512 sticker; reply to an image to make it a sticker, or to a short video/GIF for an animated one.",
+                "usage": "/sticker <text> · /sticker (as a reply to an image or video)",
+                "example": "/sticker no wahala",
+                "related": "/steal · /convert · /gif"},
+    "convert": {"what": "media conversions on the replied file, riding the house ffmpeg organ: sticker→MP4, GIF→MP4, MP4→GIF, MP4→MP3, MP3→video (waveform), image→sticker, video→sticker.",
+                "usage": "/convert <name> (as a reply to media) · /convert lists the names",
+                "example": "/convert mp4-to-mp3",
+                "related": "/sticker · /steal"},
+    "gif": {"what": "a GIF for the moment, from Devon's own library first (it grows from steals and sends) and then her GIF providers, health-checked like every source.",
+            "usage": "/gif <what you're feeling>",
+            "example": "/gif celebration dance",
+            "related": "/steal · /sticker · /emoji"},
+    "emoji": {"what": "the FULL Unicode emoji table — every emoji that exists, named and keyworded, including rare ones some phones can't render. Search by meaning, or hand her an emoji and she'll name it (ZWJ sequences included).",
+              "usage": "/emoji <words> · /emoji <an emoji>",
+              "example": "/emoji melting face",
+              "related": "/customemoji · /react · /sticker"},
+    "customemoji": {"what": "Devon's own custom emoji set: named entries with a unicode face everywhere, platform custom refs where a platform carries them, and sticker art. Curated by the owner (or group admins).",
+                    "usage": "/customemoji list · add <name> <emoji> · ref <name> <platform> <ref> · show <name> · remove <name>",
+                    "example": "/customemoji add devon 🥷",
+                    "related": "/emoji · /sticker"},
+    "react": {"what": "Devon reacts to the message you reply to — name an emoji or let her pick from the moment. Telegram bots use the standard reaction set; userbot/WhatsApp/Discord paths take any emoji where the platform path carries a reaction verb at all (the WhatsApp bridge doesn't yet — she'll say so).",
+              "usage": "/react [emoji] (as a reply)",
+              "example": "/react 🔥",
+              "related": "/emoji · /gif"},
     "pulse": {"what": "briefings: morning, afternoon, evening, midnight — check the schedule or trigger any briefing on demand. Each briefing covers what's new since the last one; long briefings arrive in full, paginated.",
              "usage": "/pulse [status|config|run|catchup] [morning|afternoon|evening|midnight|all]", "example": "/pulse run midnight",
              "related": "/news · /brief"},
@@ -2695,7 +2734,8 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate"]),
     ("media system", ["music", "distribute", "play", "video", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
-                      "download", "shorts", "caption", "imggen", "sham", "musicnote"]),
+                      "download", "shorts", "caption", "imggen", "sham", "musicnote",
+                      "steal", "sticker", "convert", "gif", "emoji", "customemoji", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "pair", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
@@ -2943,7 +2983,9 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "download", "produce", "like", "dislike",
-      "shorts", "caption", "imggen", "sham", "musicnote"]),
+      "shorts", "caption", "imggen", "sham", "musicnote",
+      "steal", "sticker", "convert", "gif", "emoji", "customemoji",
+      "react"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
@@ -3078,6 +3120,13 @@ LIST_ONELINERS: dict[str, str] = {
     "news": "fetch + summarize the feeds",
     "translate": "translate text, a replied-to message, or a link — /translate [to <lang>] <text>",
     "tl": "alias of /translate",
+    "steal": "claim replied media into her GIF/sticker library — /steal [tags] as a reply",
+    "sticker": "make a sticker from text/emoji, or a replied image/video",
+    "convert": "convert replied media — /convert sticker-to-mp4 | gif-to-mp4 | mp4-to-gif | mp4-to-mp3 | mp3-to-video | image-to-sticker | video-to-sticker",
+    "gif": "a GIF for the moment, from her library + providers — /gif <what>",
+    "emoji": "search the FULL Unicode emoji table by meaning — /emoji <words>",
+    "customemoji": "her own custom emoji set — /customemoji list|add|ref|show|remove",
+    "react": "react to the replied message — /react [emoji]",
     "pulse": "briefings — schedule + run any slot on demand",
     "osint": "read-only public-intel: reports, campaigns, graph",
     "dns": "DNS records, zero dependencies",

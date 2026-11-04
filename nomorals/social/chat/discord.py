@@ -574,6 +574,83 @@ class DiscordAdapter(ChatAdapter):
         return SendResult(ok=False, platform=self.name, error=last_error,
                           seconds=time.perf_counter() - started)
 
+    def react(self, chat: ChatRef, message_id: str, emoji: str) -> SendResult:
+        """Place a reaction (§22): Discord accepts any unicode
+        emoji, and guild custom emoji as ``<:name:id>``."""
+        started = time.perf_counter()
+        dc = self._dc()
+        if dc is None:
+            return SendResult(ok=False, platform=self.name,
+                              error="discord.py is not installed",
+                              seconds=time.perf_counter() - started)
+        try:
+            async def _do() -> Any:
+                channel = await self._channel(chat)
+                message = await channel.fetch_message(int(message_id))
+                await message.add_reaction(str(emoji))
+                return message
+
+            self._run_on_loop(_do())
+            self.stats["sent"] += 1
+            return SendResult(ok=True, platform=self.name,
+                              message_id=str(message_id),
+                              seconds=time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001
+            self.stats["send_errors"] += 1
+            return SendResult(ok=False, platform=self.name, error=str(exc),
+                              seconds=time.perf_counter() - started)
+
+    def read_reactions(self, chat: ChatRef,
+                       message_id: str) -> dict[str, int]:
+        """Live reaction counts on one message (§22) — the read
+        path that feeds engagement surfaces. {} on any failure:
+        an unreadable message is not an unreacted one, and the
+        caller treats {} as 'unknown', not zero."""
+        try:
+            async def _do() -> dict[str, int]:
+                channel = await self._channel(chat)
+                message = await channel.fetch_message(int(message_id))
+                return {str(reaction.emoji): int(reaction.count)
+                        for reaction in (message.reactions or [])}
+
+            return self._run_on_loop(_do())
+        except Exception:  # noqa: BLE001 - best-effort read
+            return {}
+
+    def fetch_media(self, chat: ChatRef,
+                    message_id: str) -> MediaRef | None:
+        """Download a message's first attachment into the media
+        dir (the Discord seam for /steal — Discord media is not
+        file_id-addressable the way Telegram's is)."""
+        dc = self._dc()
+        if dc is None:
+            return None
+        try:
+            async def _do() -> MediaRef | None:
+                channel = await self._channel(chat)
+                message = await channel.fetch_message(int(message_id))
+                attachments = list(message.attachments or [])
+                if not attachments:
+                    return None
+                att = attachments[0]
+                os.makedirs(self.media_dir, exist_ok=True)
+                fname = os.path.basename(str(att.filename or "media"))
+                path = os.path.join(self.media_dir,
+                                    f"{message_id}_{fname}")
+                await att.save(path)
+                kind = "image"
+                ctype = str(getattr(att, "content_type", "") or "")
+                if ctype.startswith("video"):
+                    kind = "video"
+                elif ctype.startswith("audio"):
+                    kind = "audio"
+                return MediaRef(path=path, mime=ctype, kind=kind,
+                                name=fname)
+
+            return self._run_on_loop(_do())
+        except Exception:  # noqa: BLE001 - best-effort
+            return None
+
     def typing(self, chat: ChatRef, seconds: float = 3.0,
                action: str = "typing") -> bool:
         """Typing indicator. ``action`` is accepted for the shared protocol

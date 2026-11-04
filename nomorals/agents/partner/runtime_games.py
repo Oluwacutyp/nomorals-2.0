@@ -173,15 +173,18 @@ class RuntimeGamesMixin:
             # actions the list itself documents (presentation
             # build): a live room offers its own rematch/quit;
             # the boards and lobby are one tap from here.
+            from ...social.chat.expression import buttons_from_spec
             from ...social.chat.tgbot_buttons import actionable
-            rows = []
+            spec = []
             if live is not None:
-                rows.append([("🔁 Rematch", "game rematch"),
-                             ("🚪 Quit game", "game quit")])
-            rows.append([("🏆 Leaderboard", "game leaderboard"),
-                         ("📊 My stats", "game stats")])
-            rows.append([("⚔️ PvP lobby", "pvp"),
-                         ("🎉 Events", "game events")])
+                spec.append([("rematch", "Rematch", "game rematch"),
+                             ("quit", "Quit game", "game quit")])
+            spec.append([("leaderboard", "Leaderboard",
+                          "game leaderboard"),
+                         ("status", "My stats", "game stats")])
+            spec.append([("pvp", "PvP lobby", "pvp"),
+                         ("events", "Events", "game events")])
+            rows = buttons_from_spec(spec)
             return actionable("\n".join(lines), rows)
         if verb == "quit":
             # capture the relay (if any) BEFORE quitting — the engine
@@ -202,9 +205,12 @@ class RuntimeGamesMixin:
                             f"(1 hour)")
                     # The button carries THIS invite's code — it
                     # exists exactly because this duel just ended.
-                    relay_buttons = [[(
-                        "🔁 Rematch — accept",
-                        f"game accept {rematch.code}")]]
+                    from ...social.chat.expression import (
+                        buttons_from_spec)
+
+                    relay_buttons = buttons_from_spec(
+                        [[("rematch", "Rematch — accept",
+                           f"game accept {rematch.code}")]])
                 self._relay_send(doomed.other_chat(chat_key), msg,
                                  buttons=relay_buttons)
             return "\n".join(out)
@@ -1429,6 +1435,25 @@ class RuntimeGamesMixin:
             _log.warning("math verify_member failed for %s", player_key)
         result = handler.handle(f"/math {tail or ''}".strip(), player_key)
         self._math_save(handler)
+        if kind != "dm" and isinstance(result, dict) \
+                and result.get("status") == "finished" \
+                and result.get("duel_winner"):
+            # A finished duel is a celebration moment (§21) —
+            # fired for the room the duel was played in, through
+            # the same gates as every expression post.
+            fire = getattr(self, "_fire_expression", None)
+            if fire is not None:
+                from types import SimpleNamespace
+
+                from ...social.chat.base import ChatKind, ChatRef
+
+                try:
+                    fire(SimpleNamespace(
+                        chat=ChatRef.parse(chat_key,
+                                           kind=ChatKind.GROUP),
+                        message_id=""), "duel_win")
+                except Exception:  # noqa: BLE001 - garnish only
+                    pass
         return self._render_math(result)
 
     @staticmethod

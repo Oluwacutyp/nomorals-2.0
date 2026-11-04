@@ -862,6 +862,12 @@ class WhatsAppAdapter(ChatAdapter):
             "chat": self._jid(chat),
             "path": path,
             "caption": caption,
+            # The kind rides along (the offline enqueue payload has
+            # always carried it): a sticker WebP or an animation
+            # should reach the bridge AS what it is (§21). Whether
+            # the bridge renders kinds beyond voice is the bridge's
+            # side of the contract — reported, not assumed.
+            "media_kind": (media.kind or "").lower(),
         }
         kind = (media.kind or "").lower()
         if kind in ("voice", "ptt"):

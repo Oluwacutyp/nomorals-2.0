@@ -1,0 +1,510 @@
+"""RuntimeExpressionMixin: the media-expression layer (DESIGN
+§21 + §22) in the live event path.
+
+The organ itself (``social/chat/expression.py``) is
+transport-free; this mixin owns the live wiring:
+
+- **Moments**: the group runtime calls :meth:`_fire_expression`
+  after a welcome / celebration notice / ban has actually been
+  posted.  Firing respects, in order: the §31 quiet switch
+  (defense autonomy off → silent), the §33 system-output gate
+  (claimed rooms only, evaluated at send time through the one
+  shared helper), and the group's own expression settings.
+  Every outcome — sent or not, and why — lands in the group's
+  held audit as an ``expression`` entry: an unsent GIF is a
+  journaled non-event, never a claimed send.
+- **Commands**: /steal (claim a replied sticker/GIF into the
+  library), /sticker (the maker), /convert (the conversion
+  organ), /gif (library + providers), /emoji (the full Unicode
+  table), /customemoji (her own set), /react (place a
+  reaction).  In groups, their media posts pass the same §33
+  gate — her library does not even GROW from a foreign room.
+- Expression never breaks its host: every path is guarded, and
+  a failure degrades to text or silence, never to an exception
+  in the message pipeline.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+from typing import Any
+
+_log = logging.getLogger(__name__)
+
+_CELEBRATIONS = frozenset({
+    "quest_complete", "jackpot", "season_podium", "duel_win",
+    "estate_milestone", "celebration"})
+
+
+class RuntimeExpressionMixin:
+    """Expression moments + commands for PartnerRuntime."""
+
+    # ---- the service -------------------------------------------
+    def _expression_root(self) -> Path:  # type: ignore[no-untyped-def]
+        """Where the library lives: beside the group store, so
+        expression state travels with group state."""
+        try:
+            store_path = Path(self._group_surface().store.path)
+            if str(store_path):
+                return store_path.parent
+        except Exception:  # noqa: BLE001 - fall back to the layout
+            pass
+        ws = getattr(self.context.settings, "workspace_dir", ".")
+        return Path(str(ws)) / "data" / "social"
+
+    def _expression_service(self):  # type: ignore[no-untyped-def]
+        service = getattr(self, "_expression_service_obj", None)
+        if service is not None:
+            return service
+        from ...social.chat.expression import (
+            ExpressionLibrary, ExpressionService, default_providers)
+
+        root = self._expression_root()
+        library = ExpressionLibrary(root / "expression_library.json")
+        settings = getattr(self.context, "settings", None)
+        tenor = str(getattr(settings, "tenor_api_key", "")
+                    or os.environ.get("NM_TENOR_API_KEY", "") or "")
+        giphy = str(getattr(settings, "giphy_api_key", "")
+                    or os.environ.get("NM_GIPHY_API_KEY", "") or "")
+        extra = getattr(settings, "gif_providers", None) or ()
+        service = ExpressionService(
+            library,
+            providers=default_providers(tenor_key=tenor,
+                                        giphy_key=giphy,
+                                        extra=extra),
+            media_dir=root / "expression_media")
+        self._expression_service_obj = service
+        return service
+
+    def _expression_library(self):  # type: ignore[no-untyped-def]
+        return self._expression_service().library
+
+    # ---- sending -------------------------------------------------
+    def _expression_send(self, message, ref):  # type: ignore[no-untyped-def]
+        """Send one MediaRef through the room's own adapter
+        (native media path — Telegram stickers/animations,
+        Discord uploads, the WhatsApp bridge).  Falls back to
+        the gateway's file send; reports honestly when neither
+        exists on this platform path."""
+        from types import SimpleNamespace
+
+        platform = str(getattr(message.chat, "platform", "") or "")
+        adapter = self._group_adapter(platform)
+        fn = getattr(adapter, "send_media", None) if adapter else None
+        if fn is not None:
+            return fn(message.chat, ref)
+        gateway = getattr(self, "gateway", None)
+        send_file = getattr(gateway, "send_file", None)
+        if send_file is not None and ref.path:
+            return send_file(platform, message.chat, ref.path)
+        return SimpleNamespace(
+            ok=False, platform=platform, message_id="",
+            media_file_id="",
+            error="this platform path has no media send")
+
+    # ---- moments ---------------------------------------------------
+    def _fire_expression(self, message, moment: str) -> dict:  # type: ignore[no-untyped-def]
+        """Fire one expression moment for this message's room.
+        Never raises; the outcome dict says what happened."""
+        try:
+            surface = self._group_surface()
+            key = message.chat.key
+            settings = surface.store.settings(key)
+            if (settings.get("defense") or {}).get(
+                    "autonomy", True) is False:
+                surface._audit(
+                    key, "expression", moment=str(moment),
+                    sent=False,
+                    reason="defense autonomy off (§31 quiet)")
+                surface.store.save()
+                return {"sent": False, "reason": "quiet"}
+            if not self._system_send_ok(surface, key, message,
+                                        "expression"):
+                return {"sent": False,
+                        "reason": "system output not claimed here"}
+            service = self._expression_service()
+            out = service.fire(
+                str(moment), room=key,
+                platform=str(message.chat.platform or ""),
+                settings=settings.get("expression") or {},
+                send=lambda ref: self._expression_send(message, ref))
+            surface._audit(
+                key, "expression", moment=str(moment),
+                sent=bool(out.get("sent")),
+                reason=str(out.get("reason") or ""),
+                item_id=str(out.get("item_id") or ""))
+            surface.store.save()
+            if out.get("sent") and str(moment) in _CELEBRATIONS \
+                    and message.message_id:
+                self._react_quietly(message, str(moment))
+            return out
+        except Exception:  # noqa: BLE001 - expression never breaks its host
+            _log.debug("expression fire failed", exc_info=True)
+            return {"sent": False, "reason": "expression unavailable"}
+
+    def _react_quietly(self, message, context: str) -> None:  # type: ignore[no-untyped-def]
+        """A celebration also earns her reaction on the message
+        that caused it, where the adapter carries reactions —
+        best-effort, unreported (the audit already has the
+        moment; a reaction is garnish, not a record)."""
+        try:
+            from ...social.chat.expression import pick_reaction
+
+            adapter = self._group_adapter(
+                str(message.chat.platform or ""))
+            fn = getattr(adapter, "react", None) if adapter else None
+            if fn is None:
+                return
+            emoji = pick_reaction(
+                context, platform=str(message.chat.platform or ""))
+            if emoji:
+                fn(message.chat, str(message.message_id), emoji)
+        except Exception:  # noqa: BLE001 - garnish only
+            _log.debug("celebration reaction failed", exc_info=True)
+
+    # ---- replied-media resolution (steal / convert) ----------------
+    def _replied_media_local(self, message):  # type: ignore[no-untyped-def]
+        """Resolve the media a command acts on, in order: the
+        message's own attachment, the replied message's Telegram
+        handles (downloaded on demand through the adapter — the
+        /sham precedent), the replied audio id, and Discord's
+        fetch-by-message.  Returns ``(path, kind, file_ids)`` or
+        None when this surface cannot yield the bytes."""
+        platform = str(getattr(message.chat, "platform", "") or "")
+        adapter = self._group_adapter(platform)
+        for media in getattr(message, "media", None) or []:
+            path = str(getattr(media, "path", "") or "")
+            file_id = str(getattr(media, "file_id", "") or "")
+            if path or file_id:
+                return (path, str(getattr(media, "kind", "") or ""),
+                        {platform: file_id} if file_id else {})
+        meta = getattr(message, "meta", None) or {}
+        replied = meta.get("replied_media") or {}
+        download = getattr(adapter, "download_file", None) \
+            if adapter else None
+        if isinstance(replied, dict) and replied.get("file_id"):
+            file_ids = {platform: str(replied["file_id"])}
+            if download is not None:
+                path = download(str(replied["file_id"]),
+                                str(replied.get("name") or "media"))
+                if path:
+                    return (str(path),
+                            str(replied.get("kind") or ""), file_ids)
+            # No bytes, but the handle itself is stealable on
+            # Telegram: the library can hold and re-send it.
+            return ("", str(replied.get("kind") or ""), file_ids)
+        audio_id = str(meta.get("replied_audio_file_id") or "")
+        if audio_id and download is not None:
+            path = download(audio_id)
+            if path:
+                return (str(path), "audio", {platform: audio_id})
+        fetch = getattr(adapter, "fetch_media", None) if adapter \
+            else None
+        reply_to = str(getattr(message, "reply_to", "") or "")
+        if fetch is not None and reply_to:
+            ref = fetch(message.chat, reply_to)
+            if ref is not None and getattr(ref, "path", ""):
+                return (str(ref.path), str(ref.kind or ""), {})
+        return None
+
+    def _group_gate(self, message, what: str) -> bool:  # type: ignore[no-untyped-def]
+        """Group gate for expression commands: media posts and
+        library growth are bot-system output (§33).  DMs are
+        the owner's own room — never gated."""
+        from ...social.chat.base import ChatKind
+
+        if getattr(message.chat, "kind", None) != ChatKind.GROUP:
+            return True
+        surface = self._group_surface()
+        return self._system_send_ok(surface, message.chat.key,
+                                    message, what)
+
+    # ---- /steal ------------------------------------------------------
+    def _control_steal(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
+        """Claim a replied sticker/GIF/animation into her
+        library, tagged by the /steal tail words + its kind."""
+        if message is None:
+            return "reply to a sticker or GIF with /steal to claim it."
+        found = self._replied_media_local(message)
+        if found is None:
+            return ("reply to a sticker, GIF or video with /steal "
+                    "and I'll add it to my library — on this "
+                    "platform path I couldn't reach the media "
+                    "itself, so there's nothing to claim yet.")
+        if not self._group_gate(message, "steal"):
+            return ("this room isn't claimed for my bot systems "
+                    "(§33), so I don't collect media here.")
+        path, kind, file_ids = found
+        tags = [w.lower() for w in str(tail or "").split() if w]
+        if kind:
+            tags.append(kind)
+        library = self._expression_library()
+        item = library.add_item(
+            kind=kind or "gif", path=path, file_ids=file_ids,
+            tags=tags, source="steal", origin=message.chat.key)
+        from ...social.chat.base import MediaRef
+
+        ref = MediaRef(path=path, kind=kind or "gif",
+                       file_id=str(file_ids.get(
+                           str(message.chat.platform or "")) or ""),
+                       name="stolen media")
+        result = self._expression_send(message, ref)
+        if getattr(result, "ok", False):
+            captured = str(getattr(result, "media_file_id", "") or "")
+            if captured:
+                library.note_file_id(
+                    str(item.get("id")),
+                    str(message.chat.platform or ""), captured)
+            library.note_use(str(item.get("id")),
+                             room=message.chat.key)
+            return ""
+        return (f"saved to my library — but the re-send failed "
+                f"here: {getattr(result, 'error', '')}")
+
+    # ---- /sticker (the maker) -----------------------------------------
+    def _control_sticker(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
+        """Make a sticker: text/emoji → the house maker's real
+        raster sticker; a replied image → image-to-sticker; a
+        replied video/GIF → animated sticker."""
+        if message is None:
+            return "usage: /sticker <text> — or reply to an image/video."
+        from ...social.chat import media_convert
+        from ...social.chat.base import MediaRef
+
+        text = str(tail or "").strip()
+        out_dir = self._expression_root() / "expression_media"
+        produced = ""
+        note = ""
+        if text:
+            made = media_convert.make_text_sticker(
+                text, out_dir=out_dir)
+            produced = str(made.get("raster") or "")
+            note = str(made.get("note") or "")
+            if not produced:
+                return (f"the SVG sticker is ready "
+                        f"({made['spec'].id}) — {note}")
+        else:
+            found = self._replied_media_local(message)
+            if found is None or not found[0]:
+                return ("usage: /sticker <text> — or reply to an "
+                        "image or a short video and I'll make it "
+                        "a sticker.")
+            path, kind, _ids = found
+            try:
+                if kind in ("video", "animation", "gif"):
+                    produced = str(media_convert.video_to_sticker(
+                        path, out_dir=out_dir))
+                else:
+                    produced = str(media_convert.image_to_sticker(
+                        path, out_dir=out_dir))
+            except media_convert.ConversionError as exc:
+                return str(exc)
+        if not self._group_gate(message, "sticker"):
+            return ("the sticker is made, but this room isn't "
+                    "claimed for my bot-system posts (§33), so "
+                    "I'm not dropping it here.")
+        ref = MediaRef(path=produced, kind="sticker",
+                       name=Path(produced).name)
+        result = self._expression_send(message, ref)
+        if getattr(result, "ok", False):
+            return ""
+        return (f"sticker made, but the send failed here: "
+                f"{getattr(result, 'error', '')}")
+
+    # ---- /convert -------------------------------------------------------
+    def _control_convert(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
+        """One conversion, by name, on the replied media (or the
+        message's own).  `/convert` alone lists the verbs."""
+        from ...social.chat import media_convert
+
+        words = str(tail or "").strip().lower().split()
+        if not words or words[0] in ("list", "help"):
+            lines = ["conversions I run (reply to the media, then "
+                     "name one):"]
+            for name, (_fn, blurb) in sorted(
+                    media_convert.CONVERSIONS.items()):
+                lines.append(f"  /convert {name} — {blurb}")
+            return "\n".join(lines)
+        if message is None:
+            return "reply to the media and name the conversion."
+        name = words[0]
+        found = self._replied_media_local(message)
+        if found is None or not found[0]:
+            return ("I couldn't reach that media's bytes on this "
+                    "platform path — nothing to convert.")
+        out_dir = self._expression_root() / "expression_media"
+        try:
+            produced = media_convert.convert_media(
+                name, found[0], out_dir=out_dir)
+        except media_convert.ConversionError as exc:
+            return str(exc)
+        if not self._group_gate(message, "convert"):
+            return ("converted — but this room isn't claimed for "
+                    "my bot-system posts (§33), so I'm not "
+                    "dropping the file here.")
+        from ...social.chat.base import MediaRef
+
+        kind = {"sticker-to-mp4": "animation",
+                "gif-to-mp4": "animation",
+                "mp4-to-mp3": "audio",
+                "image-to-sticker": "sticker",
+                "video-to-sticker": "sticker",
+                "mp4-to-gif": "animation"}.get(name, "video")
+        ref = MediaRef(path=str(produced), kind=kind,
+                       name=Path(str(produced)).name)
+        result = self._expression_send(message, ref)
+        if getattr(result, "ok", False):
+            return ""
+        return (f"converted, but the send failed here: "
+                f"{getattr(result, 'error', '')}")
+
+    # ---- /gif ---------------------------------------------------------
+    def _control_gif(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
+        """A GIF on demand: her library first (it grows from
+        steals and sends), then the provider chain."""
+        if message is None:
+            return "usage: /gif <what you're feeling>"
+        if not self._group_gate(message, "gif"):
+            return ("this room isn't claimed for my bot systems "
+                    "(§33) — my GIFs only play where my bot runs.")
+        service = self._expression_service()
+        out = service.gif_for(
+            str(tail or ""), room=message.chat.key,
+            platform=str(message.chat.platform or ""),
+            send=lambda ref: self._expression_send(message, ref))
+        if out.get("sent"):
+            return ""
+        return str(out.get("reason") or "no GIF for that yet")
+
+    # ---- /emoji ---------------------------------------------------------
+    def _control_emoji(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
+        """The full Unicode table, searchable by meaning — any
+        emoji that exists, including the ones some phones can't
+        render.  Given an emoji itself, it reports what it is."""
+        from ...social.chat.expression import emoji_info, search_emoji
+
+        query = str(tail or "").strip()
+        if not query:
+            return ("usage: /emoji <words> — melting face, thumbs "
+                    "up medium, family, rocket… the whole Unicode "
+                    "table is mine to search. Or give me an emoji "
+                    "and I'll tell you what it is.")
+        info = emoji_info(query)
+        if info is not None and info["char"] == query:
+            kws = ", ".join(info["keywords"][:8])
+            return (f"{info['char']} — {info['name']} "
+                    f"({info['codepoints']})"
+                    + (f" · also: {kws}" if kws else ""))
+        hits = search_emoji(query, limit=6)
+        if not hits:
+            return ("nothing in the whole Unicode table matches "
+                    "that — try different words.")
+        faces = " ".join(entry.char for entry in hits)
+        names = " · ".join(f"{entry.char} {entry.name}"
+                            for entry in hits[:3])
+        return f"{faces}\n{names}"
+
+    # ---- /customemoji -------------------------------------------------
+    def _control_customemoji(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
+        """Her own set: list / add / ref / show / remove.
+        Curated by the owner (DM) or a group admin — it's her
+        signature, not a public whiteboard."""
+        library = self._expression_library()
+        registry = library.custom_emoji
+        words = str(tail or "").strip().split()
+        head = words[0].lower() if words else "list"
+        if head in ("list", ""):
+            names = registry.names()
+            if not names:
+                return ("my custom set is empty so far — "
+                        "/customemoji add <name> <emoji> starts it.")
+            lines = ["my custom emoji set:"]
+            for name in names:
+                entry = registry.get(name) or {}
+                lines.append(f"  :{name}: {entry.get('unicode') or '—'}"
+                             f" (refs: {', '.join((entry.get('refs') or {}).keys()) or 'unicode only'})")
+            return "\n".join(lines)
+        if head == "show" and len(words) >= 2:
+            platform = str(message.chat.platform or "") \
+                if message is not None else ""
+            rendered = registry.render(words[1], platform)
+            if rendered["kind"] == "missing":
+                return f"no custom emoji named :{words[1]}: yet."
+            return (f":{words[1]}: on {platform or 'here'} goes "
+                    f"out as {rendered['kind']}: {rendered['value']}")
+        # mutations are curated
+        allowed = False
+        if message is not None:
+            try:
+                allowed = bool(self._operator_or_false(message)) \
+                    or bool(self._group_admin_ok(message))
+            except Exception:  # noqa: BLE001 - no authority surface
+                allowed = False
+        if not allowed:
+            return ("my custom set is curated by the owner (or a "
+                    "group admin here) — /customemoji list shows it.")
+        if head == "add" and len(words) >= 3:
+            name = words[1].lower()
+            registry.add(name, unicode=words[2])
+            library.save_custom_emoji(registry)
+            return f":{name}: added — {words[2]} is its face everywhere."
+        if head == "ref" and len(words) >= 4:
+            name = words[1].lower()
+            registry.add(name, platform=words[2], ref=words[3])
+            library.save_custom_emoji(registry)
+            return (f":{name}: now carries a {words[2]} custom "
+                    f"ref — that platform renders mine, the rest "
+                    f"fall back to the unicode face.")
+        if head == "remove" and len(words) >= 2:
+            if registry.remove(words[1]):
+                library.save_custom_emoji(registry)
+                return f":{words[1]}: removed from my set."
+            return f"no custom emoji named :{words[1]}:."
+        return ("usage: /customemoji list · add <name> <emoji> · "
+                "ref <name> <platform> <ref> · show <name> · "
+                "remove <name>")
+
+    # ---- /react ---------------------------------------------------------
+    def _control_react(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
+        """Place a reaction on the replied message (or this
+        one): /react [emoji] — no emoji named means she picks
+        one from the moment, through the §22 rules."""
+        if message is None:
+            return "reply to a message with /react [emoji]."
+        from ...social.chat.expression import (
+            pick_reaction, reaction_allowed)
+
+        platform = str(message.chat.platform or "")
+        words = str(tail or "").strip().split()
+        emoji = words[0] if words else ""
+        if not emoji:
+            context = str((getattr(message, "meta", None) or {})
+                          .get("reply_to_text") or "")
+            emoji = pick_reaction(context or "hello",
+                                  platform=platform)
+        if not emoji:
+            return "no reaction fits here."
+        if not reaction_allowed(platform, emoji):
+            return (f"{emoji} isn't placeable here — Telegram "
+                    f"bots may only react with the standard set "
+                    f"(👍 ❤️ 🔥 🎉 …). Pick one of those and it's on.")
+        adapter = self._group_adapter(platform)
+        fn = getattr(adapter, "react", None) if adapter else None
+        if fn is None:
+            return ("this platform path carries no reaction verb "
+                    "— on WhatsApp the bridge has no react command "
+                    "yet, so I won't pretend I reacted.")
+        if not self._group_gate(message, "reaction"):
+            return ("this room isn't claimed for my bot systems "
+                    "(§33) — I don't react as the bot here.")
+        target = str(getattr(message, "reply_to", "") or "") \
+            or str(getattr(message, "message_id", "") or "")
+        if not target:
+            return "nothing to react to here."
+        result = fn(message.chat, target, emoji)
+        if getattr(result, "ok", False):
+            return ""
+        return (f"couldn't react here: "
+                f"{getattr(result, 'error', '')}")

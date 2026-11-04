@@ -146,11 +146,15 @@ class MediaRef:
     # from ``voice_note`` (outbound send-as-voice-bubble flag) — this
     # one records what the attachment WAS on arrival.
     is_voice: bool = False
+    # Platform file handle (a Telegram file_id): set on inbound media
+    # the platform already hosts, and on outbound refs to RE-SEND by
+    # handle instead of uploading bytes again.
+    file_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {"path": self.path, "mime": self.mime, "kind": self.kind,
                 "name": self.name, "voice_note": self.voice_note,
-                "is_voice": self.is_voice}
+                "is_voice": self.is_voice, "file_id": self.file_id}
 
 
 @dataclass
@@ -232,11 +236,16 @@ class SendResult:
     #: the send went direct without a receipt. Degradation is reported
     #: ON the result — never only in a log line the caller never sees.
     delivery_degraded: bool = False
+    #: The platform's file handle for media just sent (a Telegram
+    #: file_id). The expression library caches it per item so the
+    #: next send of the same media goes by handle, no re-upload.
+    media_file_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {"ok": self.ok, "platform": self.platform, "message_id": self.message_id,
                 "error": self.error, "seconds": round(self.seconds, 3),
-                "delivery_degraded": self.delivery_degraded}
+                "delivery_degraded": self.delivery_degraded,
+                "media_file_id": self.media_file_id}
 
 
 class ChatAdapter(ABC):
@@ -476,6 +485,20 @@ class ChatAdapter(ABC):
         """
         return SendResult(ok=False, platform=self.name,
                           error="edit_media not supported")
+
+    # ── reactions (DESIGN §22) ──────────────────────────────────────────
+    def react(self, chat: ChatRef, message_id: str, emoji: str) -> SendResult:
+        """Place a reaction on a message. The base adapter reports the
+        truth — this platform path carries no reaction verb — and each
+        adapter that CAN place one overrides. Never a fake success."""
+        return SendResult(ok=False, platform=self.name,
+                          error="reactions not supported on this adapter")
+
+    def read_reactions(self, chat: ChatRef,
+                       message_id: str) -> dict[str, int]:
+        """``{emoji: count}`` currently on a message, where the platform
+        exposes them (Discord); ``{}`` where it does not."""
+        return {}
 
     def typing(self, chat: ChatRef, seconds: float = 3.0,
              action: str = "typing") -> bool:

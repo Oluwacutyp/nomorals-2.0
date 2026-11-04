@@ -158,7 +158,8 @@ class RuntimeGroupMixin:
         platform = str(message.chat.platform or "")
         if record is not None:
             body = notice_text({**record, "text": text}, platform)
-            buttons = notice_keyboard(record)
+            buttons = notice_keyboard(
+                record, settings=surface.store.settings(key))
         else:
             body, buttons = text, None
         result = self._send(
@@ -168,6 +169,13 @@ class RuntimeGroupMixin:
             mid = getattr(result, "message_id", "") or ""
             if mid:
                 surface.set_notice_message(key, nid, str(mid))
+        if str(action.get("kind") or "") == "ban":
+            # A ban lands with theatre (§21); a warning never
+            # does. The expression mixin owns the firing — the
+            # getattr guard keeps bare group rigs (tests) whole.
+            fire = getattr(self, "_fire_expression", None)
+            if fire is not None:
+                fire(message, "ban")
 
     def _rendered_mode(self, message, text: str) -> str:  # type: ignore[no-untyped-def]
         """Parse mode for a surface-rendered text (welcome /
@@ -203,15 +211,20 @@ class RuntimeGroupMixin:
     def _welcome_buttons(self, surface: Any, key: str) -> list:
         """Buttons authored from the group's LIVE state: rules are
         always reachable; the sparks row appears only when the
-        economy actually runs here."""
-        rows = [[("📜 Rules", "rules")]]
+        economy actually runs here. Labels come from the one
+        button vocabulary (§21), under the group's own
+        presentation settings."""
+        from ...social.chat.expression import buttons_from_spec
+
+        settings = surface.store.settings(key)
+        spec: list = [[("rules", "Rules", "rules")]]
         try:
             if surface.economy_on(key):
-                rows.append([("🪙 My sparks", "balance"),
-                             ("🗺️ Quests", "quests")])
+                spec.append([("balance", "My sparks", "balance"),
+                             ("quests", "Quests", "quests")])
         except Exception:  # noqa: BLE001 - buttons never block a welcome
             pass
-        return rows
+        return buttons_from_spec(spec, settings=settings)
 
     # ---- join acceptance execution (DESIGN §28) -------------------
     # The surface judges; these helpers perform.  Every execution
@@ -336,9 +349,13 @@ class RuntimeGroupMixin:
             list(reasons or []),
             grace_minutes=grace_minutes if pending_kick else None)
         card.lines(body.splitlines())
+        from ...social.chat.expression import buttons_from_spec
+
         text = surface._card_render(key, card)
         self._send(message.chat, text,
-                   buttons=[[("✅ Check me again", "recheck")]],
+                   buttons=buttons_from_spec(
+                       [[("check", "Check me again", "recheck")]],
+                       settings=surface.store.settings(key)),
                    parse_mode=self._rendered_mode(message, text))
 
     def _send_acceptance_queue_note(self, surface, key, message,  # type: ignore[no-untyped-def]
@@ -371,13 +388,16 @@ class RuntimeGroupMixin:
                          "is off, so this one's yours.")
         lines.append("requests stay open until an admin decides "
                      "or the invite link is revoked.")
+        from ...social.chat.expression import buttons_from_spec
+
         card.lines(lines)
         text = surface._card_render(key, card)
         rid = str(record.get("id") or "")
-        self._send(message.chat, text, buttons=[
-            [("✅ Approve", f"joinq approve {rid}"),
-             ("🚫 Decline", f"joinq decline {rid}")],
-            [("📋 The queue", "joinq")]],
+        self._send(message.chat, text, buttons=buttons_from_spec([
+            [("approve", "Approve", f"joinq approve {rid}"),
+             ("decline", "Decline", f"joinq decline {rid}")],
+            [("queue", "The queue", "joinq")]],
+            settings=surface.store.settings(key)),
             parse_mode=self._rendered_mode(message, text))
 
     def _group_adapter(self, platform: str):  # type: ignore[no-untyped-def]
@@ -395,6 +415,21 @@ class RuntimeGroupMixin:
         meta = message.meta or {}
         service = str(meta.get("service") or "")
 
+        if service == "reaction":
+            # Reactions IN (§22): a member's reaction is room
+            # signal — journaled to the held audit (the surface
+            # engagement counts read from), never answered, never
+            # narrated. Not system output: the §33 gate does not
+            # apply to READING the room.
+            surface._audit(
+                key, "reaction",
+                user_id=str(message.sender_id or ""),
+                emojis=",".join(meta.get("reaction_new") or []),
+                removed=",".join(meta.get("reaction_old") or []),
+                message_id=str(meta.get("reacted_message_id")
+                               or ""))
+            surface.store.save()
+            return True
         if service == "join":
             adapter = self._group_adapter(message.chat.platform)
             acc_cfg = (surface.store.settings(key)
@@ -457,6 +492,12 @@ class RuntimeGroupMixin:
                         buttons=self._welcome_buttons(surface, key),
                         parse_mode=self._rendered_mode(message,
                                                        text))
+                # The welcome moment (§21): a GIF/sticker rides
+                # the welcome where the group's expression
+                # settings allow — same gate, same room.
+                fire = getattr(self, "_fire_expression", None)
+                if fire is not None:
+                    fire(message, "welcome")
             self._clean_service_message(surface, message)
             return True
         if service == "join_request":
@@ -519,6 +560,10 @@ class RuntimeGroupMixin:
                                         surface, key),
                                     parse_mode=self._rendered_mode(
                                         message, text))
+                                fire = getattr(
+                                    self, "_fire_expression", None)
+                                if fire is not None:
+                                    fire(message, "welcome")
                 elif verdict == "decline":
                     self._acceptance_join_request(
                         surface, key, adapter, message.chat,
@@ -585,8 +630,19 @@ class RuntimeGroupMixin:
         notices = result.get("notices") or []
         if notices and self._system_send_ok(
                 surface, key, message, "notice"):
+            from ...social.chat.expression import (
+                classify_notice_moment)
+
             for notice in notices:
                 self._send(message.chat, str(notice))
+                # Celebration notices carry a moment (§21): a
+                # finished quest / a season podium gets her
+                # media voice; every other notice stays text.
+                moment = classify_notice_moment(str(notice))
+                if moment:
+                    fire = getattr(self, "_fire_expression", None)
+                    if fire is not None:
+                        fire(message, moment)
         self._execute_pending_pin(surface, message)
         actions = result.get("actions") or []
         if not actions:
@@ -804,6 +860,57 @@ class RuntimeGroupMixin:
         surface.update_settings(key, presentation=pres)
         return pres
 
+    def _expression_update(self, surface, key, **fields):  # type: ignore[no-untyped-def]
+        """Mutate the expression settings block (DESIGN §21)
+        through the store's own settings machinery — the one
+        write path behind both /gsettings and the console."""
+        import copy as _copy
+
+        current = surface.store.settings(key)
+        expr = _copy.deepcopy(current.get("expression") or {})
+        expr.update(fields)
+        surface.update_settings(key, expression=expr)
+        return expr
+
+    def _apply_expression_grammar(self, surface, key, words):  # type: ignore[no-untyped-def]
+        """The expression grammar, shared by /gsettings (words
+        after the `expression` head) and the console's
+        expression section (bare words). Returns the reply line,
+        or None when the words aren't expression grammar.
+        Forms: `on|off` · `gifs off|low|normal` ·
+        `welcome on|off` · `ban on|off`."""
+        w = [str(x).lower() for x in words or []]
+        if w == ["on"] or w == ["off"]:
+            on = w[0] == "on"
+            self._expression_update(surface, key, enabled=on)
+            return (f"expression {'on' if on else 'off'} — "
+                    + ("moments get their media voice here."
+                       if on else
+                       "moments ship text-only here."))
+        if len(w) == 2 and w[0] == "gifs" \
+                and w[1] in ("off", "low", "normal"):
+            self._expression_update(surface, key, gifs=w[1])
+            return {
+                "off": "gifs off — every moment ships text-only.",
+                "low": "gifs low — welcomes and celebrations "
+                       "only; bans land without theatre.",
+                "normal": "gifs normal — welcomes, celebrations "
+                          "and ban theatre.",
+            }[w[1]]
+        if len(w) == 2 and w[0] == "welcome" \
+                and w[1] in ("on", "off"):
+            on = w[1] == "on"
+            self._expression_update(surface, key,
+                                    welcome_media=on)
+            return f"welcome media {'on' if on else 'off'}."
+        if len(w) == 2 and w[0] == "ban" \
+                and w[1] in ("on", "off"):
+            on = w[1] == "on"
+            self._expression_update(surface, key, ban_theatre=on)
+            return (f"ban theatre {'on' if on else 'off'} — "
+                    "warnings stay dry either way.")
+        return None
+
     # ---- group commands (P1 slice 2) --------------------------------
     def _control_group_help(self, message):  # type: ignore[no-untyped-def]
         """Bare /help INSIDE a group (owner order 2026-11-03):
@@ -912,13 +1019,17 @@ class RuntimeGroupMixin:
             f"{'on' if settings['welcome_enabled'] else 'off'} · "
             f"link moderation "
             f"{'allowlist' if (settings['moderation'].get('link_allowlist')) else 'open'}")
-        buttons = [[("📜 Rules", "rules"), ("🎮 Games", "game")]]
+        from ...social.chat.expression import buttons_from_spec
+
+        spec = [[("rules", "Rules", "rules"),
+                 ("games", "Games", "game")]]
         if eco:
-            buttons.append([("🪙 My sparks", "balance"),
-                            ("🗺️ Quests", "quests"),
-                            ("🏦 Treasury", "treasury")])
-        buttons.append([("⚙️ Group settings", "gsettings"),
-                        ("📋 Audit log", "glog")])
+            spec.append([("balance", "My sparks", "balance"),
+                         ("quests", "Quests", "quests"),
+                         ("treasury", "Treasury", "treasury")])
+        spec.append([("settings", "Group settings", "gsettings"),
+                     ("glog", "Audit log", "glog")])
+        buttons = buttons_from_spec(spec, settings=settings)
         return self._card(message, card, buttons)
 
     def _group_key_or_none(self, message):  # type: ignore[no-untyped-def]
@@ -1004,11 +1115,19 @@ class RuntimeGroupMixin:
             s = surface.store.settings(key)
             mod = s["moderation"]
 
-            def _toggle(label: str, kind: str, on_now: bool) -> tuple:
+            from ...social.chat.expression import button_label
+
+            def _toggle(action: str, label: str, kind: str,
+                        on_now: bool) -> tuple:
                 # The button SHOWS the current state and carries
                 # the flip — authored from the live settings, so
                 # it can never disagree with the summary above it.
-                return (f"{label}: {'ON' if on_now else 'OFF'}",
+                # Its emoji comes from the one button vocabulary
+                # (§21), under this group's presentation settings.
+                return (button_label(
+                            action,
+                            f"{label}: {'ON' if on_now else 'OFF'}",
+                            settings=s),
                         f"gsettings {kind} "
                         f"{'off' if on_now else 'on'}")
 
@@ -1017,18 +1136,19 @@ class RuntimeGroupMixin:
                            "board": "house"}
             theme_now = str(pres.get("theme") or "house")
             buttons = [
-                [_toggle("👋 Welcome", "welcome",
+                [_toggle("welcome", "Welcome", "welcome",
                          bool(s["welcome_enabled"])),
-                 _toggle("🚪 Goodbye", "goodbye",
+                 _toggle("goodbye", "Goodbye", "goodbye",
                          bool(s["goodbye_enabled"]))],
-                [_toggle("🧹 Cleanup", "clean",
+                [_toggle("cleanup", "Cleanup", "clean",
                          bool(s["clean_service"])),
-                 _toggle("🪙 Economy", "economy",
+                 _toggle("economy", "Economy", "economy",
                          bool(s["economy_enabled"]))],
-                [(f"🎨 Theme: {theme_now}",
+                [(button_label("theme", f"Theme: {theme_now}",
+                               settings=s),
                   f"gsettings theme "
                   f"{theme_cycle.get(theme_now, 'house')}"),
-                 _toggle("🔖 Stamp", "stamp",
+                 _toggle("stamp", "Stamp", "stamp",
                          bool(pres.get("stamp", True)))],
             ]
             # Defense block (DESIGN §17): sensor states from the
@@ -1183,6 +1303,30 @@ class RuntimeGroupMixin:
                 "the owner designates a room with "
                 "`/gsettings system output on`",
             ], title="System output")
+            # Expression block (§21): her GIF/sticker voice in
+            # this room — state read from the same settings the
+            # moment service reads, library size included.
+            expr = s.get("expression") or {}
+            lib_n = ""
+            try:
+                svc = getattr(self, "_expression_service", None)
+                if svc is not None:
+                    lib_n = (f" · library "
+                             f"{len(svc().library)} items")
+            except Exception:  # noqa: BLE001 - display only
+                lib_n = ""
+            card.block_lines([
+                f"expression: "
+                f"{'on' if expr.get('enabled', True) else 'off'}"
+                f" · gifs {expr.get('gifs', 'normal')}"
+                f" · welcome media "
+                f"{'on' if expr.get('welcome_media', True) else 'off'}"
+                f" · ban theatre "
+                f"{'on' if expr.get('ban_theatre', True) else 'off'}"
+                f"{lib_n}",
+                "warnings stay dry at every setting — a warning "
+                "is a record, not a show",
+            ], title="Expression")
             card.block_lines([
                 "`/gsettings welcome on|off` · "
                 "`/gsettings goodbye on|off` · "
@@ -1237,6 +1381,10 @@ class RuntimeGroupMixin:
                 "`/gsettings system output on|off` "
                 "(owner — designates this room for my "
                 "bot-system output, §33)",
+                "`/gsettings expression on|off` · "
+                "`/gsettings expression gifs off|low|normal`",
+                "`/gsettings expression welcome on|off` · "
+                "`/gsettings expression ban on|off`",
             ], title="Change it")
             card.note("tap a button to flip a switch, or type a "
                       "command")
@@ -1266,6 +1414,18 @@ class RuntimeGroupMixin:
             return ("system output: designation lifted — "
                     "this room is claimed only where my bot "
                     "itself operates.")
+        if head == "expression":
+            # Media expression (§21): on/off, GIF frequency,
+            # welcome media, ban theatre — the same helper the
+            # DM console's expression section applies.
+            out = self._apply_expression_grammar(
+                surface, key, text.split()[1:])
+            if out is not None:
+                return out
+            return ("usage: /gsettings expression on|off · "
+                    "expression gifs off|low|normal · "
+                    "expression welcome on|off · "
+                    "expression ban on|off")
         if head == "warns" and rest.isdigit():
             surface.update_settings(
                 key, warn_threshold=max(1, int(rest)))
@@ -1732,7 +1892,8 @@ class RuntimeGroupMixin:
     # ---- the DM admin console (DESIGN §30) ----------------------
     _CONSOLE_TTL_S = 1800
     _CONSOLE_SECTIONS = ("defense", "acceptance", "economy",
-                         "estate", "presentation", "welcome")
+                         "estate", "presentation", "welcome",
+                         "expression")
 
     def _console_session_map(self) -> dict:  # type: ignore[no-untyped-def]
         sessions = getattr(self, "_console_sessions", None)
@@ -1953,18 +2114,27 @@ class RuntimeGroupMixin:
             f"{'on' if s.get('welcome_enabled') else 'off'}"
             f" · rules {len(s.get('rules') or [])} · presentation "
             f"theme {(s.get('presentation') or {}).get('theme', 'house')}",
+            f"expression "
+            f"{'on' if (s.get('expression') or {}).get('enabled', True) else 'off'}"
+            f" · gifs {(s.get('expression') or {}).get('gifs', 'normal')}",
         ])
-        buttons = [[(f"🛡️ Defense + ladder",
-                     f"console {token} defense"),
-                    ("🚪 Acceptance",
-                     f"console {token} acceptance")],
-                   [("🪙 Economy", f"console {token} economy"),
-                    ("🏘️ Estate", f"console {token} estate")],
-                   [("🎨 Presentation",
-                     f"console {token} presentation"),
-                    ("👋 Welcome + rules",
-                     f"console {token} welcome")],
-                   [("⬅️ All groups", "console")]]
+        from ...social.chat.expression import buttons_from_spec
+
+        buttons = buttons_from_spec([
+            [("defense", "Defense + ladder",
+              f"console {token} defense"),
+             ("acceptance", "Acceptance",
+              f"console {token} acceptance")],
+            [("economy", "Economy", f"console {token} economy"),
+             ("estate", "Estate", f"console {token} estate")],
+            [("presentation", "Presentation",
+              f"console {token} presentation"),
+             ("expression", "Expression",
+              f"console {token} expression")],
+            [("welcome", "Welcome + rules",
+              f"console {token} welcome"),
+             ("back", "All groups", "console")],
+        ], settings=s)
         card.note("tap a section, or type its grammar — every "
                   "change lands in the group's /glog with your "
                   "name on it")
@@ -1982,8 +2152,15 @@ class RuntimeGroupMixin:
             card.line(lead)
         buttons: list = []
 
-        def _toggle(label: str, grammar: str, on_now: bool):
-            return (f"{label}: {'ON' if on_now else 'OFF'}",
+        from ...social.chat.expression import (
+            button_label, buttons_from_spec)
+
+        def _toggle(action: str, label: str, grammar: str,
+                    on_now: bool):
+            return (button_label(
+                        action,
+                        f"{label}: {'ON' if on_now else 'OFF'}",
+                        settings=s),
                     f"console {token} {section} {grammar} "
                     f"{'off' if on_now else 'on'}")
 
@@ -2015,15 +2192,15 @@ class RuntimeGroupMixin:
                 f"ladder: {esc.describe()}",
             ])
             buttons = [
-                [_toggle("🤖 Autonomy", "autonomy",
+                [_toggle("autonomy", "Autonomy", "autonomy",
                          bool(d.get("autonomy", True))),
-                 _toggle("💥 Anticrash", "anticrash",
+                 _toggle("anticrash", "Anticrash", "anticrash",
                          bool((d.get('anticrash') or {})
                               .get('enabled', True)))],
-                [_toggle("📣 Antichannel", "antichannel",
+                [_toggle("antichannel", "Antichannel", "antichannel",
                          bool((d.get('antichannel') or {})
                               .get('enabled', True))),
-                 _toggle("🏷️ Antitag", "antitag",
+                 _toggle("antitag", "Antitag", "antitag",
                          bool((d.get('antitag') or {})
                               .get('enabled', True)))],
             ]
@@ -2073,7 +2250,7 @@ class RuntimeGroupMixin:
                 f"threshold {s.get('governance_threshold', 500)}"
                 f" · moderation fine {s.get('fine_amount', 0)}",
             ])
-            buttons = [[_toggle("🪙 Economy", "economy",
+            buttons = [[_toggle("economy", "Economy", "economy",
                                 bool(s.get("economy_enabled")))]]
             card.block_lines([
                 "`economy on|off` · `tax PCT` · `governance N`"
@@ -2103,10 +2280,11 @@ class RuntimeGroupMixin:
                            "board": "house"}
             theme_now = str(pres.get("theme") or "house")
             buttons = [
-                [(f"🎨 Theme: {theme_now}",
+                [(button_label("theme", f"Theme: {theme_now}",
+                               settings=s),
                   f"console {token} presentation theme "
                   f"{theme_cycle.get(theme_now, 'house')}"),
-                 _toggle("🔖 Stamp", "stamp",
+                 _toggle("stamp", "Stamp", "stamp",
                          bool(pres.get("stamp", True)))],
             ]
             card.block_lines([
@@ -2126,11 +2304,11 @@ class RuntimeGroupMixin:
                 f" · rules {len(s.get('rules') or [])}",
             ])
             buttons = [
-                [_toggle("👋 Welcome", "welcome",
+                [_toggle("welcome", "Welcome", "welcome",
                          bool(s.get("welcome_enabled"))),
-                 _toggle("🚪 Goodbye", "goodbye",
+                 _toggle("goodbye", "Goodbye", "goodbye",
                          bool(s.get("goodbye_enabled")))],
-                [_toggle("🧹 Cleanup", "clean",
+                [_toggle("cleanup", "Cleanup", "clean",
                          bool(s.get("clean_service")))],
             ]
             card.block_lines([
@@ -2138,9 +2316,52 @@ class RuntimeGroupMixin:
                 "`clean on|off`",
                 "`rules add TEXT` · `rules clear`",
             ], title="Grammar")
-        buttons.append([("⬅️ Sections",
-                         f"console {token}"),
-                        ("🏠 Console home", "console")])
+        elif section == "expression":
+            expr = s.get("expression") or {}
+            lib_line = "library size unknown"
+            try:
+                svc = getattr(self, "_expression_service", None)
+                if svc is not None:
+                    lib_line = (f"library {len(svc().library)} "
+                                f"items (steals, makes and "
+                                f"provider finds — it grows)")
+            except Exception:  # noqa: BLE001 - display only
+                pass
+            card.block_lines([
+                f"expression "
+                f"{'ON' if expr.get('enabled', True) else 'OFF'}"
+                f" · gifs {expr.get('gifs', 'normal')}",
+                f"welcome media "
+                f"{'on' if expr.get('welcome_media', True) else 'off'}"
+                f" · ban theatre "
+                f"{'on' if expr.get('ban_theatre', True) else 'off'}"
+                f" · {lib_line}",
+                "moments: welcome · quest complete · jackpot · "
+                "season podium · duel wins · estate milestones · "
+                "bans (theatre) — warnings stay dry, always",
+            ])
+            gif_cycle = {"off": "low", "low": "normal",
+                         "normal": "off"}
+            gif_now = str(expr.get("gifs") or "normal")
+            buttons = [
+                [_toggle("expression", "Expression", "",
+                         bool(expr.get("enabled", True))),
+                 (button_label("gif", f"GIFs: {gif_now}",
+                               settings=s),
+                  f"console {token} expression gifs "
+                  f"{gif_cycle.get(gif_now, 'normal')}")],
+                [_toggle("welcome", "Welcome media", "welcome",
+                         bool(expr.get("welcome_media", True))),
+                 _toggle("ban", "Ban theatre", "ban",
+                         bool(expr.get("ban_theatre", True)))],
+            ]
+            card.block_lines([
+                "`on|off` · `gifs off|low|normal`",
+                "`welcome on|off` · `ban on|off`",
+            ], title="Grammar")
+        buttons += buttons_from_spec(
+            [[("back", "Sections", f"console {token}"),
+              ("home", "Console home", "console")]], settings=s)
         return self._card(message, card, buttons)
 
     def _console_apply(self, surface, key, message, sender,  # type: ignore[no-untyped-def]
@@ -2434,6 +2655,11 @@ class RuntimeGroupMixin:
                 surface.update_settings(key, rules=[])
                 return "rules cleared."
             return None
+        if section == "expression":
+            # The console's words ARE the gsettings tail (minus
+            # the head): one grammar, one write path (§21).
+            return self._apply_expression_grammar(
+                surface, key, list(words))
         return None
 
     # ---- the notice undo (DESIGN §31) ---------------------------
@@ -4087,10 +4313,13 @@ class RuntimeGroupMixin:
                 return "🔒 no slots from jail — /bail first."
             return "not enough sparks in your wallet for that bet."
         reels = " ".join(result["symbols"])
+        from ...social.chat.expression import buttons_from_spec
         from ...social.chat.typography import Card, sparks
 
-        buttons = [[(f"🎰 Spin again ({bet})", f"slots {bet}"),
-                    ("🪙 My balance", "balance")]]
+        buttons = buttons_from_spec(
+            [[("spin", f"Spin again ({bet})", f"slots {bet}"),
+              ("balance", "My balance", "balance")]],
+            settings=surface.store.settings(key))
         if result.get("jackpot"):
             card = Card("game", title="Slots", icon="🎰")
             card.board(reels)
@@ -4099,6 +4328,11 @@ class RuntimeGroupMixin:
                       f"reels.")
             card.stats([("Balance", sparks(result["balance"]),
                          True)])
+            # The jackpot moment (§21): the room celebrates in
+            # media too, where expression is on and claimed.
+            fire = getattr(self, "_fire_expression", None)
+            if fire is not None:
+                fire(message, "jackpot")
             return self._card(message, card, buttons)
         if result["payout"] > 0:
             card = Card("game", title="Slots", icon="🎰")
@@ -4135,10 +4369,13 @@ class RuntimeGroupMixin:
             if result.get("reason") == "jailed":
                 return "🔒 no coinflips from jail — /bail first."
             return "not enough sparks in your wallet for that bet."
+        from ...social.chat.expression import buttons_from_spec
         from ...social.chat.typography import Card, sparks
 
-        buttons = [[(f"🪙 Flip again ({bet})", f"coinflip {bet}"),
-                    ("🪙 My balance", "balance")]]
+        buttons = buttons_from_spec(
+            [[("flip", f"Flip again ({bet})", f"coinflip {bet}"),
+              ("balance", "My balance", "balance")]],
+            settings=surface.store.settings(key))
         card = Card("game", title="Coinflip", icon="🪙")
         card.board(f"🪙 {result['flip']}")
         if result["won"]:

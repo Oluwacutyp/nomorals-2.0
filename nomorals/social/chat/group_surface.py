@@ -62,6 +62,7 @@ from .group_acceptance import ACCEPTANCE_DEFAULTS
 from .group_defense import (
     DEFAULTS as DEFENSE_DEFAULTS,
 )
+from .expression import EXPRESSION_DEFAULTS
 from .typography import DEFAULT_PRESENTATION, notice_line, sparks
 from .group_defense import (
     ESCALATION_DEFAULTS,
@@ -177,6 +178,14 @@ def _default_settings() -> dict[str, Any]:
                                         # runtime's last verified
                                         # standing of her bot
                                         # (None = never probed)
+        "expression": copy.deepcopy(EXPRESSION_DEFAULTS),
+                                        # media expression
+                                        # (§21): GIF/sticker
+                                        # moments on/off, gif
+                                        # frequency, welcome
+                                        # media, ban theatre —
+                                        # warnings stay dry at
+                                        # every setting
         "state": "discovered",          # discovered|configured|
                                         # active|dormant
     }
@@ -242,7 +251,8 @@ class GroupStore:
                        if k in merged
                        and k not in ("defense", "presentation",
                                      "estate", "acceptance",
-                                     "escalation", "system_claim")})
+                                     "escalation", "system_claim",
+                                     "expression")})
         mod = dict(merged["moderation"])
         mod.update((stored.get("moderation") or {}))
         merged["moderation"] = mod
@@ -264,6 +274,9 @@ class GroupStore:
         merged["system_claim"] = _deep_merge(
             {"designated": False, "bot_admin": None},
             stored.get("system_claim") or {})
+        merged["expression"] = _deep_merge(
+            copy.deepcopy(EXPRESSION_DEFAULTS),
+            stored.get("expression") or {})
         return merged
 
 

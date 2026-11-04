@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .expression import button_label
 from .tgbot_buttons import buttons_for_text, check_callback_data
 from .failures import record_failure
 
@@ -61,18 +62,18 @@ def _scheduled_buttons(payload: dict[str, Any] | None) -> Keyboard | None:
         job = str(payload.get("job") or "").strip()
     if job == "memory-consolidation":
         rows = [
-            _row(("🧠 Recall", "recall"), ("📋 Memories", "memories")),
-            _row(("📋 Jobs", "schedule list"),
-                 ("🔁 Re-run", "schedule run memory-consolidation")),
+            _row((button_label("recall", "Recall"), "recall"), (button_label("memories", "Memories"), "memories")),
+            _row((button_label("jobs", "Jobs"), "schedule list"),
+                 (button_label("rerun", "Re-run"), "schedule run memory-consolidation")),
         ]
         return [r for r in rows if r] or None
     if job:
         rows = [
-            _row(("📋 Jobs", "schedule list"), ("📊 Status", "schedule status")),
-            _row(("🔁 Re-run", f"schedule run {job}")),
+            _row((button_label("jobs", "Jobs"), "schedule list"), (button_label("status", "Status"), "schedule status")),
+            _row((button_label("rerun", "Re-run"), f"schedule run {job}")),
         ]
         return [r for r in rows if r] or None
-    row = _row(("📋 Jobs", "schedule list"), ("📊 Status", "schedule status"))
+    row = _row((button_label("jobs", "Jobs"), "schedule list"), (button_label("status", "Status"), "schedule status"))
     return [row] if row else None
 
 
@@ -84,9 +85,9 @@ def _search_buttons(payload: dict[str, Any] | None) -> Keyboard | None:
     if not query:
         return None
     rows = [
-        _row(("💾 Save query", f"remember {query}"),
-             ("🔬 Deep research", f"searchdeep {query}")),
-        _row(("🔁 Search again", f"search {query}")),
+        _row((button_label("save", "Save query"), f"remember {query}"),
+             (button_label("research", "Deep research"), f"searchdeep {query}")),
+        _row((button_label("rerun", "Search again"), f"search {query}")),
     ]
     return [r for r in rows if r] or None
 
@@ -101,10 +102,10 @@ def _game_buttons(payload: dict[str, Any] | None) -> Keyboard | None:
     game = ""
     if isinstance(payload, dict):
         game = str(payload.get("game") or payload.get("name") or "").strip()
-    rematch = f"🔁 Rematch {game}" if game else "🔁 Rematch"
+    rematch = button_label("rematch", f"Rematch {game}" if game else "Rematch")
     rows = [
-        _row((rematch, "game rematch"), ("⏭️ Next", "game list")),
-        _row(("🏆 Leaderboard", "game leaderboard")),
+        _row((rematch, "game rematch"), (button_label("next", "Next"), "game list")),
+        _row((button_label("leaderboard", "Leaderboard"), "game leaderboard")),
     ]
     return [r for r in rows if r] or None
 
@@ -117,8 +118,8 @@ def _music_ask_buttons() -> Keyboard | None:
     store, so the callbacks need no payload and stay well inside the
     47-byte budget.
     """
-    row = _row(("🔍 Find this music", "musicnote find"),
-               ("🎵 Create a song", "musicnote create"))
+    row = _row((button_label("search", "Find this music"), "musicnote find"),
+               (button_label("music", "Create a song"), "musicnote create"))
     return [row] if row else None
 
 
@@ -128,7 +129,7 @@ def _memory_buttons() -> Keyboard | None:
     NOTE: ``/memory`` is a GAME — memory-system actions are
     ``/recall`` / ``/memories`` / ``/forget``, never ``/memory``.
     """
-    row = _row(("🧠 Recall", "recall"), ("📋 Memories", "memories"))
+    row = _row((button_label("recall", "Recall"), "recall"), (button_label("memories", "Memories"), "memories"))
     return [row] if row else None
 
 
@@ -143,7 +144,7 @@ def _retry_only(origin_command: str) -> Keyboard | None:
     origin = (origin_command or "").strip()
     if not origin:
         return None
-    row = _row(("🔁 Retry", origin))
+    row = _row((button_label("rerun", "Retry"), origin))
     return [row] if row else None
 
 

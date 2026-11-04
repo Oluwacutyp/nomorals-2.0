@@ -1749,6 +1749,38 @@ class TelegramAdapter(ChatAdapter):
             return SendResult(ok=False, platform=self.name, error=str(exc),
                               seconds=time.perf_counter() - started)
 
+    def react(self, chat: ChatRef, message_id: str, emoji: str) -> SendResult:
+        """Place a reaction via MTProto ``SendReactionRequest``
+        (§22). A userbot may react with ANY emoji — no standard
+        set limit (that limit is Bot-API-only)."""
+        client = self._client
+        if client is None:
+            return SendResult(ok=False, platform=self.name,
+                              error="not connected")
+        started = time.perf_counter()
+
+        async def _do() -> Any:
+            from telethon.tl.functions.messages import SendReactionRequest
+            from telethon.tl.types import ReactionEmoji
+
+            entity = self._input_entity_cache.get(chat.chat_id)
+            if entity is None:
+                entity = await self._resolve(chat)
+            return await client(SendReactionRequest(
+                peer=entity, msg_id=int(message_id),
+                reaction=[ReactionEmoji(emoticon=str(emoji))]))
+
+        try:
+            self._run_on_loop(_do())
+            self.stats["sent"] += 1
+            return SendResult(ok=True, platform=self.name,
+                              message_id=str(message_id),
+                              seconds=time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001
+            self.stats["send_errors"] += 1
+            return SendResult(ok=False, platform=self.name, error=str(exc),
+                              seconds=time.perf_counter() - started)
+
     def typing(self, chat: ChatRef, seconds: float = 3.0,
              action: str = "typing") -> bool:
         """Chat action indicator: "typing" or "recording" (voice).
@@ -2247,6 +2279,25 @@ def _chunk_text(text: str, limit: int) -> list[str]:
     if rest:
         chunks.append(rest)
     return chunks
+
+
+def _sent_file_id(result: Any) -> str:
+    """The file_id of the media in a Bot API message result —
+    what the expression library caches after a first upload
+    (§21). Photo results carry a size ladder; the largest is
+    the canonical handle."""
+    if not isinstance(result, dict):
+        return ""
+    for key in ("sticker", "animation", "video", "document",
+                "audio", "voice", "video_note"):
+        node = result.get(key)
+        if isinstance(node, dict) and node.get("file_id"):
+            return str(node["file_id"])
+    photos = result.get("photo")
+    if isinstance(photos, list) and photos \
+            and isinstance(photos[-1], dict):
+        return str(photos[-1].get("file_id") or "")
+    return ""
 
 
 def _bot_message_envelope(msg: dict[str, Any], text: str
@@ -2763,7 +2814,8 @@ class TelegramBotAdapter(ChatAdapter):
                                     timeout=self.poll_timeout,
                                     allowed_updates=["message", "edited_message",
                                                      "channel_post", "callback_query",
-                                                     "inline_query"])
+                                                     "inline_query",
+                                                     "message_reaction"])
             except Exception as exc:  # noqa: BLE001 - transient, back off a little
                 # A persistent failure (revoked token, dead DNS) must not
                 # hot-spin the poll loop every 5s — back off exponentially,
@@ -2832,6 +2884,20 @@ class TelegramBotAdapter(ChatAdapter):
                     return
                 self._handle_inline_query(query)
                 return
+            # Reaction changes (§22): delivered as service events
+            # for GROUP chats only — a DM reaction is a private
+            # gesture, counted in stats and never surfaced to the
+            # group organs.
+            if "message_reaction" in update:
+                reaction = update["message_reaction"]
+                if not isinstance(reaction, dict):
+                    _log.warning("telegram-bot: dropping non-dict message_reaction %r",
+                                 type(reaction).__name__)
+                    return
+                converted = self._convert_reaction(reaction, update)
+                if converted is not None:
+                    self._deliver(handler, converted)
+                return
             message = self._convert(update)
             if message is not None:
                 # At-most-once: a restarted poll loop can re-fetch
@@ -2877,6 +2943,57 @@ class TelegramBotAdapter(ChatAdapter):
                       text=self.deny_text)
         except Exception as exc:  # noqa: BLE001 - denial is best-effort
             _log.debug("telegram-personal: denial send failed: %s", exc)
+
+    def _convert_reaction(self, reaction: dict[str, Any],
+                          update: dict[str, Any]) -> ChatMessage | None:
+        """A ``message_reaction`` update → a service ChatMessage
+        (meta.service == "reaction") for GROUP chats. DM
+        reactions are counted in adapter stats only — they are
+        a private gesture, not group signal."""
+        chat = reaction.get("chat") or {}
+        if not isinstance(chat, dict):
+            return None
+        chat_id = str(chat.get("id", ""))
+        if not chat_id:
+            return None
+        chat_type = chat.get("type", "")
+        kind = _BOT_CHAT_TYPES.get(
+            chat_type if isinstance(chat_type, str) else "",
+            ChatKind.DM)
+        self.stats["reactions_seen"] = \
+            int(self.stats.get("reactions_seen", 0)) + 1
+        if kind == ChatKind.DM:
+            return None
+        user = reaction.get("user") or {}
+        if not isinstance(user, dict):
+            user = {}
+        if user.get("is_bot"):
+            return None
+
+        def _emojis(rows: Any) -> list[str]:
+            out: list[str] = []
+            for row in rows or []:
+                if isinstance(row, dict) and row.get("type") == "emoji" \
+                        and row.get("emoji"):
+                    out.append(str(row["emoji"]))
+            return out
+
+        title = chat.get("title") or chat.get("username") or ""
+        return ChatMessage(
+            chat=ChatRef(platform=self.name, chat_id=chat_id,
+                         kind=kind, title=str(title)),
+            incoming=True, text="",
+            sender=str(user.get("first_name") or ""),
+            sender_id=str(user.get("id") or ""),
+            sender_username=str(user.get("username") or ""),
+            message_id=str(reaction.get("message_id") or ""),
+            meta={"update_id": update.get("update_id"),
+                  "service": "reaction",
+                  "reaction_new": _emojis(reaction.get("new_reaction")),
+                  "reaction_old": _emojis(reaction.get("old_reaction")),
+                  "reacted_message_id": str(
+                      reaction.get("message_id") or "")},
+        )
 
     def _convert(self, update: dict[str, Any]) -> ChatMessage | None:
         if not isinstance(update, dict):
@@ -2974,6 +3091,41 @@ class TelegramBotAdapter(ChatAdapter):
                 "bot_role": "personal" if self.owner_only else "gated"}
         if replied_audio_file_id:
             meta["replied_audio_file_id"] = replied_audio_file_id
+        # /steal support (§21): the replied message's visual media
+        # handles, for the same reason as the audio id above — a
+        # reply is the ONLY chance to learn a sticker/GIF's file_id.
+        for _mkey, _mkind, _mname in (
+                ("sticker", "sticker", "sticker.webp"),
+                ("animation", "animation", "animation.mp4"),
+                ("video", "video", "video.mp4"),
+                ("document", "document", "file")):
+            _rm2 = replied.get(_mkey) or {}
+            if isinstance(_rm2, dict) and _rm2.get("file_id"):
+                _fname = _rm2.get("file_name") or _mname
+                if _mkey == "sticker" and _rm2.get("is_video"):
+                    _fname = "sticker.webm"
+                meta["replied_media"] = {
+                    "kind": _mkind,
+                    "file_id": str(_rm2["file_id"]),
+                    "file_unique_id": str(
+                        _rm2.get("file_unique_id") or ""),
+                    "name": str(_fname),
+                    "set_name": str(_rm2.get("set_name") or ""),
+                    "emoji": str(_rm2.get("emoji") or ""),
+                }
+                break
+        else:
+            _rphoto = replied.get("photo") or []
+            if isinstance(_rphoto, list) and _rphoto \
+                    and isinstance(_rphoto[-1], dict) \
+                    and _rphoto[-1].get("file_id"):
+                meta["replied_media"] = {
+                    "kind": "image",
+                    "file_id": str(_rphoto[-1]["file_id"]),
+                    "file_unique_id": str(
+                        _rphoto[-1].get("file_unique_id") or ""),
+                    "name": "photo.jpg", "set_name": "", "emoji": "",
+                }
         # Who wrote the replied-to message: reply-targeted group
         # admin commands (/mute /ban /warn …) act on the AUTHOR of
         # the message the admin replied to — the standard grammar
@@ -3341,6 +3493,18 @@ class TelegramBotAdapter(ChatAdapter):
             fmime = _mt if isinstance(_mt, str) and _mt else "audio/mpeg"
         elif _fid(msg.get("video_note")):
             file_id, fkind, fname = _fid(msg.get("video_note")), "video", "note.mp4"
+        elif _fid(msg.get("sticker")):
+            # Stickers + animations used to fall through every
+            # branch and vanish — the expression layer (§21) needs
+            # them: a sticker replied to can be /steal'd, a sticker
+            # sent can be answered in kind.
+            _st = msg["sticker"]
+            file_id, fkind = _fid(_st), "sticker"
+            fname = "sticker.webm" if _st.get("is_video") else "sticker.webp"
+            fmime = "video/webm" if _st.get("is_video") else "image/webp"
+        elif _fid(msg.get("animation")):
+            file_id, fkind, fname = _fid(msg.get("animation")), "animation", "animation.mp4"
+            fmime = "video/mp4"
         if not file_id:
             return []
         size = 0
@@ -3356,12 +3520,12 @@ class TelegramBotAdapter(ChatAdapter):
             # placeholder (empty path) the STT path reports "no audio
             # file" honestly instead of hallucinating about a clip.
             return [MediaRef(path="", kind=fkind, name=fname, mime=fmime,
-                             is_voice=(fkind == "voice"))]
+                             is_voice=(fkind == "voice"), file_id=file_id)]
         if not media_download_allowed(kind, size, self.media_in_groups, self.media_max_mb):
             return []
         if not path:
             return [MediaRef(path="", kind=fkind, name=fname, mime=fmime,
-                             is_voice=(fkind == "voice"))]
+                             is_voice=(fkind == "voice"), file_id=file_id)]
         # fname is sender-controlled (Telegram document file_name): it
         # can contain "../", ":", or other Windows-illegal characters.
         # Sanitise before it becomes a path — the MediaRef keeps the
@@ -3378,9 +3542,10 @@ class TelegramBotAdapter(ChatAdapter):
         except Exception as exc:  # noqa: BLE001
             _log.debug("telegram-bot media download failed: %s", exc)
             return [MediaRef(path="", kind=fkind, name=orig_fname, mime=fmime,
-                             is_voice=(fkind == "voice"))]
+                             is_voice=(fkind == "voice"), file_id=file_id)]
         return [MediaRef(path=str(dest), kind=fkind, name=orig_fname,
-                         mime=fmime, is_voice=(fkind == "voice"))]
+                         mime=fmime, is_voice=(fkind == "voice"),
+                         file_id=file_id)]
 
     def download_file(self, file_id: str, fname: str = "audio.ogg") -> str:
         """Download a Telegram file_id to the media dir. Returns the local
@@ -3670,9 +3835,6 @@ class TelegramBotAdapter(ChatAdapter):
                    parse_mode: str = "") -> SendResult:
         started = time.perf_counter()
         path = Path(media.path)
-        if not path.is_file():
-            return SendResult(ok=False, platform=self.name,
-                              error=f"media file not found: {media.path}")
         if media.kind == "voice" or getattr(media, "voice_note", False):
             # A voice note must arrive as a voice bubble, not a file
             # attachment: kind="voice" used to fall through the map to
@@ -3684,13 +3846,50 @@ class TelegramBotAdapter(ChatAdapter):
                 "image": "sendPhoto",
                 "video": "sendVideo",
                 "audio": "sendVoice" if path.suffix.lower() == ".ogg" else "sendAudio",
+                # Expression kinds (§21): a sticker is sendSticker and
+                # a GIF is sendAnimation — both used to fall through
+                # to sendDocument and arrive as dull file attachments.
+                "sticker": "sendSticker",
+                "animation": "sendAnimation",
+                "gif": "sendAnimation",
             }.get(media.kind, "sendDocument")
         field = {"sendPhoto": "photo", "sendVideo": "video",
-                 "sendVoice": "voice", "sendAudio": "audio"}.get(method, "document")
+                 "sendVoice": "voice", "sendAudio": "audio",
+                 "sendSticker": "sticker",
+                 "sendAnimation": "animation"}.get(method, "document")
+        # A ref carrying a platform file_id re-sends BY HANDLE —
+        # the expression library's cache means a GIF uploads once
+        # and is re-sent by id forever after (§21).
+        held_id = str(getattr(media, "file_id", "") or "")
+        if held_id:
+            try:
+                data: dict[str, Any] = {"chat_id": chat.chat_id,
+                                        field: held_id}
+                if caption and method != "sendSticker":
+                    cap0 = for_platform("telegram-bot").max_caption
+                    data["caption"] = caption if parse_mode \
+                        else caption[:cap0]
+                    if parse_mode in ("HTML", "Markdown", "MarkdownV2"):
+                        data["parse_mode"] = parse_mode
+                result = self._api(method, **data)
+                self.stats["sent"] += 1
+                return SendResult(
+                    ok=True, platform=self.name,
+                    message_id=str(result.get("message_id", "")),
+                    media_file_id=_sent_file_id(result) or held_id,
+                    seconds=time.perf_counter() - started)
+            except Exception as exc:  # noqa: BLE001
+                self.stats["send_errors"] += 1
+                return SendResult(ok=False, platform=self.name,
+                                  error=str(exc),
+                                  seconds=time.perf_counter() - started)
+        if not path.is_file():
+            return SendResult(ok=False, platform=self.name,
+                              error=f"media file not found: {media.path}")
         cap = for_platform("telegram-bot").max_caption
         try:
-            data: dict[str, Any] = {"chat_id": chat.chat_id}
-            if caption:
+            data = {"chat_id": chat.chat_id}
+            if caption and method != "sendSticker":
                 # A caption carrying a parse mode arrives pre-fitted
                 # by the gateway (F7): it is sent whole — truncating
                 # HTML mid-tag would break the entity parse.  Plain
@@ -3718,10 +3917,33 @@ class TelegramBotAdapter(ChatAdapter):
             self.stats["sent"] += 1
             return SendResult(ok=True, platform=self.name,
                               message_id=str(result.get("message_id", "")),
+                              media_file_id=_sent_file_id(result),
                               seconds=time.perf_counter() - started)
         except Exception as exc:  # noqa: BLE001
             self.stats["send_errors"] += 1
             return SendResult(ok=False, platform=self.name, error=str(exc),
+                              seconds=time.perf_counter() - started)
+
+    def react(self, chat: ChatRef, message_id: str, emoji: str) -> SendResult:
+        """Place a reaction via ``setMessageReaction`` (§22). The
+        Bot API only allows its standard reaction set for bots —
+        ``expression.reaction_allowed`` is the pre-check; an
+        emoji outside it comes back as Telegram's own error."""
+        started = time.perf_counter()
+        try:
+            reaction = json.dumps(
+                [{"type": "emoji", "emoji": str(emoji)}],
+                ensure_ascii=False)
+            self._api("setMessageReaction", chat_id=int(chat.chat_id),
+                      message_id=int(message_id), reaction=reaction)
+            self.stats["sent"] += 1
+            return SendResult(ok=True, platform=self.name,
+                              message_id=str(message_id),
+                              seconds=time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001
+            self.stats["send_errors"] += 1
+            return SendResult(ok=False, platform=self.name,
+                              error=str(exc),
                               seconds=time.perf_counter() - started)
 
     def edit_media(self, chat: ChatRef, message_id: str, media: MediaRef,

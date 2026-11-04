@@ -38,6 +38,7 @@ from .runtime_memory import RuntimeMemoryMixin
 from .runtime_games import RuntimeGamesMixin
 from .runtime_provision import RuntimeProvisionMixin
 from .runtime_group import RuntimeGroupMixin
+from .runtime_expression import RuntimeExpressionMixin
 from .runtime_system import RuntimeSystemMixin
 from .runtime_media import RuntimeMediaMixin
 from .runtime_intel import RuntimeIntelMixin
@@ -184,6 +185,7 @@ class PartnerRuntime(
     RuntimeSystemMixin,
     RuntimeProvisionMixin,
     RuntimeGroupMixin,
+    RuntimeExpressionMixin,
     RuntimeMediaMixin,
     RuntimeIntelMixin,
     RuntimeSearchMixin,
@@ -4681,6 +4683,21 @@ class PartnerRuntime(
             return self._control_news(command.tail or arg)
         if kind in {"translate", "tl"}:
             return self._control_translate(command.tail or "", message)
+        # ── media expression (§21 + §22) ─────────────────────────
+        if kind == "steal":
+            return self._control_steal(command.tail or "", message)
+        if kind == "sticker":
+            return self._control_sticker(command.tail or "", message)
+        if kind == "convert":
+            return self._control_convert(command.tail or "", message)
+        if kind == "gif":
+            return self._control_gif(command.tail or "", message)
+        if kind == "emoji":
+            return self._control_emoji(command.tail or "", message)
+        if kind == "customemoji":
+            return self._control_customemoji(command.tail or "", message)
+        if kind == "react":
+            return self._control_react(command.tail or "", message)
         if kind == "pulse":
             return self._control_pulse(command.tail or arg)
         if kind == "code":

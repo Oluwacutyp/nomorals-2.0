@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .expression import button_label
+
 #: Platforms whose adapters render inline keyboards (gateway
 #: contract in social/chat/base.py).  Everything else gets the
 #: text-command form of every affordance.
@@ -37,15 +39,19 @@ def undo_command(notice_id: str) -> str:
     return f"undonotice {notice_id}"
 
 
-def notice_keyboard(record: dict[str, Any]) -> list | None:
+def notice_keyboard(record: dict[str, Any],
+                    settings: dict[str, Any] | None = None) -> list | None:
     """The buttons under a notice, from the record itself: an
     undo button while the action stands; nothing once undone
-    (the edited text carries the outcome instead)."""
+    (the edited text carries the outcome instead). The label
+    comes from the one button vocabulary (§21) — the record's
+    own presentation settings may override it."""
     if not record or record.get("undone"):
         return None
     if (record.get("extra") or {}).get("reversible") is False:
         return None
-    return [[("↩️ Undo", undo_command(str(record.get("id"))))]]
+    return [[(button_label("undo", "Undo", settings=settings),
+              undo_command(str(record.get("id"))))]]
 
 
 def notice_text(record: dict[str, Any], platform: str) -> str:
