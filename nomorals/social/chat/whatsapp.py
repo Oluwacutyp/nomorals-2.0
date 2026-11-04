@@ -596,6 +596,51 @@ class WhatsAppAdapter(ChatAdapter):
             # The sender IS the owner — flag it for group recognition.
             msg.meta["from_owner"] = True
             self._deliver(handler, msg)
+        elif kind == "status_post":
+            # Personal surface feed (§15): a status post this
+            # account can see, media already downloaded by the
+            # bridge.  Delivered as a service message — the runtime's
+            # personal-surface hook saves it (per-account toggle) and
+            # consumes it; it is never conversation, never a reply
+            # target.  An older bridge never sends these, and then
+            # the status saver simply has no feed — nothing here
+            # invents one.
+            frm = obj.get("from") or {}
+            poster_id = str(frm.get("id") or "")
+            if not poster_id:
+                return
+            ts = obj.get("ts") or 0
+            try:
+                ts = float(ts) / 1000.0
+            except (TypeError, ValueError):
+                ts = time.time()
+            msg = ChatMessage(
+                chat=ChatRef(
+                    platform=self.name,
+                    chat_id="status@broadcast",
+                    kind=ChatKind.DM,
+                    title="status",
+                    peer=poster_id,
+                ),
+                incoming=True,
+                text=str(obj.get("text") or ""),
+                sender=str(frm.get("name") or ""),
+                sender_id=poster_id,
+                message_id=str(obj.get("id") or ""),
+                media=[
+                    MediaRef(path=str(m.get("path") or ""),
+                             mime=str(m.get("mime") or ""),
+                             kind=str(m.get("kind") or "file"),
+                             is_voice=str(m.get("kind") or "") == "voice")
+                    for m in (obj.get("media") or [])
+                    if m.get("path")
+                ],
+                ts=ts,
+            )
+            msg.meta["service"] = "status_post"
+            if obj.get("view_once"):
+                msg.meta["view_once"] = True
+            self._deliver(handler, msg)
         elif kind in ("revoke", "edit"):
             # Evidentiary feeds (defense brief §2.1), pass-through:
             # recognized IF the bridge sends them (Baileys emits
@@ -685,6 +730,11 @@ class WhatsAppAdapter(ChatAdapter):
                     ts=ts,
                 )
             wa_msg.meta["envelope"] = _wa_envelope(obj, wa_msg.text)
+            if obj.get("view_once"):
+                # The bridge unwrapped a view-once payload (§15):
+                # the personal surface preserves the downloaded
+                # media before WhatsApp vanishes it.
+                wa_msg.meta["view_once"] = True
             self._deliver(handler, wa_msg)
 
     # ── lifecycle ────────────────────────────────────────────────────────────

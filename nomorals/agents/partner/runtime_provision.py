@@ -501,6 +501,147 @@ class RuntimeProvisionMixin:
                    if r.identity == digits or r.id.endswith(ref)]
         return matches[0] if len(matches) == 1 else None
 
+    def _pairing_personal(self) -> dict[str, Any]:
+        """The §15 slices 2–3 service bundle: registry + bridge
+        supervisor (slice 1), the Telegram pairer, the personal
+        surfaces organ, and the supervision sweep — built once,
+        lazily, over the runtime workspace."""
+        svc = getattr(self, "_pair_personal_svc", None)
+        if svc is not None:
+            return svc
+        from pathlib import Path
+
+        from ...social.pairing import PoolSupervision
+        from ...social.personal import PersonalSurfaces, PersonalVault
+        from ...social.telegram_pairing import TelegramPairer
+
+        sup = self._pairing_supervisor()
+        ws = Path(getattr(self.context.settings, "workspace_dir", "."))
+        chat = getattr(self.context.settings, "chat", None)
+        pairer = TelegramPairer(
+            sup.registry,
+            sessions_root=ws / "data" / "telegram_sessions",
+            api_id=getattr(chat, "telegram_api_id", ""),
+            api_hash=getattr(chat, "telegram_api_hash", ""))
+
+        def _story_fetcher(rec: Any) -> list[dict[str, Any]]:
+            adapter = self._adapter_for("telegram")
+            fetch = getattr(adapter, "fetch_active_stories", None)
+            if not callable(fetch):
+                return []  # adapter exposes no story feed — absence
+            return list(fetch() or [])
+
+        personal = PersonalSurfaces(
+            sup.registry,
+            PersonalVault(ws / "data" / "social" / "personal"),
+            story_fetcher=_story_fetcher)
+        svc = {
+            "supervisor": sup, "registry": sup.registry,
+            "pairer": pairer, "personal": personal,
+            "supervision": PoolSupervision(sup.registry, sup, pairer),
+            "last_cycle": 0.0,
+        }
+        self._pair_personal_svc = svc
+        return svc
+
+    def _personal_surface_turn(self, message: Any) -> bool:
+        """Observe one inbound message for the §15 personal surfaces.
+
+        Returns True only when the message is FULLY consumed (a
+        status post, a DM delete service event — neither is
+        conversation).  Ordinary DMs are observed (DM cache,
+        view-once preservation) and flow on to the conversation
+        pipeline untouched.  Only the owner's personal-account
+        platforms feed this: whatsapp + the telegram userbot —
+        never the gated bot surface, never groups (group antidelete
+        evidence is the defense organ's, and this never duplicates
+        it), never channels."""
+        platform = str(getattr(message.chat, "platform", "") or "")
+        if platform not in ("whatsapp", "telegram"):
+            return False
+        meta = message.meta or {}
+        service = str(meta.get("service") or "")
+        kind = str(getattr(message.chat, "kind", "") or "")
+        svc = self._pairing_personal()
+        personal = svc["personal"]
+        # Throttled housekeeping on the same beat: the supervision
+        # sweep (dropped sessions flip honestly, dead bridges
+        # relaunch, stale pairing flows expire) and the Telegram
+        # story sweep.  Message-driven, like every other cycle in
+        # this runtime — no new daemon.
+        now = time.time()
+        if now - float(svc.get("last_cycle") or 0.0) > 60.0:
+            svc["last_cycle"] = now
+            try:
+                svc["supervision"].sweep()
+            except Exception as e:  # noqa: BLE001 - housekeeping
+                record_failure(           # never breaks intake
+                    "runtime_provision.supervision_sweep", e)
+            try:
+                personal.cycle_stories("telegram")
+            except Exception as e:  # noqa: BLE001
+                record_failure(
+                    "runtime_provision.story_cycle", e)
+        chat_key = str(getattr(message.chat, "key", "") or "")
+        counterpart = str(getattr(message.chat, "peer", "")
+                          or getattr(message, "sender_id", "") or "")
+        media = [{"path": str(m.path or ""), "kind": str(m.kind or "")}
+                 for m in (getattr(message, "media", None) or [])
+                 if getattr(m, "path", "")]
+        ts = float(getattr(message, "ts", 0.0) or now)
+        if service == "status_post":
+            personal.observe_status_post(
+                platform, poster_id=str(
+                    getattr(message, "sender_id", "") or counterpart),
+                poster_name=str(getattr(message, "sender", "") or ""),
+                text=str(getattr(message, "text", "") or ""),
+                media=media,
+                source_id=str(getattr(message, "message_id", "")
+                              or ""),
+                ts=ts)
+            return True
+        if service == "delete":
+            if kind != "dm":
+                return False  # group deletes belong to the surface
+            personal.observe_delete(
+                platform, chat_key=chat_key,
+                counterpart_id=counterpart,
+                deleted_ids=[str(d) for d in
+                             (meta.get("deleted_ids") or [])],
+                ts=ts)
+            return True
+        if kind != "dm":
+            return False
+        if meta.get("edited"):
+            personal.observe_edit(
+                platform, chat_key=chat_key,
+                counterpart_id=counterpart,
+                message_id=str(getattr(message, "message_id", "")
+                               or ""),
+                new_text=str(getattr(message, "text", "") or ""),
+                sender_id=str(getattr(message, "sender_id", "")
+                              or ""),
+                sender_name=str(getattr(message, "sender", "") or ""),
+                ts=ts)
+            return False
+        if getattr(message, "incoming", False) \
+                or meta.get("own_message"):
+            personal.observe_message(
+                platform, chat_key=chat_key,
+                counterpart_id=counterpart,
+                sender_id=str(getattr(message, "sender_id", "")
+                              or ""),
+                sender_name=str(getattr(message, "sender", "") or ""),
+                message_id=str(getattr(message, "message_id", "")
+                               or ""),
+                text=str(getattr(message, "text", "") or ""),
+                media=media,
+                view_once=bool(meta.get("view_once")),
+                ttl_seconds=int(meta.get("ttl_seconds") or 0),
+                incoming=bool(getattr(message, "incoming", False)),
+                ts=ts)
+        return False
+
     def _control_pair(self, tail: str, *, chat_key: str = "",
                       message: Any = None) -> str:
         """/pair — the pairing-with-code account pool (§15).
@@ -509,9 +650,24 @@ class RuntimeProvisionMixin:
         /pair whatsapp <number> [label]    pair a WhatsApp account:
                                            returns the 8-char code to
                                            type into Linked Devices
+        /pair telegram <number> [label]    pair a Telegram account:
+                                           Telegram sends IT a login
+                                           code; answer with tgcode
+        /pair tgcode <id> <code>           complete a Telegram pairing
+        /pair tgpass <id> <password>       its 2FA password, when asked
         /pair code <id>                    re-show a live code
         /pair start|stop|restart <id>      supervise that session
         /pair remove <id>                  forget the account
+        /pair use <id>                     name a platform's default
+                                           account (routing, §15)
+        /pair route [platform]             show routing resolution
+        /pair toggle <id> <name> <on|off>  personal surfaces per
+                                           account: status_saving |
+                                           view_once | antidelete
+        /pair saved [id]                   saved statuses/view-once
+        /pair recovered [id]               DM delete/edit recoveries
+        /pair page                         the pairing page (same
+                                           state, in a browser)
 
         Owner-only (not a public command): pairing an account in is
         the owner's explicit act, and the pool is his accounts.
@@ -527,13 +683,36 @@ class RuntimeProvisionMixin:
             counts = sup.counts()
             lines = [f"📟 paired accounts — Registered: "
                      f"{counts['registered']} · Connected: "
-                     f"{counts['connected']}"]
+                     f"{counts['connected']} · Dropped: "
+                     f"{counts.get('dropped', 0)}"]
+            try:
+                pairer = self._pairing_personal()["pairer"]
+            except Exception:  # noqa: BLE001 - summary never dies
+                pairer = None       # on the Telegram bundle
             for row in sup.status_all():
                 label = f" “{row['label']}”" if row.get("label") else ""
+                extra = ""
+                rec = sup.registry.get(row["id"])
+                if rec is not None:
+                    if rec.primary:
+                        extra += " · primary"
+                    on = [name for name in
+                          ("status_saving", "view_once", "antidelete")
+                          if rec.toggle(name)]
+                    if on:
+                        extra += f" · surfaces: {', '.join(on)}"
+                if pairer is not None and row["platform"] == "telegram":
+                    pending = pairer.pending(row["id"])
+                    if pending:
+                        extra += (f" · ⏳ login code sent "
+                                  f"({pending['state']}, "
+                                  f"{int(pending['expires_in_s'])}s "
+                                  "left)")
                 lines.append(
                     f"  {row['id']}{label} — {row['status']}"
-                    f" (bridge {row['process']})")
-            lines.append("pair one: /pair whatsapp <number> [label]")
+                    f" (bridge {row['process']}){extra}")
+            lines.append("pair one: /pair whatsapp <number> [label] "
+                         "· /pair telegram <number> [label]")
             return "\n".join(lines)
         sub = parts[0].lower()
         if sub == "whatsapp":
@@ -575,10 +754,84 @@ class RuntimeProvisionMixin:
             code, age = got
             return (f"📟 {rec.id}: **{code}** "
                     f"({int(age)}s old — type it into Linked Devices)")
-        if sub in ("start", "stop", "restart", "remove"):
-            rec = self._pair_find(sup, parts[1] if len(parts) > 1 else "")
+        if sub == "telegram":
+            if len(parts) < 2:
+                return ("usage: /pair telegram <number> [label] — the "
+                        "number in international format; Telegram "
+                        "sends that account a login code, and you "
+                        "answer it here with /pair tgcode")
+            label = " ".join(parts[2:])
+            try:
+                svc = self._pairing_personal()
+                rec = svc["pairer"].start(parts[1], label)
+            except Exception as exc:  # noqa: BLE001 - the flow's own
+                return f"⚠️ {exc}"     # words are the honest answer
+            return (f"📟 login code sent to the Telegram account "
+                    f"+{rec.identity} ({rec.id}). When the code "
+                    f"arrives (Telegram service message or SMS), "
+                    f"send it back:\n/pair tgcode {rec.id} <code>\n"
+                    "The flow lives ten minutes; the code itself is "
+                    "never stored anywhere.")
+        if sub in ("tgcode", "tgpass"):
+            rec = self._pair_find(sup, parts[1] if len(parts) > 1
+                                  else "")
             if rec is None:
                 return "which account? /pair lists them."
+            if len(parts) < 3:
+                return (f"usage: /pair {sub} {rec.id} "
+                        f"<{'code' if sub == 'tgcode' else 'password'}>")
+            try:
+                svc = self._pairing_personal()
+                if sub == "tgcode":
+                    out = svc["pairer"].confirm_code(
+                        rec.id, parts[2])
+                else:
+                    # The 2FA password rides this one message into
+                    # Telethon's sign-in and nowhere else — never
+                    # stored, never logged, never journaled.
+                    out = svc["pairer"].confirm_password(
+                        rec.id, " ".join(parts[2:]))
+            except Exception as exc:  # noqa: BLE001
+                return f"⚠️ {exc}"
+            if out.get("status") == "password_needed":
+                return (f"🔐 {rec.id} has two-factor auth on. Send "
+                        f"the password:\n/pair tgpass {rec.id} "
+                        "<password>\nIt goes straight to the sign-in "
+                        "and is not kept.")
+            return (f"✅ {rec.id} is linked — its session file is "
+                    "saved under its own name and the account is a "
+                    "live member of the pool.")
+        if sub in ("start", "stop", "restart", "remove"):
+            rec = self._pair_find(sup, parts[1] if len(parts) > 1
+                                  else "")
+            if rec is None:
+                return "which account? /pair lists them."
+            if rec.platform == "telegram":
+                if sub == "remove":
+                    sup.remove(rec.id)
+                    return (f"🗑️ {rec.id} removed from the pool. "
+                            "Its session file stays on disk; the "
+                            "number can be paired again any time.")
+                if sub == "stop":
+                    sup.registry.set_status(rec.id, "stopped")
+                    return (f"⏸️ {rec.id} marked stopped — Devon "
+                            "will not treat it as connected. Its "
+                            "session file is untouched.")
+                # start/restart on Telegram = an authorization probe:
+                # there is no process to launch; the session file
+                # either still authorizes or it does not.
+                try:
+                    state = self._pairing_personal()["pairer"].probe(
+                        rec)
+                except Exception as exc:  # noqa: BLE001
+                    return f"⚠️ probe failed for {rec.id}: {exc}"
+                if state == "linked":
+                    sup.registry.set_status(rec.id, "linked")
+                    return f"▶️ {rec.id} — session authorized, live."
+                sup.registry.set_status(rec.id, "down")
+                return (f"⚠️ {rec.id} — the saved session no longer "
+                        "authorizes. Re-pair it: /pair telegram "
+                        f"{rec.identity}")
             if sub == "start":
                 sup.start(rec.id)
                 return f"▶️ bridge starting for {rec.id}."
@@ -593,8 +846,105 @@ class RuntimeProvisionMixin:
             return (f"🗑️ {rec.id} removed from the pool. Its saved "
                     "session stays on disk; the number can be paired "
                     "again any time.")
-        return ("usage: /pair [whatsapp <number> [label]|code <id>|"
-                "start|stop|restart|remove <id>]")
+        if sub == "use":
+            rec = self._pair_find(sup, parts[1] if len(parts) > 1
+                                  else "")
+            if rec is None:
+                return "which account? /pair lists them."
+            sup.registry.set_primary(rec.id)
+            return (f"🎯 {rec.id} is now the default {rec.platform} "
+                    "account — surfaces that act as you on "
+                    f"{rec.platform} use it unless they name another.")
+        if sub == "route":
+            from ...social.pairing import resolve_account
+
+            platforms = [parts[1].lower()] if len(parts) > 1 else \
+                ["whatsapp", "telegram"]
+            lines = []
+            for platform in platforms:
+                rec = resolve_account(sup.registry, platform)
+                if rec is None:
+                    lines.append(f"{platform}: no paired account — "
+                                 "surfaces must say so, never borrow "
+                                 "another platform's session")
+                else:
+                    why = ("named primary" if rec.primary else
+                           "first connected" if rec.status == "linked"
+                           else "first registered")
+                    lines.append(f"{platform}: {rec.id} ({why}, "
+                                 f"status {rec.status})")
+            return "\n".join(lines)
+        if sub == "toggle":
+            if len(parts) < 4:
+                return ("usage: /pair toggle <id> <status_saving|"
+                        "view_once|antidelete> <on|off>")
+            name = parts[2].lower()
+            on = parts[3].lower() in ("on", "true", "yes", "1")
+            try:
+                svc = self._pairing_personal()
+                rec = self._pair_find(sup, parts[1])
+                if rec is None and parts[1].lower().endswith(
+                        ":primary"):
+                    rec = svc["personal"].ensure_primary(
+                        parts[1].split(":")[0])
+                if rec is None:
+                    return "which account? /pair lists them."
+                svc["personal"].set_toggle(rec.id, name, on)
+            except ValueError as exc:
+                return f"⚠️ {exc}"
+            return (f"{'✅' if on else '⏸️'} {rec.id}: {name} "
+                    f"{'on' if on else 'off'}.")
+        if sub in ("saved", "recovered"):
+            from datetime import datetime
+
+            svc = self._pairing_personal()
+            vault = svc["personal"].vault
+            rec = self._pair_find(sup, parts[1]) if len(parts) > 1 \
+                else None
+            if sub == "saved":
+                rows = vault.saved_entries(rec.id if rec else "")
+            else:
+                rows = vault.recoveries(rec.id if rec else "")
+            if not rows:
+                what = "saved" if sub == "saved" else "recovered"
+                scope = f" for {rec.id}" if rec else ""
+                return (f"nothing {what}{scope} yet — saves land "
+                        "when a per-account toggle is on (/pair "
+                        "toggle) and the surface sees traffic.")
+            lines = []
+            for row in rows[-15:]:
+                when = datetime.fromtimestamp(
+                    float(row.get("ts") or 0)).strftime("%d %b %H:%M")
+                if sub == "saved":
+                    who = row.get("poster_name") or \
+                        row.get("counterpart_id") or "?"
+                    lines.append(
+                        f"  {when} · {row.get('kind')} · {who} · "
+                        f"{row.get('media_kind') or 'text'}"
+                        f"{' · ' + str(row.get('path')).split('/')[-1] if row.get('path') else ''}")
+                else:
+                    mark = "🎯" if row.get("recovered") else "∅"
+                    orig = str(row.get("original_text") or "")
+                    if len(orig) > 120:
+                        orig = orig[:117] + "…"
+                    lines.append(
+                        f"  {when} · {mark} {row.get('kind')} · "
+                        f"{row.get('chat_key', '')} · “{orig}”")
+            head = (f"{'💾 saved' if sub == 'saved' else '🕵️ recovered'}"
+                    f"{f' — {rec.id}' if rec else ''} "
+                    f"(latest {len(lines)} of {len(rows)}):")
+            return "\n".join([head] + lines)
+        if sub == "page":
+            return ("📟 the pairing page renders this same pool for "
+                    "a browser: GET /pair on Devon's API, with your "
+                    "owner token — it shows live pairing codes, so "
+                    "nothing less than the owner token opens it. "
+                    "Approval still only ever happens on the phone.")
+        return ("usage: /pair [whatsapp <number> [label]|telegram "
+                "<number> [label]|tgcode <id> <code>|tgpass <id> "
+                "<password>|code <id>|start|stop|restart|remove <id>|"
+                "use <id>|route [platform]|toggle <id> <name> "
+                "<on|off>|saved [id]|recovered [id]|page]")
 
     def _control_browser_watch(self, tail: str, *, chat_key: str = "",
                                message: Any = None) -> str:

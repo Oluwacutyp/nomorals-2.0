@@ -49,6 +49,17 @@ def account_id_for(platform: str, identity: str) -> str:
     return f"{platform}:{slug}"
 
 
+#: Personal-surface toggles every account carries (§15 slices 2–3).
+#: All default OFF — the owner enables each surface per account;
+#: Devon never starts saving a man's statuses or shadowing his DMs
+#: because a default said so.
+PERSONAL_TOGGLES = ("status_saving", "view_once", "antidelete")
+
+
+def default_toggles() -> dict[str, bool]:
+    return {name: False for name in PERSONAL_TOGGLES}
+
+
 @dataclass
 class AccountRecord:
     id: str
@@ -60,6 +71,14 @@ class AccountRecord:
     status: str = "registered"   # registered|pairing|linked|down|stopped
     created_at: float = 0.0
     last_seen: float = 0.0
+    # ── slices 2–3 ──
+    session_path: str = ""   # TG: Telethon session file stem (no suffix)
+    remote_id: str = ""      # TG: numeric user id once linked
+    primary: bool = False    # routing: the platform's named default
+    toggles: dict[str, bool] = field(default_factory=default_toggles)
+
+    def toggle(self, name: str) -> bool:
+        return bool((self.toggles or {}).get(name, False))
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -142,6 +161,68 @@ class PairingRegistry:
             rec.status = status
             rec.last_seen = time.time()
             self._save()
+
+    def accounts_for(self, platform: str) -> list[AccountRecord]:
+        with self._lock:
+            return [r for r in self.all() if r.platform == platform]
+
+    def set_toggles(self, account_id: str, **kw: bool) -> AccountRecord:
+        """Flip personal-surface toggles on one account.  Unknown
+        toggle names raise — a typo must never read as success."""
+        unknown = set(kw) - set(PERSONAL_TOGGLES)
+        if unknown:
+            raise ValueError(
+                f"unknown personal toggle(s): {', '.join(sorted(unknown))} "
+                f"— known: {', '.join(PERSONAL_TOGGLES)}")
+        with self._lock:
+            rec = self._accounts.get(account_id)
+            if rec is None:
+                raise ValueError(f"no paired account {account_id}")
+            toggles = default_toggles()
+            toggles.update(rec.toggles or {})
+            toggles.update({k: bool(v) for k, v in kw.items()})
+            rec.toggles = toggles
+            self._save()
+            return rec
+
+    def set_primary(self, account_id: str) -> AccountRecord:
+        """Name one account its platform's routing default.  Exactly
+        one primary per platform — setting a new one clears the old."""
+        with self._lock:
+            rec = self._accounts.get(account_id)
+            if rec is None:
+                raise ValueError(f"no paired account {account_id}")
+            for other in self._accounts.values():
+                if other.platform == rec.platform:
+                    other.primary = other.id == rec.id
+            self._save()
+            return rec
+
+
+def resolve_account(registry: PairingRegistry, platform: str,
+                    account_id: str = "") -> AccountRecord | None:
+    """The routing primitive (§15 slice 3): which account speaks for
+    a platform.  An explicit id wins (and must belong to the
+    platform); otherwise the account the owner named primary;
+    otherwise the earliest-created LINKED account (first-connected);
+    otherwise the earliest-registered account; otherwise None — the
+    platform has no paired account and callers must say so, never
+    silently borrow another platform's session."""
+    rows = registry.accounts_for(platform)
+    if not rows:
+        return None
+    if account_id:
+        for rec in rows:
+            if rec.id == account_id:
+                return rec
+        return None
+    for rec in rows:
+        if rec.primary:
+            return rec
+    for rec in rows:
+        if rec.status == "linked":
+            return rec
+    return rows[0]
 
 
 @dataclass
@@ -244,6 +325,10 @@ class BridgeSupervisor:
             return live.proc.poll() is None
         except Exception:  # noqa: BLE001
             return False
+
+    def is_running(self, account_id: str) -> bool:
+        """Public view of the process table (supervision reads it)."""
+        return self._alive(account_id)
 
     # ── pairing ─────────────────────────────────────────────────────
     def pair_whatsapp(self, number: str, label: str = "") -> AccountRecord:
@@ -359,7 +444,128 @@ class BridgeSupervisor:
             "registered": len(rows),
             "connected": sum(1 for r in rows
                              if r.get("status") == "linked"),
+            # dropped: known to the registry, believed linked once,
+            # currently unreachable — the supervision sweep's quarry.
+            "dropped": sum(1 for r in rows
+                           if r.get("status") == "down"),
         }
+
+
+class PoolSupervision:
+    """The supervision sweep (§15): one pass over the registry that
+    flips account states to what is TRUE right now.
+
+    - WhatsApp: an account believed linked whose bridge process is
+      gone gets probed over the bridge protocol (a bridge Devon did
+      not spawn — e.g. surviving a Devon restart — still answers).
+      Probe says down → the record flips to ``down`` (dropped) and
+      the bridge is relaunched through the supervisor's own start —
+      the bridge's internal reconnect policy then owns the session;
+      the sweep never writes "linked" itself, the next probe earns
+      it back.  Relaunches are throttled per account so a bridge
+      that keeps dying is not fork-bombed.
+    - Telegram: a linked account is probed through the pairer's
+      session prober (throttled — an MTProto authorization check is
+      a network round-trip).  Unauthorized → ``down``.  A down
+      Telegram account is NEVER auto-relaunched: re-login needs a
+      fresh code from the owner, and pretending otherwise would be
+      a fake "connected".
+    - Pairing flows that outlived their TTL are expired by the
+      pairer as part of the same pass.
+
+    ``pairer`` is duck-typed (probe / expire_flows) so this module
+    never imports the Telethon layer.
+    """
+
+    def __init__(self, registry: PairingRegistry,
+                 supervisor: "BridgeSupervisor | None" = None,
+                 pairer: Any = None, *,
+                 clock: Callable[[], float] = time.time,
+                 tg_probe_interval: float = 300.0,
+                 relaunch_interval: float = 300.0) -> None:
+        self.registry = registry
+        self.supervisor = supervisor
+        self.pairer = pairer
+        self._clock = clock
+        self.tg_probe_interval = float(tg_probe_interval)
+        self.relaunch_interval = float(relaunch_interval)
+        self._tg_probed_at: dict[str, float] = {}
+        self._relaunched_at: dict[str, float] = {}
+
+    def sweep(self) -> list[dict[str, Any]]:
+        """Run one pass; returns the list of state changes made."""
+        changes: list[dict[str, Any]] = []
+        if self.pairer is not None:
+            try:
+                for account_id in self.pairer.expire_flows():
+                    changes.append({"account": account_id,
+                                    "change": "pairing flow expired"})
+            except Exception:  # noqa: BLE001 - expiry is best-effort
+                pass
+        for rec in self.registry.all():
+            if rec.platform == "whatsapp" and self.supervisor is not None:
+                change = self._sweep_whatsapp(rec)
+            elif rec.platform == "telegram" and self.pairer is not None:
+                change = self._sweep_telegram(rec)
+            else:
+                change = None
+            if change:
+                changes.append(change)
+        return changes
+
+    def _sweep_whatsapp(self, rec: AccountRecord) -> dict[str, Any] | None:
+        sup = self.supervisor
+        assert sup is not None
+        if rec.status == "stopped":
+            return None
+        if sup.is_running(rec.id):
+            return None  # the bridge's own policy owns a live process
+        probed = sup.probe(rec)
+        if probed == "linked":
+            if rec.status != "linked":
+                self.registry.set_status(rec.id, "linked")
+                return {"account": rec.id,
+                        "change": "probe found the bridge linked"}
+            return None
+        change = None
+        if rec.status != "down":
+            self.registry.set_status(rec.id, "down")
+            change = {"account": rec.id,
+                      "change": f"{rec.status} → down (bridge gone)"}
+        now = self._clock()
+        last = self._relaunched_at.get(rec.id, 0.0)
+        if now - last >= self.relaunch_interval:
+            self._relaunched_at[rec.id] = now
+            try:
+                sup.start(rec.id)
+                change = {"account": rec.id,
+                          "change": "dropped — bridge relaunched; "
+                                    "its reconnect policy owns the "
+                                    "session until a probe earns "
+                                    "'linked' back"}
+            except Exception as exc:  # noqa: BLE001
+                change = {"account": rec.id,
+                          "change": f"relaunch failed: {exc}"}
+        return change
+
+    def _sweep_telegram(self, rec: AccountRecord) -> dict[str, Any] | None:
+        if rec.status != "linked":
+            return None
+        now = self._clock()
+        last = self._tg_probed_at.get(rec.id, 0.0)
+        if now - last < self.tg_probe_interval:
+            return None
+        self._tg_probed_at[rec.id] = now
+        try:
+            state = self.pairer.probe(rec)
+        except Exception:  # noqa: BLE001 - a failed probe is not a
+            return None                 # verdict; state stays as-is
+        if state != "linked" and rec.status != "down":
+            self.registry.set_status(rec.id, "down")
+            return {"account": rec.id,
+                    "change": "linked → down (session probe: "
+                              "not authorized)"}
+        return None
 
 
 def default_supervisor(workspace_dir: str | Path) -> BridgeSupervisor:

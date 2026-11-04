@@ -803,6 +803,21 @@ class PartnerRuntime(
             self._harvest_play_downloads(message.chat.key, message.chat)
         except Exception as e:
             record_failure("runtime.PartnerRuntime._process_inner", e)
+        # Personal surfaces (§15 slices 2–3): on the owner's own
+        # WhatsApp / Telegram-userbot accounts, status posts and DM
+        # delete events are consumed here (saved / journaled for the
+        # owner alone — never conversation, never replied to), and
+        # ordinary DMs are observed for the antidelete cache and
+        # view-once preservation before flowing on.  As-him hat: the
+        # §33 system-output gate does not apply — nothing here posts
+        # anything anywhere.
+        try:
+            personal_turn = getattr(self, "_personal_surface_turn", None)
+            if personal_turn is not None and personal_turn(message):
+                return
+        except Exception as e:  # noqa: BLE001 - the personal
+            record_failure(           # surfaces never break intake
+                "runtime.PartnerRuntime._personal_surface_turn", e)
         # Channel posture (owner order, 2026-11-02): a channel is a
         # broadcast surface, not a conversation. Devon never replies in
         # one — no commands, no catalog, no games, no persona chat, not

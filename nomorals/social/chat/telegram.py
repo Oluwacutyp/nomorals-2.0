@@ -846,6 +846,86 @@ class TelegramAdapter(ChatAdapter):
     def entity_cache_stats(self) -> dict[str, Any]:
         """Cache health for the dashboard: hit rate, avg lookup time, etc."""
         return self._input_entity_cache.stats()
+
+    # ── stories (§15 status saving) ──────────────────────────────────
+    def fetch_active_stories(self) -> list[dict[str, Any]]:
+        """Currently-visible stories from this account's peers,
+        media downloaded to the media dir.
+
+        Returns a list of ``{poster_id, poster_name, story_id,
+        path, kind, ts}`` dicts — the feed the personal surface's
+        story cycle saves from.  Any failure (not connected, an
+        MTProto error, a Telethon build without the stories
+        functions) returns []: absence of a feed, honestly, never
+        invented stories."""
+        client = self._client
+        if client is None or self._loop is None:
+            return []
+        try:
+            return self._run_on_loop(
+                self._fetch_stories_async(client), timeout=60.0)
+        except Exception as exc:  # noqa: BLE001 - a story sweep is
+            _log.debug("telegram: story fetch failed: %s", exc)
+            return []                      # best-effort by contract
+
+    async def _fetch_stories_async(self, client: Any) -> list[dict[str, Any]]:
+        from telethon.tl.functions.stories import GetAllStoriesRequest
+        from telethon.utils import get_peer_id
+
+        result = await client(GetAllStoriesRequest(
+            next=False, hidden=False))
+        out: list[dict[str, Any]] = []
+        users = {int(getattr(u, "id", 0) or 0): u
+                 for u in (getattr(result, "users", None) or [])}
+        for peer_stories in (getattr(result, "peer_stories", None)
+                             or []):
+            peer = getattr(peer_stories, "peer", None)
+            try:
+                poster_id = str(get_peer_id(peer))
+            except Exception:  # noqa: BLE001 - unresolvable peer
+                continue                       # → skip its stories
+            user = users.get(int(poster_id) if poster_id.lstrip("-")
+                             .isdigit() else 0)
+            poster_name = ""
+            if user is not None:
+                poster_name = str(
+                    getattr(user, "username", None)
+                    or getattr(user, "first_name", None) or "")
+            for story in (getattr(peer_stories, "stories", None)
+                          or []):
+                media = getattr(story, "media", None)
+                if media is None:
+                    continue  # text-only story: nothing to save
+                story_id = str(getattr(story, "id", "") or "")
+                if not story_id:
+                    continue
+                try:
+                    fname = f"story-{poster_id}-{story_id}"
+                    path = await client.download_media(
+                        media,
+                        file=os.path.join(self.media_dir, fname))
+                except Exception as exc:  # noqa: BLE001
+                    _log.debug("telegram: story media download "
+                               "failed: %s", exc)
+                    continue
+                if not path:
+                    continue
+                date = getattr(story, "date", None)
+                ts = (date.timestamp() if date is not None
+                      else time.time())
+                mime = _mime_for_download(
+                    str(path), str(getattr(
+                        getattr(media, "document", None),
+                        "mime_type", "") or ""))
+                out.append({
+                    "poster_id": poster_id,
+                    "poster_name": poster_name,
+                    "story_id": story_id,
+                    "path": str(path),
+                    "kind": _kind_for_mime(mime),
+                    "ts": ts,
+                })
+        return out
         
         raise ValueError(f"cannot resolve chat_id={chat_id!r}")
 
@@ -980,9 +1060,28 @@ class TelegramAdapter(ChatAdapter):
                     deleted = [str(d) for d in
                                (getattr(event, "deleted_ids", None)
                                 or [])]
-                    if not chat_id.startswith("-") or not deleted:
-                        return  # groups/channels only; a DM
-                        # deletion is not the surface's business
+                    if not deleted or not chat_id:
+                        return  # unattributable deletions journal
+                        # against nothing — skip, never guess a chat
+                    if not chat_id.startswith("-"):
+                        # A DM deletion (§15 personal surface): the
+                        # group sensors never see DMs, but the
+                        # owner's DM antidelete cache does — the
+                        # runtime's personal hook consumes this
+                        # service message and journals the recovery
+                        # for the owner alone.
+                        handler(ChatMessage(
+                            chat=ChatRef(platform=self.name,
+                                         chat_id=chat_id,
+                                         kind=ChatKind.DM,
+                                         title="",
+                                         peer=chat_id),
+                            incoming=True, text="", sender="",
+                            sender_id="",
+                            meta={"service": "delete",
+                                  "deleted_ids": deleted,
+                                  "envelope": None}))
+                        return
                     _log.info("telegram: %d message(s) deleted in "
                               "%s", len(deleted), chat_id)
                     handler(ChatMessage(
@@ -1487,6 +1586,18 @@ class TelegramAdapter(ChatAdapter):
         service_meta["envelope"] = _mtproto_envelope(message, text)
         if getattr(event, "_devon_edited", False):
             service_meta["edited"] = True
+        # Self-destructing media (view-once photos, TTL media in
+        # DMs and secret chats): the media above was downloaded on
+        # arrival, so the file exists NOW — the §15 personal
+        # surface preserves it into the owner's store when its
+        # toggle is on.  Surface the TTL so it can tell.
+        try:
+            _ttl = getattr(getattr(message, "media", None),
+                           "ttl_seconds", None)
+            if _ttl:
+                service_meta["ttl_seconds"] = int(_ttl)
+        except Exception:  # noqa: BLE001 - a stamp, never a failure
+            pass
         handler_msg = ChatMessage(
             chat=ChatRef(
                 platform=self.name,

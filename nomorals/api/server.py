@@ -1313,6 +1313,40 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                     cors=self._cors_origin(),
                 )
                 return
+            if method == "GET" and parsed.path == "/pair":
+                # Devon's pairing page (§15 slice 2): HTML cannot ride
+                # the JSON dispatch (same reason as SSE above), and a
+                # live pairing code is a credential while it lives —
+                # the page rides the sys.config capability, which the
+                # bounded default grant does not carry.
+                try:
+                    _require_capability(principal, Capability.SYS_CONFIG)
+                except CapabilityDenied as exc:
+                    self._send_error(403, str(exc) or "capability denied",
+                                     extra={"kind": "CapabilityDenied"})
+                    return
+                from ..social.pairing_page import \
+                    pairing_page_for_context
+                try:
+                    page = pairing_page_for_context(server.context)
+                except Exception:  # noqa: BLE001 - a broken pool must
+                    _log.exception("pairing page render failed")
+                    self._send_error(503, "pairing page unavailable")
+                    return
+                raw = page.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type",
+                                 "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Referrer-Policy", "no-referrer")
+                request_id = getattr(self, "_request_id", "")
+                if request_id:
+                    self.send_header("X-Request-ID", request_id)
+                self.end_headers()
+                self.wfile.write(raw)
+                return
             if method == "POST" and parsed.path == "/acp" and \
                     "text/event-stream" in \
                     self.headers.get("Accept", "").lower():

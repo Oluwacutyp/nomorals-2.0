@@ -380,6 +380,23 @@ function mediaKindOf(m) {
   return '';
 }
 
+// View-once media arrives wrapped (viewOnceMessage / V2 /
+// V2Extension) or, in the older shape, as a media message carrying
+// viewOnce=true.  Unwrap to the inner message so text/media
+// extraction sees the payload, and report the flag — the personal
+// surface (§15) preserves view-once media before it vanishes, and
+// it can only preserve what the bridge admits it saw.
+function unwrapViewOnce(m) {
+  const msg = m.message || {};
+  const inner = msg.viewOnceMessage?.message
+    || msg.viewOnceMessageV2?.message
+    || msg.viewOnceMessageV2Extension?.message;
+  if (inner) return { msg: { ...m, message: inner }, viewOnce: true };
+  const media = msg.imageMessage || msg.videoMessage;
+  if (media && media.viewOnce) return { msg: m, viewOnce: true };
+  return { msg: m, viewOnce: false };
+}
+
 const EXT_MIME = {
   '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
   '.webp': 'image/webp', '.gif': 'image/gif', '.mp4': 'video/mp4',
@@ -500,7 +517,48 @@ async function connect() {
       try {
         if (!m.message) continue;
         const jid = jidNormalizedUser(m.key.remoteJid || '');
-        if (!jid || jid === 'status@broadcast') continue;
+        if (!jid) continue;
+        const actorId = m.key.participant
+          ? jidNormalizedUser(m.key.participant) : jid;
+        const tsMs = Number(m.messageTimestamp || Date.now() / 1000) * 1000;
+        // Protocol messages are not conversation: a REVOKE (type 0)
+        // is a delete-for-everyone, a MESSAGE_EDIT (type 14) is an
+        // edit.  Broadcast them as the evidentiary feeds the Python
+        // adapter already carries ({type:'revoke'|'edit'}) — group
+        // defense sensors and the DM antidelete surface both read
+        // from these, and neither can see what the bridge drops.
+        const proto = m.message?.protocolMessage;
+        if (proto) {
+          const targetId = proto.key?.id || '';
+          if (targetId && proto.type === 0) {
+            broadcast({ type: 'revoke', id: targetId,
+              chat: { id: jid, kind: kindOf(jid) },
+              from: { id: actorId }, ts: tsMs });
+          } else if (targetId && proto.type === 14) {
+            broadcast({ type: 'edit', id: targetId,
+              chat: { id: jid, kind: kindOf(jid) },
+              from: { id: actorId, name: m.pushName || '' },
+              text: textOf({ ...m, message: proto.editedMessage || {} }),
+              ts: tsMs });
+          }
+          continue;
+        }
+        const unwrapped = unwrapViewOnce(m);
+        const mm = unwrapped.msg;
+        // Status posts: not conversation either — they are the
+        // status-saving surface's feed (§15).  The account's OWN
+        // statuses are skipped (saving a man's own posts back to
+        // him is noise); everyone else's ride out as status_post
+        // events with their media already downloaded.
+        if (jid === 'status@broadcast') {
+          if (m.key.fromMe) continue;
+          const media = await downloadInbound(mm);
+          broadcast({ type: 'status_post', id: m.key.id || '',
+            from: { id: actorId, name: m.pushName || '' },
+            text: textOf(mm), media: media ? [media] : [],
+            view_once: unwrapped.viewOnce, ts: tsMs });
+          continue;
+        }
         // Own outgoing messages (shared-account mode): forward as
         // informational own_message events so the bot can track the
         // owner's replies (double-reply discipline, per-chat profile).
@@ -510,14 +568,15 @@ async function connect() {
             type: 'own_message',
             id: m.key.id || '',
             chat: { id: jid, kind: kindOf(jid), title: chatTitles.get(jid) || '' },
-            text: textOf(m),
-            ts: Number(m.messageTimestamp || Date.now() / 1000) * 1000,
+            text: textOf(mm),
+            view_once: unwrapped.viewOnce,
+            ts: tsMs,
           };
           remember(jid, { ...ownOut, incoming: false, sender: '', key: m.key });
           broadcast(ownOut);
           continue;
         }
-        const senderId = m.key.participant ? jidNormalizedUser(m.key.participant) : jid;
+        const senderId = actorId;
         const kind = kindOf(jid);
         let title = chatTitles.get(jid) || '';
         if (kind === 'group' && !title) {
@@ -529,21 +588,22 @@ async function connect() {
         }
         if (!title) title = m.pushName || senderId.split('@')[0];
         else if (kind === 'dm') chatTitles.set(jid, m.pushName || title);
-        const media = await downloadInbound(m);
+        const media = await downloadInbound(mm);
         // @-mention of this account (groups): drives the brain's
         // should-speak-in-group exactly like Telegram mentions.
-        const mentioned = mentionedJidOf(m).some(
+        const mentioned = mentionedJidOf(mm).some(
           (j) => jidNormalizedUser(String(j)) === meJid);
         const out = {
           type: 'message',
           id: m.key.id || '',
           chat: { id: jid, kind, title },
           from: { id: senderId, name: m.pushName || '' },
-          text: textOf(m),
+          text: textOf(mm),
           media: media ? [media] : [],
-          reply_to: replyToOf(m),
+          reply_to: replyToOf(mm),
           mentioned,
-          ts: Number(m.messageTimestamp || Date.now() / 1000) * 1000,
+          view_once: unwrapped.viewOnce,
+          ts: tsMs,
         };
         if (m.key.id) msgCache.set(m.key.id, m);
         remember(jid, { ...out, incoming: true, sender: m.pushName || '', key: m.key });
