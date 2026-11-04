@@ -762,6 +762,11 @@ class _Live:
     last_error: str = ""
     #: The drain saw this process end (set once, under the lock).
     exited: bool = False
+    #: When this process was launched (supervisor clock) — the
+    #: throttle base for AUTOMATIC relaunches (ensure_running):
+    #: a bridge that died seconds after launch is not fork-looped,
+    #: while one that lived for hours earns an immediate retry.
+    launched_at: float = 0.0
 
 
 class BridgeSupervisor:
@@ -1178,7 +1183,8 @@ class BridgeSupervisor:
                 f"started ({exc}) — bridge program at {program}. "
                 "Nothing was paired; fix the cause and run "
                 "/pair again.") from exc
-        live = _Live(proc=proc, bridge_engine=eng)
+        live = _Live(proc=proc, bridge_engine=eng,
+                     launched_at=time.time())
         # register BEFORE the reader starts: a fast bridge can emit
         # its pairing code immediately, and a code that arrives before
         # the live entry exists would be dropped on the floor.
@@ -1347,6 +1353,84 @@ class BridgeSupervisor:
     def is_running(self, account_id: str) -> bool:
         """Public view of the process table (supervision reads it)."""
         return self._alive(account_id)
+
+    def _port_listening(self, rec: AccountRecord) -> bool:
+        """Something accepts TCP on the record's bridge port.
+
+        A bridge Devon did not spawn — one that survived a Devon
+        restart, or a hand-run bridge — still counts as serving:
+        it is adopted, never double-launched (a second process
+        could not bind the port anyway, and two bridges on one
+        account would fight over the session)."""
+        if not rec.port:
+            return False
+        try:
+            with socket.create_connection(("127.0.0.1", rec.port),
+                                          timeout=1.0):
+                return True
+        except OSError:
+            return False
+
+    def bridge_serving(self, rec: AccountRecord) -> bool:
+        """Is this account's bridge reachable right now — a
+        process this supervisor runs, or anything listening on
+        the record's port?  The truth the honest surfaces read
+        (/platforms, the live-attach reconcile) before anyone
+        claims a WhatsApp surface is up."""
+        return self._alive(rec.id) or self._port_listening(rec)
+
+    def ensure_running(self, account_id: str, *,
+                       relaunch_interval: float = 300.0
+                       ) -> tuple[bool, str]:
+        """Make sure a bridge process serves this account, or
+        say why none can — the AUTOMATIC ensure the surface
+        lifecycle rides (boot reconcile, supervision beats,
+        surface starts).  Owner-explicit starts (``start()``)
+        never pass through here and are never throttled.
+
+        Returns ``(True, "")`` when a bridge serves: already
+        running under this supervisor, listening on the record's
+        port (a survivor — adopted, never double-launched), or
+        launched here through the same ``start()`` every other
+        path uses (per-engine preflight included: the Go binary
+        probe, the node ladder + npm deps).
+
+        Returns ``(False, reason)`` in plain words when none
+        can: the launch blocker verbatim (PairingUnavailable),
+        a stopped account (an owner's stop is never an automatic
+        path's business to undo), or a death still inside its
+        relaunch throttle window — a bridge that died seconds
+        after launch is not fork-looped; its own last line (via
+        pairing_error) is the reason when it left one."""
+        rec = self.registry.get(account_id)
+        if rec is None:
+            return False, f"no paired account {account_id}"
+        if rec.platform != "whatsapp":
+            return False, (f"{account_id} is a {rec.platform} "
+                           "account — it has no WhatsApp bridge")
+        if self._alive(account_id):
+            return True, ""
+        if rec.status == "stopped":
+            return False, (f"{rec.id} is stopped — start it "
+                           f"with /pair start {rec.id}")
+        if not rec.port:
+            return False, (f"{rec.id} has no bridge port "
+                           "recorded — re-pair the account")
+        if self._port_listening(rec):
+            return True, ""
+        with self._lock:
+            live = self._live.get(account_id)
+        if live is not None and relaunch_interval > 0 and \
+                time.time() - live.launched_at < relaunch_interval:
+            reason = self.pairing_error(account_id)
+            return False, reason or (
+                "the bridge process exited and its relaunch is "
+                "throttled — it will be retried shortly")
+        try:
+            self.start(account_id)
+        except PairingUnavailable as exc:
+            return False, str(exc)
+        return True, ""
 
     # ── pairing ─────────────────────────────────────────────────────
     def pair_whatsapp(self, number: str, label: str = "",

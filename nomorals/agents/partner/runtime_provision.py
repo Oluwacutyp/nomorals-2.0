@@ -588,6 +588,27 @@ class RuntimeProvisionMixin:
         except Exception as exc:  # noqa: BLE001
             record_failure("runtime_provision.wa_surface_clear", exc)
 
+    def _wa_bridge_down(self, sup: Any, rec: Any, reason: str) -> str:
+        """The bridge-down verdict for one reconcile pass: the
+        note the caller answers with (also recorded on the
+        account via :meth:`_wa_surface_note`, so /pair shows it),
+        plus ONE failure-ledger entry per EPISODE.  An episode is
+        one (account, reason) signature — beats that keep finding
+        the same dead bridge do not spam the ledger; a recovery
+        (the reconcile clears the signature when the bridge
+        serves again) or a new reason re-arms the recording."""
+        note = f"bridge down — {reason}"
+        sig = f"{rec.id}|{reason}"
+        if getattr(self, "_wa_bridge_down_sig", "") != sig:
+            self._wa_bridge_down_sig = sig
+            record_failure(
+                "runtime_provision.wa_bridge_down",
+                RuntimeError(
+                    f"whatsapp bridge down for {rec.id}: {reason}"))
+            _log.warning("whatsapp surface not attached for %s: %s",
+                         rec.id, note)
+        return self._wa_surface_note(sup, rec.id, note)
+
     def _set_platform_owner_stopped(self, platform: str,
                                     stopped: bool) -> None:
         """Record the owner's start/stop order for a platform in
@@ -616,10 +637,10 @@ class RuntimeProvisionMixin:
         (/pair whatsapp|start|stop|restart|remove|use) and on the
         supervision beat, and keeps exactly one truth: the resolved
         WhatsApp account (the §15 routing primitive: primary → first
-        linked → first registered) whose bridge is live gets an
-        adapter pointed at ITS bridge port, started in the running
-        process via the gateway's own ``start_one`` — the same path
-        /start whatsapp takes; when no account qualifies any more,
+        linked → first registered) whose bridge the supervisor can
+        serve gets an adapter pointed at ITS bridge port, started
+        in the running process via the gateway's own ``start_one``;
+        when no account qualifies any more,
         an adapter this reconcile attached (or adopted — one already
         serving that very bridge) is stopped again.  An adapter
         running for a bridge outside the pool is left alone whenever
@@ -631,8 +652,18 @@ class RuntimeProvisionMixin:
         and /pair stop, cleared by /start, /pair start and a fresh
         pair).  While it stands, the desired state is DOWN no
         matter how live the account looks — any WhatsApp adapter
-        found up is stopped and nothing is ever attached.  Without
+        found up is stopped and nothing is ever attached (and no
+        bridge is ever launched for it).  Without
         this term a manual /stop lasted only until the next beat.
+
+        And the bridge is part of the truth, not an assumption:
+        before any attach, the supervisor ENSURES the account's
+        bridge process (``BridgeSupervisor.ensure_running`` —
+        running, listening on its port, or (re)launched, with a
+        throttled retry for a bridge that dies on launch).  When
+        no bridge can serve, the surface does not attach and does
+        not claim to: an owned adapter is put down and the answer
+        is a bridge-down note (see :meth:`_wa_bridge_down`).
 
         Returns "" on success/no-op, else a plain-words note naming
         why the surface did not come up; the note is ALSO recorded
@@ -657,11 +688,13 @@ class RuntimeProvisionMixin:
                 if gateway.adapters.get("whatsapp") is not None:
                     gateway.stop_one("whatsapp")
                 self._wa_surface_account = ""
+                self._wa_bridge_down_sig = ""
                 return ""
             rec = resolve_account(sup.registry, "whatsapp")
             desired_port = 0
             if rec is not None and rec.port and (
-                    rec.status == "linked" or sup.is_running(rec.id)):
+                    rec.status in ("linked", "down")
+                    or sup.is_running(rec.id)):
                 desired_id = rec.id
                 desired_port = int(rec.port)
             attached = getattr(self, "_wa_surface_account", "") or ""
@@ -674,7 +707,36 @@ class RuntimeProvisionMixin:
                 if attached:
                     gateway.stop_one("whatsapp")
                     self._wa_surface_account = ""
+                self._wa_bridge_down_sig = ""
                 return ""
+            # The bridge itself, before any adapter: a registry
+            # status is a MEMORY of liveness, not liveness — a
+            # persisted "linked" used to qualify an account whose
+            # bridge process did not exist in this session, and
+            # the adapter then sat "live-attached" to a dead port
+            # in an endless reconnect loop (the owner's EC2 boot,
+            # 2026-11-04: attached at 8787, nothing listening, no
+            # launch ever attempted).  The supervisor ENSURES the
+            # process now — running, listening (a survivor is
+            # adopted, never double-launched), or (re)launched
+            # through the same start() /pair uses, throttled
+            # against fork-looping a bridge that dies on launch.
+            serving, bridge_reason = sup.ensure_running(desired_id)
+            if not serving:
+                # Never sit attached to a dead bridge: an adapter
+                # this reconcile owns comes down, the episode is
+                # recorded once, and the answer is the bridge-down
+                # note — on the reply AND on the account record.
+                if attached == desired_id and \
+                        gateway.adapters.get("whatsapp") is not None:
+                    gateway.stop_one("whatsapp")
+                    self._wa_surface_account = ""
+                reason = bridge_reason or sup.pairing_error(
+                    desired_id) or "the bridge process is not running"
+                return self._wa_bridge_down(sup, rec, reason)
+            # A serving bridge ends any bridge-down episode: the
+            # next distinct failure records afresh.
+            self._wa_bridge_down_sig = ""
             if running_live and int(
                     getattr(running, "port", 0) or 0) == desired_port:
                 # Already serving this account's bridge (boot start
@@ -725,6 +787,50 @@ class RuntimeProvisionMixin:
                 except Exception:  # noqa: BLE001 - noting is best-effort
                     pass
             return ""
+
+    def _start_whatsapp_surface(self) -> dict[str, Any] | None:
+        """The /start whatsapp route (see ``PartnerRuntime.
+        start_platform``): the surface's start is the reconcile's
+        start — the resolved account's bridge is part of the
+        surface.  An account the owner stopped at the pool level
+        (registry status "stopped") is first revived through the
+        supervisor — the /pair start act — then the reconcile
+        ensures the bridge and attaches the adapter to it.  The
+        generic gateway start knows none of this: it would start
+        an adapter against the static config endpoint with no
+        bridge behind it.
+
+        Returns the start verdict, or None when no WhatsApp
+        account is paired (the caller's generic start owns that
+        case, exactly as before).  Never raises."""
+        try:
+            from ...social.pairing import PairingUnavailable, \
+                resolve_account
+
+            gateway = getattr(self, "gateway", None)
+            if gateway is None:
+                return None
+            sup = self._pairing_supervisor()
+            rec = resolve_account(sup.registry, "whatsapp")
+            if rec is None:
+                return None
+            if rec.status == "stopped" \
+                    and not sup.is_running(rec.id):
+                try:
+                    sup.start(rec.id)
+                except PairingUnavailable as exc:
+                    return {"ok": False, "error": str(exc)}
+            note = self._sync_whatsapp_surface()
+            if gateway.adapters.get("whatsapp") is not None:
+                return {"ok": True, "platform": "whatsapp"}
+            if note:
+                return {"ok": False, "error": note}
+            return {"ok": False,
+                    "error": "the WhatsApp surface did not start"}
+        except Exception as exc:  # noqa: BLE001 - a broken route
+            record_failure(       # falls back, never breaks /start
+                "runtime_provision.start_whatsapp", exc)
+            return None
 
     def _housekeeping_beat(self) -> None:
         """The throttled §15 housekeeping cycle, drivable by ANY
