@@ -692,6 +692,53 @@ class RuntimeProvisionMixin:
                     pass
             return ""
 
+    def _housekeeping_beat(self) -> None:
+        """The throttled §15 housekeeping cycle, drivable by ANY
+        inbound message.
+
+        One beat, three jobs: the supervision sweep (dropped
+        sessions flip honestly, dead bridges relaunch, stale
+        pairing flows expire), the WhatsApp live-attach reconcile
+        (a bridge the sweep just relaunched, or a probe-earned
+        "linked", raises the conversational surface in this
+        process — no restart), and the Telegram story sweep.
+        Message-driven, like every other cycle in this runtime —
+        no new daemon.
+
+        The beat used to live inside ``_personal_surface_turn``,
+        behind its whatsapp/telegram platform gate: in a bot-only
+        deployment no inbound message ever passes that gate
+        (WhatsApp cannot message without an adapter, and bot
+        traffic carries a bot platform), so the reconcile never
+        ran and a paired account stayed conversationally dark
+        until a /pair or /start happened to call it directly.
+        ``PartnerRuntime._process_inner`` now drives the beat for
+        every platform, and the personal turn still calls it so
+        direct callers keep the cadence — the 60s throttle state
+        lives on the shared service bundle (``last_cycle``), so
+        the two call sites can never double-sweep: whichever
+        fires first in a window does the work.  Each job is
+        failure-isolated; housekeeping never breaks intake."""
+        svc = self._pairing_personal()
+        now = time.time()
+        if now - float(svc.get("last_cycle") or 0.0) <= 60.0:
+            return
+        svc["last_cycle"] = now
+        try:
+            svc["supervision"].sweep()
+        except Exception as e:  # noqa: BLE001 - housekeeping
+            record_failure(           # never breaks intake
+                "runtime_provision.supervision_sweep", e)
+        # Same beat: a bridge the sweep just relaunched, or a
+        # probe-earned "linked", raises the conversational
+        # surface in this process — no restart (live-attach).
+        self._sync_whatsapp_surface()
+        try:
+            svc["personal"].cycle_stories("telegram")
+        except Exception as e:  # noqa: BLE001
+            record_failure(
+                "runtime_provision.story_cycle", e)
+
     def _personal_surface_turn(self, message: Any) -> bool:
         """Observe one inbound message for the §15 personal surfaces.
 
@@ -712,28 +759,17 @@ class RuntimeProvisionMixin:
         kind = str(getattr(message.chat, "kind", "") or "")
         svc = self._pairing_personal()
         personal = svc["personal"]
-        # Throttled housekeeping on the same beat: the supervision
-        # sweep (dropped sessions flip honestly, dead bridges
-        # relaunch, stale pairing flows expire) and the Telegram
-        # story sweep.  Message-driven, like every other cycle in
-        # this runtime — no new daemon.
+        # The throttled housekeeping beat (supervision sweep,
+        # WhatsApp live-attach, story sweep) is shared now — see
+        # _housekeeping_beat.  It used to live ONLY here, behind
+        # this turn's personal-platform gate, where bot-only
+        # deployments never reached it; the generic inbound path
+        # drives it for every platform, and this call keeps the
+        # cadence for direct callers (the shared throttle makes
+        # the second call in a window a no-op).  It still runs
+        # BEFORE the observation logic below, as it always did.
+        self._housekeeping_beat()
         now = time.time()
-        if now - float(svc.get("last_cycle") or 0.0) > 60.0:
-            svc["last_cycle"] = now
-            try:
-                svc["supervision"].sweep()
-            except Exception as e:  # noqa: BLE001 - housekeeping
-                record_failure(           # never breaks intake
-                    "runtime_provision.supervision_sweep", e)
-            # Same beat: a bridge the sweep just relaunched, or a
-            # probe-earned "linked", raises the conversational
-            # surface in this process — no restart (live-attach).
-            self._sync_whatsapp_surface()
-            try:
-                personal.cycle_stories("telegram")
-            except Exception as e:  # noqa: BLE001
-                record_failure(
-                    "runtime_provision.story_cycle", e)
         chat_key = str(getattr(message.chat, "key", "") or "")
         counterpart = str(getattr(message.chat, "peer", "")
                           or getattr(message, "sender_id", "") or "")

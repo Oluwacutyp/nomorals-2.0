@@ -804,6 +804,23 @@ class PartnerRuntime(
             self._harvest_play_downloads(message.chat.key, message.chat)
         except Exception as e:
             record_failure("runtime.PartnerRuntime._process_inner", e)
+        # Housekeeping beat (§15): the supervision sweep, the
+        # WhatsApp live-attach reconcile and the story sweep —
+        # throttled inside _housekeeping_beat, and driven from
+        # here so ANY inbound message (bot platforms included)
+        # can drive it.  It used to ride only the personal-surface
+        # turn below, whose platform gate a bot-only deployment
+        # never passes — a paired WhatsApp account stayed dark
+        # from cold start until a /pair or /start triggered the
+        # reconcile by hand.  Failure-isolated, like every cycle
+        # here: housekeeping never breaks intake.
+        try:
+            beat = getattr(self, "_housekeeping_beat", None)
+            if beat is not None:
+                beat()
+        except Exception as e:  # noqa: BLE001
+            record_failure(
+                "runtime.PartnerRuntime._housekeeping_beat", e)
         # Personal surfaces (§15 slices 2–3): on the owner's own
         # WhatsApp / Telegram-userbot accounts, status posts and DM
         # delete events are consumed here (saved / journaled for the
@@ -1991,6 +2008,24 @@ class PartnerRuntime(
         # locked vault skips the bridge, never the boot.
         self._bridge_provisioned_credentials()
         started = self.gateway.start(self.on_message)
+        # WhatsApp cold-start attach (§15): gateway start builds
+        # the whatsapp adapter once, against the static config
+        # endpoint, and drops it when no bridge is listening yet —
+        # an account paired in a PREVIOUS run (registry: linked,
+        # its bridge relaunched by the supervisor) would stay
+        # conversationally dark until some inbound message drove
+        # the housekeeping beat.  Reconcile once here, now that
+        # the gateway is live and its builders exist: a qualifying
+        # account raises its surface with zero inbound messages.
+        # Failure-isolated — the reconcile notes a failure on the
+        # account record itself (visible in /pair), and a raise
+        # here is recorded, never a broken boot.
+        if not self.dry_run:
+            try:
+                self._sync_whatsapp_surface()
+            except Exception as e:  # noqa: BLE001 - attach is
+                record_failure(           # never load-bearing
+                    "runtime.PartnerRuntime.start:wa_attach", e)
         if self.settings.partner.enabled and not self.dry_run:
             try:
                 from ..autonomy import AutonomyAgent
