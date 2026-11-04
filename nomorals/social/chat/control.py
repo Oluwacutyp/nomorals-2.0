@@ -161,6 +161,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "cipher", "wisdom", "think",
     "rules", "member", "glog", "gsettings", "strikes",
     "recheck", "joinq", "console", "undonotice",
+    "flag", "rep", "repclear", "repdismiss",
     "steal", "sticker", "convert", "gif", "emoji", "customemoji",
     "react",
     "balance", "mine", "work", "pay", "gshop", "quests", "treasury",
@@ -201,12 +202,21 @@ def public_menu_text() -> str:
     return (
         "🥷 Devon — tap a button below, or type a command:\n"
         "\n"
-        "talk — /help /search /news /book\n"
+        "talk — /help /ping /search /news /translate /tl /book\n"
         "make — /music /play /video /podcast\n"
         "see & hear — /tts /stt /look /image /lens\n"
         "tools — /decode /dns /whois /cipher /wisdom /think\n"
         "express — /steal /sticker /convert /gif /emoji "
         "/customemoji /react\n"
+        "groups — /rules /member /glog /gsettings /strikes "
+        "/recheck /joinq /console /undonotice /flag /rep "
+        "/repclear /repdismiss /report /mute /unmute /ban "
+        "/unban /kick /warn /pin /unpin /purge\n"
+        "group purse — /balance /mine /work /pay /gshop "
+        "/quests /treasury /deposit /withdraw /rob /bail "
+        "/coinflip /top /tax /grant /property /buyproperty "
+        "/sellproperty /rent /listproperty /auctions /mortgage "
+        "/insure /drop /claim\n"
         f"play — /game {games}\n"
         "\n"
         "tap a button below to run it · /help for what each one does"
@@ -464,6 +474,10 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "joinq": (0, None),       # /joinq [approve|decline <id>|all] — the admin join queue: requests + raid holds (§28)
     "console": (0, None),     # /console [gN [section [grammar]]] — the DM admin console: groups the sender admins, configured in tappable sections (§30)
     "undonotice": (0, None),  # /undonotice <id> — undo one automated action from its notice: strike removed, platform action reversed (§31)
+    "flag": (0, None),        # /flag [@member <category> [note]|ok|no <id>|queue|retract @member] — cross-group reputation flags: staged, admin-confirmed (§32)
+    "rep": (0, None),         # /rep [@member] — the reputation book: one person's file, or the book's shape (§32)
+    "repclear": (0, None),    # /repclear <member id> — lift a reputation restriction in this group (§32)
+    "repdismiss": (0, None),  # /repdismiss <record id> — dismiss a reputation record's warnings for this group (§32)
     "gsettings": (0, None),   # /gsettings [welcome|goodbye|clean on|off|rules add|clear|flood <n>|links ...] — group settings (admins; P1)
     "balance": (0, 0),        # /balance — your sparks + the group treasury (P2 economy)
     "mine": (0, 0),           # /mine — claim mined sparks at the decaying rate (P2)
@@ -2160,6 +2174,22 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/undonotice <notice id> (or tap the notice's Undo button)",
             "example": "/undonotice n1730…-0",
             "related": "/glog /strikes /console"},
+    "flag": {"what": "cross-group reputation (§32): stage a record on a member — scam, fraud, raid, harassment, spam-ring or other, with a short evidence note. Nothing is recorded until an admin confirms (the command answers with Confirm/Discard buttons); reports and defense-sensor bans propose flags into the same queue, and unconfirmed proposals expire in 3 days branding nobody. A confirmed record binds the resolved person — platform ids plus username history, so a changed handle doesn't shed it — and warns every group they join, per that group's warning mode. It never decides admission. 'retract' clears the records THIS group sourced, everywhere. Admins only.",
+            "usage": "/flag @member <category> [note] | /flag | /flag ok <id> | /flag no <id> | /flag retract @member",
+            "example": "/flag @ada scam took deposits for a fake signal room",
+            "related": "/rep /repdismiss /repclear /glog"},
+    "rep": {"what": "the reputation book (§32): one ledger across every group and platform Devon serves. With a member: their whole file — live records (category, source group, date, confirming admin, evidence note, where it has warned), plus retracted and aged history. Bare: the book's shape. A record never auto-rejects a join; §28 acceptance decides admission on the group's own criteria and the record only warns. Admins only.",
+            "usage": "/rep [@member]",
+            "example": "/rep @ada",
+            "related": "/flag /repdismiss /member /glog"},
+    "repclear": {"what": "lift a reputation restriction (§32 restricted mode): a flagged joiner admitted restricted stays that way until an admin clears them here (or taps Clear on the warning notice). The record itself stands in the book — clearing only ends this group's hold. Admins only.",
+            "usage": "/repclear <member id> (or tap the notice's Clear button)",
+            "example": "/repclear 424242",
+            "related": "/rep /repdismiss /flag"},
+    "repdismiss": {"what": "dismiss a reputation record for THIS group (§32): the group stops hearing about it — no warning on the next join, and any hold the record is causing here lifts. The record stands globally and still warns elsewhere; only the source group can retract it outright. Journaled in /glog and in the record's own history. Admins only.",
+            "usage": "/repdismiss <record id> (or tap the notice's Dismiss button)",
+            "example": "/repdismiss rep-0003",
+            "related": "/rep /flag /repclear"},
     "gsettings": {"what": "this group's settings: welcome and goodbye switches, service-message cleanup, the rules list, flood limit, link allowlist, the economy switch and transfer tax, and the defense system (autonomy, anticrash, antichannel, antitag, antidelete, antiedit) with the platform limits stated plainly. Group admins only — Devon checks your platform admin status; the autonomy switch belongs to the group owner on Telegram.",
             "usage": "/gsettings | /gsettings welcome on|off | /gsettings rules add <text> | /gsettings rules clear | /gsettings flood <n> | /gsettings links <domains>|off | /gsettings economy on|off | /gsettings tax <pct> | /gsettings autonomy on|off | /gsettings anticrash on|off | /gsettings antitag <n>",
             "example": "/gsettings rules add No spam",
@@ -2749,7 +2779,8 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                           "update", "pull", "deploy", "restart"]),
     ("groups & communities", ["rules", "member", "glog", "gsettings",
                             "strikes", "recheck", "joinq", "console",
-                            "undonotice",
+                            "undonotice", "flag", "rep", "repclear",
+                            "repdismiss",
                             "balance", "mine", "work", "pay", "gshop",
                             "quests", "treasury", "drop", "claim",
                             "property", "buyproperty", "sellproperty",
@@ -3017,6 +3048,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("groups & communities",
      ["rules", "member", "glog", "gsettings", "strikes",
       "recheck", "joinq", "console", "undonotice",
+      "flag", "rep", "repclear", "repdismiss",
       "balance", "mine", "work", "pay", "gshop", "quests",
       "treasury", "deposit", "withdraw", "rob", "bail", "coinflip",
       "top", "tax", "grant", "drop", "claim",

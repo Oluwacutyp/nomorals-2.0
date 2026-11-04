@@ -108,6 +108,7 @@ BUTTON_EMOJI: dict[str, str] = {
     "gif": "🎞️", "sticker": "🌟", "convert": "🔄",
     "react": "😀", "customemoji": "💠", "library": "🗂️",
     "treasury": "🏦", "glog": "📋", "expression": "🎭",
+    "dismiss": "🔕", "flag": "🚩", "rep": "🗂️",
     "spin": "🎰", "flip": "🪙", "quit": "🚪", "pvp": "⚔️",
     "events": "🎉", "save": "💾", "research": "🔬",
 }

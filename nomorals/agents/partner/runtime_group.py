@@ -405,6 +405,108 @@ class RuntimeGroupMixin:
         adapters = getattr(gateway, "adapters", {}) or {}
         return adapters.get(platform)
 
+    def _reputation_join_hook(self, surface, key, message, *,  # type: ignore[no-untyped-def]
+                              user_id, username="", name="",
+                              held=False):
+        """The §32 join hook: fires AFTER §28 admitted the person
+        (admission was decided on the group's own criteria — a
+        record never changes it).  A live record earns the group
+        its configured warning through the §31 notice layer:
+        public posts the factual ⚠️ notice, admins writes the
+        /glog trail only, restricted admits them restricted until
+        an admin taps Clear, off stays silent.  Public/restricted
+        posts are system output: the §33 gate and the group's
+        quiet mode apply, and every outcome — landed or
+        suppressed, with its reason — is journaled."""
+        from ...social.chat.group_notices import (
+            reputation_warning_lines,
+        )
+        from ...social.chat.expression import buttons_from_spec
+        from ...social.chat.typography import Card
+
+        check = surface.reputation_join_check(
+            key, user_id, username=username, name=name)
+        if not check.get("found"):
+            return
+        record = check["record"]
+        mode = check["mode"]
+        rid = record["id"]
+        if check.get("dismissed"):
+            surface.reputation_note_suppressed(
+                key, rid, user_id=user_id, reason="dismissed",
+                mode=mode)
+            return
+        if mode == "off":
+            surface.reputation_note_suppressed(
+                key, rid, user_id=user_id, reason="mode_off",
+                mode=mode)
+            return
+        if mode == "admins":
+            # The /glog trail IS the delivery in admins mode.
+            surface.reputation_note_warned(
+                key, rid, user_id=user_id, mode="admins")
+            return
+        if not self._system_send_ok(
+                surface, key, message, "reputation warning"):
+            surface.reputation_note_suppressed(
+                key, rid, user_id=user_id, reason="gate",
+                mode=mode)
+            return
+        settings = surface.store.settings(key)
+        if not (settings.get("defense") or {}).get(
+                "autonomy", True):
+            surface.reputation_note_suppressed(
+                key, rid, user_id=user_id,
+                reason="autonomy_off", mode=mode)
+            return
+        member = surface.member(key, user_id) or {}
+        # The §31 mention convention (name, else @handle, else
+        # the id) — the same shape every notice carries.
+        mname = str(member.get("name") or name or "")
+        muser = str(member.get("username") or username or "")
+        mention = mname or (f"@{muser}" if muser else str(user_id))
+        source_label = str(record.get("source_group") or "")
+        date_text = time.strftime(
+            "%Y-%m-%d", time.gmtime(
+                float(record.get("created_ts") or 0)))
+        restricted = mode == "restricted" and not held
+        lines = reputation_warning_lines(
+            record, mention=mention, user_id=str(user_id),
+            source_label=source_label, date_text=date_text,
+            more=int(check.get("more") or 0),
+            restricted=restricted, held=held)
+        card = Card("moderation", title="Known record",
+                    icon="⚠️")
+        card.block_lines(lines)
+        spec: list = []
+        if restricted:
+            surface.reputation_apply_restriction(
+                key, user_id, record)
+            adapter = self._group_adapter(message.chat.platform)
+            self._execute_group_action(
+                surface, key, adapter, message,
+                {"kind": "acceptance_restrict",
+                 "user_id": str(user_id), "rule": "reputation"})
+            spec.append(("check", "Clear",
+                         f"repclear {user_id}"))
+        spec.append(("dismiss", "Dismiss",
+                     f"repdismiss {rid}"))
+        settings_now = surface.store.settings(key)
+        buttons = buttons_from_spec([spec],
+                                    settings=settings_now)
+        if not buttons and str(message.chat.platform or "") \
+                not in ("telegram-bot", "telegram"):
+            # No-button platforms get the text form of the same
+            # affordances (§31 platform honesty).
+            card.note(f"admins: /repclear {user_id} clears a "
+                      f"hold · /repdismiss {rid} dismisses this "
+                      f"warning here")
+        self._send(message.chat, surface._card_render(
+            key, card), buttons=buttons,
+            parse_mode="Markdown")
+        surface.reputation_note_warned(
+            key, rid, user_id=user_id, mode=mode)
+
     def _group_surface_turn(self, message) -> bool:  # type: ignore[no-untyped-def]
         """Run one group message through the surface.  Returns
         True when the message is fully consumed (service event,
@@ -456,6 +558,10 @@ class RuntimeGroupMixin:
                         group_name=str(message.chat.title or ""))
                     if text:
                         welcomed.append(text)
+                    self._reputation_join_hook(
+                        surface, key, message, user_id=user_id,
+                        username=str(member.get("username") or ""),
+                        name=str(member.get("name") or ""))
                     continue
                 facts = self._acceptance_facts(member)
                 has_photo = member.get("has_photo")
@@ -484,6 +590,17 @@ class RuntimeGroupMixin:
                         out.get("reasons") or [],
                         grace_minutes=out.get("grace_minutes"),
                         pending_kick=bool(out.get("pending_kick")))
+                # §32: admitted (welcomed or restricted-admitted)
+                # — the reputation hook hears about the record;
+                # declined/kicked arrivals never reach it.
+                if out.get("welcome") \
+                        or out.get("verdict") == "restricted":
+                    held = bool((surface.member(key, user_id)
+                                 or {}).get("acceptance"))
+                    self._reputation_join_hook(
+                        surface, key, message, user_id=user_id,
+                        username=facts["username"],
+                        name=facts["name"], held=held)
             if welcomed and self._system_send_ok(
                     surface, key, message, "welcome"):
                 for text in welcomed:
@@ -564,6 +681,17 @@ class RuntimeGroupMixin:
                                     self, "_fire_expression", None)
                                 if fire is not None:
                                     fire(message, "welcome")
+                        # §32: the request was admitted — the
+                        # reputation hook hears about any record.
+                        if admitted.get("welcome") \
+                                or admitted.get("restricted"):
+                            self._reputation_join_hook(
+                                surface, key, message,
+                                user_id=user_id,
+                                username=facts["username"],
+                                name=facts["name"],
+                                held=bool(admitted.get(
+                                    "restricted")))
                 elif verdict == "decline":
                     self._acceptance_join_request(
                         surface, key, adapter, message.chat,
@@ -670,9 +798,54 @@ class RuntimeGroupMixin:
                 self._send(
                     message.chat,
                     f"⚠️ {who} — {action.get('reason') or 'warning'}")
+            if kind == "ban" and executed:
+                # §32: a defense sensor's ban PROPOSES a flag
+                # into this group's queue — an admin confirms or
+                # discards it; the sensor itself brands nobody.
+                self._sensor_flag_proposal(surface, key, action)
             if kind in ("delete", "ban", "kick") and executed:
                 consumed = True
         return consumed
+
+    def _sensor_flag_proposal(self, surface, key, action):  # type: ignore[no-untyped-def]
+        """Map an executed sensor ban to a §32 flag proposal
+        (spam-ring for the spam-family sensors, raid for the
+        crash sensor).  Acceptance/manual actions never propose —
+        only defense rules do — and a person already carrying a
+        live same-category record from THIS group is not
+        re-proposed."""
+        # Sensor bans land through the escalation ladder, whose
+        # action names the ladder as its rule and carries the
+        # ORIGINATING sensor as _strike_rule — read that first.
+        rule = str(action.get("_strike_rule")
+                   or action.get("rule") or "")
+        category = {"anticrash": "raid",
+                    "antichannel": "spam-ring",
+                    "antitag": "spam-ring",
+                    "flood": "spam-ring",
+                    "repeat": "spam-ring"}.get(rule)
+        if not category:
+            return
+        user_id = str(action.get("user_id") or "")
+        if not user_id:
+            return
+        member = surface.member(key, user_id) or {}
+        person = surface.reputation_person(
+            key, user_id,
+            username=str(member.get("username") or ""),
+            name=str(member.get("name") or ""))
+        for record in surface.reputation.live_for(person):
+            if record.get("source_group") == key \
+                    and record.get("category") == category:
+                return
+        surface.stage_flag(
+            key, user_id=user_id, person=person,
+            category=category,
+            note=f"auto-proposed: the {rule} sensor banned them "
+                 f"here — an admin must confirm before this "
+                 f"brands anyone",
+            by=f"sensor:{rule}", by_label=f"the {rule} sensor",
+            direct=False, source="sensor")
 
     def _execute_pending_pin(self, surface, message) -> None:  # type: ignore[no-untyped-def]
         """A bought Pinned Message grant acts on the buyer's next
@@ -911,6 +1084,48 @@ class RuntimeGroupMixin:
                     "warnings stay dry either way.")
         return None
 
+    def _reputation_update(self, surface, key, **fields):  # type: ignore[no-untyped-def]
+        """Mutate the reputation settings block (DESIGN §32)
+        through the store's own settings machinery — the one
+        write path behind both /gsettings and the console."""
+        import copy as _copy
+
+        current = surface.store.settings(key)
+        rep = _copy.deepcopy(current.get("reputation") or {})
+        rep.update(fields)
+        surface.update_settings(key, reputation=rep)
+        return rep
+
+    def _apply_reputation_grammar(self, surface, key, words):  # type: ignore[no-untyped-def]
+        """The reputation grammar, shared by /gsettings (words
+        after the `reputation` head) and the console's reputation
+        section.  Returns the reply line, or None when the words
+        aren't reputation grammar.  Forms: `public|admins|
+        restricted|off` (optionally after `mode`)."""
+        from ...social.chat.group_reputation import WARNING_MODES
+
+        w = [str(x).lower() for x in words or []]
+        if w and w[0] == "mode":
+            w = w[1:]
+        if len(w) == 1 and w[0] in WARNING_MODES:
+            self._reputation_update(surface, key, warning=w[0])
+            return {
+                "public": "reputation warnings: public — a "
+                          "flagged joiner gets a factual ⚠️ "
+                          "notice in the group.",
+                "admins": "reputation warnings: admins only — "
+                          "flagged joiners land in the console "
+                          "and /glog, nothing posts in-group.",
+                "restricted": "reputation warnings: restricted — "
+                              "a flagged joiner is admitted "
+                              "restricted until an admin taps "
+                              "Clear on the notice.",
+                "off": "reputation warnings: off — records still "
+                       "exist in the book, this group just never "
+                       "hears about them.",
+            }[w[0]]
+        return None
+
     # ---- group commands (P1 slice 2) --------------------------------
     def _control_group_help(self, message):  # type: ignore[no-untyped-def]
         """Bare /help INSIDE a group (owner order 2026-11-03):
@@ -1007,6 +1222,15 @@ class RuntimeGroupMixin:
             "rules held for a human, decided here or on the "
             "notice's buttons; the door rules themselves live "
             "in /gsettings (acceptance block)",
+            "/flag @member <kind> [note] — reputation (§32): "
+            "stage a cross-group record (scam · fraud · raid · "
+            "harassment · spam-ring · other); an admin confirms "
+            "it, then it warns every group they join — without "
+            "ever deciding admission itself. Bare /flag reviews "
+            "the proposals reports and sensor bans filed; "
+            "/flag retract @member clears this group's records",
+            "/rep @member — their reputation file: live records, "
+            "sources, and what became of them",
             "I moderate on my own: floods, repeat spam and "
             "off-allowlist links get deleted; crash payloads are "
             "quarantined, channel injections and mass tags are "
@@ -1327,6 +1551,25 @@ class RuntimeGroupMixin:
                 "warnings stay dry at every setting — a warning "
                 "is a record, not a show",
             ], title="Expression")
+            # Reputation block (§32): this group's warning mode +
+            # the live shape of the book and its queue here.
+            rep = s.get("reputation") or {}
+            rep_stats = surface.reputation.stats()
+            pending_n = len(surface.flag_proposals(key))
+            card.block_lines([
+                f"join warnings: {rep.get('warning', 'public')}"
+                f" — what happens when someone carrying a "
+                f"cross-group record is admitted here",
+                f"the book: {rep_stats['live']} live records "
+                f"across every group I serve"
+                + (f" · {pending_n} flag proposal"
+                   f"{'s' if pending_n != 1 else ''} waiting "
+                   f"here (/flag reviews them)"
+                   if pending_n else ""),
+                "a record never decides admission — the door "
+                "rules above do; it only warns, and only about "
+                "what an admin somewhere confirmed",
+            ], title="Reputation")
             card.block_lines([
                 "`/gsettings welcome on|off` · "
                 "`/gsettings goodbye on|off` · "
@@ -1385,6 +1628,8 @@ class RuntimeGroupMixin:
                 "`/gsettings expression gifs off|low|normal`",
                 "`/gsettings expression welcome on|off` · "
                 "`/gsettings expression ban on|off`",
+                "`/gsettings reputation public|admins|restricted"
+                "|off` — join warnings for flagged members (§32)",
             ], title="Change it")
             card.note("tap a button to flip a switch, or type a "
                       "command")
@@ -1426,6 +1671,16 @@ class RuntimeGroupMixin:
                     "expression gifs off|low|normal · "
                     "expression welcome on|off · "
                     "expression ban on|off")
+        if head == "reputation":
+            # Cross-group reputation (§32): the join-warning
+            # mode — the same helper the DM console's reputation
+            # section applies.
+            out = self._apply_reputation_grammar(
+                surface, key, text.split()[1:])
+            if out is not None:
+                return out
+            return ("usage: /gsettings reputation "
+                    "public|admins|restricted|off")
         if head == "warns" and rest.isdigit():
             surface.update_settings(
                 key, warn_threshold=max(1, int(rest)))
@@ -1893,7 +2148,7 @@ class RuntimeGroupMixin:
     _CONSOLE_TTL_S = 1800
     _CONSOLE_SECTIONS = ("defense", "acceptance", "economy",
                          "estate", "presentation", "welcome",
-                         "expression")
+                         "expression", "reputation")
 
     def _console_session_map(self) -> dict:  # type: ignore[no-untyped-def]
         sessions = getattr(self, "_console_sessions", None)
@@ -2117,6 +2372,10 @@ class RuntimeGroupMixin:
             f"expression "
             f"{'on' if (s.get('expression') or {}).get('enabled', True) else 'off'}"
             f" · gifs {(s.get('expression') or {}).get('gifs', 'normal')}",
+            f"reputation warnings "
+            f"{(s.get('reputation') or {}).get('warning', 'public')}"
+            f" · flag proposals waiting "
+            f"{len(surface.flag_proposals(key))}",
         ])
         from ...social.chat.expression import buttons_from_spec
 
@@ -2133,7 +2392,9 @@ class RuntimeGroupMixin:
               f"console {token} expression")],
             [("welcome", "Welcome + rules",
               f"console {token} welcome"),
-             ("back", "All groups", "console")],
+             ("rep", "Reputation",
+              f"console {token} reputation")],
+            [("back", "All groups", "console")],
         ], settings=s)
         card.note("tap a section, or type its grammar — every "
                   "change lands in the group's /glog with your "
@@ -2358,6 +2619,30 @@ class RuntimeGroupMixin:
             card.block_lines([
                 "`on|off` · `gifs off|low|normal`",
                 "`welcome on|off` · `ban on|off`",
+            ], title="Grammar")
+        elif section == "reputation":
+            rep = s.get("reputation") or {}
+            stats = surface.reputation.stats()
+            pending = surface.flag_proposals(key)
+            card.block_lines([
+                f"join warnings: "
+                f"{rep.get('warning', 'public')} — public posts "
+                f"the factual ⚠️ notice in-group · admins keeps "
+                f"it to the console + /glog · restricted holds "
+                f"the joiner until an admin taps Clear · off "
+                f"stays silent",
+                f"the book: {stats['live']} live records across "
+                f"every group I serve ({stats['total']} "
+                f"all-time)",
+                f"flag proposals waiting here: {len(pending)}"
+                + (" — decide them in the group with /flag"
+                   if pending else ""),
+                "a record never decides admission — the door "
+                "rules do; it only warns, and dismissal here "
+                "never deletes another group's record",
+            ])
+            card.block_lines([
+                "`public|admins|restricted|off`",
             ], title="Grammar")
         buttons += buttons_from_spec(
             [[("back", "Sections", f"console {token}"),
@@ -2659,6 +2944,11 @@ class RuntimeGroupMixin:
             # The console's words ARE the gsettings tail (minus
             # the head): one grammar, one write path (§21).
             return self._apply_expression_grammar(
+                surface, key, list(words))
+        if section == "reputation":
+            # Same rule (§32): the console's words are the
+            # gsettings grammar.
+            return self._apply_reputation_grammar(
                 surface, key, list(words))
         return None
 
@@ -3012,6 +3302,338 @@ class RuntimeGroupMixin:
         card.note("requests stay open until decided or the "
                   "invite link is revoked")
         return self._card(message, card, buttons)
+
+    # ---- cross-group reputation (DESIGN §32) -----------------------
+
+    def _flag_who(self, surface, key, prop):  # type: ignore[no-untyped-def]
+        """The admin-facing label for a proposal's person:
+        name/@handle from the ledger + the numeric id."""
+        user_id = str(prop.get("user_id") or "")
+        member = surface.member(key, user_id) or {}
+        name = str(member.get("name") or "")
+        uname = str(member.get("username") or "")
+        label = name or (f"@{uname}" if uname else user_id)
+        return f"{label} [{user_id}]"
+
+    def _flag_proposal_card(self, surface, key, message, prop,  # type: ignore[no-untyped-def]
+                            label=""):
+        """One staged flag, shown for its human decision — the
+        confirm tap is what creates a record; until then the
+        proposal brands nobody."""
+        from ...social.chat.group_reputation import CATEGORIES
+        from ...social.chat.typography import Card
+
+        card = Card("moderation", title="Flag proposal",
+                    icon="🚩")
+        who = label or self._flag_who(surface, key, prop)
+        if "[" not in who:
+            who = f"{who} [{prop.get('user_id')}]"
+        category = str(prop.get("category") or "other")
+        cat_label = (CATEGORIES.get(category) or {}).get(
+            "label", category)
+        lines = [f"{who}", f"category: **{cat_label}**"]
+        if prop.get("note"):
+            lines.append(f"note: {prop['note']}")
+        origin = ("an admin's /flag" if prop.get("direct")
+                  else f"proposed by {prop.get('source') or 'a report'}")
+        lines.append(f"{origin} · proposed by "
+                     f"{prop.get('by_label') or prop.get('by')}")
+        lines.append("nothing is recorded until an admin "
+                     "confirms — unconfirmed proposals expire "
+                     "in 3 days and brand nobody")
+        card.lines(lines)
+        fid = str(prop.get("id") or "")
+        buttons = [[("✅ Confirm", f"flag ok {fid}"),
+                    ("🚫 Discard", f"flag no {fid}")]]
+        return self._card(message, card, buttons)
+
+    def _control_flag(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        """Cross-group reputation flags (§32): an admin flags a
+        member HERE; the record is born only on the confirm tap
+        and then follows the person — ids + username history —
+        into every group Devon serves.  `retract` is the source
+        group's undo: it clears records this group sourced."""
+        key, err = self._mod_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        text = str(tail or "").strip()
+        parts = text.split()
+        low = [p.lower() for p in parts]
+        by = str(message.sender_id or message.sender or "")
+        by_label = str(message.sender or "")
+        if len(parts) >= 2 and low[0] in (
+                "ok", "confirm", "no", "discard"):
+            approve = low[0] in ("ok", "confirm")
+            out = surface.decide_flag(
+                key, parts[1], approve=approve, by=by,
+                by_label=by_label)
+            if not out.get("ok"):
+                return ("that proposal isn't waiting anymore — "
+                        "/flag shows what's live.")
+            prop = out.get("proposal") or {}
+            who = self._flag_who(surface, key, prop)
+            if not approve:
+                return (f"discarded — no record for {who}. "
+                        f"Proposals brand nobody until confirmed.")
+            record = out.get("record") or {}
+            from ...social.chat.group_reputation import \
+                CATEGORIES
+
+            cat_label = (CATEGORIES.get(
+                record.get("category") or "") or {}).get(
+                    "label", record.get("category") or "")
+            return (f"🚩 recorded: {who} — **{cat_label}** "
+                    f"[{record.get('id')}]. Every group I serve "
+                    f"will see this record when they join; it "
+                    f"never decides admission by itself. Retract "
+                    f"it here any time with /flag retract.")
+        if not parts or low[0] == "queue":
+            pending = surface.flag_proposals(key)
+            if not pending:
+                return ("no flag proposals waiting here. "
+                        "/flag @member <category> [note] stages "
+                        "one; reports and sensor bans propose "
+                        "their own.")
+            from ...social.chat.typography import Card
+
+            card = Card("moderation", title="Flag proposals",
+                        icon="🚩")
+            lines = []
+            buttons = []
+            for prop in pending:
+                who = self._flag_who(surface, key, prop)
+                note = str(prop.get("note") or "")[:80]
+                lines.append(
+                    f"{who} — {prop.get('category')} · {note} "
+                    f"· by {prop.get('by_label') or prop.get('by')}")
+                fid = str(prop.get("id") or "")
+                buttons.append(
+                    [(f"✅ {who}"[:24], f"flag ok {fid}"),
+                     (f"🚫 {who}"[:24], f"flag no {fid}")])
+            card.lines(lines)
+            card.note("confirming creates the record — it then "
+                      "follows the person across every group; "
+                      "unconfirmed proposals expire in 3 days")
+            return self._card(message, card, buttons)
+        if low[0] == "retract":
+            rest = text.split(None, 1)[1] if len(parts) > 1 \
+                else ""
+            res = self._mod_target(surface, key, rest, message)
+            if not res.found:
+                msg = self._mod_no_target(res, "retract")
+                return msg or (
+                    "usage: /flag retract @member — clears the "
+                    "records THIS group sourced for them.")
+            gone = surface.reputation_retract_for(
+                key, res.member.user_id, by=by,
+                by_label=by_label,
+                any_source=self._operator_or_false(message))
+            if not gone:
+                return (f"no live record from this group for "
+                        f"{res.member.label} — nothing to "
+                        f"retract. (Another group's record is "
+                        f"theirs to retract.)")
+            cats = ", ".join(sorted(
+                {str(r.get('category') or '') for r in gone}))
+            return (f"retracted — {res.member.label}'s record "
+                    f"({cats}) is cleared everywhere; it stops "
+                    f"warning from now. Past warnings aren't "
+                    f"un-sent.")
+        res = self._mod_target(surface, key, text, message)
+        if not res.found:
+            msg = self._mod_no_target(res, "flag")
+            return msg or (
+                "usage: /flag @member <category> [note] — "
+                "categories: scam · fraud · raid · harassment · "
+                "spam-ring · other. Reply to their message, or "
+                "name them.")
+        from ...social.chat.group_reputation import CATEGORIES
+
+        rest = str(res.rest or "").split(None, 1)
+        if not rest or rest[0].lower() not in CATEGORIES:
+            return (f"which kind? /flag {res.member.label} "
+                    f"<category> [note] — categories: scam · "
+                    f"fraud · raid · harassment · spam-ring · "
+                    f"other.")
+        category = rest[0].lower()
+        note = rest[1] if len(rest) > 1 else ""
+        person = surface.reputation_person(
+            key, res.member.user_id,
+            username=res.member.username, name=res.member.name)
+        prop = surface.stage_flag(
+            key, user_id=res.member.user_id, person=person,
+            category=category, note=note, by=by,
+            by_label=by_label, direct=True, source="command")
+        if prop.get("duplicate"):
+            return (f"already waiting: a {category} flag for "
+                    f"{res.member.label} is in the queue — "
+                    f"/flag reviews it.")
+        return self._flag_proposal_card(
+            surface, key, message, prop, res.member.label)
+
+    def _control_rep(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        """The admin read of the reputation book (§32): one
+        person's whole file — live, retracted and aged records
+        with their sources, confirmers and journals."""
+        key, err = self._mod_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        text = str(tail or "").strip()
+        if not text:
+            stats = surface.reputation.stats()
+            return (f"the reputation book: {stats['live']} live "
+                    f"records ({stats['total']} all-time) across "
+                    f"every group I serve. /rep @member shows one "
+                    f"person's file; /flag starts one.")
+        res = self._mod_target(surface, key, text, message)
+        if res.found:
+            view = surface.reputation_view(
+                key, res.member.user_id,
+                username=res.member.username,
+                name=res.member.name)
+            records = view["records"]
+            who = f"{res.member.label} [{res.member.user_id}]"
+        else:
+            # One more path (§29's spirit): the BOOK itself.  A
+            # person who has never joined THIS group can still
+            # have a file — probe it by handle, or by id on this
+            # platform, before answering "not found".
+            token = text.split()[0].lstrip("@").lower()
+            platform = key.split(":", 1)[0]
+            probe = {"ids": {}, "usernames": [token], "names": []}
+            if token.isdigit():
+                probe = {"ids": {platform: token},
+                         "usernames": [], "names": []}
+            records = surface.reputation.all_for(probe)
+            if not records:
+                msg = self._mod_no_target(res, "look up")
+                return msg or "usage: /rep @member"
+            person = records[0].get("person") or {}
+            names = person.get("names") or []
+            handles = person.get("usernames") or []
+            ids = person.get("ids") or {}
+            label = (names[0] if names else
+                     f"@{handles[0]}" if handles else
+                     next(iter(ids.values()), token))
+            who = f"{label} [{next(iter(ids.values()), token)}]"
+        if not records:
+            return f"{who} — no record on file, anywhere."
+        from ...social.chat.group_reputation import CATEGORIES
+        from ...social.chat.typography import Card
+
+        card = Card("moderation",
+                    title=f"Reputation — {who.split(' [')[0]}",
+                    icon="🗂️")
+        lines = []
+        for record in records:
+            status = str(record.get("status") or "live")
+            mark = {"live": "⚠️", "retracted": "↩️",
+                    "aged": "🕰️"}.get(status, "•")
+            category = str(record.get("category") or "other")
+            cat_label = (CATEGORIES.get(category) or {}).get(
+                "label", category)
+            lines.append(
+                f"{mark} **{cat_label}** [{record['id']}] · "
+                f"{status} · from "
+                f"{record.get('source_group')} · "
+                f"{_fmt_ts(record.get('created_ts'))} · "
+                f"confirmed by "
+                f"{record.get('confirmed_by_label') or record.get('confirmed_by')}")
+            if record.get("note"):
+                lines.append(f"   note: {record['note']}")
+            events = record.get("events") or []
+            warned = {e.get("group") for e in events
+                      if e.get("kind") == "warned"}
+            bits = []
+            if warned:
+                bits.append(f"warned in {len(warned)} group"
+                            f"{'s' if len(warned) != 1 else ''}")
+            if any(e.get("kind") == "dismissed" for e in events):
+                bits.append("dismissed somewhere")
+            if status == "live":
+                bits.append("expires "
+                            + _fmt_ts(record.get("expires_ts")))
+            if bits:
+                lines.append("   " + " · ".join(bits))
+        card.lines(lines)
+        card.note("retraction belongs to the source group: "
+                  "/flag retract there")
+        return self._card(message, card)
+
+    def _control_repclear(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        """Clear on a restricted-mode warning (§32): lift the
+        reputation hold on a member in THIS group.  The record
+        itself stands in the book."""
+        key, err = self._mod_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        words = str(tail or "").strip().split()
+        if not words:
+            return ("usage: /repclear <member id> — or tap "
+                    "Clear on the warning notice.")
+        target = words[0]
+        out = surface.reputation_clear(
+            key, target,
+            by=str(message.sender_id or message.sender or ""),
+            by_label=str(message.sender or ""))
+        if not out.get("cleared"):
+            return ("that member isn't held by a reputation "
+                    "record here.")
+        adapter = self._group_adapter(message.chat.platform)
+        self._execute_group_action(
+            surface, key, adapter, message,
+            {"kind": "acceptance_unrestrict", "user_id": target,
+             "rule": "reputation"})
+        member = surface.member(key, target) or {}
+        label = str(member.get("name") or "") \
+            or (f"@{member['username']}"
+                if member.get("username") else target)
+        return (f"cleared — {label} [{target}] is free of the "
+                f"reputation hold here. The record itself stands "
+                f"in the book.")
+
+    def _control_repdismiss(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        """Dismiss on a warning (§32): this group stops hearing
+        about that record; the record stands globally.  A hold
+        the record is causing here lifts with the dismissal —
+        the group has made its call."""
+        key, err = self._mod_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        words = str(tail or "").strip().split()
+        if not words or not words[0].startswith("rep-"):
+            return ("usage: /repdismiss <record id> — or tap "
+                    "Dismiss on the warning notice.")
+        record_id = words[0]
+        by = str(message.sender_id or message.sender or "")
+        out = surface.reputation_dismiss(
+            key, record_id, by=by,
+            by_label=str(message.sender or ""))
+        if not out.get("ok"):
+            return "no such record in the book."
+        adapter = self._group_adapter(message.chat.platform)
+        released = 0
+        for uid, row in surface.members(key).items():
+            state = (row or {}).get("reputation") or {}
+            if state.get("state") == "restricted" \
+                    and state.get("record_id") == record_id:
+                surface.reputation_clear(
+                    key, uid, by=by,
+                    by_label=str(message.sender or ""))
+                self._execute_group_action(
+                    surface, key, adapter, message,
+                    {"kind": "acceptance_unrestrict",
+                     "user_id": uid, "rule": "reputation"})
+                released += 1
+        tail_note = (f" The hold it had here is lifted too."
+                     if released else "")
+        return (f"dismissed for this group — record "
+                f"[{record_id}] stands in the book and still "
+                f"warns elsewhere.{tail_note}")
 
     # ---- manual moderation (DESIGN §4: the admin command set) ------
     def _mod_gate(self, message):  # type: ignore[no-untyped-def]
@@ -3525,6 +4147,22 @@ class RuntimeGroupMixin:
                            (message.meta or {}).get(
                                "reply_to_text") or "")[:200])
         surface.store.save()
+        if user_id and user_id != reporter:
+            # §32: a report also PROPOSES a reputation flag into
+            # this group's queue — an admin confirms or discards
+            # it; the report alone brands nobody.
+            member = surface.member(key, user_id) or {}
+            person = surface.reputation_person(
+                key, user_id,
+                username=str(member.get("username") or ""),
+                name=str(member.get("name") or ""))
+            note = str(res.rest or "").strip()[:300] \
+                or "reported by a member"
+            surface.stage_flag(
+                key, user_id=user_id, person=person,
+                category="other", note=note, by=reporter,
+                by_label=str(message.sender or ""),
+                direct=False, source="report")
         if user_id:
             return (f"📣 reported {label} — it's in the group log "
                     f"for the admins (/glog).")

@@ -59,6 +59,17 @@ from ...security.payload_inspection import (
 )
 from .failures import record_failure
 from .group_acceptance import ACCEPTANCE_DEFAULTS
+from .group_reputation import (
+    CATEGORIES as REPUTATION_CATEGORIES,
+)
+from .group_reputation import (
+    PROPOSAL_TTL_S as REPUTATION_PROPOSAL_TTL_S,
+)
+from .group_reputation import (
+    REPUTATION_DEFAULTS,
+    ReputationBook,
+    normalize_person,
+)
 from .group_defense import (
     DEFAULTS as DEFENSE_DEFAULTS,
 )
@@ -186,6 +197,17 @@ def _default_settings() -> dict[str, Any]:
                                         # media, ban theatre —
                                         # warnings stay dry at
                                         # every setting
+        "reputation": copy.deepcopy(REPUTATION_DEFAULTS),
+                                        # cross-group reputation
+                                        # (§32): what this group
+                                        # does when an admitted
+                                        # joiner carries a live
+                                        # record — public notice
+                                        # / admins-only trail /
+                                        # restricted until an
+                                        # admin clears / off.  The
+                                        # record never decides
+                                        # admission itself.
         "state": "discovered",          # discovered|configured|
                                         # active|dormant
     }
@@ -252,7 +274,7 @@ class GroupStore:
                        and k not in ("defense", "presentation",
                                      "estate", "acceptance",
                                      "escalation", "system_claim",
-                                     "expression")})
+                                     "expression", "reputation")})
         mod = dict(merged["moderation"])
         mod.update((stored.get("moderation") or {}))
         merged["moderation"] = mod
@@ -277,6 +299,9 @@ class GroupStore:
         merged["expression"] = _deep_merge(
             copy.deepcopy(EXPRESSION_DEFAULTS),
             stored.get("expression") or {})
+        merged["reputation"] = _deep_merge(
+            copy.deepcopy(REPUTATION_DEFAULTS),
+            stored.get("reputation") or {})
         return merged
 
 
@@ -301,6 +326,7 @@ class GroupSurface:
         self._moderators: dict[str, Moderator] = {}
         self._msg_cache: dict[str, deque] = {}
         self._signatures: SignatureStore | None = None
+        self._reputation: ReputationBook | None = None
 
     @property
     def signatures(self) -> SignatureStore:
@@ -311,6 +337,17 @@ class GroupSurface:
             self._signatures = SignatureStore(
                 self.store.path.parent / "payload_signatures.json")
         return self._signatures
+
+    @property
+    def reputation(self) -> ReputationBook:
+        """The cross-group reputation book (§32): ONE global
+        ledger beside the group store — records are evidence, so
+        the book quarantines and raises on corruption rather than
+        resetting (ReputationBook owns that discipline)."""
+        if self._reputation is None:
+            self._reputation = ReputationBook(
+                self.store.path.parent / "reputation.json")
+        return self._reputation
 
     def defense_config(self, group_key: str) -> DefenseConfig:
         return DefenseConfig.from_settings(
@@ -2891,6 +2928,327 @@ class GroupSurface:
             self.store.save()
             return removed
         return None
+
+    # ---- cross-group reputation (§32) -----------------------------
+    # The book is global; this section is the surface's half of
+    # it: identity assembly from EVERY ledger (the §29 stitch),
+    # the per-group proposal queue (a record is created only by
+    # an admin's confirmation), the join check, dismissals and
+    # the reputation restriction state — kept apart from the
+    # acceptance state on purpose: a door-rule recheck must never
+    # clear a reputation hold, and vice versa.
+
+    def reputation_person(self, group_key: str, user_id: str, *,
+                          username: str = "",
+                          name: str = "") -> dict[str, Any]:
+        """Assemble the §29 person for one member: their id on
+        this platform plus every ledger's word on them — all
+        usernames they have carried here, and (the bridge) any
+        other platform's row whose username matches one of those
+        handles.  A changed handle therefore never sheds the
+        person, and neither does a platform hop."""
+        platform = group_key.split(":", 1)[0]
+        user_id = str(user_id)
+        ids: dict[str, str] = {platform: user_id}
+        usernames: list[str] = []
+        names: list[str] = []
+
+        def _note(uname: Any, nm: Any) -> None:
+            clean = str(uname or "").strip().lstrip("@").lower()
+            if clean and clean not in usernames:
+                usernames.append(clean)
+            label = str(nm or "").strip()
+            if label and label not in names:
+                names.append(label)
+
+        _note(username, name)
+        for gkey, entry in self.store.data.items():
+            if gkey.split(":", 1)[0] != platform:
+                continue
+            row = (entry.get("members") or {}).get(user_id)
+            if row:
+                _note(row.get("username"), row.get("name"))
+        known = set(usernames)
+        if known:
+            for gkey, entry in self.store.data.items():
+                plat = gkey.split(":", 1)[0]
+                for uid, row in (entry.get("members")
+                                 or {}).items():
+                    handle = str(row.get("username") or "") \
+                        .strip().lstrip("@").lower()
+                    if handle and handle in known:
+                        ids.setdefault(plat, str(uid))
+                        _note(handle, row.get("name"))
+        return normalize_person({"ids": ids,
+                                 "usernames": usernames,
+                                 "names": names})
+
+    def reputation_join_check(
+            self, group_key: str, user_id: str, *,
+            username: str = "", name: str = "",
+            now: float | None = None) -> dict[str, Any]:
+        """What a join meets: the live records naming this person
+        (worst first; aging applied inside the book), this group's
+        warning mode, and whether the group already dismissed the
+        worst record.  Admission itself is §28's business — this
+        check never touches it."""
+        now = now if now is not None else time.time()
+        mode = str((self.store.settings(group_key)
+                    .get("reputation") or {}).get("warning")
+                   or "public")
+        person = self.reputation_person(
+            group_key, user_id, username=username, name=name)
+        records = self.reputation.live_for(person, now=now)
+        if not records:
+            return {"found": False, "mode": mode, "records": [],
+                    "person": person}
+        for record in records:
+            self.reputation.stitch(record["id"], person, now=now)
+        record = records[0]
+        dismissals = self.store.group(group_key) \
+            .get("reputation_dismissals") or {}
+        return {"found": True, "mode": mode, "record": record,
+                "records": records, "more": len(records) - 1,
+                "dismissed": record["id"] in dismissals,
+                "person": person}
+
+    def reputation_view(self, group_key: str, user_id: str, *,
+                        username: str = "", name: str = "",
+                        now: float | None = None) -> dict[str, Any]:
+        """The admin /rep read: every record naming this person —
+        live, retracted and aged — worst first."""
+        person = self.reputation_person(
+            group_key, user_id, username=username, name=name)
+        return {"person": person,
+                "records": self.reputation.all_for(
+                    person, now=now)}
+
+    def reputation_note_warned(self, group_key: str,
+                               record_id: str, *,
+                               user_id: str, mode: str,
+                               now: float | None = None) -> None:
+        """A warning actually landed (posted, or written to the
+        admins-only trail): the book's journal and this group's
+        /glog both carry it."""
+        self.reputation.note_event(
+            record_id, "warned",
+            now=now if now is not None else time.time(),
+            group=group_key, mode=mode)
+        self._audit(group_key, "reputation_warned",
+                    user_id=str(user_id), record=record_id,
+                    mode=mode)
+        self.store.save()
+
+    def reputation_note_suppressed(self, group_key: str,
+                                   record_id: str, *,
+                                   user_id: str, reason: str,
+                                   mode: str) -> None:
+        """A warning that did NOT land is journaled too — the
+        /glog reader can always see why (§33 gate, dismissal,
+        quiet mode, mode off)."""
+        self._audit(group_key, "reputation_suppressed",
+                    user_id=str(user_id), record=record_id,
+                    mode=mode, suppressed=reason)
+        self.store.save()
+
+    def reputation_dismiss(self, group_key: str, record_id: str, *,
+                           by: str, by_label: str = "",
+                           now: float | None = None) -> dict[str, Any]:
+        """A local admin dismisses the warning FOR THIS GROUP:
+        the record stands globally; the dismissal is journaled
+        here and in the book."""
+        now = now if now is not None else time.time()
+        record = self.reputation.get(record_id)
+        if record is None:
+            return {"ok": False}
+        entry = self.store.group(group_key)
+        entry.setdefault("reputation_dismissals", {})[record_id] = {
+            "by": str(by), "by_label": by_label, "ts": now}
+        self.reputation.note_event(record_id, "dismissed",
+                                   now=now, group=group_key,
+                                   by=str(by))
+        self._audit(group_key, "reputation_dismiss",
+                    record=record_id, by=by, by_label=by_label)
+        self.store.save()
+        return {"ok": True, "record": record}
+
+    def reputation_restricted(self, group_key: str,
+                              user_id: str) -> dict[str, Any] | None:
+        member = self.member(group_key, str(user_id)) or {}
+        state = member.get("reputation") or {}
+        return dict(state) if state.get("state") == "restricted" \
+            else None
+
+    def reputation_apply_restriction(
+            self, group_key: str, user_id: str,
+            record: dict[str, Any], *,
+            now: float | None = None) -> bool:
+        entry = self.store.group(group_key)
+        member = (entry.get("members") or {}).get(str(user_id))
+        if member is None:
+            return False
+        member["reputation"] = {
+            "state": "restricted", "record_id": record["id"],
+            "category": record.get("category") or "",
+            "since": now if now is not None else time.time()}
+        self._audit(group_key, "reputation_restrict",
+                    user_id=str(user_id), record=record["id"],
+                    category=record.get("category") or "")
+        self.store.save()
+        return True
+
+    def reputation_clear(self, group_key: str, user_id: str, *,
+                         by: str, by_label: str = "",
+                         now: float | None = None) -> dict[str, Any]:
+        """An admin taps Clear: the reputation hold on this member
+        in this group lifts (the record itself stands)."""
+        entry = self.store.group(group_key)
+        member = (entry.get("members") or {}).get(str(user_id))
+        state = (member or {}).get("reputation") or {}
+        if not member or state.get("state") != "restricted":
+            return {"cleared": False}
+        record_id = str(state.get("record_id") or "")
+        member.pop("reputation", None)
+        if record_id:
+            self.reputation.note_event(
+                record_id, "cleared",
+                now=now if now is not None else time.time(),
+                group=group_key, by=str(by))
+        self._audit(group_key, "reputation_clear",
+                    user_id=str(user_id), record=record_id,
+                    by=by, by_label=by_label)
+        self.store.save()
+        return {"cleared": True, "record_id": record_id}
+
+    # ── flag proposals: propose → confirm, never propose → brand ──
+
+    def _reputation_state(self, entry: dict[str, Any]) \
+            -> dict[str, Any]:
+        return entry.setdefault("reputation_state", {"prop_seq": 0})
+
+    def stage_flag(self, group_key: str, *, user_id: str,
+                   person: dict[str, Any], category: str,
+                   note: str, by: str, by_label: str = "",
+                   direct: bool = False, source: str = "",
+                   now: float | None = None) -> dict[str, Any]:
+        """Stage a flag PROPOSAL in the source group.  Nothing
+        here brands anyone: only decide_flag(approve=True) creates
+        a book record.  A duplicate pending proposal for the same
+        person + category is returned as-is, not stacked."""
+        now = now if now is not None else time.time()
+        if category not in REPUTATION_CATEGORIES:
+            category = "other"
+        entry = self.store.group(group_key)
+        for prop in self.flag_proposals(group_key, now=now):
+            if str(prop.get("user_id")) == str(user_id) \
+                    and prop.get("category") == category:
+                return {**prop, "duplicate": True}
+        state = self._reputation_state(entry)
+        state["prop_seq"] = int(state.get("prop_seq") or 0) + 1
+        fid = f"fr-{state['prop_seq']:04d}"
+        prop = {"id": fid, "user_id": str(user_id),
+                "person": normalize_person(person),
+                "category": category,
+                "note": str(note or "")[:400],
+                "by": str(by), "by_label": by_label,
+                "direct": bool(direct), "source": source,
+                "proposed_ts": now}
+        entry.setdefault("reputation_proposals", {})[fid] = prop
+        self._audit(group_key, "reputation_proposed",
+                    user_id=str(user_id), proposal=fid,
+                    category=category, by=by, direct=bool(direct),
+                    source=source)
+        self.store.save()
+        return dict(prop)
+
+    def flag_proposals(self, group_key: str, *,
+                       now: float | None = None) \
+            -> list[dict[str, Any]]:
+        """Pending proposals, oldest first.  Expired ones are
+        pruned and journaled — an unconfirmed proposal dies
+        quietly and brands nobody."""
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        props = entry.get("reputation_proposals") or {}
+        out: list[dict[str, Any]] = []
+        changed = False
+        for fid in list(props):
+            prop = props[fid]
+            if now - float(prop.get("proposed_ts") or 0) \
+                    > REPUTATION_PROPOSAL_TTL_S:
+                del props[fid]
+                changed = True
+                self._audit(group_key,
+                            "reputation_proposal_expired",
+                            user_id=prop.get("user_id") or "",
+                            proposal=fid,
+                            category=prop.get("category") or "")
+            else:
+                out.append(dict(prop))
+        if changed:
+            self.store.save()
+        return out
+
+    def decide_flag(self, group_key: str, fid: str, *,
+                    approve: bool, by: str, by_label: str = "",
+                    now: float | None = None) -> dict[str, Any]:
+        """The human decision.  Approve creates the book record —
+        attributed to the CONFIRMING admin, sourced to this group;
+        discard leaves only the audit line."""
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        self.flag_proposals(group_key, now=now)   # prune expired
+        prop = (entry.get("reputation_proposals") or {}).pop(
+            fid, None)
+        if prop is None:
+            return {"ok": False}
+        if not approve:
+            self._audit(group_key, "reputation_proposal_discarded",
+                        user_id=prop.get("user_id") or "",
+                        proposal=fid,
+                        category=prop.get("category") or "", by=by)
+            self.store.save()
+            return {"ok": True, "record": None, "proposal": prop}
+        record = self.reputation.add_record(
+            person=prop.get("person") or {},
+            category=prop.get("category") or "other",
+            note=prop.get("note") or "",
+            source_group=group_key,
+            source_platform=group_key.split(":", 1)[0],
+            confirmed_by=by, confirmed_by_label=by_label, now=now)
+        self._audit(group_key, "reputation_flag",
+                    user_id=prop.get("user_id") or "", proposal=fid,
+                    record=record["id"], category=record["category"],
+                    by=by, by_label=by_label)
+        self.store.save()
+        return {"ok": True, "record": record, "proposal": prop}
+
+    def reputation_retract_for(self, group_key: str, user_id: str,
+                               *, by: str, by_label: str = "",
+                               any_source: bool = False,
+                               now: float | None = None) \
+            -> list[dict[str, Any]]:
+        """Retraction clears the record everywhere.  By default a
+        group retracts only records IT sourced; any_source is the
+        operator's override.  Past warnings are not un-sent — the
+        record simply stops warning."""
+        now = now if now is not None else time.time()
+        person = self.reputation_person(group_key, user_id)
+        out: list[dict[str, Any]] = []
+        for record in self.reputation.live_for(person, now=now):
+            if not any_source \
+                    and record.get("source_group") != group_key:
+                continue
+            gone = self.reputation.retract(
+                record["id"], by=by, by_label=by_label, now=now)
+            if gone:
+                self._audit(group_key, "reputation_retract",
+                            user_id=str(user_id),
+                            record=record["id"],
+                            category=record.get("category") or "",
+                            by=by)
+                out.append(gone)
+        return out
 
     # ---- the notice layer (§31) -----------------------------------
     def record_notice(self, group_key: str, *, user_id: str,

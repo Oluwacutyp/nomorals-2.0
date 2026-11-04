@@ -3686,6 +3686,14 @@ class PartnerRuntime(
             return self._control_console(command.tail, message)
         if kind == "undonotice":
             return self._control_undonotice(command.tail, message)
+        if kind == "flag":
+            return self._control_flag(command.tail, message)
+        if kind == "rep":
+            return self._control_rep(command.tail, message)
+        if kind == "repclear":
+            return self._control_repclear(command.tail, message)
+        if kind == "repdismiss":
+            return self._control_repdismiss(command.tail, message)
 
         if kind == "gsettings":
             return self._control_gsettings(command.tail, message)

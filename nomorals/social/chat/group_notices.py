@@ -79,6 +79,51 @@ def undone_text(record: dict[str, Any], outcome: str) -> str:
     return f"{base}\n{line}" if base else line
 
 
+def reputation_warning_lines(record: dict[str, Any], *,
+                             mention: str, user_id: str,
+                             source_label: str, date_text: str,
+                             more: int = 0,
+                             restricted: bool = False,
+                             held: bool = False) -> list[str]:
+    """The §32 join warning's factual lines (DESIGN §32): the
+    member named with their id, the category, the source group
+    and the date — a record line, never an accusation essay.  The
+    joiner sees exactly this; a dispute goes to the source group,
+    which is named.  ``more`` counts further live records the one
+    warning stands for (worst first, one warning per join)."""
+    from .group_reputation import CATEGORIES
+
+    category = str(record.get("category") or "other")
+    label = (CATEGORIES.get(category) or {}).get(
+        "label", category)
+    lines = [
+        f"{mention} [{user_id}] joined with a record on file:",
+        f"⚠️ **{label}** — flagged in {source_label} on "
+        f"{date_text}, confirmed by an admin there.",
+    ]
+    note = str(record.get("note") or "").strip()
+    if note:
+        lines.append(f"note: {note}")
+    if more:
+        lines.append(f"(+{more} more record"
+                     f"{'s' if more != 1 else ''} on file — "
+                     f"/rep shows them to admins)")
+    if restricted:
+        lines.append("They're admitted restricted — an admin "
+                     "taps **Clear** to lift it, or **Dismiss** "
+                     "to wave the record for this group.")
+    elif held:
+        lines.append("They're already held by this group's door "
+                     "rules; this record stands alongside.")
+    else:
+        lines.append("An admin can **Dismiss** this warning for "
+                     "this group — the record itself stands "
+                     "unless the source group retracts it.")
+    lines.append(f"Dispute it with {source_label} — they own "
+                 f"the record.")
+    return lines
+
+
 def drop_notice_text(mention: str, user_id: str, *,
                      total: int, per_claim: int,
                      treasury: bool) -> str:
