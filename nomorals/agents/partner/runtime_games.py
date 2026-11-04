@@ -2115,6 +2115,10 @@ class RuntimeGamesMixin:
             # Group economy bridge (P2): in-group game coins land
             # in the group's purse too — one purse for group play.
             engine.coin_sink = self._group_coin_sink
+            # Wager integrity: group rooms stake the group economy
+            # estate itself (debits AND credits), every other room
+            # plays against the games wallet.
+            engine.purse_source = self._group_wager_purse
             # character/brain agent seats play through the live engine
             try:
                 from ...characters import CharacterStore, register_with_engine

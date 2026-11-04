@@ -36,6 +36,8 @@ ADA = Player.from_sender("telegram", "111", "Ada")
 class SettleIsOneMessageTests(unittest.TestCase):
     def test_slots_spin_settle_is_one_message_and_not_emitted(self):
         engine, db, sent = make_engine()
+        # wager integrity: a spin stakes real coins — fund the table
+        engine.store.add_coins(ADA, 100, reason="test funding")
         room, _ = engine.start("test:sl", "slots", ADA, kind="dm")
         seed = room.state["fair"]["seed"]
         sent.clear()
@@ -68,6 +70,8 @@ class SettleIsOneMessageTests(unittest.TestCase):
 
     def test_quit_returns_single_settle_and_emits_nothing(self):
         engine, db, sent = make_engine()
+        # wager integrity: blackjack stakes its bet at the deal
+        engine.store.add_coins(ADA, 100, reason="test funding")
         engine.start("test:q", "blackjack", ADA, kind="dm")
         sent.clear()
         out = engine.quit("test:q")

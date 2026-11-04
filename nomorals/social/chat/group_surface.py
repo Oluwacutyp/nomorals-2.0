@@ -2383,6 +2383,60 @@ class GroupSurface:
         except Exception:  # noqa: BLE001 - bridge is best-effort
             return 0
 
+    # ── wager purse (games): the estate side of the table ──
+    # A game played in this group stakes REAL group coins: the
+    # runtime binds the room's purse to these methods.  Debits are
+    # gated exactly like awards (§33 + economy on) — no wager state
+    # accrues in a foreign room.  Credits are NOT gated: a credit
+    # returns money a gated debit already took (stake back, push,
+    # winnings), and refusing it would trap the member's coins.
+
+    def game_wager_available(self, group_key: str) -> bool:
+        """True when a wager table may bind this group's purse."""
+        try:
+            return bool(self.system_output_allowed(group_key)
+                        and self.economy_on(group_key))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def game_wager_balance(self, group_key: str, user_id: str) -> int:
+        try:
+            return int(self.economy.balance(group_key, user_id))
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def game_wager_debit(self, group_key: str, user_id: str,
+                         amount: int, reason: str, ref: str = "") -> bool:
+        """Escrow a wager stake from the member's group wallet.
+        False = not available or insufficient — nothing moved."""
+        try:
+            if amount <= 0 or not self.game_wager_available(group_key):
+                return False
+            econ = self.economy
+            if not econ.is_verified(group_key, user_id):
+                econ.verify_member(group_key, user_id)
+            return econ.wager_debit(group_key, user_id, int(amount),
+                                    reason, ref=ref) is not None
+        except Exception:  # noqa: BLE001
+            return False
+
+    def game_wager_credit(self, group_key: str, user_id: str,
+                          amount: int, reason: str,
+                          ref: str = "") -> int:
+        """Pay a settled wager into the member's group wallet
+        (stake returned / winnings).  Returns what landed."""
+        try:
+            if amount <= 0:
+                return 0
+            econ = self.economy
+            if not econ.is_verified(group_key, user_id):
+                econ.verify_member(group_key, user_id)
+            entry = econ.wager_credit(group_key, user_id, int(amount),
+                                      reason, ref=ref)
+            return int(entry.amount) if entry else 0
+        except Exception:  # noqa: BLE001
+            return 0
+
     def work_shift(self, group_key: str, user_id: str, *,
                    now: float | None = None) -> dict[str, Any]:
         """/work: a cooldown-bound shift.  Pay follows engagement

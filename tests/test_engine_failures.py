@@ -129,7 +129,7 @@ def test_direct_import_surface_and_all_unchanged():
 def test_store_coins_failure_omits_bits_but_records():
     card = render_game_over_card("g", [player()], {"k": 5},
                                  store=raising_store(), db=None)
-    assert "5 pts" in card
+    assert "5 score" in card
     assert "render_game_over_card:store_coins" in sites()
 
 
@@ -139,7 +139,7 @@ def test_glicko_failure_omits_tier_but_records(monkeypatch):
     monkeypatch.setattr(mm, "get_glicko", raising_fn("glicko down"))
     card = render_game_over_card("g", [player()], {"k": 5},
                                  store=ok_store(), db=object())
-    assert "5 pts" in card
+    assert "5 score" in card
     assert "render_game_over_card:glicko" in sites()
 
 

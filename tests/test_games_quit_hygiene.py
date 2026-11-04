@@ -109,6 +109,9 @@ class PerGameQuitHygieneTests(unittest.TestCase):
         engine, db, sent = make_engine()
         try:
             chat = f"t:quit-{game}"
+            # wager games stake real coins at the table — fund ADA
+            # so every game can actually start (wager integrity)
+            engine.store.add_coins(ADA, 1000, reason="test funding")
             room, _msgs = engine.start(chat, game, ADA, kind=kind)
             room_id = room.id
             # mid-game move (some one-shot games finish here — both

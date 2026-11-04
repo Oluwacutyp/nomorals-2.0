@@ -145,6 +145,8 @@ class IdleExpiryTests(unittest.TestCase):
 
     def test_idle_room_expires_and_frees_table(self):
         engine_mod.IDLE_ROOM_TTL = 3600.0
+        # wager integrity: blackjack stakes its bet at the deal
+        self.engine.store.add_coins(ADA, 100, reason="test funding")
         room, _ = self.engine.start("t:i1", "blackjack", ADA)  # move_timeout=0
         room.last_activity = time.time() - 7200
         self.engine._sweep_timeouts()
@@ -156,6 +158,7 @@ class IdleExpiryTests(unittest.TestCase):
         self.assertEqual(room2.status, "active")
 
     def test_active_room_survives_sweep(self):
+        self.engine.store.add_coins(ADA, 100, reason="test funding")
         self.engine.start("t:i2", "blackjack", ADA)
         self.engine._sweep_timeouts()
         live = self.engine.live("t:i2")

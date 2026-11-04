@@ -435,6 +435,38 @@ class GroupEconomy:
         return self._append(group_id, self._new_entry(
             group_id, member, kind, amount, reason, ref=ref, ts=now))
 
+    # ── wagering (games): the member's own money, both ways ──
+    # Wager movements are NOT earns: no caps, no faucet.  A debit is
+    # balance-checked and atomic (insufficient -> None, nothing
+    # moves); a credit is a stake returning or winnings paid.  Both
+    # journal as kind "wager" so statements show the game's legs.
+
+    def wager_debit(self, group_id: str, member: str, amount: int,
+                    reason: str, ref: str = "",
+                    now: float | None = None) -> LedgerEntry | None:
+        """Escrow ``amount`` from the member's wallet for a game
+        wager.  Returns None — moving nothing — when the balance
+        cannot cover it."""
+        amount = int(amount)
+        if amount <= 0 or not member:
+            return None
+        if self.balance(group_id, member) < amount:
+            return None
+        return self._append(group_id, self._new_entry(
+            group_id, member, "wager", -amount, reason, ref=ref,
+            ts=now))
+
+    def wager_credit(self, group_id: str, member: str, amount: int,
+                     reason: str, ref: str = "",
+                     now: float | None = None) -> LedgerEntry | None:
+        """Return a stake / pay winnings to the member's wallet."""
+        amount = int(amount)
+        if amount <= 0 or not member:
+            return None
+        return self._append(group_id, self._new_entry(
+            group_id, member, "wager", amount, reason, ref=ref,
+            ts=now))
+
     def record_activity(self, group_id: str, member: str, kind: str,
                         now: float | None = None) -> LedgerEntry | None:
         """Record real activity AND pay its earn-table amount, if any.

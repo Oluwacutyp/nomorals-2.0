@@ -35,9 +35,19 @@ from ..fairness import draw_int
 from ..fairness import shuffle as fair_shuffle
 from ..players import Player
 from .base import (DIFFICULTY_LEVELS, MultiGame, Room,
-                   normalize_difficulty)
+                   normalize_difficulty, table_purse)
 
 __all__ = ["WILD_GAMES"]
+
+
+def _balance_line(room: Room) -> str:
+    """The bettor's current purse balance, for the game panel — the
+    number shown is the number that moves."""
+    purse = table_purse(room)
+    human = next((p for p in room.players if not p.is_ai), None)
+    if purse is None or human is None:
+        return ""
+    return f"your balance: {purse.balance(human)} coins ({purse.name})"
 
 _WORD_RE = re.compile(r"[a-z]+")
 
@@ -130,6 +140,11 @@ class PokerGame(MultiGame):
     max_players = 1  # heads-up by design: one human, one house seat
     ai_seats = 1
     move_timeout = 120
+    takes_wagers = True
+
+    #: the buy-in: real coins escrowed from the purse at setup,
+    #: cashed back out (stack + any unresolved stake) at the end.
+    BUY_IN = 200
     #: provably fair: every hand's deck is drawn from the committed sequence
     fair = True
     rules = ("Hold'em heads-up. 200 chips each, blinds 2/4. You act "
@@ -144,13 +159,35 @@ class PokerGame(MultiGame):
         return {"stacks": {}, "hand": 0, "deck": [], "hole": {},
                 "board": [], "street": 0, "bets": {}, "pot": 0,
                 "committed": {}, "to_act": None, "done": False,
-                "blind": 2}
+                "blind": 2,
+                # wager state: who bought in (key -> coins) and who
+                # has been cashed out (key -> net)
+                "buyin": {}, "wager_settled": {}}
 
     def setup(self, room, mind):
+        s = room.state
+        purse = table_purse(room)
+        humans = [p for p in room.players if not p.is_ai]
+        if purse is not None:
+            # check everyone first, then debit: a short stack at
+            # the table aborts the start with nobody charged.
+            for p in humans:
+                if purse.balance(p) < self.BUY_IN:
+                    raise ValueError(
+                        f"poker buys in for {self.BUY_IN} coins — "
+                        f"{p.name} has {purse.balance(p)} in the "
+                        f"{purse.name}. Earn coins in any game "
+                        "first, then come back.")
+            for p in humans:
+                purse.debit(p, self.BUY_IN, "poker buy-in")
+                s["buyin"][p.key] = self.BUY_IN
         for p in room.players:
-            room.state["stacks"][p.key] = 200
+            s["stacks"][p.key] = self.BUY_IN
         out = ["poker — 200 chips each, blinds 2/4. I deal."]
         out.extend(self._deal(room))
+        bal = _balance_line(room)
+        if bal:
+            out.append(bal)
         return " · ".join(out[:1]) + "\n" + "\n".join(out[1:])
 
     # ── dealing & streets ────────────────────────────────────────────
@@ -425,6 +462,55 @@ class PokerGame(MultiGame):
 
     def score(self, room, player):
         return int(room.state.get("stacks", {}).get(player.key, 0)) - 200
+
+    def _cash_out(self, room, player, purse) -> tuple[int, int]:
+        """Credit the player's live stack back to the purse.  A
+        hand still in flight is voided: the player's own unresolved
+        stake (their committed chips) comes back with the stack —
+        the house's committed chips were never the player's money.
+        Returns (cash, net)."""
+        s = room.state
+        cash = int(s.get("stacks", {}).get(player.key, 0))
+        if not s.get("done"):
+            cash += int(s.get("committed", {}).get(player.key, 0))
+        if cash > 0:
+            purse.credit(player, cash, "poker cash-out")
+        net = cash - int(s["buyin"][player.key])
+        s.setdefault("wager_settled", {})[player.key] = net
+        return cash, net
+
+    def wager_settle(self, room, player):
+        s = room.state
+        purse = table_purse(room)
+        if purse is None or player.is_ai:
+            return None
+        settled = s.get("wager_settled", {})
+        if player.key in settled:
+            return (int(settled[player.key]), "poker wager")
+        if player.key not in s.get("buyin", {}):
+            return None
+        cash, net = self._cash_out(room, player, purse)
+        buyin = int(s["buyin"][player.key])
+        if net > 0:
+            why = f"poker cashed out {cash} on a {buyin} buy-in"
+        elif net == 0:
+            why = "poker — buy-in walked away even"
+        else:
+            why = "poker buy-in lost at the table"
+        return (net, why)
+
+    def wager_leave(self, room, player):
+        s = room.state
+        purse = table_purse(room)
+        if purse is None or player.is_ai:
+            return None
+        if player.key in s.get("wager_settled", {}):
+            return None
+        if player.key not in s.get("buyin", {}):
+            return None
+        cash, _net = self._cash_out(room, player, purse)
+        return (f"💰 {player.name} cashes out {cash} chips from "
+                "the poker table.")
 
     def describe_state(self, room):
         s = room.state
@@ -876,6 +962,12 @@ class CrapsGame(MultiGame):
     max_players = 3
     ai_seats = 1
     move_timeout = 90
+    takes_wagers = True
+
+    #: the buy-in: real coins escrowed from the purse at setup (or
+    #: on joining), cashed back out at the live bank when the table
+    #: closes or the player leaves.
+    BUY_IN = 100
     #: provably fair: every roll is drawn from the committed sequence
     fair = True
     rules = ("You and the house each bank 100 chips, 10 per roll. "
@@ -886,14 +978,56 @@ class CrapsGame(MultiGame):
 
     def new_state(self, rng: random.Random) -> dict[str, Any]:
         return {"bank": {}, "phase": "comeout", "point": None,
-                "rolls": 0, "done": False, "bet": 10, "history": []}
+                "rolls": 0, "done": False, "bet": 10, "history": [],
+                # wager state: who bought in (key -> coins) and who
+                # has been cashed out (key -> net)
+                "buyin": {}, "wager_settled": {}}
 
     def setup(self, room, mind):
+        s = room.state
+        purse = table_purse(room)
+        humans = [p for p in room.players if not p.is_ai]
+        if purse is not None:
+            # check everyone first, then debit: a short stack at
+            # the table aborts the start with nobody charged.
+            for p in humans:
+                if purse.balance(p) < self.BUY_IN:
+                    raise ValueError(
+                        f"craps buys in for {self.BUY_IN} coins — "
+                        f"{p.name} has {purse.balance(p)} in the "
+                        f"{purse.name}. Earn coins in any game "
+                        "first, then come back.")
+            for p in humans:
+                purse.debit(p, self.BUY_IN, "craps buy-in")
+                s["buyin"][p.key] = self.BUY_IN
         for p in room.players:
-            room.state["bank"][p.key] = 100
-        return ("craps — 100 chips each, 10 per roll. say 'roll'. "
+            s["bank"][p.key] = self.BUY_IN
+        text = ("craps — 100 chips each, 10 per roll. say 'roll'. "
                 "come-out: 7/11 win, 2/3/12 lose, else the point is "
                 "set.")
+        bal = _balance_line(room)
+        return text + (f"\n{bal}" if bal else "")
+
+    def on_join(self, room, player, mind):
+        s = room.state
+        if player.is_ai or player.key in s.get("bank", {}):
+            return None
+        purse = table_purse(room)
+        if purse is None:
+            s["bank"][player.key] = self.BUY_IN
+            return (f"🎲 {player.name} joins the craps table with "
+                    f"{self.BUY_IN} chips.")
+        if not purse.debit(player, self.BUY_IN, "craps buy-in"):
+            # can't cover the buy-in: they watch — no bank entry,
+            # so the rolls never move money for them either way.
+            return (f"🎲 {player.name} is watching the craps table "
+                    f"— the buy-in is {self.BUY_IN} coins and their "
+                    f"balance is {purse.balance(player)} in the "
+                    f"{purse.name}.")
+        s["buyin"][player.key] = self.BUY_IN
+        s["bank"][player.key] = self.BUY_IN
+        return (f"🎲 {player.name} buys in for {self.BUY_IN} coins "
+                "and joins the craps table.")
 
     def on_move(self, room, player, text, mind):
         s = room.state
@@ -968,7 +1102,60 @@ class CrapsGame(MultiGame):
         return room.player(best[0])
 
     def score(self, room, player):
-        return int(room.state.get("bank", {}).get(player.key, 0)) - 100
+        bank = room.state.get("bank", {})
+        if player.key not in bank:
+            # a watcher who never bought in has no money on the
+            # table — their result is zero, not a phantom loss
+            return 0
+        return int(bank[player.key]) - self.BUY_IN
+
+    def _cash_out(self, room, player, purse) -> tuple[int, int]:
+        """Credit the player's live bank back to the purse — the
+        bank already reflects every resolved roll, so what stands
+        is what's theirs.  Returns (cash, net)."""
+        s = room.state
+        cash = int(s.get("bank", {}).get(player.key, 0))
+        if cash > 0:
+            purse.credit(player, cash, "craps cash-out")
+        net = cash - int(s["buyin"][player.key])
+        s.setdefault("wager_settled", {})[player.key] = net
+        return cash, net
+
+    def wager_settle(self, room, player):
+        s = room.state
+        purse = table_purse(room)
+        if purse is None or player.is_ai:
+            return None
+        settled = s.get("wager_settled", {})
+        if player.key in settled:
+            return (int(settled[player.key]), "craps wager")
+        if player.key not in s.get("buyin", {}):
+            return None
+        cash, net = self._cash_out(room, player, purse)
+        buyin = int(s["buyin"][player.key])
+        if net > 0:
+            why = f"craps cashed out {cash} on a {buyin} buy-in"
+        elif net == 0:
+            why = "craps — buy-in walked away even"
+        else:
+            why = "craps buy-in lost at the table"
+        return (net, why)
+
+    def wager_leave(self, room, player):
+        s = room.state
+        purse = table_purse(room)
+        if purse is None or player.is_ai:
+            return None
+        if player.key in s.get("wager_settled", {}):
+            return None
+        if player.key not in s.get("buyin", {}):
+            return None
+        cash, _net = self._cash_out(room, player, purse)
+        # the seat leaves the table: later rolls no longer move a
+        # bank that has already been paid out
+        s.get("bank", {}).pop(player.key, None)
+        return (f"💰 {player.name} cashes out {cash} chips from "
+                "the craps table.")
 
     def describe_state(self, room):
         s = room.state

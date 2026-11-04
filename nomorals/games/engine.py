@@ -28,6 +28,7 @@ from .ai import GameMind
 from .economy import GameEconomy, ShopItem
 from .games.base import GAME_COMMANDS, MultiGame, Room, parse_command
 from .players import AI_PLAYER, Leaderboard, Player, PlayerStore
+from .purse import BoundPurse, StorePurseBackend
 from .engine_failures import record_failure
 
 
@@ -35,12 +36,19 @@ def render_game_over_card(game_name: str, players: list[Player],
                           scores: dict[str, int],
                           winner_label: str = "",
                           store: Any | None = None,
-                          db: Any | None = None) -> str:
+                          db: Any | None = None,
+                          balances: dict[str, int] | None = None) -> str:
     """The final table card: standings, scores, balances, tier moves.
 
     ``players`` in seat order; ``scores`` maps player key → final score.
     Sorted by score desc (then name). Ranked games get Glicko tier lines
     when ``db`` is provided. Pure render — never raises, never writes.
+
+    The score renders AS a score (never dressed as "points" — points
+    are the separate progression currency).  ``balances`` (player key
+    → post-settlement balance) overrides the store read per player:
+    wager games pass the bound purse's balance, which is the purse
+    that actually moved.
     """
     try:
         humans = [p for p in players if not getattr(p, "is_ai", False)]
@@ -56,8 +64,19 @@ def render_game_over_card(game_name: str, players: list[Player],
             bits = [f"{mark} {p.name}"]
             sc = scores.get(p.key)
             if sc is not None:
-                bits.append(f"{sc} pts")
-            if store is not None:
+                bits.append(f"{sc} score")
+            bal = balances.get(p.key) if balances is not None else None
+            if bal is not None:
+                bits.append(f"{bal}c")
+                if store is not None:
+                    try:
+                        from .progression import level_for_xp
+
+                        prof = store.get_for(p)
+                        bits.append(f"lvl {level_for_xp(prof.xp)}")
+                    except Exception as e:  # noqa: BLE001
+                        record_failure("render_game_over_card:bal_lvl", e)
+            elif store is not None:
                 try:
                     from .progression import level_for_xp
 
@@ -163,6 +182,11 @@ class GameEngine:
         #: coins, game) invoked when a human wins coins in a group
         #: room.  Installed by the runtime; None = no bridge.
         self.coin_sink = None
+        #: Optional wager-purse source: callable(room) -> purse
+        #: backend | None, installed by the runtime (group rooms are
+        #: bound to the group economy estate).  None = every room
+        #: plays against the games wallet (StorePurseBackend).
+        self.purse_source = None
         self._lock = threading.RLock()
         self._rooms: dict[str, Room] = {}        # chat_key -> live room
         self._by_id: dict[str, Room] = {}
@@ -426,6 +450,24 @@ class GameEngine:
                 print(text)  # CLI/standalone: visible output
 
     # ── persistence ───────────────────────────────────────────────────────
+    def _bind_purse(self, room: Room) -> None:
+        """Bind the room's wager purse (transient — rebound on every
+        open and restore, never persisted).  The runtime's
+        ``purse_source`` may claim the room (group rooms play in the
+        group economy estate); anything unclaimed plays against the
+        games wallet."""
+        backend = None
+        source = getattr(self, "purse_source", None)
+        if source is not None:
+            try:
+                backend = source(room)
+            except Exception:  # noqa: BLE001 - a bad source never blocks a table
+                _log.debug("purse source failed", exc_info=True)
+                backend = None
+        if backend is None:
+            backend = StorePurseBackend(self.store, self.db)
+        room.purse = BoundPurse(backend, room)
+
     def _persist(self, room: Room) -> None:
         if self.db is None:
             return
@@ -477,6 +519,7 @@ class GameEngine:
         if row is None:
             return None
         room = Room.from_row(row, {})
+        self._bind_purse(room)
         self._rooms[room.chat_key] = room
         self._by_id[room.id] = room
         return room
@@ -545,6 +588,9 @@ class GameEngine:
             )
             room.players = [host]
             self._fill_ai(room, game)
+            # the wager purse binds BEFORE setup: buy-in games
+            # (blackjack, craps, poker) stake their escrow there.
+            self._bind_purse(room)
             # daily/timed/difficulty/variant/history/mastery are opt-in:
             # only handed to games whose new_state accepts kwargs
             # (hangman: daily; case: history + timed; connect4/reversi/…:
@@ -855,6 +901,16 @@ class GameEngine:
                      player: Player) -> list[str]:
         """The body of :meth:`leave`. Caller holds ``room.guard``."""
         notice = game.on_leave(room, player, self._mind) if game else None
+        # wager integrity: a departing player's escrowed money is
+        # cashed out BEFORE the seat drops — the finish below only
+        # settles players still seated, so an uncashed escrow would
+        # be silently kept.
+        wager_note = None
+        if game is not None and getattr(game, "takes_wagers", False):
+            try:
+                wager_note = game.wager_leave(room, player)
+            except Exception as e:  # noqa: BLE001
+                record_failure("_leave_inner:wager_leave", e)
         room.players = [p for p in room.players if p.key != player.key]
         if room.turn >= len(room.players):
             room.turn = 0 % max(1, len(room.players))
@@ -862,13 +918,17 @@ class GameEngine:
         # honor that instead of leaving a decided table open
         if (not room.humans or len(room.players) <= len(room.ai_seats)
                 or self.is_over(room)):
-            return self._finish(room, notice)
+            extra = "\n".join(x for x in (notice, wager_note) if x) \
+                or None
+            return self._finish(room, extra)
         room.turn_started = time.time()
         room.last_activity = time.time()
         self._persist(room)
         msgs = []
         if notice:
             msgs.append(notice)
+        if wager_note:
+            msgs.append(wager_note)
         self._emit(room, *msgs)
         self._pump_ai(room, [])
         self._persist(room)
@@ -1378,53 +1438,97 @@ class GameEngine:
                     except Exception as e:  # noqa: BLE001
                         record_failure("_finish_inner:streak", e)
                         streak_after = 1 if won is True else 0
-                    coins, coin_why = self._settle_coins(
-                        game, room, p, won, score, difficulty,
-                        streak_after)
-                    # seasonal event: the week's multiplier on coins
-                    try:
-                        from .seasons import apply_event
-                        coins, _season_note = apply_event(
-                            self.db, room.game, "coins", coins)
-                        coin_why += _season_note
-                    except Exception:  # noqa: BLE001
-                        _log.debug("season coin mult failed", exc_info=True)
-                    # boosters: coin charm is consumed on use
-                    try:
-                        prof_items = self.store.get_for(p).items
-                        if int(prof_items.get("coin_charm", 0)) > 0:
-                            coins = int(coins * 1.5)
-                            coin_why += " + coin charm"
-                            msgs.append("✨ Coin Charm consumed!")
-                            self.store.consume_item(p, "coin_charm")
-                    except Exception:  # noqa: BLE001
-                        _log.debug("booster apply failed", exc_info=True)
+                    # wager games settle REAL money through the
+                    # room's bound purse — the wager settlement IS
+                    # the coin delta (negative on a loss).  No
+                    # performance formula, no season multiplier, no
+                    # charm, no sink: the purse already journaled
+                    # every leg, and record_outcome below takes
+                    # coins=0 so progression (points/XP/streaks)
+                    # moves without touching money twice.
+                    wager_net: tuple[int, str] | None = None
+                    if getattr(game, "takes_wagers", False):
+                        try:
+                            wager_net = game.wager_settle(room, p)
+                        except Exception as e:  # noqa: BLE001
+                            record_failure(
+                                "_finish_inner:wager_settle", e)
+                            wager_net = (
+                                0, "wager held — settle errored, the "
+                                   "escrow stays on the table")
+                    if wager_net is not None:
+                        coins, coin_why = wager_net
+                    else:
+                        coins, coin_why = self._settle_coins(
+                            game, room, p, won, score, difficulty,
+                            streak_after)
+                        # seasonal event: the week's multiplier on coins
+                        try:
+                            from .seasons import apply_event
+                            coins, _season_note = apply_event(
+                                self.db, room.game, "coins", coins)
+                            coin_why += _season_note
+                        except Exception:  # noqa: BLE001
+                            _log.debug("season coin mult failed",
+                                       exc_info=True)
+                        # boosters: coin charm is consumed on use
+                        try:
+                            prof_items = self.store.get_for(p).items
+                            if int(prof_items.get("coin_charm", 0)) > 0:
+                                coins = int(coins * 1.5)
+                                coin_why += " + coin charm"
+                                msgs.append("✨ Coin Charm consumed!")
+                                self.store.consume_item(p, "coin_charm")
+                        except Exception:  # noqa: BLE001
+                            _log.debug("booster apply failed",
+                                       exc_info=True)
                     prof_after = self.store.record_outcome(
                         p, won=won, game=room.game, points=points,
-                        coins=coins, score=score)
-                    msgs.append(f"🪙 {p.name}: +{coins} coins ({coin_why})")
-                    # one purse (group build P2): coins won in a
-                    # GROUP game also land in that group's economy
-                    # purse for the member — the runtime installs
-                    # the sink; the engine only reports the win.
-                    _sink = getattr(self, "coin_sink", None)
-                    if _sink is not None and coins > 0 \
-                            and room.kind == "group" and not p.is_ai:
+                        coins=0 if wager_net is not None else coins,
+                        score=score)
+                    msgs.append(f"🪙 {p.name}: {coins:+} coins "
+                                f"({coin_why})")
+                    if wager_net is not None:
+                        # the health ledger records the NET flow
+                        # (the purse journaled the legs themselves)
                         try:
-                            _sink(room.chat_key, p, int(coins),
-                                  room.game)
+                            from .economy import record_ledger
+                            if coins > 0:
+                                record_ledger(self.db, p.key, "source",
+                                              coins, f"game:{room.game}")
+                            elif coins < 0:
+                                record_ledger(self.db, p.key, "sink",
+                                              -coins, f"game:{room.game}")
                         except Exception:  # noqa: BLE001
-                            _log.debug("coin sink failed",
+                            _log.debug("wager ledger record failed",
                                        exc_info=True)
-                    # economy ledger: every faucet tagged for the health
-                    # report (sources/sinks, inflation watch)
-                    try:
-                        from .economy import record_ledger
-                        if coins > 0:
-                            record_ledger(self.db, p.key, "source", coins,
-                                          f"game:{room.game}")
-                    except Exception:  # noqa: BLE001
-                        _log.debug("ledger record failed", exc_info=True)
+                    else:
+                        # one purse (group build P2): coins won in a
+                        # GROUP game also land in that group's economy
+                        # purse for the member — the runtime installs
+                        # the sink; the engine only reports the win.
+                        # Wager games skip this: their settlement
+                        # already landed in the bound purse, and a
+                        # sink pass would move the money twice.
+                        _sink = getattr(self, "coin_sink", None)
+                        if _sink is not None and coins > 0 \
+                                and room.kind == "group" and not p.is_ai:
+                            try:
+                                _sink(room.chat_key, p, int(coins),
+                                      room.game)
+                            except Exception:  # noqa: BLE001
+                                _log.debug("coin sink failed",
+                                           exc_info=True)
+                        # economy ledger: every faucet tagged for the
+                        # health report (sources/sinks, inflation watch)
+                        try:
+                            from .economy import record_ledger
+                            if coins > 0:
+                                record_ledger(self.db, p.key, "source",
+                                              coins, f"game:{room.game}")
+                        except Exception:  # noqa: BLE001
+                            _log.debug("ledger record failed",
+                                       exc_info=True)
                     # streak milestones: use the streak from the profile
                     # record_outcome just wrote (not the pre-read estimate
                     # above) so the fanfare matches the stored streak.
@@ -1552,9 +1656,15 @@ class GameEngine:
                                            exc_info=True)
                     except Exception:  # noqa: BLE001
                         _log.debug("xp award failed", exc_info=True)
-                msgs.append(
-                    f"📈 points and coins credited — /game leaderboard"
-                )
+                if getattr(game, "takes_wagers", False):
+                    msgs.append(
+                        "📈 points credited · wagers settled in the "
+                        "purse — /game leaderboard"
+                    )
+                else:
+                    msgs.append(
+                        f"📈 points and coins credited — /game leaderboard"
+                    )
             except Exception:  # noqa: BLE001
                 _log.debug("game ledger credit failed", exc_info=True)
         try:
@@ -1565,10 +1675,19 @@ class GameEngine:
         # the final table card: standings, scores, balances, tier moves
         try:
             if game is not None and card_scores:
+                # wager games: the card's balance is the bound
+                # purse's POST-SETTLEMENT balance (the purse that
+                # actually moved), not the games wallet's.
+                card_balances = None
+                if getattr(game, "takes_wagers", False) \
+                        and room.purse is not None:
+                    card_balances = {
+                        p.key: room.purse.balance(p)
+                        for p in room.players if not p.is_ai}
                 card = render_game_over_card(
                     room.game, list(room.players), card_scores,
                     winner_label=winner_label, store=self.store,
-                    db=self.db)
+                    db=self.db, balances=card_balances)
                 if card:
                     msgs.append(card)
         except Exception:  # noqa: BLE001

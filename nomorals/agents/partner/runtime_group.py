@@ -30,6 +30,49 @@ from typing import Any
 _log = logging.getLogger(__name__)
 
 
+class _GroupWagerPurse:
+    """Wager-purse backend binding one group room to the group
+    economy estate (see games/purse.py for the backend contract).
+    Player keys are ``platform:sender_id`` — the sender id IS the
+    member id, exactly as the coin sink resolves it.  Every movement
+    journals in the group ledger via the surface's wager methods,
+    tagged by the bound purse with game + room."""
+
+    name = "group purse"
+
+    def __init__(self, surface, group_key: str) -> None:  # type: ignore[no-untyped-def]
+        self._surface = surface
+        self._group_key = group_key
+
+    @staticmethod
+    def _member(player) -> str:  # type: ignore[no-untyped-def]
+        key = str(getattr(player, "key", "") or "")
+        return key.split(":", 1)[1] if ":" in key else ""
+
+    def balance(self, player) -> int:  # type: ignore[no-untyped-def]
+        member = self._member(player)
+        if not member:
+            return 0
+        return self._surface.game_wager_balance(self._group_key,
+                                                member)
+
+    def debit(self, player, amount: int, reason: str,  # type: ignore[no-untyped-def]
+              ref: str) -> bool:
+        member = self._member(player)
+        if not member:
+            return False
+        return self._surface.game_wager_debit(
+            self._group_key, member, int(amount), reason, ref=ref)
+
+    def credit(self, player, amount: int, reason: str,  # type: ignore[no-untyped-def]
+               ref: str) -> int:
+        member = self._member(player)
+        if not member:
+            return 0
+        return self._surface.game_wager_credit(
+            self._group_key, member, int(amount), reason, ref=ref)
+
+
 class RuntimeGroupMixin:
     """Group-surface turn for PartnerRuntime._process_inner."""
 
@@ -954,6 +997,23 @@ class RuntimeGroupMixin:
                 chat_key, member, int(coins), str(game))
         except Exception:  # noqa: BLE001 - bridge is best-effort
             _log.debug("group coin sink failed", exc_info=True)
+
+    def _group_wager_purse(self, room):  # type: ignore[no-untyped-def]
+        """GameEngine wager-purse source: a GROUP room's table
+        stakes the group economy estate — the same purse the coin
+        sink credits and members see on /balance.  Any other room
+        (or a group whose economy is off / unclaimed) returns None
+        and the engine falls back to the games wallet."""
+        try:
+            if getattr(room, "kind", "") != "group":
+                return None
+            surface = self._group_surface()
+            if not surface.game_wager_available(room.chat_key):
+                return None
+            return _GroupWagerPurse(surface, room.chat_key)
+        except Exception:  # noqa: BLE001 - binding never breaks a table
+            _log.debug("group wager purse bind failed", exc_info=True)
+            return None
 
     def _clean_service_message(self, surface, message) -> None:  # type: ignore[no-untyped-def]
         """Service-message hygiene (P1): the raw "X joined the

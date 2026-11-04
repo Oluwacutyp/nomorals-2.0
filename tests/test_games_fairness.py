@@ -125,6 +125,7 @@ class ClientSeedTests(unittest.TestCase):
 class CasinoWiringTests(unittest.TestCase):
     def test_blackjack_commit_before_deal_and_reveal_on_demand(self):
         engine, db, sent = make_engine()
+        engine.store.add_coins(ADA, 100, reason="test funding")
         room, msgs = engine.start("test:bj", "blackjack", ADA, kind="dm")
         # commitment published at table open, before any card is known
         self.assertIn("fair", room.state)
@@ -151,6 +152,7 @@ class CasinoWiringTests(unittest.TestCase):
 
     def test_roulette_spin_uses_fair_stream(self):
         engine, db, sent = make_engine()
+        engine.store.add_coins(ADA, 100, reason="test funding")
         room, msgs = engine.start("test:rl", "roulette", ADA, kind="dm")
         before = room.state["fair"]["draws"]
         engine.move("test:rl", "bet red", ADA, kind="dm")
@@ -161,6 +163,7 @@ class CasinoWiringTests(unittest.TestCase):
 
     def test_slots_reels_use_fair_stream(self):
         engine, db, sent = make_engine()
+        engine.store.add_coins(ADA, 100, reason="test funding")
         room, msgs = engine.start("test:sl", "slots", ADA, kind="dm")
         before = room.state["fair"]["draws"]
         engine.move("test:sl", "spin", ADA, kind="dm")

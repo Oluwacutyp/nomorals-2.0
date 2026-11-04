@@ -29,7 +29,7 @@ from ..ai import GameMind
 from ..players import AI_PLAYER, Player
 
 __all__ = ["Room", "MultiGame", "parse_command", "GAME_COMMANDS",
-           "DIFFICULTY_LEVELS", "DEFAULT_DIFFICULTY"]
+           "DIFFICULTY_LEVELS", "DEFAULT_DIFFICULTY", "table_purse"]
 
 #: in-game commands understood by the engine (not the game).
 GAME_COMMANDS = {
@@ -89,6 +89,12 @@ class Room:
     #: room; the guard is never held while taking the engine lock.
     guard: threading.RLock = field(
         default_factory=threading.RLock, repr=False, compare=False)
+
+    #: The wager purse bound to this room by the engine (transient,
+    #: never persisted — the engine rebinds it on restore).  A
+    #: ``BoundPurse`` (see nomorals/games/purse.py) or None in bare
+    #: game rigs that never passed through the engine.
+    purse: Any = field(default=None, repr=False, compare=False)
 
     # ── players ─────────────────────────────────────────────────────────────
     def rng(self) -> random.Random:
@@ -193,6 +199,19 @@ class Room:
         )
 
 
+def table_purse(room: Room) -> Any | None:
+    """The purse wager games may move money through in this room.
+
+    The engine binds a purse to every room it opens or restores.
+    Bare rigs (a game driven without the engine) have none — wager
+    games then play their legacy no-money path.  Channel rooms are
+    spectacle: the house plays every seat, so no purse is ever
+    active there."""
+    if getattr(room, "kind", "") == "channel":
+        return None
+    return getattr(room, "purse", None)
+
+
 def parse_command(text: str) -> tuple[str, str]:
     """/pass, /shop buy x → (command, rest). ('', text) when not a
     command. Only game commands are parsed here; control commands
@@ -232,6 +251,11 @@ class MultiGame:
     #: closes it. None = the engine default (IDLE_ROOM_TTL). Inbox games
     #: (one message per turn, days between moves) set this to days.
     idle_ttl: float | None = None
+    #: wager games stake REAL coins from the room's bound purse:
+    #: bets debit (escrow) at placement and settle from the escrow
+    #: at the finish — the engine routes their money through
+    #: ``wager_settle`` instead of the performance coin formula.
+    takes_wagers: bool = False
     rules: str = ""             # shown by /help and in the intro
     #: short how-to-play blurb (3-4 lines) posted when a multiplayer
     #: game starts in a group: how to join and the core loop. Empty =
@@ -348,6 +372,33 @@ class MultiGame:
         ``GameEconomy.coin_breakdown`` — e.g. a score-based settlement
         that outgrows the standard win caps — or None (the default) for
         the standard performance-based breakdown.
+        """
+        return None
+
+    def wager_settle(self, room: Room, player: Player
+                     ) -> tuple[int, str] | None:
+        """Settle this player's wager at the finish (wager games).
+
+        Called once per human by the engine's finish, INSTEAD of the
+        performance coin formula.  The game moves the money itself
+        through ``room.purse`` — paying out from the escrow it took
+        at bet time, or refunding/cashing out when the table closed
+        with the wager unresolved — and returns ``(net, reason)``:
+        the player's net coin delta (negative on a loss) for the
+        settle line.  Return None (the default) when this player has
+        no wager in this room's purse (bare rigs, spectators), and
+        the engine falls back to the standard settle.
+        """
+        return None
+
+    def wager_leave(self, room: Room, player: Player) -> str | None:
+        """Cash one departing player out mid-game (wager games).
+
+        Called by the engine's leave path BEFORE the seat is dropped,
+        so a player who walks away from a table that plays on without
+        them (or closes around them) never leaves escrowed money
+        behind.  Moves the money through ``room.purse`` and returns
+        a line for the chat, or None when nothing was held.
         """
         return None
 

@@ -153,6 +153,8 @@ class AchievementTests(unittest.TestCase):
 
     def test_poker_trio(self):
         p = Player(key="local:pk", platform="local", name="Pk")
+        # wager integrity: poker buys in for 200 real coins
+        self.engine.store.add_coins(p, 500, reason="test funding")
         room, _ = self.engine.start("local:c2", "poker", p)
         room.state["human_best_rank"] = 5  # flush
         room.state["human_allin"] = True
@@ -336,6 +338,9 @@ class GameSmokeTests(unittest.TestCase):
 
     def _smoke(self, game_name, moves, *, kind="dm"):
         chat = f"local:smoke:{game_name}"
+        # wager games stake real coins — keep the smoke player funded
+        self.engine.store.add_coins(self.p, 1000,
+                                    reason="test funding")
         try:
             room, msgs = self.engine.start(chat, game_name, self.p,
                                            kind=kind)

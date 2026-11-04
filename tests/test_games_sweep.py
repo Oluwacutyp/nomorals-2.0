@@ -621,7 +621,7 @@ class GameOverCardTests(unittest.TestCase):
             "pvp", [a, b], {"telegram:1": 30, "telegram:2": 10},
             winner_label="Ada")
         self.assertIn("Ada", card)
-        self.assertIn("30 pts", card)
+        self.assertIn("30 score", card)
         self.assertIn("rematch", card)
         # sorted: winner first
         self.assertLess(card.index("Ada"), card.index("Bob"))
