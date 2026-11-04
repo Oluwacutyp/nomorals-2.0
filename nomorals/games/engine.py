@@ -313,6 +313,13 @@ class GameEngine:
         still get their scene. Never raises — a silent DM beats a
         broken game.
 
+        The cooldown DEFERS, it never discards: the feed is peeked,
+        and events are consumed only at the moment they are actually
+        narrated. A drain that lands inside the cooldown leaves the
+        feed exactly as it stands, so the moments narrate — in their
+        original order — on the first drain after the cooldown lapses
+        (or on the finish drain, which forces).
+
         One narration per moment: every event text this room narrates
         is remembered in ``_dm_narrated`` and never narrated again,
         and when a drain narrates while the game is already over, the
@@ -320,7 +327,7 @@ class GameEngine:
         both before letting a ``dm_finale`` game tell its ending a
         second time.
         """
-        feed = room.state.pop("_dm_feed", None)
+        feed = room.state.get("_dm_feed")
         if not feed:
             return
         narrated: list[str] = room.state.setdefault("_dm_narrated", [])
@@ -331,12 +338,18 @@ class GameEngine:
                 continue  # this moment already had its narration
             fresh.append(item)
         if not fresh:
+            # Nothing new to tell — the feed held only moments that
+            # already had their narration. Clear it so they are not
+            # re-scanned on every later drain.
+            room.state.pop("_dm_feed", None)
             return
         now = time.time()
         if not force:
             last = float(room.state.get("_dm_last_narrate") or 0)
             if now - last < 25:
-                return
+                return  # deferred: the feed stays for the next drain
+        # Narrating now — consume the feed, then tell it.
+        room.state.pop("_dm_feed", None)
         room.state["_dm_last_narrate"] = now
         try:
             gm = self.dm
