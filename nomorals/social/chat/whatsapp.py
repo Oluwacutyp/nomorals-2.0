@@ -1312,6 +1312,36 @@ class WhatsAppAdapter(ChatAdapter):
         return self._admin_cmd("channel_unfollow",
                                {"chat": self._newsletter_jid(chat)})
 
+    def channel_resolve_invite(self, code: str) -> dict[str, Any]:
+        """Resolve a channel invite code (the tail of a
+        whatsapp.com/channel/<code> link) to the channel's JID
+        via the bridge's ``channel_resolve`` (Baileys
+        newsletterMetadata 'invite').  Returns ``{"ok": True,
+        "chat": "<jid>", "name": ...}`` or the bridge's honest
+        error — a link that resolves nowhere stays unresolved."""
+        code = (code or "").strip()
+        if not code:
+            return {"ok": False, "error": "missing channel invite code"}
+        return self._admin_cmd("channel_resolve", {"invite": code})
+
+    def channel_react(self, chat: ChatRef | str, server_id: str,
+                      emoji: str) -> dict[str, Any]:
+        """React to one channel post (§14 mass react): the
+        bridge's ``channel_react`` → Baileys
+        newsletterReactMessage(jid, serverId, emoji).  The
+        server_id is the number at the end of the post link.
+        A bridge whose Baileys build lacks the verb answers
+        ok:false with that reason — never a fake success."""
+        server_id = str(server_id or "").strip()
+        if not server_id:
+            return {"ok": False,
+                    "error": "missing server_id (the number at "
+                             "the end of the channel post link)"}
+        return self._admin_cmd("channel_react", {
+            "chat": self._newsletter_jid(chat),
+            "server_id": server_id, "emoji": str(emoji or ""),
+        })
+
     def channel_set_name(self, chat: ChatRef | str, name: str) -> dict[str, Any]:
         """Rename a channel the account owns."""
         return self._admin_cmd("channel_set_name", {

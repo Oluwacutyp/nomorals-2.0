@@ -37,6 +37,8 @@
  *     {"id":"<req>","cmd":"channel_delete","chat":"<@newsletter>"}
  *     {"id":"<req>","cmd":"channel_follow","chat":"<@newsletter>"}
  *     {"id":"<req>","cmd":"channel_unfollow","chat":"<@newsletter>"}
+ *     {"id":"<req>","cmd":"channel_resolve","invite":"<channel invite code>"}
+ *     {"id":"<req>","cmd":"channel_react","chat":"<@newsletter>","server_id":"<post id>","emoji":"🔥"}
  *     {"id":"<req>","cmd":"channel_set_name","chat":"<@newsletter>","name":"..."}
  *     {"id":"<req>","cmd":"channel_set_description","chat":"<@newsletter>","description":"..."}
  *
@@ -291,6 +293,41 @@ export function registerGroupAdminCommands(ctx) {
     channel_unfollow: async (req) => {
       const jid = newsletterJid(req.chat);
       await sock().newsletterUnfollow(jid);
+      return { ok: true };
+    },
+
+    channel_resolve: async (req) => {
+      // A whatsapp.com/channel/<code> link carries an INVITE
+      // CODE, not the channel JID. Baileys resolves it through
+      // newsletterMetadata('invite', code) — the metadata's id
+      // IS the JID. Guarded like every verb here: a build
+      // without it gets an honest error, not a guess.
+      const code = String(req.invite || '').trim();
+      if (!code) throw new Error('missing invite: pass the channel invite code');
+      if (typeof sock().newsletterMetadata !== 'function') {
+        throw new Error('this Baileys build has no newsletterMetadata verb — channel links cannot be resolved; pass the …@newsletter JID instead');
+      }
+      const meta = await sock().newsletterMetadata('invite', code);
+      const jid = (meta && (meta.id || meta.jid)) || '';
+      if (!isNewsletterJid(jid)) {
+        throw new Error(`channel invite did not resolve to a channel (got ${jid || 'nothing'})`);
+      }
+      return { ok: true, chat: jid, name: (meta && meta.name) || '' };
+    },
+
+    channel_react: async (req) => {
+      // The §14 mass-react mechanism for WhatsApp channels
+      // (DESIGN §16): followers interact with a channel ONLY by
+      // reacting, and newsletterReactMessage is the verb. The
+      // server_id is the number at the end of the post link
+      // (whatsapp.com/channel/<code>/<server_id>).
+      const jid = newsletterJid(req.chat);
+      const serverId = String(req.server_id || req.serverId || '').trim();
+      if (!serverId) throw new Error('missing server_id: the number at the end of the channel post link');
+      if (typeof sock().newsletterReactMessage !== 'function') {
+        throw new Error('this Baileys build has no newsletterReactMessage verb — channel reactions unavailable');
+      }
+      await sock().newsletterReactMessage(jid, serverId, String(req.emoji || ''));
       return { ok: true };
     },
 

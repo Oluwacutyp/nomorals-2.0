@@ -473,6 +473,9 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "connectors": (0, 2),   # /connectors [list|status|connect] [name] — manage the service connectors
     "provision": (0, None),  # /provision [service] | login <service> <username> — Devon fetches missing API keys herself (owner only)
     "pair": (0, None),        # /pair [whatsapp <number> [label]|code|start|stop|restart|remove <id>] — pairing-with-code account pool (§15; owner only)
+    "massreact": (0, None),   # /massreact <post link> | <emoji> [| count] [| live] — react from every paired account (§14; owner only, arm-gated)
+    "pollvote": (0, None),    # /pollvote <poll link> | <option> [| count] [| live] — vote from every paired account (§14; owner only, arm-gated)
+    "chfollow": (0, None),    # /chfollow <channel link> [| live] — every paired account follows (§14; owner only, arm-gated)
     "rules": (0, 0),          # /rules — this group's rules, rendered from the settings the enforcer reads (P1)
     "member": (0, 1),         # /member [@name] — group member card: tenure, activity, identity changes (P1)
     "glog": (0, 1),           # /glog [n] — the group's held audit log (admins; P1)
@@ -2167,6 +2170,18 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/pair | /pair whatsapp <number> [label] | /pair telegram <number> [label] | /pair tgcode <id> <code> | /pair tgpass <id> <password> | /pair code <id> | /pair start|stop|restart|remove <id> | /pair use <id> | /pair route [platform] | /pair toggle <id> <status_saving|view_once|antidelete> <on|off> | /pair saved [id] | /pair recovered [id] | /pair page",
             "example": "/pair whatsapp 2348012345678 main",
             "related": "/provision /connectors"},
+    "massreact": {"what": "mass react (§14): place one emoji reaction on a post from every connected account in your pairing pool at once — Telegram posts via your MTProto sessions, WhatsApp channel posts via each account's bridge. Paced with jitter, journaled per account, and arm-gated: the tool must be armed once (its warning is shown then), and its first run is a dry-run unless you say live. Your own accounts only — never the bot.",
+            "usage": "/massreact <post link> | <emoji> [| count] [| live|dry] · /massreact arm|disarm|status|pacing <s>|runs",
+            "example": "/massreact https://t.me/somechannel/482 | 🔥",
+            "related": "/pollvote /chfollow /pair"},
+    "pollvote": {"what": "mass vote (§14): vote in an external poll from every connected Telegram account in your pairing pool — MTProto only, because the Bot API cannot vote in polls at all. The option resolves by number or by its exact text against the poll's own answers before anything is cast. WhatsApp poll voting has no Baileys verb (protocol-level only) and honestly refuses there. Arm-gated like /massreact; first run is a dry-run unless you say live.",
+            "usage": "/pollvote <poll link> | <option text or number> [| count] [| live|dry] · /pollvote arm|disarm|status|pacing <s>|runs",
+            "example": "/pollvote https://t.me/somechannel/511 | 2",
+            "related": "/massreact /chfollow /pair"},
+    "chfollow": {"what": "channel follow (§14): every connected account in your pairing pool follows/subscribes to a channel — Telegram channels via MTProto join, WhatsApp channels via each account's bridge. Idempotent: an account that already follows counts as done. Arm-gated like /massreact; first run is a dry-run unless you say live.",
+            "usage": "/chfollow <channel link> [| count] [| live|dry] · /chfollow arm|disarm|status|pacing <s>|runs",
+            "example": "/chfollow https://whatsapp.com/channel/0029VaExample",
+            "related": "/massreact /pollvote /pair"},
     "rules": {"what": "this group's rules — rendered live from the same settings the moderation enforcer reads, so what you see is what's enforced.",
             "usage": "/rules",
             "example": "/rules",
@@ -2856,7 +2871,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                       "download", "shorts", "caption", "imggen", "sham", "musicnote",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
-    ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "pair", "notion",
+    ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "pair", "massreact", "pollvote", "chfollow", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "desk", "apk", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
@@ -3134,7 +3149,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["schedule", "db", "artifact", "api", "proxy", "toolhub", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "desk", "apk", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
-      "connectors", "provision", "pair", "notion", "gcal", "trello", "exness", "stripe",
+      "connectors", "provision", "pair", "massreact", "pollvote", "chfollow", "notion", "gcal", "trello", "exness", "stripe",
       "guardrails", "content",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
     ("platform control — updates & restarts",
@@ -3395,6 +3410,9 @@ LIST_ONELINERS: dict[str, str] = {
     "browser": "the browser tool in chat: /browser open|text|links|forms|headings <url> | takeover [url] | run <url> [goal] (owner-only, background job) | run status [job] | watch [session] — attach a live view to a running browser session (owner-only)",
     "provision": "self-provisioning: /provision [service] — Devon fetches a missing API key herself (login or account creation; key validated + vaulted, request retried); /provision login <service> <username> hands her an existing login",
     "pair": "pairing-with-code pool: /pair whatsapp <number> [label] — pair a WhatsApp account by 8-char code (own bridge session each); /pair telegram <number> pairs Telegram by login code into the same pool; /pair lists the pool with Registered/Connected/Dropped counts (owner only)",
+    "massreact": "mass react: /massreact <post link> | <emoji> [| count] [| live] — one reaction on a post from every connected account in your pool (Telegram + WhatsApp channels); arm it once first, first run dry-runs (owner only)",
+    "pollvote": "mass vote: /pollvote <poll link> | <option> [| count] [| live] — vote in a poll from every connected Telegram account (MTProto; bots can't vote); arm-gated, first run dry-runs (owner only)",
+    "chfollow": "channel follow: /chfollow <channel link> [| live] — every connected account in your pool follows the channel; idempotent; arm-gated, first run dry-runs (owner only)",
     "paper": "paper trading: /paper start <symbol> [market] [capital] | status | stop | list (simulated, never real)",
     "people": "the people spine: /people list | show <name> | add <name> | note <name> <text>",
     "commitments": "the obligation layer: /commitments list | add <what> [by <deadline>] | kept|broken|cancel <id> | overdue | due | reliability | verify",

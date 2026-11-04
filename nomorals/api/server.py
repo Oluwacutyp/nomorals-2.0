@@ -563,6 +563,34 @@ class APIServer:
             # stays behind the bearer token on /health.
             return {"ok": True}
 
+        @self.route("POST", "/site/publish",
+                    description="Publish Devon's web presence (her page + "
+                                "the claimed groups' rules pages) to the "
+                                "two configured WordPress sites; an "
+                                "unconfigured site reports exactly that "
+                                "(sys.config)")
+        def site_publish(body: dict[str, Any],
+                         query: dict[str, str]) -> dict[str, Any]:
+            # Publishing to external sites is owner configuration
+            # work — the same capability that guards /pair.
+            _require_capability(server._current_principal(),
+                                Capability.SYS_CONFIG)
+            from ..social.site import (_surface_for_context,
+                                       _titles_for_context,
+                                       claimed_group_keys,
+                                       publish_to_wordpress)
+
+            settings = getattr(context, "settings", None)
+            web = getattr(settings, "web", None)
+            surface = _surface_for_context(context)
+            titles = _titles_for_context(
+                context, claimed_group_keys(surface))
+            report = publish_to_wordpress(
+                web, surface,
+                bot_username=getattr(web, "bot_username", "") or "",
+                titles=titles)
+            return {"sites": report}
+
         @self.route("GET", "/ready",
                    description="Readiness probe (authenticated): 200 when "
                                "the database answers, 503 problem when it "
@@ -1059,6 +1087,14 @@ class APIServer:
         self._route_docs[("GET", "/stream")] = (
             "Live Timeline events as Server-Sent Events (?since=EPOCH, ?topic=GLOB)"
         )
+        # Devon's public web presence is likewise served directly by
+        # the handler (HTML, public, no bearer auth); docs entries only.
+        self._route_docs[("GET", "/devon")] = (
+            "Devon's public page, generated from the live command registry"
+        )
+        self._route_docs[("GET", "/rules")] = (
+            "Index of the claimed groups' public rules pages (/rules/<slug>)"
+        )
 
 
 def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
@@ -1242,6 +1278,43 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
             parsed = urlparse(self.path)
             if not _ROUTE.match(parsed.path):
                 self._send_error(400, "malformed path")
+                return
+            if method == "GET" and (
+                    parsed.path in ("/devon", "/rules")
+                    or parsed.path.startswith("/rules/")):
+                # Devon's public web presence (social/site.py):
+                # her page + the claimed groups' rules pages.
+                # Public like the liveness probe — the content
+                # is member-facing by design (rules and titles,
+                # no ids in slugs, nothing else), so these paths
+                # skip bearer auth entirely and never enter the
+                # JSON dispatch (HTML cannot ride it — the /pair
+                # precedent).
+                from ..social.site import render_site_path
+
+                try:
+                    page = render_site_path(server.context,
+                                            parsed.path)
+                except Exception:  # noqa: BLE001 - a broken store
+                    _log.exception("site page render failed")
+                    self._send_error(503, "site page unavailable")
+                    return
+                if page is None:
+                    self._send_error(404, "no such page")
+                    return
+                raw = page.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type",
+                                 "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Referrer-Policy", "no-referrer")
+                request_id = getattr(self, "_request_id", "")
+                if request_id:
+                    self.send_header("X-Request-ID", request_id)
+                self.end_headers()
+                self.wfile.write(raw)
                 return
             if (method.upper(), parsed.path) in server._public_routes:
                 # Tokenless liveness: skip bearer auth and serve the static

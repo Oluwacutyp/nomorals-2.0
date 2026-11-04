@@ -2084,11 +2084,54 @@ class RuntimeGroupMixin:
             return None
         return message.chat.key
 
-    def _control_rules(self, message) -> str:  # type: ignore[no-untyped-def]
+    def _rules_page_url(self, key: str) -> str:
+        """The group's public rules-page URL, or "" when no
+        public base URL is configured or the room isn't claimed
+        (an unclaimed room publishes no page to link to)."""
+        settings = getattr(getattr(self, "context", None),
+                           "settings", None)
+        web = getattr(settings, "web", None)
+        base = str(getattr(web, "base_url", "") or "").strip()
+        if not base:
+            return ""
+        from ...social.site import group_slug, rules_url
+
+        surface = self._group_surface()
+        if key not in {k for k in surface.store.data
+                       if surface.system_output_allowed(k)}:
+            return ""
+        title = ""
+        try:
+            db = getattr(getattr(self, "gateway", None), "db", None)
+            if db is not None:
+                row = db.query_one(
+                    "SELECT title FROM chats WHERE key = ?", [key])
+                if row:
+                    title = str(row.get("title") or "")
+        except Exception:  # noqa: BLE001 - the title only
+            title = ""                    # pretties the slug
+        return rules_url(base, group_slug(key, title))
+
+    def _control_rules(self, message):  # type: ignore[no-untyped-def]
         key = self._group_key_or_none(message)
         if key is None:
             return "that's a group command — run it inside the group."
-        return self._group_surface().rules_text(key)
+        text = self._group_surface().rules_text(key)
+        url = self._rules_page_url(key)
+        if not url:
+            return text
+        platform = str(getattr(message.chat, "platform", "") or "")
+        if platform == "telegram-bot":
+            # The bot surface carries buttons: the page rides
+            # as a native URL button (the closest Telegram
+            # equivalent of an HTML link).  Everywhere else —
+            # the userbot (its sends drop inline keyboards),
+            # WhatsApp, Discord — the bare link goes in the
+            # text, where it always works.
+            from ...social.chat.tgbot_buttons import actionable
+
+            return actionable(text, [[("📜 Rules page", url)]])
+        return f"{text}\n📜 full rules page: {url}"
 
     def _control_member(self, arg, message) -> str:  # type: ignore[no-untyped-def]
         key = self._group_key_or_none(message)

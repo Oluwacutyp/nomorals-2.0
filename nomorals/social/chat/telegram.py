@@ -1892,6 +1892,128 @@ class TelegramAdapter(ChatAdapter):
             return SendResult(ok=False, platform=self.name, error=str(exc),
                               seconds=time.perf_counter() - started)
 
+    # ── polls + channel joins (§14 mass tools) ──────────────────────
+    # MTProto-only territory: the Bot API cannot vote in polls at
+    # all, which is why these verbs live on the userbot adapter
+    # and why the mass tools never run from a bot token.
+
+    async def _poll_answers(self, client: Any, chat: ChatRef,
+                            message_id: str) -> list[Any]:
+        entity = self._input_entity_cache.get(chat.chat_id)
+        if entity is None:
+            entity = await self._resolve(chat)
+        msg = await client.get_messages(entity, ids=int(message_id))
+        media = getattr(msg, "media", None)
+        poll = getattr(media, "poll", None)
+        if poll is None:
+            raise ValueError(
+                f"message {message_id} is not a poll — pollvote "
+                "needs a poll post")
+        return list(poll.answers or [])
+
+    @staticmethod
+    def _answer_text(answer: Any) -> str:
+        text = getattr(answer, "text", "")
+        if isinstance(text, str):
+            return text
+        return str(getattr(text, "text", "") or "")
+
+    def poll_options(self, chat: ChatRef,
+                     message_id: str) -> list[str]:
+        """The option texts of the poll at (chat, message_id),
+        in order — the read the mass vote resolves option TEXT
+        against.  Raises ValueError when the message is not a
+        poll (the caller's refusal carries the reason)."""
+        client = self._client
+        if client is None:
+            raise ValueError("not connected")
+
+        async def _do() -> list[str]:
+            answers = await self._poll_answers(client, chat,
+                                               message_id)
+            return [self._answer_text(a) for a in answers]
+
+        return self._run_on_loop(_do())
+
+    def vote_poll(self, chat: ChatRef, message_id: str,
+                  option_index: int) -> SendResult:
+        """Cast this account's vote in a poll via MTProto
+        ``SendVoteRequest`` (§14).  ``option_index`` is 0-based
+        into the poll's own answers (re-read here, so the bytes
+        voted are the poll's, never a caller's guess)."""
+        client = self._client
+        if client is None:
+            return SendResult(ok=False, platform=self.name,
+                              error="not connected")
+        started = time.perf_counter()
+
+        async def _do() -> Any:
+            from telethon.tl.functions.messages import SendVoteRequest
+
+            answers = await self._poll_answers(client, chat,
+                                               message_id)
+            if not (0 <= int(option_index) < len(answers)):
+                raise ValueError(
+                    f"option {int(option_index) + 1} doesn't exist "
+                    f"— the poll has {len(answers)} options")
+            entity = self._input_entity_cache.get(chat.chat_id)
+            if entity is None:
+                entity = await self._resolve(chat)
+            return await client(SendVoteRequest(
+                peer=entity, msg_id=int(message_id),
+                options=[bytes(answers[int(option_index)].option)]))
+
+        try:
+            self._run_on_loop(_do())
+            self.stats["sent"] += 1
+            return SendResult(ok=True, platform=self.name,
+                              message_id=str(message_id),
+                              seconds=time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001
+            self.stats["send_errors"] += 1
+            return SendResult(ok=False, platform=self.name,
+                              error=str(exc),
+                              seconds=time.perf_counter() - started)
+
+    def join_channel(self, chat: ChatRef) -> SendResult:
+        """Join/follow a channel via ``JoinChannelRequest``
+        (§14 chfollow).  Already-a-participant collapses to a
+        plain success — SendResult has no detail field to carry
+        the distinction, and following twice is the idempotent
+        no-op the mass tool promises, not an error.  (The
+        per-account session actor keeps the explicit marker.)"""
+        client = self._client
+        if client is None:
+            return SendResult(ok=False, platform=self.name,
+                              error="not connected")
+        started = time.perf_counter()
+
+        async def _do() -> str:
+            from telethon.errors import UserAlreadyParticipantError
+            from telethon.tl.functions.channels import \
+                JoinChannelRequest
+
+            entity = self._input_entity_cache.get(chat.chat_id)
+            if entity is None:
+                entity = await self._resolve(chat)
+            try:
+                await client(JoinChannelRequest(channel=entity))
+            except UserAlreadyParticipantError:
+                return "already"
+            return ""
+
+        try:
+            self._run_on_loop(_do())
+            self.stats["sent"] += 1
+            return SendResult(
+                ok=True, platform=self.name,
+                seconds=time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001
+            self.stats["send_errors"] += 1
+            return SendResult(ok=False, platform=self.name,
+                              error=str(exc),
+                              seconds=time.perf_counter() - started)
+
     def typing(self, chat: ChatRef, seconds: float = 3.0,
              action: str = "typing") -> bool:
         """Chat action indicator: "typing" or "recording" (voice).
@@ -3327,6 +3449,17 @@ class TelegramBotAdapter(ChatAdapter):
                        hashlib.sha256).hexdigest()[:16]
         return f"{data}|{sig}"
 
+    def _button_json(self, label: str, data: str) -> dict[str, Any]:
+        """One inline-keyboard button.  A payload that is a URL
+        renders as Telegram's native URL button (the closest
+        equivalent of an HTML link — e.g. a group's rules page);
+        anything else is a signed callback button."""
+        data = str(data or "")
+        if data.startswith(("http://", "https://")):
+            return {"text": str(label), "url": data}
+        return {"text": str(label),
+                "callback_data": self._sign_callback(data)}
+
     def _verify_callback(self, signed: str) -> str | None:
         """Verify signature, return the original data or None."""
         if not isinstance(signed, str):
@@ -3762,8 +3895,7 @@ class TelegramBotAdapter(ChatAdapter):
             for row in resolved:
                 krow = []
                 for label, data in row:
-                    krow.append({"text": label,
-                                 "callback_data": self._sign_callback(data)})
+                    krow.append(self._button_json(label, data))
                 keyboard.append(krow)
             params["reply_markup"] = {"inline_keyboard": keyboard}
         try:
@@ -3887,8 +4019,7 @@ class TelegramBotAdapter(ChatAdapter):
                     for row in resolved:
                         krow = []
                         for label, data in row:
-                            krow.append({"text": label,
-                                         "callback_data": self._sign_callback(data)})
+                            krow.append(self._button_json(label, data))
                         keyboard.append(krow)
             chunks = _chunk_text(text, self.MAX_TEXT)
             plain_fallback = False

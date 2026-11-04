@@ -956,6 +956,239 @@ class RuntimeProvisionMixin:
                 "use <id>|route [platform]|toggle <id> <name> "
                 "<on|off>|saved [id]|recovered [id]|page]")
 
+    # ── mass actions (§14: massreact / pollvote / chfollow) ─────────
+    def _mass_service(self) -> dict[str, Any]:
+        """The §14 mass-action bundle over the §15 pool: arms
+        store + run journal + runner, built once, lazily.  The
+        handle builder reads the LIVE pool each run (registry
+        accounts + gateway sessions), so an account paired
+        mid-session joins the next run without a restart."""
+        svc = getattr(self, "_mass_svc", None)
+        if svc is not None:
+            return svc
+        from pathlib import Path
+
+        from ...social.mass_actions import (MassArms, MassJournal,
+                                            MassRunner,
+                                            default_mass_root)
+
+        sup = self._pairing_supervisor()
+        ws = Path(getattr(self.context.settings, "workspace_dir", "."))
+        root = default_mass_root(ws)
+        arms = MassArms(root / "arms.json")
+        journal = MassJournal(root / "journal.jsonl")
+        svc = {"supervisor": sup, "registry": sup.registry,
+               "arms": arms, "journal": journal,
+               "runner": MassRunner(arms, journal)}
+        self._mass_svc = svc
+        return svc
+
+    def _mass_handles(self, platform: str) -> list[Any]:
+        """The pool for one platform as mass handles: every
+        LINKED registry account (WhatsApp → its own bridge
+        actor; Telegram → its own session actor), plus the
+        gateway's live session as the platform primary when the
+        registry doesn't already carry that same account.
+        Bot adapters are never handles — mass tools act as him,
+        never as the bot."""
+        from ...social.mass_actions import (TG_CAPABILITIES,
+                                            WA_CAPABILITIES,
+                                            GatewayAdapterActor,
+                                            MassAccount,
+                                            TelegramSessionActor,
+                                            WhatsAppBridgeActor)
+        from ...social.pairing import AccountRecord
+
+        svc = self._mass_service()
+        registry = svc["registry"]
+        chat = getattr(self.context.settings, "chat", None)
+        api_id = getattr(chat, "telegram_api_id", "")
+        api_hash = getattr(chat, "telegram_api_hash", "")
+        adapter = self._adapter_for(platform)
+        handles: list[Any] = []
+        gateway_covered = False
+        me_id = str(getattr(adapter, "_me_id", "") or "") \
+            if adapter is not None else ""
+        for rec in registry.accounts_for(platform):
+            if platform == "whatsapp":
+                if rec.port:
+                    handles.append(MassAccount(
+                        record=rec, capabilities=WA_CAPABILITIES,
+                        factory=lambda r=rec: WhatsAppBridgeActor(r)))
+                elif adapter is not None:
+                    gateway_covered = True
+                    handles.append(MassAccount(
+                        record=rec, capabilities=WA_CAPABILITIES,
+                        factory=lambda a=adapter:
+                        GatewayAdapterActor(a, "whatsapp")))
+            elif platform == "telegram":
+                if rec.session_path:
+                    if me_id and rec.remote_id == me_id \
+                            and adapter is not None:
+                        # This record IS the gateway's own
+                        # account, paired twice over — the
+                        # gateway session speaks for it; a
+                        # second session of the same account
+                        # would double-vote.
+                        gateway_covered = True
+                        handles.append(MassAccount(
+                            record=rec,
+                            capabilities=TG_CAPABILITIES,
+                            factory=lambda a=adapter:
+                            GatewayAdapterActor(a, "telegram")))
+                        continue
+                    handles.append(MassAccount(
+                        record=rec, capabilities=TG_CAPABILITIES,
+                        factory=lambda r=rec: TelegramSessionActor(
+                            r, api_id=api_id, api_hash=api_hash)))
+                elif adapter is not None:
+                    gateway_covered = True
+                    handles.append(MassAccount(
+                        record=rec, capabilities=TG_CAPABILITIES,
+                        factory=lambda a=adapter:
+                        GatewayAdapterActor(a, "telegram")))
+        if adapter is not None and not gateway_covered:
+            caps = WA_CAPABILITIES if platform == "whatsapp" \
+                else TG_CAPABILITIES
+            handles.append(MassAccount(
+                record=AccountRecord(
+                    id=f"{platform}:primary", platform=platform,
+                    identity="primary",
+                    label="live session (gateway)", status="linked"),
+                capabilities=caps,
+                factory=lambda a=adapter: GatewayAdapterActor(
+                    a, platform)))
+        handles.sort(key=lambda h: (
+            0 if (h.record.primary
+                  or h.record.id.endswith(":primary")) else 1,
+            h.record.created_at))
+        return handles
+
+    def _control_mass(self, tool: str, tail: str) -> str:
+        """/massreact · /pollvote · /chfollow — the §14 mass
+        tools over the owner's own paired accounts.
+
+        /massreact <post link> | <emoji> [| count] [| live|dry]
+        /pollvote <poll link> | <option> [| count] [| live|dry]
+        /chfollow <channel link> [| count] [| live|dry]
+        /<tool> arm|disarm|status|runs|pacing <seconds>
+
+        Owner-only (control dispatch).  A live run BLOCKS this
+        chat's turn for its paced duration — the pacing is the
+        safety control, and the reply when it lands IS the run
+        report (the design's deliverable shape)."""
+        from ...social.mass_actions import (WARN_TEXT, MassRefusal,
+                                            parse_target, render_run)
+
+        svc = self._mass_service()
+        arms, journal, runner = svc["arms"], svc["journal"], \
+            svc["runner"]
+        raw = str(tail or "").strip()
+        segments = [s.strip() for s in raw.split("|")]
+        head = segments[0] if segments else ""
+        words = head.split()
+        meta = words[0].lower() if words else ""
+
+        if meta == "arm":
+            arms.arm(tool)
+            return (f"{WARN_TEXT}\n\n✅ /{tool} is ARMED. "
+                    "Live runs are possible now; the tool's "
+                    "first run still dry-runs unless you say "
+                    "“| live”. Disarm any time: "
+                    f"/{tool} disarm")
+        if meta == "disarm":
+            arms.disarm(tool)
+            return (f"⏸️ /{tool} disarmed — live runs refuse "
+                    "until you arm it again.")
+        if meta == "pacing":
+            if len(words) < 2:
+                return (f"/{tool} pacing is "
+                        f"{arms.pacing(tool):.0f}s between "
+                        "accounts. Raise it: "
+                        f"/{tool} pacing <seconds>")
+            try:
+                value = arms.set_pacing(tool, float(words[1]))
+            except (MassRefusal, ValueError) as exc:
+                return f"⚠️ {exc}"
+            return f"⏱️ /{tool} pacing set to {value:.0f}s."
+        if meta == "status":
+            st = arms.state(tool)
+            rows = svc["registry"].all()
+            linked = sum(1 for r in rows if r.status == "linked")
+            return "\n".join([
+                f"🎛️ /{tool}: "
+                f"{'ARMED' if st.get('armed') else 'disarmed'} · "
+                f"pacing {arms.pacing(tool):.0f}s · "
+                f"{int(st.get('live_runs') or 0)} live run(s) so "
+                "far",
+                f"pool: {len(rows)} registered · {linked} "
+                "connected (mass reach = connected accounts on "
+                "the target's platform)",
+                WARN_TEXT if not st.get("armed") else
+                "armed — the platform-risk warning was shown "
+                "at arm time and stands."])
+        if meta == "runs":
+            rows = journal.tail(5, tool=tool)
+            if not rows:
+                return f"no /{tool} runs journaled yet."
+            lines = [f"📓 recent /{tool} runs:"]
+            for row in rows:
+                accounts = row.get("accounts") or []
+                ok = sum(1 for a in accounts if a.get("ok"))
+                kind = row.get("kind", "run")
+                mode = "dry" if row.get("dry_run") else "live"
+                lines.append(
+                    f"  {row.get('run_id', '?')} · {kind}/{mode} "
+                    f"· {ok}/{len(accounts)} ok · "
+                    f"{row.get('target', '')}")
+            return "\n".join(lines)
+        if not head:
+            return (f"usage: /{tool} <link>"
+                    + (" | <emoji>" if tool == "massreact"
+                       else " | <option>" if tool == "pollvote"
+                       else "")
+                    + " [| count] [| live|dry] — or "
+                    f"/{tool} arm|status|runs|pacing <s>")
+
+        # ── a run ──
+        try:
+            target, riding_count = parse_target(words[0])
+        except MassRefusal as exc:
+            return f"⚠️ {exc}"
+        payload = ""
+        count: int | None = riding_count or None
+        dry_run: bool | None = None
+        for seg in segments[1:]:
+            low = seg.lower()
+            if low in ("live",):
+                dry_run = False
+            elif low in ("dry", "dry-run", "dryrun"):
+                dry_run = True
+            elif seg.isdigit():
+                count = int(seg)
+            elif seg and not payload:
+                payload = seg
+            elif seg:
+                payload = f"{payload} {seg}"
+        if tool == "massreact" and not payload:
+            return ("⚠️ massreact needs its emoji: "
+                    "/massreact <post link> | <emoji> [| count] "
+                    "[| live]")
+        if tool == "pollvote" and not payload:
+            return ("⚠️ pollvote needs its option: "
+                    "/pollvote <poll link> | <option text or "
+                    "number> [| count] [| live]")
+        try:
+            run = runner.run(
+                tool, target,
+                accounts=self._mass_handles(target.platform),
+                emoji=payload if tool == "massreact" else "",
+                option_spec=payload if tool == "pollvote" else "",
+                count=count, dry_run=dry_run)
+        except MassRefusal as exc:
+            return f"⚠️ {exc}"
+        return render_run(run, tool_label=f"/{tool}")
+
     def _control_browser_watch(self, tail: str, *, chat_key: str = "",
                                message: Any = None) -> str:
         """``/browser watch [session]`` — attach a LiveView to a live

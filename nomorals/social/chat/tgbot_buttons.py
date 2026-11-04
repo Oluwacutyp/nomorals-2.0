@@ -79,7 +79,12 @@ def actionable(text: str, buttons: list) -> ActionableMessage:
         data = (command or "").strip()
         if data.startswith("/"):
             data = data[1:]
-        check_callback_data(data)
+        # A URL payload is not callback data: it renders as a
+        # URL button (Telegram's native link button) and is not
+        # subject to the 47-byte callback budget.  Adapters
+        # without URL buttons ignore it like any keyboard.
+        if not data.startswith(("http://", "https://")):
+            check_callback_data(data)
         return (str(label), data)
 
     items = list(buttons or [])

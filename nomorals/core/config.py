@@ -729,6 +729,40 @@ class TranslateSettings:
 
 
 @dataclass
+class WebSettings:
+    """Devon's public web presence (social/site.py): her page,
+    the per-group rules pages, and the two WordPress sites.
+
+    ``base_url`` is the PUBLIC prefix of this machine's API —
+    the address members' browsers can reach (a domain/tunnel in
+    front of the API port).  The in-group rules card links to
+    ``<base_url>/rules/<slug>`` only when this is set; empty =
+    no link is published (the local pages still serve on the
+    API itself).  ``bot_username`` fills the "add her" link on
+    her page.
+
+    The WordPress rung: two independent sites — ``wp_page_*``
+    carries her own page, ``wp_rules_*`` carries the group
+    rules — each authenticated with a WordPress application
+    password.  A site whose three fields are not all set is
+    simply not configured: publishing reports that honestly
+    and the local bundle still serves.
+    Env: NM_WEB_BASE_URL, NM_WEB_BOT_USERNAME,
+    NM_WP_PAGE_URL, NM_WP_PAGE_USER, NM_WP_PAGE_PASSWORD,
+    NM_WP_RULES_URL, NM_WP_RULES_USER, NM_WP_RULES_PASSWORD.
+    """
+
+    base_url: str = ""
+    bot_username: str = ""
+    wp_page_url: str = ""
+    wp_page_user: str = ""
+    wp_page_password: str = ""
+    wp_rules_url: str = ""
+    wp_rules_user: str = ""
+    wp_rules_password: str = ""
+
+
+@dataclass
 class Settings:
     """Root configuration object."""
 
@@ -789,6 +823,7 @@ class Settings:
         default_factory=lambda: LocationSettings())
     translate: "TranslateSettings" = field(
         default_factory=lambda: TranslateSettings())
+    web: "WebSettings" = field(default_factory=lambda: WebSettings())
 
     # -- path helpers --------------------------------------------------------
     @property
@@ -1019,6 +1054,14 @@ _ENV_MAP: dict[str, str] = {
     "NM_TRANSLATE_OWNER_LANGUAGE": "translate.owner_language",
     "NM_TRANSLATE_MODEL": "translate.local_model",
     "NM_TRANSLATE_PROVIDERS": "translate.providers",
+    "NM_WEB_BASE_URL": "web.base_url",
+    "NM_WEB_BOT_USERNAME": "web.bot_username",
+    "NM_WP_PAGE_URL": "web.wp_page_url",
+    "NM_WP_PAGE_USER": "web.wp_page_user",
+    "NM_WP_PAGE_PASSWORD": "web.wp_page_password",
+    "NM_WP_RULES_URL": "web.wp_rules_url",
+    "NM_WP_RULES_USER": "web.wp_rules_user",
+    "NM_WP_RULES_PASSWORD": "web.wp_rules_password",
     "NM_HUB_URL": "hub.url",
     "NM_HUB_TOKEN": "hub.token",
     "NM_HUB_HOST": "hub.bind_host",

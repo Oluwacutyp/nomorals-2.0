@@ -3693,6 +3693,11 @@ class PartnerRuntime(
             return self._control_pair(command.tail, chat_key=chat_key,
                                       message=message)
 
+        if kind in ("massreact", "pollvote", "chfollow"):
+            # §14 mass tools over the §15 pool — owner-only like
+            # /pair (control dispatch never reaches non-operators).
+            return self._control_mass(kind, command.tail)
+
         if kind == "rules":
             return self._control_rules(message)
 
