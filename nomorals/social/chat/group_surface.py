@@ -77,6 +77,15 @@ from .group_reputation import (
     ReputationBook,
     normalize_person,
 )
+from .group_boards import (
+    BOARD_LIMIT as _BOARD_LIMIT,
+    BoardBook,
+    board_title as _board_title,
+    is_game_flavored as _board_game_flavored,
+    metric_format as _board_metric_format,
+    movement_marks as _board_movement,
+    parse_board_id as _parse_board_id,
+)
 from .group_defense import (
     DEFAULTS as DEFENSE_DEFAULTS,
 )
@@ -231,6 +240,38 @@ def _default_settings() -> dict[str, Any]:
                                         # record never decides
                                         # admission itself.
         "conflict": copy.deepcopy(CONFLICT_DEFAULTS),
+        "channel": {"cadence_min": 0,
+                    "links": {},
+                    "analytics": True},
+                                        # a CHANNEL entry's own
+                                        # block (§16/P4a): the
+                                        # posting cadence floor,
+                                        # the trigger links
+                                        # {source group key:
+                                        # [trigger kinds]} its
+                                        # queue cross-posts from,
+                                        # and whether subscriber
+                                        # counts are sampled where
+                                        # the platform exposes
+                                        # them.  Groups carry the
+                                        # block unused.
+        "boards": {"daily": [],
+                   "weekly": [],
+                   "hour": 20},
+                                        # §14 board publishing:
+                                        # board specs this group
+                                        # posts on the daily /
+                                        # weekly beat at its
+                                        # local hour (bare metric
+                                        # names mean this group's
+                                        # own board; full board
+                                        # ids publish those)
+        "community_id": "",             # the community this
+                                        # group belongs to, when
+                                        # it carries one (§14
+                                        # community boards read
+                                        # the tag; untagged
+                                        # groups join none)
         "rhythm": copy.deepcopy(RHYTHM_DEFAULTS),
                                         # the room's clock (P3):
                                         # silent hours + UTC
@@ -313,7 +354,8 @@ class GroupStore:
                                      "estate", "acceptance",
                                      "escalation", "system_claim",
                                      "expression", "reputation",
-                                     "conflict", "rhythm")})
+                                     "conflict", "rhythm",
+                                     "channel", "boards")})
         mod = dict(merged["moderation"])
         mod.update((stored.get("moderation") or {}))
         merged["moderation"] = mod
@@ -347,6 +389,12 @@ class GroupStore:
         merged["rhythm"] = _deep_merge(
             copy.deepcopy(RHYTHM_DEFAULTS),
             stored.get("rhythm") or {})
+        merged["channel"] = _deep_merge(
+            {"cadence_min": 0, "links": {}, "analytics": True},
+            stored.get("channel") or {})
+        merged["boards"] = _deep_merge(
+            {"daily": [], "weekly": [], "hour": 20},
+            stored.get("boards") or {})
         return merged
 
 
@@ -1552,6 +1600,12 @@ class GroupSurface:
                                              None) or []))),
                         now=now)
                 notices.extend(self.rhythm_cycle(group_key,
+                                                 now=now))
+                # The §14 board beat: this group's scheduled
+                # board publishes ride the same notices list, so
+                # silent hours hold them into the digest exactly
+                # like every other cycle post.
+                notices.extend(self.boards_cycle(group_key,
                                                  now=now))
                 if notices and self.rhythm_silent(group_key,
                                                    now=now):
@@ -3052,7 +3106,13 @@ class GroupSurface:
                 or landlord[0]
             lines.append(f"🏘️ {who} — the group's landlord: "
                          f"{landlord[1]} sparks of property")
-        return "\n".join(lines)
+        text = "\n".join(lines)
+        # A turned season is a channel trigger (§16): linked,
+        # claimed channels get the podium cross-posted from
+        # their posting queue.
+        self._channel_trigger(group_key, "season_podium", text,
+                              now=now)
+        return text
 
     def apply_fine(self, group_key: str, user_id: str, *,
                    amount: int | None = None,
@@ -4581,7 +4641,7 @@ class GroupSurface:
                         f"and <b>{name_b}</b> was never answered "
                         f"— escrow returned."))
                 elif event.get("finished"):
-                    notices.append(notice_line(
+                    war_text = notice_line(
                         "⚔️", f"<b>{event['winner_gang']['name']}"
                         f"</b> wins the war against "
                         f"<b>{event['loser_gang']['name']}</b> "
@@ -4591,7 +4651,10 @@ class GroupSurface:
                         + (" A district can be claimed with "
                            "/war spoils <district>."
                            if event.get("spoils_pending")
-                           else "")))
+                           else ""))
+                    notices.append(war_text)
+                    self._channel_trigger(group_key, "war_result",
+                                          war_text, now=now)
                 else:
                     notices.append(notice_line(
                         "⚔️", f"war round {event.get('round')}: "
@@ -4770,10 +4833,13 @@ class GroupSurface:
                     f" takes it ({event['power_a']:.0f} vs "
                     f"{event['power_b']:.0f})."))
                 if event.get("finished"):
-                    notices.append(notice_line(
+                    war_text = notice_line(
                         "🏆", f"<b>{(war.get(war.get('winner') or 'a') or {}).get('gang_name', 'a gang')}</b>"
                         f" wins the inter-group war against "
-                        f"<b>{enemy.get('gang_name', 'the enemy')}</b>!"))
+                        f"<b>{enemy.get('gang_name', 'the enemy')}</b>!")
+                    notices.append(war_text)
+                    self._channel_trigger(group_key, "war_result",
+                                          war_text, now=now)
             if war.get("status") == "done" and not (
                     war.get("settled") or {}).get(side):
                 settled = organ.settle_inter_war(group_key, war,
@@ -4977,6 +5043,8 @@ class GroupSurface:
                                             now=now))
         for entry in self._detect_milestones(group_key, now):
             out.append(str(entry["text"]))
+            self._channel_trigger(group_key, "milestone",
+                                  str(entry["text"]), now=now)
         if cfg.get("reminders_enabled"):
             out.extend(self._fire_reminders(group_key, cfg,
                                             now))
@@ -5784,6 +5852,728 @@ class GroupSurface:
                 f"({count} counted). Admins decide: "
                 f"/approve {proposal['id']} or "
                 f"/deny {proposal['id']}.")
+
+    # -- channels (§16 / P4a): registry, queue, analytics --------
+    #
+    # A channel stays SILENT (§16 law, unchanged): no commands,
+    # no catalog, no replies ever run in it.  What this build
+    # adds is the OWNER side: channels Devon admins are claimed
+    # like groups (the §33 bot-admin stamp / owner designation),
+    # and claimed channels carry a POSTING QUEUE the owner runs
+    # from the DM console.  The queue posts on its cadence when
+    # the runtime drives the cycle (channel activity, group
+    # turns, console actions — no new daemon); every post is
+    # journaled with its source.  Channel state lives in the
+    # channel's own store entry: extras["channel"] (registry
+    # note), extras["channel_queue"], extras["channel_posts"],
+    # extras["channel_counts"], settings["channel"] (cadence,
+    # trigger links, analytics switch).
+
+    #: The group events an owner can link a channel to.
+    CHANNEL_TRIGGERS = ("season_podium", "war_result",
+                        "milestone")
+    _CHANNEL_CYCLE_GAP_S = 15.0
+    _CHANNEL_SAMPLE_GAP_S = 6 * 3600.0
+    _CHANNEL_QUEUE_CAP = 100
+    _CHANNEL_POSTS_RING = 100
+    _CHANNEL_COUNTS_RING = 120
+    _CHANNEL_POSTS_PER_CYCLE = 5
+
+    def note_channel_seen(self, key: str, *, title: str = "",
+                          now: float | None = None) -> None:
+        """Registry note: this chat is a channel Devon has seen
+        (a silent read — the channel itself still gets no
+        ingest, no replies, no state beyond this note and,
+        once claimed, its queue)."""
+        now = now if now is not None else time.time()
+        extras = self._extras(key)
+        note = extras.setdefault("channel", {})
+        changed = False
+        if not note.get("seen_at"):
+            note["seen_at"] = now
+            changed = True
+        if title and note.get("title") != title:
+            note["title"] = str(title)
+            changed = True
+        if changed:
+            self.store.save()
+
+    def is_channel(self, key: str) -> bool:
+        entry = self.store.data.get(key) or {}
+        return bool((entry.get("extras") or {}).get("channel"))
+
+    def channel_keys(self) -> list[str]:
+        return sorted(k for k in self.store.data
+                      if self.is_channel(k))
+
+    def channel_title(self, key: str) -> str:
+        entry = self.store.data.get(key) or {}
+        note = (entry.get("extras") or {}).get("channel") or {}
+        return str(note.get("title") or "")
+
+    def channel_cfg(self, key: str) -> dict[str, Any]:
+        return dict(self.store.settings(key).get("channel")
+                    or {})
+
+    def channel_queue(self, key: str) -> list[dict[str, Any]]:
+        extras = self._extras(key)
+        return [dict(e) for e in
+                (extras.get("channel_queue") or [])]
+
+    def channel_enqueue(self, key: str, entry: dict[str, Any],
+                        *, now: float | None = None
+                        ) -> dict[str, Any] | None:
+        """Queue one post.  Returns the stored entry (with its
+        internal id), or None when the queue is full — the
+        caller reports the refusal honestly."""
+        now = now if now is not None else time.time()
+        extras = self._extras(key)
+        queue = list(extras.get("channel_queue") or [])
+        if len(queue) >= self._CHANNEL_QUEUE_CAP:
+            self._audit(key, "channel_queue_full",
+                        entry_kind=str(entry.get("kind") or ""))
+            return None
+        seq = int(extras.get("channel_seq") or 0) + 1
+        extras["channel_seq"] = seq
+        stored = {
+            "id": f"p{seq}",
+            "kind": str(entry.get("kind") or "once"),
+            "text": str(entry.get("text") or ""),
+            "media": entry.get("media") or None,
+            "due": float(entry.get("due") or now),
+            "time": str(entry.get("time") or ""),
+            "weekday": entry.get("weekday"),
+            "trigger": str(entry.get("trigger") or ""),
+            "source": str(entry.get("source") or "dm"),
+            "source_group": str(entry.get("source_group") or ""),
+            "created_by": str(entry.get("created_by") or ""),
+            "created_at": now,
+            "last_posted": 0.0,
+        }
+        queue.append(stored)
+        extras["channel_queue"] = queue
+        self._audit(key, "channel_queued", entry=stored["id"],
+                    entry_kind=stored["kind"],
+                    source=stored["source"],
+                    trigger=stored["trigger"])
+        self.store.save()
+        return dict(stored)
+
+    def channel_cancel(self, key: str, position: int
+                       ) -> dict[str, Any] | None:
+        """Cancel the queue entry at a 1-based position (the
+        number the console shows — internal ids never print)."""
+        extras = self._extras(key)
+        queue = list(extras.get("channel_queue") or [])
+        if position < 1 or position > len(queue):
+            return None
+        gone = queue.pop(position - 1)
+        extras["channel_queue"] = queue
+        self._audit(key, "channel_cancelled",
+                    entry=str(gone.get("id") or ""),
+                    entry_kind=str(gone.get("kind") or ""))
+        self.store.save()
+        return gone
+
+    def channel_clear(self, key: str) -> int:
+        extras = self._extras(key)
+        count = len(extras.get("channel_queue") or [])
+        if count:
+            extras["channel_queue"] = []
+            self._audit(key, "channel_queue_cleared", count=count)
+            self.store.save()
+        return count
+
+    def _channel_next_due(self, entry: dict[str, Any],
+                          now: float, tz_offset_min: int) -> float:
+        """The next occurrence of a recurring entry strictly
+        after ``now``, in the channel's own local time."""
+        minutes = _rhythm_parse_hhmm(entry.get("time")) or 0
+        shifted = now + int(tz_offset_min or 0) * 60
+        day_floor = shifted - (shifted % 86400)
+        target = day_floor + minutes * 60 - int(
+            tz_offset_min or 0) * 60
+        if entry.get("kind") == "weekly":
+            parts = _rhythm_local_parts(now, tz_offset_min)
+            want = int(entry.get("weekday") or 0)
+            target += ((want - int(parts["weekday"])) % 7) \
+                * 86400
+            if target <= now:
+                target += 7 * 86400
+        elif target <= now:
+            target += 86400
+        return float(target)
+
+    def _channel_post_text(self, key: str,
+                           entry: dict[str, Any]) -> str:
+        """Render one queue entry for posting.  Owner-composed
+        posts go through the typography layer as announcements
+        (a presented surface — the stamp rides by default under
+        the channel's own presentation settings).  Trigger
+        cross-posts carry text the source group already
+        rendered (a season podium, a war result, a milestone
+        line) — re-wrapping would double-render it, so the
+        composed text posts as-is with the same stamp rule
+        applied through the same style resolution."""
+        from .typography import Card, resolve_style, \
+            _append_stamp
+
+        text = str(entry.get("text") or "")
+        if entry.get("kind") == "trigger":
+            style = resolve_style(self.store.settings(key),
+                                  "announcement")
+            if style.stamp:
+                text = _append_stamp(text, style.stamp_text,
+                                     "canonical")
+            return text
+        title = self.channel_title(key) or "announcement"
+        card = Card("announcement", title=title, icon="📣")
+        for line in text.split("\n"):
+            card.line(line)
+        return self._card_render(key, card)
+
+    def channel_cycle(self, key: str, *,
+                      now: float | None = None,
+                      send: Any = None,
+                      force: bool = False) -> list[dict[str, Any]]:
+        """Post due queue entries for one channel.
+
+        ``send(text, entry) -> (ok, message_id | error)`` is
+        the runtime's transport; the surface decides due-ness,
+        claim, cadence and rendering, advances the queue only
+        on a confirmed send, and journals every post with its
+        source.  An unclaimed channel posts NOTHING (§33: the
+        claim is the license for system output).  A failed send
+        leaves the entry due and stops the run — the next cycle
+        retries, nothing is silently dropped."""
+        now = now if now is not None else time.time()
+        posts: list[dict[str, Any]] = []
+        if send is None or not self.is_channel(key):
+            return posts
+        if not self.claim_state(key)["claimed"]:
+            return posts
+        extras = self._extras(key)
+        last_run = float(extras.get("channel_cycle_at") or 0)
+        if not force and now - last_run < self._CHANNEL_CYCLE_GAP_S:
+            return posts
+        extras["channel_cycle_at"] = now
+        cfg = self.channel_cfg(key)
+        gap = max(0, int(cfg.get("cadence_min") or 0)) * 60
+        last_post = float(extras.get("channel_last_post") or 0)
+        queue = list(extras.get("channel_queue") or [])
+        due = sorted((e for e in queue
+                      if float(e.get("due") or 0) <= now),
+                     key=lambda e: float(e.get("due") or 0))
+        changed = False
+        for entry in due[:self._CHANNEL_POSTS_PER_CYCLE]:
+            if gap and last_post and now - last_post < gap:
+                break  # the cadence floor spaces posts out
+            text = self._channel_post_text(key, entry)
+            try:
+                ok, info = send(text, dict(entry))
+            except Exception as exc:  # transport honesty: a
+                ok, info = False, f"{type(exc).__name__}: {exc}"
+            if not ok:
+                self._audit(key, "channel_post_failed",
+                            entry=str(entry.get("id") or ""),
+                            entry_kind=str(entry.get("kind") or ""),
+                            error=str(info or "")[:120])
+                changed = True
+                break
+            record = {"ts": now, "entry": str(entry.get("id")
+                                             or ""),
+                      "kind": str(entry.get("kind") or ""),
+                      "source": str(entry.get("source") or ""),
+                      "trigger": str(entry.get("trigger") or ""),
+                      "message_id": str(info or "")}
+            ring = list(extras.get("channel_posts") or [])
+            ring.append(record)
+            extras["channel_posts"] = \
+                ring[-self._CHANNEL_POSTS_RING:]
+            self._audit(key, "channel_post",
+                        entry=record["entry"],
+                        entry_kind=record["kind"],
+                        source=record["source"],
+                        trigger=record["trigger"],
+                        message_id=record["message_id"])
+            posts.append(record)
+            last_post = now
+            extras["channel_last_post"] = now
+            changed = True
+            if entry.get("kind") in ("daily", "weekly"):
+                tz = int((self.rhythm_cfg(key) or {}).get(
+                    "tz_offset_min") or 0)
+                entry["due"] = self._channel_next_due(
+                    entry, now, tz)
+                entry["last_posted"] = now
+            else:
+                queue.remove(entry)
+        if changed:
+            extras["channel_queue"] = queue
+            self.store.save()
+        return posts
+
+    def _channel_trigger(self, group_key: str, kind: str,
+                         text: str, *,
+                         now: float | None = None) -> None:
+        """Cross-post fan-out: a group event (season podium,
+        war result, milestone) is offered to every channel the
+        owner linked to this group for this kind.  The SOURCE
+        group's claim gates the trigger (§33); the channel's
+        own claim is checked again at post time in
+        channel_cycle.  The post rides the channel's queue, so
+        it is journaled with its source like any other post."""
+        now = now if now is not None else time.time()
+        if not text or kind not in self.CHANNEL_TRIGGERS:
+            return
+        if not self.system_output_allowed(group_key):
+            return
+        for ckey in self.channel_keys():
+            links = (self.channel_cfg(ckey).get("links") or {})
+            kinds = links.get(group_key) or []
+            if kind in kinds:
+                self.channel_enqueue(ckey, {
+                    "kind": "trigger", "trigger": kind,
+                    "text": text, "due": now,
+                    "source": f"trigger:{kind}",
+                    "source_group": group_key,
+                }, now=now)
+
+    def note_channel_count(self, key: str, count: int, *,
+                           now: float | None = None) -> bool:
+        """Record one subscriber-count sample (taken by the
+        runtime from an adapter that actually exposes counts).
+        Sampling is throttled so the series is a series, not a
+        smear; returns True when the sample landed."""
+        now = now if now is not None else time.time()
+        extras = self._extras(key)
+        ring = list(extras.get("channel_counts") or [])
+        if ring and now - float(ring[-1].get("ts") or 0) \
+                < self._CHANNEL_SAMPLE_GAP_S:
+            return False
+        ring.append({"ts": now, "count": int(count)})
+        extras["channel_counts"] = \
+            ring[-self._CHANNEL_COUNTS_RING:]
+        self.store.save()
+        return True
+
+    def note_channel_views(self, key: str, message_id: str,
+                           views: int, *,
+                           now: float | None = None) -> None:
+        """Record a post view count where a platform actually
+        returned one.  No adapter currently surfaces views, so
+        in practice this stays empty and the analytics card
+        says views are not exposed — the honest state."""
+        if not message_id:
+            return
+        extras = self._extras(key)
+        seen = dict(extras.get("channel_views") or {})
+        seen[str(message_id)] = int(views)
+        extras["channel_views"] = seen
+        self.store.save()
+
+    def channel_analytics(self, key: str) -> dict[str, Any]:
+        """The analytics truth for one channel, from recorded
+        samples only: subscriber level + growth deltas when
+        samples exist, post counts from the journal, view
+        totals only when a platform returned views.  Absence
+        is reported as absence (``subscribers: None``), never
+        as zero — "cannot read" and "0 subscribers" are
+        different facts and the card keeps them apart."""
+        extras = self._extras(key)
+        counts = list(extras.get("channel_counts") or [])
+        posts = list(extras.get("channel_posts") or [])
+        views = dict(extras.get("channel_views") or {})
+
+        def _delta(window: float) -> int | None:
+            if len(counts) < 2:
+                return None
+            latest = counts[-1]
+            cutoff = float(latest.get("ts") or 0) - window
+            base = None
+            for sample in counts[:-1]:
+                if float(sample.get("ts") or 0) <= cutoff:
+                    base = sample
+            if base is None:
+                base = counts[0]
+            return int(latest.get("count") or 0) - int(
+                base.get("count") or 0)
+
+        return {
+            "samples": len(counts),
+            "subscribers": (int(counts[-1].get("count") or 0)
+                            if counts else None),
+            "delta_24h": _delta(86400),
+            "delta_7d": _delta(7 * 86400),
+            "posts": len(posts),
+            "last_post_at": (float(posts[-1].get("ts") or 0)
+                             if posts else 0.0),
+            "views_total": (sum(int(v) for v in views.values())
+                            if views else None),
+        }
+
+    # -- leaderboards (§14): one organ, many boards --------------
+    #
+    # Rows assemble here (the surface owns the store and the
+    # economy / estate / conflict organs); the snapshot book
+    # and movement math live in group_boards.  Peeking renders
+    # movement against the last PUBLISHED snapshot without
+    # advancing it; publishing (the group cycle beat, below)
+    # records the new baseline.  Reputation is never a metric.
+
+    def _board_book(self) -> BoardBook:
+        book = getattr(self, "_boards_book_cache", None)
+        if book is None:
+            book = BoardBook(self.store.path.parent
+                             / "boards.json")
+            self._boards_book_cache = book
+        return book
+
+    def _board_group_rows(self, group_key: str, metric: str,
+                          limit: int) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        members = self.members(group_key)
+        if metric == "sparks":
+            for held in self.top_holders(group_key,
+                                         limit=100000):
+                uid = str(held["member"])
+                sub = ""
+                if held.get("bank"):
+                    sub = f"🏦 {int(held['bank'])} banked"
+                if held.get("property"):
+                    sub = (sub + " · " if sub else "") + \
+                        f"🏘️ {int(held['property'])} property"
+                rows.append({
+                    "key": uid,
+                    "label": self._member_label(group_key, uid),
+                    "value": int(held.get("worth")
+                                 or held["total"]),
+                    "note": "", "sub": sub})
+        elif metric == "gems":
+            for uid in members:
+                if self.economy.is_pseudo_member(uid):
+                    continue
+                value = self.estate.gems_balance(group_key, uid)
+                if value > 0:
+                    rows.append({
+                        "key": uid,
+                        "label": self._member_label(group_key,
+                                                    uid),
+                        "value": int(value), "note": "",
+                        "sub": ""})
+        elif metric == "messages":
+            for uid, record in members.items():
+                if self.economy.is_pseudo_member(uid):
+                    continue
+                value = int(record.get("message_count") or 0)
+                if value > 0:
+                    rows.append({
+                        "key": uid,
+                        "label": self._member_label(group_key,
+                                                    uid),
+                        "value": value, "note": "", "sub": ""})
+        elif metric == "contributions":
+            for row in self.contribution_ranking(group_key,
+                                                 limit=limit):
+                rows.append({
+                    "key": str(row["user_id"]),
+                    "label": str(row.get("label") or ""),
+                    "value": int(row.get("counted") or 0),
+                    "note": "", "sub": ""})
+        elif metric == "gangs":
+            for held in self.gang_list(group_key):
+                gang = held.get("gang") or {}
+                rows.append({
+                    "key": str(gang.get("id") or ""),
+                    "label": str(gang.get("name") or "a crew"),
+                    "value": int(held.get("strength") or 0),
+                    "note": f"{len(gang.get('members') or [])} "
+                            f"members",
+                    "sub": ""})
+        rows.sort(key=lambda r: (-int(r["value"]),
+                                 str(r["label"]).lower()))
+        return rows[:limit]
+
+    def _board_people(self, group_keys: list[str]
+                      ) -> dict[str, dict[str, Any]]:
+        """Stitch the people across groups (§32 bridge): the
+        same platform account in several groups is one person;
+        a shared normalized username across platforms stitches
+        those accounts into one person too — the way people are
+        actually found cross-app.  Display names alone never
+        stitch (they are not identities)."""
+        people: dict[str, dict[str, Any]] = {}
+        by_id: dict[tuple[str, str], str] = {}
+        by_name: dict[str, str] = {}
+        for gkey in group_keys:
+            platform = str(gkey).split(":", 1)[0]
+            for uid, record in self.members(gkey).items():
+                if self.economy.is_pseudo_member(uid):
+                    continue
+                username = str(record.get("username") or "") \
+                    .strip().lower().lstrip("@")
+                pkey = by_id.get((platform, uid))
+                if pkey is None and username:
+                    pkey = by_name.get(username)
+                if pkey is None:
+                    pkey = (f"u:{username}" if username
+                            else f"{platform}:{uid}")
+                    people[pkey] = {
+                        "label": "", "platforms": set(),
+                        "ids": {}, "username": username}
+                person = people[pkey]
+                by_id[(platform, uid)] = pkey
+                if username:
+                    by_name[username] = pkey
+                    person["username"] = username
+                person["ids"][gkey] = uid
+                person["platforms"].add(platform)
+                name = str(record.get("name") or "").strip()
+                if name and (not person["label"]
+                             or person["label"].startswith("@")):
+                    person["label"] = name
+                elif not person["label"] and username:
+                    person["label"] = f"@{username}"
+                elif not person["label"]:
+                    person["label"] = uid
+        return people
+
+    def _board_people_rows(self, group_keys: list[str],
+                           metric: str, limit: int
+                           ) -> list[dict[str, Any]]:
+        people = self._board_people(group_keys)
+        worths: dict[str, dict[str, int]] = {}
+        if metric == "sparks":
+            for gkey in group_keys:
+                worths[gkey] = {
+                    str(h["member"]): int(h.get("worth")
+                                          or h["total"])
+                    for h in self.top_holders(gkey,
+                                              limit=100000)}
+        rows: list[dict[str, Any]] = []
+        for pkey, person in people.items():
+            total = 0
+            for gkey, uid in person["ids"].items():
+                record = (self.members(gkey).get(uid) or {})
+                if metric == "sparks":
+                    total += worths.get(gkey, {}).get(uid, 0)
+                elif metric == "messages":
+                    total += int(record.get("message_count")
+                                 or 0)
+                elif metric == "contributions":
+                    total += int((record.get("contributions")
+                                  or {}).get("counted") or 0)
+            if total > 0:
+                rows.append({
+                    "key": pkey, "label": person["label"],
+                    "value": total,
+                    "note": " · ".join(sorted(
+                        person["platforms"])),
+                    "sub": ""})
+        rows.sort(key=lambda r: (-int(r["value"]),
+                                 str(r["label"]).lower()))
+        return rows[:limit]
+
+    def _board_game_rows(self, parsed: dict[str, Any],
+                         games_rows: list[dict[str, Any]] | None,
+                         limit: int) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for profile in games_rows or []:
+            name = str(profile.get("name")
+                       or profile.get("player_key") or "")
+            platform = str(profile.get("platform") or "")
+            if parsed["scope"] == "games":
+                metric = parsed["metric"]
+                value = int(profile.get(metric) or 0)
+                if value <= 0:
+                    continue
+                sub = ""
+                if metric == "xp" and profile.get("level"):
+                    sub = f"level {int(profile['level'])}"
+                rows.append({"key": str(profile.get(
+                    "player_key") or ""), "label": name,
+                    "value": value, "note": platform,
+                    "sub": sub})
+                continue
+            game = parsed["game"]
+            stats = (profile.get("per_game") or {}).get(game) \
+                or {}
+            if int(stats.get("played") or 0) <= 0:
+                continue
+            metric = parsed["metric"]
+            if metric == "elo":
+                if int(stats.get("elo_games") or 0) <= 0:
+                    continue  # unrated is not a standing
+                value = int(stats.get("elo") or 0)
+                sub = f"{int(stats['elo_games'])} rated games"
+            else:
+                value = int(stats.get(metric) or 0)
+                sub = f"{int(stats.get('played') or 0)} played"
+            if value <= 0 and metric != "elo":
+                continue
+            rows.append({"key": str(profile.get("player_key")
+                                    or ""), "label": name,
+                         "value": value, "note": platform,
+                         "sub": sub})
+        rows.sort(key=lambda r: (-int(r["value"]),
+                                 str(r["label"]).lower()))
+        return rows[:limit]
+
+    def board_rows(self, board_id: str, *, group_key: str = "",
+                   games_rows: list[dict[str, Any]] | None = None,
+                   limit: int = _BOARD_LIMIT
+                   ) -> list[dict[str, Any]] | None:
+        """The ranked rows for a board, or None when the board
+        id is invalid — or names games data this call doesn't
+        carry (the cycle has no games provider; /boards does).
+        """
+        parsed = _parse_board_id(board_id)
+        if parsed is None:
+            return None
+        scope = parsed["scope"]
+        if scope == "group":
+            if not group_key:
+                return None
+            return self._board_group_rows(group_key,
+                                          parsed["metric"],
+                                          limit)
+        if scope in ("game", "games"):
+            if games_rows is None:
+                return None
+            return self._board_game_rows(parsed, games_rows,
+                                         limit)
+        group_keys = [k for k in sorted(self.store.data)
+                      if not self.is_channel(k)]
+        if scope == "platform":
+            group_keys = [k for k in group_keys
+                          if k.split(":", 1)[0]
+                          == parsed["platform"]]
+        elif scope == "community":
+            group_keys = [
+                k for k in group_keys
+                if str(self.store.settings(k).get(
+                    "community_id") or "")
+                == parsed["community"]]
+        return self._board_people_rows(group_keys,
+                                       parsed["metric"], limit)
+
+    def render_board(self, board_id: str, *, group_key: str = "",
+                     games_rows: list[dict[str, Any]] | None = None,
+                     publish: bool = False,
+                     now: float | None = None,
+                     limit: int = 10) -> str | None:
+        """Render a board through typography (§27): the board
+        preset for game-flavored boards, clean otherwise;
+        movement markers read the last published snapshot.
+        ``publish=True`` records the rendered ranking as the
+        new baseline AFTER the text is composed — a peek never
+        advances it."""
+        from .typography import Card, render_card, sparks
+
+        parsed = _parse_board_id(board_id)
+        if parsed is None:
+            return None
+        rows = self.board_rows(board_id, group_key=group_key,
+                               games_rows=games_rows,
+                               limit=_BOARD_LIMIT)
+        if rows is None:
+            return None
+        book = self._board_book()
+        marks = _board_movement(book.latest(parsed["id"]), rows)
+        meta_fmt = _board_metric_format(parsed)
+
+        def _fmt(value: int) -> str:
+            if meta_fmt == "sparks":
+                return sparks(value)
+            if meta_fmt == "gems":
+                return f"💎 {value:,} gems"
+            return f"{value:,}"
+
+        card = Card("game" if _board_game_flavored(parsed)
+                    else "leaderboard",
+                    title=_board_title(parsed), icon="🏆")
+        if not rows:
+            card.line("no standings yet — nothing honest to "
+                      "rank.")
+        else:
+            medals = ["🥇", "🥈", "🥉"]
+            stats = []
+            for i, row in enumerate(rows[:limit]):
+                mark = medals[i] if i < 3 else f"{i + 1}."
+                label = str(row.get("label") or "")
+                move = marks.get(str(row.get("key") or ""))
+                if move:
+                    label = f"{move} {label}"
+                if row.get("note"):
+                    label = f"{label} ({row['note']})"
+                value = _fmt(int(row.get("value") or 0))
+                if row.get("sub"):
+                    value = f"{value} · {row['sub']}"
+                stats.append((f"{mark} {label}", value, True))
+            card.stats(stats)
+        if group_key:
+            text = self._card_render(group_key, card)
+        else:
+            text = render_card(card, platform="telegram-bot",
+                               settings=None).text
+        if publish:
+            book.publish(parsed["id"], rows, now=now)
+            if group_key:
+                self._audit(group_key, "board_published",
+                            board=parsed["id"])
+        return text
+
+    def boards_cycle(self, group_key: str, *,
+                     now: float | None = None) -> list[str]:
+        """The board beat on the message cycle: at the group's
+        local publish hour, post its configured daily boards
+        (and weekly boards on the local Monday), each render
+        publishing its snapshot.  Cycle posts travel the
+        caller's notices list, so silent hours hold them like
+        every other cycle post; §33 gates the beat itself."""
+        now = now if now is not None else time.time()
+        if not self.system_output_allowed(group_key):
+            return []
+        cfg = self.store.settings(group_key).get("boards") \
+            or {}
+        daily = [str(s) for s in (cfg.get("daily") or [])]
+        weekly = [str(s) for s in (cfg.get("weekly") or [])]
+        if not daily and not weekly:
+            return []
+        tz = int((self.rhythm_cfg(group_key) or {}).get(
+            "tz_offset_min") or 0)
+        parts = _rhythm_local_parts(now, tz)
+        if int(parts["hour"]) < int(cfg.get("hour", 20)):
+            return []
+        extras = self._extras(group_key)
+        state = extras.setdefault("boards_state", {})
+        due: list[str] = []
+        if daily and state.get("daily") != parts["day"]:
+            state["daily"] = parts["day"]
+            due.extend(daily)
+        if weekly and int(parts["weekday"]) == 0:
+            week = time.strftime("%G-W%V", time.gmtime(
+                now + tz * 60))
+            if state.get("weekly") != week:
+                state["weekly"] = week
+                due.extend(weekly)
+        out: list[str] = []
+        for spec in due:
+            board_id = spec if ":" in spec else f"group:{spec}"
+            text = self.render_board(board_id,
+                                     group_key=group_key,
+                                     publish=True, now=now)
+            if text:
+                out.append(text)
+            else:
+                # e.g. a games board: the cycle carries no
+                # games provider, so the publish is skipped —
+                # journaled, never faked.
+                self._audit(group_key, "board_publish_skipped",
+                            board=board_id)
+        if due:
+            self.store.save()
+        return out
 
 
 def default_surface(workspace_dir: str | Path) -> GroupSurface:

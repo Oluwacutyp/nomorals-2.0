@@ -819,6 +819,11 @@ class RuntimeGroupMixin:
         # queue under the same §33/§31 rules.
         self._post_conflict_feed(surface, key, message)
         self._execute_pending_pin(surface, message)
+        # §16/P4a: group turns also drive the channel posting
+        # cycle — due queue posts in claimed channels ride the
+        # same beat as every other system (no daemon); the
+        # surface checks each channel's claim before posting.
+        self._drive_all_channels(surface)
         actions = result.get("actions") or []
         if not actions:
             return False
@@ -2436,6 +2441,21 @@ class RuntimeGroupMixin:
                 + (f" · {rhy_queue} waiting in the queue"
                    if rhy_queue else ""),
             ], title="Rhythm")
+            # Boards (§14): what this group publishes, and
+            # when — the same block the console's boards
+            # section and the cycle read.
+            brd = s.get("boards") or {}
+            card.block_lines([
+                f"daily: {', '.join(brd.get('daily') or []) or '—'}"
+                f" · weekly: "
+                f"{', '.join(brd.get('weekly') or []) or '—'}"
+                f" · publish hour "
+                f"{int(brd.get('hour', 20))}:00 group time",
+                "boards post on the cycle and hold through "
+                "silent hours; movement reads the last "
+                "published snapshot — /boards peeks never move "
+                "the baseline",
+            ], title="Boards")
             card.block_lines([
                 "`/gsettings welcome on|off` · "
                 "`/gsettings goodbye on|off` · "
@@ -2515,6 +2535,10 @@ class RuntimeGroupMixin:
                 "`/gsettings review off|auto|assisted|manual` "
                 "(§26) · `/gsettings review queue` · "
                 "`/gsettings review approve N|reject N`",
+                "`/gsettings boards daily sparks messages` · "
+                "`/gsettings boards weekly contributions` · "
+                "`/gsettings boards hour N` · "
+                "`/gsettings boards off`",
             ], title="Change it")
             card.note("tap a button to flip a switch, or type a "
                       "command")
@@ -2591,6 +2615,18 @@ class RuntimeGroupMixin:
                     "nightshield on|off · rhythm briefing "
                     "on|off|hour N · rhythm reminder add HH:MM "
                     "TEXT · rhythm quorum N")
+        if head == "boards":
+            # §14 board publishing: the specs this group posts
+            # on the daily/weekly beat — the same helper the
+            # console's boards section applies.
+            out = self._apply_boards_grammar(
+                surface, key, text.split()[1:])
+            if out is not None:
+                return out
+            return ("usage: /gsettings boards daily "
+                    "sparks|gems|messages|contributions|gangs "
+                    "(or full board ids) · boards weekly "
+                    "<spec...> · boards hour N · boards off")
         if head == "review":
             # §26 contribution review: the mode and the queue —
             # the same helper the console's rhythm section
@@ -3066,12 +3102,301 @@ class RuntimeGroupMixin:
         self._estate_update(surface, key, **{field: value})
         return f"estate {words[0].lower()}: {value}."
 
+    # ---- boards: grammar, provider, the /boards command (§14) --
+    def _boards_update(self, surface, key, **fields):  # type: ignore[no-untyped-def]
+        """Mutate the boards settings block through the store's
+        own settings machinery — the one write path behind both
+        /gsettings and the console's boards section."""
+        import copy as _copy
+
+        current = surface.store.settings(key)
+        block = _copy.deepcopy(current.get("boards") or {})
+        block.update(fields)
+        surface.update_settings(key, boards=block)
+        return block
+
+    def _board_spec_ok(self, spec) -> bool:  # type: ignore[no-untyped-def]
+        """A publish spec is a bare group metric (sparks, gems,
+        messages, contributions, gangs) or a full board id the
+        §14 organ can parse."""
+        from ...social.chat.group_boards import (
+            GROUP_METRICS, parse_board_id)
+
+        spec = str(spec or "").strip().lower()
+        if not spec:
+            return False
+        if ":" not in spec:
+            return spec in GROUP_METRICS
+        return parse_board_id(spec) is not None
+
+    def _apply_boards_grammar(self, surface, key, words):  # type: ignore[no-untyped-def]
+        """The boards grammar, shared by /gsettings (words
+        after the `boards` head) and the console's boards
+        section.  Forms: `daily <spec...>` · `weekly <spec...>`
+        · `daily off` · `weekly off` · `hour N` · `off`."""
+        w = [str(x) for x in words or []]
+        low = [x.lower() for x in w]
+        if not w:
+            return None
+        if low[0] in ("daily", "weekly"):
+            specs = low[1:]
+            if specs == ["off"]:
+                self._boards_update(surface, key, **{low[0]: []})
+                return f"{low[0]} board publishing off."
+            if not specs:
+                return None
+            bad = [s for s in specs if not self._board_spec_ok(s)]
+            if bad:
+                return (f"no such board: {', '.join(bad)} — "
+                        "group boards are sparks, gems, "
+                        "messages, contributions, gangs; wider "
+                        "boards take full ids like "
+                        "global:sparks or game:chess:elo.")
+            self._boards_update(surface, key, **{low[0]: specs})
+            return (f"{low[0]} boards: {', '.join(specs)} — "
+                    "posted on the cycle at the publish hour, "
+                    "with movement against the last publish.")
+        if low[0] == "hour" and len(w) == 2 and w[1].isdigit():
+            hour = max(0, min(23, int(w[1])))
+            self._boards_update(surface, key, hour=hour)
+            return f"board publish hour: {hour}:00 group time."
+        if low == ["off"]:
+            self._boards_update(surface, key, daily=[],
+                                weekly=[])
+            return "board publishing off — /boards still reads."
+        return None
+
+    def _board_games_rows(self):  # type: ignore[no-untyped-def]
+        """The games provider for §14 boards: profile rows from
+        the games spine (the same PlayerStore the /game boards
+        read), enriched per game with the Glicko ordinal — the
+        rating the matchmaker itself pairs by — and mastery
+        points from the achievements stats.  None when this
+        process carries no games engine: game boards then say
+        so instead of inventing standings."""
+        engine_fn = getattr(self, "_game_engine", None)
+        if engine_fn is None:
+            return None
+        try:
+            engine = engine_fn()
+        except Exception:  # noqa: BLE001 - no spine, no rows
+            return None
+        store = getattr(engine, "store", None)
+        if store is None:
+            return None
+        db = getattr(engine, "db", None)
+        if db is not None:
+            from ...games.mastery import (
+                get_one_game_stats, mastery_points)
+            from ...games.matchmaking import get_glicko
+        from ...games.progression import level_for_xp
+
+        rows = []
+        for prof in store.all(limit=500):
+            per_game: dict = {}
+            mastery_total = 0
+            for game, stats in (prof.per_game or {}).items():
+                entry = {
+                    "wins": int(stats.get("wins") or 0),
+                    "points": int(stats.get("points") or 0),
+                    "played": int(stats.get("played") or 0),
+                    "elo": 0, "elo_games": 0}
+                if db is not None:
+                    glicko = get_glicko(db, prof.key, game)
+                    entry["elo"] = int(round(float(
+                        glicko.get("ordinal") or 0)))
+                    entry["elo_games"] = int(
+                        glicko.get("games") or 0)
+                    mastery_total += mastery_points(
+                        game, get_one_game_stats(
+                            db, prof.key, game))
+                per_game[game] = entry
+            rows.append({
+                "player_key": prof.key,
+                "name": prof.name or prof.key,
+                "platform": prof.platform or "",
+                "coins": int(prof.coins or 0),
+                "xp": int(prof.xp or 0),
+                "level": level_for_xp(int(prof.xp or 0)),
+                "wins": int(prof.wins or 0),
+                "mastery": mastery_total,
+                "per_game": per_game})
+        return rows
+
+    def _control_boards(self, tail, message):  # type: ignore[no-untyped-def]
+        """/boards (§14): the board index, or one board by
+        name.  Bare metric names read THIS group's board; full
+        ids (global:sparks, platform:<platform>:<metric>,
+        community:<id>:<metric>, game:<game>:elo, games:xp)
+        read those boards.  Rendering is a PEEK — movement
+        reads the last published snapshot and a peek never
+        advances it; the group's scheduled publishes are what
+        move the baseline.  /top is untouched: it IS the group
+        sparks board."""
+        surface = self._group_surface()
+        key = self._group_key_or_none(message)
+        name = str(tail or "").strip().lower()
+        if not name:
+            lines = ["🏆 <b>boards</b> — /boards &lt;name&gt; "
+                     "reads one:"]
+            if key:
+                lines.append(
+                    "this group: sparks · gems · messages · "
+                    "contributions · gangs")
+            lines.append(
+                "wider: global:sparks · global:messages · "
+                "global:contributions · "
+                "platform:&lt;platform&gt;:&lt;metric&gt; · "
+                "community:&lt;id&gt;:&lt;metric&gt;")
+            lines.append(
+                "games: games:xp · games:coins · games:wins · "
+                "games:mastery · game:&lt;game&gt;:elo · "
+                "game:&lt;game&gt;:wins · "
+                "game:&lt;game&gt;:points")
+            if key:
+                cfg = surface.store.settings(key).get(
+                    "boards") or {}
+                lines.append(
+                    f"this group publishes daily "
+                    f"[{', '.join(cfg.get('daily') or []) or '—'}]"
+                    f" · weekly "
+                    f"[{', '.join(cfg.get('weekly') or []) or '—'}]"
+                    f" at {int(cfg.get('hour', 20))}:00 — "
+                    "/gsettings boards changes it.")
+            return "\n".join(lines)
+        board_id = name if ":" in name else f"group:{name}"
+        text = surface.render_board(
+            board_id, group_key=key or "",
+            games_rows=self._board_games_rows())
+        if text is None:
+            return (f"no board called {name!r} — /boards lists "
+                    "what exists (a games board also needs the "
+                    "games spine in this process).")
+        return text
+
+    # ---- channels: settings write path + the drive (§16/P4a) ---
+    def _channel_update(self, surface, key, **fields):  # type: ignore[no-untyped-def]
+        """Mutate a channel's settings block through the
+        store's own settings machinery (the console's channel
+        sections write through here)."""
+        import copy as _copy
+
+        current = surface.store.settings(key)
+        block = _copy.deepcopy(current.get("channel") or {})
+        block.update(fields)
+        surface.update_settings(key, channel=block)
+        return block
+
+    def _channel_drive(self, key, *, now=None, force=False):  # type: ignore[no-untyped-def]
+        """Drive one channel's posting cycle: sample the
+        subscriber count when the platform's adapter actually
+        exposes one, then post due queue entries through the
+        gateway.  The surface checks the claim before anything
+        posts; a platform that exposes no count is sampled
+        never — absence stays absence, never a fabricated 0."""
+        from types import SimpleNamespace
+
+        from ...social.chat.base import ChatKind, ChatRef
+
+        surface = self._group_surface()
+        if not surface.is_channel(key):
+            return []
+        now = now if now is not None else time.time()
+        platform = str(key).split(":", 1)[0]
+        adapter = self._group_adapter(platform)
+        cfg = surface.channel_cfg(key)
+        # Sampling accrues state, so it follows the claim: a
+        # foreign channel is noted in the registry, never
+        # series-built (§33).
+        if adapter is not None and cfg.get("analytics", True) \
+                and surface.claim_state(key)["claimed"]:
+            counter = getattr(adapter, "admin_member_count",
+                              None)
+            if callable(counter):
+                try:
+                    res = counter(ChatRef.parse(
+                        str(key), kind=ChatKind.CHANNEL))
+                except Exception:  # noqa: BLE001 - a failed
+                    res = None              # read is absence
+                if isinstance(res, dict) and res.get("ok") \
+                        and res.get("count") is not None:
+                    surface.note_channel_count(
+                        key, int(res["count"]), now=now)
+        gateway = getattr(self, "gateway", None)
+        if gateway is None \
+                or not callable(getattr(gateway, "send", None)):
+            return []
+
+        def _send(text, entry):
+            chat = ChatRef.parse(str(key), kind=ChatKind.CHANNEL)
+            media = entry.get("media") or {}
+            ref = str(media.get("ref") or "")
+            # _rendered_mode reads a message's chat platform;
+            # the channel chat itself is the honest stand-in.
+            probe = SimpleNamespace(chat=chat)
+            mode = self._rendered_mode(probe, text)
+            try:
+                if ref and media.get("kind") == "file":
+                    send_file = getattr(gateway, "send_file",
+                                        None)
+                    if send_file is not None:
+                        result = send_file(platform, chat, ref,
+                                           caption=text)
+                    else:
+                        result = gateway.send(
+                            platform, chat,
+                            f"{text}\n\n📎 {ref}",
+                            parse_mode=mode)
+                else:
+                    result = gateway.send(
+                        platform, chat, text, parse_mode=mode)
+            except Exception as exc:  # noqa: BLE001 - the
+                # surface journals the failure and keeps the
+                # entry due; transport errors never vanish a post
+                return False, f"{type(exc).__name__}: {exc}"
+            views = getattr(result, "views", None)
+            if views is not None:
+                surface.note_channel_views(
+                    key, str(getattr(result, "message_id", "")
+                             or ""), int(views), now=now)
+            ok = bool(getattr(result, "ok", False))
+            info = str(getattr(result, "message_id", "")
+                       or getattr(result, "error", "") or "")
+            return ok, info
+
+        return surface.channel_cycle(key, now=now, send=_send,
+                                     force=force)
+
+    def _drive_all_channels(self, surface):  # type: ignore[no-untyped-def]
+        """Group turns power the channel cadence: due posts in
+        claimed channels ride the same message cycle as every
+        other Devon system — no daemon was added for them."""
+        for ckey in surface.channel_keys():
+            self._channel_drive(ckey)
+
+    def _channel_note_and_drive(self, message):  # type: ignore[no-untyped-def]
+        """A message arrived IN a channel: the channel itself
+        still gets no ingest and no reply (§16) — but the
+        registry notes the sighting, the bot-claim probe runs,
+        and the posting cycle takes its beat.  Owner-side
+        control plane only; nothing about the message is fed
+        to memory or the brain."""
+        surface = self._group_surface()
+        key = message.chat.key
+        surface.note_channel_seen(
+            key, title=str(getattr(message.chat, "title", "")
+                           or ""))
+        self._probe_bot_claim(surface, key, message)
+        self._channel_drive(key)
+
     # ---- the DM admin console (DESIGN §30) ----------------------
     _CONSOLE_TTL_S = 1800
     _CONSOLE_SECTIONS = ("defense", "acceptance", "economy",
                          "estate", "presentation", "welcome",
                          "expression", "reputation", "conflict",
-                         "rhythm")
+                         "rhythm", "boards")
+    _CONSOLE_CHANNEL_SECTIONS = ("queue", "post", "analytics",
+                                 "settings")
 
     def _console_session_map(self) -> dict:  # type: ignore[no-untyped-def]
         sessions = getattr(self, "_console_sessions", None)
@@ -3194,6 +3519,10 @@ class RuntimeGroupMixin:
                                       skey)
         token = words[0].lower()
         key = (session.get("groups") or {}).get(token)
+        if key is None and (session.get("channels") or {}).get(
+                token):
+            return self._console_channel(
+                surface, message, sender, session, token, words)
         if key is None:
             return self._console_home(
                 surface, message, sender, skey,
@@ -3235,10 +3564,13 @@ class RuntimeGroupMixin:
                       note: str = ""):
         from ...social.chat.typography import Card
 
-        keys = [k for k in sorted(surface.store.data.keys())
-                if self._operator_or_false(message)
-                or self._console_is_admin(k, sender)]
-        if not keys:
+        all_keys = [k for k in sorted(surface.store.data.keys())
+                    if self._operator_or_false(message)
+                    or self._console_is_admin(k, sender)]
+        keys = [k for k in all_keys if not surface.is_channel(k)]
+        channel_keys = [k for k in all_keys
+                        if surface.is_channel(k)]
+        if not keys and not channel_keys:
             return ("you don't admin any group I serve — the "
                     "console opens for group admins.")
         groups: dict = {}
@@ -3258,17 +3590,39 @@ class RuntimeGroupMixin:
                         f"{claim_txt}")
             buttons.append([(f"⚙️ {token} · {key}",
                              f"console {token}")])
+        channels: dict = {}
+        channel_rows: list = []
+        for i, key in enumerate(channel_keys, 1):
+            token = f"c{i}"
+            channels[token] = key
+            claim = surface.claim_state(key)
+            title = surface.channel_title(key) or key
+            channel_rows.append(
+                f"{token} — {title} · "
+                f"{'claimed' if claim['claimed'] else 'unclaimed'}"
+                f" · {len(surface.channel_queue(key))} queued"
+                f" · {surface.channel_analytics(key)['posts']} "
+                "posted")
+            buttons.append([(f"📣 {token} · {title}",
+                             f"console {token}")])
         self._console_session_map()[skey] = {
-            "groups": groups, "at": time.time()}
+            "groups": groups, "channels": channels,
+            "at": time.time()}
         card = Card("settings", title="Devon console", icon="🛠️")
         if note:
             card.line(note)
         status = self._console_status_lines()
         if status:
             card.block_lines(status, title="Status")
-        card.block_lines(rows, title="Your groups")
+        if rows:
+            card.block_lines(rows, title="Your groups")
+        if channel_rows:
+            card.block_lines(channel_rows, title="Your channels")
         card.note("tap a group, or type /console g1 — then a "
-                  "section: " + ", ".join(self._CONSOLE_SECTIONS))
+                  "section: " + ", ".join(self._CONSOLE_SECTIONS)
+                  + (" · channels open with their c-handle: "
+                     "queue, post, analytics, settings"
+                     if channel_rows else ""))
         return self._card(message, card, buttons)
 
     def _console_group_menu(self, surface, key, message, token):  # type: ignore[no-untyped-def]
@@ -3659,6 +4013,29 @@ class RuntimeGroupMixin:
                 "off|auto|assisted|manual` · `review queue` · "
                 "`review approve N` · `review reject N`",
             ], title="Grammar")
+        elif section == "boards":
+            brd = s.get("boards") or {}
+            card.block_lines([
+                f"daily publishes: "
+                f"{', '.join(brd.get('daily') or []) or 'none set'}",
+                f"weekly publishes: "
+                f"{', '.join(brd.get('weekly') or []) or 'none set'}"
+                " (Mondays, group time)",
+                f"publish hour: {int(brd.get('hour', 20))}:00 "
+                "group time — posts ride the message cycle and "
+                "hold through silent hours like every other "
+                "cycle post",
+                "movement (▲▼) reads the last PUBLISHED "
+                "snapshot; /boards peeks never move the "
+                "baseline",
+            ])
+            card.block_lines([
+                "`daily sparks messages` · "
+                "`weekly contributions` · `hour N` · `off`",
+                "specs: this group's sparks · gems · messages "
+                "· contributions · gangs, or full board ids "
+                "(global:sparks, platform:…, game:chess:elo)",
+            ], title="Grammar")
         buttons += buttons_from_spec(
             [[("back", "Sections", f"console {token}"),
               ("home", "Console home", "console")]], settings=s)
@@ -3979,7 +4356,435 @@ class RuntimeGroupMixin:
                     surface, key, list(words[1:]), by=sender)
             return self._apply_rhythm_grammar(
                 surface, key, list(words))
+        if section == "boards":
+            # Same rule (§14): the console's boards words are
+            # the gsettings grammar.
+            return self._apply_boards_grammar(
+                surface, key, list(words))
         return None
+
+    # ---- the console's channel side (§16 / P4a) ------------------
+    def _console_channel(self, surface, message, sender,  # type: ignore[no-untyped-def]
+                         session, token, words):
+        """Route one /console cN … line: menu, section card, or
+        a section change.  Every change journals to the
+        CHANNEL's /glog like a group console change, and queue
+        changes take an immediate drive beat so a due post
+        goes out on the owner's action, not the next stray
+        group message."""
+        key = (session.get("channels") or {})[token]
+        if len(words) == 1:
+            return self._console_channel_menu(surface, key,
+                                              message, token)
+        section = words[1].lower()
+        if section not in self._CONSOLE_CHANNEL_SECTIONS:
+            return self._console_channel_menu(surface, key,
+                                              message, token)
+        if len(words) == 2:
+            return self._console_channel_section(
+                surface, key, message, token, section)
+        reply = self._console_channel_apply(
+            surface, key, message, sender, session, section,
+            words[2:])
+        if reply is None:
+            return (f"I didn't follow that for the channel "
+                    f"{section} section — its card shows the "
+                    "grammar.")
+        surface._audit(key, "console_change", by=sender,
+                       user_id=sender,
+                       section=f"channel:{section}",
+                       change=" ".join(words[2:]))
+        surface.store.save()
+        return self._console_channel_section(
+            surface, key, message, token, section,
+            lead=f"✓ {reply}")
+
+    def _console_channel_menu(self, surface, key, message,  # type: ignore[no-untyped-def]
+                              token):
+        from ...social.chat.expression import buttons_from_spec
+        from ...social.chat.typography import Card
+
+        claim = surface.claim_state(key)
+        analytics = surface.channel_analytics(key)
+        cfg = surface.channel_cfg(key)
+        title = surface.channel_title(key) or key
+        subs = analytics["subscribers"]
+        card = Card("settings", title=f"Channel — {title}",
+                    icon="📣")
+        card.block_lines([
+            f"claim: {'claimed (' + claim['source'] + ') — the queue posts' if claim['claimed'] else 'NOT claimed — the queue holds until my bot is an admin here, or you designate it in settings'}",
+            f"subscribers: {f'{subs:,} (latest sample)' if subs is not None else 'not readable yet — see analytics'}",
+            f"queue: {len(surface.channel_queue(key))} waiting"
+            f" · {analytics['posts']} posted · cadence floor "
+            f"{int(cfg.get('cadence_min') or 0)} min · trigger "
+            f"links: {len(cfg.get('links') or {})} group(s)",
+        ])
+        card.note("the channel itself stays silent (§16) — "
+                  "everything happens here in DM. Sections: "
+                  "queue · post · analytics · settings")
+        buttons = buttons_from_spec([
+            [("queue", "Queue", f"console {token} queue"),
+             ("post", "Post", f"console {token} post")],
+            [("analytics", "Analytics",
+              f"console {token} analytics"),
+             ("settings", "Settings",
+              f"console {token} settings")],
+            [("home", "Console home", "console")],
+        ], settings=surface.store.settings(key))
+        return self._card(message, card, buttons)
+
+    def _console_channel_section(self, surface, key, message,  # type: ignore[no-untyped-def]
+                                 token, section, lead=""):
+        from ...social.chat.expression import buttons_from_spec
+        from ...social.chat.typography import Card
+
+        s = surface.store.settings(key)
+        cfg = surface.channel_cfg(key)
+        title = surface.channel_title(key) or key
+        card = Card("settings",
+                    title=f"Channel {section} — {title}",
+                    icon="📣")
+        if lead:
+            card.line(lead)
+        if section == "queue":
+            queue = surface.channel_queue(key)
+            if queue:
+                tz = int((surface.rhythm_cfg(key) or {}).get(
+                    "tz_offset_min") or 0)
+                now = time.time()
+                lines = []
+                for i, entry in enumerate(queue, 1):
+                    due = float(entry.get("due") or 0)
+                    when = ("due now" if due <= now else
+                            time.strftime("%a %d %b %H:%M",
+                                          time.gmtime(due
+                                                      + tz * 60))
+                            + " channel time")
+                    kind = str(entry.get("kind") or "once")
+                    if kind in ("daily", "weekly"):
+                        when = f"{kind} {entry.get('time')}" \
+                               f" · next {when}"
+                    src = str(entry.get("source") or "dm")
+                    body = str(entry.get("text") or "")
+                    if entry.get("media"):
+                        body = "📎 media" + (f" — {body}"
+                                             if body else "")
+                    lines.append(
+                        f"{i}. [{kind} · {src}] {when} — "
+                        f"{body[:80]}")
+                card.block_lines(lines, title="Queued")
+            else:
+                card.line("the queue is empty — the post "
+                          "section fills it.")
+            card.block_lines([
+                "`cancel N` · `clear` · `post now`",
+            ], title="Grammar")
+        elif section == "post":
+            card.block_lines([
+                "compose here; posts go out through the bot "
+                "on their cadence, rendered as announcements "
+                "(stamp on, per the channel's presentation "
+                "settings)",
+                "attach media to your console message and "
+                "write `now` (plus an optional caption) to "
+                "queue the file itself",
+            ])
+            card.block_lines([
+                "`now TEXT` · just TEXT — post as soon as due",
+                "`at HH:MM TEXT` — one-shot at that channel "
+                "time",
+                "`daily HH:MM TEXT` · `weekly mon HH:MM TEXT`",
+                "`fwd <source name> | TEXT` — a post forwarded "
+                "from a source you name (journaled as such)",
+                "`media <file path> | caption`",
+            ], title="Grammar")
+        elif section == "analytics":
+            card.block_lines(
+                self._channel_analytics_lines(surface, key),
+                title="What the platform exposes")
+        elif section == "settings":
+            links = cfg.get("links") or {}
+            link_lines = [
+                f"{g} → {', '.join(kinds)}"
+                for g, kinds in sorted(links.items())] \
+                or ["no trigger links — group events don't "
+                    "cross-post here"]
+            pres = s.get("presentation") or {}
+            card.block_lines([
+                f"cadence floor: "
+                f"{int(cfg.get('cadence_min') or 0)} min "
+                "between posts",
+                f"analytics sampling: "
+                f"{'on' if cfg.get('analytics', True) else 'off'}",
+                f"stamp: "
+                f"{'on' if pres.get('stamp', True) else 'off'}"
+                " (presentation)",
+                "trigger links:",
+                *link_lines,
+            ])
+            card.block_lines([
+                "`cadence N` · `analytics on|off` · "
+                "`stamp on|off`",
+                "`link <group handle|key> "
+                "[season_podium war_result milestone]`",
+                "`unlink <group handle|key>` · "
+                "`designate on|off` (owner)",
+            ], title="Grammar")
+        buttons = buttons_from_spec(
+            [[("back", "Channel", f"console {token}"),
+              ("home", "Console home", "console")]],
+            settings=s)
+        return self._card(message, card, buttons)
+
+    def _channel_analytics_lines(self, surface, key):  # type: ignore[no-untyped-def]
+        """The analytics truth for the console card: what was
+        actually sampled, and — just as explicitly — what the
+        platform does not expose.  "0 subscribers" (a real
+        sample that read zero) and "cannot read" are different
+        lines, always."""
+        analytics = surface.channel_analytics(key)
+        platform = str(key).split(":", 1)[0]
+        adapter = self._group_adapter(platform)
+        can_count = adapter is not None and callable(
+            getattr(adapter, "admin_member_count", None))
+        lines = []
+        subs = analytics["subscribers"]
+        if subs is not None:
+            line = f"subscribers: {subs:,} " \
+                   f"({analytics['samples']} sample(s) on the " \
+                   "cycle)"
+            if analytics["delta_24h"] is not None:
+                line += f" · 24h {analytics['delta_24h']:+d}"
+            if analytics["delta_7d"] is not None:
+                line += f" · 7d {analytics['delta_7d']:+d}"
+            lines.append(line)
+        elif can_count:
+            lines.append(
+                "subscribers: this platform exposes the count "
+                "and I read it on the cycle — no sample has "
+                "landed yet, so there is no number to show (an "
+                "unsampled channel is not a 0-subscriber one)")
+        else:
+            lines.append(
+                "subscribers: this platform exposes no count "
+                "to me — nothing is invented in its place")
+        if analytics["posts"]:
+            lines.append(
+                f"posts: {analytics['posts']} posted from the "
+                f"queue · last at "
+                f"{time.strftime('%Y-%m-%d %H:%M', time.gmtime(analytics['last_post_at']))} UTC")
+        else:
+            lines.append("posts: none posted yet")
+        if analytics["views_total"] is not None:
+            lines.append(f"post views: "
+                         f"{analytics['views_total']:,} total "
+                         "where the platform returned them")
+        else:
+            lines.append(
+                "post views: not returned by any connected "
+                "platform — not estimated, not guessed")
+        return lines
+
+    def _console_channel_apply(self, surface, key, message,  # type: ignore[no-untyped-def]
+                               sender, session, section, words):
+        """Apply one channel-console grammar line.  Returns the
+        reply line, or None when the words don't parse."""
+        w = [str(x) for x in words or []]
+        low = [x.lower() for x in w]
+        if not w:
+            return None
+        head = low[0]
+        if section == "queue":
+            if head == "cancel" and len(w) == 2 \
+                    and w[1].isdigit():
+                gone = surface.channel_cancel(key, int(w[1]))
+                if gone is None:
+                    return "no queue entry at that number."
+                return (f"cancelled the {gone.get('kind')} "
+                        "post — it will not go out.")
+            if low == ["clear"]:
+                n = surface.channel_clear(key)
+                return f"queue cleared — {n} post(s) dropped."
+            if low == ["post", "now"]:
+                posts = self._channel_drive(key, force=True)
+                if posts:
+                    return f"{len(posts)} post(s) went out."
+                if not surface.claim_state(key)["claimed"]:
+                    return ("nothing posted — this channel is "
+                            "not claimed yet (settings → "
+                            "designate, or make my bot an "
+                            "admin).")
+                return "nothing was due."
+            return None
+        if section == "post":
+            return self._console_channel_compose(
+                surface, key, message, sender, w)
+        if section == "settings":
+            if head == "cadence" and len(w) == 2 \
+                    and w[1].isdigit():
+                n = max(0, min(1440, int(w[1])))
+                self._channel_update(surface, key,
+                                     cadence_min=n)
+                return (f"cadence floor: {n} min between "
+                        "posts.")
+            if head == "analytics" and len(w) == 2 \
+                    and low[1] in ("on", "off"):
+                on = low[1] == "on"
+                self._channel_update(surface, key, analytics=on)
+                return f"analytics sampling {'on' if on else 'off'}."
+            if head == "stamp" and len(w) == 2 \
+                    and low[1] in ("on", "off"):
+                import copy as _copy
+
+                on = low[1] == "on"
+                current = surface.store.settings(key)
+                pres = _copy.deepcopy(
+                    current.get("presentation") or {})
+                pres["stamp"] = on
+                surface.update_settings(key, presentation=pres)
+                return (f"stamp {'on' if on else 'off'} — "
+                        "channel posts are presented surfaces"
+                        if on else
+                        "stamp off for this channel.")
+            if head in ("link", "unlink") and len(w) >= 2:
+                target = (session.get("groups") or {}).get(
+                    low[1]) or w[1]
+                if target not in surface.store.data \
+                        or surface.is_channel(target):
+                    return ("that group handle doesn't resolve "
+                            "— use a g-handle from the console "
+                            "home or the group's full key.")
+                links = dict(surface.channel_cfg(key).get(
+                    "links") or {})
+                if head == "unlink":
+                    links.pop(target, None)
+                    self._channel_update(surface, key,
+                                         links=links)
+                    return f"unlinked {target}."
+                kinds = [k for k in low[2:]
+                         if k in surface.CHANNEL_TRIGGERS]
+                if len(kinds) != len(low[2:]):
+                    return ("trigger kinds are: "
+                            "season_podium, war_result, "
+                            "milestone.")
+                links[target] = kinds or list(
+                    surface.CHANNEL_TRIGGERS)
+                self._channel_update(surface, key, links=links)
+                return (f"linked {target}: "
+                        f"{', '.join(links[target])} cross-post "
+                        "here when they happen there.")
+            if head == "designate" and len(w) == 2 \
+                    and low[1] in ("on", "off"):
+                if not self._operator_or_false(message):
+                    return ("designation is the owner's call — "
+                            "only the operator can claim a "
+                            "channel by name.")
+                on = low[1] == "on"
+                surface.set_designated(key, on, by=sender)
+                return (f"designation {'on' if on else 'off'} — "
+                        "the claim follows it.")
+            return None
+        return None
+
+    def _console_channel_compose(self, surface, key, message,  # type: ignore[no-untyped-def]
+                                 sender, words):
+        """The post grammar: compose one queue entry from the
+        owner's words (and any media attached to the console
+        message itself).  A due entry takes an immediate drive
+        beat, so `now` really means now when the channel is
+        claimed."""
+        from ...social.chat.group_rhythm import parse_hhmm
+
+        raw = " ".join(words).strip()
+        if not raw:
+            return None
+        low = raw.lower()
+        now = time.time()
+        tz = int((surface.rhythm_cfg(key) or {}).get(
+            "tz_offset_min") or 0)
+        kind = "once"
+        due = now
+        at_time = ""
+        weekday = None
+        source = "dm"
+        text = raw
+        media = None
+        first_media = getattr(message, "first_media", None)
+        attached = first_media() if callable(first_media) \
+            else None
+        if attached is not None and getattr(attached, "path",
+                                           ""):
+            media = {"kind": "file",
+                     "ref": str(attached.path)}
+        if low.startswith("media ") and "|" in raw:
+            ref, _, caption = raw[6:].partition("|")
+            media = {"kind": "file", "ref": ref.strip()}
+            text = caption.strip()
+        elif low.startswith("fwd ") and "|" in raw:
+            label, _, body = raw[4:].partition("|")
+            source = f"forward:{label.strip()}"
+            text = body.strip()
+        elif low.startswith("daily "):
+            parts = raw.split(None, 2)
+            if len(parts) < 3 \
+                    or parse_hhmm(parts[1]) is None:
+                return ("daily needs a time and the words: "
+                        "daily HH:MM <text>.")
+            kind, at_time, text = "daily", parts[1], parts[2]
+            due = surface._channel_next_due(
+                {"kind": "daily", "time": at_time}, now, tz)
+        elif low.startswith("weekly "):
+            parts = raw.split(None, 3)
+            days = {"mon": 0, "tue": 1, "wed": 2, "thu": 3,
+                    "fri": 4, "sat": 5, "sun": 6}
+            if len(parts) < 4 or parts[1].lower()[:3] not in days \
+                    or parse_hhmm(parts[2]) is None:
+                return ("weekly needs a day, a time and the "
+                        "words: weekly mon HH:MM <text>.")
+            kind = "weekly"
+            weekday = days[parts[1].lower()[:3]]
+            at_time, text = parts[2], parts[3]
+            due = surface._channel_next_due(
+                {"kind": "weekly", "time": at_time,
+                 "weekday": weekday}, now, tz)
+        elif low.startswith("at "):
+            parts = raw.split(None, 2)
+            if len(parts) < 3 \
+                    or parse_hhmm(parts[1]) is None:
+                return ("at needs a time and the words: "
+                        "at HH:MM <text>.")
+            at_time, text = parts[1], parts[2]
+            due = surface._channel_next_due(
+                {"kind": "daily", "time": at_time}, now, tz)
+        elif low.startswith("now "):
+            text = raw[4:]
+        elif low == "now":
+            text = ""
+        if not text and not media:
+            return ("nothing to post — give me the words, or "
+                    "attach media to the message.")
+        entry = surface.channel_enqueue(key, {
+            "kind": kind, "text": text, "media": media,
+            "due": due, "time": at_time, "weekday": weekday,
+            "source": source, "created_by": sender,
+        }, now=now)
+        if entry is None:
+            return ("the queue is full (100 posts) — cancel "
+                    "something from the queue section first.")
+        posts = self._channel_drive(key, now=now, force=True)
+        if any(p.get("entry") == entry["id"] for p in posts):
+            return "posted now."
+        if kind in ("daily", "weekly"):
+            return (f"queued — {kind} at {at_time} channel "
+                    "time, first run on its beat.")
+        if due > now:
+            return (f"queued — it posts at {at_time} channel "
+                    "time.")
+        if not surface.claim_state(key)["claimed"]:
+            return ("queued — it posts the moment this "
+                    "channel is claimed (my bot made admin, "
+                    "or your designation in settings).")
+        return "queued — it rides the next cycle beat."
 
     # ---- the notice undo (DESIGN §31) ---------------------------
     def _control_undonotice(self, tail, message) -> str:  # type: ignore[no-untyped-def]

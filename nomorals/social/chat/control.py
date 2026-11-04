@@ -169,7 +169,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "top", "tax", "grant",
     "gear", "heist", "shoot", "kill", "assassinate", "sabotage",
     "gang", "war", "police", "bounty", "claimdrop",
-    "poll", "vote", "milestones", "contributions",
+    "poll", "vote", "milestones", "contributions", "boards",
     "property", "buyproperty", "sellproperty", "rent",
     "listproperty", "auctions", "mortgage", "insure",
     "drop", "claim",
@@ -222,7 +222,8 @@ def public_menu_text() -> str:
         "/insure /drop /claim\n"
         "conflict — /gear /heist /shoot /kill /assassinate "
         "/sabotage /gang /war /police /bounty /claimdrop\n"
-        "group life — /poll /vote /milestones /contributions\n"
+        "group life — /poll /vote /milestones /contributions "
+        "/boards\n"
         f"play — /game {games}\n"
         "\n"
         "tap a button below to run it · /help for what each one does"
@@ -513,6 +514,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "vote": (0, 2),           # /vote [poll] <option> — one vote per member; buttons carry this command
     "milestones": (0, None),  # /milestones — the group's memory book (P3)
     "contributions": (0, None),  # /contributions [top|appeal N] — §26 transparency + the reviewed ranker
+    "boards": (0, None),         # /boards [name] — the §14 board organ: scopes × metrics, movement vs the last publish
     "coinflip": (0, 2),       # /coinflip 10 heads — casino sink at 1.9×
     "top": (0, 0),            # /top — the richest board (wallet + bank)
     "tax": (0, 0),            # /tax — the group's monetary policy, stated
@@ -2329,6 +2331,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/contributions · /contributions top · /contributions appeal <number>",
             "example": "/contributions top",
             "related": "/milestones /top /member"},
+    "boards": {"what": "the §14 leaderboards: one board organ over many standings — this group's sparks, gems, messages, REVIEWED contributions and gang strength; per-platform and cross-platform standings with people stitched across platforms so one person ranks once; per-game ELO/wins/points and whole-spine XP/coins/mastery. Boards are living surfaces: a scheduled publish stores the snapshot and later renders show movement (▲2 / ▼1 / — / new) against it. /top stays the quick group sparks board.",
+            "usage": "/boards · /boards <name> — sparks, global:sparks, platform:telegram-bot:messages, game:chess:elo, games:xp",
+            "example": "/boards global:sparks",
+            "related": "/top /contributions /milestones"},
     "coinflip": {"what": "flip a coin against the house at 1.9×: call heads or tails. Losses feed the treasury and the jackpot pot.",
             "usage": "/coinflip <bet> heads|tails",
             "example": "/coinflip 10 heads",
@@ -2873,7 +2879,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "assassinate", "sabotage", "gang", "war",
                             "police", "bounty", "claimdrop",
                             "poll", "vote", "milestones",
-                            "contributions",
+                            "contributions", "boards",
                             "mute", "unmute", "ban", "unban", "kick",
                             "warn", "pin", "unpin", "purge", "report"]),
     ("discovery", ["list", "commands", "menu", "help", "tour", "heal"]),
@@ -3144,7 +3150,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "listproperty", "auctions", "mortgage", "insure",
       "gear", "heist", "shoot", "kill", "assassinate", "sabotage",
       "gang", "war", "police", "bounty", "claimdrop",
-      "poll", "vote", "milestones", "contributions",
+      "poll", "vote", "milestones", "contributions", "boards",
       "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
       "unpin", "purge", "report"]),
     ("discovery",

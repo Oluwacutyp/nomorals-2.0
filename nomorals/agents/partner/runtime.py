@@ -814,6 +814,19 @@ class PartnerRuntime(
         if message.chat.kind == ChatKind.CHANNEL:
             _log.info("channel post in %s noted; channels are silent "
                       "by posture", message.chat.key)
+            # Owner-side control plane (P4a): the sighting is
+            # noted in the channel registry, the bot-claim probe
+            # runs, and the posting queue takes its beat.  The
+            # message itself still feeds nothing — no memory,
+            # no brain, no reply; control stays in DM.
+            note = getattr(self, "_channel_note_and_drive", None)
+            if note is not None:
+                try:
+                    note(message)
+                except Exception as e:  # noqa: BLE001 - the
+                    # control plane never breaks the silence
+                    record_failure(
+                        "runtime.PartnerRuntime.channel_note", e)
             return
         # Group surface (DESIGN §1, P1): group chats are claimed by
         # the surface before conversation — service events (join /
@@ -3794,6 +3807,9 @@ class PartnerRuntime(
 
         if kind == "contributions":
             return self._control_contributions(command.tail, message)
+
+        if kind == "boards":
+            return self._control_boards(command.tail, message)
 
         if kind == "slots" \
                 and self._group_key_or_none(message) is not None:
