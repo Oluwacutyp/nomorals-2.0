@@ -19,6 +19,9 @@ A board is ``<scope>:<metric>`` over a living data source:
   spine (ELO, wins, points per game; XP, coins, wins, mastery
   across games), fed by a provider the runtime injects — the
   surface owns no games database.
+- ``gangs:<metric>`` — the §36 gang scope: global gang records
+  ranked across every group (prestige, chapters held, roster
+  size), read off the gang registry.
 
 Reputation is NEVER a board metric: flags are a safety record,
 not a standing, and nobody gets ranked by them (§14/§32).
@@ -52,6 +55,7 @@ __all__ = [
     "PEOPLE_METRICS",
     "GAME_METRICS",
     "GAMES_METRICS",
+    "GANG_METRICS",
     "board_title",
     "is_game_flavored",
     "metric_format",
@@ -103,8 +107,16 @@ GAMES_METRICS: dict[str, dict[str, str]] = {
     "mastery": {"label": "mastery points", "fmt": "count"},
 }
 
+#: Metrics over the §36 global gang registry — standings of
+#: gangs themselves, across every group they hold chapters in.
+GANG_METRICS: dict[str, dict[str, str]] = {
+    "prestige": {"label": "gang prestige", "fmt": "count"},
+    "chapters": {"label": "chapters held", "fmt": "count"},
+    "members": {"label": "members worldwide", "fmt": "count"},
+}
+
 _SCOPES = ("group", "platform", "global", "community", "game",
-           "games")
+           "games", "gangs")
 
 
 def parse_board_id(board_id: Any) -> dict[str, Any] | None:
@@ -149,6 +161,10 @@ def parse_board_id(board_id: Any) -> dict[str, Any] | None:
         if len(parts) != 2 or parts[1] not in GAMES_METRICS:
             return None
         out["metric"] = parts[1]
+    elif scope == "gangs":
+        if len(parts) != 2 or parts[1] not in GANG_METRICS:
+            return None
+        out["metric"] = parts[1]
     return out
 
 
@@ -160,6 +176,8 @@ def _metric_meta(parsed: dict[str, Any]) -> dict[str, str]:
         return PEOPLE_METRICS[parsed["metric"]]
     if scope == "game":
         return GAME_METRICS[parsed["metric"]]
+    if scope == "gangs":
+        return GANG_METRICS[parsed["metric"]]
     return GAMES_METRICS[parsed["metric"]]
 
 
@@ -183,6 +201,8 @@ def board_title(parsed: dict[str, Any]) -> str:
         return f"{label} — community {parsed['community']}"
     if scope == "game":
         return f"{parsed['game']} — {label}"
+    if scope == "gangs":
+        return f"{label} — all gangs, everywhere"
     return f"games — {label}"
 
 

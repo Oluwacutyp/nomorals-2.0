@@ -52,6 +52,7 @@ __all__ = [
     "GroupConflict", "GroupConflictError", "WarBook",
     "ARSENAL", "LIFESTYLES", "CONFLICT_DEFAULTS",
     "LOOT_KINDS", "WANTED_RUNGS",
+    "HQ_TIERS", "HQ_DEFENSE", "hq_tier_of", "hq_defense_bonus",
     "combat_power_of", "heist_odds",
 ]
 
@@ -526,6 +527,34 @@ WANTED_RUNGS: dict[int, dict[str, Any]] = {
         "wallet_pct": 15, "fine_cap": 600, "bounty": 600},
 }
 
+#: Headquarters (§36): a chapter gang dict may carry an
+#: ``hq`` block ({"tier": 0..3}) written ONLY by the gang
+#: registry — the gang whose HQ sits in this group concentrates
+#: its defense here.  The bonus is one number read by every
+#: defense surface the organ owns: heist defense against the
+#: town's money (and against an HQ member's vault), in-group
+#: war side power, and gang strength.  Tier names ride along so
+#: no reader hardcodes them.
+HQ_TIERS: list[str] = ["none", "hideout", "compound",
+                       "fortress"]
+HQ_DEFENSE: dict[int, int] = {0: 0, 1: 6, 2: 14, 3: 26}
+
+
+def hq_tier_of(gang: dict[str, Any] | None) -> int:
+    """The HQ tier of a chapter gang dict (0 = no HQ here)."""
+    if not gang:
+        return 0
+    hq = gang.get("hq") or {}
+    try:
+        return max(0, min(3, int(hq.get("tier") or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def hq_defense_bonus(gang: dict[str, Any] | None) -> int:
+    return HQ_DEFENSE[hq_tier_of(gang)]
+
+
 #: System drops (§35): the loot table.  Contents roll fresh
 #: every drop; rarity weights the roll; slots scale 1–5 by
 #: kind (a single gear piece is winner-take-all; a sparks pool
@@ -814,6 +843,8 @@ class GroupConflict:
             else self._load_state(group_id)
         total = sum(int(g.get("treasury") or 0)
                     for g in state["gangs"].values())
+        total += sum(int(g.get("hq_vault") or 0)
+                     for g in state["gangs"].values())
         total += sum(int(w.get("pot") or 0)
                      for w in state["wars"].values()
                      if w.get("status") in ("declared", "active"))
@@ -1250,11 +1281,17 @@ class GroupConflict:
             if hold.get("gang") == gang.get("id"))
         treasury = min(20, int(gang.get("treasury") or 0) // 100)
         wins = 5 * int(gang.get("wins") or 0)
-        return {"members": members, "armory": armory,
-                "territory": territory, "treasury": treasury,
-                "wins": wins,
-                "total": members + armory + territory + treasury
-                + wins}
+        parts = {"members": members, "armory": armory,
+                 "territory": territory, "treasury": treasury,
+                 "wins": wins}
+        hq = hq_defense_bonus(gang)
+        if hq:
+            # the HQ concentration (§36): a gang is stronger
+            # where its fortress stands — the key appears only
+            # when it is real, so hq-less gangs read as before.
+            parts["hq"] = hq
+        parts["total"] = sum(parts.values())
+        return parts
 
     def gang_job(self, group_id: str, member: str, *,
                  rng: Any, now: float) -> dict[str, Any]:
@@ -1410,6 +1447,26 @@ class GroupConflict:
             sorted(set(attack_items)), defense_items, job)
         offense += bonus
         defense -= cut
+        # HQ concentration (§36): a gang's headquarters in this
+        # group watches the town's money — treasury and bank
+        # scores face the strongest HQ here; a member vault
+        # faces its own gang's HQ when it stands here.
+        hq_bonus = 0
+        if kind in ("treasury", "bank"):
+            hq_bonus = max(
+                (hq_defense_bonus(g) for g in
+                 (state.get("gangs") or {}).values()),
+                default=0)
+        else:
+            owner_gang = self.gang_of(
+                group_id, str(target.get("id") or ""),
+                state=state)
+            hq_bonus = hq_defense_bonus(owner_gang)
+        if hq_bonus:
+            defense += hq_bonus
+            notes = list(notes) + [
+                f"an HQ watches this score (+{hq_bonus} "
+                "defense)"]
         stars = 0.0
         for member in lobby.get("crew") or []:
             member_stars, _, _ = self.wanted_stars(
@@ -1418,6 +1475,7 @@ class GroupConflict:
         odds = heist_odds(offense, defense, heat_stars=stars)
         return {"job": job, "scope": scope, "offense": offense,
                 "defense": defense, "odds": odds,
+                "hq_defense": hq_bonus,
                 "heat_stars": stars, "notes": notes,
                 "attack_items": sorted(set(attack_items)),
                 "defense_items": defense_items,
@@ -1897,6 +1955,9 @@ class GroupConflict:
                                       now=now) for m in parts)
         power += gear_power(list(gang.get("armory") or []),
                             "war", now=now)
+        # home turf (§36): a gang fighting where its HQ stands
+        # fights with the fortress behind it.
+        power += hq_defense_bonus(gang)
         power *= float(life["war_mult"])
         return power * float(rng.uniform(0.85, 1.15))
 
@@ -2061,11 +2122,16 @@ class GroupConflict:
 
     def bully_index(self, group_id: str, member: str, *,
                     state: dict[str, Any] | None = None,
-                    now: float) -> tuple[float, list[str]]:
+                    now: float,
+                    focus: float = 1.0) -> tuple[float, list[str]]:
         """The bully index, recomputed from the crime journal
         — the system's own evidence, never a vibe.  Returns
         (index, human-readable inputs) so an admin reading
-        /glog sees exactly why the police moved."""
+        /glog sees exactly why the police moved.  ``focus`` is
+        the owner's enforcement-focus multiplier for the group
+        (§36: the aggression setting the thresholds read);
+        1.0 — the default everywhere it isn't wired — changes
+        nothing."""
         state = state if state is not None \
             else self._load_state(group_id)
         since = now - INDEX_WINDOW_S
@@ -2128,18 +2194,57 @@ class GroupConflict:
         total = max(0.0, total - forgiven)
         if life is not None:
             total *= float(life["heat_mult"])
+        if focus != 1.0:
+            total *= float(focus)
+            inputs.append(
+                f"enforcement focus ×{float(focus):g} (owner)")
         return round(total, 2), inputs
+
+    def owner_mark(self, group_id: str, member: str, *,
+                   state: dict[str, Any] | None = None,
+                   now: float) -> int | None:
+        """The owner's standing wanted mark on a member (§36),
+        or None: a mark set inside the index window HOLDS the
+        member's stars at the marked level — the ladder reads
+        the mark, the journal keeps the evidence.  Written only
+        through the registry's override verbs."""
+        state = state if state is not None \
+            else self._load_state(group_id)
+        mark = ((state.get("police") or {}).get(
+            "owner_marks") or {}).get(member)
+        if not isinstance(mark, dict):
+            return None
+        if float(mark.get("at") or 0) < now - INDEX_WINDOW_S:
+            return None
+        try:
+            return max(0, min(5, int(mark.get("stars") or 0)))
+        except (TypeError, ValueError):
+            return None
 
     def wanted_stars(self, group_id: str, member: str, *,
                      state: dict[str, Any] | None = None,
-                     now: float) -> tuple[int, float, list[str]]:
+                     now: float,
+                     focus: float = 1.0
+                     ) -> tuple[int, float, list[str]]:
         index, inputs = self.bully_index(
-            group_id, member, state=state, now=now)
+            group_id, member, state=state, now=now, focus=focus)
         stars = 0
         for floor, band in WANTED_BANDS:
             if index >= floor:
                 stars = band
                 break
+        mark = self.owner_mark(group_id, member, state=state,
+                               now=now)
+        if mark is not None:
+            stars = mark
+            if mark == 0:
+                index = 0.0
+            else:
+                floor = next((f for f, b in WANTED_BANDS
+                              if b == mark), 0.0)
+                index = max(index, float(floor))
+            inputs = list(inputs) + [
+                f"owner's mark — held at {mark}★"]
         return stars, index, inputs
 
     def note_report_attention(self, group_id: str, *,
@@ -2166,7 +2271,8 @@ class GroupConflict:
             self._save_state(group_id, state)
 
     def police_sweep(self, group_id: str, *, now: float,
-                     free_treasury: int) -> list[dict[str, Any]]:
+                     free_treasury: int,
+                     focus: float = 1.0) -> list[dict[str, Any]]:
         """One pass of the ladder over every member the
         journal knows.  Each rung acts ONCE per wanted
         episode; when a member's index decays to zero the
@@ -2186,7 +2292,8 @@ class GroupConflict:
         remaining_free = max(0, int(free_treasury))
         for member in sorted(members):
             stars, index, inputs = self.wanted_stars(
-                group_id, member, state=state, now=now)
+                group_id, member, state=state, now=now,
+                focus=focus)
             record = dict(acted.get(member) or {"rung": 0})
             if index <= 0:
                 if record.get("rung"):
@@ -2676,6 +2783,67 @@ class GroupConflict:
                       won=won, escrow=escrow)
         self._save_state(group_id, state)
         return {"won": won, "escrow": escrow,
+                "gang": gang.get("name") if gang else ""}
+
+    def settle_hq_raid(self, group_id: str, war: dict[str, Any],
+                       *, now: float) -> dict[str, Any] | None:
+        """This group's half of an HQ raid settlement (§36).
+
+        The raid is an inter-group war (kind ``hq_raid`` in
+        the book) whose defender side is a gang's HQ chapter.
+        Money discipline matches settle_inter_war exactly —
+        each group's sparks are its own closed economy: the
+        winner's escrow returns to its gang treasury; the
+        attacker's spoils arrive as a journaled mint capped
+        by the pool the fortress actually held.  The defender's
+        loss is REAL and local: the pool burns out of the HQ
+        vault first, then the chapter treasury — a fortress's
+        reserves are what a raid is FOR."""
+        wid = str(war.get("id") or "")
+        state = self._load_state(group_id)
+        escrow = int((state.get("escrow_inter") or {}).pop(
+            wid, 0))
+        if not escrow:
+            return None
+        side = "a" if (war.get("a") or {}).get(
+            "group") == group_id else "b"
+        mine = (war.get(side) or {})
+        gang = (state.get("gangs") or {}).get(
+            str(mine.get("gang") or ""))
+        won = war.get("winner") == side
+        pool = int(war.get("raid_pool") or 0)
+        burned = 0
+        if gang is not None and won:
+            gang["treasury"] = int(gang.get("treasury") or 0) \
+                + escrow
+            gang["wins"] = int(gang.get("wins") or 0) + 1
+            if side == "a" and pool > 0:
+                leader = str(gang.get("leader") or "")
+                if leader and self.economy.treasury_bonus(
+                        group_id, pool,
+                        reason=f"HQ raid spoils vs "
+                               f"{(war.get('b') or {}).get('gang_name', 'the fortress')}",
+                        now=now):
+                    self.economy.treasury_grant(
+                        group_id, leader, pool,
+                        reason="HQ raid spoils", now=now)
+        elif gang is not None:
+            gang["losses"] = int(gang.get("losses") or 0) + 1
+            if side == "b" and pool > 0:
+                vault = int(gang.get("hq_vault") or 0)
+                from_vault = min(vault, pool)
+                gang["hq_vault"] = vault - from_vault
+                rest = pool - from_vault
+                held = int(gang.get("treasury") or 0)
+                from_treasury = min(rest, held)
+                gang["treasury"] = held - from_treasury
+                burned = from_vault + from_treasury
+        self._journal(state, "hq_raid_settle", now, war=wid,
+                      won=won, escrow=escrow, side=side,
+                      pool=pool, burned=burned)
+        self._save_state(group_id, state)
+        return {"won": won, "escrow": escrow, "side": side,
+                "pool": pool, "burned": burned,
                 "gang": gang.get("name") if gang else ""}
 
 

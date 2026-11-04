@@ -509,8 +509,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "kill": (0, 1),           # /kill @member — needs a real weapon; bigger take + hospital for the target (§23)
     "assassinate": (0, 1),    # /assassinate @member — needs a heavy weapon; the biggest hit (§23)
     "sabotage": (0, 1),       # /sabotage @member — wreck their best property; the estate bills the damage (§23)
-    "gang": (0, None),        # /gang [create <lifestyle> <name>|join|leave|job|deposit|withdraw|claim|tax|list] — gang life (§24)
-    "war": (0, None),         # /war [declare <gang>|accept|decline|join|spoils <district>] — gang wars, in-group + inter-group (§23)
+    "gang": (0, None),        # /gang [create <lifestyle> <name>|join|leave|job|deposit|withdraw|claim|tax|list] — gang life (§24); §36: register|chapter <name>|hq [claim|build|move]|vault|armory|code|redeem|side <gang>
+    "war": (0, None),         # /war [declare <gang>|accept|decline|join|spoils <district>|raid <gang>] — gang wars, in-group + inter-group (§23); raid = the §36 HQ raid
     "police": (0, None),      # /police [bribe [envelope]] — the precinct board: wanted, bounties, your heat (§24)
     "bounty": (0, None),      # /bounty [post @member <n>|hunt @member] — heads and hunters (§24)
     "claimdrop": (0, 1),      # /claimdrop [ref] — claim a system drop (§35); claims are settlements

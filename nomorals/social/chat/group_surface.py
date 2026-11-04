@@ -46,6 +46,12 @@ from ...community.group_conflict import (
     WarBook,
 )
 from ...community.group_exchange import EXCHANGE_DEFAULTS, GroupExchange
+from ...community.group_gangs import (
+    GANGS36_DEFAULTS,
+    GangRegistry,
+    GangRegistryError,
+    person_key as _person_key,
+)
 from ...community.group_real_estate import (
     DISTRICTS,
     ESTATE_DEFAULTS,
@@ -241,6 +247,12 @@ def _default_settings() -> dict[str, Any]:
                                         # record never decides
                                         # admission itself.
         "conflict": copy.deepcopy(CONFLICT_DEFAULTS),
+        "gangs": copy.deepcopy(GANGS36_DEFAULTS),
+                                        # §36 cross-group gangs:
+                                        # the chapter capacity
+                                        # table, the flagship's
+                                        # identity, HQ prices,
+                                        # raid + prestige tuning
         "exchange": copy.deepcopy(EXCHANGE_DEFAULTS),
                                         # the §25 exchange: the
                                         # weekly pool, the rate
@@ -363,7 +375,7 @@ class GroupStore:
                                      "expression", "reputation",
                                      "conflict", "rhythm",
                                      "channel", "boards",
-                                     "exchange")})
+                                     "exchange", "gangs")})
         mod = dict(merged["moderation"])
         mod.update((stored.get("moderation") or {}))
         merged["moderation"] = mod
@@ -406,6 +418,9 @@ class GroupStore:
         merged["exchange"] = _deep_merge(
             copy.deepcopy(EXCHANGE_DEFAULTS),
             stored.get("exchange") or {})
+        merged["gangs"] = _deep_merge(
+            copy.deepcopy(GANGS36_DEFAULTS),
+            stored.get("gangs") or {})
         return merged
 
 
@@ -439,6 +454,8 @@ class GroupSurface:
         self._conflict: GroupConflict | None = None
         self._exchange: GroupExchange | None = None
         self._war_book: WarBook | None = None
+        self._gangs: GangRegistry | None = None
+        self._gangs_touched: set[str] = set()
 
     @property
     def signatures(self) -> SignatureStore:
@@ -4080,6 +4097,98 @@ class GroupSurface:
                 self.store.path.parent / "conflict_wars.json")
         return self._war_book
 
+    # ---- cross-group gangs (§36) --------------------------------
+
+    @property
+    def gangs(self) -> GangRegistry:
+        """The §36 registry: ONE global book beside the group
+        store (the war book's shape) — global gang records,
+        chapters, the flagship, war declarations, claim codes
+        and the owner's police focus."""
+        if self._gangs is None:
+            self._gangs = GangRegistry(
+                self.conflict,
+                self.store.path.parent / "gang_registry.json")
+        return self._gangs
+
+    def gangs_cfg(self, group_key: str) -> dict[str, Any]:
+        return dict(self.store.settings(group_key).get(
+            "gangs") or {})
+
+    def gangs_frozen(self) -> str | None:
+        try:
+            self.gangs.all_gangs()
+        except GangRegistryError as exc:
+            return str(exc)
+        return None
+
+    def _owner_person(self, group_key: str
+                      ) -> tuple[str | None, str | None]:
+        """(person key, local id) for the owner on this group's
+        platform, from the §19 owner record — (None, None)
+        when the record doesn't know the owner there."""
+        reg = self.owner_registry
+        if reg is None:
+            return None, None
+        segment = str(group_key).split(":", 1)[0]
+        for plat in (segment, "telegram"):
+            try:
+                ids = reg.identities(plat) or []
+            except Exception:  # noqa: BLE001 - no record, no
+                ids = []       # owner — seeding simply defers
+            if ids:
+                return _person_key(segment, str(ids[0])), str(
+                    ids[0])
+        return None, None
+
+    def _person_of(self, group_key: str, user_id: str) -> str:
+        """The §36 person key for a local identity — resolved
+        through the registry's bindings first (a claim-code
+        bound identity is one person on every platform)."""
+        try:
+            return self.gangs.person_for(group_key, user_id)
+        except GangRegistryError:
+            return _person_key(
+                str(group_key).split(":", 1)[0], str(user_id))
+
+    def gangs_touch(self, group_key: str, *,
+                    now: float | None = None) -> None:
+        """First contact with a claimed group (§36): the
+        flagship chapter seeds lazily — once per group per
+        process, on the cycle's claimed-room beat.  Unclaimed
+        rooms are never touched (no state accrues there, §33).
+        A frozen registry freezes the gangs layer only; the
+        street keeps its own discipline."""
+        if group_key in self._gangs_touched:
+            return
+        if not self.claim_state(group_key)["claimed"]:
+            return
+        self._gangs_touched.add(group_key)
+        now = now if now is not None else time.time()
+        person, local = self._owner_person(group_key)
+        try:
+            out = self.gangs.ensure_flagship(
+                group_key, owner_person=person,
+                owner_local_id=local, now=now,
+                cfg=self.gangs_cfg(group_key))
+        except (GangRegistryError, GroupConflictError):
+            return
+        if out.get("ok") and out.get("created"):
+            self._audit(group_key, "flagship_seeded",
+                        user_id=str(local or ""),
+                        gang=str(out["gang"].get("name") or ""))
+
+    def _gang_register(self, group_key: str, gang: dict[str, Any],
+                       *, now: float) -> dict[str, Any] | None:
+        """Register a chapter gang into the §36 registry on
+        first touch (best-effort: a name held globally leaves
+        the gang local-only, never blocks its street life)."""
+        try:
+            return self.gangs.ensure_registered(
+                group_key, gang, now=now)
+        except (GangRegistryError, GroupConflictError):
+            return None
+
     def conflict_cfg(self, group_key: str) -> dict[str, Any]:
         return dict(self.store.settings(group_key)["conflict"])
 
@@ -4424,6 +4533,10 @@ class GroupSurface:
             except GroupConflictError:
                 pass  # index is a directory, not the gang —
                 # a broken book never blocks the street forming
+            # §36: every gang is born into the global registry
+            # (a record with one chapter); a globally held name
+            # leaves it local-only, never blocked.
+            self._gang_register(group_key, out["gang"], now=now)
             self._audit(group_key, "gang_create", user_id=user_id,
                         gang=str(out["gang"].get("name") or ""))
             self.store.save()
@@ -4435,6 +4548,34 @@ class GroupSurface:
         gate = self._conflict_gate(group_key, "crime")
         if gate:
             return gate
+        # §36: a registered gang's joins run the loyalty rules
+        # (one cross-group + one local membership) in the
+        # registry, which performs the local join itself.
+        try:
+            gang = self.conflict.gang_by_name(group_key, name)
+        except GroupConflictError:
+            gang = None
+        if gang is not None:
+            record = self._gang_register(group_key, gang,
+                                         now=now)
+            if record is not None:
+                member = self.store.group(group_key)["members"] \
+                    .get(user_id) or {}
+                try:
+                    out = self.gangs.join_chapter(
+                        str(record["id"]), group_key,
+                        person=self._person_of(group_key, user_id),
+                        local_id=user_id,
+                        name=str(member.get("name") or ""),
+                        username=str(member.get("username")
+                                     or ""),
+                        now=now, cfg=self.gangs_cfg(group_key))
+                except (GangRegistryError, GroupConflictError):
+                    out = {"ok": False, "reason": "frozen"}
+                if out.get("ok"):
+                    self.store.save()
+                    return {"ok": True, "gang": out["chapter"]}
+                return out
         out = self.conflict.join_gang(group_key, user_id, name,
                                       now=now)
         if out.get("ok"):
@@ -4444,6 +4585,30 @@ class GroupSurface:
     def gang_leave(self, group_key: str, user_id: str, *,
                    now: float | None = None) -> dict[str, Any]:
         now = now if now is not None else time.time()
+        gang = None
+        try:
+            gang = self.conflict.gang_of(group_key, user_id)
+        except GroupConflictError:
+            gang = None
+        if gang is not None and gang.get("global"):
+            try:
+                out = self.gangs.leave_chapter(
+                    str(gang["global"]), group_key,
+                    person=self._person_of(group_key, user_id),
+                    local_id=user_id, now=now)
+            except (GangRegistryError, GroupConflictError):
+                out = {"ok": False, "reason": "frozen"}
+            if out.get("ok"):
+                if out.get("dissolved"):
+                    try:
+                        self.war_book.unregister_gang(
+                            group_key, str(gang.get("id") or ""))
+                    except GroupConflictError:
+                        pass
+                self.store.save()
+                return {"ok": True, "dissolved": bool(
+                    out.get("dissolved")), "gang": gang}
+            return out
         out = self.conflict.leave_gang(group_key, user_id,
                                        now=now)
         if out.get("ok"):
@@ -4470,7 +4635,7 @@ class GroupSurface:
                                        state=state, now=now)
         held = [d for d, h in state["territory"].items()
                 if h.get("gang") == gang.get("id")]
-        return {"ok": True, "gang": gang,
+        view = {"ok": True, "gang": gang,
                 "tier": gang_tier(len(gang.get("members") or [])),
                 "strength": strength, "territory": held,
                 "power": organ.power_gang(
@@ -4478,6 +4643,21 @@ class GroupSurface:
                 or (organ.power_gang(group_key, state=state,
                                      now=now) or {}).get(
                     "id") == gang.get("id")}
+        # §36: the global standing rides the card when the
+        # gang is registered — tier/prestige over the whole
+        # roster, chapters, HQ, and the caller's global rank.
+        record = self._gang_register(group_key, gang, now=now)
+        if record is not None:
+            gview = self.gangs.global_view(
+                record, cfg=self.gangs_cfg(group_key))
+            person = self._person_of(group_key, user_id)
+            entry = (record.get("roster") or {}).get(person) \
+                or {}
+            gview["your_role"] = str(entry.get("role")
+                                     or "member")
+            gview["your_slot"] = str(gview.get("class") or "")
+            view["global"] = gview
+        return view
 
     def gang_list(self, group_key: str, *,
                   now: float | None = None) -> list[dict[str, Any]]:
@@ -4834,6 +5014,24 @@ class GroupSurface:
             war["status"] = "void"
             self.war_book.update(war)
             return paid
+        # §36: pair the two gangs in the registry so dual
+        # holders can declare a side for this war.
+        rec_mine = self._gang_register(group_key, mine, now=now)
+        rec_theirs = None
+        if theirs.get("global"):
+            try:
+                rec_theirs = self.gangs.gang(
+                    str(theirs["global"]))
+            except GangRegistryError:
+                rec_theirs = None
+        if rec_mine is not None and rec_theirs is not None:
+            try:
+                self.gangs.note_war(str(war["id"]),
+                                    str(rec_mine["id"]),
+                                    str(rec_theirs["id"]),
+                                    now=now)
+            except GangRegistryError:
+                pass
         self._audit(group_key, "war_inter_declare",
                     user_id=user_id,
                     target=str(theirs.get("name") or ""))
@@ -4902,11 +5100,668 @@ class GroupSurface:
             side) or {})
         if user_id in parts:
             return {"ok": False, "reason": "already"}
+        # §36 loyalty: a dual holder fights only for the side
+        # they declared for this war — undeclared, they sit
+        # it out; declared for the other side, they're refused.
+        if gang.get("global"):
+            try:
+                check = self.gangs.war_join_check(
+                    person=self._person_of(group_key, user_id),
+                    war_id=str(war["id"]),
+                    global_id=str(gang["global"]))
+            except GangRegistryError:
+                check = {"ok": True}
+            if not check.get("ok"):
+                return check
         parts[user_id] = organ.member_power(group_key, user_id,
                                             now=now)
         war.setdefault("participants", {})[side] = parts
         self.war_book.update(war)
         return {"ok": True, "war": war, "side": side}
+
+    # ── §36: settled-war prestige + the HQ raid ──────────────
+
+    def _gangs_note_settled(self, group_key: str,
+                            war: dict[str, Any], *,
+                            now: float) -> None:
+        """Prestige for a settled inter-group war / HQ raid —
+        the registry awards each war exactly once, whichever
+        side's cycle settles it first."""
+        try:
+            gangs = self.gangs
+            cfg = self.gangs_cfg(group_key)
+            winner = str(war.get("winner") or "")
+            if war.get("kind") == "hq_raid":
+                a = war.get("a") or {}
+                b = war.get("b") or {}
+                rec_a = self.gangs.gang(str(
+                    war.get("attacker_global") or ""))
+                rec_b = self.gangs.gang(str(
+                    war.get("defender_global") or ""))
+                if rec_a is not None and rec_b is not None:
+                    gangs.note_hq_raid_outcome(
+                        str(war["id"]),
+                        attacker_gid=str(rec_a["id"]),
+                        defender_gid=str(rec_b["id"]),
+                        attacker_won=winner == "a",
+                        now=now, cfg=cfg)
+                return
+            side = (war.get(winner) or {}) if winner else {}
+            other_group = str(side.get("group") or "")
+            if not other_group:
+                return
+            organ = self.conflict if other_group == group_key \
+                else self._conflict_for_store(str(
+                    side.get("store") or self.store.path))
+            gang = (organ._load_state(other_group).get(
+                "gangs") or {}).get(str(side.get("gang") or ""))
+            if gang is not None and gang.get("global"):
+                gangs.note_inter_war_win(
+                    str(war["id"]), str(gang["global"]),
+                    now=now, cfg=cfg)
+        except (GangRegistryError, GroupConflictError):
+            pass  # prestige is garnish on a settled war; the
+            # settlement itself already landed
+
+    def war_raid_hq(self, group_key: str, user_id: str,
+                    target_name: str, *,
+                    now: float | None = None
+                    ) -> dict[str, Any]:
+        """Declare an HQ raid (§36): an inter-group war whose
+        target is a gang's HQ chapter — the crown jewel.
+        Bigger escrow, spoils drawn from the fortress's actual
+        vault (blunted by its tier), prestige on top.  It runs
+        through the SAME war book, rounds and settlement shape
+        as any inter-group war — kind ``hq_raid``, settled by
+        settle_hq_raid."""
+        from ...community.group_conflict import gang_tier
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "warfare")
+        if gate:
+            return gate
+        organ = self.conflict
+        mine = organ.gang_of(group_key, user_id)
+        if mine is None:
+            return {"ok": False, "reason": "no_gang"}
+        if gang_tier(len(mine.get("members") or [])) == "crew":
+            return {"ok": False, "reason": "tier"}
+        try:
+            record = self.gangs.gang_by_name(target_name)
+        except GangRegistryError:
+            return {"ok": False, "reason": "frozen"}
+        if record is None:
+            return {"ok": False, "reason": "not_found"}
+        rec_mine = self._gang_register(group_key, mine, now=now)
+        if rec_mine is not None \
+                and rec_mine["id"] == record["id"]:
+            return {"ok": False, "reason": "self"}
+        status = self.gangs.hq_status(str(record["id"]))
+        hq = status.get("hq")
+        if not status.get("ok") or hq is None:
+            return {"ok": False, "reason": "no_hq"}
+        hq_group = str(hq["group"])
+        if hq_group == group_key:
+            return {"ok": False, "reason": "local"}
+        for war in self.war_book.wars_for_group(group_key):
+            if war.get("status") in ("declared", "active"):
+                return {"ok": False, "reason": "busy"}
+        # the defender snapshot comes from the HQ chapter in
+        # its own group (through that group's store, the
+        # _war_side discipline), blunted by the fortress tier
+        found = [f for f in self.war_book.find_gangs(
+            str(record["name"])) if f["group"] == hq_group]
+        store_path = str(found[0]["store"]) if found \
+            else str(self.store.path)
+        try:
+            other = self._conflict_for_store(store_path)
+            other_state = other._load_state(hq_group)
+        except GroupConflictError:
+            return {"ok": False, "reason": "frozen"}
+        theirs = (other_state.get("gangs") or {}).get(str(
+            (record.get("chapters") or {}).get(
+                hq_group, {}).get("gang") or ""))
+        if theirs is None:
+            return {"ok": False, "reason": "gone"}
+        cfg = self.conflict_cfg(group_key)
+        gcfg = self.gangs_cfg(group_key)
+        raid_cfg = dict(gcfg.get("hq_raid") or {})
+        escrow = int(cfg.get("war_escrow") or 0) * int(
+            raid_cfg.get("escrow_mult") or 2)
+        tier = int(hq["tier"])
+        from ...community.group_conflict import gear_power
+        strength_b = other.gang_strength(
+            hq_group, theirs, state=other_state,
+            now=now)["total"]
+        blunt = 1.0 + (int(raid_cfg.get(
+            "strength_per_tier_pct") or 10) * tier) / 100.0
+        side_a = self._war_side(group_key, mine, now=now)
+        side_b = {"group": hq_group, "store": store_path,
+                  "gang": str(theirs.get("id") or ""),
+                  "gang_name": str(theirs.get("name") or ""),
+                  "lifestyle": str(theirs.get("lifestyle")
+                                   or "street"),
+                  "strength": int(strength_b * blunt),
+                  "armory_power": gear_power(
+                      list(theirs.get("armory") or []), "war",
+                      now=now),
+                  "leader_power": other.member_power(
+                      hq_group, str(theirs.get("leader") or ""),
+                      state=other_state, now=now),
+                  "hq_tier": tier}
+        vault = int(hq["vault"])
+        pool = min(vault, int(raid_cfg.get("pool_cap") or 0))
+        pool = int(pool * max(0.0, 1.0 - (
+            int(raid_cfg.get("pool_per_tier_pct") or 15)
+            * tier) / 100.0))
+        war = self.war_book.create_war(side_a, side_b,
+                                       escrow=escrow, now=now,
+                                       cfg=cfg)
+        war["kind"] = "hq_raid"
+        war["raid_pool"] = pool
+        war["hq_tier"] = tier
+        war["hq_group"] = hq_group
+        if rec_mine is not None:
+            war["attacker_global"] = str(rec_mine["id"])
+        war["defender_global"] = str(record["id"])
+        self.war_book.update(war)
+        paid = organ.escrow_for_inter_war(
+            group_key, user_id, str(war["id"]), escrow, now=now)
+        if not paid.get("ok"):
+            war["status"] = "void"
+            self.war_book.update(war)
+            return paid
+        if rec_mine is not None:
+            try:
+                self.gangs.note_war(str(war["id"]),
+                                    str(rec_mine["id"]),
+                                    str(record["id"]), now=now)
+            except GangRegistryError:
+                pass
+        self._audit(group_key, "hq_raid_declare",
+                    user_id=user_id,
+                    target=str(record["name"]))
+        self.store.save()
+        return {"ok": True, "war": war, "mine": mine,
+                "theirs": theirs, "hq": hq, "pool": pool}
+
+    # ── §36: chapter / HQ / loyalty surface verbs ────────────
+
+    def gang_found_chapter(self, group_key: str, user_id: str,
+                           gang_name: str, *,
+                           now: float | None = None
+                           ) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        try:
+            record = self.gangs.gang_by_name(gang_name)
+            if record is None:
+                return {"ok": False, "reason": "no_gang"}
+            out = self.gangs.found_chapter(
+                str(record["id"]), group_key,
+                by_person=self._person_of(group_key, user_id),
+                by_local_id=user_id, now=now,
+                cfg=self.gangs_cfg(group_key))
+        except (GangRegistryError, GroupConflictError):
+            return {"ok": False, "reason": "frozen"}
+        if out.get("ok"):
+            try:
+                self.war_book.register_gang(
+                    group_key, str(self.store.path),
+                    out["chapter"])
+            except GroupConflictError:
+                pass
+            self._audit(group_key, "gang_chapter_founded",
+                        user_id=user_id,
+                        gang=str(record["name"]))
+            self.store.save()
+        return out
+
+    def gang_register_here(self, group_key: str, user_id: str, *,
+                           now: float | None = None
+                           ) -> dict[str, Any]:
+        """Register the caller's existing gang into the §36
+        registry — registration, not re-founding: history,
+        treasury and roster carry over as they stand."""
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        gang = self.conflict.gang_of(group_key, user_id)
+        if gang is None:
+            return {"ok": False, "reason": "no_gang"}
+        if gang.get("global"):
+            record = None
+            try:
+                record = self.gangs.gang(str(gang["global"]))
+            except GangRegistryError:
+                record = None
+            if record is not None:
+                return {"ok": True, "gang": record,
+                        "already": True}
+        try:
+            out = self.gangs.register_local_gang(
+                group_key, str(gang.get("id") or ""), now=now)
+        except (GangRegistryError, GroupConflictError):
+            return {"ok": False, "reason": "frozen"}
+        if out.get("ok"):
+            self._audit(group_key, "gang_registered",
+                        user_id=user_id,
+                        gang=str(out["gang"].get("name") or ""))
+            self.store.save()
+        return out
+
+    def _callers_gang_record(self, group_key: str, user_id: str,
+                             *, now: float
+                             ) -> tuple[dict[str, Any] | None,
+                                        dict[str, Any] | None]:
+        """(global record, chapter gang) for the caller's gang
+        in this group — registering on touch; (None, gang)
+        when the gang runs local-only."""
+        gang = self.conflict.gang_of(group_key, user_id)
+        if gang is None:
+            return None, None
+        record = self._gang_register(group_key, gang, now=now)
+        return record, gang
+
+    def gang_hq_status(self, group_key: str, user_id: str, *,
+                       now: float | None = None
+                       ) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        record, _gang = self._callers_gang_record(
+            group_key, user_id, now=now)
+        if record is None:
+            return {"ok": False, "reason": "no_gang"}
+        try:
+            return self.gangs.hq_status(str(record["id"]))
+        except (GangRegistryError, GroupConflictError):
+            return {"ok": False, "reason": "frozen"}
+
+    def gang_hq_designate(self, group_key: str, user_id: str, *,
+                          now: float | None = None
+                          ) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "warfare")
+        if gate:
+            return gate
+        record, _gang = self._callers_gang_record(
+            group_key, user_id, now=now)
+        if record is None:
+            return {"ok": False, "reason": "no_gang"}
+        try:
+            out = self.gangs.hq_designate(
+                str(record["id"]), group_key,
+                by_person=self._person_of(group_key, user_id),
+                now=now)
+        except (GangRegistryError, GroupConflictError):
+            return {"ok": False, "reason": "frozen"}
+        if out.get("ok"):
+            self._audit(group_key, "hq_designate",
+                        user_id=user_id,
+                        gang=str(record["name"]))
+            self.store.save()
+        return out
+
+    def gang_hq_buy(self, group_key: str, user_id: str, *,
+                    now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "warfare")
+        if gate:
+            return gate
+        record, _gang = self._callers_gang_record(
+            group_key, user_id, now=now)
+        if record is None:
+            return {"ok": False, "reason": "no_gang"}
+        try:
+            out = self.gangs.hq_buy_tier(
+                str(record["id"]), by_local_id=user_id,
+                now=now, cfg=self.gangs_cfg(group_key))
+        except (GangRegistryError, GroupConflictError):
+            return {"ok": False, "reason": "frozen"}
+        if out.get("ok"):
+            self._audit(group_key, "hq_tier", user_id=user_id,
+                        gang=str(record["name"]),
+                        tier=str(out.get("tier_name") or ""))
+            self.store.save()
+        return out
+
+    def gang_hq_move(self, group_key: str, user_id: str, *,
+                     now: float | None = None) -> dict[str, Any]:
+        """Relocate the gang's HQ to the chapter the caller is
+        standing in (cost + tier drop, registry rules)."""
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "warfare")
+        if gate:
+            return gate
+        record, _gang = self._callers_gang_record(
+            group_key, user_id, now=now)
+        if record is None:
+            return {"ok": False, "reason": "no_gang"}
+        try:
+            out = self.gangs.hq_relocate(
+                str(record["id"]), group_key,
+                by_person=self._person_of(group_key, user_id),
+                now=now, cfg=self.gangs_cfg(group_key))
+        except (GangRegistryError, GroupConflictError):
+            return {"ok": False, "reason": "frozen"}
+        if out.get("ok"):
+            self._audit(group_key, "hq_relocate",
+                        user_id=user_id,
+                        gang=str(record["name"]))
+            self.store.save()
+        return out
+
+    def gang_hq_vault(self, group_key: str, user_id: str,
+                      verb: str, amount: int, *,
+                      now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        record, _gang = self._callers_gang_record(
+            group_key, user_id, now=now)
+        if record is None:
+            return {"ok": False, "reason": "no_gang"}
+        if record.get("hq_group") != group_key:
+            # the vault is a partition of the HQ chapter's
+            # treasury — you stand at the fortress to use it.
+            return {"ok": False, "reason": "hq_elsewhere",
+                    "hq_group": record.get("hq_group")}
+        try:
+            if verb == "deposit":
+                out = self.gangs.hq_vault_deposit(
+                    str(record["id"]), local_id=user_id,
+                    amount=int(amount), now=now)
+            else:
+                out = self.gangs.hq_vault_withdraw(
+                    str(record["id"]), local_id=user_id,
+                    amount=int(amount), now=now)
+        except (GangRegistryError, GroupConflictError):
+            return {"ok": False, "reason": "frozen"}
+        if out.get("ok"):
+            self.store.save()
+        return out
+
+    def gang_hq_armory(self, group_key: str, user_id: str,
+                       verb: str, item_id: str = "", *,
+                       now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        record, _gang = self._callers_gang_record(
+            group_key, user_id, now=now)
+        if record is None:
+            return {"ok": False, "reason": "no_gang"}
+        person = self._person_of(group_key, user_id)
+        try:
+            if verb == "list":
+                status = self.gangs.hq_status(str(record["id"]))
+                hq = status.get("hq")
+                if hq is None:
+                    return {"ok": False, "reason": "no_hq"}
+                return {"ok": True, "armory": hq["armory"],
+                        "hq": hq}
+            if verb == "store":
+                out = self.gangs.hq_armory_store(
+                    str(record["id"]), group_key, person=person,
+                    local_id=user_id, item_id=item_id, now=now)
+            else:
+                out = self.gangs.hq_armory_draw(
+                    str(record["id"]), group_key, person=person,
+                    local_id=user_id, item_id=item_id, now=now)
+        except (GangRegistryError, GroupConflictError):
+            return {"ok": False, "reason": "frozen"}
+        if out.get("ok"):
+            self.store.save()
+        return out
+
+    def gang_claim_code(self, group_key: str, user_id: str, *,
+                        now: float | None = None
+                        ) -> dict[str, Any]:
+        """Mint a chapter claim code for the caller's gang."""
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        record, _gang = self._callers_gang_record(
+            group_key, user_id, now=now)
+        if record is None:
+            return {"ok": False, "reason": "no_gang"}
+        try:
+            return self.gangs.mint_claim_code(
+                str(record["id"]),
+                person=self._person_of(group_key, user_id),
+                now=now, cfg=self.gangs_cfg(group_key))
+        except (GangRegistryError, GroupConflictError):
+            return {"ok": False, "reason": "frozen"}
+
+    def gang_redeem_code(self, group_key: str, user_id: str,
+                         code: str, *,
+                         now: float | None = None
+                         ) -> dict[str, Any]:
+        """Redeem a claim code here: binds this platform
+        identity into the minter's roster + takes the seat."""
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        member = self.store.group(group_key)["members"].get(
+            user_id) or {}
+        try:
+            out = self.gangs.redeem_claim_code(
+                code, group_key, local_id=user_id,
+                name=str(member.get("name") or ""),
+                username=str(member.get("username") or ""),
+                now=now)
+        except (GangRegistryError, GroupConflictError):
+            return {"ok": False, "reason": "frozen"}
+        if out.get("ok"):
+            self._audit(group_key, "gang_claim_redeemed",
+                        user_id=user_id,
+                        gang=str(out["gang"].get("name") or ""))
+            self.store.save()
+        return out
+
+    def gang_war_side(self, group_key: str, user_id: str,
+                      gang_name: str, *,
+                      now: float | None = None) -> dict[str, Any]:
+        """Declare your side for the live inter-group war
+        against the named gang — the dual holder's loyalty
+        act (§36).  Finds the active/declared war whose other
+        side is that gang and records the declaration."""
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "warfare")
+        if gate:
+            return gate
+        gang = self.conflict.gang_of(group_key, user_id)
+        if gang is None:
+            return {"ok": False, "reason": "no_gang"}
+        record = self._gang_register(group_key, gang, now=now)
+        if record is None:
+            return {"ok": False, "reason": "no_gang"}
+        try:
+            chosen = self.gangs.gang_by_name(gang_name)
+        except GangRegistryError:
+            return {"ok": False, "reason": "frozen"}
+        if chosen is None:
+            return {"ok": False, "reason": "no_gang"}
+        pair = {str(record["id"]), str(chosen["id"])}
+        for war in self.war_book.wars_for_group(group_key):
+            if war.get("status") not in ("declared", "active"):
+                continue
+            sides = set()
+            for s in ("a", "b"):
+                side = war.get(s) or {}
+                s_group = str(side.get("group") or "")
+                if not s_group:
+                    continue
+                organ = self.conflict if s_group == group_key \
+                    else self._conflict_for_store(str(
+                        side.get("store") or self.store.path))
+                try:
+                    s_state = organ._load_state(s_group)
+                except GroupConflictError:
+                    continue
+                s_gang = (s_state.get("gangs") or {}).get(
+                    str(side.get("gang") or ""))
+                if s_gang is not None and s_gang.get("global"):
+                    sides.add(str(s_gang["global"]))
+            if sides == pair:
+                try:
+                    return self.gangs.declare_war_side(
+                        person=self._person_of(group_key,
+                                               user_id),
+                        war_id=str(war["id"]),
+                        global_id=str(chosen["id"]), now=now)
+                except GangRegistryError:
+                    return {"ok": False, "reason": "frozen"}
+        return {"ok": False, "reason": "no_war"}
+
+    # ── §36: the owner's police override (surface verbs) ─────
+
+    def police_wanted_view(self, group_key: str, member: str, *,
+                           now: float | None = None
+                           ) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        try:
+            return self.gangs.police_view(group_key, member,
+                                          now=now)
+        except (GangRegistryError, GroupConflictError) as exc:
+            return {"ok": False, "reason": "frozen",
+                    "error": str(exc)}
+
+    def police_owner_set_stars(self, group_key: str,
+                               member: str, stars: int, *,
+                               by_person: str,
+                               now: float | None = None
+                               ) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        try:
+            out = self.gangs.police_set_stars(
+                group_key, member, stars, by_person=by_person,
+                now=now)
+        except (GangRegistryError, GroupConflictError):
+            return {"ok": False, "reason": "frozen"}
+        if out.get("ok"):
+            self._audit(group_key, "police_override",
+                        user_id=member, verb="set_stars",
+                        stars=int(stars))
+            self.store.save()
+        return out
+
+    def police_owner_pardon(self, group_key: str, member: str,
+                            *, by_person: str,
+                            now: float | None = None
+                            ) -> dict[str, Any]:
+        """Owner pardon: the registry forgives the slate; an
+        active jail lifts HERE — the release is the one
+        member-visible part of an override."""
+        now = now if now is not None else time.time()
+        try:
+            out = self.gangs.police_pardon(
+                group_key, member, by_person=by_person,
+                now=now)
+        except (GangRegistryError, GroupConflictError):
+            return {"ok": False, "reason": "frozen"}
+        if out.get("ok"):
+            released = False
+            if self.jail_state(group_key, member,
+                               now=now) is not None:
+                released = self.jail_clear(group_key, member)
+            out["released"] = bool(released)
+            self._audit(group_key, "police_override",
+                        user_id=member, verb="pardon",
+                        released=bool(released))
+            self.store.save()
+        return out
+
+    def police_owner_call_off(self, group_key: str,
+                              member: str, *, by_person: str,
+                              now: float | None = None
+                              ) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        try:
+            out = self.gangs.police_call_off(
+                group_key, member, by_person=by_person,
+                now=now)
+        except (GangRegistryError, GroupConflictError):
+            return {"ok": False, "reason": "frozen"}
+        if out.get("ok"):
+            self._audit(group_key, "police_override",
+                        user_id=member, verb="call_off")
+            self.store.save()
+        return out
+
+    def police_owner_focus(self, group_key: str,
+                           aggression: float, *,
+                           by_person: str,
+                           now: float | None = None
+                           ) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        try:
+            out = self.gangs.police_set_focus(
+                group_key, aggression, by_person=by_person,
+                now=now)
+        except (GangRegistryError, GroupConflictError):
+            return {"ok": False, "reason": "frozen"}
+        if out.get("ok"):
+            self._audit(group_key, "police_override",
+                        user_id="", verb="focus",
+                        aggression=float(aggression))
+            self.store.save()
+        return out
+
+    def console_police_view(self, group_key: str, *,
+                            now: float | None = None
+                            ) -> dict[str, Any]:
+        """The console's police card data: the group's focus
+        plus every member the ladder currently sees (stars or
+        a rising index), read through the registry's view."""
+        now = now if now is not None else time.time()
+        organ = self.conflict
+        try:
+            state = organ._load_state(group_key)
+        except GroupConflictError:
+            return {"ok": False, "reason": "frozen"}
+        members = set((state.get("rep") or {}).keys())
+        for event in state.get("journal") or []:
+            if event.get("kind") == "crime":
+                members.add(str(event.get("actor") or ""))
+        rows = []
+        try:
+            focus = self.gangs.police_focus(group_key)
+            for member in sorted(m for m in members if m):
+                view = self.gangs.police_view(
+                    group_key, member, now=now)
+                if view["stars"] > 0 or view["index"] >= 6.0:
+                    rows.append(view)
+        except GangRegistryError:
+            return {"ok": False, "reason": "frozen"}
+        rows.sort(key=lambda r: -float(r["index"]))
+        return {"ok": True, "focus": focus, "wanted": rows[:10]}
+
+    def member_id_for_token(self, group_key: str, token: str
+                            ) -> str | None:
+        """Resolve a console member token to a ledger user id:
+        the id itself, an @username, or a display name — the
+        group's own ledger only (no guessing beyond it)."""
+        wanted = str(token or "").strip()
+        if not wanted:
+            return None
+        members = self.store.group(group_key)["members"]
+        if wanted in members:
+            return wanted
+        bare = wanted.lstrip("@").lower()
+        for uid, member in members.items():
+            if str(member.get("username") or "").lower() == bare:
+                return str(uid)
+        for uid, member in members.items():
+            if str(member.get("name") or "").lower() == \
+                    wanted.lower():
+                return str(uid)
+        return None
 
     # ── system drops (§35) ──
 
@@ -4972,6 +5827,10 @@ class GroupSurface:
         now = now if now is not None else time.time()
         rng = rng if rng is not None else _random
         notices: list[str] = []
+        # §36: first contact with a claimed room seeds the
+        # flagship chapter (lazy, once per process) — even
+        # while the street itself sleeps.
+        self.gangs_touch(group_key, now=now)
         if self._conflict_mode(group_key) == "off" \
                 or not self.economy_on(group_key) \
                 or not self.system_output_allowed(group_key):
@@ -5055,9 +5914,13 @@ class GroupSurface:
                         group_key, reports=tallies, now=now)
                 free = self.economy.treasury_balance(group_key) \
                     - self.reserved_treasury(group_key)
+                try:
+                    focus = self.gangs.police_focus(group_key)
+                except GangRegistryError:
+                    focus = 1.0
                 for action in organ.police_sweep(
                         group_key, now=now,
-                        free_treasury=max(0, free)):
+                        free_treasury=max(0, free), focus=focus):
                     notices.append(self._police_notice(
                         group_key, action, now=now))
             state = organ._load_state(group_key)
@@ -5211,12 +6074,19 @@ class GroupSurface:
                                           war_text, now=now)
             if war.get("status") == "done" and not (
                     war.get("settled") or {}).get(side):
-                settled = organ.settle_inter_war(group_key, war,
-                                                 now=now)
+                if war.get("kind") == "hq_raid":
+                    settled = organ.settle_hq_raid(
+                        group_key, war, now=now)
+                else:
+                    settled = organ.settle_inter_war(
+                        group_key, war, now=now)
                 flags = dict(war.get("settled") or {})
                 flags[side] = True
                 war["settled"] = flags
                 self.war_book.update(war)
+                if settled is not None:
+                    self._gangs_note_settled(group_key, war,
+                                             now=now)
                 if settled and settled.get("won"):
                     notices.append(notice_line(
                         "💰", f"<b>{settled.get('gang', 'your gang')}</b>"
@@ -6598,6 +7468,38 @@ class GroupSurface:
             self._boards_book_cache = book
         return book
 
+    def _board_gang_rows(self, metric: str,
+                         limit: int) -> list[dict[str, Any]]:
+        """§36 gang-scope rows: the global registry ranked —
+        prestige (or chapters / worldwide members), with the
+        gang's tier and reach riding as the sub-line.  A frozen
+        registry reads as an empty board, never a guess."""
+        rows: list[dict[str, Any]] = []
+        try:
+            records = self.gangs.all_gangs()
+        except GangRegistryError:
+            return rows
+        for record in records:
+            view = self.gangs.global_view(record)
+            if metric == "prestige":
+                value = int(view["prestige"])
+            elif metric == "chapters":
+                value = int(view["chapter_count"])
+            else:
+                value = int(view["roster_size"])
+            note = "flagship" if view["flagship"] else ""
+            sub = (f"{view['tier']} · "
+                   f"{view['chapter_count']} chapter(s)")
+            if view["hq"]:
+                sub += f" · HQ {view['hq']['tier_name']}"
+            rows.append({"key": str(view["id"]),
+                         "label": str(view["name"]),
+                         "value": value, "note": note,
+                         "sub": sub})
+        rows.sort(key=lambda r: (-int(r["value"]),
+                                 str(r["label"]).lower()))
+        return rows[:limit]
+
     def _board_group_rows(self, group_key: str, metric: str,
                           limit: int) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -6810,6 +7712,9 @@ class GroupSurface:
             if games_rows is None:
                 return None
             return self._board_game_rows(parsed, games_rows,
+                                         limit)
+        if scope == "gangs":
+            return self._board_gang_rows(parsed["metric"],
                                          limit)
         group_keys = [k for k in sorted(self.store.data)
                       if not self.is_channel(k)]

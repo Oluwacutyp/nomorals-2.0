@@ -4352,7 +4352,7 @@ class RuntimeGroupMixin:
     _CONSOLE_SECTIONS = ("defense", "acceptance", "economy",
                          "estate", "presentation", "welcome",
                          "expression", "reputation", "conflict",
-                         "rhythm", "boards")
+                         "rhythm", "boards", "police")
     _CONSOLE_CHANNEL_SECTIONS = ("queue", "post", "analytics",
                                  "settings")
 
@@ -4994,6 +4994,60 @@ class RuntimeGroupMixin:
                 "· contributions · gangs, or full board ids "
                 "(global:sparks, platform:…, game:chess:elo)",
             ], title="Grammar")
+        elif section == "police":
+            # §36: the owner's override card.  OWNER-ONLY — a
+            # group admin opening it sees the gate, not the
+            # precinct.
+            if not self._operator_or_false(message):
+                card.block_lines([
+                    "the police override is the owner's section "
+                    "— the power to bend the precinct (set wanted "
+                    "levels, pardon, call off enforcement, aim "
+                    "its focus) belongs to the owner alone. "
+                    "Admins meet the police as everyone does: "
+                    "/police in the group.",
+                ])
+            else:
+                view = surface.console_police_view(key)
+                if not view.get("ok"):
+                    card.block_lines([
+                        "the street is frozen — the wanted "
+                        "state is unreadable, so no override "
+                        "can land until it's repaired."])
+                else:
+                    lines = [
+                        f"enforcement focus: "
+                        f"×{view['focus']:g} — the bully index "
+                        "the ladder reads is scaled by it "
+                        "(100% = the precinct's own judgment)",
+                    ]
+                    if view["wanted"]:
+                        for row in view["wanted"]:
+                            label = surface._member_label(
+                                key, row["member"])
+                            mark = (f" · owner's mark "
+                                    f"{row['mark']}★"
+                                    if row.get("mark")
+                                    is not None else "")
+                            lines.append(
+                                f"{label}: {row['stars']}★ · "
+                                f"index {row['index']:g} · "
+                                f"rung served "
+                                f"{row['episode_rung']}{mark}")
+                    else:
+                        lines.append(
+                            "nobody is wanted here right now.")
+                    card.block_lines(lines)
+                card.block_lines([
+                    "`wanted <member>` · `stars <member> "
+                    "<0-5>` · `pardon <member>`",
+                    "`calloff <member>` · `focus <pct>` · "
+                    "`focus off`",
+                    "members resolve by id, @username or "
+                    "exact name; every override journals in "
+                    "the police journal (held — a pardon "
+                    "shows only as the release itself)",
+                ], title="Grammar")
         buttons += buttons_from_spec(
             [[("back", "Sections", f"console {token}"),
               ("home", "Console home", "console")]], settings=s)
@@ -5326,7 +5380,114 @@ class RuntimeGroupMixin:
             # the gsettings grammar.
             return self._apply_boards_grammar(
                 surface, key, list(words))
+        if section == "police":
+            # §36: NOT a settings grammar — the owner's police
+            # override.  Its own apply, owner-gated inside.
+            return self._apply_police_grammar(
+                surface, key, message, sender, list(words))
         return None
+
+    def _apply_police_grammar(self, surface, key, message,  # type: ignore[no-untyped-def]
+                              sender, words):
+        """The owner's hand on the §24 police (§36): view a
+        member's wanted state, set/clear their stars, pardon,
+        call off an enforcement, set the group's enforcement
+        focus.  OWNER-ONLY — the operator gate, not group
+        adminship: this is the owner's manipulation power over
+        the police, and every verb journals in the police
+        journal.  Grammar: `wanted <member>` · `stars <member>
+        <0-5>` · `pardon <member>` · `calloff <member>` ·
+        `focus <pct>|off`."""
+        if not self._operator_or_false(message):
+            return ("the police override is the owner's hand "
+                    "alone — group admins run the precinct "
+                    "through /police, not over it. Nothing was "
+                    "changed.")
+        w = [str(x) for x in words or []]
+        if not w:
+            return None
+        head = w[0].lower()
+        by = surface._person_of(key, sender)
+        if head == "focus":
+            if len(w) == 2 and w[1].lower() == "off":
+                out = surface.police_owner_focus(
+                    key, 1.0, by_person=by)
+            elif len(w) == 2 and w[1].rstrip("%").isdigit():
+                pct = int(w[1].rstrip("%"))
+                out = surface.police_owner_focus(
+                    key, pct / 100.0, by_person=by)
+            else:
+                return None
+            if not out.get("ok"):
+                return "the registry is frozen — no override landed."
+            return (f"enforcement focus: "
+                    f"{out['aggression']:g}× — the bully index "
+                    "thresholds read it from the next sweep.")
+        if head not in ("wanted", "stars", "pardon", "calloff"):
+            return None
+        if len(w) < 2:
+            return None
+        member = surface.member_id_for_token(key, w[1])
+        if member is None:
+            return (f"no member matches {w[1]} in this group's "
+                    "ledger — an id, @username or exact name "
+                    "resolves; nothing was changed.")
+        if head == "wanted":
+            view = surface.police_wanted_view(key, member)
+            if view.get("reason") == "frozen":
+                return "the wanted state is unreadable right now."
+            label = surface._member_label(key, member)
+            bits = [f"{label}: {view['stars']}★ "
+                    f"(index {view['index']:g}"]
+            if view.get("mark") is not None:
+                bits.append(f"owner's mark at {view['mark']}★")
+            if view.get("episode_rung"):
+                bits.append(
+                    f"episode served to rung "
+                    f"{view['episode_rung']}")
+            if view.get("police_bounties"):
+                bits.append(
+                    f"{view['police_bounties']} police "
+                    "bounty(ies) open")
+            bits.append(f"focus ×{view['focus']:g}")
+            return " · ".join(bits) + ")"
+        if head == "stars":
+            if len(w) < 3 or not w[2].isdigit():
+                return None
+            out = surface.police_owner_set_stars(
+                key, member, int(w[2]), by_person=by)
+            if not out.get("ok"):
+                return ("stars live between 0 and 5 — nothing "
+                        "was changed."
+                        if out.get("reason") == "range" else
+                        "the registry is frozen — no override "
+                        "landed.")
+            return (f"wanted level set: "
+                    f"{surface._member_label(key, member)} now "
+                    f"stands at {out['stars']}★ — the mark "
+                    "holds for the index window and is journaled "
+                    "in the police journal.")
+        if head == "pardon":
+            out = surface.police_owner_pardon(
+                key, member, by_person=by)
+            if not out.get("ok"):
+                return "the registry is frozen — no pardon landed."
+            line = (f"pardon: {surface._member_label(key, member)}"
+                    " — slate forgiven, episode closed, "
+                    f"{out['bounties_cancelled']} police "
+                    "bounty(ies) cancelled.")
+            if out.get("released"):
+                line += " Their jail lifts — a release."
+            return line
+        out = surface.police_owner_call_off(
+            key, member, by_person=by)
+        if not out.get("ok"):
+            return "the registry is frozen — no call-off landed."
+        return (f"called off: the precinct stands down on "
+                f"{surface._member_label(key, member)} at "
+                f"{out['stars']}★ — the episode is marked "
+                "handled and police bounties are cancelled, "
+                "but the heat stays on the books.")
 
     # ---- the console's channel side (§16 / P4a) ------------------
     def _console_channel(self, surface, message, sender,  # type: ignore[no-untyped-def]
@@ -8534,7 +8695,10 @@ class RuntimeGroupMixin:
         <lifestyle> <name> · join <name> · leave · promote/
         demote @member · deposit/withdraw · job · armory add
         <item> · claim <district> · tax N (the power gang) ·
-        list."""
+        list.  §36 adds: register · chapter <name> · hq
+        [claim|build|move] · vault deposit/withdraw N ·
+        armory [store|draw <item>] · code · redeem <code> ·
+        side <gang>."""
         key, err = self._economy_gate(message)
         if err:
             return err
@@ -8582,6 +8746,21 @@ class RuntimeGroupMixin:
                     surface, key, out,
                     {"not_found": "no gang by that name here — "
                                   "/gang list shows them.",
+                     "cross_taken": (
+                         f"your cross-group seat is taken — "
+                         f"you ride with "
+                         f"**{out.get('holder') or 'another gang'}** "
+                         "across groups. One cross-group gang "
+                         "plus one local crew is the loyalty "
+                         "shape; leave that one first."),
+                     "local_taken": (
+                         f"your local seat is taken — you ride "
+                         f"with **{out.get('holder') or 'another gang'}** "
+                         "as your single-group gang. One local "
+                         "gang plus one cross-group gang is "
+                         "the loyalty shape; leave that one "
+                         "first."),
+                     "already": "you're already in that gang.",
                      "already_in": "you're already in a gang."}.get(
                         out.get("reason") or "", "can't join."))
             return self._gang_card(surface, key, message, user_id,
@@ -8751,6 +8930,312 @@ class RuntimeGroupMixin:
             return (f"🏛️ {out['gang']['name']} sets the group's "
                     f"transfer tax to {out['pct']}% — /pay fees "
                     "follow it while they hold power.")
+        # ── §36: cross-group gangs — chapters, HQ, codes ──
+        if head == "register":
+            out = surface.gang_register_here(key, user_id)
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"no_gang": "you're not in a gang here — "
+                                "there's nothing to register.",
+                     "name_registered": "that name is already "
+                                        "held by a registered "
+                                        "gang elsewhere — this "
+                                        "gang runs local-only "
+                                        "under it.",
+                     "frozen": "the gang registry is frozen."}
+                    .get(out.get("reason") or "",
+                         "can't register."))
+            if out.get("already"):
+                return (f"🌐 **{out['gang']['name']}** is "
+                        "already in the global registry.")
+            return (f"🌐 **{out['gang']['name']}** is in the "
+                    "global registry now — one chapter (here), "
+                    "its history and treasury exactly as they "
+                    "stood. It expands as it climbs tiers: "
+                    "/gang chapter <name> founds a chapter where "
+                    "its officers stand.")
+        if head == "chapter" and len(words) >= 2:
+            name = " ".join(words[1:])
+            out = surface.gang_found_chapter(key, user_id, name)
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"no_gang": f"no registered gang called "
+                                f"{name}.",
+                     "rank": "chapters are founded by the "
+                             "gang's leader or an officer.",
+                     "already_chapter": f"{name} already has "
+                                        "a chapter here.",
+                     "already_in": "you're in a gang in this "
+                                   "group already — leave it "
+                                   "before founding a chapter.",
+                     "name_taken": "a different gang holds "
+                                   "that name in this group.",
+                     "capacity": (
+                         f"{out.get('gang') or name} is "
+                         f"{out.get('tier') or 'crew'} tier — "
+                         f"{out.get('used') or 0} of "
+                         f"{out.get('slots')} chapter slots "
+                         "used. Grow the roster to climb a "
+                         "tier and earn more reach."),
+                     "frozen": "the gang registry is frozen."}
+                    .get(out.get("reason") or "",
+                         "can't found a chapter."))
+            return (f"🌐 **{out['gang']['name']}** opens a "
+                    "chapter here — you lead it locally. The "
+                    "gang now stands in "
+                    f"{len(out['gang'].get('chapters') or {})} "
+                    "group(s); its treasury and territory here "
+                    "are this chapter's own.")
+        if head == "hq":
+            sub = words[1].lower() if len(words) > 1 else ""
+            if sub == "claim":
+                out = surface.gang_hq_designate(key, user_id)
+                if not out.get("ok"):
+                    return self._conflict_refusal(
+                        surface, key, out,
+                        {"no_gang": "you're not in a gang here.",
+                         "not_leader": "the HQ is designated "
+                                       "by the gang's global "
+                                       "leader.",
+                         "no_chapter": "your gang has no "
+                                       "chapter here.",
+                         "hq_exists": "your gang already has "
+                                      "an HQ — /gang hq move "
+                                      "relocates it (a tier "
+                                      "drops; it costs).",
+                         "frozen": "the gang registry is "
+                                   "frozen."}.get(
+                            out.get("reason") or "",
+                            "can't designate."))
+                return ("🏰 this chapter is your gang's "
+                        "headquarters now. Build it: /gang hq "
+                        "build (hideout first) — the vault, the "
+                        "shared armory and the defense of this "
+                        "group all live here.")
+            if sub == "build":
+                out = surface.gang_hq_buy(key, user_id)
+                if not out.get("ok"):
+                    return self._conflict_refusal(
+                        surface, key, out,
+                        {"no_gang": "you're not in a gang here.",
+                         "no_hq": "your gang has no HQ — "
+                                  "/gang hq claim where it "
+                                  "should stand.",
+                         "rank": "HQ building is the chapter "
+                                 "leader's or an officer's call.",
+                         "max_tier": "fortress — the top. "
+                                     "Nothing above it to buy.",
+                         "funds": (
+                             f"the next tier costs "
+                             f"{out.get('cost')} sparks from "
+                             "the gang treasury (it holds "
+                             f"{out.get('treasury')})."),
+                         "frozen": "the gang registry is "
+                                   "frozen."}.get(
+                            out.get("reason") or "",
+                            "can't build."))
+                return (f"🏰 HQ rises: **{out['tier_name']}** — "
+                        f"{out['cost']} sparks from the gang "
+                        "treasury. Its vault deepens, its walls "
+                        "count in every heist and war read "
+                        "here, and raiders will come for it.")
+            if sub == "move":
+                out = surface.gang_hq_move(key, user_id)
+                if not out.get("ok"):
+                    return self._conflict_refusal(
+                        surface, key, out,
+                        {"no_gang": "you're not in a gang here.",
+                         "not_leader": "relocation is the "
+                                       "gang's global leader's "
+                                       "call.",
+                         "no_hq": "your gang has no HQ to "
+                                  "move.",
+                         "no_chapter": "your gang has no "
+                                       "chapter here to move "
+                                       "the HQ to.",
+                         "already_hq": "the HQ already stands "
+                                       "here.",
+                         "funds": (
+                             f"relocation costs "
+                             f"{out.get('cost')} sparks from "
+                             "THIS chapter's treasury (it holds "
+                             f"{out.get('treasury')})."),
+                         "frozen": "the gang registry is "
+                                   "frozen."}.get(
+                            out.get("reason") or "",
+                            "can't relocate."))
+                return (f"🏰 the HQ relocates here — "
+                        f"{out['cost']} sparks spent, the "
+                        f"fortress drops to "
+                        f"**{out['tier_name']}** (a fortress is "
+                        "built, not carried), and the old vault "
+                        f"released {out['released']} sparks to "
+                        "the old chapter's treasury.")
+            view = surface.gang_hq_status(key, user_id)
+            if not view.get("ok"):
+                return "you're not in a gang here."
+            hq = view.get("hq")
+            if hq is None:
+                return ("🏰 your gang has no headquarters yet "
+                        "— the global leader designates one "
+                        "with /gang hq claim, standing in the "
+                        "chapter that should hold it.")
+            from ...community.group_conflict import HQ_TIERS
+            return (f"🏰 **HQ** — {hq['tier_name']} "
+                    f"(tier {hq['tier']} of "
+                    f"{len(HQ_TIERS) - 1}) · vault "
+                    f"{hq['vault']} sparks held in reserve · "
+                    f"chapter treasury {hq['treasury']} · "
+                    f"{len(hq['armory'])} item(s) in the "
+                    "shared armory. /gang hq build raises it; "
+                    "/gang vault works the reserve.")
+        if head == "vault" and len(words) >= 3 \
+                and words[1].lower() in ("deposit", "withdraw") \
+                and words[2].isdigit():
+            verb = words[1].lower()
+            out = surface.gang_hq_vault(
+                key, user_id, verb, int(words[2]))
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"no_gang": "you're not in a gang here.",
+                     "no_hq": "your gang has no HQ.",
+                     "hq_elsewhere": "the vault lives at the "
+                                     "HQ — work it standing "
+                                     "in the HQ's group.",
+                     "not_member": "the vault is for HQ "
+                                   "chapter members.",
+                     "rank": "the vault opens for the HQ "
+                             "chapter's leader and officers.",
+                     "funds": "there isn't that much there.",
+                     "amount": "a positive amount.",
+                     "frozen": "the gang registry is frozen."}
+                    .get(out.get("reason") or "",
+                         "the vault won't move."))
+            return (f"🏦 {verb} done — the HQ vault now holds "
+                    f"{out['vault']} sparks in reserve.")
+        if head == "armory":
+            sub = words[1].lower() if len(words) > 1 else "list"
+            if sub == "list":
+                out = surface.gang_hq_armory(key, user_id,
+                                             "list")
+                if not out.get("ok"):
+                    return ("your gang has no HQ — the shared "
+                            "armory lives at the headquarters.")
+                from ...community.group_conflict import ARSENAL
+                names = [str((ARSENAL.get(
+                    str(i.get('item') or ''), {}).get('name'))
+                    or i.get("item")) for i in out["armory"]]
+                return ("🧰 the shared armory (at HQ): "
+                        + (", ".join(names) if names
+                           else "empty — /gang armory store "
+                                "<item> shelves your gear for "
+                                "the whole gang")
+                        + ". Draw from any chapter: /gang "
+                          "armory draw <item>.")
+            if sub in ("store", "draw") and len(words) >= 3:
+                item = words[2].lower()
+                out = surface.gang_hq_armory(
+                    key, user_id, sub, item)
+                if not out.get("ok"):
+                    return self._conflict_refusal(
+                        surface, key, out,
+                        {"no_gang": "you're not in a gang "
+                                    "here.",
+                         "not_member": "the armory serves "
+                                       "the gang's roster.",
+                         "no_hq": "your gang has no HQ — "
+                                  "the shared armory lives "
+                                  "there.",
+                         "no_chapter": "you hold no chapter "
+                                       "seat here.",
+                         "not_owned": "that item isn't in "
+                                      "your loadout.",
+                         "not_stocked": "the armory doesn't "
+                                        "hold that item.",
+                         "frozen": "the gang registry is "
+                                   "frozen."}.get(
+                            out.get("reason") or "",
+                            "the armory won't move."))
+                return (f"🧰 {item} "
+                        + ("shelved in the shared armory — "
+                           "any chapter can draw it."
+                           if sub == "store" else
+                           "drawn from the shared armory — "
+                           "it's in your loadout here now."))
+            return ("🧰 /gang armory · /gang armory store "
+                    "<item> · /gang armory draw <item>")
+        if head == "code":
+            out = surface.gang_claim_code(key, user_id)
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"no_gang": "you're not in a gang here.",
+                     "not_member": "codes are minted by the "
+                                   "gang's roster.",
+                     "frozen": "the gang registry is frozen."}
+                    .get(out.get("reason") or "",
+                         "can't mint a code."))
+            return (f"🎟️ your gang claim code: "
+                    f"`{out['code']}` — redeem it from your "
+                    "other platform with /gang redeem "
+                    f"{out['code']} standing in a group where "
+                    "the gang has a chapter, and that identity "
+                    "joins this roster. One use, 30 minutes.")
+        if head == "redeem" and len(words) >= 2:
+            out = surface.gang_redeem_code(
+                key, user_id, words[1])
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"bad_code": "that code doesn't ring any "
+                                 "bell — codes are one-shot; "
+                                 "mint a fresh one with /gang "
+                                 "code.",
+                     "expired": "that code expired — mint a "
+                                "fresh one with /gang code.",
+                     "no_chapter": "the code's real — your "
+                                   "identity is bound — but "
+                                   "the gang has no chapter in "
+                                   "this group to seat you in.",
+                     "already_in": "you're in another gang in "
+                                   "this group — leave it "
+                                   "first; your identity stays "
+                                   "bound.",
+                     "gone": "the minter's roster seat is "
+                             "gone.",
+                     "no_gang": "the gang behind that code "
+                                "is gone.",
+                     "frozen": "the gang registry is frozen."}
+                    .get(out.get("reason") or "",
+                         "can't redeem."))
+            return (f"🎟️ bound and seated — this identity now "
+                    f"rides with **{out['gang']['name']}** "
+                    "here, one person across platforms.")
+        if head == "side" and len(words) >= 2:
+            name = " ".join(words[1:])
+            out = surface.gang_war_side(key, user_id, name)
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"no_gang": "you're not in a gang here.",
+                     "no_war": "no live inter-group war "
+                               "against that gang.",
+                     "not_dual": "you hold one gang in this "
+                                 "fight — your side is your "
+                                 "gang; declarations are for "
+                                 "members whose two gangs meet.",
+                     "not_side": "that gang isn't a side in "
+                                 "this war.",
+                     "frozen": "the gang registry is frozen."}
+                    .get(out.get("reason") or "",
+                         "can't declare."))
+            return ("⚔️ declared — in this war you fight for "
+                    f"**{name}** only; /war join seats you on "
+                    "that side, and the other gang gets "
+                    "nothing from you.")
         gang = organ.gang_of(key, user_id)
         if gang is None:
             from ...community.group_conflict import LIFESTYLES
@@ -8799,6 +9284,35 @@ class RuntimeGroupMixin:
                          "transfer tax" if view["power"]
              else "no"),
         ])
+        glob = view.get("global")
+        if glob:
+            # §36: the standing ABOVE this room — the gang as
+            # the registry knows it, then the chapter you're
+            # standing in (the stats above are this chapter's).
+            hq = glob.get("hq")
+            card.stats([
+                ("🌐 Global tier",
+                 f"{glob['tier']} · {glob['roster_size']} "
+                 "members worldwide"),
+                ("Prestige", str(glob["prestige"])),
+                ("Chapters",
+                 f"{glob['chapter_count']} "
+                 f"({glob['capacity_text']})"),
+                ("Your global rank", str(glob["your_role"])),
+                ("HQ", (f"{hq['tier_name']} — its vault, "
+                        "armory and defense stand in another "
+                        "of your chapters"
+                        if hq and hq["group"] != key else
+                        "🏰 HERE — this chapter is the "
+                        "headquarters"
+                        if hq else "none designated")),
+            ])
+            card.note(
+                "chapter perks (this room): the "
+                f"{life.get('name', gang['lifestyle'])} way — "
+                "gang jobs pay its rates here, its gear "
+                "affinities sharpen its members, its war style "
+                "and heat profile ride every local read")
         card.note("strength = members' power + armory + "
                   "territory + treasury depth + war record")
         buttons = buttons_from_spec(
@@ -8898,6 +9412,42 @@ class RuntimeGroupMixin:
                         "until one side takes the best of it.")
             return ("🏳️ war declined — the challenger's escrow "
                     "is returned.")
+        if head == "raid" and len(words) >= 2:
+            name = " ".join(words[1:])
+            out = surface.war_raid_hq(key, user_id, name)
+            if not out.get("ok"):
+                return self._conflict_refusal(
+                    surface, key, out,
+                    {"no_gang": "you're not in a gang.",
+                     "tier": "HQ raids are gang-tier work "
+                             "(5+ members) — crews don't march "
+                             "on fortresses.",
+                     "not_found": f"no registered gang called "
+                                  f"{name}.",
+                     "self": "that's your own gang's HQ.",
+                     "no_hq": f"{name} has no headquarters to "
+                              "raid — yet.",
+                     "local": "their HQ stands HERE — that's "
+                              "an in-group war (/war declare), "
+                              "not a raid.",
+                     "busy": "your gang is already at war.",
+                     "funds": "the raid escrow (double the "
+                              "war escrow) comes from your "
+                              "gang treasury — it can't "
+                              "cover it.",
+                     "gone": "the HQ chapter is gone.",
+                     "frozen": "the war book is unreadable."}
+                    .get(out.get("reason") or "",
+                         "can't raid."))
+            war = out["war"]
+            return (f"🏰⚔️ **{out['mine']['name']}** marches "
+                    f"on the **{out['theirs']['name']}** "
+                    f"headquarters — a "
+                    f"{out['hq']['tier_name']} fortress with "
+                    f"{out['pool']} sparks of its vault in "
+                    f"reach. {int(war.get('escrow') or 0)} "
+                    "sparks escrowed; their leadership answers "
+                    "there with /war accept.")
         if head == "join":
             out = surface.war_join(key, user_id)
             if not out.get("ok") and out.get("reason") \
@@ -8914,6 +9464,14 @@ class RuntimeGroupMixin:
                     surface, key, out,
                     {"no_war": "your gang isn't at war.",
                      "no_gang": "you're not in a gang.",
+                     "undeclared": "your two gangs are BOTH in "
+                                   "this war — declare a side "
+                                   "first (/gang side <gang>), "
+                                   "or sit it out.",
+                     "declared_other": "you declared for the "
+                                       "other gang in this "
+                                       "war — your strength "
+                                       "fights there, not here.",
                      "already": "you're already in."}.get(
                         out.get("reason") or "", "can't join."))
             return ("⚔️ you're in — your power fights with "
