@@ -128,6 +128,18 @@ def _jittered_backoff(base: float, attempt: int, *, cap: float = 60.0,
     return max(0.5, delay * rng.uniform(0.7, 1.3))
 
 
+#: Error text for a send whose command reached the bridge but whose
+#: ack never came back (the flap ate it). Worded to fall in NEITHER
+#: the transient nor the terminal substring table of
+#: :mod:`nomorals.social.chat.send_retry`: upper layers must not file
+#: it as a clean retry (that is how one reply became five copies in a
+#: real group, 2026-11-04) nor as a clean failure — the truth is
+#: "unknown", and the only safe handling is to not send it again.
+UNCONFIRMED_SEND_ERROR = (
+    "bridge ack unconfirmed after dispatch — held, not re-sent "
+    "(a duplicate is worse than a held send)")
+
+
 class Outbox:
     """Persistent send queue for bridge outages.
 
@@ -191,31 +203,100 @@ class Outbox:
         with self._lock:
             self._write_all([])
 
-    def flush(self, deliver: Any) -> dict[str, int]:
+    def held_count(self) -> int:
+        """Rows held after an unconfirmed dispatch (see :meth:`flush`)."""
+        return sum(1 for e in self.pending() if e.get("held"))
+
+    def flush(self, deliver: Any, reconcile: Any = None) -> dict[str, int]:
         """Deliver queued entries FIFO via ``deliver(entry) -> bool``.
 
-        Expired entries are dropped; failed ones stay queued (in order).
-        Returns ``{"sent": n, "dropped": n, "kept": n}``.
+        Send-once across reconnects: a fresh entry is stamped
+        ``dispatched_at`` and the stamp is PERSISTED before
+        ``deliver`` runs, so a flap or crash between the bridge send
+        and its bookkeeping leaves a dispatched row — never a pristine
+        row a later flush would blindly send a second time. Every
+        fate change is written through immediately, not batched at
+        the end.
+
+        An entry found already stamped at flush time is NEVER
+        re-delivered. ``reconcile(entry)`` gives it its one fate:
+        ``"sent"`` (the bridge's own record shows the message — the
+        ack was lost, not the send; row removed), ``"held"`` (no
+        trace found: the row is marked held and stays in the file as
+        the journal of that decision — ambiguity resolves to NOT
+        re-sending, because a duplicate in a real group is worse
+        than a held row), or anything else / no callback (cannot
+        decide now; the row waits for a later flush). ``deliver``
+        may set ``entry["_outcome_known"]`` before returning False
+        to prove nothing was dispatched (no connection, write
+        failed, bridge answered with a definitive refusal) — the
+        stamp is then cleared and the row stays fresh.
+
+        Expired entries are dropped; failed ones stay queued (in
+        order). Returns ``{"sent", "dropped", "kept", "held"}``.
         """
         with self._lock:
-            entries = self._read_all()
+            rows = self._read_all()
             now = time.time()
-            sent, dropped, kept = 0, 0, []
-            for entry in entries:
+            sent = dropped = held = 0
+
+            def persist() -> None:
+                self._write_all(rows)
+
+            for entry in list(rows):
                 if now - float(entry.get("enqueued_at", now)) > self.ttl_s:
+                    rows.remove(entry)
                     dropped += 1
+                    persist()
                     continue
+                if entry.get("held"):
+                    held += 1
+                    continue
+                if entry.get("dispatched_at"):
+                    fate = "unknown"
+                    if reconcile is not None:
+                        try:
+                            fate = str(reconcile(entry))
+                        except Exception as exc:  # noqa: BLE001 - reconcile must not break the queue
+                            _log.debug("whatsapp outbox reconcile failed: %s", exc)
+                            fate = "unknown"
+                    if fate == "sent":
+                        rows.remove(entry)
+                        sent += 1
+                        persist()
+                    elif fate == "held":
+                        entry["held"] = True
+                        entry["held_reason"] = str(
+                            entry.get("held_reason") or
+                            "dispatched but never confirmed — held, not "
+                            "re-sent (a duplicate is worse than a held send)")
+                        held += 1
+                        _log.warning(
+                            "whatsapp outbox: holding %s entry for %s — %s",
+                            entry.get("kind"), entry.get("chat_id"),
+                            entry["held_reason"])
+                        persist()
+                    # "unknown": leave the row exactly as it stands; a
+                    # later flush reconciles again. Never re-deliver.
+                    continue
+                entry["dispatched_at"] = now
+                persist()
                 try:
                     ok = bool(deliver(entry))
                 except Exception as exc:  # noqa: BLE001 - deliver must not break the queue
                     _log.debug("whatsapp outbox deliver failed: %s", exc)
                     ok = False
                 if ok:
+                    rows.remove(entry)
                     sent += 1
+                    persist()
+                elif entry.pop("_outcome_known", False):
+                    entry.pop("dispatched_at", None)
+                    persist()
                 else:
-                    kept.append(entry)
-            self._write_all(kept)
-            return {"sent": sent, "dropped": dropped, "kept": len(kept)}
+                    persist()
+            return {"sent": sent, "dropped": dropped,
+                    "kept": len(rows), "held": held}
 
 
 def _split_text(text: str, *, limit: int | None = None) -> list[str]:
@@ -366,6 +447,16 @@ class WhatsAppAdapter(ChatAdapter):
         #: its echo could still plausibly arrive.
         self._sent_ids: dict[str, float] = {}
         self._sent_ids_lock = threading.Lock()
+        #: Sends dispatched to the bridge whose ack was lost (a flap
+        #: between the bridge send and its response): (chat jid, text)
+        #: → dispatch time. A repeat of the same send inside the
+        #: window is answered from the bridge's own history, or held
+        #: unconfirmed — never dispatched a second time, no matter
+        #: how many retry layers above ask again. Bounded like
+        #: ``_sent_ids`` (same window: an ack older than that is not
+        #: plausibly still in flight).
+        self._unconfirmed: dict[tuple[str, str], float] = {}
+        self._unconfirmed_lock = threading.Lock()
 
     # ── delivery receipts ────────────────────────────────────────────────
     def delivery_status(self, message_id: str) -> dict[str, Any] | None:
@@ -420,6 +511,102 @@ class WhatsAppAdapter(ChatAdapter):
             ts = self._sent_ids.get(message_id)
         return ts is not None and (time.time() - ts) <= 600.0
 
+    # ── unconfirmed dispatches (send-once across reconnects) ───────
+    #: How long a dispatch with a lost ack stays guarded. Matches the
+    #: ``_sent_ids`` window — the bridge's per-chat history reaches
+    #: back far beyond it in any chat quiet enough for a lost ack to
+    #: matter.
+    _UNCONFIRMED_WINDOW_S = 600.0
+
+    def _note_unconfirmed(self, key: tuple[str, str]) -> None:
+        now = time.time()
+        with self._unconfirmed_lock:
+            self._unconfirmed[key] = now
+            if len(self._unconfirmed) > 512:
+                stale = [k for k, ts in self._unconfirmed.items()
+                         if now - ts > self._UNCONFIRMED_WINDOW_S]
+                for k in stale:
+                    self._unconfirmed.pop(k, None)
+                while len(self._unconfirmed) > 512:
+                    oldest = min(self._unconfirmed,
+                                 key=lambda k: self._unconfirmed[k])
+                    self._unconfirmed.pop(oldest, None)
+
+    def _unconfirmed_at(self, key: tuple[str, str]) -> float | None:
+        """Dispatch time of an unconfirmed send, or None when the key
+        is not (or no longer) guarded."""
+        with self._unconfirmed_lock:
+            ts = self._unconfirmed.get(key)
+        if ts is None or (time.time() - ts) > self._UNCONFIRMED_WINDOW_S:
+            return None
+        return ts
+
+    def _clear_unconfirmed(self, key: tuple[str, str]) -> None:
+        with self._unconfirmed_lock:
+            self._unconfirmed.pop(key, None)
+
+    def _history_find_own(self, chat: ChatRef, text: str, *,
+                          since: float) -> bool:
+        """Ask the bridge's own message store whether a text this
+        account sent is already in *chat* — the reconciliation query
+        for a dispatch whose ack was lost. The bridge remembers its
+        sends independently of this adapter's connection state, so
+        the answer survives a reconnect. Best-effort: any failure
+        reads as "not found" (holding is the safe direction)."""
+        if not self.connected.is_set():
+            return False
+        try:
+            response = self._send_cmd(
+                {"cmd": "history", "chat": self._jid(chat), "limit": 50},
+                timeout=15)
+        except Exception as exc:  # noqa: BLE001 - a failed query finds nothing
+            _log.debug("whatsapp history reconcile query failed: %s", exc)
+            return False
+        if not response.get("ok"):
+            return False
+        floor_ms = (float(since) - 5.0) * 1000.0
+        for entry in response.get("messages") or []:
+            if entry.get("incoming"):
+                continue
+            if str(entry.get("text") or "") != text:
+                continue
+            try:
+                ts_ms = float(entry.get("ts") or 0)
+            except (TypeError, ValueError):
+                ts_ms = 0.0
+            if ts_ms and ts_ms < floor_ms:
+                continue
+            return True
+        return False
+
+    def _reconcile_entry(self, entry: dict[str, Any]) -> str:
+        """The one fate for an outbox row dispatched by an earlier
+        flush whose outcome was never recorded (see Outbox.flush):
+
+        * ``"sent"`` — the bridge's history shows the message: the
+          ack was lost, not the send.
+        * ``"held"`` — no trace: the row is NOT re-sent. It may have
+          landed; a duplicate in a real group is worse than a held
+          row, so ambiguity resolves to holding.
+        * ``"unknown"`` — cannot ask right now (bridge down); a
+          later flush asks again.
+
+        Media rows resolve to ``"held"`` directly: history cannot
+        match them (the bridge's media paths are its own downloads,
+        never our source paths), so no honest query exists.
+        """
+        if not self.connected.is_set():
+            return "unknown"
+        if str(entry.get("kind") or "text") == "media":
+            return "held"
+        chat = self._chat_from_entry(entry)
+        text = str(entry.get("_dispatched_text") or entry.get("text") or "")
+        if not text:
+            return "held"
+        since = float(entry.get("dispatched_at") or 0.0)
+        return ("sent" if self._history_find_own(chat, text, since=since)
+                else "held")
+
     def _is_self_chat(self, chat_id: str, kind: str) -> bool:
         """True when *chat_id* is this account's own "Message
         yourself" chat: a DM whose JID is the account's own JID
@@ -463,8 +650,9 @@ class WhatsAppAdapter(ChatAdapter):
         """Flush the outbox on a side thread — never on the reader thread."""
         def _job() -> None:
             try:
-                report = self.outbox.flush(self._deliver_entry)
-                if report["sent"] or report["dropped"]:
+                report = self.outbox.flush(
+                    self._deliver_entry, reconcile=self._reconcile_entry)
+                if report["sent"] or report["dropped"] or report["held"]:
                     _log.info("whatsapp outbox flush: %s", report)
             except Exception as exc:  # noqa: BLE001
                 _log.debug("whatsapp outbox flush failed: %s", exc)
@@ -472,8 +660,19 @@ class WhatsAppAdapter(ChatAdapter):
         threading.Thread(target=_job, name="wa-outbox-flush", daemon=True).start()
 
     def _deliver_entry(self, entry: dict[str, Any]) -> bool:
-        """Deliver one outbox entry. True when delivered."""
+        """Deliver one outbox entry. True when delivered.
+
+        The flush stamps the entry dispatched before this runs (see
+        Outbox.flush). When the outcome is KNOWN — nothing was
+        dispatched, or the bridge definitively answered — this sets
+        ``entry["_outcome_known"]`` so the flush clears the stamp and
+        the entry stays an ordinary queued row. When a dispatch's
+        outcome is unknown (its ack was lost), the marker stays
+        unset: the stamp survives and the next flush reconciles the
+        entry instead of re-sending it.
+        """
         if not self.connected.is_set():
+            entry["_outcome_known"] = True  # nothing was dispatched
             return False
         chat = self._chat_from_entry(entry)
         kind = str(entry.get("kind") or "text")
@@ -484,6 +683,8 @@ class WhatsAppAdapter(ChatAdapter):
                                  name=str(entry.get("name") or ""))
                 result = self.send_media(chat, media,
                                          caption=str(entry.get("caption") or ""))
+                if result.ok or result.error != UNCONFIRMED_SEND_ERROR:
+                    entry["_outcome_known"] = True
                 return bool(result.ok)
             # Text entries render EXACTLY like the live path in send():
             # WhatsApp-markdown conversion + platform split. The flush
@@ -498,11 +699,18 @@ class WhatsAppAdapter(ChatAdapter):
                 record_failure('whatsapp.WhatsAppAdapter._deliver_entry', exc)
             reply_to = str(entry.get("reply_to") or "")
             entry_buttons = entry.get("buttons") or None
-            for i, chunk in enumerate(_split_text(text)):
-                result = self._send_with_retry(
+            chunks = _split_text(text)
+            if chunks:
+                # The first chunk is what a later reconciliation looks
+                # for in the bridge's history (formatted, as sent).
+                entry["_dispatched_text"] = chunks[0]
+            for i, chunk in enumerate(chunks):
+                result, outcome_known = self._send_text_outcome(
                     chat, chunk, reply_to=reply_to if i == 0 else "",
                     buttons=entry_buttons if i == 0 else None)
                 if not result.ok:
+                    if outcome_known:
+                        entry["_outcome_known"] = True
                     return False
             return True
         except Exception as exc:  # noqa: BLE001
@@ -541,7 +749,14 @@ class WhatsAppAdapter(ChatAdapter):
         try:
             self._write_line({**cmd, "id": req_id})
             if not event.wait(timeout):
-                return {"id": req_id, "ok": False, "error": "bridge response timeout"}
+                # The command line reached the bridge; only its
+                # response is missing. For a send that distinction is
+                # life-or-death (the message may already be live), so
+                # the timeout return is marked ambiguous — send paths
+                # read the mark, everything else just sees a timeout.
+                return {"id": req_id, "ok": False,
+                        "error": "bridge response timeout",
+                        "ambiguous": True}
             with self._responses_lock:
                 return self._responses.pop(req_id, (event, {}))[1]
         except ConnectionError as exc:
@@ -560,7 +775,17 @@ class WhatsAppAdapter(ChatAdapter):
         buf = b""
         try:
             while not self.stopped:
-                chunk = sock.recv(65536)
+                try:
+                    chunk = sock.recv(65536)
+                except TimeoutError:
+                    # run() sets a 1.0s socket timeout so this loop can
+                    # re-check `stopped` — a timeout (socket.timeout,
+                    # the same class) means the bridge was simply quiet
+                    # for a tick. It is NOT a disconnect: keep reading,
+                    # and never let it reach the exit path below (which
+                    # clears `connected` and makes run() reconnect —
+                    # an idle bridge flapped once a second that way).
+                    continue
                 if not chunk:
                     break
                 buf += chunk
@@ -910,12 +1135,41 @@ class WhatsAppAdapter(ChatAdapter):
                 "bridge/whatsapp-bridge.mjs)") from exc
 
     # ── outbound ─────────────────────────────────────────────────────────────
-    def _send_with_retry(self, chat: ChatRef, text: str,
-                         *, reply_to: str = "",
-                         buttons: Any = None) -> SendResult:
-        """One text send with a single retry on transient bridge failure."""
+    def _send_text_outcome(self, chat: ChatRef, text: str,
+                           *, reply_to: str = "",
+                           buttons: Any = None) -> tuple[SendResult, bool]:
+        """One text send; returns ``(result, outcome_known)``.
+
+        ``outcome_known`` is False ONLY when a dispatch's ack was
+        lost — the message may already be live and nobody may send
+        it again. Every other outcome (delivered, definitively
+        refused, never dispatched) is known.
+
+        Send-once guard: a send identical to one whose ack was lost
+        inside the window is never dispatched again. It is first
+        reconciled against the bridge's own history — visible there
+        means the original landed (report success; the bridge's
+        history carries no message id, so the result's id is empty
+        rather than invented). Not visible means it stays
+        unconfirmed and held.
+        """
         started = time.perf_counter()
         jid = self._jid(chat)
+        key = (jid, text)
+        prior = self._unconfirmed_at(key)
+        if prior is not None:
+            if self._history_find_own(chat, text, since=prior):
+                self._clear_unconfirmed(key)
+                self.stats["sent"] += 1
+                _log.info("whatsapp: unconfirmed send to %s found in "
+                          "bridge history — counting it sent, not "
+                          "re-sending", jid)
+                return SendResult(ok=True, platform=self.name,
+                                  message_id="",
+                                  seconds=time.perf_counter() - started), True
+            return SendResult(ok=False, platform=self.name,
+                              error=UNCONFIRMED_SEND_ERROR,
+                              seconds=time.perf_counter() - started), False
         last_error = "bridge rejected send"
         request: dict[str, Any] = {"cmd": "send", "chat": jid,
                                    "text": text, "reply_to": reply_to}
@@ -938,7 +1192,19 @@ class WhatsAppAdapter(ChatAdapter):
                 self._note_sent_id(str(response.get("message_id") or ""))
                 return SendResult(ok=True, platform=self.name,
                                   message_id=str(response.get("message_id") or ""),
-                                  seconds=time.perf_counter() - started)
+                                  seconds=time.perf_counter() - started), True
+            if response.get("ambiguous"):
+                # The command reached the bridge; only its ack is
+                # missing. The old code retried here on the "timeout"
+                # substring — that retry is exactly how one reply
+                # became five copies in a real group (2026-11-04).
+                # An unconfirmed dispatch is never re-dispatched:
+                # guard the key and report the outcome as unknown.
+                self._note_unconfirmed(key)
+                self.stats["send_errors"] += 1
+                return SendResult(ok=False, platform=self.name,
+                                  error=UNCONFIRMED_SEND_ERROR,
+                                  seconds=time.perf_counter() - started), False
             last_error = str(response.get("error") or last_error)
             # only retry transient failures, not rejections
             if "timeout" not in last_error.lower() and \
@@ -948,7 +1214,15 @@ class WhatsAppAdapter(ChatAdapter):
                 time.sleep(1.0)
         self.stats["send_errors"] += 1
         return SendResult(ok=False, platform=self.name, error=last_error,
-                          seconds=time.perf_counter() - started)
+                          seconds=time.perf_counter() - started), True
+
+    def _send_with_retry(self, chat: ChatRef, text: str,
+                         *, reply_to: str = "",
+                         buttons: Any = None) -> SendResult:
+        """One text send with a single retry on transient bridge failure."""
+        result, _outcome_known = self._send_text_outcome(
+            chat, text, reply_to=reply_to, buttons=buttons)
+        return result
 
     def send(self, chat: ChatRef, text: str, *,
              reply_to: str = "",
@@ -1013,6 +1287,16 @@ class WhatsAppAdapter(ChatAdapter):
                 "name": media.name or "",
                 "caption": caption,
             })
+        # Same send-once guard as text (see _send_text_outcome): a
+        # media dispatch whose ack was lost is never re-dispatched.
+        # History cannot reconcile media, so a guarded repeat is
+        # simply held unconfirmed.
+        media_key = (self._jid(chat),
+                     "\x00media\x00" + path + "\x00" + caption)
+        if self._unconfirmed_at(media_key) is not None:
+            return SendResult(ok=False, platform=self.name,
+                              error=UNCONFIRMED_SEND_ERROR,
+                              seconds=time.perf_counter() - started)
         cmd: dict[str, Any] = {
             "cmd": "send_media",
             "chat": self._jid(chat),
@@ -1030,12 +1314,20 @@ class WhatsAppAdapter(ChatAdapter):
             cmd["ptt"] = True  # voice-note bubble instead of an audio file
         response = self._send_cmd(cmd, timeout=60)
         if response.get("ok"):
+            self._clear_unconfirmed(media_key)
             self.stats["sent"] += 1
             self._note_sent_id(str(response.get("message_id") or ""))
             return SendResult(ok=True, platform=self.name,
                               message_id=str(response.get("message_id") or ""),
                               seconds=time.perf_counter() - started)
         self.stats["send_errors"] += 1
+        if response.get("ambiguous"):
+            # Dispatched, ack lost — never re-dispatched (see
+            # _send_text_outcome for the incident this prevents).
+            self._note_unconfirmed(media_key)
+            return SendResult(ok=False, platform=self.name,
+                              error=UNCONFIRMED_SEND_ERROR,
+                              seconds=time.perf_counter() - started)
         return SendResult(ok=False, platform=self.name,
                           error=str(response.get("error") or "bridge rejected media"),
                           seconds=time.perf_counter() - started)
@@ -1544,4 +1836,5 @@ class WhatsAppAdapter(ChatAdapter):
                 round(time.time() - self.last_pairing_code_at, 1)
                 if self.last_pairing_code else None,
                 "outbox_pending": self.outbox.pending_count(),
+                "outbox_held": self.outbox.held_count(),
                 "receipts_tracked": len(self._receipts)}

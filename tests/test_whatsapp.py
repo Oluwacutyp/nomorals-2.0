@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import json
 import socket
+import tempfile
 import threading
 import time
 import unittest
 
 from nomorals.social.chat.base import ChatKind, ChatRef, MediaRef
-from nomorals.social.chat.whatsapp import WhatsAppAdapter, _split_text
+from nomorals.social.chat.whatsapp import (
+    UNCONFIRMED_SEND_ERROR, WhatsAppAdapter, _split_text)
 
 
 class FakeBridge:
@@ -458,6 +460,381 @@ class ReconnectTests(unittest.TestCase):
             stop.set()
             runner.join(timeout=5)
             srv.close()
+
+
+class ScriptedSocket:
+    """A recv-scripted stand-in for the bridge socket.
+
+    Each script item is bytes (returned by ``recv``) or an exception
+    instance (raised by ``recv``); past the end of the script, ``recv``
+    returns b"" (orderly close). When ``gate_before`` is a script
+    index, the recv that would serve that item first sets
+    ``gate_reached`` and blocks until the test sets ``gate_release`` —
+    how a test observes adapter state mid-stream.
+    """
+
+    def __init__(self, script, gate_before=None):
+        self._script = list(script)
+        self._gate_before = gate_before
+        self.recv_calls = 0
+        self.gate_reached = threading.Event()
+        self.gate_release = threading.Event()
+
+    def recv(self, _n):
+        idx = self.recv_calls
+        self.recv_calls += 1
+        if self._gate_before is not None and idx == self._gate_before:
+            self.gate_reached.set()
+            self.gate_release.wait(timeout=5)
+        if idx >= len(self._script):
+            return b""
+        item = self._script[idx]
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+class ReaderTimeoutTests(unittest.TestCase):
+    """The 1.0s socket timeout in run() is a stop-check tick, not a
+    disconnect: an idle bridge must never flap (owner EC2 live log,
+    2026-11-04: connect → "connection lost" once a second, forever).
+    """
+
+    def test_timeouts_around_a_status_line_are_survived(self):
+        status = (json.dumps(
+            {"type": "status", "state": "open",
+             "user": "2348012345678@s.whatsapp.net"}) + "\n").encode()
+        script = [socket.timeout("tick"), TimeoutError("tick"), status,
+                  socket.timeout("tick"), socket.timeout("tick"), b""]
+        sock = ScriptedSocket(script, gate_before=3)
+        adapter = WhatsAppAdapter()
+        adapter._sock = sock
+        reader = threading.Thread(target=adapter._reader_loop,
+                                  args=(lambda m: None,), daemon=True)
+        reader.start()
+        try:
+            # The gate fires on the first recv AFTER the status line:
+            # by then the reader must have dispatched it and still be
+            # alive despite the two timeouts that preceded it.
+            self.assertTrue(sock.gate_reached.wait(timeout=5),
+                            "reader never got past the status line")
+            self.assertTrue(reader.is_alive())
+            self.assertTrue(adapter.connected.is_set())
+            self.assertEqual(adapter.user_jid,
+                             "2348012345678@s.whatsapp.net")
+        finally:
+            sock.gate_release.set()
+        reader.join(timeout=5)
+        # Only the final b"" (orderly close) may end the loop: every
+        # scripted item was consumed, and the genuine close still
+        # clears `connected` on the way out.
+        self.assertFalse(reader.is_alive())
+        self.assertEqual(sock.recv_calls, len(script))
+        self.assertFalse(adapter.connected.is_set())
+
+    def test_timeouts_alone_never_end_the_loop_or_clear_connected(self):
+        class IdleSocket:
+            def __init__(self):
+                self.recv_calls = 0
+
+            def recv(self, _n):
+                self.recv_calls += 1
+                time.sleep(0.01)  # pace the tick; a real socket blocks
+                raise socket.timeout("tick")
+
+        sock = IdleSocket()
+        adapter = WhatsAppAdapter()
+        adapter._sock = sock
+        adapter.connected.set()
+        reader = threading.Thread(target=adapter._reader_loop,
+                                  args=(lambda m: None,), daemon=True)
+        reader.start()
+        try:
+            deadline = time.time() + 5
+            while sock.recv_calls < 5 and time.time() < deadline:
+                time.sleep(0.02)
+            self.assertGreaterEqual(sock.recv_calls, 5)
+            self.assertTrue(reader.is_alive(),
+                            "reader died on recv timeouts")
+            self.assertTrue(adapter.connected.is_set(),
+                            "an idle tick cleared the connected state")
+        finally:
+            adapter.stop()
+        reader.join(timeout=3)
+        self.assertFalse(reader.is_alive(),
+                         "reader did not notice stop() promptly")
+
+
+class FlapBridge:
+    """A fake bridge that can eat acks — the 2026-11-04 incident rig.
+
+    Unlike FakeBridge (one connection, always answers), this one
+    accepts connection after connection, records every send it
+    receives as a delivered own message (its history), greets each
+    connection with a status event like the real bridge, and can be
+    told to never answer send commands — the message lands, the ack
+    never comes, which is exactly what the flapping adapter
+    connection did to the real bridge.
+    """
+
+    def __init__(self):
+        self.received: list[dict] = []
+        self.delivered: list[dict] = []
+        self.ack_sends = True       # False: sends land, acks never come
+        self.serve_history = True   # False: history answers empty
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._srv.bind(("127.0.0.1", 0))
+        self._srv.listen(5)
+        self.port = self._srv.getsockname()[1]
+        self._thread = threading.Thread(target=self._accept_loop,
+                                        daemon=True)
+        self._thread.start()
+
+    def _accept_loop(self):
+        self._srv.settimeout(0.5)
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._srv.accept()
+            except OSError:
+                continue
+            threading.Thread(target=self._serve_conn, args=(conn,),
+                             daemon=True).start()
+
+    @staticmethod
+    def _send_line(conn, obj):
+        try:
+            conn.sendall((json.dumps(obj) + "\n").encode())
+        except OSError:
+            pass
+
+    def _serve_conn(self, conn):
+        with conn:
+            self._send_line(conn, {"type": "status", "state": "open",
+                                   "user": "2348012345678@s.whatsapp.net"})
+            buf = b""
+            conn.settimeout(5)
+            try:
+                while True:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        return
+                    buf += chunk
+                    while b"\n" in buf:
+                        line, _, buf = buf.partition(b"\n")
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line.decode("utf-8"))
+                        except json.JSONDecodeError:
+                            continue
+                        self._handle(conn, obj)
+            except OSError:
+                return
+
+    def _handle(self, conn, obj):
+        cmd = obj.get("cmd")
+        with self._lock:
+            self.received.append(obj)
+        if cmd == "send":
+            with self._lock:
+                self.delivered.append({
+                    "incoming": False, "text": obj.get("text") or "",
+                    "sender": "", "media": [], "reply_to": "",
+                    "ts": int(time.time() * 1000)})
+                n = len(self.delivered)
+            if self.ack_sends:
+                self._send_line(conn, {"id": obj.get("id"), "ok": True,
+                                       "message_id": f"mid-{n}"})
+            return
+        if cmd == "history":
+            with self._lock:
+                msgs = [dict(m) for m in self.delivered] \
+                    if self.serve_history else []
+            self._send_line(conn, {"id": obj.get("id"), "ok": True,
+                                   "messages": msgs})
+            return
+        self._send_line(conn, {"id": obj.get("id"), "ok": True})
+
+    def send_count(self, needle):
+        with self._lock:
+            return sum(1 for m in self.delivered if needle in m["text"])
+
+    def close(self):
+        self._stop.set()
+        try:
+            self._srv.close()
+        except OSError:
+            pass
+
+
+def _shrink_ack_wait(adapter, timeout=1.0):
+    """Shorten the adapter's bridge-response wait for flap tests.
+
+    The behaviour under test (dispatch marking, reconciliation, the
+    send-once guard) does not depend on the wait's length — only on
+    the ack never arriving inside it.
+    """
+    orig = adapter._send_cmd
+
+    def wrapped(cmd, *, timeout=timeout):
+        return orig(cmd, timeout=timeout)
+
+    adapter._send_cmd = wrapped
+
+
+def _wire(adapter, bridge):
+    """Connect an adapter to a bridge the way run() would, minus the
+    reconnect loop: one socket + one reader thread."""
+    sock = socket.create_connection(("127.0.0.1", bridge.port), timeout=5)
+    adapter._sock = sock
+    reader = threading.Thread(target=adapter._reader_loop,
+                              args=(lambda m: None,), daemon=True)
+    reader.start()
+    deadline = time.time() + 5
+    while not adapter.connected.is_set() and time.time() < deadline:
+        time.sleep(0.05)
+    return reader
+
+
+class SendOnceTests(unittest.TestCase):
+    """One reply, one copy — however the connection flaps."""
+
+    def _queued_adapter(self, bridge, tmp):
+        """An adapter that queued one reply while the bridge was down."""
+        adapter = WhatsAppAdapter(host="127.0.0.1", port=bridge.port,
+                                  outbox_dir=tmp)
+        _shrink_ack_wait(adapter)
+        chat = ChatRef(platform="whatsapp", chat_id="120363012345@g.us",
+                       kind=ChatKind.GROUP)
+        result = adapter.send(chat, "the reply")
+        self.assertFalse(result.ok)  # queued, not sent
+        rows = adapter.outbox.pending()
+        self.assertEqual(len(rows), 1)
+        self.assertNotIn("dispatched_at", rows[0])
+        return adapter, chat
+
+    def test_outbox_dispatch_with_lost_ack_is_reconciled_not_resent(self):
+        bridge = FlapBridge()
+        bridge.ack_sends = False  # sends land; acks never come
+        tmp = tempfile.mkdtemp()
+        try:
+            adapter, _chat = self._queued_adapter(bridge, tmp)
+            _wire(adapter, bridge)
+            # The reconnect flush (async, on the status event) makes
+            # the one dispatch and loses its ack; wait for its stamp.
+            deadline = time.time() + 8
+            rows = adapter.outbox.pending()
+            while not rows[0].get("dispatched_at") \
+                    and time.time() < deadline:
+                time.sleep(0.05)
+                rows = adapter.outbox.pending()
+            self.assertTrue(rows[0].get("dispatched_at"),
+                            "first flush never dispatched the row")
+            self.assertEqual(bridge.send_count("the reply"), 1)
+            # The next flush must NOT send it again: it reconciles
+            # against the bridge's history, finds the message, and
+            # retires the row as sent.
+            adapter.outbox.flush(adapter._deliver_entry,
+                                 reconcile=adapter._reconcile_entry)
+            self.assertEqual(bridge.send_count("the reply"), 1)
+            self.assertEqual(adapter.outbox.pending(), [])
+        finally:
+            adapter.stop()
+            bridge.close()
+
+    def test_outbox_dispatch_with_no_trace_is_held_not_resent(self):
+        bridge = FlapBridge()
+        bridge.ack_sends = False
+        bridge.serve_history = False  # the bridge has no trace of it
+        tmp = tempfile.mkdtemp()
+        try:
+            adapter, _chat = self._queued_adapter(bridge, tmp)
+            _wire(adapter, bridge)
+            deadline = time.time() + 8
+            rows = adapter.outbox.pending()
+            while not rows[0].get("dispatched_at") \
+                    and time.time() < deadline:
+                time.sleep(0.05)
+                rows = adapter.outbox.pending()
+            self.assertTrue(rows[0].get("dispatched_at"))
+            self.assertEqual(bridge.send_count("the reply"), 1)
+            report = adapter.outbox.flush(
+                adapter._deliver_entry, reconcile=adapter._reconcile_entry)
+            self.assertEqual(report["held"], 1)
+            rows = adapter.outbox.pending()
+            self.assertEqual(len(rows), 1)
+            self.assertTrue(rows[0].get("held"))
+            # A held row is never dispatched again, however often
+            # later flushes run.
+            adapter.outbox.flush(adapter._deliver_entry,
+                                 reconcile=adapter._reconcile_entry)
+            self.assertEqual(bridge.send_count("the reply"), 1)
+        finally:
+            adapter.stop()
+            bridge.close()
+
+    def test_placeholder_and_final_across_a_flap_send_once(self):
+        bridge = FlapBridge()
+        bridge.ack_sends = False
+        tmp = tempfile.mkdtemp()
+        try:
+            adapter, _msgs = make_adapter(bridge, outbox_dir=tmp)
+            _shrink_ack_wait(adapter)
+            chat = ChatRef(platform="whatsapp",
+                           chat_id="120363012345@g.us",
+                           kind=ChatKind.GROUP)
+            placeholder = ("one sec — still thinking, the model is "
+                           "slow on the phone")
+            r1 = adapter.send(chat, placeholder)
+            self.assertFalse(r1.ok)
+            self.assertEqual(r1.error, UNCONFIRMED_SEND_ERROR)
+            # The old retry re-dispatched on the lost ack within this
+            # single send() call — the bridge must hold ONE copy.
+            self.assertEqual(bridge.send_count("still thinking"), 1)
+            r2 = adapter.send(chat, "the final answer")
+            self.assertFalse(r2.ok)
+            self.assertEqual(bridge.send_count("final answer"), 1)
+            # A caller retrying after the "reconnect" is answered
+            # from the bridge's history — success, and STILL one
+            # copy of each.
+            r3 = adapter.send(chat, placeholder)
+            self.assertTrue(r3.ok)
+            r4 = adapter.send(chat, "the final answer")
+            self.assertTrue(r4.ok)
+            self.assertEqual(bridge.send_count("still thinking"), 1)
+            self.assertEqual(bridge.send_count("final answer"), 1)
+        finally:
+            adapter.stop()
+            bridge.close()
+
+    def test_never_dispatched_row_flushes_normally_after_reconnect(self):
+        bridge = FlapBridge()  # healthy: acks flow
+        tmp = tempfile.mkdtemp()
+        adapter = WhatsAppAdapter(host="127.0.0.1", port=bridge.port,
+                                  outbox_dir=tmp)
+        try:
+            chat = ChatRef(platform="whatsapp",
+                           chat_id="120363012345@g.us",
+                           kind=ChatKind.GROUP)
+            result = adapter.send(chat, "queued while down")
+            self.assertFalse(result.ok)
+            rows = adapter.outbox.pending()
+            self.assertEqual(len(rows), 1)
+            self.assertNotIn("dispatched_at", rows[0])
+            _wire(adapter, bridge)
+            # The reconnect flush delivers it, exactly once.
+            deadline = time.time() + 8
+            while adapter.outbox.pending() and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(adapter.outbox.pending(), [])
+            self.assertEqual(bridge.send_count("queued while down"), 1)
+        finally:
+            adapter.stop()
+            bridge.close()
 
 
 if __name__ == "__main__":
