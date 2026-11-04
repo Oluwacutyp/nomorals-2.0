@@ -452,6 +452,25 @@ def _kind_for_jid(chat_id: str, claimed: str = "",
     return kind if kind in ChatKind.ALL else default
 
 
+def _is_command_text(text: str) -> bool:
+    """True when *text* parses as a registered Devon command —
+    the runtime's own verdict (``parse_control``), so a message
+    promoted to a turn on this test would actually dispatch
+    there.  Unknown slashes and plain text are False: they keep
+    whatever fate they already had.  A parse failure resolves
+    to False — the persist-only side is the safe side."""
+    if not (text or "").strip().startswith("/"):
+        return False
+    try:
+        from .control import parse_control
+
+        return parse_control(text) is not None
+    except Exception as exc:  # noqa: BLE001 - recognition
+        record_failure(           # never breaks intake
+            "whatsapp.WhatsAppAdapter._is_command_text", exc)
+        return False
+
+
 class WhatsAppAdapter(ChatAdapter):
     """Client for the local WhatsApp bridge (bridge/bin/ Go program
     by default, or the Node bridge/whatsapp-bridge.mjs)."""
@@ -951,6 +970,23 @@ class WhatsAppAdapter(ChatAdapter):
             # forever. Own messages in every other chat — DMs with
             # other people, groups — keep the persist-only discipline
             # untouched: she never replies as the owner mid-chat.
+            #
+            # SECOND carve-out — the owner's commands typed inside
+            # a GROUP. On the Telegram userbot he is the operator
+            # in groups: his commands dispatch. Here the bridge's
+            # own_message event is the same proof of authorship
+            # the self-chat carve-out already trusts (the event
+            # exists only for the paired account's own messages),
+            # so a group message of his that parses as a registered
+            # command is delivered as an owner turn (incoming,
+            # from_owner, owner_command) and reaches the same
+            # control dispatch. Everything else he types in a
+            # group — plain text, unknown slashes — is NOT
+            # promoted: it stays persist-only as-him conversation,
+            # never answered, never a game move, exactly as
+            # before. A stale command (typed while the surface
+            # was down) gets the self-chat treatment too: stamped
+            # stale_replay, observed, never detonated at reconnect.
             chat = obj.get("chat") or {}
             chat_id = str(chat.get("id") or "")
             if not chat_id:
@@ -963,7 +999,8 @@ class WhatsAppAdapter(ChatAdapter):
             chat_kind = _kind_for_jid(
                 chat_id, str(chat.get("kind") or ""))
             message_id = str(obj.get("id") or "")
-            if not self._was_sent_by_me(message_id) and \
+            sent_by_me = self._was_sent_by_me(message_id)
+            if not sent_by_me and \
                     self._is_self_chat(chat_id, chat_kind):
                 turn = ChatMessage(
                     chat=ChatRef(
@@ -988,6 +1025,34 @@ class WhatsAppAdapter(ChatAdapter):
                     # observed, never answered — a stale self-chat
                     # command detonating at boot is the flood this
                     # stamp exists to prevent.
+                    turn.meta["stale_replay"] = True
+                self._deliver(handler, turn)
+                return
+            if not sent_by_me \
+                    and (chat_kind or "").strip().lower() \
+                    == str(ChatKind.GROUP) \
+                    and _is_command_text(str(obj.get("text") or "")):
+                turn = ChatMessage(
+                    chat=ChatRef(
+                        platform=self.name,
+                        chat_id=chat_id,
+                        kind=chat_kind,
+                        title=str(chat.get("title") or ""),
+                        peer=chat_id,
+                    ),
+                    incoming=True,
+                    text=str(obj.get("text") or ""),
+                    sender=str(obj.get("name") or ""),
+                    sender_id=self.user_jid,
+                    message_id=message_id,
+                    reply_to=str(obj.get("reply_to") or ""),
+                    ts=ts,
+                )
+                turn.meta["from_owner"] = True
+                turn.meta["owner_command"] = True
+                if ts and (time.time() - ts) > STALE_INBOUND_S:
+                    # Offline-delivered at (re)connect, like the
+                    # self-chat above: observed, never executed.
                     turn.meta["stale_replay"] = True
                 self._deliver(handler, turn)
                 return

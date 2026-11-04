@@ -530,12 +530,19 @@ class ChatGateway:
             message.chat,
             owner_chats=self.owner_chats,
             db_is_owner=bool(row.get("is_owner")),
-        ) or (message.meta or {}).get("self_chat") is True
+        ) or (message.meta or {}).get("self_chat") is True \
+            or (message.meta or {}).get("owner_command") is True
         # The self_chat verdict rides alongside the single owner test:
         # the WhatsApp adapter stamps it only for the paired account's
         # own "Message yourself" chat — a surface only the account
         # owner can write in. The runtime's operator test honors the
-        # same stamp, so the two can never disagree.
+        # same stamp, so the two can never disagree. The owner_command
+        # verdict is the same provenance one step over: the adapter
+        # stamps it only on a bridge own_message event — a message
+        # the paired account itself sent — in a group, promoted to a
+        # turn because it parses as a registered command, so the
+        # owner can command from inside a WhatsApp group. Same
+        # agreement: the runtime honors it identically.
         # Stash the owner verdict on the message so downstream (runtime
         # command gating) uses the same answer instead of recomputing it
         # with less information.

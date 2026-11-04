@@ -3168,6 +3168,21 @@ class PartnerRuntime(
         # two can never disagree.
         if isinstance(meta, dict) and meta.get("self_chat") is True:
             return True
+        # The WhatsApp owner-command verdict (adapter-stamped): the
+        # bridge reported one of the paired account's OWN messages
+        # in a group, and the adapter promoted it to a turn because
+        # it parses as a registered command. The bridge emits
+        # own_message events only for the paired account itself, so
+        # the stamp carries the same provenance as the self-chat
+        # stamp above — the owner's identity on his own account,
+        # proven by the pairing — and the gateway's inbound owner
+        # test honors it identically. This is what lets the owner
+        # command her from inside a WhatsApp group, exactly as on
+        # the userbot. His non-command group text is never promoted
+        # (the adapter keeps it persist-only), so no conversation
+        # path opens with this — commands only.
+        if isinstance(meta, dict) and meta.get("owner_command") is True:
+            return True
         # Sender-id allowlist: the owner's Telegram user id, same number
         # on every Telegram surface. Covers the personal bot and userbot,
         # where the chat key carries an adapter prefix the owner never

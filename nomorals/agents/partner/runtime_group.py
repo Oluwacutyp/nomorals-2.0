@@ -2765,6 +2765,19 @@ class RuntimeGroupMixin:
                 honesty.append(avail["antidelete_note"])
             if not avail["antiedit"]:
                 honesty.append(avail["antiedit_note"])
+            if key.partition(":")[0].strip().lower() \
+                    in ("whatsapp", "wa") \
+                    and ((mod.get("filter_action") or "")
+                         == "mute"
+                         or int(s.get("mute_default_s") or 0) > 0):
+                # Stored on another surface, or before the
+                # platform rule: the values stay as data, but
+                # the panel says plainly they cannot fire here.
+                honesty.append(
+                    "mute settings are stored for this group, "
+                    "but WhatsApp has no per-person mute for "
+                    "them to fire — at execution they refuse "
+                    "honestly (see /glog) instead of pretending.")
             degraded = []
             for entry in surface.audit(key, limit=50):
                 if entry.get("kind") == "moderation_unexecuted":
@@ -3044,6 +3057,24 @@ class RuntimeGroupMixin:
                 "`/gsettings escalation at N mute [10m|2h]` · "
                 "`… at N fine AMOUNT` · `… at N restrict|kick` · "
                 "`… clear N` · `… reset`")
+            # The mute-bottomed settings get the same treatment
+            # (owner ruling 2026-11-04): on WhatsApp the offers
+            # state the platform truth instead of listing a
+            # mute the platform cannot fire.
+            _on_wa = key.partition(":")[0].strip().lower() \
+                in ("whatsapp", "wa")
+            mute_default_offer = (
+                "`/gsettings mute default off` — no standing "
+                "mute length on WhatsApp: there is no "
+                "per-person mute for one to fire"
+                if _on_wa else
+                "`/gsettings mute default 2h|off`")
+            filter_action_offer = (
+                "`/gsettings filter action delete|warn` — no "
+                "mute action on WhatsApp: there is no "
+                "per-person mute for it to fire"
+                if _on_wa else
+                "`/gsettings filter action delete|warn|mute`")
             card.block_lines([
                 "`/gsettings welcome on|off` · "
                 "`/gsettings goodbye on|off` · "
@@ -3055,11 +3086,11 @@ class RuntimeGroupMixin:
                 "`/gsettings economy on|off` · "
                 "`/gsettings tax PCT` · "
                 "`/gsettings warns N` · "
-                "`/gsettings mute default 2h|off`",
+                + mute_default_offer,
                 "`/gsettings fine N` · "
                 "`/gsettings governance N`",
                 "`/gsettings filter add WORD` · "
-                "`/gsettings filter action delete|warn|mute`",
+                + filter_action_offer,
                 "`/gsettings autonomy on|off` · "
                 "`/gsettings anticrash on|off|delete|flag`",
                 "`/gsettings antichannel on|off` · "
@@ -3253,6 +3284,19 @@ class RuntimeGroupMixin:
                 surface.update_settings(key, mute_default_s=0)
                 return ("no standing mute length — when a member "
                         "is named without one, I'll ask.")
+            if key.partition(":")[0].strip().lower() \
+                    in ("whatsapp", "wa"):
+                # Platform truth (owner ruling 2026-11-04, the
+                # ladder rule extended): a mute length cannot be
+                # newly selected where no per-person mute exists
+                # to fire it. Clearing (off) above stays allowed;
+                # a value stored earlier keeps its data and its
+                # execution refuses honestly.
+                return ("that can't be set here: WhatsApp has "
+                        "no per-person mute, so a standing mute "
+                        "length would never fire — removal is "
+                        "the strongest step this platform has. "
+                        "Nothing changed.")
             secs, _why = _parse_duration(rest2)
             if secs:
                 surface.update_settings(key, mute_default_s=secs)
@@ -3379,6 +3423,19 @@ class RuntimeGroupMixin:
             return "filters cleared."
         if head == "filter" and rest.lower() == "action" \
                 and rest2.lower() in ("delete", "warn", "mute"):
+            if rest2.lower() == "mute" \
+                    and key.partition(":")[0].strip().lower() \
+                    in ("whatsapp", "wa"):
+                # Platform truth (owner ruling 2026-11-04, the
+                # ladder rule extended): the mute action cannot
+                # be newly selected where no per-person mute
+                # exists to fire it. A value stored earlier
+                # keeps its data; its execution refuses honestly.
+                return ("that can't be set here: WhatsApp has "
+                        "no per-person mute for the filter to "
+                        "fire — delete and warn are the filter "
+                        "actions this platform carries out. "
+                        "Nothing changed.")
             current = surface.store.settings(key)
             mod = dict(current["moderation"])
             mod["filter_action"] = rest2.lower()
@@ -4911,6 +4968,18 @@ class RuntimeGroupMixin:
         if section == "defense":
             d = s.get("defense") or {}
             esc = surface.escalation_config(key)
+            # Stored mute settings on WhatsApp are data that
+            # cannot fire — the state line says so (owner
+            # ruling 2026-11-04, the ladder rule extended).
+            mute_truth = ""
+            if key.partition(":")[0].strip().lower() \
+                    in ("whatsapp", "wa") \
+                    and (((s.get("moderation") or {})
+                          .get("filter_action") or "") == "mute"
+                         or int(s.get("mute_default_s") or 0) > 0):
+                mute_truth = (" · stored mute settings can't "
+                              "fire here (no per-person mute "
+                              "on WhatsApp)")
             card.block_lines([
                 f"autonomy "
                 f"{'ON' if d.get('autonomy', True) else 'OFF'}"
@@ -4932,7 +5001,8 @@ class RuntimeGroupMixin:
                 f"{len((s.get('moderation') or {}).get('word_filters') or [])}"
                 f" · standing mute "
                 f"{_duration_text(int(s.get('mute_default_s') or 0)) if s.get('mute_default_s') else 'ask'}"
-                f" · mute fine {s.get('fine_amount', 0)}",
+                f" · mute fine {s.get('fine_amount', 0)}"
+                f"{mute_truth}",
                 f"ladder: {esc.describe()}",
             ])
             buttons = [
@@ -4962,14 +5032,30 @@ class RuntimeGroupMixin:
                 "`escalation at N mute [10m]` · `escalation at N "
                 "fine AMOUNT` · `escalation at N restrict|kick` "
                 "· `escalation clear N` · `escalation reset`")
+            # The mute-bottomed settings get the same treatment
+            # (owner ruling 2026-11-04): on WhatsApp the offers
+            # state the platform truth instead of listing a
+            # mute the platform cannot fire.
+            _on_wa = key.partition(":")[0].strip().lower() \
+                in ("whatsapp", "wa")
+            filter_action_offer = (
+                "`filter action delete|warn` — no mute action "
+                "on WhatsApp (no per-person mute)"
+                if _on_wa else
+                "`filter action delete|warn|mute`")
+            mute_default_offer = (
+                "`mute default off` — no standing mute length "
+                "on WhatsApp (no per-person mute)"
+                if _on_wa else
+                "`mute default 2h|off`")
             card.block_lines([
                 "`autonomy on|off` · `anticrash on|off|delete|flag`",
                 "`antichannel|antitag|antidelete|antiedit on|off`"
                 " · `antitag N` · `antidelete mode log|callout`",
                 "`flood N` · `links DOMAINS|off` · "
                 "`filter add|remove WORD` · `filter clear` · "
-                "`filter action delete|warn|mute`",
-                "`warns N` · `mute default 2h|off` · `fine N`",
+                + filter_action_offer,
+                "`warns N` · " + mute_default_offer + " · `fine N`",
                 "`escalation limit N` · `escalation final "
                 "kick|ban` · `escalation window DAYS`",
                 escalation_steps_offer,
@@ -5434,6 +5520,18 @@ class RuntimeGroupMixin:
                 if rest == "action" and len(words) > 2 \
                         and words[2].lower() in (
                         "delete", "warn", "mute"):
+                    if words[2].lower() == "mute" \
+                            and key.partition(":")[0].strip() \
+                            .lower() in ("whatsapp", "wa"):
+                        # Platform truth, same as /gsettings:
+                        # no per-person mute exists on WhatsApp
+                        # for the filter to fire.
+                        return ("that can't be set here: "
+                                "WhatsApp has no per-person mute "
+                                "for the filter to fire — delete "
+                                "and warn are the filter actions "
+                                "this platform carries out. "
+                                "Nothing changed.")
                     mod["filter_action"] = words[2].lower()
                     surface.update_settings(key, moderation=mod)
                     return f"filter action: {words[2].lower()}."
@@ -5448,6 +5546,17 @@ class RuntimeGroupMixin:
                 if arg.lower() in ("off", "none", "0", ""):
                     surface.update_settings(key, mute_default_s=0)
                     return "no standing mute length."
+                if key.partition(":")[0].strip().lower() \
+                        in ("whatsapp", "wa"):
+                    # Platform truth, same as /gsettings:
+                    # no per-person mute exists on WhatsApp
+                    # for a standing length to fire.
+                    return ("that can't be set here: WhatsApp "
+                            "has no per-person mute, so a "
+                            "standing mute length would never "
+                            "fire — removal is the strongest "
+                            "step this platform has. Nothing "
+                            "changed.")
                 secs, _why = _parse_duration(arg)
                 if secs:
                     surface.update_settings(key,
