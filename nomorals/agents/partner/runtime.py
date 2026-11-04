@@ -853,6 +853,18 @@ class PartnerRuntime(
             record_failure(
                 "runtime.PartnerRuntime._drive_webshot_watches",
                 e)
+        # Security-audit beat: queued /scan + /audit jobs run
+        # one per cycle and deliver their report to the DM they
+        # were requested from — no daemon, the watch discipline.
+        try:
+            audit_drive = getattr(self, "_drive_security_audits",
+                                  None)
+            if audit_drive is not None:
+                audit_drive()
+        except Exception as e:  # noqa: BLE001
+            record_failure(
+                "runtime.PartnerRuntime._drive_security_audits",
+                e)
         # Channel posture (owner order, 2026-11-02): a channel is a
         # broadcast surface, not a conversation. Devon never replies in
         # one — no commands, no catalog, no games, no persona chat, not
@@ -3954,6 +3966,9 @@ class PartnerRuntime(
         if kind == "webshot":
             return self._control_webshot(command.tail, message)
 
+        if kind == "audit":
+            return self._control_audit(command.tail, message)
+
         if kind == "owner":
             return self._control_owner(command.tail, message)
 
@@ -5187,7 +5202,15 @@ class PartnerRuntime(
         if kind == "dns":
             return self._control_dns(command.tail or arg)
         if kind == "scan":
-            return self._control_scan(command.tail or arg)
+            _tail = command.tail or arg
+            _first = (_tail or "").split()[0] if (_tail or "").split() \
+                else ""
+            if _first.lower().startswith(("http://", "https://")) \
+                    and message is not None:
+                # A URL target is the security-audit exposure
+                # scan (owner, 2026-11-03), not a port scan.
+                return self._control_audit_scan(_tail, message)
+            return self._control_scan(_tail)
         if kind == "whois":
             return self._control_whois(command.tail or arg)
         if kind == "ports":

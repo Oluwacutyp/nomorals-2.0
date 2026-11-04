@@ -551,7 +551,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "swarm": (1, None),      # /swarm <goal> [workers] — parallel devon agents
     # power layer: network, proxies, scripts, osint, macros
     "dns": (1, 5),           # /dns <domain> [record type]
-    "scan": (1, 6),          # /scan <target> [ports] [banner]
+    "scan": (1, 6),          # /scan <target> [ports] [banner] — a URL target routes to the security-audit exposure scan instead
+    "audit": (0, None),      # /audit <repo url|path> — security audit of a repo (secrets incl. history, dependencies, insecure patterns) + disclosure draft; /audit own add|remove|list <asset> — the own-asset registry (owner only)
     "whois": (1, 3),         # /whois <domain>
     "ports": (0, 1),         # /ports — what is listening here
     "proxy": (0, 8),         # /proxy status|scrape|test|health|pool|pick|affinity|rotate on|set <url>|ssh <…>
@@ -2480,10 +2481,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "dns": {"what": "DNS records with zero dependencies: A/AAAA/MX/NS/TXT/SPF/CAA.",
             "usage": "/dns <domain> [record]", "example": "/dns example.com MX",
             "related": "/whois /osint"},
-    "scan": {"what": "port scan your own infrastructure.",
-             "usage": "/scan <target> [ports] [banner]",
-             "example": "/scan 192.168.1.10 22,80,443",
-             "related": "/ports"},
+    "scan": {"what": "port scan your own infrastructure — or, handed a URL, the security-audit exposure scan of that web app: exposed files (/.env, /.git), unauthenticated data backends, secrets shipped in its own JS, and open API routes, each finding proven by an evidence pack (the exact request, the full field schema, the source's own record count, a bounded masked sample). Runs as background work; the graded report card + full report file land in DM.",
+             "usage": "/scan <target> [ports] [banner] · /scan <url>",
+             "example": "/scan https://some-app.example.com",
+             "related": "/audit /ports"},
+    "audit": {"what": "security audit of a repository (the disclosure desk): secrets in the working tree AND in git history (a deleted key still in history is still leaked), dependency audit against an advisory feed (bundled seed, refreshed from OSV when it answers), and insecure-pattern rules (string-built SQL, eval sinks, wildcard CORS, debug flags, weak password hashes). Every finding is graded by a defined rubric and lands as a report card + full markdown report in DM, with a responsible-disclosure draft when a public contact exists — drafts only; sending is the owner's act. /audit own manages the own-asset registry: targets declared his own are captured unmasked and at full sample depth.",
+             "usage": "/audit <repo url|path> · /audit own add|remove|list <asset>",
+             "example": "/audit https://github.com/some/project",
+             "related": "/scan /owner"},
     "whois": {"what": "domain registration data via RDAP.",
               "usage": "/whois <domain>", "example": "/whois example.com",
               "related": "/dns /osint"},
@@ -2849,7 +2854,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("search & research", ["search", "searchdeep", "searchleads",
                            "money",
                            "searchhist", "research", "news", "osint",
-                           "dns", "scan", "whois", "ports",
+                           "dns", "scan", "audit", "whois", "ports",
                            "brief", "competitor", "aeo"]),
     ("wisdom keeper — corpus · history · practice", ["wisdom", "wis"]),
     ("building for real", ["code", "py", "devon", "swarm", "task", "gen",
@@ -3123,7 +3128,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "insights", "alert", "cost", "heal", "tour", "pulse"]),
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
-      "news", "osint", "dns", "scan", "whois", "ports",
+      "news", "osint", "dns", "scan", "audit", "whois", "ports",
       "brief", "competitor", "aeo"]),
     ("wisdom keeper — corpus · history · practice",
      ["wisdom", "wis"]),
@@ -3286,7 +3291,8 @@ LIST_ONELINERS: dict[str, str] = {
     "pulse": "briefings — schedule + run any slot on demand",
     "osint": "read-only public-intel: reports, campaigns, graph",
     "dns": "DNS records, zero dependencies",
-    "scan": "port scan (own infra)",
+    "scan": "port scan (own infra) · exposure-audit a URL",
+    "audit": "security audit of a repo — secrets, deps, patterns + disclosure draft",
     "whois": "domain registration data (RDAP)",
     "ports": "what is listening on this machine",
     "code": "the coding bot — draft→run→fix to a real acceptance",

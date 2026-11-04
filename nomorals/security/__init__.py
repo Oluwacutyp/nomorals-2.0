@@ -64,3 +64,49 @@ __all__ = [
 from .egress_audit import EgressAuditor, EgressDecision, EgressRecord
 
 __all__ += ["EgressAuditor", "EgressDecision", "EgressRecord"]
+
+# Tier 3: security -> the audit class (owner, 2026-11-03):
+# exposure scanning of web apps + repo code/security review +
+# the disclosure desk.  Evidence packs, severity rubric, the
+# durable book — see the audit_* module docstrings.
+from .audit_evidence import (
+    DEFAULT_SAMPLE_CAP, OWN_ASSET_SAMPLE_CAP, build_pack,
+    field_sensitivity, mask_record, mask_value, pack_for_storage,
+    schema_of,
+)
+from .audit_patterns import (
+    SECRET_PATTERNS, SecretHit, entropy_hits, jwt_payload,
+    redact_secret, scan_text_for_secrets, shannon_entropy,
+)
+from .audit_report import (
+    SEVERITY_ORDER, AuditBook, AuditStoreError, default_book,
+    discover_contacts_repo, discover_contacts_web,
+    draft_disclosure, grade_finding, grade_findings,
+    render_report_md, summarize,
+)
+from .audit_repo import (
+    INSECURE_RULES, SEED_ADVISORIES, RepoAuditor, audit_repo,
+    compare_versions, parse_lockfiles,
+)
+from .audit_service import AuditService, run_job
+from .audit_web import (
+    ExposureScanner, Fetcher, FetchResult, ScanBudgetExceeded,
+    scan_url,
+)
+
+__all__ += [
+    "DEFAULT_SAMPLE_CAP", "OWN_ASSET_SAMPLE_CAP", "build_pack",
+    "field_sensitivity", "mask_record", "mask_value",
+    "pack_for_storage", "schema_of",
+    "SECRET_PATTERNS", "SecretHit", "entropy_hits", "jwt_payload",
+    "redact_secret", "scan_text_for_secrets", "shannon_entropy",
+    "SEVERITY_ORDER", "AuditBook", "AuditStoreError",
+    "default_book", "discover_contacts_repo",
+    "discover_contacts_web", "draft_disclosure", "grade_finding",
+    "grade_findings", "render_report_md", "summarize",
+    "INSECURE_RULES", "SEED_ADVISORIES", "RepoAuditor",
+    "audit_repo", "compare_versions", "parse_lockfiles",
+    "AuditService", "run_job",
+    "ExposureScanner", "Fetcher", "FetchResult",
+    "ScanBudgetExceeded", "scan_url",
+]

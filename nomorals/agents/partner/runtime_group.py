@@ -183,6 +183,204 @@ class RuntimeGroupMixin:
             self._webshot_book_obj = book
         return book
 
+    def _secaudit_book(self):  # type: ignore[no-untyped-def]
+        book = getattr(self, "_secaudit_book_obj", None)
+        if book is None:
+            from ...security.audit_report import default_book
+
+            context = getattr(self, "context", None)
+            settings = getattr(context, "settings", None)
+            ws_dir = getattr(settings, "workspace_dir", ".")
+            book = default_book(ws_dir)
+            self._secaudit_book_obj = book
+        return book
+
+    # ── security audit (owner, 2026-11-03) ───────────────────
+    _SECAUDIT_DRIVE_THROTTLE_S = 15.0
+
+    def _control_audit_scan(self, tail, message):  # type: ignore[no-untyped-def]
+        """/scan <url>: queue an exposure scan.  DM-first by
+        law — findings are disclosure material, they never post
+        to a group; in a group the command points at DM and
+        queues nothing."""
+        if self._group_key_or_none(message) is not None:
+            return ("🛡️ audits run in DM — findings are "
+                    "disclosure material and never post to a "
+                    "group. Run /scan <url> in my DM.")
+        url = str(tail or "").strip().split()[0] \
+            if str(tail or "").strip() else ""
+        if not url:
+            return "usage: /scan <url>"
+        book = self._secaudit_book()
+        job = book.enqueue(
+            kind="web", target=url,
+            chat_platform=str(message.chat.platform or ""),
+            chat_key=str(message.chat.key or ""),
+            requester=str(message.sender_id or message.sender
+                          or ""))
+        own = book.is_own_asset(url)
+        return (f"🛡️ exposure scan queued ({job['id']}) for {url}"
+                + (" — your own asset: full-depth capture"
+                   if own else "")
+                + ". The graded report lands here when it's done.")
+
+    def _control_audit(self, tail, message):  # type: ignore[no-untyped-def]
+        """/audit <repo url|path> — queue a repo audit (secrets
+        incl. history, dependencies, insecure patterns) with a
+        disclosure draft when a public contact exists.
+        /audit own add|remove|list <asset> — the own-asset
+        registry the owner controls: his declared assets are
+        captured unmasked, at full sample depth."""
+        if self._group_key_or_none(message) is not None:
+            return ("🛡️ audits run in DM — findings are "
+                    "disclosure material and never post to a "
+                    "group. Run /audit in my DM.")
+        text = str(tail or "").strip()
+        words = text.split()
+        book = self._secaudit_book()
+        if words and words[0].lower() == "own":
+            return self._control_audit_own(words[1:], book)
+        if not words:
+            return ("usage: /audit <repo url|path> · "
+                    "/audit own add|remove|list <asset>")
+        target = words[0]
+        job = book.enqueue(
+            kind="repo", target=target,
+            chat_platform=str(message.chat.platform or ""),
+            chat_key=str(message.chat.key or ""),
+            requester=str(message.sender_id or message.sender
+                          or ""))
+        own = book.is_own_asset(target)
+        return (f"🛡️ repo audit queued ({job['id']}) for {target}"
+                + (" — your own asset: full-depth capture"
+                   if own else "")
+                + ". The graded report lands here when it's done.")
+
+    def _control_audit_own(self, words, book):  # type: ignore[no-untyped-def]
+        sub = words[0].lower() if words else "list"
+        if sub in ("list", ""):
+            assets = book.own_assets()
+            if not assets:
+                return ("own-asset registry is empty — "
+                        "/audit own add <host|url|path> declares "
+                        "one of your systems (full-depth, "
+                        "unmasked capture for those targets).")
+            return ("🛡️ your declared assets:\n"
+                    + "\n".join(f"· {a}" for a in assets))
+        if sub in ("add", "remove"):
+            if len(words) < 2:
+                return f"usage: /audit own {sub} <host|url|path>"
+            value = " ".join(words[1:])
+            if sub == "add":
+                added = book.add_own_asset(value)
+                return (f"🛡️ {value} declared yours — audits of "
+                        "it capture at full depth, unmasked."
+                        if added else
+                        f"{value} is already in the registry.")
+            removed = book.remove_own_asset(value)
+            return (f"🛡️ {value} removed from the registry."
+                    if removed else
+                    f"{value} was not in the registry.")
+        return ("usage: /audit own add|remove|list <asset>")
+
+    def _secaudit_report_card(self, outcome, *, platform=""):  # type: ignore[no-untyped-def]
+        """The chat card for a finished audit: severity counts
+        + the top findings, via the typography layer (§27)."""
+        from ...social.chat.typography import Card, render_card
+
+        summary = outcome.get("summary") or {}
+        counts = summary.get("counts") or {}
+        card = Card("announcement", title="Security audit",
+                    icon="🛡️", tone="info")
+        kind = "web app" if outcome.get("kind") == "web" \
+            else "repository"
+        card.line(f"{kind}: {outcome.get('target')}")
+        if outcome.get("own_asset"):
+            card.line("your own asset — full-depth capture")
+        card.stats([
+            ("critical", counts.get("critical", 0)),
+            ("high", counts.get("high", 0)),
+            ("medium", counts.get("medium", 0)),
+            ("low", counts.get("low", 0)),
+        ], title="findings by severity")
+        top = (outcome.get("findings") or [])[:5]
+        if top:
+            card.block_lines(
+                [f"[{str(f.get('severity') or '').upper()}] "
+                 f"{f.get('title')}" for f in top],
+                title="top findings")
+        else:
+            card.line("no findings — every check came back clean")
+        for note in (outcome.get("notes") or [])[:3]:
+            card.line(f"note: {note}")
+        if outcome.get("draft_path"):
+            card.line("a disclosure draft is ready — sending "
+                      "it is your call")
+        card.note(f"audit {outcome.get('audit_id')} · full "
+                  "report in the attached file")
+        rendered = render_card(card, platform=platform or
+                               "telegram-bot", settings=None)
+        return rendered.text
+
+    def _drive_security_audits(self):  # type: ignore[no-untyped-def]
+        """The audit beat: one queued job per cycle, delivered
+        to the DM it was requested from (card + report file +
+        disclosure draft when one was written).  No daemon —
+        the page-watch discipline."""
+        import time as _time
+        from types import SimpleNamespace
+
+        now = _time.time()
+        last = getattr(self, "_secaudit_last", 0.0)
+        if now - last < self._SECAUDIT_DRIVE_THROTTLE_S:
+            return
+        self._secaudit_last = now
+        book = self._secaudit_book()
+        job = book.next_job()
+        if job is None:
+            return
+        from ...security.audit_service import AuditService, run_job
+
+        # Jobs exist only because an operator queued one: the
+        # kinds are owner-only (absent from PUBLIC_COMMANDS)
+        # and the handlers refuse groups — so the operator's
+        # private-target privilege (his own LAN) applies here
+        # exactly as it does for /webshot in his DM.
+        service = AuditService(book, allow_private=True)
+        try:
+            outcome = run_job(service, job)
+        except Exception as exc:  # noqa: BLE001 - a failed job
+            book.finish_job(job["id"], {   # is reported, not lost
+                "error": f"{type(exc).__name__}: {exc}"})
+            self.gateway.send(
+                job.get("chat_platform") or "",
+                SimpleNamespace(
+                    platform=job.get("chat_platform") or "",
+                    key=job.get("chat_key") or ""),
+                f"🛡️ audit of {job.get('target')} failed: "
+                f"{type(exc).__name__}: {exc}")
+            return
+        book.finish_job(job["id"], {
+            "audit_id": outcome.get("audit_id"),
+            "summary": outcome.get("summary"),
+            "report_path": outcome.get("report_path"),
+            "draft_path": outcome.get("draft_path")})
+        chat = SimpleNamespace(
+            platform=job.get("chat_platform") or "",
+            key=job.get("chat_key") or "")
+        card = self._secaudit_report_card(
+            outcome, platform=job.get("chat_platform") or "")
+        self.gateway.send(chat.platform, chat, card)
+        caption = (f"🛡️ security audit — {outcome.get('target')}")
+        self.gateway.send_file(
+            chat.platform, str(chat.key),
+            str(outcome.get("report_path") or ""), caption=caption)
+        if outcome.get("draft_path"):
+            self.gateway.send_file(
+                chat.platform, str(chat.key),
+                str(outcome["draft_path"]),
+                caption="✉️ disclosure draft — sending is your call")
+
     def _send(self, chat, text: str, *, buttons=None,  # type: ignore[no-untyped-def]
               parse_mode: str = ""):
         """The mixin's own outbound channel (welcomes, goodbyes,
