@@ -1282,8 +1282,28 @@ class RuntimeGroupMixin:
             fn = getattr(adapter, "admin_pin", None) if adapter \
                 else None
             if fn is None:
+                # No pin surface on this adapter: the pin did
+                # not happen, so the bought grant is NOT spent —
+                # hand it back for the buyer's next message.
+                surface.grant_pin(message.chat.key, user_id)
                 return
-            fn(message.chat, str(message.message_id))
+            try:
+                out = fn(message.chat, str(message.message_id))
+                if isinstance(out, dict) \
+                        and out.get("ok") is False:
+                    raise RuntimeError(str(out.get("error")
+                                           or "platform refused"))
+            except Exception as exc:  # noqa: BLE001 - audited below
+                # A refused (or failed) pin is not a used grant:
+                # restore it and audit the refusal, never a use.
+                surface.grant_pin(message.chat.key, user_id)
+                surface._audit(
+                    message.chat.key, "pin_grant_refused",
+                    user_id=user_id,
+                    message_id=str(message.message_id),
+                    reason=f"{type(exc).__name__}: {exc}")
+                surface.store.save()
+                return
             surface._audit(message.chat.key, "pin_grant_used",
                            user_id=user_id,
                            message_id=str(message.message_id))
@@ -1327,7 +1347,9 @@ class RuntimeGroupMixin:
         group" service message is deleted after the surface has
         handled it — the welcome is the visible artifact, the
         platform's own notice is clutter.  Setting-gated,
-        best-effort, audited on success."""
+        best-effort, audited either way: a delete the platform
+        refused (ok:False dict) is audited as a refusal, never
+        as a cleaning that happened."""
         try:
             settings = surface.store.settings(message.chat.key)
             if not settings.get("clean_service"):
@@ -1339,7 +1361,15 @@ class RuntimeGroupMixin:
                 if adapter else None
             if fn is None:
                 return
-            fn(message.chat, str(message.message_id))
+            out = fn(message.chat, str(message.message_id))
+            if isinstance(out, dict) and out.get("ok") is False:
+                surface._audit(
+                    message.chat.key, "service_clean_refused",
+                    message_id=str(message.message_id),
+                    reason=str(out.get("error")
+                               or "platform refused"))
+                surface.store.save()
+                return
             surface._audit(message.chat.key, "service_cleaned",
                            message_id=str(message.message_id))
             surface.store.save()
@@ -11177,9 +11207,9 @@ class RuntimeGroupMixin:
             return False
         try:
             if kind == "delete":
-                fn(message.chat, str(message.message_id or ""))
+                out = fn(message.chat, str(message.message_id or ""))
             elif kind == "ban":
-                fn(message.chat, user_id)
+                out = fn(message.chat, user_id)
             else:
                 # A timed mute (1h by default posture; defense
                 # actions carry their configured minutes); the two
@@ -11187,10 +11217,17 @@ class RuntimeGroupMixin:
                 # vs until) — speak each one's own grammar.
                 minutes = int(action.get("minutes") or 60)
                 try:
-                    fn(message.chat, user_id, minutes=minutes)
+                    out = fn(message.chat, user_id, minutes=minutes)
                 except TypeError:
-                    fn(message.chat, user_id,
-                       until=int(time.time()) + minutes * 60)
+                    out = fn(message.chat, user_id,
+                             until=int(time.time()) + minutes * 60)
+            # Every adapter reports refusal as an ok:False dict,
+            # not an exception (the kick branch's check, adopted
+            # here): a refused delete/ban/mute is an unexecution
+            # with the platform's reason, never an execution.
+            if isinstance(out, dict) and out.get("ok") is False:
+                raise RuntimeError(str(out.get("error")
+                                       or "platform refused"))
         except Exception as exc:  # noqa: BLE001 - audited, not raised
             surface._audit(
                 key, "moderation_unexecuted", action=kind,
