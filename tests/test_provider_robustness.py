@@ -190,21 +190,31 @@ class CompatFailoverTests(unittest.TestCase):
         self.assertEqual(calls, ["dead/model"])  # single attempt, no swap
         self.assertEqual(provider.model, "dead/model")
 
-    def test_429_does_not_heal_models(self):
-        # Rate limits are per-key: swapping the model cannot fix them.
-        # Retry-After: 0 keeps the test fast (no sleeping).
+    def test_429_walks_models_without_healing(self):
+        # LADDERFIX: a 429 is metered per model (per-model token
+        # buckets — the 2026-11-04 outage had gpt-oss-120b limited
+        # while gpt-oss-20b could answer), so the leg walks to the next
+        # model instead of sitting on the limited one. This supersedes
+        # the old per-key doctrine this test pinned before. The walk is
+        # transient: the configured model is NOT healed away — its
+        # quota refills, so it stays the primary.
         provider = _FlakyCompat(["good/model"], model="m1")
         calls = []
 
         def fake_post(url, payload):
             calls.append(payload["model"])
-            raise http_error(429, "slow", url, {"Retry-After": "0"})
+            if payload["model"] == "m1":
+                raise http_error(429, "slow", url, {"Retry-After": "0"})
+            return FakeRaw(_chat_payload(text="walked",
+                                          model=payload["model"]))
 
         with mock.patch.object(provider.http, "post_json", side_effect=fake_post):
             resp = provider.chat([Message.user("hi")])
-        self.assertTrue(resp.error)
-        self.assertEqual(set(calls), {"m1"})  # retried, never swapped
-        self.assertGreaterEqual(len(calls), 2)  # policy retried the 429
+        self.assertEqual(resp.text, "walked")
+        self.assertEqual(calls, ["m1", "good/model"])  # walked, in order
+        self.assertEqual(provider.model, "m1")  # restored, not healed
+        self.assertEqual((resp.raw or {}).get("failover_from"), "m1")
+        self.assertNotIn("healed_from", resp.raw or {})
 
     def test_all_fail_reports_chain(self):
         provider = _FlakyCompat(["dead/b", "dead/c"], model="dead/a")

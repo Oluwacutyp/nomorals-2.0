@@ -916,6 +916,41 @@ class LLMRouter:
                 return 0.0
             return max(0.0, health.cooldown_until - self._clock())
 
+    def all_cooling_down(self) -> bool:
+        """True when every registered provider would currently be skipped.
+
+        False when nothing is registered (an empty chain is a config
+        problem, not an outage) or when at least one provider can be
+        attempted right now.  The llm ladder's health probe consults
+        this: a non-empty chain of cooling providers is NOT "primary
+        healed", however alive their /models endpoints look.
+        """
+        with self._lock:
+            if not self._providers:
+                return False
+            return all(self.is_cooling_down(p.name)
+                       for p in self._providers)
+
+    def next_available_in(self) -> float:
+        """Seconds until the earliest skipped provider can be attempted.
+
+        0.0 when at least one provider is available now (or none are
+        registered).  The llm ladder's all-down circuit breaker uses
+        this as its fast-fail window: callers stop paying full ladder
+        walks until a provider could actually answer.
+        """
+        with self._lock:
+            if not self._providers:
+                return 0.0
+            remaining: list[float] = []
+            for provider in self._providers:
+                if not self.is_cooling_down(provider.name):
+                    return 0.0
+                left = self.cooldown_remaining(provider.name)
+                if left > 0:
+                    remaining.append(left)
+            return min(remaining) if remaining else 0.0
+
     # ── calling ──────────────────────────────────────────────────────────────
     def _chain(self) -> list[LLMProvider]:
         with self._lock:

@@ -168,7 +168,8 @@ def specs_from_env() -> list[ProviderSpec]:
         ),
         ProviderSpec(
             "openrouter", "openrouter",
-            kwargs={"model": os.environ.get("OPENROUTER_MODEL", "openrouter/free")},
+            kwargs={"model": os.environ.get("OPENROUTER_MODEL", "openrouter/free"),
+                    **_models_kwarg("OPENROUTER_MODELS")},
             env_key="OPENROUTER_API_KEY",
         ),
         ProviderSpec(
@@ -195,11 +196,24 @@ def specs_from_env() -> list[ProviderSpec]:
         ),
         ProviderSpec(
             "groq", "groq",
-            kwargs={"model": os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")},
+            kwargs={"model": os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b"),
+                    **_models_kwarg("GROQ_MODELS")},
             context_len=131072, env_key="GROQ_API_KEY",
         ),
     ]
     return [s for s in specs if s.available()]
+
+
+def _models_kwarg(env_name: str) -> dict[str, Any]:
+    """``{"fallback_models": [...]}`` from a comma-separated env list.
+
+    ``GROQ_MODELS`` / ``OPENROUTER_MODELS``: the operator's ordered
+    in-provider fallback models. Empty dict when unset — the provider
+    then uses its built-in known-good roster.
+    """
+    raw = os.environ.get(env_name, "") or ""
+    models = [m.strip() for m in raw.split(",") if m.strip()]
+    return {"fallback_models": models} if models else {}
 
 
 def key_pool_from_env(env_key: str) -> list[str]:

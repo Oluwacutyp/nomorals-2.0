@@ -272,10 +272,43 @@ def record_error(subsystem: str, exc: BaseException,
 def _llm_probe(router: Any) -> Callable[[], bool]:
     def probe() -> bool:
         try:
-            return bool(router._chain())
+            if not router._chain():
+                return False
+            # A non-empty chain of COOLING providers is not a healed
+            # primary: their /models endpoints answer while every chat
+            # call is being skipped, and calling that "healthy" made
+            # the ladder climb → fail → exhaust in a loop during
+            # provider outages. Healthy means at least one provider
+            # could actually be attempted now.
+            all_cooling = getattr(router, "all_cooling_down", None)
+            if callable(all_cooling) and all_cooling():
+                return False
+            return True
         except Exception:  # noqa: BLE001
             return False
     return probe
+
+
+def _llm_breaker_hint(context: Any) -> Callable[[], float | None]:
+    """Fast-fail window for the llm ladder's all-down circuit breaker.
+
+    Resolves the router lazily (it attaches after registration) and
+    reports the earliest provider-cooldown expiry — callers fast-fail
+    until a provider could actually answer, then the ladder retries.
+    None (no router / no signal) → the ladder's default window.
+    """
+    def hint() -> float | None:
+        router = getattr(context, "router", None) if context else None
+        if router is None:
+            return None
+        next_in = getattr(router, "next_available_in", None)
+        if not callable(next_in):
+            return None
+        try:
+            return float(next_in())
+        except Exception:  # noqa: BLE001 - a broken hint must not break calls
+            return None
+    return hint
 
 
 def _resolve_gateway(context: Any) -> Any | None:
@@ -450,7 +483,7 @@ def register_default_ladders(
              capability_trade="no live model; answers unavailable",
              honesty="All language models are unreachable right now — "
                      "I can't generate a fresh answer."),
-    ], journal=journal))
+    ], journal=journal, exhausted_hint=_llm_breaker_hint(context)))
 
     # ── Telegram: live send → durable queue ──
     def _tg_primary(chat: str, text: str, **kw: Any) -> Any:

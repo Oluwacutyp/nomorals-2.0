@@ -11,10 +11,17 @@ import base64
 import time
 from typing import Any, Collection, Sequence
 
-from ...core.errors import ModelError, ProviderError, classify, is_not_found_error
+from ...core.errors import (
+    ModelError,
+    ProviderError,
+    classify,
+    http_status_of,
+    is_auth_error,
+    is_not_found_error,
+)
 from ...core.http import HttpClient
 from ...core.logging_setup import get_logger
-from ...core.retry import BackoffPolicy, retry_call
+from ...core.retry import BackoffPolicy, default_retryable, retry_call
 from ..base import (
     LLMProvider,
     LLMResponse,
@@ -24,9 +31,75 @@ from ..base import (
     short_error,
     validate_messages,
 )
+from ..failures import FailureClass, classify_failure
 
 
 _log = get_logger(__name__)
+
+
+#: A rate-limited model whose Retry-After window is at most this long
+#: gets ONE brief in-leg retry before the model walk moves on — the
+#: window is usually a per-minute reset a few seconds out. Longer
+#: windows walk immediately: a turn never stalls on a dead model.
+_IN_LEG_RETRY_AFTER_MAX_S = 5.0
+
+
+def _same_model_retryable(exc: BaseException) -> bool:
+    """May the transport retry re-send this request to the SAME model?
+
+    Only transport transients (server / network / timeout /
+    unclassified): re-sending can heal those. Model-scoped failures
+    (rate limit, dead id, parse rejection) are the model walk's
+    decision, and provider-scoped ones (auth) must abort the leg —
+    the retry loop must not sit on either, sleeping out Retry-After
+    windows against a model that cannot answer.
+    """
+    if not default_retryable(exc):
+        return False
+    status = http_status_of(exc)
+    if status is not None and 400 <= status < 500:
+        # A definitive client error (bad key, dead id, parse rejection,
+        # rate limit) cannot heal by resending the identical payload —
+        # it is the model walk's decision, or the leg's abort.
+        return False
+    info = classify_failure(str(exc), exc)
+    return info.failure_class in (
+        FailureClass.SERVER,
+        FailureClass.NETWORK,
+        FailureClass.TIMEOUT,
+        FailureClass.UNKNOWN,
+    )
+
+
+def _model_scoped_failure(exc: BaseException) -> bool:
+    """Is this failure about THIS model id rather than the provider?
+
+    Model-scoped: the model is rate-limited (quotas are metered per
+    model — Groq's free tier included), the id is dead/unknown (404,
+    or a model_not_found body under another status), or the model
+    rejected the request with a 400 (gpt-oss's harmony "Parsing
+    failed" is exactly this: another model family accepts the same
+    payload). Provider-scoped failures — auth, unreachable endpoint,
+    context overflow — return False: a different id cannot fix them.
+    """
+    if is_auth_error(exc):
+        return False
+    if is_not_found_error(exc):
+        return True
+    info = classify_failure(str(exc), exc)
+    if info.failure_class in (FailureClass.RATE_LIMITED,
+                              FailureClass.CONFIG):
+        return True
+    return http_status_of(exc) == 400
+
+
+def _retry_after_hint(exc: BaseException, info: Any) -> float | None:
+    """The server's Retry-After for this failure, when it gave one."""
+    hint = getattr(exc, "retry_after", None)
+    if isinstance(hint, (int, float)) and not isinstance(hint, bool) \
+            and hint > 0:
+        return float(hint)
+    return info.retry_after_s
 
 
 def heal_model_id(configured: str, known: Collection[str]) -> str:
@@ -109,6 +182,7 @@ class OpenAICompatProvider(LLMProvider):
         vision_base_url: str = "",
         vision_api_key: str = "",
         api_keys: Sequence[str] | None = None,
+        fallback_models: Sequence[str] | None = None,
     ) -> None:
         super().__init__(timeout=timeout, max_retries=max_retries)
         self.base_url = base_url.rstrip("/")
@@ -125,6 +199,13 @@ class OpenAICompatProvider(LLMProvider):
         self._key_index = 0
         self.api_key = self.api_keys[0] if self.api_keys else ""
         self.model = model
+        # Explicit ordered fallback models (operator config — NM_*_MODELS).
+        # None = use the subclass roster (_fallback_models); a list, even
+        # empty, is the operator's word and replaces the roster.
+        self._explicit_fallbacks: list[str] | None = (
+            [str(m).strip() for m in fallback_models if str(m).strip()]
+            if fallback_models is not None else None
+        )
         self.template = template
         self.extra_body = dict(extra_body or {})
         # A dedicated vision model/endpoint: text chat and image understanding
@@ -217,6 +298,23 @@ class OpenAICompatProvider(LLMProvider):
         """
         return []
 
+    def _model_chain(self) -> list[str]:
+        """Ordered model ids for one chat call: configured first.
+
+        The fallback list is the explicit ``fallback_models`` when the
+        operator configured one (config wins), else the subclass roster
+        (:meth:`_fallback_models`). Deduped, order preserved.
+        """
+        fallbacks = (self._explicit_fallbacks
+                     if self._explicit_fallbacks is not None
+                     else self._fallback_models())
+        chain: list[str] = []
+        for model_id in [self.model, *fallbacks]:
+            model_id = (model_id or "").strip()
+            if model_id and model_id not in chain:
+                chain.append(model_id)
+        return chain or [self.model]
+
     def chat(
         self, messages: Sequence[Message], params: SamplingParams | None = None, **kw: Any
     ) -> LLMResponse:
@@ -235,34 +333,78 @@ class OpenAICompatProvider(LLMProvider):
             **kw,
         }
         original_model = self.model
-        fallbacks = [m for m in self._fallback_models() if m and m != original_model]
+        chain = self._model_chain()
         attempts: list[tuple[str, str]] = []
         last_exc: Exception | None = None
-        for attempt_no, model_id in enumerate([original_model, *fallbacks]):
-            self.model = model_id
+        # Set when the walk leaves the configured model because its id
+        # is dead (404 / model_not_found): the fallback id is then KEPT
+        # as the active model (a dead id fails every call). Transient
+        # walks (rate limit, parse rejection) restore the configured
+        # model afterwards — its quota refills; its rank does not drop.
+        dead_id_heal = False
+
+        def _post(model_id: str) -> Any:
             payload["model"] = model_id
+            return retry_call(
+                lambda: self.http.post_json(
+                    f"{self.base_url}/chat/completions", payload,
+                    **({"timeout": req_timeout}
+                       if req_timeout is not None else {})),
+                policy=self._policy,
+                retryable=_same_model_retryable,
+            )
+
+        for attempt_no, model_id in enumerate(chain):
+            self.model = model_id
+            raw: Any = None
+            exc: Exception | None = None
             try:
-                raw = retry_call(
-                    lambda: self.http.post_json(
-                        f"{self.base_url}/chat/completions", payload,
-                        **({"timeout": req_timeout}
-                           if req_timeout is not None else {})),
-                    policy=self._policy,
-                )
-            except Exception as exc:  # noqa: BLE001
+                raw = _post(model_id)
+            except Exception as first_exc:  # noqa: BLE001
+                exc = first_exc
+                attempts.append((model_id, short_error(first_exc)))
+                # A 429 whose Retry-After window is short gets ONE
+                # brief in-leg retry of the SAME model before the walk
+                # moves on. Long windows walk immediately.
+                info = classify_failure(str(first_exc), first_exc)
+                hint = _retry_after_hint(first_exc, info)
+                if (info.failure_class is FailureClass.RATE_LIMITED
+                        and hint is not None
+                        and 0.0 < hint <= _IN_LEG_RETRY_AFTER_MAX_S):
+                    time.sleep(hint)
+                    try:
+                        raw = _post(model_id)
+                        exc = None
+                    except Exception as second_exc:  # noqa: BLE001
+                        exc = second_exc
+                        attempts.append((model_id, short_error(second_exc)))
+            if exc is not None:
                 last_exc = exc
-                attempts.append((model_id, short_error(exc)))
-                # 404 = this model id is dead; a different id may live.
-                # Anything else (auth, rate limit, server error) is already
-                # retried by the policy above — swapping the model cannot
-                # fix a bad key or an overloaded server.
-                if is_not_found_error(exc) and attempt_no < len(fallbacks):
+                # Model-scoped failure (this model's rate limit, dead
+                # id, parse rejection) → the next id may live. Anything
+                # else — auth, unreachable endpoint, context overflow,
+                # provider-side 5xx — is provider-scoped: the transport
+                # policy already retried what retrying can heal, and a
+                # different model id cannot fix the rest.
+                if _model_scoped_failure(exc) \
+                        and attempt_no < len(chain) - 1:
+                    if attempt_no == 0 and is_not_found_error(exc):
+                        # The CONFIGURED id is dead — the fallback that
+                        # eventually serves is kept as the active model.
+                        dead_id_heal = True
                     continue
                 break
 
             data = raw.json()
             choices = data.get("choices") or []
             if not choices:
+                # A soft per-model failure (the free-alias gateway does
+                # this when its pick has no headroom): walk like any
+                # other model-scoped failure; only the last model's
+                # empty answer is reported as-is.
+                attempts.append((model_id, "provider returned no choices"))
+                if attempt_no < len(chain) - 1:
+                    continue
                 self.model = original_model
                 return self._record(
                     LLMResponse(text="", model=model_id, error="provider returned no choices", raw=data),
@@ -283,22 +425,30 @@ class OpenAICompatProvider(LLMProvider):
                 finish_reason=choice.get("finish_reason", "stop"),
                 raw=data,
             )
-            # Healed onto a fallback id: keep it (a dead id 404s every call),
-            # and record where we came from.
-            if model_id != original_model and isinstance(response.raw, dict):
-                response.raw["healed_from"] = original_model
+            if model_id != original_model:
+                if isinstance(response.raw, dict):
+                    response.raw["model_failover_attempts"] = [
+                        {"model": m, "error": e} for m, e in attempts]
+                    if dead_id_heal:
+                        # Healed onto a fallback id: keep it (a dead id
+                        # 404s every call), and record where we came from.
+                        response.raw["healed_from"] = original_model
+                    else:
+                        response.raw["failover_from"] = original_model
+                if not dead_id_heal:
+                    self.model = original_model
             return self._record(response, started)
 
         # Every model id failed — restore the configured one and report the
         # whole attempt chain, not just the last error.
         self.model = original_model
         error = classify(last_exc) if last_exc is not None else ModelError("unknown error")
-        chain = "; ".join(f"{m} ({e})" for m, e in attempts) or "no attempt made"
+        chain_desc = "; ".join(f"{m} ({e})" for m, e in attempts) or "no attempt made"
         return self._record(
             LLMResponse(
                 text="",
                 model=original_model,
-                error=f"{error.code}: all models failed on {self.name} — {chain}",
+                error=f"{error.code}: all models failed on {self.name} — {chain_desc}",
                 raw={"model_failover_attempts": [{"model": m, "error": e} for m, e in attempts]},
             ),
             started,

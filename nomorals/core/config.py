@@ -175,10 +175,21 @@ class LLMSettings:
     groq_model: str = "openai/gpt-oss-120b"
     groq_api_key: str = ""
     groq_base_url: str = "https://api.groq.com/openai/v1"
+    #: Ordered fallback models for Groq, comma-separated (NM_GROQ_MODELS).
+    #: When the configured model fails with a model-scoped error (its own
+    #: rate limit, a parse rejection, a dead id), the provider walks this
+    #: list before the provider itself is counted failed. Empty = the
+    #: provider's built-in known-good roster (gpt-oss-120b → gpt-oss-20b
+    #: → qwen…).
+    groq_models: str = ""
     #: OpenRouter fallback. Model IDs (esp. :free ones) churn — set
     #: NM_OPENROUTER_MODEL explicitly, e.g. "qwen/qwen3-8b:free".
     openrouter_api_key: str = ""
     openrouter_model: str = ""
+    #: Ordered fallback models for OpenRouter, comma-separated
+    #: (NM_OPENROUTER_MODELS) — same model-walk semantics as groq_models.
+    #: Empty = the provider's built-in fallback (the openrouter/free alias).
+    openrouter_models: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     local_lora: str = ""
 
@@ -997,9 +1008,11 @@ _ENV_MAP: dict[str, str] = {
     "NM_LLM_FALLBACK_CHAIN": "llm.fallback_chain",
     "NM_GROQ_API_KEY": "llm.groq_api_key",
     "NM_GROQ_MODEL": "llm.groq_model",
+    "NM_GROQ_MODELS": "llm.groq_models",
     "NM_GROQ_BASE_URL": "llm.groq_base_url",
     "NM_OPENROUTER_API_KEY": "llm.openrouter_api_key",
     "NM_OPENROUTER_MODEL": "llm.openrouter_model",
+    "NM_OPENROUTER_MODELS": "llm.openrouter_models",
     "NM_OPENROUTER_BASE_URL": "llm.openrouter_base_url",
     "NM_LLM_ACTIVE_MODEL": "llm.active_model",
     "NM_LLM_TIMEOUT": "llm.timeout",

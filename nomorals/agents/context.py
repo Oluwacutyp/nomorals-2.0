@@ -466,6 +466,15 @@ def _apply_provider_override(db: Any, settings: Settings) -> None:
         _log.debug("provider override lookup failed; using .env defaults: %s", exc)
 
 
+def _split_models(raw: Any) -> list[str]:
+    """Parse a comma-separated model list setting (NM_*_MODELS)."""
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return [str(m).strip() for m in raw if str(m).strip()]
+    return [m.strip() for m in str(raw).split(",") if m.strip()]
+
+
 def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
                  context: Any | None = None) -> Any:
     """Build the provider chain, wiring each backend's own credentials.
@@ -508,14 +517,21 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
             return {**common, "base_url": llm.llama_cpp_url,
                     "model": llm.openai_model or _model_label}
         if kind == "groq":
-            return {
+            kwargs: dict[str, Any] = {
                 **common,
                 "base_url": llm.groq_base_url,
                 "api_key": llm.groq_api_key,
                 "model": llm.groq_model,
             }
+            # NM_GROQ_MODELS: the operator's ordered in-provider fallback
+            # list. Only passed when set — unset keeps the provider's
+            # built-in known-good roster.
+            groq_fallbacks = _split_models(llm.groq_models)
+            if groq_fallbacks:
+                kwargs["fallback_models"] = groq_fallbacks
+            return kwargs
         if kind == "openrouter":
-            return {
+            kwargs = {
                 **common,
                 "base_url": llm.openrouter_base_url,
                 "api_key": llm.openrouter_api_key,
@@ -527,6 +543,10 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
                     "X-Title": "Devon",
                 },
             }
+            openrouter_fallbacks = _split_models(llm.openrouter_models)
+            if openrouter_fallbacks:
+                kwargs["fallback_models"] = openrouter_fallbacks
+            return kwargs
         if kind in {"mock", "offline", "test"}:
             return {**common, "model": llm.openai_model or "mock-7b"}
         if kind in {"anthropic", "gemini", "deepseek"}:

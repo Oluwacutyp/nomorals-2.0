@@ -1050,6 +1050,22 @@ class RuntimeMetaMixin:
                     lines.append(f"    {hint}")
             elif calls and not failures:
                 lines.append(f"    {calls} calls, 0 failures")
+        # The llm ladder's all-down circuit breaker, when open: callers
+        # are fast-failing instead of paying full provider walks, and
+        # the owner should see that state (and its expiry) here rather
+        # than wonder why the brain went quiet.
+        try:
+            es = getattr(self.context, "error_system", None)
+            ladder = es.ladders.get("llm") if es is not None else None
+            if ladder is not None:
+                ladder_status = ladder.status()
+                if ladder_status.get("circuit_open"):
+                    lines.append(
+                        f" ⚡ llm circuit open — brain fast-failing; "
+                        f"retry in ~{float(ladder_status.get('retry_in_s') or 0):.0f}s "
+                        f"({int(ladder_status.get('fast_fails') or 0)} calls held)")
+        except Exception as exc:  # noqa: BLE001 - status must never crash a chat
+            record_failure("runtime_meta._control_providers:ladder", exc)
         return "\n".join(lines)
 
     # ── devon: the autonomous dev & investigation agent ──────────────────────
