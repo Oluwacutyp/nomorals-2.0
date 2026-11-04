@@ -91,6 +91,21 @@ class RuntimeGroupMixin:
         surface.store.save()
         return False
 
+    def _rhythm_hold(self, surface, key, what, text) -> bool:  # type: ignore[no-untyped-def]
+        """Silent hours (P3): when the group's rhythm says the
+        room is quiet, a non-urgent system post is HELD for the
+        morning digest instead of sent — returns True when held
+        (the caller then skips the send).  Moderation output
+        never comes through here: enforcement is not scheduled.
+        As-him conversation never comes through here either
+        (§33 hat-1)."""
+        if not text:
+            return False
+        if surface.rhythm_silent(key):
+            surface.rhythm_hold(key, what, str(text))
+            return True
+        return False
+
     _BOT_CLAIM_TTL_S = 600
 
     def _probe_bot_claim(self, surface, key, message) -> None:  # type: ignore[no-untyped-def]
@@ -603,18 +618,28 @@ class RuntimeGroupMixin:
                         name=facts["name"], held=held)
             if welcomed and self._system_send_ok(
                     surface, key, message, "welcome"):
-                for text in welcomed:
-                    self._send(
-                        message.chat, text,
-                        buttons=self._welcome_buttons(surface, key),
-                        parse_mode=self._rendered_mode(message,
-                                                       text))
-                # The welcome moment (§21): a GIF/sticker rides
-                # the welcome where the group's expression
-                # settings allow — same gate, same room.
-                fire = getattr(self, "_fire_expression", None)
-                if fire is not None:
-                    fire(message, "welcome")
+                if surface.rhythm_silent(key):
+                    # Welcomes are system output: during silent
+                    # hours they wait for the morning digest.
+                    for text in welcomed:
+                        surface.rhythm_hold(key, "welcome",
+                                            text)
+                else:
+                    for text in welcomed:
+                        self._send(
+                            message.chat, text,
+                            buttons=self._welcome_buttons(
+                                surface, key),
+                            parse_mode=self._rendered_mode(
+                                message, text))
+                    # The welcome moment (§21): a GIF/sticker
+                    # rides the welcome where the group's
+                    # expression settings allow — same gate,
+                    # same room.
+                    fire = getattr(self, "_fire_expression",
+                                   None)
+                    if fire is not None:
+                        fire(message, "welcome")
             self._clean_service_message(surface, message)
             return True
         if service == "join_request":
@@ -671,16 +696,22 @@ class RuntimeGroupMixin:
                             if text and self._system_send_ok(
                                     surface, key, message,
                                     "welcome"):
-                                self._send(
-                                    message.chat, text,
-                                    buttons=self._welcome_buttons(
-                                        surface, key),
-                                    parse_mode=self._rendered_mode(
-                                        message, text))
-                                fire = getattr(
-                                    self, "_fire_expression", None)
-                                if fire is not None:
-                                    fire(message, "welcome")
+                                if not self._rhythm_hold(
+                                        surface, key, "welcome",
+                                        text):
+                                    self._send(
+                                        message.chat, text,
+                                        buttons=(
+                                            self._welcome_buttons(
+                                                surface, key)),
+                                        parse_mode=(
+                                            self._rendered_mode(
+                                                message, text)))
+                                    fire = getattr(
+                                        self, "_fire_expression",
+                                        None)
+                                    if fire is not None:
+                                        fire(message, "welcome")
                         # §32: the request was admitted — the
                         # reputation hook hears about any record.
                         if admitted.get("welcome") \
@@ -711,10 +742,12 @@ class RuntimeGroupMixin:
                     group_name=str(message.chat.title or ""))
                 if text and self._system_send_ok(
                         surface, key, message, "goodbye"):
-                    self._send(
-                        message.chat, text,
-                        parse_mode=self._rendered_mode(message,
-                                                       text))
+                    if not self._rhythm_hold(
+                            surface, key, "goodbye", text):
+                        self._send(
+                            message.chat, text,
+                            parse_mode=self._rendered_mode(
+                                message, text))
             self._clean_service_message(surface, message)
             return True
         if service == "delete":
@@ -1195,6 +1228,558 @@ class RuntimeGroupMixin:
                     "gang treasuries.")
         return None
 
+    # ---- rhythm: settings grammar (P3) ---------------------------
+    def _rhythm_update(self, surface, key, **fields):  # type: ignore[no-untyped-def]
+        """Mutate the rhythm settings block through the store's
+        own settings machinery — the one write path behind both
+        /gsettings and the console's rhythm section."""
+        import copy as _copy
+
+        current = surface.store.settings(key)
+        block = _copy.deepcopy(current.get("rhythm") or {})
+        block.update(fields)
+        surface.update_settings(key, rhythm=block)
+        return block
+
+    def _apply_rhythm_grammar(self, surface, key, words):  # type: ignore[no-untyped-def]
+        """The rhythm grammar, shared by /gsettings (words after
+        the `rhythm` head) and the console's rhythm section.
+        Returns the reply line, or None when the words aren't
+        rhythm grammar.  Forms: `on|off` · `silent HH:MM HH:MM` ·
+        `tz <offset>` · `nightshield on|off` · `briefing on|off` ·
+        `briefing hour N` · `reminders on|off` ·
+        `reminder add HH:MM <text>` · `reminder rules HH:MM` ·
+        `reminder remove N` · `reminder list` · `quorum N`."""
+        from ...social.chat.group_rhythm import (
+            format_offset, parse_hhmm, parse_offset)
+
+        w = [str(x) for x in words or []]
+        low = [x.lower() for x in w]
+        if not w:
+            return None
+        if len(w) == 1 and low[0] in ("on", "off"):
+            on = low[0] == "on"
+            cfg = self._rhythm_update(
+                surface, key, silent_enabled=on)
+            if on:
+                return (f"silent hours on — "
+                        f"{cfg.get('silent_start')}–"
+                        f"{cfg.get('silent_end')} "
+                        f"({format_offset(int(cfg.get('tz_offset_min') or 0))}); "
+                        "system posts wait for the morning "
+                        "digest. Moderation never waits.")
+            return ("silent hours off — system posts land as "
+                    "they happen again.")
+        if len(w) == 3 and low[0] == "silent" \
+                and parse_hhmm(w[1]) is not None \
+                and parse_hhmm(w[2]) is not None:
+            cfg = self._rhythm_update(
+                surface, key, silent_start=w[1], silent_end=w[2],
+                silent_enabled=True)
+            return (f"silent hours: {cfg['silent_start']}–"
+                    f"{cfg['silent_end']} "
+                    f"({format_offset(int(cfg.get('tz_offset_min') or 0))}), "
+                    "on.")
+        if len(w) == 2 and low[0] == "tz":
+            off = parse_offset(w[1])
+            if off is None:
+                return ("that offset doesn't parse — try +1, "
+                        "-5 or +05:30.")
+            off = max(-12 * 60, min(14 * 60, off))
+            self._rhythm_update(surface, key, tz_offset_min=off)
+            return (f"group time: {format_offset(off)} — silent "
+                    "hours, briefings and reminders read this "
+                    "clock.")
+        if len(w) == 2 and low[0] == "nightshield" \
+                and low[1] in ("on", "off"):
+            on = low[1] == "on"
+            self._rhythm_update(surface, key, nightshield=on)
+            return ("nightshield on — during the quiet window "
+                    "joins take the request posture and drop/"
+                    "war events pause."
+                    if on else
+                    "nightshield off — the night door works "
+                    "like the day door.")
+        if len(w) == 2 and low[0] == "briefing" \
+                and low[1] in ("on", "off"):
+            on = low[1] == "on"
+            cfg = self._rhythm_update(
+                surface, key, briefing_enabled=on)
+            return (f"group briefing on — yesterday's shape "
+                    f"posts at {int(cfg.get('briefing_hour') or 8)}"
+                    ":00 group time."
+                    if on else
+                    "group briefing off.")
+        if len(w) == 3 and low[0] == "briefing" \
+                and low[1] == "hour" and w[2].isdigit():
+            hour = max(0, min(23, int(w[2])))
+            self._rhythm_update(surface, key, briefing_hour=hour)
+            return f"briefing hour: {hour}:00 group time."
+        if len(w) == 2 and low[0] == "reminders" \
+                and low[1] in ("on", "off"):
+            on = low[1] == "on"
+            self._rhythm_update(surface, key,
+                                reminders_enabled=on)
+            return f"reminders {'on' if on else 'off'}."
+        if low[0] == "reminder" and len(w) >= 2:
+            cfg = surface.rhythm_cfg(key)
+            reminders = list(cfg.get("reminders") or [])
+            if low[1] == "list":
+                if not reminders:
+                    return "no reminders set."
+                return "reminders:\n" + "\n".join(
+                    f"{i}. {r.get('time')} — "
+                    + ("the group rules card"
+                       if r.get("kind") == "rules"
+                       else str(r.get("text") or ""))
+                    for i, r in enumerate(reminders, 1))
+            if low[1] == "add" and len(w) >= 4 \
+                    and parse_hhmm(w[2]) is not None:
+                seq = max([int(str(r.get("id") or "r0")[1:])
+                           for r in reminders
+                           if str(r.get("id") or "").startswith("r")
+                           and str(r.get("id"))[1:].isdigit()]
+                          or [0]) + 1
+                reminders.append({
+                    "id": f"r{seq}", "text": " ".join(w[3:]),
+                    "time": w[2], "days": [], "kind": "custom"})
+                self._rhythm_update(surface, key,
+                                    reminders=reminders)
+                return (f"reminder set: daily at {w[2]} — "
+                        f"{' '.join(w[3:])}")
+            if low[1] == "rules" and len(w) == 3 \
+                    and parse_hhmm(w[2]) is not None:
+                seq = max([int(str(r.get("id") or "r0")[1:])
+                           for r in reminders
+                           if str(r.get("id") or "").startswith("r")
+                           and str(r.get("id"))[1:].isdigit()]
+                          or [0]) + 1
+                reminders.append({
+                    "id": f"r{seq}", "text": "", "time": w[2],
+                    "days": [], "kind": "rules"})
+                self._rhythm_update(surface, key,
+                                    reminders=reminders)
+                return (f"rules reminder set: the rules card "
+                        f"posts daily at {w[2]}.")
+            if low[1] == "remove" and len(w) == 3 \
+                    and w[2].isdigit():
+                idx = int(w[2]) - 1
+                if 0 <= idx < len(reminders):
+                    gone = reminders.pop(idx)
+                    self._rhythm_update(surface, key,
+                                        reminders=reminders)
+                    return (f"reminder removed: "
+                            f"{gone.get('time')} — "
+                            f"{gone.get('text') or 'rules card'}")
+                return "no reminder with that number — " \
+                    "`reminder list` shows them."
+            return None
+        if len(w) == 2 and low[0] == "quorum" and w[1].isdigit():
+            n = max(1, min(50, int(w[1])))
+            self._rhythm_update(surface, key, poll_quorum=n)
+            return (f"poll quorum: {n} — a treasury poll needs "
+                    "at least that many votes cast before its "
+                    "result can move money.")
+        return None
+
+    def _apply_review_grammar(self, surface, key, words,  # type: ignore[no-untyped-def]
+                              by: str = "admin"):
+        """The §26 review grammar, shared by /gsettings (words
+        after the `review` head) and the console's rhythm
+        section.  Forms: `off|auto|assisted|manual` · `queue` ·
+        `approve N` · `reject N` (N = the number in the queue
+        listing)."""
+        w = [str(x) for x in words or []]
+        low = [x.lower() for x in w]
+        if not w:
+            return None
+        if len(w) == 1 and low[0] in ("off", "auto", "assisted",
+                                      "manual"):
+            mode = low[0]
+            self._rhythm_update(surface, key,
+                                review={"mode": mode})
+            return {
+                "off": "contribution review: off — contributions "
+                       "count toward the rankers as they land, "
+                       "as they always have.",
+                "auto": "contribution review: auto — the "
+                        "ensemble decides (length, structure, "
+                        "duplication); members see why and can "
+                        "appeal once.",
+                "assisted": "contribution review: assisted — "
+                            "clear cases decide themselves; "
+                            "borderline ones wait in the queue "
+                            "for an admin.",
+                "manual": "contribution review: manual — every "
+                          "contribution waits in the queue for "
+                          "an admin's ruling.",
+            }[mode]
+        if len(w) == 1 and low[0] in ("queue", "list"):
+            queue = surface.contribution_queue(key)
+            if not queue:
+                return "the review queue is empty."
+            lines = ["📋 *Contribution review queue*"]
+            for i, event in enumerate(queue, 1):
+                label = surface._member_label(
+                    key, str(event.get("user_id") or ""))
+                flag = " (appeal)" if event.get("appealed") \
+                    else ""
+                lines.append(
+                    f"{i}. {label}{flag} — score "
+                    f"{event.get('score')}: "
+                    f"{str(event.get('text') or '')[:90]}")
+            lines.append("rule: /gsettings review approve N · "
+                         "reject N")
+            return "\n".join(lines)
+        if len(w) == 2 and low[0] in ("approve", "reject") \
+                and w[1].isdigit():
+            queue = surface.contribution_queue(key)
+            idx = int(w[1]) - 1
+            if not (0 <= idx < len(queue)):
+                return ("no queue item with that number — "
+                        "`review queue` lists them.")
+            event = queue[idx]
+            out = surface.review_contribution(
+                key, str(event.get("id") or ""),
+                approve=low[0] == "approve", by=by)
+            if not out.get("ok"):
+                return "that item was already decided."
+            label = surface._member_label(
+                key, str(event.get("user_id") or ""))
+            return (f"{'✅ approved' if low[0] == 'approve' else '🚫 rejected'}"
+                    f" — {label}'s contribution now "
+                    f"{'counts' if low[0] == 'approve' else 'does not count'}"
+                    " toward the rankers.")
+        return None
+
+    # ---- polls / milestones / contributions (P3) -----------------
+    def _poll_card(self, message, surface, key, poll):  # type: ignore[no-untyped-def]
+        """The house poll card: one counting core (the surface),
+        rendered per platform — vote buttons where the platform
+        carries them, /vote numbers in the text everywhere."""
+        from ...social.chat.expression import buttons_from_spec
+        from ...social.chat.typography import Card
+
+        settings = surface.store.settings(key)
+        card = Card("announcement", title="Poll", icon="🗳️")
+        card.line(f"**{poll['question']}**")
+        for i, option in enumerate(poll.get("options") or [], 1):
+            card.line(f"{i}. {option}")
+        left = int(float(poll.get("closes_at") or 0)
+                   - float(getattr(message, "ts", 0) or 0))
+        bits = []
+        if left > 0:
+            bits.append(f"closes in {_duration_text(left)}")
+        if poll.get("kind") == "treasury":
+            bits.append(f"treasury vote — quorum "
+                        f"{poll.get('quorum')}")
+        if poll.get("changeable"):
+            bits.append("votes can change until close")
+        else:
+            bits.append("one vote, final")
+        bits.append("vote with /vote <option number>")
+        card.note(" · ".join(bits))
+        spec = [[("poll", f"{i}. {option}",
+                  f"vote {poll['id']} {i}")]
+                for i, option in enumerate(
+                    poll.get("options") or [], 1)]
+        buttons = buttons_from_spec(spec, settings=settings)
+        return self._card(message, card, buttons=buttons)
+
+    def _control_poll(self, tail, message):  # type: ignore[no-untyped-def]
+        key = self._group_key_or_none(message)
+        if key is None:
+            return "that's a group command — run it inside the group."
+        surface = self._group_surface()
+        if not self._system_send_ok(surface, key, message,
+                                    "poll"):
+            return ("polls run where Devon's bot systems are "
+                    "claimed — this room isn't one of those.")
+        raw = str(tail or "").strip()
+        sender = str(message.sender_id or message.sender or "")
+        if not raw:
+            open_polls = surface.polls(key, open_only=True)
+            if not open_polls:
+                return ("no open polls. Start one: /poll "
+                        "<question> | <option> | <option>")
+            now = float(getattr(message, "ts", 0) or time.time())
+            lines = ["🗳️ Open polls:"]
+            for i, poll in enumerate(open_polls, 1):
+                left = int(float(poll.get("closes_at") or 0)
+                           - now)
+                lines.append(
+                    f"{i}. {poll['question']} — "
+                    f"{len(poll.get('votes') or {})} vote(s)"
+                    + (f", closes in {_duration_text(left)}"
+                       if left > 0 else ""))
+            lines.append("vote: /vote <poll number> <option "
+                         "number> — or just /vote <option> on "
+                         "the newest.")
+            return "\n".join(lines)
+        if raw.lower() == "close" or raw.lower().startswith(
+                "close "):
+            rest = raw[5:].strip()
+            open_polls = surface.polls(key, open_only=True)
+            if not open_polls:
+                return "no open poll to close."
+            poll = None
+            if rest.isdigit():
+                idx = int(rest) - 1
+                if 0 <= idx < len(open_polls):
+                    poll = open_polls[idx]
+            else:
+                mine = [p for p in open_polls
+                        if str(p.get("by") or "") == sender]
+                poll = mine[-1] if mine else None
+                if poll is None and self._group_admin_ok(message):
+                    poll = open_polls[-1]
+            if poll is None:
+                return ("name the poll's number from /poll — "
+                        "or the poll's creator / an admin "
+                        "closes it.")
+            if str(poll.get("by") or "") != sender \
+                    and not self._group_admin_ok(message):
+                return ("only the poll's creator or an admin "
+                        "can close it early.")
+            out = surface.close_poll(key, str(poll["id"]),
+                                     by=sender,
+                                     now=float(getattr(
+                                         message, "ts", 0)
+                                         or time.time()))
+            return out.get("text") or "poll closed."
+        if raw.lower().startswith("treasury"):
+            # /poll treasury grant @member 500 [reason…] — a
+            # Yes/No vote whose passing EXECUTES the grant
+            # through governance on close.
+            if not self._group_admin_ok(message) \
+                    and not surface.gang_power_actor(key, sender):
+                return "treasury polls are for admins."
+            key2, err = self._economy_gate(message)
+            if err:
+                return err
+            parts = raw.split()
+            if len(parts) < 4 or parts[1].lower() != "grant":
+                return ("usage: /poll treasury grant @member "
+                        "500 [reason]")
+            amount = None
+            target_token = ""
+            for part in parts[2:]:
+                if part.isdigit() and amount is None:
+                    amount = int(part)
+                elif not target_token:
+                    target_token = part
+            if amount is None or not target_token:
+                return ("usage: /poll treasury grant @member "
+                        "500 [reason]")
+            recipient, miss = self._named_ref(
+                surface, key, target_token, message)
+            if not recipient:
+                return miss
+            reason = raw.split(str(amount), 1)[-1].strip() \
+                if str(amount) in raw else ""
+            label = surface._member_label(key, recipient)
+            out = surface.create_poll(
+                key, question=f"Grant {amount:,} sparks to "
+                              f"{label} from the treasury?",
+                options=["Yes", "No"], by=sender,
+                kind="treasury",
+                action={"kind": "grant",
+                        "payload": {"recipient": recipient,
+                                    "amount": amount,
+                                    "reason": reason
+                                    or "treasury poll"}},
+                now=float(getattr(message, "ts", 0)
+                          or time.time()))
+            if not out.get("ok"):
+                return "that poll couldn't be opened."
+            return self._poll_card(message, surface, key,
+                                   out["poll"])
+        segments = [s.strip() for s in raw.split("|")]
+        question = segments[0] if segments else ""
+        options: list[str] = []
+        duration = None
+        changeable = False
+        for seg in segments[1:]:
+            low = seg.lower()
+            if low == "flexible":
+                changeable = True
+            elif low.startswith("for "):
+                secs, _rest = _parse_duration(seg[4:].strip())
+                if secs:
+                    duration = float(secs)
+            elif seg:
+                options.append(seg)
+        if not question or len(options) < 2:
+            return ("usage: /poll <question> | <option> | "
+                    "<option> — add `| for 2h` to shorten it, "
+                    "`| flexible` to let votes change.")
+        out = surface.create_poll(
+            key, question=question, options=options, by=sender,
+            duration_s=duration, changeable=changeable,
+            now=float(getattr(message, "ts", 0) or time.time()))
+        if not out.get("ok"):
+            return "that poll couldn't be opened."
+        return self._poll_card(message, surface, key,
+                               out["poll"])
+
+    def _control_vote(self, tail, message):  # type: ignore[no-untyped-def]
+        key = self._group_key_or_none(message)
+        if key is None:
+            return "that's a group command — run it inside the group."
+        surface = self._group_surface()
+        sender = str(message.sender_id or message.sender or "")
+        parts = str(tail or "").split()
+        now = float(getattr(message, "ts", 0) or time.time())
+        poll = None
+        option = None
+        if len(parts) == 1 and parts[0].isdigit():
+            option = int(parts[0]) - 1
+        elif len(parts) == 2 and parts[0].isdigit() \
+                and parts[1].isdigit():
+            open_polls = surface.polls(key, open_only=True)
+            idx = int(parts[0]) - 1
+            if not (0 <= idx < len(open_polls)):
+                return "no open poll with that number — /poll lists them."
+            poll = open_polls[idx]
+            option = int(parts[1]) - 1
+        elif len(parts) == 2 and parts[1].isdigit():
+            # the button form: vote <poll ref> <option number>
+            # (the ref rides callback data only, never text)
+            poll = surface.get_poll(key, parts[0])
+            if poll is None:
+                return "that poll is gone."
+            option = int(parts[1]) - 1
+        if option is None:
+            return ("usage: /vote <option number> (newest "
+                    "poll), or /vote <poll number> <option "
+                    "number>.")
+        out = surface.vote_poll(
+            key, str(poll["id"]) if poll else "", sender,
+            option, now=now)
+        if not out.get("ok"):
+            return {"no_poll": "no open poll to vote on.",
+                    "closed": "that poll has closed.",
+                    "option": "no option with that number.",
+                    "locked": "your vote is in and this poll "
+                              "doesn't allow changing it.",
+                    }.get(str(out.get("reason") or ""),
+                          "the vote didn't land.")
+        poll = out["poll"]
+        counts = surface._poll_tally(poll)
+        choice = (poll.get("options") or [])[option]
+        return (f"🗳️ vote counted — **{choice}** "
+                f"({counts[option]} so far"
+                + (", changed from your earlier vote"
+                   if out.get("changed") else "")
+                + ").")
+
+    def _control_milestones(self, tail, message):  # type: ignore[no-untyped-def]
+        key = self._group_key_or_none(message)
+        if key is None:
+            return "that's a group command — run it inside the group."
+        surface = self._group_surface()
+        entries = surface.milestones(key, limit=10)
+        if not entries:
+            return ("the group's memory book is empty — "
+                    "milestones (first gang, message landmarks, "
+                    "join anniversaries, economy records) are "
+                    "written here as they happen.")
+        lines = ["📖 *The group's memory book*"]
+        for entry in entries:
+            when = time.strftime(
+                "%Y-%m-%d",
+                time.gmtime(float(entry.get("ts") or 0)))
+            lines.append(f"{when} — {entry.get('text') or ''}")
+        return "\n".join(lines)
+
+    def _control_contributions(self, tail, message):  # type: ignore[no-untyped-def]
+        """§26 transparency: a member sees their own counted /
+        pending / not-counted contributions and why, and can
+        appeal a rejection once.  `top` shows the reviewed
+        ranker — the board the review feeds."""
+        key = self._group_key_or_none(message)
+        if key is None:
+            return "that's a group command — run it inside the group."
+        surface = self._group_surface()
+        sender = str(message.sender_id or message.sender or "")
+        raw = str(tail or "").strip()
+        low = raw.lower()
+        if low == "top":
+            from ...social.chat.typography import Card
+
+            rows = surface.contribution_ranking(key, limit=10)
+            card = Card("leaderboard",
+                        title="Contribution board (reviewed)",
+                        icon="🏆")
+            if not rows:
+                card.line("No counted contributions yet — "
+                          "substantive posts are what this "
+                          "board counts.")
+            else:
+                card.stats([(r["label"], str(r["counted"]))
+                            for r in rows])
+            card.note("raw activity still counts every message "
+                      "(/member); this board counts reviewed "
+                      "contributions only." if
+                      surface.review_mode(key) != "off" else
+                      "contribution review is off here — every "
+                      "contribution counts as it lands.")
+            return self._card(message, card)
+        if low.startswith("appeal"):
+            parts = raw.split()
+            if len(parts) != 2 or not parts[1].isdigit():
+                return "usage: /contributions appeal <number from your list below>"
+            mine = surface.contributions_of(key, sender)
+            rejected = [e for e in mine
+                        if e.get("state") == "rejected"]
+            idx = int(parts[1]) - 1
+            if not (0 <= idx < len(rejected)):
+                return "no rejected contribution with that number in your list."
+            out = surface.appeal_contribution(
+                key, str(rejected[idx].get("id") or ""), sender)
+            if not out.get("ok"):
+                return {"not_yours": "that one isn't yours.",
+                        "not_rejected": "that one wasn't rejected.",
+                        "appealed": "you already appealed that one — an admin's ruling on an appeal is final.",
+                        }.get(str(out.get("reason") or ""),
+                              "the appeal didn't land.")
+            return ("appeal filed — the contribution is back "
+                    "in the admin review queue; their ruling "
+                    "is final.")
+        mode = surface.review_mode(key)
+        mine = surface.contributions_of(key, sender)
+        member = surface.member(key, sender) or {}
+        counted = int((member.get("contributions") or {}).get(
+            "counted") or 0)
+        lines = [f"📚 *Your contributions* — review mode: "
+                 f"{mode}"]
+        lines.append(f"counted toward the rankers: {counted}")
+        if not mine:
+            lines.append("nothing filed yet — substantive "
+                         "posts (a real point, a source, an "
+                         "answer) are what gets filed.")
+            return "\n".join(lines)
+        pending = [e for e in mine
+                   if e.get("state") == "pending"]
+        rejected = [e for e in mine
+                    if e.get("state") == "rejected"]
+        if pending:
+            lines.append(f"⏳ waiting on review: {len(pending)}")
+        for i, event in enumerate(rejected[-5:], 1):
+            why = "; ".join(event.get("reasons") or []) \
+                or "scored below the bar"
+            appealed = " (appealed)" if event.get("appealed") \
+                else ""
+            lines.append(
+                f"✗ not counted{appealed}: "
+                f"{str(event.get('text') or '')[:60]}… — {why}")
+        if rejected:
+            lines.append("appeal once per item: "
+                         "/contributions appeal <number> — "
+                         "the numbers count your rejected "
+                         "items, oldest first.")
+        return "\n".join(lines)
+
     # ---- the conflict feed (§35 announcements) -------------------
     def _post_conflict_feed(self, surface, key, message) -> None:  # type: ignore[no-untyped-def]
         """Drain the surface's queued conflict announcements
@@ -1210,8 +1795,12 @@ class RuntimeGroupMixin:
         settings = surface.store.settings(key)
         quiet = (settings.get("defense") or {}).get(
             "autonomy", True) is False
-        if quiet or not self._system_send_ok(
-                surface, key, message, "conflict feed"):
+        # Silent hours hold the feed too (P3): the queue stays
+        # put and drains when the room wakes — drop announcements
+        # are games/economy output, never urgent.
+        if quiet or surface.rhythm_silent(key) \
+                or not self._system_send_ok(
+                    surface, key, message, "conflict feed"):
             return
         items = surface.conflict_feed_take(key)
         for item in items:
@@ -1384,6 +1973,17 @@ class RuntimeGroupMixin:
                     "/grant and /approve like admins, and set "
                     "the transfer tax with /gang tax N.")
         everyone.append(
+            "🗳️ polls — /poll <question> | <option> | <option> "
+            "opens one (tap a button or /vote <option number>); "
+            "a treasury poll that passes actually spends — the "
+            "group votes, the treasury moves.")
+        everyone.append(
+            "📚 contributions — substantive posts are what the "
+            "group remembers: /contributions shows yours "
+            "(counted, waiting, not counted — and why), "
+            "/contributions top is the reviewed board, "
+            "/milestones is the group's memory book.")
+        everyone.append(
             "/help /balance — the full page for any command")
         card.block_lines(everyone, title="for everyone:")
         card.block_lines([
@@ -1438,6 +2038,18 @@ class RuntimeGroupMixin:
             "quarantined, channel injections and mass tags are "
             "struck; repeat offenders are muted, kicked, then "
             "banned — all tuned in /gsettings.",
+            "/gsettings rhythm — the room's clock: silent "
+            "hours (system posts hold for a morning digest; "
+            "moderation never holds), the group's own clock "
+            "offset, the nightshield (the door tightens at "
+            "night, drop/war events pause), the daily group "
+            "briefing, reminders, and poll quorum. "
+            "`/gsettings review …` runs §26 contribution "
+            "review (off|auto|assisted|manual + the queue).",
+            "/poll treasury grant @member 500 — a treasury "
+            "poll: it passes with quorum and the grant executes "
+            "through governance on close; it fails, nothing "
+            "moves.",
         ], title="for admins:")
         card.note(
             f"{len(members)} members in my ledger · "
@@ -1794,6 +2406,36 @@ class RuntimeGroupMixin:
                 "rules above do; it only warns, and only about "
                 "what an admin somewhere confirmed",
             ], title="Reputation")
+            # Rhythm block (P3): the room's clock — silent
+            # hours, the nightshield, the briefing, reminders,
+            # poll quorum and the §26 review mode, read from
+            # the same settings the cycle reads.
+            from ...social.chat.group_rhythm import (
+                format_offset as _fmt_offset)
+
+            rhy = s.get("rhythm") or {}
+            rhy_review = (rhy.get("review") or {}).get(
+                "mode", "off")
+            rhy_queue = len(surface.contribution_queue(key))
+            card.block_lines([
+                f"silent hours: "
+                f"{'on' if rhy.get('silent_enabled') else 'off'}"
+                f" · {rhy.get('silent_start', '23:00')}–"
+                f"{rhy.get('silent_end', '07:00')} "
+                f"{_fmt_offset(int(rhy.get('tz_offset_min') or 0))}"
+                f" · nightshield "
+                f"{'on' if rhy.get('nightshield') else 'off'}",
+                f"briefing: "
+                f"{'on' if rhy.get('briefing_enabled') else 'off'}"
+                f" at {rhy.get('briefing_hour', 8)}:00 group "
+                f"time · reminders: "
+                f"{len(rhy.get('reminders') or [])} set, "
+                f"{'on' if rhy.get('reminders_enabled', True) else 'off'}",
+                f"polls: quorum {rhy.get('poll_quorum', 3)} · "
+                f"contribution review (§26): {rhy_review}"
+                + (f" · {rhy_queue} waiting in the queue"
+                   if rhy_queue else ""),
+            ], title="Rhythm")
             card.block_lines([
                 "`/gsettings welcome on|off` · "
                 "`/gsettings goodbye on|off` · "
@@ -1859,6 +2501,20 @@ class RuntimeGroupMixin:
                 "per day, §35) · `/gsettings conflict police "
                 "on|off` · `/gsettings conflict escrow N` (war "
                 "escrow from gang treasuries)",
+                "`/gsettings rhythm on|off` · "
+                "`/gsettings rhythm silent HH:MM HH:MM` · "
+                "`/gsettings rhythm tz +1|+05:30` (the group's "
+                "clock) · `/gsettings rhythm nightshield "
+                "on|off`",
+                "`/gsettings rhythm briefing on|off` · "
+                "`… briefing hour N` · `/gsettings rhythm "
+                "reminders on|off` · `… reminder add HH:MM "
+                "TEXT` · `… reminder rules HH:MM` · "
+                "`… reminder remove N` · "
+                "`/gsettings rhythm quorum N`",
+                "`/gsettings review off|auto|assisted|manual` "
+                "(§26) · `/gsettings review queue` · "
+                "`/gsettings review approve N|reject N`",
             ], title="Change it")
             card.note("tap a button to flip a switch, or type a "
                       "command")
@@ -1921,6 +2577,32 @@ class RuntimeGroupMixin:
             return ("usage: /gsettings conflict "
                     "off|crime|warfare · conflict drops N · "
                     "conflict police on|off · conflict escrow N")
+        if head == "rhythm":
+            # The room's clock (P3): silent hours, timezone,
+            # nightshield, briefing, reminders, poll quorum —
+            # the same helper the DM console's rhythm section
+            # applies.
+            out = self._apply_rhythm_grammar(
+                surface, key, text.split()[1:])
+            if out is not None:
+                return out
+            return ("usage: /gsettings rhythm on|off · rhythm "
+                    "silent HH:MM HH:MM · rhythm tz +1 · rhythm "
+                    "nightshield on|off · rhythm briefing "
+                    "on|off|hour N · rhythm reminder add HH:MM "
+                    "TEXT · rhythm quorum N")
+        if head == "review":
+            # §26 contribution review: the mode and the queue —
+            # the same helper the console's rhythm section
+            # applies.
+            out = self._apply_review_grammar(
+                surface, key, text.split()[1:],
+                by=str(message.sender_id or ""))
+            if out is not None:
+                return out
+            return ("usage: /gsettings review "
+                    "off|auto|assisted|manual · review queue · "
+                    "review approve N · review reject N")
         if head == "warns" and rest.isdigit():
             surface.update_settings(
                 key, warn_threshold=max(1, int(rest)))
@@ -2388,7 +3070,8 @@ class RuntimeGroupMixin:
     _CONSOLE_TTL_S = 1800
     _CONSOLE_SECTIONS = ("defense", "acceptance", "economy",
                          "estate", "presentation", "welcome",
-                         "expression", "reputation", "conflict")
+                         "expression", "reputation", "conflict",
+                         "rhythm")
 
     def _console_session_map(self) -> dict:  # type: ignore[no-untyped-def]
         sessions = getattr(self, "_console_sessions", None)
@@ -2622,6 +3305,14 @@ class RuntimeGroupMixin:
             f"{(s.get('conflict') or {}).get('drops_per_day', 2)}/day"
             f" · police "
             f"{'on' if (s.get('conflict') or {}).get('police', True) else 'off'}",
+            f"rhythm: silent hours "
+            f"{'on' if (s.get('rhythm') or {}).get('silent_enabled') else 'off'}"
+            f" {(s.get('rhythm') or {}).get('silent_start', '23:00')}"
+            f"–{(s.get('rhythm') or {}).get('silent_end', '07:00')}"
+            f" · briefing "
+            f"{'on' if (s.get('rhythm') or {}).get('briefing_enabled') else 'off'}"
+            f" · review "
+            f"{((s.get('rhythm') or {}).get('review') or {}).get('mode', 'off')}",
         ])
         from ...social.chat.expression import buttons_from_spec
 
@@ -2642,7 +3333,9 @@ class RuntimeGroupMixin:
               f"console {token} reputation")],
             [("conflict", "Conflict",
               f"console {token} conflict"),
-             ("back", "All groups", "console")],
+             ("rhythm", "Rhythm",
+              f"console {token} rhythm")],
+            [("back", "All groups", "console")],
         ], settings=s)
         card.note("tap a section, or type its grammar — every "
                   "change lands in the group's /glog with your "
@@ -2919,6 +3612,52 @@ class RuntimeGroupMixin:
             card.block_lines([
                 "`off|crime|warfare` · `drops N` · "
                 "`police on|off` · `escrow N`",
+            ], title="Grammar")
+        elif section == "rhythm":
+            from ...social.chat.group_rhythm import (
+                format_offset as _fmt_offset)
+
+            rhy = s.get("rhythm") or {}
+            queue = surface.contribution_queue(key)
+            held = surface._extras(key).get(
+                "rhythm_held") or []
+            card.block_lines([
+                f"silent hours: "
+                f"{'on' if rhy.get('silent_enabled') else 'off'}"
+                f" · {rhy.get('silent_start', '23:00')}–"
+                f"{rhy.get('silent_end', '07:00')} "
+                f"{_fmt_offset(int(rhy.get('tz_offset_min') or 0))}"
+                f" — system posts hold for one morning digest; "
+                f"moderation never holds"
+                + (f" · {len(held)} post(s) held right now"
+                   if held else ""),
+                f"nightshield: "
+                f"{'on' if rhy.get('nightshield') else 'off'}"
+                f" — the door takes the raid posture at night; "
+                f"drop/war events pause",
+                f"briefing: "
+                f"{'on' if rhy.get('briefing_enabled') else 'off'}"
+                f" at {rhy.get('briefing_hour', 8)}:00 group "
+                f"time · reminders: "
+                f"{len(rhy.get('reminders') or [])} set",
+                f"polls: quorum {rhy.get('poll_quorum', 3)}"
+                f" · §26 review: "
+                f"{(rhy.get('review') or {}).get('mode', 'off')}"
+                + (f" · {len(queue)} contribution(s) waiting "
+                   f"in the queue" if queue else
+                   " · the review queue is empty"),
+            ])
+            card.block_lines([
+                "`on|off` · `silent HH:MM HH:MM` · `tz +1` · "
+                "`nightshield on|off`",
+                "`briefing on|off` · `briefing hour N` · "
+                "`reminders on|off`",
+                "`reminder add HH:MM TEXT` · "
+                "`reminder rules HH:MM` · `reminder remove N` "
+                "· `reminder list`",
+                "`quorum N` · `review "
+                "off|auto|assisted|manual` · `review queue` · "
+                "`review approve N` · `review reject N`",
             ], title="Grammar")
         buttons += buttons_from_spec(
             [[("back", "Sections", f"console {token}"),
@@ -3230,6 +3969,15 @@ class RuntimeGroupMixin:
             # Same rule (§23): the console's words are the
             # gsettings grammar.
             return self._apply_conflict_grammar(
+                surface, key, list(words))
+        if section == "rhythm":
+            # Same rule (P3): the console's rhythm words are the
+            # gsettings grammar — `review …` lines route to the
+            # §26 grammar, everything else to rhythm's.
+            if head == "review":
+                return self._apply_review_grammar(
+                    surface, key, list(words[1:]), by=sender)
+            return self._apply_rhythm_grammar(
                 surface, key, list(words))
         return None
 

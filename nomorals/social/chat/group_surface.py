@@ -80,6 +80,21 @@ from .group_reputation import (
 from .group_defense import (
     DEFAULTS as DEFENSE_DEFAULTS,
 )
+from .group_rhythm import (
+    BORDERLINE_SCORE,
+    CLEAR_SCORE,
+    CONTRIBUTION_RING,
+    GROUP_MESSAGE_MILESTONES,
+    HELD_RING,
+    MEMBER_MESSAGE_MILESTONES,
+    RHYTHM_DEFAULTS,
+    day_window as _rhythm_day_window,
+    in_window as _rhythm_in_window,
+    is_contribution_candidate,
+    local_parts as _rhythm_local_parts,
+    parse_hhmm as _rhythm_parse_hhmm,
+    score_contribution,
+)
 from .expression import EXPRESSION_DEFAULTS
 from .typography import DEFAULT_PRESENTATION, notice_line, sparks
 from .group_defense import (
@@ -216,6 +231,13 @@ def _default_settings() -> dict[str, Any]:
                                         # record never decides
                                         # admission itself.
         "conflict": copy.deepcopy(CONFLICT_DEFAULTS),
+        "rhythm": copy.deepcopy(RHYTHM_DEFAULTS),
+                                        # the room's clock (P3):
+                                        # silent hours + UTC
+                                        # offset, nightshield,
+                                        # the group briefing,
+                                        # reminders, poll
+                                        # defaults, §26 review
                                         # the conflict layer
                                         # (§23/§24/§35): mode
                                         # off|crime|warfare, the
@@ -291,7 +313,7 @@ class GroupStore:
                                      "estate", "acceptance",
                                      "escalation", "system_claim",
                                      "expression", "reputation",
-                                     "conflict")})
+                                     "conflict", "rhythm")})
         mod = dict(merged["moderation"])
         mod.update((stored.get("moderation") or {}))
         merged["moderation"] = mod
@@ -322,6 +344,9 @@ class GroupStore:
         merged["conflict"] = _deep_merge(
             copy.deepcopy(CONFLICT_DEFAULTS),
             stored.get("conflict") or {})
+        merged["rhythm"] = _deep_merge(
+            copy.deepcopy(RHYTHM_DEFAULTS),
+            stored.get("rhythm") or {})
         return merged
 
 
@@ -585,6 +610,7 @@ class GroupSurface:
         member = entry["members"][user_id]
         member["joined_ts"] = now
         member["left_ts"] = None
+        self._rhythm_count(group_key, "joins", now)
         if last_name:
             member["last_name"] = last_name
         if is_bot:
@@ -645,6 +671,7 @@ class GroupSurface:
         member = entry["members"].get(user_id)
         if member is not None:
             member["left_ts"] = now
+        self._rhythm_count(group_key, "leaves", now)
         self._audit(group_key, "leave", user_id=user_id)
         self.store.save()
         settings = self.store.settings(group_key)
@@ -694,7 +721,13 @@ class GroupSurface:
                     cfg.get("raid_cooldown_s") or 600)
         else:
             state["recent_joins"] = recent
-        return now < float(state.get("raid_until") or 0)
+        if now < float(state.get("raid_until") or 0):
+            return True
+        # The nightshield (P3) rides this same posture: while
+        # it is up, every acceptance decision reads raid — an
+        # open door behaves as a request door and grace shrinks
+        # (effective_cfg), with the CRITERIA unchanged.
+        return self.rhythm_nightshield(group_key, now=now)
 
     def acceptance_cfg(self, group_key: str, *,
                        now: float | None = None
@@ -1393,6 +1426,10 @@ class GroupSurface:
                     "_strike_count": count, "_strike_rule": rule})
             return count
 
+        msg_text = text  # finish() assigns its own `text`
+        # below (the acceptance notice) — the rhythm beat reads
+        # the message through this alias.
+
         def finish(blocked: bool) -> dict[str, Any]:
             # A designed fine step is collected BEFORE the
             # warning is composed, so the notice only ever claims
@@ -1492,6 +1529,42 @@ class GroupSurface:
                 # self-gates on mode, claim and freeze.
                 notices.extend(self.conflict_cycle(group_key,
                                                    now=now))
+                # The rhythm beat (P3): the day counter, the
+                # §26 contribution read on this surviving
+                # message, and the rhythm cycle itself — polls
+                # closing, milestones, reminders, the briefing,
+                # the morning digest.
+                if self.system_output_allowed(group_key):
+                    # §33: rhythm state (day shape, contribution
+                    # events) is bot-system state — it accrues in
+                    # claimed rooms only, like every other organ.
+                    self._rhythm_count(group_key, "messages",
+                                       now)
+                    self._note_contribution(
+                        group_key, user_id, msg_text,
+                        has_media=bool(getattr(env, "media",
+                                               None)),
+                        has_link=("http" in msg_text
+                                  or "t.me/" in msg_text
+                                  or any(e.get("type") == "url"
+                                         for e in (getattr(
+                                             env, "entities",
+                                             None) or []))),
+                        now=now)
+                notices.extend(self.rhythm_cycle(group_key,
+                                                 now=now))
+                if notices and self.rhythm_silent(group_key,
+                                                   now=now):
+                    # Silent hours: non-urgent SYSTEM output is
+                    # held for the morning digest.  Moderation
+                    # never travels this list — warnings ride the
+                    # actions and their §31 notices — and the
+                    # acceptance warning below is enforcement
+                    # too: neither is ever held.
+                    for held_text in notices:
+                        self.rhythm_hold(group_key, "cycle",
+                                         held_text, now=now)
+                    notices = []
                 # Acceptance grace expiries ride the same cycle:
                 # kick-action graces remove, profile warnings
                 # engage their restriction.  (When autonomy is
@@ -2518,6 +2591,22 @@ class GroupSurface:
             return {"ok": False, "reason": "no_proposal"}
         if proposal.get("by") == by:
             return {"ok": False, "reason": "self_approve"}
+        return self._execute_proposal(group_key, proposal_id,
+                                      by=by, now=now)
+
+    def _execute_proposal(self, group_key: str, proposal_id: str,
+                          *, by: str,
+                          now: float) -> dict[str, Any]:
+        """The one execution path for governance proposals —
+        an admin's approve and a passed treasury poll both land
+        here, so a poll's execution journals exactly like any
+        other governance act (``proposal_executed``, by = the
+        approver or ``poll <ref>``)."""
+        proposals = self._extras(group_key).setdefault(
+            "proposals", {})
+        proposal = proposals.get(proposal_id)
+        if not proposal or not proposal.get("open"):
+            return {"ok": False, "reason": "no_proposal"}
         payload = proposal.get("payload") or {}
         if proposal["kind"] == "grant":
             out = self.grant(group_key, str(payload["recipient"]),
@@ -4461,6 +4550,10 @@ class GroupSurface:
         if self.conflict_frozen(group_key) is not None:
             return notices
         cfg = self.conflict_cfg(group_key)
+        # Nightshield (P3): while it is up, war rounds and drop
+        # openings pause — the street sleeps; territory income and
+        # the police sweep are bookkeeping, not events, and run.
+        shield = self.rhythm_nightshield(group_key, now=now)
         organ = self.conflict
         extras = self._extras(group_key)
         state = organ._load_state(group_key)
@@ -4474,8 +4567,8 @@ class GroupSurface:
             extras["conflict_cycle_at"] = now
             free = self.economy.treasury_balance(group_key) \
                 - self.reserved_treasury(group_key)
-            for event in organ.cycle_wars(
-                    group_key, rng=rng, now=now, cfg=cfg):
+            for event in ([] if shield else organ.cycle_wars(
+                    group_key, rng=rng, now=now, cfg=cfg)):
                 war = event.get("war") or {}
                 gangs = state.get("gangs") or {}
                 name_a = (gangs.get(str(war.get("a"))) or {}).get(
@@ -4541,7 +4634,7 @@ class GroupSurface:
         budget = int(cfg.get("drops_per_day") or 0)
         open_now = sum(1 for d in (state.get("drops") or {})
                        .values() if d.get("status") == "open")
-        if budget > 0 and open_now == 0 and float(
+        if not shield and budget > 0 and open_now == 0 and float(
                 rng.random()) < float(cfg.get("drop_chance")
                                       or 0.25):
             drop = organ.open_drop(group_key, rng=rng, now=now,
@@ -4775,6 +4868,922 @@ class GroupSurface:
             card.line("Links: only allowlisted domains are "
                       "permitted.")
         return self._card_render(group_key, card)
+
+
+    # ---- the rhythm layer (P3: §30/§31/§26) --------------------
+    # The room's clock.  Everything periodic rides the existing
+    # message-driven cycle (handle_message → rhythm_cycle); there
+    # is no new daemon.  State lives in the store with the group:
+    # settings under settings["rhythm"], the working state under
+    # extras (rhythm_held / rhythm_days / rhythm_state / polls /
+    # contributions / memory).
+
+    def rhythm_cfg(self, group_key: str) -> dict[str, Any]:
+        return dict(self.store.settings(group_key)["rhythm"])
+
+    def rhythm_local(self, group_key: str,
+                     ts: float) -> dict[str, Any]:
+        cfg = self.rhythm_cfg(group_key)
+        return _rhythm_local_parts(
+            ts, int(cfg.get("tz_offset_min") or 0))
+
+    def _rhythm_window_open(self, group_key: str,
+                            now: float) -> bool:
+        cfg = self.rhythm_cfg(group_key)
+        parts = self.rhythm_local(group_key, now)
+        return _rhythm_in_window(
+            parts["minute"],
+            _rhythm_parse_hhmm(cfg.get("silent_start")),
+            _rhythm_parse_hhmm(cfg.get("silent_end")))
+
+    def rhythm_silent(self, group_key: str, *,
+                      now: float | None = None) -> bool:
+        """Silent hours are up: non-urgent system output holds
+        for the morning digest.  (Moderation never consults this
+        — enforcement is not scheduled.)"""
+        now = now if now is not None else time.time()
+        if not self.rhythm_cfg(group_key).get("silent_enabled"):
+            return False
+        return self._rhythm_window_open(group_key, now)
+
+    def rhythm_nightshield(self, group_key: str, *,
+                           now: float | None = None) -> bool:
+        """The nightshield rides the silent-hours WINDOW (the
+        group's night) but is its own switch: posture tightens
+        and drop/war events pause while it is up."""
+        now = now if now is not None else time.time()
+        if not self.rhythm_cfg(group_key).get("nightshield"):
+            return False
+        return self._rhythm_window_open(group_key, now)
+
+    def rhythm_hold(self, group_key: str, kind: str, text: str,
+                    *, now: float | None = None) -> None:
+        """Queue one system post for the morning digest."""
+        now = now if now is not None else time.time()
+        held = self._extras(group_key).setdefault(
+            "rhythm_held", [])
+        held.append({"ts": now, "kind": str(kind),
+                     "text": str(text)})
+        del held[:-HELD_RING]
+        self._audit(group_key, "rhythm_held", held_kind=str(kind),
+                    queued=len(held))
+        self.store.save()
+
+    def _rhythm_count(self, group_key: str, field: str,
+                      ts: float) -> None:
+        """One tick on the group's local-day shape counters —
+        the briefing's raw material, straight from the ledger
+        events (message survived / join / leave)."""
+        day = self.rhythm_local(group_key, ts)["day"]
+        days = self._extras(group_key).setdefault(
+            "rhythm_days", {})
+        row = days.setdefault(
+            day, {"messages": 0, "joins": 0, "leaves": 0})
+        row[field] = int(row.get(field) or 0) + 1
+        for old in sorted(days)[:-10]:
+            days.pop(old, None)
+
+    def rhythm_cycle(self, group_key: str, *,
+                     now: float | None = None) -> list[str]:
+        """The rhythm beat on the message cycle: release the
+        digest when the quiet ends, close due polls (treasury
+        polls execute through governance), detect milestones,
+        fire due reminders, post the briefing at its hour, and —
+        weekly, when §26 review is on — surface the reviewed
+        rankers as a gift proposal for admins to decide.
+        Claimed rooms only (§33): abroad, rhythm neither speaks
+        nor accrues."""
+        now = now if now is not None else time.time()
+        if not self.system_output_allowed(group_key):
+            return []
+        extras = self._extras(group_key)
+        last = float(extras.get("rhythm_cycle_at") or 0)
+        if now - last < 60:
+            return []
+        extras["rhythm_cycle_at"] = now
+        cfg = self.rhythm_cfg(group_key)
+        out: list[str] = []
+        if not self.rhythm_silent(group_key, now=now):
+            held = list(extras.get("rhythm_held") or [])
+            if held:
+                extras["rhythm_held"] = []
+                out.append(self._rhythm_digest_text(held))
+                self._audit(group_key, "rhythm_released",
+                            items=len(held))
+        for poll in list((extras.get("polls") or {}).values()):
+            if not poll.get("closed") and float(
+                    poll.get("closes_at") or 0) <= now:
+                out.append(self._close_poll(group_key, poll,
+                                            now=now))
+        for entry in self._detect_milestones(group_key, now):
+            out.append(str(entry["text"]))
+        if cfg.get("reminders_enabled"):
+            out.extend(self._fire_reminders(group_key, cfg,
+                                            now))
+        if cfg.get("briefing_enabled"):
+            text = self._briefing_if_due(group_key, cfg, now)
+            if text:
+                out.append(text)
+        gift = self._gift_proposal_if_due(group_key, cfg, now)
+        if gift:
+            out.append(gift)
+        self.store.save()
+        return [text for text in out if text]
+
+    def _rhythm_digest_text(self, held: list[dict[str, Any]]
+                            ) -> str:
+        lines = [f"🌅 <b>While the room was quiet</b> — "
+                 f"{len(held)} post(s) held for the morning:"]
+        for item in held:
+            lines.append(str(item.get("text") or ""))
+        return "\n\n".join(lines)
+
+    # -- reminders (§31 cards on the rhythm tick) ----------------
+
+    def _fire_reminders(self, group_key: str,
+                        cfg: dict[str, Any],
+                        now: float) -> list[str]:
+        parts = self.rhythm_local(group_key, now)
+        state = self._extras(group_key).setdefault(
+            "rhythm_state", {})
+        fired = state.setdefault("reminders_fired", {})
+        out: list[str] = []
+        for reminder in cfg.get("reminders") or []:
+            rid = str(reminder.get("id") or "")
+            if not rid:
+                continue
+            days = reminder.get("days") or []
+            if days and parts["weekday"] not in days:
+                continue
+            due = _rhythm_parse_hhmm(reminder.get("time"))
+            if due is None or parts["minute"] < due:
+                continue
+            if fired.get(rid) == parts["day"]:
+                continue
+            fired[rid] = parts["day"]
+            self._audit(group_key, "reminder_fired", reminder=rid)
+            if reminder.get("kind") == "rules":
+                out.append(self.rules_text(group_key))
+            else:
+                out.append(notice_line(
+                    "⏰", str(reminder.get("text") or "")))
+        return out
+
+    # -- the group briefing ---------------------------------------
+
+    def _briefing_if_due(self, group_key: str,
+                         cfg: dict[str, Any],
+                         now: float) -> str:
+        parts = self.rhythm_local(group_key, now)
+        if parts["hour"] < int(cfg.get("briefing_hour") or 8):
+            return ""
+        state = self._extras(group_key).setdefault(
+            "rhythm_state", {})
+        if state.get("briefing_day") == parts["day"]:
+            return ""
+        state["briefing_day"] = parts["day"]
+        self._audit(group_key, "briefing_posted",
+                    day=parts["day"])
+        return self.compose_briefing(group_key, now=now)
+
+    def compose_briefing(self, group_key: str, *,
+                         now: float | None = None) -> str:
+        """Yesterday's shape, from the store's real ledgers
+        only: day counters, counted contributions, the economy
+        ledger, territory as it stands (with flips since the
+        last briefing), yesterday's milestones, today's
+        reminders.  No data → an honest short card."""
+        from .typography import Card
+
+        now = now if now is not None else time.time()
+        cfg = self.rhythm_cfg(group_key)
+        offset = int(cfg.get("tz_offset_min") or 0)
+        parts = _rhythm_local_parts(now, offset)
+        yday = _rhythm_local_parts(now - 86400, offset)["day"]
+        start, end = _rhythm_day_window(yday, offset)
+        extras = self._extras(group_key)
+        counts = (extras.get("rhythm_days") or {}).get(
+            yday) or {}
+        card = Card("announcement", title=f"Yesterday — {yday}",
+                    icon="🌅")
+        messages = int(counts.get("messages") or 0)
+        joins = int(counts.get("joins") or 0)
+        leaves = int(counts.get("leaves") or 0)
+        if messages or joins or leaves:
+            card.stats([
+                ("Messages", f"{messages:,}"),
+                ("Joined", f"{joins:,}"),
+                ("Left", f"{leaves:,}"),
+            ], title="The room")
+        # top contributors: counted contribution events in the
+        # window (post-§26 review, whatever the group's mode).
+        per_member: dict[str, int] = {}
+        for event in extras.get("contributions") or []:
+            if event.get("state") != "counted":
+                continue
+            if start <= float(event.get("ts") or 0) < end:
+                uid = str(event.get("user_id") or "")
+                per_member[uid] = per_member.get(uid, 0) + 1
+        if per_member:
+            top = sorted(per_member.items(),
+                         key=lambda kv: -kv[1])[:3]
+            card.block_lines(
+                [f"{self._member_label(group_key, uid)} — "
+                 f"{n} counted contribution(s)"
+                 for uid, n in top],
+                title="Top contributors")
+        # economy movement from the ledger itself.
+        econ = self.economy
+        treasury_delta = 0
+        earners: dict[str, int] = {}
+        try:
+            ledger = econ._ledger(group_key)
+        except Exception:
+            ledger = []  # a frozen ledger reads as no movement,
+            # never as invented movement (the freeze itself is
+            # surfaced by the economy's own paths)
+        for entry in ledger:
+            ts = float(getattr(entry, "ts", 0) or 0)
+            if not (start <= ts < end):
+                continue
+            amount = int(getattr(entry, "amount", 0) or 0)
+            member = str(getattr(entry, "member", "") or "")
+            if member == "":
+                treasury_delta += amount
+            elif amount > 0 and not econ.is_pseudo_member(
+                    member):
+                earners[member] = earners.get(member, 0) + amount
+        econ_lines = []
+        if treasury_delta:
+            econ_lines.append(
+                f"Treasury {'+' if treasury_delta > 0 else ''}"
+                f"{treasury_delta:,} sparks")
+        if earners:
+            uid, amount = max(earners.items(),
+                              key=lambda kv: kv[1])
+            econ_lines.append(
+                f"Top earner: "
+                f"{self._member_label(group_key, uid)} "
+                f"(+{amount:,} sparks)")
+        if econ_lines:
+            card.block_lines(econ_lines, title="Economy")
+        # territory as it stands + flips since the last briefing
+        terr_lines = self._briefing_territory(group_key)
+        if terr_lines:
+            card.block_lines(terr_lines, title="Territory")
+        # yesterday's milestones
+        book = extras.get("memory") or {}
+        yday_ms = [e for e in book.get("entries") or []
+                   if start <= float(e.get("ts") or 0) < end]
+        if yday_ms:
+            card.block_lines(
+                [str(e.get("text") or "") for e in yday_ms[-3:]],
+                title="Milestones")
+        # today's reminders
+        today = [r for r in cfg.get("reminders") or []
+                 if cfg.get("reminders_enabled")
+                 and (not (r.get("days") or [])
+                      or parts["weekday"] in (r.get("days")
+                                              or []))]
+        if today:
+            card.block_lines(
+                [f"{r.get('time')} — "
+                 + ("the group rules card"
+                    if r.get("kind") == "rules"
+                    else str(r.get("text") or ""))
+                 for r in today],
+                title="Today's reminders")
+        if not (messages or joins or leaves or per_member
+                or econ_lines or terr_lines or yday_ms):
+            card.line("A quiet day — nothing on the ledgers "
+                      "yet. The room's story starts with its "
+                      "first busy day.")
+        return self._card_render(group_key, card)
+
+    def _briefing_territory(self, group_key: str) -> list[str]:
+        """Current district holders + flips since the last
+        briefing's snapshot (the snapshot diff is the honest
+        'changes' read — no invented history)."""
+        if self._conflict_mode(group_key) == "off":
+            return []
+        try:
+            state = self.conflict._load_state(group_key)
+        except Exception:
+            return []
+        gangs = state.get("gangs") or {}
+        current: dict[str, str] = {}
+        for district, hold in (state.get("territory")
+                               or {}).items():
+            gid = str((hold or {}).get("gang") or "")
+            name = (gangs.get(gid) or {}).get("name") or gid
+            if name:
+                current[str(district)] = str(name)
+        rstate = self._extras(group_key).setdefault(
+            "rhythm_state", {})
+        seen = rstate.get("territory_seen")
+        rstate["territory_seen"] = current
+        if not current:
+            return []
+        lines = []
+        for district, name in sorted(current.items()):
+            label = DISTRICTS.get(district, district)
+            label = label["name"] if isinstance(
+                label, dict) else str(label)
+            mark = ""
+            if isinstance(seen, dict) and district in seen \
+                    and seen[district] != name:
+                mark = f" (new — was {seen[district]})"
+            lines.append(f"{label} — {name}{mark}")
+        return lines
+
+
+    # -- executing polls ------------------------------------------
+    # One counting core in the surface.  No adapter exposes a
+    # native poll verb today (checked: telegram / whatsapp /
+    # discord), so every platform renders the house button-card
+    # poll — buttons where the platform has them, /vote numbers
+    # where it does not — and this core counts either way.
+
+    def lapse_proposal(self, group_key: str, proposal_id: str,
+                       *, by: str,
+                       now: float | None = None) -> None:
+        """Close an open proposal WITHOUT executing it (a
+        treasury poll that failed or missed quorum): the money
+        never moved, and the journal says why it closed."""
+        now = now if now is not None else time.time()
+        proposals = self._extras(group_key).setdefault(
+            "proposals", {})
+        proposal = proposals.get(proposal_id)
+        if proposal and proposal.get("open"):
+            proposal["open"] = False
+            proposal["lapsed_by"] = by
+            self._audit(group_key, "proposal_lapsed",
+                        proposal=proposal_id, by=by)
+            self.store.save()
+
+    def create_poll(self, group_key: str, *, question: str,
+                    options: list[str], by: str,
+                    kind: str = "opinion",
+                    action: dict[str, Any] | None = None,
+                    quorum: int | None = None,
+                    duration_s: float | None = None,
+                    changeable: bool = False,
+                    now: float | None = None) -> dict[str, Any]:
+        """Open a poll.  A TREASURY poll first opens its real
+        governance proposal — the poll IS the vote on that
+        proposal, and passing executes it through the same path
+        an admin's approve takes."""
+        now = now if now is not None else time.time()
+        cfg = self.rhythm_cfg(group_key)
+        options = [str(o).strip()[:80] for o in options
+                   if str(o).strip()][:6]
+        if len(options) < 2:
+            return {"ok": False, "reason": "options"}
+        extras = self._extras(group_key)
+        seq = int(extras.get("poll_seq") or 0) + 1
+        poll: dict[str, Any] = {
+            "id": f"poll-{seq}", "question": str(question)[:300],
+            "options": options, "by": by, "kind": kind,
+            "quorum": int(quorum if quorum is not None
+                          else cfg.get("poll_quorum") or 3),
+            "changeable": bool(changeable),
+            "created": now,
+            "closes_at": now + float(
+                duration_s or cfg.get("poll_duration_s")
+                or 86400),
+            "votes": {}, "closed": False, "result": None,
+        }
+        if kind == "treasury":
+            action = action or {}
+            proposal = self.propose_spend(
+                group_key,
+                kind=str(action.get("kind") or "grant"),
+                payload=dict(action.get("payload") or {}),
+                by=by, now=now)
+            if not proposal.get("id"):
+                return {"ok": False, "reason": "proposal"}
+            poll["proposal_id"] = proposal["id"]
+            poll["action"] = action
+        extras["poll_seq"] = seq
+        extras.setdefault("polls", {})[poll["id"]] = poll
+        self._audit(group_key, "poll_created", ref=poll["id"],
+                    poll_kind=kind, by=by)
+        self.store.save()
+        return {"ok": True, "poll": poll}
+
+    def polls(self, group_key: str, *,
+              open_only: bool = False) -> list[dict[str, Any]]:
+        polls = list((self._extras(group_key).get("polls")
+                      or {}).values())
+        polls.sort(key=lambda p: float(p.get("created") or 0))
+        if open_only:
+            polls = [p for p in polls if not p.get("closed")]
+        return polls
+
+    def get_poll(self, group_key: str,
+                 ref: str) -> dict[str, Any] | None:
+        return (self._extras(group_key).get("polls")
+                or {}).get(str(ref))
+
+    def vote_poll(self, group_key: str, ref: str, user_id: str,
+                  option_index: int, *,
+                  now: float | None = None) -> dict[str, Any]:
+        """One vote per member.  Changing a vote before close is
+        allowed only when the poll was opened as changeable."""
+        now = now if now is not None else time.time()
+        poll = self.get_poll(group_key, ref) if ref else None
+        if poll is None:
+            open_polls = self.polls(group_key, open_only=True)
+            poll = open_polls[-1] if open_polls else None
+        if poll is None:
+            return {"ok": False, "reason": "no_poll"}
+        if poll.get("closed") or now >= float(
+                poll.get("closes_at") or 0):
+            return {"ok": False, "reason": "closed"}
+        idx = int(option_index)
+        if idx < 0 or idx >= len(poll.get("options") or []):
+            return {"ok": False, "reason": "option"}
+        votes = poll.setdefault("votes", {})
+        existing = votes.get(user_id)
+        if existing is not None and int(existing) != idx \
+                and not poll.get("changeable"):
+            return {"ok": False, "reason": "locked",
+                    "poll": poll}
+        votes[user_id] = idx
+        self._audit(group_key, "poll_vote", ref=poll["id"],
+                    user_id=user_id)
+        self.store.save()
+        return {"ok": True, "poll": poll,
+                "changed": existing is not None}
+
+    def close_poll(self, group_key: str, ref: str, *,
+                   by: str,
+                   now: float | None = None) -> dict[str, Any]:
+        """Close a poll NOW (its creator or an admin — the
+        handler checks) and settle it like a deadline close."""
+        now = now if now is not None else time.time()
+        poll = self.get_poll(group_key, ref)
+        if poll is None:
+            return {"ok": False, "reason": "no_poll"}
+        if poll.get("closed"):
+            return {"ok": False, "reason": "closed"}
+        text = self._close_poll(group_key, poll, now=now)
+        self.store.save()
+        return {"ok": True, "poll": poll, "text": text}
+
+    def _poll_tally(self, poll: dict[str, Any]) -> list[int]:
+        counts = [0] * len(poll.get("options") or [])
+        for idx in (poll.get("votes") or {}).values():
+            idx = int(idx)
+            if 0 <= idx < len(counts):
+                counts[idx] += 1
+        return counts
+
+    def _close_poll(self, group_key: str, poll: dict[str, Any],
+                    *, now: float) -> str:
+        poll["closed"] = True
+        poll["closed_at"] = now
+        counts = self._poll_tally(poll)
+        total = sum(counts)
+        lines = [f"🗳️ <b>Poll closed</b> — {poll['question']}"]
+        for i, option in enumerate(poll.get("options") or []):
+            lines.append(f"• {option} — {counts[i]} vote(s)")
+        if poll.get("kind") == "treasury":
+            yes, no = counts[0], counts[1]
+            quorum = int(poll.get("quorum") or 3)
+            passed = yes > no and total >= quorum
+            executed = False
+            if passed:
+                out = self._execute_proposal(
+                    group_key, str(poll.get("proposal_id") or ""),
+                    by=f"poll {poll['id']}", now=now)
+                executed = bool(out.get("ok"))
+                if not executed:
+                    self._audit(
+                        group_key, "poll_execution_failed",
+                        ref=poll["id"],
+                        reason=str(out.get("reason") or ""))
+            else:
+                self.lapse_proposal(
+                    group_key, str(poll.get("proposal_id") or ""),
+                    by=f"poll {poll['id']}", now=now)
+            poll["result"] = {"counts": counts, "total": total,
+                              "passed": passed,
+                              "executed": executed}
+            self._audit(group_key, "poll_closed",
+                        ref=poll["id"], poll_kind="treasury",
+                        passed=passed, executed=executed,
+                        votes=total)
+            action = poll.get("action") or {}
+            payload = action.get("payload") or {}
+            if executed:
+                lines.append(
+                    f"✅ Passed ({total} votes, quorum {quorum})"
+                    f" — executed: "
+                    f"{int(payload.get('amount') or 0):,} sparks "
+                    f"to "
+                    f"{self._member_label(group_key, str(payload.get('recipient') or ''))}.")
+            elif passed:
+                lines.append(
+                    "⚠️ The vote passed but the execution "
+                    "failed — nothing moved; the journal has "
+                    "the reason and an admin can re-propose.")
+            else:
+                lines.append(
+                    f"❌ Did not pass ({total} votes, quorum "
+                    f"{quorum}) — nothing was spent.")
+        else:
+            best = max(counts) if counts else 0
+            winners = [poll["options"][i]
+                       for i, c in enumerate(counts) if c == best]
+            poll["result"] = {"counts": counts, "total": total,
+                              "winners": winners}
+            self._audit(group_key, "poll_closed",
+                        ref=poll["id"], poll_kind="opinion",
+                        votes=total)
+            if total == 0:
+                lines.append("No votes were cast.")
+            elif len(winners) == 1:
+                lines.append(f"🏆 <b>{winners[0]}</b> wins.")
+            else:
+                lines.append(
+                    "🤝 A tie between "
+                    + " and ".join(f"<b>{w}</b>" for w in winners)
+                    + ".")
+        return "\n".join(lines)
+
+    # -- group memory + milestones --------------------------------
+
+    def memory_book(self, group_key: str) -> dict[str, Any]:
+        return self._extras(group_key).setdefault(
+            "memory", {"seen": {}, "entries": [], "records": {}})
+
+    def milestones(self, group_key: str, *,
+                   limit: int = 10) -> list[dict[str, Any]]:
+        entries = self.memory_book(group_key).get(
+            "entries") or []
+        return list(reversed(entries))[:limit]
+
+    def _milestone_truths(self, group_key: str, now: float,
+                          book: dict[str, Any]
+                          ) -> list[dict[str, Any]]:
+        """Everything the ledgers can prove is true RIGHT NOW,
+        as (key, kind, text, user_id) milestone candidates.  The
+        seen-set decides which are news."""
+        out: list[dict[str, Any]] = []
+        members = self.members(group_key)
+        total = sum(int(m.get("message_count") or 0)
+                    for m in members.values())
+        for th in reversed(GROUP_MESSAGE_MILESTONES):
+            if total >= th:
+                out.append({
+                    "key": f"group_msgs:{th}", "kind": "messages",
+                    "text": f"🎉 The group just passed "
+                            f"{th:,} messages together.",
+                    "user_id": ""})
+                break
+        for uid, member in members.items():
+            count = int(member.get("message_count") or 0)
+            for th in reversed(MEMBER_MESSAGE_MILESTONES):
+                if count >= th:
+                    out.append({
+                        "key": f"member_msgs:{uid}:{th}",
+                        "kind": "member_messages",
+                        "text": f"🎉 "
+                                f"{self._member_label(group_key, uid)}"
+                                f" just passed {th:,} messages "
+                                f"in this group.",
+                        "user_id": uid})
+                    break
+            joined = float(member.get("joined_ts") or 0)
+            if joined:
+                years = int((now - joined) // (365.25 * 86400))
+                if years >= 1:
+                    out.append({
+                        "key": f"anniv:{uid}:{years}",
+                        "kind": "anniversary",
+                        "text": f"🎂 "
+                                f"{self._member_label(group_key, uid)}"
+                                f" has been with this group for "
+                                f"{years} year"
+                                f"{'s' if years != 1 else ''}.",
+                        "user_id": uid})
+        # economy records: richest balance + biggest heist are
+        # RECORDS — a truth only when the standing record falls.
+        records = book.setdefault("records", {})
+        econ = self.economy
+        try:
+            balances = econ.balances(group_key)
+        except Exception:
+            balances = {}
+        best_uid, best_total = "", 0
+        for uid, wallet in balances.items():
+            if not uid or econ.is_pseudo_member(uid):
+                continue
+            total_bal = int(wallet) + int(
+                econ.bank_balance(group_key, uid))
+            if total_bal > best_total:
+                best_uid, best_total = uid, total_bal
+        standing = records.get("richest") or {}
+        if best_total > int(standing.get("total") or 0):
+            out.append({
+                "key": f"richest:{best_uid}:{best_total}",
+                "kind": "richest", "user_id": best_uid,
+                "text": f"👑 "
+                        f"{self._member_label(group_key, best_uid)}"
+                        f" now holds the richest balance this "
+                        f"group has seen: {best_total:,} sparks.",
+                "record": {"richest": {"user_id": best_uid,
+                                       "total": best_total}}})
+        if self._conflict_mode(group_key) != "off":
+            try:
+                state = self.conflict._load_state(group_key)
+            except Exception:
+                state = {}
+            if state.get("gangs"):
+                out.append({
+                    "key": "first_gang", "kind": "first_gang",
+                    "user_id": "",
+                    "text": "🏴 The group's first gang has "
+                            "formed."})
+            if state.get("wars"):
+                out.append({
+                    "key": "first_war", "kind": "first_war",
+                    "user_id": "",
+                    "text": "⚔️ The group's first war is on."})
+            takes = [int(e.get("take") or 0)
+                     for e in state.get("journal") or []
+                     if e.get("kind") == "heist"]
+            standing_heist = int(records.get("heist") or 0)
+            if takes and max(takes) > standing_heist:
+                top_take = max(takes)
+                out.append({
+                    "key": f"heist:{top_take}", "kind": "heist",
+                    "user_id": "",
+                    "text": f"💰 Biggest heist yet: "
+                            f"{top_take:,} sparks taken in one "
+                            f"run.",
+                    "record": {"heist": top_take}})
+        return out
+
+    def _detect_milestones(self, group_key: str, now: float
+                           ) -> list[dict[str, Any]]:
+        """Record what the ledgers newly prove.  The FIRST pass
+        for a group seeds silently: everything already true is
+        marked seen and the records baselined, so the book never
+        announces a past it didn't witness — milestones accrue
+        from this build forward, seeded only from facts the
+        ledger already proves."""
+        book = self.memory_book(group_key)
+        seen = book.setdefault("seen", {})
+        truths = self._milestone_truths(group_key, now, book)
+        if not book.get("seeded"):
+            book["seeded"] = True
+            for truth in truths:
+                seen[truth["key"]] = True
+                for rkey, rvalue in (
+                        truth.get("record") or {}).items():
+                    book["records"][rkey] = rvalue
+            # a group whose richest/heist records predate the
+            # book still baselines them (no announcement).
+            if truths:
+                self._audit(group_key, "memory_seeded",
+                            facts=len(truths))
+            return []
+        new: list[dict[str, Any]] = []
+        for truth in truths:
+            if truth["key"] in seen:
+                continue
+            seen[truth["key"]] = True
+            for rkey, rvalue in (truth.get("record")
+                                 or {}).items():
+                book["records"][rkey] = rvalue
+            entry = {"key": truth["key"], "kind": truth["kind"],
+                     "text": truth["text"], "ts": now,
+                     "user_id": truth.get("user_id") or ""}
+            book.setdefault("entries", []).append(entry)
+            new.append(entry)
+            self._audit(group_key, "milestone",
+                        mkind=truth["kind"], key=truth["key"])
+        return new
+
+    # -- §26 contribution review -----------------------------------
+
+    def review_mode(self, group_key: str) -> str:
+        review = self.rhythm_cfg(group_key).get("review") or {}
+        mode = str(review.get("mode") or "off")
+        return mode if mode in ("off", "auto", "assisted",
+                                "manual") else "off"
+
+    def _note_contribution(self, group_key: str, user_id: str,
+                           text: str, *, has_media: bool,
+                           has_link: bool,
+                           now: float) -> dict[str, Any] | None:
+        """Score one surviving message as a §26 contribution
+        candidate and file it under the group's review mode.
+        Counted events feed the contribution rankers and the
+        briefing; the member's durable counted total lives on
+        their ledger record, so the ranker survives the event
+        ring."""
+        text = str(text or "")
+        if not text or text.startswith("/"):
+            return None
+        if not is_contribution_candidate(
+                text, has_media=has_media, has_link=has_link):
+            return None
+        member = self.member(group_key, user_id)
+        if member is None:
+            return None
+        own = list(member.get("contribution_texts") or [])
+        recent = [str(item.get("text") or "")
+                  for item in list(self._msg_cache.get(
+                      group_key, ()))[-30:]
+                  if item.get("user_id") != user_id]
+        score, reasons = score_contribution(
+            text, own_texts=own, recent_texts=recent,
+            has_media=has_media, has_link=has_link)
+        mode = self.review_mode(group_key)
+        if mode == "off":
+            state = "counted"  # as today: no review at all
+        elif mode == "manual":
+            state = "pending"  # a human approves everything
+        elif mode == "assisted":
+            state = ("counted" if score >= CLEAR_SCORE
+                     else "pending" if score == BORDERLINE_SCORE
+                     else "rejected")
+        else:  # auto: the ensemble decides, members can appeal
+            state = "counted" if score >= BORDERLINE_SCORE \
+                else "rejected"
+        extras = self._extras(group_key)
+        seq = int(extras.get("contribution_seq") or 0) + 1
+        extras["contribution_seq"] = seq
+        event = {"id": f"contrib-{seq}", "user_id": user_id,
+                 "text": text[:500], "ts": now, "score": score,
+                 "reasons": reasons, "state": state,
+                 "appealed": False}
+        events = extras.setdefault("contributions", [])
+        events.append(event)
+        del events[:-CONTRIBUTION_RING]
+        member["contribution_texts"] = (own + [text])[-20:]
+        if state == "counted":
+            self._contribution_counted(group_key, user_id)
+        if mode != "off":
+            self._audit(group_key, "contribution",
+                        user_id=user_id, state=state, score=score)
+        return event
+
+    def _contribution_counted(self, group_key: str,
+                              user_id: str) -> None:
+        member = self.member(group_key, user_id)
+        if member is None:
+            return
+        tally = member.setdefault("contributions", {})
+        tally["counted"] = int(tally.get("counted") or 0) + 1
+
+    def contribution_ranking(self, group_key: str, *,
+                             limit: int = 10
+                             ) -> list[dict[str, Any]]:
+        """The reviewed ranker (§26): members by COUNTED
+        contributions — pending and rejected work never counts
+        while review is on; with review off, everything counts
+        as it did before §26 existed."""
+        rows = []
+        for uid, member in self.members(
+                group_key).items():
+            counted = int((member.get("contributions")
+                           or {}).get("counted") or 0)
+            if counted > 0:
+                rows.append({"user_id": uid, "counted": counted,
+                             "label": self._member_label(
+                                 group_key, uid)})
+        rows.sort(key=lambda r: (-r["counted"], r["user_id"]))
+        return rows[:limit]
+
+    def contributions_of(self, group_key: str, user_id: str
+                         ) -> list[dict[str, Any]]:
+        return [e for e in self._extras(group_key).get(
+            "contributions") or []
+            if e.get("user_id") == user_id]
+
+    def contribution_queue(self, group_key: str
+                           ) -> list[dict[str, Any]]:
+        """Pending review work, oldest first — appeals ride the
+        same queue, flagged."""
+        return [e for e in self._extras(group_key).get(
+            "contributions") or [] if e.get("state") == "pending"]
+
+    def review_contribution(self, group_key: str, event_id: str,
+                            *, approve: bool, by: str,
+                            now: float | None = None
+                            ) -> dict[str, Any]:
+        """An admin's ruling on a queued contribution — final,
+        journaled; approving is the moment it starts counting."""
+        now = now if now is not None else time.time()
+        for event in self._extras(group_key).get(
+                "contributions") or []:
+            if event.get("id") != event_id:
+                continue
+            if event.get("state") != "pending":
+                return {"ok": False, "reason": "decided",
+                        "event": event}
+            event["state"] = "counted" if approve else "rejected"
+            event["ruled_by"] = by
+            if approve:
+                self._contribution_counted(
+                    group_key, str(event.get("user_id") or ""))
+            self._audit(group_key, "contribution_reviewed",
+                        user_id=str(event.get("user_id") or ""),
+                        approve=approve, by=by,
+                        appeal=bool(event.get("appealed")))
+            self.store.save()
+            return {"ok": True, "event": event}
+        return {"ok": False, "reason": "unknown"}
+
+    def appeal_contribution(self, group_key: str, event_id: str,
+                            user_id: str, *,
+                            now: float | None = None
+                            ) -> dict[str, Any]:
+        """One appeal per item (§26): a rejected contribution
+        goes back to the queue, flagged as an appeal; the
+        admin's ruling on it is final."""
+        for event in self._extras(group_key).get(
+                "contributions") or []:
+            if event.get("id") != event_id:
+                continue
+            if event.get("user_id") != user_id:
+                return {"ok": False, "reason": "not_yours"}
+            if event.get("state") != "rejected":
+                return {"ok": False, "reason": "not_rejected"}
+            if event.get("appealed"):
+                return {"ok": False, "reason": "appealed"}
+            event["appealed"] = True
+            event["state"] = "pending"
+            self._audit(group_key, "contribution_appealed",
+                        user_id=user_id)
+            self.store.save()
+            return {"ok": True, "event": event}
+        return {"ok": False, "reason": "unknown"}
+
+    # -- §26: the weekly gift proposal ------------------------------
+
+    def _gift_proposal_if_due(self, group_key: str,
+                              cfg: dict[str, Any],
+                              now: float) -> str:
+        """Once a week, when §26 review is ON, the reviewed
+        rankers surface as a gift PROPOSAL through governance
+        (DESIGN §26) — the system proposes, admins decide; the
+        payment itself rides the treasury path like any other
+        grant."""
+        if self.review_mode(group_key) == "off":
+            return ""
+        if not self.economy_on(group_key):
+            return ""
+        import time as _time
+        tm = _time.gmtime(now + int(
+            cfg.get("tz_offset_min") or 0) * 60)
+        week = _time.strftime("%Y-W%W", tm)
+        state = self._extras(group_key).setdefault(
+            "rhythm_state", {})
+        if state.get("gift_week") == week:
+            return ""
+        since = now - 7 * 86400
+        per_member: dict[str, int] = {}
+        for event in self._extras(group_key).get(
+                "contributions") or []:
+            if event.get("state") == "counted" and float(
+                    event.get("ts") or 0) >= since:
+                uid = str(event.get("user_id") or "")
+                per_member[uid] = per_member.get(uid, 0) + 1
+        if not per_member:
+            return ""
+        uid, count = max(per_member.items(),
+                         key=lambda kv: kv[1])
+        if count < 3:
+            return ""
+        free = self.economy.treasury_balance(group_key) \
+            - self.reserved_treasury(group_key)
+        if free < 100:
+            return ""
+        amount = max(50, min(500, int(free * 0.05)))
+        proposal = self.propose_spend(
+            group_key, kind="grant",
+            payload={"recipient": uid, "amount": amount,
+                     "reason": "§26 reviewed-contribution gift "
+                               "proposal (weekly)"},
+            by="rhythm", now=now)
+        if not proposal.get("id"):
+            return ""
+        state["gift_week"] = week
+        self._audit(group_key, "gift_proposal",
+                    proposal=proposal["id"], user_id=uid,
+                    amount=amount)
+        return (f"🎁 <b>Gift proposal open</b> — "
+                f"{sparks(amount)} to "
+                f"{self._member_label(group_key, uid)}, the "
+                f"week's top reviewed contributor "
+                f"({count} counted). Admins decide: "
+                f"/approve {proposal['id']} or "
+                f"/deny {proposal['id']}.")
 
 
 def default_surface(workspace_dir: str | Path) -> GroupSurface:

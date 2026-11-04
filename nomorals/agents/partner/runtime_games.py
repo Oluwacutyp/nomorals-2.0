@@ -1427,8 +1427,13 @@ class RuntimeGamesMixin:
         settings = surface.store.settings(key)
         quiet = (settings.get("defense") or {}).get(
             "autonomy", True) is False
-        if quiet or not self._system_send_ok(
-                surface, key, message, "math close"):
+        # Silent hours (P3): game posts hold like every other
+        # non-urgent system output — the closes divert to held
+        # notes exactly as the §33/§31 diversions do, so no
+        # result is ever lost to the quiet.
+        if quiet or surface.rhythm_silent(key) \
+                or not self._system_send_ok(
+                    surface, key, message, "math close"):
             try:
                 handler.fallback_room_closes(key)
                 self._math_save(handler)

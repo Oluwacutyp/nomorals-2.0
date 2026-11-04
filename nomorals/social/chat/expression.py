@@ -113,6 +113,7 @@ BUTTON_EMOJI: dict[str, str] = {
     "events": "🎉", "save": "💾", "research": "🔬",
     "gang": "🏴", "heist": "💰", "war": "⚔️", "bounty": "🎯",
     "gear": "🧰", "police": "🚔", "conflict": "⚔️",
+    "rhythm": "🌙", "poll": "🗳️", "milestones": "📖",
 }
 
 

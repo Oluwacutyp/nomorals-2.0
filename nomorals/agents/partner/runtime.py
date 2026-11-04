@@ -3783,6 +3783,18 @@ class PartnerRuntime(
         if kind == "claimdrop":
             return self._control_claimdrop(command.tail, message)
 
+        if kind == "poll":
+            return self._control_poll(command.tail, message)
+
+        if kind == "vote":
+            return self._control_vote(command.tail, message)
+
+        if kind == "milestones":
+            return self._control_milestones(command.tail, message)
+
+        if kind == "contributions":
+            return self._control_contributions(command.tail, message)
+
         if kind == "slots" \
                 and self._group_key_or_none(message) is not None:
             return self._control_slots(command.tail, message)

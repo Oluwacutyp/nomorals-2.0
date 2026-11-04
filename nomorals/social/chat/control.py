@@ -169,6 +169,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "top", "tax", "grant",
     "gear", "heist", "shoot", "kill", "assassinate", "sabotage",
     "gang", "war", "police", "bounty", "claimdrop",
+    "poll", "vote", "milestones", "contributions",
     "property", "buyproperty", "sellproperty", "rent",
     "listproperty", "auctions", "mortgage", "insure",
     "drop", "claim",
@@ -221,6 +222,7 @@ def public_menu_text() -> str:
         "/insure /drop /claim\n"
         "conflict — /gear /heist /shoot /kill /assassinate "
         "/sabotage /gang /war /police /bounty /claimdrop\n"
+        "group life — /poll /vote /milestones /contributions\n"
         f"play — /game {games}\n"
         "\n"
         "tap a button below to run it · /help for what each one does"
@@ -507,6 +509,10 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "police": (0, None),      # /police [bribe [envelope]] — the precinct board: wanted, bounties, your heat (§24)
     "bounty": (0, None),      # /bounty [post @member <n>|hunt @member] — heads and hunters (§24)
     "claimdrop": (0, 1),      # /claimdrop [ref] — claim a system drop (§35); claims are settlements
+    "poll": (0, None),        # /poll — group polls; treasury polls execute through governance (P3)
+    "vote": (0, 2),           # /vote [poll] <option> — one vote per member; buttons carry this command
+    "milestones": (0, None),  # /milestones — the group's memory book (P3)
+    "contributions": (0, None),  # /contributions [top|appeal N] — §26 transparency + the reviewed ranker
     "coinflip": (0, 2),       # /coinflip 10 heads — casino sink at 1.9×
     "top": (0, 0),            # /top — the richest board (wallet + bank)
     "tax": (0, 0),            # /tax — the group's monetary policy, stated
@@ -2307,6 +2313,22 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/claimdrop (or tap the drop's Claim button)",
             "example": "/claimdrop",
             "related": "/gear /balance /drop"},
+    "poll": {"what": "open a group poll (🗳️): one counting core, rendered as a button card where the platform carries buttons and as /vote numbers everywhere. Plain polls are opinion; a TREASURY poll is a vote on a real governance proposal — pass it with quorum and the grant executes through governance on close; fail it and nothing moves. Polls close on the message cycle at their deadline and post their results as a card.",
+            "usage": "/poll <question> | <option> | <option> [| for 2h] [| flexible] · /poll treasury grant @member 500 · /poll close [N] · bare /poll lists open polls",
+            "example": "/poll Best session to trade? | London | New York",
+            "related": "/vote /treasury /approve"},
+    "vote": {"what": "vote in an open poll: one vote per member, final unless the poll was opened as flexible (then changeable until close). The poll card's buttons run this same command.",
+            "usage": "/vote <option number> (newest poll) · /vote <poll number> <option number>",
+            "example": "/vote 2",
+            "related": "/poll"},
+    "milestones": {"what": "the group's memory book (📖): milestones recorded as they happen — member join anniversaries, message-count landmarks for the group and its members, economy records (richest balance, biggest heist), the first gang, the first war. Seeded only from facts the ledgers already prove; nothing is backdated.",
+            "usage": "/milestones",
+            "example": "/milestones",
+            "related": "/contributions"},
+    "contributions": {"what": "your §26 contribution file: substantive posts are the rankers' raw material; when the group's review is on, an ensemble (and borderline cases an admin) decides what counts. See your counted / waiting / not-counted items with the plain-word reasons, appeal a rejection once, or read the reviewed board with /contributions top.",
+            "usage": "/contributions · /contributions top · /contributions appeal <number>",
+            "example": "/contributions top",
+            "related": "/milestones /top /member"},
     "coinflip": {"what": "flip a coin against the house at 1.9×: call heads or tails. Losses feed the treasury and the jackpot pot.",
             "usage": "/coinflip <bet> heads|tails",
             "example": "/coinflip 10 heads",
@@ -2850,6 +2872,8 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "gear", "heist", "shoot", "kill",
                             "assassinate", "sabotage", "gang", "war",
                             "police", "bounty", "claimdrop",
+                            "poll", "vote", "milestones",
+                            "contributions",
                             "mute", "unmute", "ban", "unban", "kick",
                             "warn", "pin", "unpin", "purge", "report"]),
     ("discovery", ["list", "commands", "menu", "help", "tour", "heal"]),
@@ -3120,6 +3144,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "listproperty", "auctions", "mortgage", "insure",
       "gear", "heist", "shoot", "kill", "assassinate", "sabotage",
       "gang", "war", "police", "bounty", "claimdrop",
+      "poll", "vote", "milestones", "contributions",
       "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
       "unpin", "purge", "report"]),
     ("discovery",
