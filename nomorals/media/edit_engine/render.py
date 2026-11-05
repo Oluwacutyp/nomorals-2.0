@@ -23,10 +23,10 @@ from ...media_edit.videos import (
 )
 from .audio import AudioLayer, AudioMix, mix_layers
 from .effects import (
-    DEFERRED_EFFECTS,
     _ctx,
     _effect_filter,
     EFFECTS,
+    deferred_effect_reason,
     effect_rung,
 )
 from .frametime import FrameGrid
@@ -1030,7 +1030,7 @@ def apply_effect(src: str | os.PathLike[str], effect: str, *,
     if not p.exists():
         raise MediaEditError(f"no such video: {src}")
     fx = Effect(name=effect, params=dict(params), at=at)
-    reason = DEFERRED_EFFECTS.get(fx.name)
+    reason = deferred_effect_reason(fx.name)
     if reason is not None:
         raise MediaEditError(
             f"effect {effect!r} is deferred, not unknown: {reason}")

@@ -41,8 +41,10 @@ values fail loudly; ``require=(...)`` makes resolution fail loudly
 when a needed parameter group is one the format itself does not speak
 (defaults do not count). The 3D seam (§1.5e): the ``camera3d`` format
 declares ``renderer="camera3d"`` — it resolves as data, and
-:func:`apply_format` refuses with the reason, because no 3D rung has
-been chosen. No stub renderer.
+:func:`apply_format` resolves it through the scene3d renderer
+registry (:func:`_resolve_format_renderer`): a rung serving the
+``format3d`` surface lets the apply proceed with the rung named in
+the record; otherwise it refuses with the reason. No stub renderer.
 """
 
 from __future__ import annotations
@@ -524,8 +526,10 @@ def _shipped_entries() -> list[FormatSpec]:
         ),
         FormatSpec(
             name="camera3d",
-            label="3D camera format — seam only: no 3D rung chosen "
-                  "(§1.5e); resolves as data, refuses at apply",
+            label="3D camera format — resolves as data; at apply it "
+                  "resolves through the scene3d renderer registry "
+                  "(§1.5e) and refuses, naming why, while no rung "
+                  "serves the format3d surface",
             extends="landscape",
             renderer="camera3d",
             source="format registry (shipped data; §1.5e seam)",
@@ -715,6 +719,43 @@ def pack_for_format(name: str) -> dict[str, Any]:
 # Application — a format steers a spec
 # ---------------------------------------------------------------------------
 
+def _resolve_format_renderer(resolved: ResolvedFormat) -> dict[str, Any]:
+    """The §1.5e seam, resolved through the scene3d registry.
+
+    A format declaring a non-engine renderer (the shipped
+    ``camera3d``) asks :func:`scene3d.resolve_renderer` for a rung
+    serving the ``format3d`` surface at the format's canvas:
+
+    * **no rung registered** — the historical refusal, verbatim:
+      the seam predates the registry and its wording is pinned;
+    * **rungs registered, none serving** — a refusal naming each
+      rung's recorded reason (probe failure or capability gap);
+    * **a rung serves** — its resolution record, which
+      :func:`apply_format` carries in the apply record's
+      ``renderer3d`` entry while the format steers the spec as data.
+    """
+    from .scene3d import Scene3DError, registered_renderers, resolve_renderer
+
+    if not registered_renderers():
+        raise FormatError(
+            f"format {resolved.name!r} declares renderer "
+            f"{resolved.renderer!r}, which is unavailable: no 3D rung "
+            f"has been chosen (§1.5e/§6.3 — Blender-class external "
+            f"engine vs a Rust rung is the owner's decision). The "
+            f"format resolves as data; it does not render.")
+    try:
+        _renderer, record = resolve_renderer(
+            surface="format3d",
+            requirements={"width": resolved.width,
+                          "height": resolved.height})
+    except Scene3DError as exc:
+        raise FormatError(
+            f"format {resolved.name!r} declares renderer "
+            f"{resolved.renderer!r}: {exc} The format resolves as "
+            f"data; it does not render.") from exc
+    return record
+
+
 def apply_format(spec: Any, name: str, *,
                  require: Any = ()) -> tuple[Any, dict[str, Any]]:
     """Apply format ``name`` to an EditSpec (or spec dict).
@@ -728,18 +769,18 @@ def apply_format(spec: Any, name: str, *,
     provenance, the grade pack (for the render path to consume via
     :func:`pure_render.render_pure`), the loudness contract, and how
     many layers the caption defaults touched. A format whose renderer
-    is unavailable (the §1.5e camera3d seam) refuses, naming why.
+    is unavailable (the §1.5e camera3d seam) refuses, naming why; the
+    seam resolves through the scene3d renderer registry — see
+    :func:`_resolve_format_renderer`. When a rung serves, the apply
+    proceeds and the record's ``renderer3d`` entry names the rung
+    and its capabilities.
     """
     from .spec import EditSpec
 
     resolved = resolve_format(name, require=require)
+    renderer3d_record = None
     if resolved.renderer != "engine":
-        raise FormatError(
-            f"format {resolved.name!r} declares renderer "
-            f"{resolved.renderer!r}, which is unavailable: no 3D rung "
-            f"has been chosen (§1.5e/§6.3 — Blender-class external "
-            f"engine vs a Rust rung is the owner's decision). The "
-            f"format resolves as data; it does not render.")
+        renderer3d_record = _resolve_format_renderer(resolved)
     was_spec = isinstance(spec, EditSpec)
     data = spec.to_dict() if was_spec else dict(spec)
     data["width"] = resolved.width
@@ -781,6 +822,8 @@ def apply_format(spec: Any, name: str, *,
         "design_pack": resolved.design_pack,
         "provenance": resolved.provenance,
     }
+    if renderer3d_record is not None:
+        record["renderer3d"] = renderer3d_record
     out = EditSpec.from_dict(data) if was_spec else data
     return out, record
 
@@ -805,8 +848,9 @@ _SCAFFOLD_HELP = {
     "target_lufs": "explicit loudness target in [-70, 0], or null",
     "design_pack": "a director style pack (neutral, naturalist, noir, "
                    "neon, golden), or null",
-    "renderer": "engine (camera3d declares the §1.5e seam and refuses "
-                "at apply)",
+    "renderer": "engine (camera3d declares the §1.5e seam: resolves "
+                "through the scene3d registry at apply, refuses "
+                "while no rung serves)",
 }
 
 

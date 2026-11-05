@@ -55,10 +55,15 @@ rendered by :mod:`.explainers`' deterministic frame functions —
 builds that assemble step by step, text composited by the
 deterministic text path, never model-drawn.
 
-Deferred, named (never silently shrunk): ``camera3d/*`` property
-paths are *carried* by the document but refuse at compile — the 3D
-rung is the owner's open choice (plan §1.5e/§6.3), and this module
-will not fake a renderer for it. Procedural paths on video/text/
+The ``camera3d/*`` property group (plan §1.5e): paths are *carried*
+by the document and resolve at compile through the scene3d
+renderer registry (``edit_engine.scene3d`` — the owner's 2026-11-05
+decision put both engine rungs behind it). While no rung is
+registered — or none serves the composed camera — compile refuses
+with the historical §1.5e wording; when a rung serves, the group
+composes into a Scene3D camera in the compile record (see
+:func:`_camera3d_composition`) and the 2D composite proceeds. This
+module never fakes a renderer. Procedural paths on video/text/
 procedural segments, and procedural engines outside the shipped
 family, likewise refuse with their reason named in the error.
 
@@ -185,8 +190,9 @@ MOTION_PROPERTIES: dict[str, _PropSpec] = {
         "region only; requires a mask; procedural only"),
 }
 
-#: property-path prefix carried but never rendered in this wave —
-#: the 3D rung is the owner's open choice (plan §1.5e/§6.3).
+#: property-path prefix for the 3D camera group — carried by the
+#: document, resolved at compile through the scene3d renderer
+#: registry (plan §1.5e; see :func:`_resolve_segment_camera3d`).
 DEFERRED_PREFIX = "camera3d/"
 
 #: segment transition name → the session-directive type
@@ -478,6 +484,191 @@ class MotionSegment:
 
 
 # ---------------------------------------------------------------------------
+# camera3d composition — the §1.5e group, resolved through the
+# scene3d renderer registry (owner decision 2026-11-05: both engine
+# rungs are built behind the registry; the profile runtime picks)
+# ---------------------------------------------------------------------------
+
+#: camera3d scalar paths → the Scene3D camera field of the same name.
+_CAMERA3D_SCALARS = ("fov", "near", "far")
+#: camera3d vector paths → composed from per-axis scalar paths
+#: (``camera3d/position/x`` …): a MotionProject property is a scalar
+#: or a scalar track, so a vec3 arrives one axis at a time.
+_CAMERA3D_VEC3 = ("position", "lookat", "rotation")
+
+
+def _camera3d_composition(seg: MotionSegment, paths: list[str], *,
+                          title: str, width: int, height: int,
+                          fps: Any) -> tuple[Any, str]:
+    """Compose one segment's ``camera3d/*`` group into a Scene3D.
+
+    Returns ``(scene, camera_name)``. The composed scene carries one
+    camera (named ``<uid>-camera``) on an otherwise empty graph: the
+    motion segment's own source stays the 2D composite's business;
+    the camera is the 3D pass's. Scalar paths land as camera fields
+    or :class:`AnimTrack` s; axis tracks merge by sampling the true
+    curves at the union of their key frames (the bake doctrine —
+    the merged track is linear between union frames). Raises
+    :class:`MotionStudioError` naming any path this composition
+    does not map, and any *animated* aim (lookat/rotation tracks):
+    Scene3D camera animation covers position/fov/near/far, so an
+    animated aim is a named refusal, never an approximation.
+    """
+    from ..edit_engine.scene3d import (
+        AnimKey,
+        AnimTrack,
+        Camera,
+        Rotation,
+        Scene3D,
+        Transform,
+    )
+
+    cam_name = f"{seg.uid}-camera"
+    scalars: dict[str, Any] = {}
+    axes: dict[str, dict[str, Any]] = {}
+    for path in sorted(paths):
+        rest = path[len(DEFERRED_PREFIX):]
+        value = seg.properties[path]
+        if rest in _CAMERA3D_SCALARS:
+            scalars[rest] = value
+            continue
+        head, _, axis = rest.partition("/")
+        if head in _CAMERA3D_VEC3 and axis in ("x", "y", "z"):
+            axes.setdefault(head, {})[axis] = value
+            continue
+        raise MotionStudioError(
+            f"segment @{seg.uid}: {path} — no composition maps "
+            f"this camera3d path (mapped: camera3d/fov, "
+            f"camera3d/near, camera3d/far, and camera3d/position, "
+            f"camera3d/lookat, camera3d/rotation as /x /y /z axes)")
+
+    tracks: list[AnimTrack] = []
+
+    def axis_value(group: dict[str, Any], axis: str,
+                   frame: float, default: float) -> float:
+        v = group.get(axis)
+        if v is None:
+            return default
+        if isinstance(v, PropertyTrack):
+            return v.sample(frame)
+        return float(v)
+
+    def vec3(group_name: str, defaults: tuple[float, float, float]
+             ) -> tuple[float, float, float]:
+        group = axes.get(group_name, {})
+        return tuple(axis_value(group, ax, 0.0, d)
+                     for ax, d in zip("xyz", defaults, strict=True))
+
+    def vec3_track(group_name: str, target: str,
+                   defaults: tuple[float, float, float]) -> None:
+        group = axes.get(group_name, {})
+        frames = sorted({k.frame for v in group.values()
+                         if isinstance(v, PropertyTrack)
+                         for k in v.keys})
+        if not frames:
+            return
+        keys = [AnimKey(f, tuple(axis_value(group, ax, float(f), d)
+                                 for ax, d in zip("xyz", defaults,
+                                                  strict=True)),
+                        "linear")
+                for f in frames]
+        tracks.append(AnimTrack(target=target, keys=keys))
+
+    position = vec3("position", (0.0, 0.0, 0.0))
+    if "lookat" in axes and "rotation" in axes:
+        raise MotionStudioError(
+            f"segment @{seg.uid}: camera3d declares both lookat "
+            f"and rotation aims — a camera aims one way; drop one")
+    if "lookat" in axes:
+        if any(isinstance(v, PropertyTrack)
+               for v in axes["lookat"].values()):
+            raise MotionStudioError(
+                f"segment @{seg.uid}: animated camera3d/lookat has "
+                f"no Scene3D rung — camera animation covers "
+                f"position/fov/near/far; author the aim as scalars "
+                f"or as a Scene3D document")
+        target = vec3("lookat", (position[0], position[1],
+                                 position[2] - 1.0))
+        rotation = Rotation.look_at(target)
+    elif "rotation" in axes:
+        if any(isinstance(v, PropertyTrack)
+               for v in axes["rotation"].values()):
+            raise MotionStudioError(
+                f"segment @{seg.uid}: animated camera3d/rotation "
+                f"has no Scene3D rung — camera animation covers "
+                f"position/fov/near/far; author the aim as scalars "
+                f"or as a Scene3D document")
+        rotation = Rotation.from_euler(*vec3("rotation", (0.0, 0.0, 0.0)))
+    else:
+        rotation = Rotation.look_at((position[0], position[1],
+                                     position[2] - 1.0))
+    vec3_track("position", f"cameras/{cam_name}/position",
+               (0.0, 0.0, 0.0))
+
+    cam_fields: dict[str, Any] = {}
+    for prop in _CAMERA3D_SCALARS:
+        value = scalars.get(prop)
+        if value is None:
+            continue
+        if isinstance(value, PropertyTrack):
+            tracks.append(AnimTrack(
+                target=f"cameras/{cam_name}/{prop}",
+                keys=[AnimKey(k.frame, (k.value,), k.easing)
+                      for k in value.keys]))
+        else:
+            cam_fields[prop] = float(value)
+    camera = Camera(transform=Transform(position=position,
+                                        rotation=rotation),
+                    **cam_fields)
+    scene = Scene3D(title=title or "motion camera",
+                    cameras={cam_name: camera},
+                    active_camera=cam_name,
+                    tracks=tracks,
+                    output={"width": int(width),
+                            "height": int(height), "fps": fps})
+    return scene, cam_name
+
+
+def _resolve_segment_camera3d(seg: MotionSegment, paths: list[str],
+                              *, title: str, width: int, height: int,
+                              fps: Any) -> dict[str, Any] | None:
+    """Resolve one segment's camera3d group through the registry.
+
+    Returns the composition record when a rung serves the
+    ``motion_camera`` surface *and* covers the composed scene (its
+    requirements are the composed document's own — canvas, animated
+    props); ``None`` when no rung is registered or none serves, in
+    which case the caller raises the historical §1.5e refusal.
+    Composition failures (unmapped path, animated aim) raise —
+    they are named even when a rung serves.
+    """
+    from ..edit_engine.scene3d import (
+        Scene3DError,
+        registered_renderers,
+        resolve_renderer,
+    )
+
+    if not registered_renderers():
+        return None
+    scene, cam_name = _camera3d_composition(
+        seg, paths, title=title, width=width, height=height, fps=fps)
+    try:
+        renderer, record = resolve_renderer(scene,
+                                            surface="motion_camera")
+    except Scene3DError:
+        return None
+    return {"rung": renderer.name, "camera": cam_name,
+            "paths": sorted(paths),
+            "document": scene.to_dict(),
+            "resolution": record,
+            "note": "camera3d paths composed into a Scene3D camera "
+                    "for the serving rung; the segment's 2D "
+                    "composite is unaffected — the 3D pass is the "
+                    "rung's render_scene entry over the composed "
+                    "document"}
+
+
+# ---------------------------------------------------------------------------
 # the project document
 # ---------------------------------------------------------------------------
 
@@ -690,12 +881,19 @@ class MotionProject:
         for idx, seg in enumerate(self.segments):
             deferred = [p for p in seg.properties
                         if p.startswith(DEFERRED_PREFIX)]
+            scene3d_rec = None
             if deferred:
-                raise MotionStudioError(
-                    f"segment @{seg.uid}: {', '.join(sorted(deferred))} "
-                    f"— the 3D rung is not chosen (plan §1.5e: the "
-                    f"owner picks the engine; the document carries "
-                    f"these paths but no renderer fakes them)")
+                scene3d_rec = _resolve_segment_camera3d(
+                    seg, deferred, title=self.title,
+                    width=width, height=height,
+                    fps=self.output.get("fps", 30))
+                if scene3d_rec is None:
+                    raise MotionStudioError(
+                        f"segment @{seg.uid}: "
+                        f"{', '.join(sorted(deferred))} "
+                        f"— the 3D rung is not chosen (plan §1.5e: the "
+                        f"owner picks the engine; the document carries "
+                        f"these paths but no renderer fakes them)")
             rec, clip, seg_kf = _compile_segment(
                 seg, grid=grid, size=size, fps=fps, tmp=tmp,
                 seed=self.seed, project_audio=self.audio)
@@ -720,6 +918,12 @@ class MotionProject:
             clips.append(clip)
             keyframes.extend(seg_kf)
             rec["at"] = round(at, 6)
+            if scene3d_rec is not None:
+                rec["scene3d"] = scene3d_rec
+                rungs.append({
+                    "stage": f"motion:{seg.uid}:camera3d",
+                    "rung": f"edit_engine.scene3d:{scene3d_rec['rung']}",
+                    "note": scene3d_rec["note"]})
             seg_records.append(rec)
             rungs.append({
                 "stage": f"motion:{seg.uid}",

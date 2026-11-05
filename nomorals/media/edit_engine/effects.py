@@ -674,15 +674,40 @@ def effect_properties() -> dict[str, Any]:
 
 
 def deferred_effect_reason(name: str) -> str | None:
-    """The named reason an effect name is a deferral, or None."""
-    return DEFERRED_EFFECTS.get(name)
+    """The named reason an effect name is a deferral, or None.
+
+    Registry-aware (the §1.5e wiring): while no 3D rung is
+    registered, ``camera3d``'s reason is the historical
+    :data:`DEFERRED_EFFECTS` text, verbatim. Once a rung serves the
+    ``scene3d`` surface, the reason becomes the accurate one — the
+    rung exists, but ``camera3d`` is not a 2D chain effect: 3D
+    composes as a Scene3D document (:mod:`.scene3d`) or a
+    MotionProject ``camera3d`` group, both resolved through the
+    same registry. Either way it stays a named refusal — no builder
+    is substituted here.
+    """
+    reason = DEFERRED_EFFECTS.get(name)
+    if reason is None or name != "camera3d":
+        return reason
+    from .scene3d import Scene3DError, registered_renderers, resolve_renderer
+    if not registered_renderers():
+        return reason
+    try:
+        renderer, _record = resolve_renderer(surface="scene3d")
+    except Scene3DError:
+        return reason
+    return (f"the 3D rung is chosen ({renderer.name!r} serves "
+            f"Scene3D documents through edit_engine.scene3d's "
+            f"registry) — but 'camera3d' is not a 2D chain effect "
+            f"and has no builder here; 3D composes as a Scene3D "
+            f"document or a MotionProject camera3d group")
 
 
 def _effect_filter(name: str, params: dict[str, Any],
                    ctx: dict[str, Any]) -> str:
     from .timeline import canonical_effect
     name = canonical_effect(name)
-    reason = DEFERRED_EFFECTS.get(name)
+    reason = deferred_effect_reason(name)
     if reason is not None:
         raise MediaEditError(
             f"effect {name!r} is deferred, not unknown: {reason}")

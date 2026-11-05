@@ -219,8 +219,8 @@ def classify_track(track: KeyframeTrack) -> str:
     A track naming a deferred effect raises with the deferral's
     reason (a named refusal, not an unknown target).
     """
-    from .effects import DEFERRED_EFFECTS, KEYFRAMABLE_PARAMS
-    reason = DEFERRED_EFFECTS.get(track.effect)
+    from .effects import KEYFRAMABLE_PARAMS, deferred_effect_reason
+    reason = deferred_effect_reason(track.effect)
     if reason is not None:
         raise ValueError(
             f"keyframe target {track.effect}.{track.param}: effect "
