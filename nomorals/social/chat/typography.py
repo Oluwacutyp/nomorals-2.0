@@ -52,7 +52,7 @@ __all__ = [
     "STAMP_CLASSES", "ResolvedStyle", "resolve_style",
     "WATERMARK_MODES", "DEFAULT_WATERMARK_MODE",
     "MediaMark", "resolve_media_mark",
-    "Card", "render_card", "card_text",
+    "Card", "render_card", "render_card_framed", "card_text",
     "fmt_amount", "sparks", "moderation_warning", "notice_line",
 ]
 
@@ -60,7 +60,7 @@ __all__ = [
 #: the handler — decides preset and stamp treatment.
 SURFACE_CLASSES = (
     "economy", "moderation", "game", "briefing", "announcement",
-    "leaderboard", "settings", "chat",
+    "leaderboard", "settings", "chat", "menu",
 )
 
 #: Rendering presets (treatments).  ``clean``: hierarchy through
@@ -78,6 +78,7 @@ CLASS_ICONS: dict[str, str] = {
     "leaderboard": "🏆",
     "settings": "⚙️",
     "chat": "💬",
+    "menu": "📖",
 }
 
 #: The house footer signature (§19/§20's owner mark, message
@@ -90,6 +91,7 @@ DEFAULT_STAMP_TEXT = "Powered by peacethefirst"
 #: not presentation — no stamp.
 STAMP_CLASSES: tuple[str, ...] = (
     "economy", "game", "briefing", "announcement", "leaderboard",
+    "menu",
 )
 
 
@@ -462,6 +464,74 @@ def render_card(card: Card, *, platform: Any = "telegram-bot",
         text = _append_stamp(text, style.stamp_text,
                              _dialect(platform))
     return Rendered(text, rendered.parse_mode, rendered.platform)
+
+
+def render_card_framed(card: Card, *,
+                       settings: dict[str, Any] | None = None
+                       ) -> Rendered:
+    """The card in the XMD frame grammar (owner order
+    2026-11-05 — the boxed WhatsApp menu format): one box for the
+    card's head, one box per section, in the WhatsApp dialect.
+
+    Same Card, same content, same stamp resolution as
+    :func:`render_card` — only the framing differs.  Section
+    bodies come from present's own section renderer, so a framed
+    line can never drift from the flat render's line; the section
+    title rides the frame (small-capped, presentation only)
+    instead of a bold line inside the box.  Pure divider sections
+    (the board preset's rules) are the frame's job here and are
+    skipped.  WhatsApp only — every other platform keeps
+    :func:`render_card`."""
+    # present's own internals, reused so framed content IS the
+    # flat render's content (same package, same layer).
+    from .present import _literal as _present_literal
+    from .present import _prose as _present_prose
+    from .present import _section_lines as _present_section_lines
+    from .style import small_caps, xmd_frame_bottom, xmd_frame_line, xmd_frame_top
+
+    style = resolve_style(settings, card.surface_class)
+    doc = card.to_doc(style.preset)
+    dialect = "whatsapp"
+    boxes: list[str] = []
+    if doc.title or doc.resolved_icon:
+        title = _present_literal(doc.title, dialect)
+        if doc.summary:
+            head_title = (f"{doc.resolved_icon} {small_caps(title)}"
+                          if title else doc.resolved_icon)
+            head = [xmd_frame_top(head_title)]
+            for ln in _present_prose(doc.summary, dialect) \
+                    .split("\n"):
+                head.append(xmd_frame_line(ln))
+            head.append(xmd_frame_bottom())
+            boxes.append("\n".join(head))
+        else:
+            # No summary: the title is a masthead line (the flat
+            # render's own head form), not an empty box.
+            boxes.append(f"{doc.resolved_icon} *{title}*"
+                         if title else doc.resolved_icon)
+    for section in doc.sections:
+        body = _present_section_lines(section, dialect)
+        if section.title and body:
+            # the title rides the frame, not a bold line inside
+            body = body[1:]
+        flat = [ln for chunk in body
+                for ln in str(chunk).split("\n")
+                if ln.strip() and ln.strip() != DIVIDER]
+        if not flat:
+            continue
+        title = _present_literal(section.title, dialect)
+        box = [xmd_frame_top(small_caps(title) if title else "")]
+        box += [xmd_frame_line(ln) for ln in flat]
+        box.append(xmd_frame_bottom())
+        boxes.append("\n".join(box))
+    text = "\n\n".join(boxes)
+    if doc.footer:
+        foot = _present_prose(doc.footer, dialect)
+        if foot:
+            text = f"{text}\n\n_{foot}_" if text else f"_{foot}_"
+    if style.stamp:
+        text = _append_stamp(text, style.stamp_text, dialect)
+    return Rendered(text, "", "whatsapp")
 
 
 def card_text(card: Card, *,

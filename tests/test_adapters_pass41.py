@@ -546,9 +546,10 @@ class TestWhatsAppHelpMenuWiring:
         key = "whatsapp:2348012345678@c.us"
         out = runtime.handle_control("/help", key,
                                      message=self._msg("/help", key))
-        # The WhatsApp-native menu's stable markers.
+        # The WhatsApp-native menu's stable markers (XMD frame
+        # since 2026-11-05: category titles ride small-capped).
         assert "text-first — no buttons" in out
-        assert "GROUPS & COMMUNITIES" in out
+        assert "ɢʀᴏᴜᴘs & ᴄᴏᴍᴍᴜɴɪᴛɪᴇs" in out
 
     def test_telegram_help_unchanged(self):
         runtime = self._runtime()

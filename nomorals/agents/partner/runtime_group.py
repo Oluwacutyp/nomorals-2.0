@@ -542,21 +542,32 @@ class RuntimeGroupMixin:
             return "HTML"
         return ""
 
-    def _card(self, message, card, buttons=None):  # type: ignore[no-untyped-def]
+    def _card(self, message, card, buttons=None, *, xmd_frame: bool = False):  # type: ignore[no-untyped-def]
         """Render a typography Card (§27) for this message's
         platform under the group's presentation settings, and
         bundle the buttons the handler authored from the same
         state.  This is the ONE way group control replies are
         composed now: handlers name what renders, the group's
-        theme decides how it looks."""
+        theme decides how it looks.
+
+        ``xmd_frame`` (the group help's owner-ordered WhatsApp
+        frame, 2026-11-05): on WhatsApp the same Card renders in
+        the XMD box grammar instead of the flat dialect render —
+        same content, same buttons, same stamp resolution; every
+        other platform ignores the flag."""
         from ...social.chat.tgbot_buttons import actionable
-        from ...social.chat.typography import render_card
+        from ...social.chat.typography import render_card, render_card_framed
 
         surface = self._group_surface()
         key = message.chat.key
-        rendered = render_card(
-            card, platform=str(message.chat.platform or ""),
-            settings=surface.store.settings(key))
+        platform = str(message.chat.platform or "")
+        if xmd_frame and platform.strip().lower() in ("whatsapp", "wa"):
+            rendered = render_card_framed(
+                card, settings=surface.store.settings(key))
+        else:
+            rendered = render_card(
+                card, platform=platform,
+                settings=surface.store.settings(key))
         if buttons is not None:
             return actionable(rendered.text, buttons)
         return rendered.text
@@ -2401,7 +2412,10 @@ class RuntimeGroupMixin:
         sparks row exists exactly when the economy runs here; the
         buttons mirror the sections on screen).  Typography
         (§27): composed as a Card, settings class — the group's
-        theme decides the form."""
+        theme decides the form; on WhatsApp the card renders in
+        the XMD box grammar (owner order 2026-11-05), the same
+        frame as the WhatsApp menu — content unchanged, cut down
+        to this room, claim block included."""
         from ...social.chat.typography import Card
 
         key = message.chat.key
@@ -2681,7 +2695,7 @@ class RuntimeGroupMixin:
         spec.append([("settings", "Group settings", "gsettings"),
                      ("glog", "Audit log", "glog")])
         buttons = buttons_from_spec(spec, settings=settings)
-        return self._card(message, card, buttons)
+        return self._card(message, card, buttons, xmd_frame=True)
 
     def _group_key_or_none(self, message):  # type: ignore[no-untyped-def]
         if message is None:

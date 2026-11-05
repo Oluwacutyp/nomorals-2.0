@@ -1334,7 +1334,7 @@ def _whatsapp_sections() -> list[tuple[str, str, list[tuple[str, str]]]]:
     """
     from . import whatsapp as _wa  # local import: never at module load
     sections: list[tuple[str, str, list[tuple[str, str]]]] = [(
-        "💬", "groups & communities",
+        "💬", "groups — in plain words",
         [(f'"{say}"', what) for _, say, what in _wa.GROUP_CAPABILITIES],
     )]
     by_name = dict(LIST_GROUPS)
@@ -1396,78 +1396,136 @@ def _whatsapp_find_section(sections: list, page: str) -> int | None:
     return None
 
 
-def _whatsapp_greeting() -> str:
-    """Time-aware menu header. Never raises."""
+def _whatsapp_daypart() -> str:
+    """The time-aware daypart word for the menu header ("good
+    morning" …).  A greeting, never a name: the menu surface does
+    not know the requester's display name, so it does not invent
+    one.  Never raises."""
     try:
         from datetime import datetime
         hour = datetime.now().hour
         if 5 <= hour < 12:
-            daypart = "good morning"
-        elif 12 <= hour < 17:
-            daypart = "good afternoon"
-        elif 17 <= hour < 22:
-            daypart = "good evening"
-        else:
-            daypart = "up late"
-        return f"✨ *Devon — {daypart}* · here's what I can do"
+            return "good morning"
+        if 12 <= hour < 17:
+            return "good afternoon"
+        if 17 <= hour < 22:
+            return "good evening"
+        return "up late"
+    except Exception as exc:  # noqa: BLE001
+        record_failure('control._whatsapp_daypart', exc)
+        return "hello"
+
+
+def _whatsapp_greeting() -> str:
+    """Time-aware menu header. Never raises."""
+    try:
+        return (f"✨ *Devon — {_whatsapp_daypart()}* · "
+                "here's what I can do")
     except Exception as exc:  # noqa: BLE001
         record_failure('control._whatsapp_greeting', exc)
         return "✨ *Devon — command menu*"
 
 
 def whatsapp_menu(page: str = "") -> str:
-    """WhatsApp-native command menu — text-first, no buttons, no HTML.
+    """WhatsApp-native command menu — the XMD frame over the real
+    catalog (owner order 2026-11-05: "one Whatsapp bot menu like
+    that" — the boxed FEI XMD format, Devon's own content).
 
-    Data-driven, never a pasted copy of the Telegram menu: the
-    "groups & communities" section comes from the WhatsApp adapter's
-    GROUP_CAPABILITIES table and every other section comes from the
-    command registry (LIST_GROUPS / LIST_ONELINERS / COMMAND_DETAILS),
-    so it can never drift from what the system actually runs. Only the
-    WhatsApp-first order and short titles are curated
-    (:data:`_WHATSAPP_SECTION_ORDER`).
+    Still data-driven, never a pasted copy of the Telegram menu:
+    the first section comes from the WhatsApp adapter's
+    GROUP_CAPABILITIES table and every other section comes from
+    the command registry (LIST_GROUPS / LIST_ONELINERS /
+    COMMAND_DETAILS) via :func:`_whatsapp_sections`, so it can
+    never drift from what the system actually runs — and the
+    platform-impossible kinds are already absent there.  Only
+    the presentation is the pasted format: a header box (name,
+    greeting, owner, status, prefix, version, command total,
+    mode), one boxed section per category, a powered-by footer.
+    The header's total is counted from the rendered lines
+    themselves; the version is the repo's own version metadata;
+    the footer stamp resolves through the typography theme
+    system (surface class ``menu`` — house defaults on this DM
+    surface), never a hardcoded string here.  Section TITLES are
+    small-capped as presentation; command strings are rendered
+    byte-exact, always typable verbatim.
 
-    * ``page=""`` — the full menu: a numbered section index, then every
-      section fully rendered (the WhatsApp send path chunks long text).
-    * ``page="3"`` — just section 3 (the "reply 3" interaction).
-    * ``page="voice"`` — the section that title/registry name matches.
+    Honest fields only: the prefix is the parser's real grammar
+    (``/``); the greeting carries the daypart, not a name — this
+    surface does not know the requester's display name, so it
+    does not invent one; the total counts the WhatsApp-visible
+    set actually shown, not the global registry.
 
-    Never raises: junk pages fall back to the full menu; total failure
-    falls back to :func:`help_text`.
+    * ``page=""`` — the full menu, ONE message: the whole render
+      sits far under WhatsApp's 65,536-char protocol cap
+      (platform_limits), so no chunking applies on this surface.
+    * ``page="3"`` / ``page="voice"`` — just that section, same
+      frame.
+
+    Never raises: junk pages fall back to the full menu; total
+    failure falls back to :func:`help_text`.
     """
     try:
-        from .style import menu_divider, menu_item, menu_section
+        from .style import small_caps, xmd_frame_bottom, xmd_frame_line, xmd_frame_top
+        from .typography import resolve_style
         sections = _whatsapp_sections()
-        n = len(sections)
 
-        def _section_page(idx: int) -> str:
-            emoji, title, items = sections[idx]
-            lines = [menu_section(emoji, title, "whatsapp"), ""]
+        def _box(emoji: str, title: str,
+                 items: list[tuple[str, str]]) -> list[str]:
+            head = f"{emoji} {small_caps(title)}".strip()
+            box = [xmd_frame_top(head)]
             for command, desc in items:
-                lines.append(menu_item(command, desc, "whatsapp"))
-            lines.append("")
-            lines.append("_reply 0 for the full index · "
-                         "/help play for one command's full page_")
-            return "\n".join(lines).rstrip()
+                row = f"{command} — {desc}" if desc else command
+                box.append(xmd_frame_line(row, "✫✧│"))
+            box.append(xmd_frame_bottom())
+            return box
+
+        def _stamped(lines: list[str]) -> list[str]:
+            style = resolve_style(None, "menu")
+            if style.stamp and style.stamp_text:
+                lines += ["", f"_{style.stamp_text}_"]
+            return lines
 
         idx = _whatsapp_find_section(sections, page)
         if idx is not None:
-            return _section_page(idx)
+            emoji, title, items = sections[idx]
+            lines = _box(emoji, title, items)
+            lines += ["", "_/help for the full menu · "
+                          "/help <command> for one command's "
+                          "full page_"]
+            return "\n".join(_stamped(lines)).rstrip()
 
-        lines = [_whatsapp_greeting(), ""]
-        lines.append("_text-first — no buttons, no tapping needed_")
-        lines.append("")
-        for i, (emoji, title, items) in enumerate(sections, 1):
-            lines.append(f"{i} · {emoji} *{title.upper()}* ({len(items)})")
+        total = sum(1 for _, _, items in sections
+                    for command, _ in items
+                    if command.startswith("/"))
+        try:
+            from ...version import __version__ as _version
+        except Exception:  # noqa: BLE001 - version line omits
+            _version = ""
+        fields = [
+            ("👋", "hello",
+             f"{_whatsapp_daypart()} — here's what I can do"),
+            ("👑", "owner", "peacethefirst"),
+            ("⚡", "status", "Online"),
+            ("🔰", "prefix", "/"),
+        ]
+        if _version:
+            fields.append(("📦", "version", _version))
+        fields += [
+            ("📚", "total commands", str(total)),
+            ("🔐", "mode", "owner-gated"),
+        ]
+        lines = [xmd_frame_top(f"🤖 {small_caps('Devon')}")]
+        for icon, label, value in fields:
+            lines.append(xmd_frame_line(
+                f"{icon} {small_caps(label)}: {value}", "✫"))
+        lines.append(xmd_frame_bottom())
+        lines += ["", "_text-first — no buttons, no tapping needed_"]
         for emoji, title, items in sections:
             lines.append("")
-            lines.append(menu_divider("whatsapp"))
-            lines.append(menu_section(emoji, title, "whatsapp"))
-            for command, desc in items:
-                lines.append(menu_item(command, desc, "whatsapp"))
-        lines.append("")
-        lines.append(f"_reply 1–{n} for just that section · "
-                     "say it in plain words · /help play for one command's full page_")
-        return "\n".join(lines).rstrip()
+            lines += _box(emoji, title, items)
+        lines += ["", "_say it in plain words, or use a command — "
+                      "/help <command> gives one command's full page_"]
+        return "\n".join(_stamped(lines)).rstrip()
     except Exception as exc:  # noqa: BLE001
         record_failure('control.whatsapp_menu', exc)
         return help_text()

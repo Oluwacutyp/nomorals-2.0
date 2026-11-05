@@ -312,6 +312,61 @@ def menu_divider(platform: str = "telegram") -> str:
         return "---"
 
 
+#: Unicode small capitals for display titles (the XMD menu
+#: grammar).  ``s``/``x`` have no small-capital codepoint in the
+#: set these bots use and stay plain; ``q`` takes ǫ.
+_SMALL_CAPS: dict[str, str] = {
+    "a": "ᴀ", "b": "ʙ", "c": "ᴄ", "d": "ᴅ", "e": "ᴇ", "f": "ꜰ",
+    "g": "ɢ", "h": "ʜ", "i": "ɪ", "j": "ᴊ", "k": "ᴋ", "l": "ʟ",
+    "m": "ᴍ", "n": "ɴ", "o": "ᴏ", "p": "ᴘ", "q": "ǫ", "r": "ʀ",
+    "s": "s", "t": "ᴛ", "u": "ᴜ", "v": "ᴠ", "w": "ᴡ", "x": "x",
+    "y": "ʏ", "z": "ᴢ",
+}
+
+
+def small_caps(text: str) -> str:
+    """A display title in unicode small capitals: ASCII letters
+    convert, everything else (digits, emoji, punctuation, existing
+    unicode) passes through untouched.  PRESENTATION ONLY — never
+    apply this to a command string or anything a reader must type
+    back verbatim; a stylized command is an untypable command.
+    Never raises."""
+    try:
+        return "".join(
+            _SMALL_CAPS.get(ch.lower(), ch)
+            if ch.isascii() and ch.isalpha() else ch
+            for ch in str(text or ""))
+    except Exception as exc:  # noqa: BLE001
+        record_failure('style.small_caps', exc)
+        return str(text or "")
+
+
+def xmd_frame_top(title: str = "") -> str:
+    """The top border of one boxed section in the XMD grammar:
+    ``╭━━〔 TITLE 〕━━┈⊷`` — or a bare rule when the box has no
+    title.  The title arrives already styled (see
+    :func:`small_caps`); it is data here, never re-styled."""
+    t = str(title or "").strip()
+    if t:
+        return f"╭━━〔 {t} 〕━━┈⊷"
+    return "╭━━━━━━━━━━━━┈⊷"
+
+
+def xmd_frame_bottom() -> str:
+    """The bottom border of one boxed section: ``╰━━━━━━━━━━━━┈⊷``."""
+    return "╰━━━━━━━━━━━━┈⊷"
+
+
+def xmd_frame_line(text: str, marker: str = "") -> str:
+    """One content line inside a box: ``┃ {marker} {text}`` — the
+    header fields ride marker ``✫``, command rows ``✫✧│``, plain
+    prose no marker."""
+    body = str(text or "")
+    if marker:
+        return f"┃ {marker} {body}"
+    return f"┃ {body}"
+
+
 def render_menu(sections: list, platform: str = "telegram",
                 header: str = "", footer: str = "") -> str:
     """Render a full menu.
