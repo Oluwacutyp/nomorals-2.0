@@ -161,9 +161,74 @@ _GRADES: dict[str, str] = {
 }
 
 
-def _fx_color_grade(params: dict[str, Any], ctx: dict[str, Any]) -> str:
+#: the scalar keyframe paths into a CDL decision (Wave 5 registry
+#: extension closing the "animated CDL components" remainder): each
+#: component of slope/offset/power is one scalar property, and
+#: saturation is the tenth. A keyframe track binds ONE component;
+#: the renderer samples every bound component jointly into
+#: constant-value windowed sub-effects whose params carry all ten,
+#: and the builder below composes them into the one CDL that gets
+#: baked — components are never applied as sequential grades.
+CDL_COMPONENT_PARAMS: dict[str, tuple[str, int | None]] = {
+    "cdl_slope_r": ("slope", 0), "cdl_slope_g": ("slope", 1),
+    "cdl_slope_b": ("slope", 2),
+    "cdl_offset_r": ("offset", 0), "cdl_offset_g": ("offset", 1),
+    "cdl_offset_b": ("offset", 2),
+    "cdl_power_r": ("power", 0), "cdl_power_g": ("power", 1),
+    "cdl_power_b": ("power", 2),
+    "cdl_saturation": ("saturation", None),
+}
+
+_CDL_IDENTITY: dict[str, Any] = {
+    "slope": (1.0, 1.0, 1.0), "offset": (0.0, 0.0, 0.0),
+    "power": (1.0, 1.0, 1.0), "saturation": 1.0}
+
+
+def compose_cdl(params: dict[str, Any]) -> dict[str, Any] | None:
+    """The CDL decision a color_grade param set names, or None.
+
+    Precedence: explicit ``cdl_*`` component params compose over
+    the ``cdl`` dict (which composes over the CDL identity);
+    a bare ``cdl`` dict stands alone; neither → None (a named
+    ``grade`` applies instead). Component params and a named
+    ``grade`` are two different decisions — carrying both raises,
+    naming the conflict, instead of silently dropping one.
+    """
+    comps = {k: params[k] for k in CDL_COMPONENT_PARAMS
+             if params.get(k) is not None}
     cdl = params.get("cdl")
+    if comps:
+        if params.get("grade") is not None:
+            raise MediaEditError(
+                "color_grade: cdl_* component params and a named "
+                "grade are two different decisions — author one "
+                "or the other (components compose over a cdl dict, "
+                "never over a named grade)")
+        out: dict[str, Any] = dict(_CDL_IDENTITY)
+        if isinstance(cdl, dict):
+            out.update({k: cdl[k] for k in
+                        ("slope", "offset", "power", "saturation")
+                        if k in cdl})
+        vec: dict[str, list[float]] = {}
+        for key, (field, idx) in CDL_COMPONENT_PARAMS.items():
+            if key not in comps:
+                continue
+            if idx is None:
+                out[field] = float(comps[key])
+            else:
+                if field not in vec:
+                    vec[field] = [float(v) for v in out[field]]
+                vec[field][idx] = float(comps[key])
+        out.update(vec)
+        return out
     if isinstance(cdl, dict) and cdl:
+        return dict(cdl)
+    return None
+
+
+def _fx_color_grade(params: dict[str, Any], ctx: dict[str, Any]) -> str:
+    cdl = compose_cdl(params)
+    if cdl is not None:
         return color_grade_cdl_chain(cdl)
     return color_grade_chain(str(params.get("grade", "warm")))
 
@@ -351,13 +416,54 @@ EFFECT_PROPERTIES: dict[str, dict[str, ParamSpec]] = {
             "enum", "warm",
             choices=tuple(sorted(_GRADES)),
             doc="canonical grade name — resolved by "
-                "color_grade_chain(), never re-implemented"),
+                "color_grade_chain(), never re-implemented. A "
+                "named grade is a cut, not a curve: not keyframable "
+                "(animate the CDL components instead)"),
         "cdl": ParamSpec(
             "dict", None,
             doc="ASC-CDL decision dict — baked to a .cube by "
                 "studio_color (the canonical chain) and applied via "
-                "lut3d. A grade is a cut, not a curve: neither "
-                "color_grade param is keyframable"),
+                "lut3d. The dict as a whole is a cut; its scalar "
+                "components are keyframable through the cdl_* "
+                "paths below"),
+        # the per-component keyframe paths (the §1.2b remainder,
+        # closed): each is one scalar of the CDL decision, bound
+        # by one keyframe track and sampled jointly with its
+        # siblings into windowed sub-effects (see render.py's
+        # joint sampled binding). The ranges are the CDL's own
+        # working domain; power's > 0 law stays in studio_color's
+        # CDL constructor, which refuses by name at the bake.
+        "cdl_slope_r": ParamSpec(
+            "number", 1.0, 0.0, 10.0, "sampled",
+            doc="CDL slope, red channel"),
+        "cdl_slope_g": ParamSpec(
+            "number", 1.0, 0.0, 10.0, "sampled",
+            doc="CDL slope, green channel"),
+        "cdl_slope_b": ParamSpec(
+            "number", 1.0, 0.0, 10.0, "sampled",
+            doc="CDL slope, blue channel"),
+        "cdl_offset_r": ParamSpec(
+            "number", 0.0, -2.0, 2.0, "sampled",
+            doc="CDL offset, red channel"),
+        "cdl_offset_g": ParamSpec(
+            "number", 0.0, -2.0, 2.0, "sampled",
+            doc="CDL offset, green channel"),
+        "cdl_offset_b": ParamSpec(
+            "number", 0.0, -2.0, 2.0, "sampled",
+            doc="CDL offset, blue channel"),
+        "cdl_power_r": ParamSpec(
+            "number", 1.0, 0.0, 10.0, "sampled",
+            doc="CDL power, red channel (the CDL constructor "
+                "refuses 0 by name at the bake)"),
+        "cdl_power_g": ParamSpec(
+            "number", 1.0, 0.0, 10.0, "sampled",
+            doc="CDL power, green channel"),
+        "cdl_power_b": ParamSpec(
+            "number", 1.0, 0.0, 10.0, "sampled",
+            doc="CDL power, blue channel"),
+        "cdl_saturation": ParamSpec(
+            "number", 1.0, 0.0, 10.0, "sampled",
+            doc="CDL saturation"),
     },
     "opacity": {
         "alpha": ParamSpec(
@@ -465,15 +571,16 @@ def validate_effect_params(name: str, params: dict[str, Any]) -> None:
     Raises MediaEditError naming the property path on: an undeclared
     param, a kind mismatch, an out-of-range number, an unlisted enum
     value. Reserved keys pass: ``mask`` (a MaskRef dict — the
-    regional anchor, resolved by the renderer) and ``_``-prefixed
-    renderer-internal keys. A param explicitly None is accepted only
-    where the declared default is None.
+    regional anchor, resolved by the renderer), ``mask_track``
+    (the renderer's tracking switch for that anchor) and
+    ``_``-prefixed renderer-internal keys. A param explicitly None
+    is accepted only where the declared default is None.
     """
     specs = EFFECT_PROPERTIES.get(name)
     if specs is None:
         return  # unknown effect — the builder lookup raises its error
     for key, value in (params or {}).items():
-        if key == "mask" or key.startswith("_"):
+        if key in ("mask", "mask_track") or key.startswith("_"):
             continue
         spec = specs.get(key)
         path = effect_property_path(name, key)
@@ -553,7 +660,13 @@ def effect_properties() -> dict[str, Any]:
             "reserved_params": {
                 "mask": "a MaskRef dict anchoring the effect to a "
                         "region (imggen.masks.MaskRef); resolved by "
-                        "the renderer, which records the mask rung"}}
+                        "the renderer, which records the mask rung",
+                "mask_track": "bool — ask the renderer to track the "
+                        "resolved mask across the clip's frames "
+                        "(edit_engine.mask_track, translation "
+                        "only); the effect record states whether "
+                        "the mask tracked, partially tracked or "
+                        "held, and why held"}}
 
 
 def deferred_effect_reason(name: str) -> str | None:

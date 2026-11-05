@@ -1,0 +1,201 @@
+{
+  "kind": "mask_track_corpus",
+  "tracker": {
+    "module": "nomorals.media.edit_engine.mask_track",
+    "method": "template NCC (FFT correlation + integral-image normalization), pure numpy; translation only",
+    "search_radius_px": 48,
+    "min_score": 0.5,
+    "texture_std_eps": 2.0,
+    "template_margin_px": 8
+  },
+  "construction": "seeded per-pixel noise textures; the patch is pasted at the fixture's velocity, so truth offsets are exact by construction; event fixtures remove or replace the content at a named frame",
+  "fixtures": [
+    {
+      "name": "translate_diagonal",
+      "seed": 21,
+      "notes": "Textured patch drifting (3, 2) px/frame for 24 frames \u2014 the tracker's home turf; offsets should come back exact.",
+      "measured": {
+        "status": "tracked",
+        "reason": "",
+        "frames": 24,
+        "mean_offset_err_px": 0.0,
+        "max_offset_err_px": 0.0,
+        "mean_centroid_err_px": 0.0,
+        "min_iou": 1.0,
+        "first_lost_frame": null,
+        "lost_frames": 0,
+        "holds_after_event": null,
+        "max_displacement_px": 82.92767933567175,
+        "min_score": 0.7160828633340084
+      },
+      "floors": {
+        "max_offset_err_px": 1.0,
+        "min_iou": 0.95
+      },
+      "expect": {
+        "status": "tracked"
+      }
+    },
+    {
+      "name": "translate_slow_east",
+      "seed": 22,
+      "notes": "One pixel per frame east for 16 frames \u2014 small steps, no accumulation drift.",
+      "measured": {
+        "status": "tracked",
+        "reason": "",
+        "frames": 16,
+        "mean_offset_err_px": 0.0,
+        "max_offset_err_px": 0.0,
+        "mean_centroid_err_px": 0.0,
+        "min_iou": 1.0,
+        "first_lost_frame": null,
+        "lost_frames": 0,
+        "holds_after_event": null,
+        "max_displacement_px": 15.0,
+        "min_score": 0.7091212660149688
+      },
+      "floors": {
+        "max_offset_err_px": 1.0,
+        "min_iou": 0.95
+      },
+      "expect": {
+        "status": "tracked"
+      }
+    },
+    {
+      "name": "translate_large_step",
+      "seed": 23,
+      "notes": "(12, 8) px/frame for 12 frames \u2014 inside the per-step search radius, far outside a naive few-pixel search.",
+      "measured": {
+        "status": "tracked",
+        "reason": "",
+        "frames": 12,
+        "mean_offset_err_px": 0.0,
+        "max_offset_err_px": 0.0,
+        "mean_centroid_err_px": 0.0,
+        "min_iou": 1.0,
+        "first_lost_frame": null,
+        "lost_frames": 0,
+        "holds_after_event": null,
+        "max_displacement_px": 158.64425612041552,
+        "min_score": 0.7164288840960615
+      },
+      "floors": {
+        "max_offset_err_px": 1.0,
+        "min_iou": 0.95
+      },
+      "expect": {
+        "status": "tracked"
+      }
+    },
+    {
+      "name": "static_scene",
+      "seed": 24,
+      "notes": "No motion at all: the tracker must report zero displacement at full confidence, not wander.",
+      "measured": {
+        "status": "tracked",
+        "reason": "",
+        "frames": 12,
+        "mean_offset_err_px": 0.0,
+        "max_offset_err_px": 0.0,
+        "mean_centroid_err_px": 0.0,
+        "min_iou": 1.0,
+        "first_lost_frame": null,
+        "lost_frames": 0,
+        "holds_after_event": null,
+        "max_displacement_px": 0.0,
+        "min_score": 1.0
+      },
+      "floors": {
+        "max_offset_err_px": 1.0,
+        "min_iou": 0.95
+      },
+      "expect": {
+        "status": "tracked"
+      }
+    },
+    {
+      "name": "vanish_midway",
+      "seed": 25,
+      "notes": "The patch drifts (2, 1) for 10 frames, then is gone \u2014 bare background. Truth after frame 10 is 'nothing to follow': loss must be flagged and the offset must hold at the last fix, not chase background texture.",
+      "measured": {
+        "status": "partial",
+        "reason": "10 of 19 step(s) fell below the match floor 0.5",
+        "frames": 20,
+        "mean_offset_err_px": 0.0,
+        "max_offset_err_px": 0.0,
+        "mean_centroid_err_px": 0.0,
+        "min_iou": 1.0,
+        "first_lost_frame": 10,
+        "lost_frames": 10,
+        "holds_after_event": true,
+        "max_displacement_px": 20.12461179749811,
+        "min_score": 0.27638136068722985
+      },
+      "floors": {
+        "max_offset_err_px": 1.0,
+        "min_iou": 0.95
+      },
+      "expect": {
+        "status": "partial",
+        "first_lost_frame": 10,
+        "holds_after_event": true
+      }
+    },
+    {
+      "name": "scene_cut",
+      "seed": 26,
+      "notes": "Twelve frames of drift, then a hard cut to a different scene (new background, new patch elsewhere). The old content is simply not there: loss must be flagged from the cut.",
+      "measured": {
+        "status": "partial",
+        "reason": "8 of 19 step(s) fell below the match floor 0.5",
+        "frames": 20,
+        "mean_offset_err_px": 0.0,
+        "max_offset_err_px": 0.0,
+        "mean_centroid_err_px": 0.0,
+        "min_iou": 1.0,
+        "first_lost_frame": 12,
+        "lost_frames": 8,
+        "holds_after_event": true,
+        "max_displacement_px": 22.0,
+        "min_score": 0.032256603884181
+      },
+      "floors": {
+        "max_offset_err_px": 1.0,
+        "min_iou": 0.95
+      },
+      "expect": {
+        "status": "partial",
+        "first_lost_frame": 12,
+        "holds_after_event": true
+      }
+    },
+    {
+      "name": "uniform_field",
+      "seed": 27,
+      "notes": "A featureless field and an arbitrary box mask: there is no texture to follow, so the tracker must refuse (held) and name the reason \u2014 a silent 'tracked' here would be a fabricated success.",
+      "measured": {
+        "status": "held",
+        "reason": "the masked region at the anchor frame has no trackable texture (template std 0.00 < 2.0)",
+        "frames": 1,
+        "mean_offset_err_px": 0.0,
+        "max_offset_err_px": 0.0,
+        "mean_centroid_err_px": 0.0,
+        "min_iou": 1.0,
+        "first_lost_frame": null,
+        "lost_frames": 0,
+        "holds_after_event": null,
+        "max_displacement_px": 0.0,
+        "min_score": 1.0
+      },
+      "floors": {
+        "max_offset_err_px": 1.0,
+        "min_iou": 0.95
+      },
+      "expect": {
+        "status": "held",
+        "reason_must_name": "texture"
+      }
+    }
+  ]
+}

@@ -263,11 +263,25 @@ def _fx_record(fx: Effect, *, kind: str = "builder") -> dict[str, Any]:
         "window": ([float(fx.at[0]), float(fx.at[1])] if fx.at else None),
         "source": str(params.get("_source", "clip"))}
     if params.get("_mask_png"):
-        rec["mask"] = {
+        mask_rec: dict[str, Any] = {
             "rung": str(params.get("_mask_rung", "")),
             "detail": str(params.get("_mask_detail", "")),
             "anchor": "source frame at the clip window start "
-                      "(masks do not track motion)"}
+                      "(mask holds; tracking not requested)"}
+        tracking = str(params.get("_mask_tracking", ""))
+        if tracking:
+            t_detail = str(params.get("_mask_track_detail", ""))
+            mask_rec["tracking"] = {"status": tracking,
+                                    "detail": t_detail}
+            if tracking == "held":
+                mask_rec["anchor"] = (
+                    "source frame at the clip window start "
+                    f"(tracking requested but held: {t_detail})")
+            else:
+                mask_rec["anchor"] = (
+                    "mask tracked from the source frame at the "
+                    f"clip window start ({t_detail})")
+        rec["mask"] = mask_rec
     return rec
 
 
@@ -414,7 +428,8 @@ def _chain_rgb_animated(parts: list[str], cur: str, fx: Effect,
     # a resolved mask (and the record source) rides into every
     # sub-window — the discretization must never drop the anchor.
     carried = {k: params[k] for k in
-               ("_mask_png", "_mask_rung", "_mask_detail", "_source")
+               ("_mask_png", "_mask_rung", "_mask_detail", "_source",
+                "_mask_tracking", "_mask_track_detail")
                if k in params}
     for i in range(steps):
         a = a0 + span * i / steps
@@ -504,23 +519,92 @@ def _atempo_chain(speed: float) -> str:
     return ",".join(chain)
 
 
+def _group_sampled_tracks(
+        pairs: list[tuple[KeyframeTrack, KeyframeTrack]], *,
+        fps: int) -> list[dict[str, Any]]:
+    """Group sampled-family tracks by effect for one clip window.
+
+    ``pairs`` = (track, window-shifted track) in author order.
+    Each returned group is ``{"tracks": [track, ...], "windows":
+    [(a, b, {param: value, ...}), ...]}`` in first-appearance
+    order. A one-track group's windows are exactly
+    ``discretize(window, fps=fps)`` — the Wave-5 binding, unchanged.
+
+    A multi-track group (several params of ONE effect — the
+    animated-CDL case: slope/saturation components bound by
+    separate tracks) is discretized JOINTLY: the union of every
+    track's frame-grid boundaries, each window carrying every
+    track's value sampled at the window midpoint. The components
+    land in ONE sub-effect per window, so they compose into a
+    single application of the effect (one CDL bake) instead of
+    sequential re-applications of the whole effect per component.
+    Two tracks on the same (effect, param) are ambiguous and raise.
+    """
+    groups: list[dict[str, Any]] = []
+    by_effect: dict[str, dict[str, Any]] = {}
+    for track, window in pairs:
+        g = by_effect.get(track.effect)
+        if g is None:
+            g = {"tracks": [], "windows_in": []}
+            by_effect[track.effect] = g
+            groups.append(g)
+        if any(t.param == track.param for t in g["tracks"]):
+            raise MediaEditError(
+                f"two keyframe tracks target "
+                f"{track.effect}.{track.param} on clip "
+                f"{track.clip_id!r} — ambiguous animation")
+        g["tracks"].append(track)
+        g["windows_in"].append(window)
+    for g in groups:
+        tracks: list[KeyframeTrack] = g["tracks"]
+        wins_in: list[KeyframeTrack] = g.pop("windows_in")
+        if len(tracks) == 1:
+            t = tracks[0]
+            g["windows"] = [
+                (a, b, {t.param: round(v, 4)})
+                for a, b, v in discretize(wins_in[0], fps=fps)]
+            continue
+        bounds: set[float] = set()
+        for w in wins_in:
+            for a, b, _v in discretize(w, fps=fps):
+                bounds.add(a)
+                bounds.add(b)
+        ordered = sorted(bounds)
+        windows: list[tuple[float, float, dict[str, float]]] = []
+        for a, b in zip(ordered, ordered[1:], strict=False):
+            if b - a < 1e-9:
+                continue
+            mid = (a + b) / 2.0
+            windows.append((a, b, {
+                t.param: round(w.sample(mid), 4)
+                for t, w in zip(tracks, wins_in, strict=True)}))
+        g["windows"] = windows
+    return groups
+
+
 class _MaskStreams:
     """Per-render registry of resolved effect masks.
 
-    Each resolved mask PNG becomes ONE extra ffmpeg input (a looped
-    still) and ONE graph label; every masked effect in the render
-    references the label. Input order = registration order, so the
-    caller can compute stream indices deterministically.
+    Each resolved mask becomes ONE extra ffmpeg input and ONE graph
+    label; every masked effect in the render references the label.
+    A mask is either a *still* (one PNG, looped for the render's
+    duration — the anchor-and-hold shape) or a *video* (a tracked
+    mask sequence, encoded losslessly by the tracking rung; it
+    plays from its own first frame in lockstep with the consuming
+    chain). Input order = registration order, so the caller can
+    compute stream indices deterministically.
     """
 
     def __init__(self) -> None:
-        self.labels: dict[str, str] = {}   # png path → graph label
-        self.inputs: list[str] = []        # png paths, in input order
+        self.labels: dict[str, str] = {}   # media path → graph label
+        self.inputs: list[str] = []        # media paths, input order
+        self.kinds: dict[str, str] = {}    # media path → still|video
 
-    def register(self, png: str) -> str:
+    def register(self, png: str, kind: str = "still") -> str:
         if png not in self.labels:
             self.labels[png] = f"msk{len(self.inputs)}"
             self.inputs.append(png)
+            self.kinds[png] = kind
         return self.labels[png]
 
     def preamble(self, parts: list[str], *, first_index: int,
@@ -532,11 +616,15 @@ class _MaskStreams:
                 f"format=gray[{self.labels[png]}]")
 
     def input_args(self, *, fps: int, duration: float) -> list[str]:
-        """cmd args adding the mask inputs (looped stills, bounded)."""
+        """cmd args adding the mask inputs (looped stills, bounded;
+        tracked videos play their own frames, unbounded by -t)."""
         args: list[str] = []
         for png in self.inputs:
-            args += ["-loop", "1", "-framerate", str(fps),
-                     "-t", f"{max(duration, 0.1):.3f}", "-i", png]
+            if self.kinds.get(png) == "video":
+                args += ["-i", png]
+            else:
+                args += ["-loop", "1", "-framerate", str(fps),
+                         "-t", f"{max(duration, 0.1):.3f}", "-i", png]
         return args
 
 
@@ -559,10 +647,116 @@ def _grab_anchor_image(source_path: str | os.PathLike[str], at_s: float,
         else img
 
 
+def _extract_track_frames(source_path: str | os.PathLike[str], *,
+                          start_s: float, step_s: float, count: int,
+                          width: int, height: int, tmp: Path,
+                          tag: str) -> list[Path]:
+    """Source frames at the chain's consumption cadence.
+
+    Frame j is the source at ``start_s + j * step_s`` (the fps
+    filter resamples the decoded stream to that grid — the same
+    grid the consuming chain plays at), scaled to the canvas so
+    mask geometry is canvas geometry. Fewer files than ``count``
+    come back when the source ends first; the caller holds the
+    mask at its last offset for the remainder.
+    """
+    seq = tmp / f"trackframes{tag}"
+    seq.mkdir(parents=True, exist_ok=True)
+    rate = 1.0 / max(step_s, 1e-6)
+    run_ffmpeg(["-ss", f"{max(0.0, start_s):.3f}", "-i",
+                str(source_path),
+                "-vf", f"fps={rate:.6f},scale={width}:{height}",
+                "-frames:v", str(count),
+                "-y", str(seq / "f%05d.png")])
+    return sorted(seq.glob("f*.png"))
+
+
+def _track_mask_attempt(source_path: str | os.PathLike[str], *,
+                        source_start: float, speed: float, fps: int,
+                        play_frames: int, width: int, height: int,
+                        mask_img: Any, tmp: Path,
+                        tag: str) -> tuple[str, str, str | None]:
+    """Try to turn a resolved anchor mask into a tracked sequence.
+
+    Returns ``(status, detail, video_path|None)`` — status/detail
+    land verbatim in the effect record. NEVER raises: tracking is
+    an enhancement of the anchor-and-hold shape, so every failure
+    mode (still source, no timeline supplied, frame cap, no
+    texture, unmatchable content, a tracker fault) comes back as
+    ``held`` with the reason named, and the caller keeps the
+    static mask. A held outcome is a recorded fact in
+    ``effects_applied``, never a silent fallback.
+    """
+    from . import mask_track
+    try:
+        if _is_still(source_path):
+            return ("held", "the source is a still image — there "
+                            "are no frames to track", None)
+        if fps <= 0 or play_frames < 2:
+            return ("held", "the renderer supplied no frame "
+                            "timeline to track over", None)
+        if play_frames > mask_track.MAX_TRACK_FRAMES:
+            return ("held",
+                    f"the clip plays {play_frames} frames — beyond "
+                    f"the {mask_track.MAX_TRACK_FRAMES}-frame "
+                    f"tracking cap", None)
+        import numpy as np
+        from PIL import Image
+        step_s = max(float(speed), 1e-6) / float(fps)
+        paths = _extract_track_frames(
+            source_path, start_s=source_start, step_s=step_s,
+            count=play_frames, width=width, height=height,
+            tmp=tmp, tag=tag)
+        if len(paths) < 2:
+            return ("held",
+                    f"only {len(paths)} frame(s) could be "
+                    f"extracted from the source window", None)
+
+        def _gray() -> Any:
+            for p in paths:
+                with Image.open(p) as im:
+                    yield np.asarray(im.convert("L"),
+                                     dtype=np.float64)
+
+        base = np.asarray(mask_img.convert("L")) > 127
+        res = mask_track.track_sequence(_gray(), base)
+        if res.status == "held":
+            return ("held", res.reason, None)
+        offsets = list(res.offsets)
+        detail = res.detail()
+        if len(offsets) < play_frames:
+            detail += (f"; the source yielded {len(paths)} of "
+                       f"{play_frames} played frames — the mask "
+                       f"holds at its last offset beyond")
+        while len(offsets) < play_frames:
+            offsets.append(offsets[-1])
+        # one second of held tail past the played span: segment
+        # trims round at frame edges, and a mask stream that ends
+        # early would starve the composite — the still path's
+        # render-length loop is the same insurance.
+        offsets.extend([offsets[-1]] * fps)
+        seq_dir = tmp / f"trackseq{tag}"
+        seq_dir.mkdir(parents=True, exist_ok=True)
+        for j, (dx, dy) in enumerate(offsets):
+            Image.fromarray(
+                mask_track.shift_mask(base, dx, dy)).save(
+                    str(seq_dir / f"m{j:05d}.png"))
+        out = tmp / f"masktrack{tag}.mkv"
+        run_ffmpeg(["-framerate", str(fps), "-i",
+                    str(seq_dir / "m%05d.png"),
+                    "-c:v", "ffv1", "-pix_fmt", "gray",
+                    "-y", str(out)])
+        return (res.status, detail, str(out))
+    except Exception as exc:  # noqa: BLE001 — held, named, recorded
+        return ("held", f"the tracking attempt failed: {exc}", None)
+
+
 def _prepare_effects(effects: Any, *, source_path: str,
                      source_start: float, width: int, height: int,
                      tmp: Path, masks: _MaskStreams,
-                     tag_prefix: str) -> list[Effect]:
+                     tag_prefix: str, fps: int = 0,
+                     speed: float = 1.0,
+                     play_frames: int = 0) -> list[Effect]:
     """Resolve ``mask`` params on effects → renderer-internal copies.
 
     An effect may carry ``params["mask"]`` = a MaskRef dict (the
@@ -574,6 +768,15 @@ def _prepare_effects(effects: Any, *, source_path: str,
     Authored effects are never mutated. A mask that cannot resolve
     raises MediaEditError with the ladder's reason — before any
     ffmpeg run, never a silent unmasked render.
+
+    ``params["mask_track"]`` (truthy) asks for the mask to follow
+    its content across the clip: the renderer tracks it with
+    :mod:`.mask_track` over the ``play_frames`` the clip will play
+    (at ``fps``, source advancing ``speed``×) and registers a
+    tracked mask *video* instead of the looped still. The outcome —
+    tracked / partial / held, with the reason when held — is
+    stamped ``_mask_tracking``/``_mask_track_detail`` and surfaces
+    in the effect record; a held outcome keeps the still.
     """
     out: list[Effect] = []
     for i, fx in enumerate(effects):
@@ -603,11 +806,26 @@ def _prepare_effects(effects: Any, *, source_path: str,
         if m.size != (width, height):
             m = m.resize((width, height))
         m.save(str(png))
-        masks.register(str(png))
-        new_params = {k: v for k, v in params.items() if k != "mask"}
+        new_params = {k: v for k, v in params.items()
+                      if k not in ("mask", "mask_track")}
         new_params["_mask_png"] = str(png)
         new_params["_mask_rung"] = result.tier
         new_params["_mask_detail"] = result.detail
+        if params.get("mask_track"):
+            status, detail, video = _track_mask_attempt(
+                source_path, source_start=source_start, speed=speed,
+                fps=fps, play_frames=play_frames, width=width,
+                height=height, mask_img=m, tmp=tmp,
+                tag=f"{tag_prefix}{i}")
+            new_params["_mask_tracking"] = status
+            new_params["_mask_track_detail"] = detail
+            if video is not None:
+                masks.register(video, kind="video")
+                new_params["_mask_png"] = video
+            else:
+                masks.register(str(png))
+        else:
+            masks.register(str(png))
         out.append(Effect(name=fx.name, params=new_params, at=fx.at))
     return out
 
@@ -743,7 +961,8 @@ def apply_effect(src: str | os.PathLike[str], effect: str, *,
             [fx], source_path=str(p),
             source_start=float(at[0]) if at else 0.0,
             width=w, height=h, tmp=mtmp, masks=masks,
-            tag_prefix="single")[0]
+            tag_prefix="single", fps=fps, speed=1.0,
+            play_frames=int(dur * fps) + 1)[0]
         ctx["mask_labels"] = masks.labels
         masks.preamble(parts, first_index=1, width=w, height=h)
     final = _chain_effect(parts, "0:v", fx, ctx, "fx", rec=fx_rec)
@@ -1002,11 +1221,16 @@ def assemble_segments(clips: list[Clip], *,
     # static base is the clip's one same-named effect (which the
     # track then replaces in the chain); two or more is ambiguous.
     masks = _MaskStreams()
+    play_frames = [0] * len(clips)
+    for ci_, play_d in plan:
+        play_frames[ci_] += int(play_d * fps) + 1
     prepared_fx: list[list[Effect]] = [
         _prepare_effects(c.effects, source_path=c.path,
                          source_start=windows[i][0], width=width,
                          height=height, tmp=tmp, masks=masks,
-                         tag_prefix=f"c{i}_")
+                         tag_prefix=f"c{i}_", fps=fps,
+                         speed=float(c.speed),
+                         play_frames=play_frames[i])
         for i, c in enumerate(clips)]
     fx_applied: list[dict[str, Any]] = []
     sampled_base: dict[tuple[int, str], dict[str, Any]] = {}
@@ -1096,7 +1320,18 @@ def assemble_segments(clips: list[Clip], *,
         # play time (Wave 1.2c): the track is re-based to segment-local
         # time. Zoom becomes one expression filter; opacity is sampled
         # into constant-alpha windows over an alpha-carrying stream.
-        for j, kt in enumerate(kf_by_clip.get(ci, [])):
+        # Sampled tracks on one effect form a group (the joint
+        # binding): a group is chained once, at its first track's
+        # position, with every component in each window's sub-effect.
+        clip_tracks = kf_by_clip.get(ci, [])
+        sampled_groups = _group_sampled_tracks(
+            [(kt, shifted(kt, playheads[ci], play_d))
+             for kt in clip_tracks
+             if kf_families[id(kt)] == "sampled"], fps=fps)
+        group_of = {id(kt): g for g in sampled_groups
+                    for kt in g["tracks"]}
+        done_groups: set[int] = set()
+        for j, kt in enumerate(clip_tracks):
             window = shifted(kt, playheads[ci], play_d)
             if kf_families[id(kt)] == "expression":
                 filt = keyframe_filter(window, width=width,
@@ -1114,23 +1349,27 @@ def assemble_segments(clips: list[Clip], *,
             else:  # sampled (Wave 5): frame-grid windows of the same
                 # effect, built by the same chain builder, over the
                 # consumed static base (or the builder defaults).
-                base = sampled_base.get((ci, kt.effect), {})
-                wins = discretize(window, fps=fps)
-                for w_i, (a, b, v) in enumerate(wins):
-                    sub_params = dict(base)
-                    sub_params[kt.param] = round(v, 4)
-                    sub = Effect(name=kt.effect, params=sub_params,
-                                 at=(a, b))
-                    vcur = _chain_effect(parts, vcur, sub, ctx,
-                                         f"{tag}sm{j}_{w_i}")
-                entry = _fx_record(
-                    Effect(name=kt.effect, params=dict(base)))
-                entry.update({
-                    "kind": "keyframe-sampled",
-                    "source": f"keyframe:{kt.param}",
-                    "clip": clip.id or ci, "segment": n,
-                    "windows": len(wins)})
-                fx_applied.append(entry)
+                g = group_of[id(kt)]
+                if id(g) not in done_groups:
+                    done_groups.add(id(g))
+                    base = sampled_base.get((ci, kt.effect), {})
+                    for w_i, (a, b, overlay) in enumerate(
+                            g["windows"]):
+                        sub_params = dict(base)
+                        sub_params.update(overlay)
+                        sub = Effect(name=kt.effect,
+                                     params=sub_params, at=(a, b))
+                        vcur = _chain_effect(parts, vcur, sub, ctx,
+                                             f"{tag}sm{j}_{w_i}")
+                    for t in g["tracks"]:
+                        entry = _fx_record(
+                            Effect(name=t.effect, params=dict(base)))
+                        entry.update({
+                            "kind": "keyframe-sampled",
+                            "source": f"keyframe:{t.param}",
+                            "clip": clip.id or ci, "segment": n,
+                            "windows": len(g["windows"])})
+                        fx_applied.append(entry)
             kf_applied.append({"clip_id": kt.clip_id,
                                "effect": kt.effect, "param": kt.param,
                                "family": kf_families[id(kt)],
@@ -1478,11 +1717,16 @@ def _render_overlay_track(track: OverlayTrack, *,
                                 height=ph, crf=21, preset="veryfast",
                                 profile="pc", tmp=tmp)
     masks = _MaskStreams()
+    ov_windows = [_clip_window(c) for c in clips]
     prepared_fx: list[list[Effect]] = [
         _prepare_effects(c.effects, source_path=c.path,
-                         source_start=_clip_window(c)[0], width=pw,
+                         source_start=ov_windows[i][0], width=pw,
                          height=ph, tmp=tmp, masks=masks,
-                         tag_prefix=f"ov{index}c{i}_")
+                         tag_prefix=f"ov{index}c{i}_", fps=fps,
+                         speed=float(c.speed),
+                         play_frames=int(
+                             (ov_windows[i][1] - ov_windows[i][0])
+                             / max(float(c.speed), 1e-6) * fps) + 1)
         for i, c in enumerate(clips)]
     sampled_base: dict[tuple[int, str], dict[str, Any]] = {}
     consumed_static: set[int] = set()
@@ -1559,25 +1803,35 @@ def _render_overlay_track(track: OverlayTrack, *,
                              params={"alpha": round(v, 4)}, at=(a, b))
                 vcur = _chain_effect(parts, vcur, sub, ctx,
                                      f"{tag}op{j}_{w_i}")
-        for j, kt in enumerate(sm_by_clip.get(ci, [])):
-            window = shifted(kt, 0.0, play_d)
+        sm_tracks = sm_by_clip.get(ci, [])
+        sm_groups = _group_sampled_tracks(
+            [(kt, shifted(kt, 0.0, play_d)) for kt in sm_tracks],
+            fps=fps)
+        sm_group_of = {id(kt): g for g in sm_groups
+                       for kt in g["tracks"]}
+        sm_done: set[int] = set()
+        for j, kt in enumerate(sm_tracks):
+            g = sm_group_of[id(kt)]
+            if id(g) in sm_done:
+                continue  # chained with its group, at track one
+            sm_done.add(id(g))
             base = sampled_base.get((ci, kt.effect), {})
-            wins = discretize(window, fps=fps)
-            for w_i, (a, b, v) in enumerate(wins):
+            for w_i, (a, b, overlay) in enumerate(g["windows"]):
                 sub_params = dict(base)
-                sub_params[kt.param] = round(v, 4)
+                sub_params.update(overlay)
                 sub = Effect(name=kt.effect, params=sub_params,
                              at=(a, b))
                 vcur = _chain_effect(parts, vcur, sub, ctx,
                                      f"{tag}sm{j}_{w_i}")
             if rec is not None:
-                entry = _fx_record(
-                    Effect(name=kt.effect, params=dict(base)))
-                entry.update({
-                    "kind": "keyframe-sampled",
-                    "source": f"keyframe:{kt.param}",
-                    "windows": len(wins)})
-                rec.append(entry)
+                for t in g["tracks"]:
+                    entry = _fx_record(
+                        Effect(name=t.effect, params=dict(base)))
+                    entry.update({
+                        "kind": "keyframe-sampled",
+                        "source": f"keyframe:{t.param}",
+                        "windows": len(g["windows"])})
+                    rec.append(entry)
         if rec is not None:
             for entry in rec[rec_mark:]:
                 entry["clip"] = clip.id or ci

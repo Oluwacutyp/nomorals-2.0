@@ -174,8 +174,19 @@ class TestPropertyRegistry:
                             ("beat_pulse", "strength")):
             assert param in kf[name]
             assert keyframable_family(name, param) == "sampled"
-        # grades are cuts, not curves
-        assert "color_grade" not in kf
+        # named grades and the cdl dict are cuts, not curves —
+        # but the CDL's scalar components are keyframable paths
+        # (the §1.2b remainder, closed by the registry extension):
+        # exactly the ten cdl_* components, all sampled family.
+        cg = kf["color_grade"]
+        assert "grade" not in cg and "cdl" not in cg
+        assert set(cg) == {
+            "cdl_slope_r", "cdl_slope_g", "cdl_slope_b",
+            "cdl_offset_r", "cdl_offset_g", "cdl_offset_b",
+            "cdl_power_r", "cdl_power_g", "cdl_power_b",
+            "cdl_saturation"}
+        for param in cg:
+            assert keyframable_family("color_grade", param) == "sampled"
 
 
 # ---------------------------------------------------------------------------
