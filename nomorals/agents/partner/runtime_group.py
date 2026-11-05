@@ -1214,6 +1214,8 @@ class RuntimeGroupMixin:
             name=str(message.sender or ""),
             text=str(message.text or ""),
             message_id=str(message.message_id or ""),
+            reply_to=str(getattr(message, "reply_to", "")
+                         or ""),
             envelope=meta.get("envelope"),
             sender_is_admin=self._group_admin_ok(message),
             sender_is_operator=self._operator_or_false(message),
@@ -4757,6 +4759,26 @@ class RuntimeGroupMixin:
                         key, str(res.get("error")
                                  or "broadcast stats refused"),
                         now=now)
+            # Discussion linkage (§7): the channel's linked
+            # discussion group, read from the platform on the
+            # same sample cadence.  A landed answer records
+            # (or clears) the linkage; a refusal/miss stamps
+            # the beat and changes nothing — unknown is not
+            # unlinked.
+            linker = getattr(adapter, "channel_discussion_link",
+                             None)
+            if callable(linker) \
+                    and surface.channel_link_due(key, now=now):
+                try:
+                    res = linker(ref)
+                except Exception:  # noqa: BLE001 - a failed
+                    res = None              # read is absence
+                if isinstance(res, dict) and res.get("ok"):
+                    surface.note_channel_discussion(
+                        key, str(res.get("linked_chat_id")
+                                 or ""), now=now)
+                else:
+                    surface.note_channel_link_miss(key, now=now)
         gateway = getattr(self, "gateway", None)
         if gateway is None \
                 or not callable(getattr(gateway, "send", None)):
@@ -4764,6 +4786,67 @@ class RuntimeGroupMixin:
 
         def _send(text, entry):
             chat = ChatRef.parse(str(key), kind=ChatKind.CHANNEL)
+            # Non-text transports ride the ADAPTER (the same
+            # split as the analytics reads): a poll entry posts
+            # through the adapter's send_poll, a cross-post
+            # entry through its native forward.  A surface
+            # without the verb fails the entry honestly — it
+            # stays due and the failure is journaled, like any
+            # other transport failure.
+            poll = entry.get("poll") or {}
+            if poll:
+                fn = getattr(adapter, "send_poll", None) \
+                    if adapter is not None else None
+                if fn is None:
+                    return False, ("this surface cannot post "
+                                   "polls")
+                try:
+                    result = fn(
+                        chat,
+                        str(poll.get("question") or text),
+                        [str(o) for o in
+                         (poll.get("options") or [])],
+                        anonymous=bool(poll.get(
+                            "anonymous", True)),
+                        multiple=bool(poll.get("multiple")),
+                        quiz=bool(poll.get("quiz")),
+                        correct_option=poll.get("correct"),
+                        explanation=str(
+                            poll.get("explanation") or ""))
+                except Exception as exc:  # noqa: BLE001
+                    return False, (f"{type(exc).__name__}: "
+                                   f"{exc}")
+                ok = bool(getattr(result, "ok", False))
+                info = str(getattr(result, "message_id", "")
+                           or getattr(result, "error", "") or "")
+                if ok:
+                    views = getattr(result, "views", None)
+                    if views is not None:
+                        surface.note_channel_views(
+                            key, str(getattr(
+                                result, "message_id", "") or ""),
+                            int(views), now=now)
+                return ok, info
+            forward = entry.get("forward") or {}
+            if forward:
+                fn = getattr(adapter, "forward_post", None) \
+                    if adapter is not None else None
+                if fn is None:
+                    return False, ("this surface cannot "
+                                   "forward posts")
+                src = ChatRef.parse(
+                    str(forward.get("from_channel") or ""),
+                    kind=ChatKind.CHANNEL)
+                try:
+                    result = fn(src, str(
+                        forward.get("message_id") or ""), chat)
+                except Exception as exc:  # noqa: BLE001
+                    return False, (f"{type(exc).__name__}: "
+                                   f"{exc}")
+                ok = bool(getattr(result, "ok", False))
+                info = str(getattr(result, "message_id", "")
+                           or getattr(result, "error", "") or "")
+                return ok, info
             media = entry.get("media") or {}
             ref = str(media.get("ref") or "")
             # _rendered_mode reads a message's chat platform;
@@ -4831,7 +4914,8 @@ class RuntimeGroupMixin:
                          "expression", "reputation", "conflict",
                          "rhythm", "boards", "cleanup", "police",
                          "p5")
-    _CONSOLE_CHANNEL_SECTIONS = ("queue", "post", "analytics",
+    _CONSOLE_CHANNEL_SECTIONS = ("queue", "post", "posts",
+                                 "series", "analytics",
                                  "settings")
 
     def _console_session_map(self) -> dict:  # type: ignore[no-untyped-def]
@@ -6188,10 +6272,16 @@ class RuntimeGroupMixin:
             f" · {analytics['posts']} posted · cadence floor "
             f"{int(cfg.get('cadence_min') or 0)} min · trigger "
             f"links: {len(cfg.get('links') or {})} group(s)",
+            f"series: {analytics['series']['active']} running"
+            f" · digest: "
+            f"{'on (' + str((cfg.get('digest') or {}).get('kind') or 'daily') + ')' if (cfg.get('digest') or {}).get('enabled') else 'off'}"
+            f" · discussion: "
+            f"{'linked' if analytics['discussion'] else 'none on record'}",
         ])
         card.note("the channel itself stays silent (§16) — "
                   "everything happens here in DM. Sections: "
-                  "queue · post · analytics · settings")
+                  "queue · post · posts · series · analytics "
+                  "· settings")
         buttons = buttons_from_spec([
             [("queue", "Queue", f"console {token} queue"),
              ("post", "Post", f"console {token} post")],
@@ -6236,7 +6326,17 @@ class RuntimeGroupMixin:
                                f" · next {when}"
                     src = str(entry.get("source") or "dm")
                     body = str(entry.get("text") or "")
-                    if entry.get("media"):
+                    if entry.get("poll"):
+                        poll = entry.get("poll") or {}
+                        body = (f"🗳 poll"
+                                f"{' (quiz)' if poll.get('quiz') else ''}"
+                                f" — {poll.get('question') or body}"
+                                f" · {' · '.join(str(o) for o in (poll.get('options') or []))}")
+                    elif entry.get("forward"):
+                        fwd = entry.get("forward") or {}
+                        body = (f"↪ cross-post from "
+                                f"{fwd.get('from_title') or fwd.get('from_channel') or 'a channel'}")
+                    elif entry.get("media"):
                         body = "📎 media" + (f" — {body}"
                                              if body else "")
                     lines.append(
@@ -6264,9 +6364,80 @@ class RuntimeGroupMixin:
                 "`at HH:MM TEXT` — one-shot at that channel "
                 "time",
                 "`daily HH:MM TEXT` · `weekly mon HH:MM TEXT`",
+                "`poll [quiz|multi|open] QUESTION | OPT | OPT"
+                " …` — a poll post (anonymous unless `open`; "
+                "in a quiz, mark the right option with `*`)",
+                "`xpost <channel> <post N>` — native-forward "
+                "post N from another claimed channel of yours "
+                "into this one",
                 "`fwd <source name> | TEXT` — a post forwarded "
                 "from a source you name (journaled as such)",
                 "`media <file path> | caption`",
+            ], title="Grammar")
+        elif section == "posts":
+            ring = surface.channel_posts(key)
+            views = surface.channel_post_views_map(key)
+            if ring:
+                lines = []
+                for i, record in enumerate(ring, 1):
+                    when = time.strftime(
+                        "%d %b %H:%M", time.gmtime(
+                            float(record.get("ts") or 0)))
+                    kind = str(record.get("kind") or "once")
+                    if record.get("poll"):
+                        kind = "poll"
+                    label = str(record.get("label") or "")
+                    line = (f"{i}. [{kind} · "
+                            f"{record.get('source') or 'dm'}] "
+                            f"{when} UTC — {label[:60]}")
+                    mid = str(record.get("message_id") or "")
+                    if mid in views:
+                        line += f" · {views[mid]:,} views"
+                    if record.get("edited_at"):
+                        line += " · edited"
+                    lines.append(line)
+                card.block_lines(lines, title="Published")
+            else:
+                card.line("nothing published yet — the post "
+                          "section is where posts are born.")
+            card.block_lines([
+                "`edit N <new text>` — re-render + replace "
+                "post N's text on the platform",
+                "`delete N` — delete post N on the platform "
+                "and from the record",
+                "`results N` — a poll post's current results, "
+                "read back from the platform",
+            ], title="Grammar")
+        elif section == "series":
+            rows = surface.channel_series(key)
+            if rows:
+                lines = []
+                days = ["mon", "tue", "wed", "thu", "fri",
+                        "sat", "sun"]
+                for i, row in enumerate(rows, 1):
+                    cadence = str(row.get("kind") or "daily")
+                    if cadence == "weekly":
+                        cadence += " " + days[
+                            int(row.get("weekday") or 0)]
+                    cadence += f" {row.get('time') or ''}"
+                    total = len(row.get("items") or [])
+                    pos = int(row.get("position") or 0)
+                    state = ("archived" if row.get("archived")
+                             else "done" if row.get("done")
+                             else "running")
+                    lines.append(
+                        f"{i}. {row.get('name')} — {cadence}"
+                        f" · {pos}/{total} posted · {state}")
+                card.block_lines(lines, title="Series")
+            else:
+                card.line("no series yet — a series is a "
+                          "named format that posts its next "
+                          "instalment on its cadence, in order.")
+            card.block_lines([
+                "`new <name> daily HH:MM` · "
+                "`new <name> weekly mon HH:MM`",
+                "`add N <text>` — append an instalment",
+                "`archive N` · `resume N` · `drop N`",
             ], title="Grammar")
         elif section == "analytics":
             card.block_lines(
@@ -6280,6 +6451,15 @@ class RuntimeGroupMixin:
                 or ["no trigger links — group events don't "
                     "cross-post here"]
             pres = s.get("presentation") or {}
+            dcfg = cfg.get("digest") or {}
+            digest_line = "digest: off"
+            if dcfg.get("enabled"):
+                digest_line = (
+                    f"digest: {dcfg.get('kind') or 'daily'}"
+                    f"{' ' + ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'][int(dcfg['weekday'])] if dcfg.get('kind') == 'weekly' and dcfg.get('weekday') is not None else ''}"
+                    f" at {dcfg.get('time') or '09:00'}"
+                    f" · silence "
+                    f"{'on' if dcfg.get('silence', True) else 'off'}")
             card.block_lines([
                 f"cadence floor: "
                 f"{int(cfg.get('cadence_min') or 0)} min "
@@ -6289,12 +6469,16 @@ class RuntimeGroupMixin:
                 f"stamp: "
                 f"{'on' if pres.get('stamp', True) else 'off'}"
                 " (presentation)",
+                digest_line,
                 "trigger links:",
                 *link_lines,
             ])
             card.block_lines([
                 "`cadence N` · `analytics on|off` · "
                 "`stamp on|off`",
+                "`digest on|off` · `digest daily HH:MM` · "
+                "`digest weekly mon HH:MM` · "
+                "`digest silence on|off`",
                 "`link <group handle|key> "
                 "[season_podium war_result milestone]`",
                 "`unlink <group handle|key>` · "
@@ -6402,6 +6586,22 @@ class RuntimeGroupMixin:
             lines.append(
                 "broadcast stats: this platform exposes none "
                 "to me — nothing is invented in their place")
+        series = analytics["series"]
+        if series["total"]:
+            lines.append(
+                f"series: {series['active']} running · "
+                f"{series['done']} complete "
+                f"({series['total']} total)")
+        disc = analytics["discussion"]
+        if disc:
+            line = ("discussion: a linked group — "
+                    f"{disc['mirrors']} mirrored post(s) on "
+                    "record")
+            if disc["comments_total"]:
+                line += (f" · {disc['comments_total']} "
+                         f"comment(s), {disc['comments_7d']} "
+                         "in the last 7d")
+            lines.append(line)
         return lines
 
     def _console_channel_apply(self, surface, key, message,  # type: ignore[no-untyped-def]
@@ -6437,7 +6637,14 @@ class RuntimeGroupMixin:
             return None
         if section == "post":
             return self._console_channel_compose(
-                surface, key, message, sender, w)
+                surface, key, message, sender, w,
+                session=session)
+        if section == "posts":
+            return self._console_channel_posts_apply(
+                surface, key, message, w)
+        if section == "series":
+            return self._console_channel_series_apply(
+                surface, key, sender, w)
         if section == "settings":
             if head == "cadence" and len(w) == 2 \
                     and w[1].isdigit():
@@ -6502,11 +6709,369 @@ class RuntimeGroupMixin:
                 surface.set_designated(key, on, by=sender)
                 return (f"designation {'on' if on else 'off'} — "
                         "the claim follows it.")
+            if head == "digest":
+                from ...social.chat.group_rhythm import \
+                    parse_hhmm
+
+                dcfg = dict(surface.channel_cfg(key).get(
+                    "digest") or {})
+                if len(w) == 2 and low[1] in ("on", "off"):
+                    dcfg["enabled"] = low[1] == "on"
+                    self._channel_update(surface, key,
+                                         digest=dcfg)
+                    return (f"digest "
+                            f"{'on' if dcfg['enabled'] else 'off'}"
+                            " — it posts on its cadence from "
+                            "recorded facts only.")
+                if len(w) == 3 and low[1] == "silence" \
+                        and low[2] in ("on", "off"):
+                    dcfg["silence"] = low[2] == "on"
+                    self._channel_update(surface, key,
+                                         digest=dcfg)
+                    return ("digest silence on — an empty "
+                            "period posts nothing."
+                            if dcfg["silence"] else
+                            "digest silence off — an empty "
+                            "period still posts its quiet line.")
+                days = {"mon": 0, "tue": 1, "wed": 2, "thu": 3,
+                        "fri": 4, "sat": 5, "sun": 6}
+                if low[1:2] == ["daily"] and len(w) == 3 \
+                        and parse_hhmm(w[2]) is not None:
+                    dcfg.update({"enabled": True,
+                                 "kind": "daily", "time": w[2],
+                                 "weekday": None})
+                    self._channel_update(surface, key,
+                                         digest=dcfg)
+                    surface.channel_digest_reset(key)
+                    return (f"digest: daily at {w[2]} channel "
+                            "time.")
+                if low[1:2] == ["weekly"] and len(w) == 4 \
+                        and low[2][:3] in days \
+                        and parse_hhmm(w[3]) is not None:
+                    dcfg.update({"enabled": True,
+                                 "kind": "weekly", "time": w[3],
+                                 "weekday": days[low[2][:3]]})
+                    self._channel_update(surface, key,
+                                         digest=dcfg)
+                    surface.channel_digest_reset(key)
+                    return (f"digest: weekly {low[2][:3]} at "
+                            f"{w[3]} channel time.")
+                return ("digest grammar: `digest on|off` · "
+                        "`digest daily HH:MM` · "
+                        "`digest weekly mon HH:MM` · "
+                        "`digest silence on|off`.")
             return None
         return None
 
+    def _console_channel_posts_apply(self, surface, key,  # type: ignore[no-untyped-def]
+                                     message, w):
+        """Published-post management grammar (§7): edit /
+        delete / results by the number the posts card shows.
+        Every action runs through the adapter holding THIS
+        channel; a missing verb or a platform refusal is
+        reported in its own words, and the record changes
+        only when the platform confirms."""
+        from ...social.chat.base import ChatKind, ChatRef
+
+        low = [x.lower() for x in w]
+        if len(w) < 2 or not w[1].isdigit():
+            return None
+        head = low[0]
+        if head not in ("edit", "delete", "results"):
+            return None
+        record = surface.channel_post_record(key, int(w[1]))
+        if record is None:
+            return "no published post at that number."
+        mid = str(record.get("message_id") or "")
+        if not mid:
+            return ("that post has no platform id on record, "
+                    "so I can't reach it on the platform.")
+        platform = str(key).split(":", 1)[0]
+        adapter = self._group_adapter(platform)
+        ref = ChatRef.parse(str(key), kind=ChatKind.CHANNEL)
+        if head == "delete":
+            fn = getattr(adapter, "admin_delete", None) \
+                if adapter is not None else None
+            if fn is None:
+                return "this surface cannot delete posts."
+            try:
+                res = fn(ref, mid)
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "error": str(exc)}
+            if not (isinstance(res, dict) and res.get("ok")):
+                return ("the platform refused the delete ("
+                        + str((res or {}).get("error")
+                              or "no reason given")
+                        + ") — the post stays, on the platform "
+                        "and in the record.")
+            surface.channel_forget_post(key, mid)
+            return ("deleted — on the platform and in the "
+                    "record.")
+        if head == "edit":
+            text = " ".join(w[2:]).strip()
+            if not text:
+                return ("edit needs the new text: "
+                        "`edit N <new text>`.")
+            fn = getattr(adapter, "edit_post", None) \
+                if adapter is not None else None
+            if fn is None:
+                return "this surface cannot edit posts."
+            rendered = surface._channel_post_text(
+                key, {"kind": "once", "text": text})
+            try:
+                res = fn(ref, mid, rendered)
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "error": str(exc)}
+            if not (isinstance(res, dict) and res.get("ok")):
+                return ("the platform refused the edit ("
+                        + str((res or {}).get("error")
+                              or "no reason given")
+                        + ") — the post keeps its old text.")
+            surface.note_channel_post_edited(key, mid,
+                                             label=text)
+            return "edited — the post now carries the new text."
+        # results
+        if not record.get("poll"):
+            return ("that post is not a poll — results are a "
+                    "poll read.")
+        fn = getattr(adapter, "channel_poll_results", None) \
+            if adapter is not None else None
+        if fn is None:
+            return ("this surface can't read poll results "
+                    "back (the Bot API exposes none) — poll "
+                    "results ride the userbot surface.")
+        try:
+            res = fn(ref, mid)
+        except Exception as exc:  # noqa: BLE001
+            res = {"ok": False, "error": str(exc)}
+        if not (isinstance(res, dict) and res.get("ok")):
+            return ("the platform returned no results ("
+                    + str((res or {}).get("error")
+                          or "no reason given") + ").")
+        total = res.get("total_voters")
+        bits = []
+        for opt in res.get("options") or []:
+            voters = opt.get("voters")
+            bit = (f"{opt.get('text')}: {voters:,}"
+                   if voters is not None else
+                   f"{opt.get('text')}: not exposed")
+            if opt.get("correct"):
+                bit += " ✓"
+            bits.append(bit)
+        head_line = (f"{total:,} voter(s)" if total is not None
+                     else "total not exposed")
+        return f"poll results — {head_line} · " \
+               + " · ".join(bits)
+
+    def _console_channel_series_apply(self, surface, key,  # type: ignore[no-untyped-def]
+                                      sender, w):
+        """Series grammar (§7): open a named format, append
+        instalments, archive/resume/drop — by the number the
+        series card shows."""
+        low = [x.lower() for x in w]
+        head = low[0]
+        rows = surface.channel_series(key)
+        days = {"mon": 0, "tue": 1, "wed": 2, "thu": 3,
+                "fri": 4, "sat": 5, "sun": 6}
+        if head == "new":
+            from ...social.chat.group_rhythm import \
+                parse_hhmm
+
+            # The cadence is the LAST daily/weekly token whose
+            # tail parses — a series may itself be named
+            # "Daily" ("TA Daily daily 09:00" is name +
+            # cadence, not cadence + cadence).
+            idx = None
+            kind = ""
+            for i in range(len(low) - 1, 0, -1):
+                if low[i] == "daily" and i + 1 < len(w) \
+                        and parse_hhmm(w[i + 1]) is not None:
+                    idx, kind = i, "daily"
+                    break
+                if low[i] == "weekly" and i + 2 < len(w) \
+                        and low[i + 1][:3] in days \
+                        and parse_hhmm(w[i + 2]) is not None:
+                    idx, kind = i, "weekly"
+                    break
+            if idx is None or idx == 0:
+                return ("a series opens with a name and a "
+                        "cadence: `new <name> daily HH:MM` or "
+                        "`new <name> weekly mon HH:MM`.")
+            name = " ".join(w[1:idx])
+            rest = w[idx + 1:]
+            weekday = None
+            if kind == "weekly":
+                if len(rest) < 2 \
+                        or rest[0].lower()[:3] not in days:
+                    return ("weekly needs a day: "
+                            "`new <name> weekly mon HH:MM`.")
+                weekday = days[rest[0].lower()[:3]]
+                at = rest[1]
+            else:
+                if not rest:
+                    return ("daily needs a time: "
+                            "`new <name> daily HH:MM`.")
+                at = rest[0]
+            row = surface.channel_series_create(
+                key, name, {"kind": kind, "time": at,
+                            "weekday": weekday}, by=sender)
+            if row is None:
+                return ("that didn't open — the time must "
+                        "parse as HH:MM, and a channel runs "
+                        "at most 20 series.")
+            return (f"series open: {name} ({kind} {at}) — "
+                    f"add instalments with "
+                    f"`add {len(rows) + 1} <text>`.")
+        if head in ("add", "archive", "resume", "drop"):
+            if len(w) < 2 or not w[1].isdigit():
+                return None
+            pos = int(w[1])
+            if pos < 1 or pos > len(rows):
+                return "no series at that number."
+            row = rows[pos - 1]
+            if head == "add":
+                text = " ".join(w[2:]).strip()
+                if not text:
+                    return ("add needs the instalment's "
+                            "words: `add N <text>`.")
+                added = surface.channel_series_add(
+                    key, str(row.get("id") or ""), text)
+                if added is None:
+                    return "that series is gone."
+                return (f"instalment "
+                        f"{len(added.get('items') or [])} "
+                        f"added to {row.get('name')}.")
+            if head == "archive":
+                surface.channel_series_set_archived(
+                    key, str(row.get("id") or ""), True)
+                return (f"archived {row.get('name')} — it "
+                        "posts nothing until resumed.")
+            if head == "resume":
+                surface.channel_series_set_archived(
+                    key, str(row.get("id") or ""), False)
+                return f"resumed {row.get('name')}."
+            surface.channel_series_drop(
+                key, str(row.get("id") or ""))
+            return (f"dropped {row.get('name')} — its "
+                    "unposted instalments go with it.")
+        return None
+
+    def _console_channel_enqueue_now(self, surface, key,  # type: ignore[no-untyped-def]
+                                     sender, now, entry):
+        """Enqueue a due-now entry and take the immediate
+        drive beat — the compose tail for the poll and
+        cross-post grammars (same replies as a text `now`)."""
+        stored = surface.channel_enqueue(
+            key, {**entry, "created_by": sender}, now=now)
+        if stored is None:
+            return ("the queue is full (100 posts) — cancel "
+                    "something from the queue section first.")
+        posts = self._channel_drive(key, now=now, force=True)
+        if any(p.get("entry") == stored["id"] for p in posts):
+            return "posted now."
+        if not surface.claim_state(key)["claimed"]:
+            return ("queued — it posts the moment this "
+                    "channel is claimed (my bot made admin, "
+                    "or your designation in settings).")
+        return "queued — it rides the next cycle beat."
+
+    def _channel_poll_parse(self, body: str):  # type: ignore[no-untyped-def]
+        """The poll grammar: ``[quiz|multi|open] QUESTION |
+        OPT | OPT …`` — a leading ``*`` marks a quiz's correct
+        option.  Returns the poll block, or a refusal line in
+        Devon's words (Telegram's caps checked here so a bad
+        poll never reaches the platform to fail there)."""
+        parts = [p.strip() for p in str(body or "").split("|")]
+        head = parts[0] if parts else ""
+        flags = {"quiz": False, "multi": False, "open": False}
+        words = head.split()
+        while words and words[0].lower() in flags:
+            flags[words[0].lower()] = True
+            words = words[1:]
+        question = " ".join(words)
+        options: list[str] = []
+        correct = None
+        for i, raw_opt in enumerate(parts[1:]):
+            opt = raw_opt
+            if opt.startswith("*"):
+                correct = i
+                opt = opt[1:].strip()
+            options.append(opt)
+        if not question or len(options) < 2:
+            return ("a poll needs a question and at least two "
+                    "options: `poll QUESTION | OPT | OPT`.")
+        if len(options) > 10 or any(
+                not o or len(o) > 100 for o in options):
+            return ("Telegram caps polls at 2–10 options of "
+                    "≤100 characters each.")
+        if len(question) > 255:
+            return ("Telegram caps a poll question at 255 "
+                    "characters.")
+        if flags["quiz"] and correct is None:
+            return ("a quiz poll marks its correct option "
+                    "with `*`: `poll quiz Q | *right | wrong`.")
+        return {"question": question, "options": options,
+                "anonymous": not flags["open"],
+                "multiple": flags["multi"],
+                "quiz": flags["quiz"], "correct": correct,
+                "explanation": ""}
+
+    def _channel_xpost_parse(self, surface, key, session,  # type: ignore[no-untyped-def]
+                             body: str):
+        """The cross-post grammar: ``xpost <channel> <post
+        N>``.  Both ends must be the owner's claimed channels
+        — the source so she may read/reach its posts, the
+        target enforced again at post time by the cycle's
+        claim gate.  Returns a forward queue entry, or a
+        refusal line."""
+        parts = str(body or "").split()
+        if len(parts) != 2 or not parts[1].isdigit():
+            return ("xpost needs a channel and a post "
+                    "number: `xpost <channel> <post N>`.")
+        token = parts[0]
+        skey = None
+        if session:
+            skey = (session.get("channels") or {}).get(
+                token.lower())
+        if skey is None and token in surface.store.data \
+                and surface.is_channel(token):
+            skey = token
+        if skey is None:
+            for cand in surface.channel_keys():
+                if surface.channel_title(cand).lower() \
+                        == token.lower():
+                    skey = cand
+                    break
+        if skey is None:
+            return ("that channel doesn't resolve — use its "
+                    "c-handle from the console home, its "
+                    "title, or its full key.")
+        if skey == key:
+            return "a channel can't cross-post into itself."
+        if not surface.claim_state(skey)["claimed"]:
+            return ("the source channel isn't claimed — "
+                    "cross-posts run only between your "
+                    "claimed channels.")
+        record = surface.channel_post_record(
+            skey, int(parts[1]))
+        if record is None:
+            return ("no published post at that number in "
+                    "the source channel.")
+        mid = str(record.get("message_id") or "")
+        if not mid:
+            return ("that post has no platform id on record "
+                    "— I can't forward what I can't name.")
+        title = surface.channel_title(skey) or "a channel"
+        return {"kind": "forward", "text": "",
+                "forward": {"from_channel": skey,
+                            "message_id": mid,
+                            "from_title": title},
+                "due": 0.0, "source": f"xpost:{title}",
+                "label": (f"↪ from {title}: "
+                          f"{record.get('label') or ''}")[:80]}
+
     def _console_channel_compose(self, surface, key, message,  # type: ignore[no-untyped-def]
-                                 sender, words):
+                                 sender, words, session=None):
         """The post grammar: compose one queue entry from the
         owner's words (and any media attached to the console
         message itself).  A due entry takes an immediate drive
@@ -6535,6 +7100,34 @@ class RuntimeGroupMixin:
                                            ""):
             media = {"kind": "file",
                      "ref": str(attached.path)}
+        if low.startswith("poll "):
+            parsed = self._channel_poll_parse(raw[5:])
+            if isinstance(parsed, str):
+                return parsed
+            return self._console_channel_enqueue_now(
+                surface, key, sender, now, {
+                    "kind": "once",
+                    "text": parsed["question"], "poll": parsed,
+                    "due": now, "source": "dm",
+                    "label": f"🗳 {parsed['question']}"[:80]})
+        if low.startswith("xpost "):
+            parsed = self._channel_xpost_parse(
+                surface, key, session, raw[6:])
+            if isinstance(parsed, str):
+                return parsed
+            skey = str((parsed.get("forward") or {}).get(
+                "from_channel") or "")
+            sources = list(surface.channel_cfg(key).get(
+                "xpost_sources") or [])
+            if skey and skey not in sources:
+                # The pairing is owner-designated by this very
+                # act (the console is owner-only): recorded, so
+                # the relationship is state, not folklore.
+                self._channel_update(
+                    surface, key,
+                    xpost_sources=sources + [skey])
+            return self._console_channel_enqueue_now(
+                surface, key, sender, now, parsed)
         if low.startswith("media ") and "|" in raw:
             ref, _, caption = raw[6:].partition("|")
             media = {"kind": "file", "ref": ref.strip()}

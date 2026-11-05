@@ -448,6 +448,21 @@ class GroupStore:
         return merged
 
 
+def _chat_id_match(a: Any, b: Any) -> bool:
+    """Do two chat-id spellings name the same chat?  Telegram
+    ids arrive in two forms — the bare peer id (MTProto
+    payloads) and the marked ``-100<id>`` form (Bot API, Devon
+    keys) — so equality is judged on the digit body with the
+    mark folded in, never on the raw string."""
+    da = "".join(ch for ch in str(a or "") if ch.isdigit())
+    db = "".join(ch for ch in str(b or "") if ch.isdigit())
+    if not da or not db:
+        return False
+    if da == db:
+        return True
+    return da == "100" + db or db == "100" + da
+
+
 def _slug(group_key: str) -> str:
     return str(group_key).replace(":", "_").replace("/", "_")
 
@@ -1730,6 +1745,7 @@ class GroupSurface:
     def handle_message(self, group_key: str, user_id: str, *,
                        username: str = "", name: str = "",
                        text: str = "", message_id: str = "",
+                       reply_to: str = "",
                        ts: float | None = None,
                        envelope: Any = None,
                        sender_is_admin: bool = False,
@@ -1749,6 +1765,31 @@ class GroupSurface:
         to a live game — it exempts the message from the
         Moderator's counting stages only."""
         now = ts if ts is not None else time.time()
+        # §7 discussion context: if this group is a claimed
+        # channel's linked discussion group, the channel's OWN
+        # mirrored posts arrive here as channel-sent traffic.
+        # They are the channel's posts, not a member and not a
+        # foreign-room injection: no member state accrues to
+        # the channel, no defense stage runs on them — the
+        # mirror is recorded on the channel as a comment
+        # anchor and the message passes.
+        discussion_channel = self.channel_for_discussion(
+            group_key)
+        if discussion_channel:
+            chan_chat_id = discussion_channel.split(":", 1)[-1]
+            raw_fwd = (envelope.get("forward")
+                       if isinstance(envelope, dict) else None)
+            fwd_chat = (str(raw_fwd.get("sender_chat_id") or "")
+                        if isinstance(raw_fwd, dict) else "")
+            if _chat_id_match(user_id, chan_chat_id) or (
+                    fwd_chat
+                    and _chat_id_match(fwd_chat, chan_chat_id)):
+                self.note_channel_mirror(
+                    discussion_channel, group_key,
+                    message_id=message_id, now=now)
+                return {"changes": [], "actions": [],
+                        "notices": [],
+                        "discussion_mirror": discussion_channel}
         changes = self._observe_identity(
             group_key, user_id, username=username, name=name, ts=now)
         entry = self.store.group(group_key)
@@ -1816,6 +1857,15 @@ class GroupSurface:
             envelope if isinstance(envelope, dict) else None,
             platform=group_key.split(":", 1)[0], chat_key=group_key,
             sender_id=user_id, message_id=message_id, text=text)
+        if discussion_channel and reply_to and str(reply_to) in \
+                self.channel_mirror_ids(discussion_channel):
+            # A member replying to a mirrored post is a
+            # comment on the channel's post (§7): counted on
+            # the channel, whatever the defense stages below
+            # decide about the comment itself.
+            self.note_channel_comment(
+                discussion_channel, message_id=str(reply_to),
+                now=now)
         self._cache_message(
             group_key, message_id=message_id, user_id=user_id,
             text=text, sticker_key=(env.sticker or {}).get("key")
@@ -2147,7 +2197,20 @@ class GroupSurface:
                     strike("moderator", action.rule, action.kind)
 
         # ── stage 3: envelope sensors ──────────────────────────
-        hit = check_antichannel(env, cfg)
+        # The group's own linked channel is exempt from the
+        # antichannel sensor (§7): pass its id in the
+        # envelope's own spelling so the exemption compares
+        # like with like across MTProto and Bot API shapes.
+        linked_for_env = ""
+        if discussion_channel:
+            env_fwd_chat = str((env.forward or {}).get(
+                "sender_chat_id") or "")
+            if env_fwd_chat and _chat_id_match(
+                    env_fwd_chat,
+                    discussion_channel.split(":", 1)[-1]):
+                linked_for_env = env_fwd_chat
+        hit = check_antichannel(env, cfg,
+                                linked_chat_id=linked_for_env)
         if hit is not None:
             self._audit(group_key, hit.rule, user_id=user_id,
                         action=hit.action, reason=hit.reason,
@@ -7500,6 +7563,9 @@ class GroupSurface:
             "kind": str(entry.get("kind") or "once"),
             "text": str(entry.get("text") or ""),
             "media": entry.get("media") or None,
+            "poll": entry.get("poll") or None,
+            "forward": entry.get("forward") or None,
+            "label": str(entry.get("label") or "")[:80],
             "due": float(entry.get("due") or now),
             "time": str(entry.get("time") or ""),
             "weekday": entry.get("weekday"),
@@ -7579,6 +7645,17 @@ class GroupSurface:
             _append_stamp
 
         text = str(entry.get("text") or "")
+        if entry.get("poll"):
+            # A poll post IS the question — card-wrapping it
+            # would bury the poll under presentation.  The
+            # question rides raw; the adapter posts the poll
+            # itself from the entry's poll block.
+            return str((entry.get("poll") or {}).get("question")
+                       or text)
+        if entry.get("pre_rendered"):
+            # The digest compiler already rendered its card
+            # through this same typography path.
+            return text
         if entry.get("kind") == "trigger":
             style = resolve_style(self.store.settings(key),
                                   "announcement")
@@ -7588,6 +7665,11 @@ class GroupSurface:
             return text
         title = self.channel_title(key) or "announcement"
         card = Card("announcement", title=title, icon="📣")
+        if entry.get("kind") == "series":
+            # A series post carries its format + number: the
+            # running shape subscribers recognise (§7 series).
+            card.line(f"📚 {entry.get('series_name') or 'series'}"
+                      f" · #{int(entry.get('series_no') or 0)}")
         for line in text.split("\n"):
             card.line(line)
         return self._card_render(key, card)
@@ -7618,14 +7700,47 @@ class GroupSurface:
             return posts
         extras["channel_cycle_at"] = now
         cfg = self.channel_cfg(key)
+        tz = int((self.rhythm_cfg(key) or {}).get(
+            "tz_offset_min") or 0)
         gap = max(0, int(cfg.get("cadence_min") or 0)) * 60
         last_post = float(extras.get("channel_last_post") or 0)
         queue = list(extras.get("channel_queue") or [])
-        due = sorted((e for e in queue
-                      if float(e.get("due") or 0) <= now),
-                     key=lambda e: float(e.get("due") or 0))
+        # The work list is one queue in spirit: due series
+        # instalments and a due digest are programming entries
+        # with their own state machines, merged with the post
+        # queue by due time so cadence and the per-cycle cap
+        # govern everything the channel publishes (§7).
+        work: list[tuple[float, dict[str, Any], str]] = []
+        for e in queue:
+            if float(e.get("due") or 0) <= now:
+                work.append((float(e.get("due") or 0), e,
+                             "queue"))
+        for s in self._channel_series_rows(key):
+            if s.get("archived") or s.get("done"):
+                continue
+            pos = int(s.get("position") or 0)
+            if pos >= len(s.get("items") or []):
+                continue
+            nd = float(s.get("next_due") or 0)
+            if nd <= now:
+                work.append((nd, {
+                    "id": str(s.get("id") or ""),
+                    "kind": "series",
+                    "text": str((s.get("items") or [])[pos]),
+                    "series_name": str(s.get("name") or ""),
+                    "series_no": pos + 1,
+                    "source": "series",
+                    "due": nd,
+                }, "series"))
+        digest_entry = self._channel_digest_work(key, cfg, now,
+                                                   tz)
+        if digest_entry is not None:
+            work.append((float(digest_entry.get("due") or 0),
+                         digest_entry, "digest"))
+        work.sort(key=lambda w: w[0])
         changed = False
-        for entry in due[:self._CHANNEL_POSTS_PER_CYCLE]:
+        for _due, entry, origin in \
+                work[:self._CHANNEL_POSTS_PER_CYCLE]:
             if gap and last_post and now - last_post < gap:
                 break  # the cadence floor spaces posts out
             text = self._channel_post_text(key, entry)
@@ -7645,7 +7760,11 @@ class GroupSurface:
                       "kind": str(entry.get("kind") or ""),
                       "source": str(entry.get("source") or ""),
                       "trigger": str(entry.get("trigger") or ""),
-                      "message_id": str(info or "")}
+                      "message_id": str(info or ""),
+                      "label": str(entry.get("label")
+                                   or entry.get("text")
+                                   or "")[:60],
+                      "poll": bool(entry.get("poll"))}
             ring = list(extras.get("channel_posts") or [])
             ring.append(record)
             extras["channel_posts"] = \
@@ -7660,9 +7779,22 @@ class GroupSurface:
             last_post = now
             extras["channel_last_post"] = now
             changed = True
-            if entry.get("kind") in ("daily", "weekly"):
-                tz = int((self.rhythm_cfg(key) or {}).get(
-                    "tz_offset_min") or 0)
+            if origin == "series":
+                self._channel_series_advance(
+                    key, str(entry.get("id") or ""), now, tz)
+            elif origin == "digest":
+                extras["channel_digest_at"] = now
+                extras["channel_digest_next"] = \
+                    self._channel_next_due(
+                        {"kind": str(
+                            (cfg.get("digest") or {}).get("kind")
+                            or "daily"),
+                         "time": str(
+                             (cfg.get("digest") or {}).get("time")
+                             or ""),
+                         "weekday": (cfg.get("digest") or {}).get(
+                             "weekday")}, now, tz)
+            elif entry.get("kind") in ("daily", "weekly"):
                 entry["due"] = self._channel_next_due(
                     entry, now, tz)
                 entry["last_posted"] = now
@@ -7672,6 +7804,478 @@ class GroupSurface:
             extras["channel_queue"] = queue
             self.store.save()
         return posts
+
+    # -- series (§7): named recurring formats -------------------
+    #
+    # A series is an ordered list of instalments on a cadence.
+    # Its position lives in the channel's extras, so it
+    # persists across restarts; the cycle posts the next
+    # instalment when due and advances ONLY on a confirmed
+    # send — a failed post holds the position, never skips.
+
+    _CHANNEL_SERIES_CAP = 20
+
+    def _channel_series_rows(self, key: str) -> list[dict[str, Any]]:
+        extras = self._extras(key)
+        return list(extras.get("channel_series") or [])
+
+    def channel_series(self, key: str) -> list[dict[str, Any]]:
+        return [dict(s) for s in self._channel_series_rows(key)]
+
+    def channel_series_create(self, key: str, name: str,
+                              cadence: dict[str, Any], *,
+                              now: float | None = None,
+                              by: str = "") -> dict[str, Any] | None:
+        """Open a series.  ``cadence`` is {kind: daily|weekly,
+        time: "HH:MM", weekday}.  Returns the stored series,
+        or None when the channel already runs the cap or the
+        cadence doesn't parse — the caller reports it."""
+        now = now if now is not None else time.time()
+        kind = str(cadence.get("kind") or "daily")
+        at = str(cadence.get("time") or "")
+        if kind not in ("daily", "weekly") \
+                or _rhythm_parse_hhmm(at) is None \
+                or not str(name or "").strip():
+            return None
+        extras = self._extras(key)
+        rows = self._channel_series_rows(key)
+        if len(rows) >= self._CHANNEL_SERIES_CAP:
+            self._audit(key, "channel_series_full",
+                        name=str(name)[:60])
+            return None
+        seq = int(extras.get("channel_series_seq") or 0) + 1
+        extras["channel_series_seq"] = seq
+        tz = int((self.rhythm_cfg(key) or {}).get(
+            "tz_offset_min") or 0)
+        row = {
+            "id": f"s{seq}",
+            "name": str(name).strip()[:80],
+            "kind": kind, "time": at,
+            "weekday": cadence.get("weekday"),
+            "items": [], "position": 0,
+            "next_due": self._channel_next_due(
+                {"kind": kind, "time": at,
+                 "weekday": cadence.get("weekday")}, now, tz),
+            "archived": False, "done": False,
+            "created_at": now, "created_by": str(by or ""),
+            "last_posted": 0.0,
+        }
+        rows.append(row)
+        extras["channel_series"] = rows
+        self._audit(key, "channel_series_created",
+                    series=row["id"], name=row["name"],
+                    cadence=f"{kind} {at}")
+        self.store.save()
+        return dict(row)
+
+    def channel_series_add(self, key: str, series_id: str,
+                           text: str) -> dict[str, Any] | None:
+        """Append one instalment to a series (works on a
+        finished series too — it re-opens at the new item)."""
+        if not str(text or "").strip():
+            return None
+        extras = self._extras(key)
+        rows = self._channel_series_rows(key)
+        for row in rows:
+            if row.get("id") == series_id:
+                row.setdefault("items", []).append(
+                    str(text).strip())
+                if row.get("done") and int(
+                        row.get("position") or 0) < len(
+                        row["items"]):
+                    row["done"] = False
+                extras["channel_series"] = rows
+                self._audit(key, "channel_series_item",
+                            series=series_id,
+                            items=len(row["items"]))
+                self.store.save()
+                return dict(row)
+        return None
+
+    def channel_series_set_archived(self, key: str,
+                                    series_id: str,
+                                    archived: bool
+                                    ) -> dict[str, Any] | None:
+        extras = self._extras(key)
+        rows = self._channel_series_rows(key)
+        for row in rows:
+            if row.get("id") == series_id:
+                row["archived"] = bool(archived)
+                extras["channel_series"] = rows
+                self._audit(key, "channel_series_archived"
+                            if archived else
+                            "channel_series_resumed",
+                            series=series_id)
+                self.store.save()
+                return dict(row)
+        return None
+
+    def channel_series_drop(self, key: str, series_id: str
+                            ) -> dict[str, Any] | None:
+        extras = self._extras(key)
+        rows = self._channel_series_rows(key)
+        kept = [r for r in rows if r.get("id") != series_id]
+        if len(kept) == len(rows):
+            return None
+        gone = next(r for r in rows
+                    if r.get("id") == series_id)
+        extras["channel_series"] = kept
+        self._audit(key, "channel_series_dropped",
+                    series=series_id,
+                    name=str(gone.get("name") or ""))
+        self.store.save()
+        return gone
+
+    def _channel_series_advance(self, key: str, series_id: str,
+                                now: float, tz: int) -> None:
+        """Advance one series after a CONFIRMED post (called
+        only from the cycle's success path — failure never
+        reaches here, so a position can never skip)."""
+        extras = self._extras(key)
+        rows = self._channel_series_rows(key)
+        for row in rows:
+            if row.get("id") != series_id:
+                continue
+            row["position"] = int(row.get("position") or 0) + 1
+            row["last_posted"] = now
+            if row["position"] >= len(row.get("items") or []):
+                row["done"] = True
+                self._audit(key, "channel_series_complete",
+                            series=series_id,
+                            name=str(row.get("name") or ""),
+                            items=len(row.get("items") or []))
+            else:
+                row["next_due"] = self._channel_next_due(
+                    {"kind": str(row.get("kind") or "daily"),
+                     "time": str(row.get("time") or ""),
+                     "weekday": row.get("weekday")}, now, tz)
+            extras["channel_series"] = rows
+            return
+
+    # -- digest (census gap #4): a scheduled post of facts ------
+
+    def _channel_digest_compile(self, key: str,
+                                now: float) -> str | None:
+        """Compile the digest text from REAL recorded data
+        only: posts the queue published in the period, their
+        re-read view counters, subscriber movement from the
+        count samples, discussion comments.  Returns None when
+        the period holds nothing she can actually stand
+        behind — absence compiles to silence, never filler."""
+        from .typography import Card
+
+        cfg = self.channel_cfg(key).get("digest") or {}
+        period = 7 * 86400 if cfg.get("kind") == "weekly" \
+            else 86400
+        extras = self._extras(key)
+        since = float(extras.get("channel_digest_at") or 0) \
+            or (now - period)
+        posts = [p for p in (extras.get("channel_posts") or [])
+                 if float(p.get("ts") or 0) >= since]
+        views_map = dict(extras.get("channel_views") or {})
+        counted = [int(views_map[str(p.get("message_id"))])
+                   for p in posts
+                   if str(p.get("message_id") or "")
+                   in views_map]
+        counts = list(extras.get("channel_counts") or [])
+        delta = None
+        level = None
+        if counts:
+            level = int(counts[-1].get("count") or 0)
+            base = None
+            for sample in counts:
+                if float(sample.get("ts") or 0) <= since:
+                    base = sample
+            if base is not None and counts[-1] is not base:
+                delta = level - int(base.get("count") or 0)
+        comments = [t for t in
+                    (extras.get("channel_comments") or [])
+                    if float(t) >= since]
+        if not posts and not counted and delta is None \
+                and not comments:
+            return None
+        title = self.channel_title(key) or "channel"
+        card = Card("announcement", title=f"{title} — digest",
+                    icon="📊")
+        span = "week" if period > 86400 else "day"
+        if posts:
+            card.line(f"{len(posts)} post(s) published this "
+                      f"{span}.")
+            if counted:
+                card.line(
+                    f"post views: {sum(counted):,} across "
+                    f"{len(counted)} counted post(s) — the "
+                    "counters the platform returned.")
+            else:
+                card.line("post views: the platform returned "
+                          "none for these posts.")
+        else:
+            card.line(f"no posts published this {span}.")
+        if level is not None:
+            line = f"subscribers: {level:,}"
+            if delta is not None:
+                line += f" ({delta:+d} this {span})"
+            else:
+                line += (" (movement unknown — too few "
+                         "samples)")
+            card.line(line)
+        if comments:
+            card.line(f"💬 {len(comments)} comment(s) in the "
+                      "discussion group.")
+        return self._card_render(key, card)
+
+    def channel_digest_reset(self, key: str) -> None:
+        """Forget the digest's computed next due (a cadence
+        change in settings): the cycle recomputes it from the
+        new cadence on its next beat."""
+        extras = self._extras(key)
+        if extras.pop("channel_digest_next", None) is not None:
+            self.store.save()
+
+    def _channel_digest_work(self, key: str,
+                             cfg: dict[str, Any], now: float,
+                             tz: int) -> dict[str, Any] | None:
+        """The cycle's digest candidate, or None.  Scheduling
+        state lives in extras (next due + last run), so the
+        digest survives restarts like the queue does.  An
+        empty period under the channel's silence setting
+        advances the schedule WITHOUT posting — and journals
+        the skip, so silence is a decision on record."""
+        dcfg = cfg.get("digest") or {}
+        if not dcfg.get("enabled"):
+            return None
+        cadence = {"kind": str(dcfg.get("kind") or "daily"),
+                   "time": str(dcfg.get("time") or "09:00"),
+                   "weekday": dcfg.get("weekday")}
+        extras = self._extras(key)
+        nxt = float(extras.get("channel_digest_next") or 0)
+        if not nxt:
+            nxt = self._channel_next_due(cadence, now, tz)
+            extras["channel_digest_next"] = nxt
+            self.store.save()
+        if nxt > now:
+            return None
+        text = self._channel_digest_compile(key, now)
+        if text is None:
+            if dcfg.get("silence", True):
+                extras["channel_digest_at"] = now
+                extras["channel_digest_next"] = \
+                    self._channel_next_due(cadence, now, tz)
+                self._audit(key, "channel_digest_skipped",
+                            reason="nothing to report")
+                self.store.save()
+                return None
+            from .typography import Card
+
+            title = self.channel_title(key) or "channel"
+            card = Card("announcement",
+                        title=f"{title} — digest", icon="📊")
+            card.line("a quiet period — no posts published, "
+                      "and nothing moved that I can read.")
+            text = self._card_render(key, card)
+        return {"id": "digest", "kind": "digest", "text": text,
+                "pre_rendered": True, "source": "digest",
+                "due": nxt}
+
+    # -- discussion linkage (§7 comment context) -----------------
+    #
+    # The channel's registry note learns its linked discussion
+    # group from the platform (the drive asks on the sample
+    # cadence).  Mirrored posts — the channel's own posts
+    # appearing in that group — are then recognised as the
+    # channel's own traffic: no member state accrues to the
+    # channel, the antichannel sensor exempts them, and member
+    # replies to a mirrored post count as comments on it.
+
+    _CHANNEL_MIRROR_RING = 50
+    _CHANNEL_COMMENT_RING = 300
+
+    def channel_link_due(self, key: str, *,
+                         now: float | None = None) -> bool:
+        now = now if now is not None else time.time()
+        note = (self._extras(key).get("channel") or {})
+        return now - float(note.get("link_at") or 0) \
+            >= self._CHANNEL_SAMPLE_GAP_S
+
+    def note_channel_discussion(self, key: str,
+                                linked_chat_id: str, *,
+                                now: float | None = None) -> str:
+        """Record the platform's answer about this channel's
+        discussion group.  A change of linkage is journaled;
+        a steady state just re-stamps the check."""
+        now = now if now is not None else time.time()
+        extras = self._extras(key)
+        note = extras.setdefault("channel", {})
+        note["link_at"] = now
+        linked = str(linked_chat_id or "")
+        group_key = (f"{str(key).split(':', 1)[0]}:{linked}"
+                     if linked else "")
+        disc = dict(note.get("discussion") or {})
+        if str(disc.get("group_key") or "") != group_key:
+            if group_key:
+                self._audit(key, "channel_discussion_linked",
+                            group=group_key)
+            elif disc.get("group_key"):
+                self._audit(key,
+                            "channel_discussion_unlinked",
+                            group=str(disc.get("group_key")))
+            disc = {"group_key": group_key, "chat_id": linked,
+                    "linked_at": now}
+        note["discussion"] = disc
+        self.store.save()
+        return group_key
+
+    def note_channel_link_miss(self, key: str, *,
+                               now: float | None = None) -> None:
+        """The platform wouldn't answer the linkage question
+        this beat — stamp the attempt (no retry storm) and
+        change nothing: unknown is not unlinked."""
+        now = now if now is not None else time.time()
+        extras = self._extras(key)
+        note = extras.setdefault("channel", {})
+        note["link_at"] = now
+        self.store.save()
+
+    def channel_discussion(self, key: str) -> dict[str, Any]:
+        note = ((self.store.data.get(key) or {}).get("extras")
+                or {}).get("channel") or {}
+        return dict(note.get("discussion") or {})
+
+    def channel_for_discussion(self, group_key: str) -> str:
+        """The channel key whose discussion group IS this
+        group, or "" — the reverse of the linkage record."""
+        for ckey in self.channel_keys():
+            if self.channel_discussion(ckey).get(
+                    "group_key") == group_key:
+                return ckey
+        return ""
+
+    def channel_mirror_ids(self, key: str) -> set[str]:
+        note = ((self.store.data.get(key) or {}).get("extras")
+                or {}).get("channel") or {}
+        return {str(m.get("id") or "")
+                for m in (note.get("mirrors") or [])
+                if m.get("id")}
+
+    def note_channel_mirror(self, key: str, group_key: str, *,
+                            message_id: str = "",
+                            now: float | None = None) -> None:
+        """One of the channel's own posts appeared in its
+        discussion group (the platform's automatic mirror).
+        The mirror's group message id becomes a comment
+        anchor: replies to it are this channel's comments."""
+        now = now if now is not None else time.time()
+        extras = self._extras(key)
+        note = extras.setdefault("channel", {})
+        mirrors = list(note.get("mirrors") or [])
+        if message_id and any(
+                str(m.get("id")) == str(message_id)
+                for m in mirrors):
+            return
+        mirrors.append({"id": str(message_id or ""),
+                        "group": group_key, "ts": now,
+                        "comments": 0})
+        note["mirrors"] = mirrors[-self._CHANNEL_MIRROR_RING:]
+        self._audit(key, "channel_discussion_mirror",
+                    group=group_key,
+                    message_id=str(message_id or ""))
+        self.store.save()
+
+    def note_channel_comment(self, key: str, *,
+                             message_id: str = "",
+                             now: float | None = None) -> None:
+        """A member replied to a mirrored post in the
+        discussion group — a comment on this channel's post.
+        Counted on the channel (the digest + analytics read
+        it); journaled at most hourly, since comments are
+        conversation, not events."""
+        now = now if now is not None else time.time()
+        extras = self._extras(key)
+        note = extras.setdefault("channel", {})
+        stamps = list(note.get("comments") or [])
+        stamps.append(now)
+        note["comments"] = stamps[-self._CHANNEL_COMMENT_RING:]
+        for m in note.get("mirrors") or []:
+            if str(m.get("id")) == str(message_id):
+                m["comments"] = int(m.get("comments") or 0) + 1
+        if now - float(note.get("comment_audit_at") or 0) \
+                >= 3600:
+            note["comment_audit_at"] = now
+            self._audit(key, "channel_comment",
+                        message_id=str(message_id or ""))
+        self.store.save()
+
+    # -- published-post management -------------------------------
+
+    def channel_post_views_map(self, key: str) -> dict[str, int]:
+        """The recorded per-post view counters (message id →
+        views), exactly as the platform returned them — posts
+        the platform never counted are absent, not zero."""
+        extras = self._extras(key)
+        return {str(k): int(v) for k, v in
+                (extras.get("channel_views") or {}).items()}
+
+    def channel_posts(self, key: str) -> list[dict[str, Any]]:
+        """The published ring, oldest first (copies) — the
+        records post management and the digest read."""
+        return [dict(p) for p in
+                (self._extras(key).get("channel_posts") or [])]
+
+    def channel_post_record(self, key: str, position: int
+                            ) -> dict[str, Any] | None:
+        """The published-ring record at a 1-based position
+        (the number the console shows — internal ids never
+        print)."""
+        ring = list(self._extras(key).get("channel_posts")
+                    or [])
+        if position < 1 or position > len(ring):
+            return None
+        return dict(ring[position - 1])
+
+    def channel_forget_post(self, key: str, message_id: str
+                            ) -> bool:
+        """A published post was deleted on the platform: it
+        leaves the published ring (and its view counter goes
+        with it) — the ring only ever names posts that exist."""
+        extras = self._extras(key)
+        ring = list(extras.get("channel_posts") or [])
+        kept = [p for p in ring
+                if str(p.get("message_id") or "")
+                != str(message_id)]
+        if len(kept) == len(ring):
+            return False
+        extras["channel_posts"] = kept
+        views = dict(extras.get("channel_views") or {})
+        views.pop(str(message_id), None)
+        extras["channel_views"] = views
+        self._audit(key, "channel_post_removed",
+                    message_id=str(message_id))
+        self.store.save()
+        return True
+
+    def note_channel_post_edited(self, key: str,
+                                 message_id: str, *,
+                                 label: str = "",
+                                 now: float | None = None
+                                 ) -> bool:
+        """A published post was edited on the platform: the
+        ring record keeps the post, stamped as edited, with
+        its new label."""
+        now = now if now is not None else time.time()
+        extras = self._extras(key)
+        ring = list(extras.get("channel_posts") or [])
+        for record in ring:
+            if str(record.get("message_id") or "") \
+                    == str(message_id):
+                record["edited_at"] = now
+                if label:
+                    record["label"] = label[:60]
+                extras["channel_posts"] = ring
+                self._audit(key, "channel_post_edited",
+                            message_id=str(message_id))
+                self.store.save()
+                return True
+        return False
 
     def _channel_trigger(self, group_key: str, kind: str,
                          text: str, *,
@@ -7907,6 +8511,46 @@ class GroupSurface:
                 if stats_state.get("reason") else None),
             "stats_checked_at": float(
                 extras.get("channel_stats_at") or 0),
+            "series": {
+                "total": len(
+                    extras.get("channel_series") or []),
+                "active": sum(
+                    1 for s in
+                    (extras.get("channel_series") or [])
+                    if not s.get("archived")
+                    and not s.get("done")),
+                "done": sum(
+                    1 for s in
+                    (extras.get("channel_series") or [])
+                    if s.get("done")),
+            },
+            "discussion": self._channel_discussion_analytics(
+                extras),
+        }
+
+    def _channel_discussion_analytics(self, extras: dict
+                                      ) -> dict[str, Any] | None:
+        """The discussion truth for analytics: the linked
+        group (from the platform's own record), how many
+        mirrored posts were seen there, and the comment
+        counts recorded against them.  None when the channel
+        has no linked discussion group on record — unlinked
+        is a state, not a zero."""
+        note = extras.get("channel") or {}
+        disc = note.get("discussion") or {}
+        if not disc.get("group_key"):
+            return None
+        stamps = [float(t) for t in (note.get("comments")
+                                     or [])]
+        now = time.time()
+        return {
+            "group_key": str(disc.get("group_key")),
+            "mirrors": len(note.get("mirrors") or []),
+            "comments_total": len(stamps),
+            "comments_7d": sum(
+                1 for t in stamps if now - t < 7 * 86400),
+            "last_comment_at": (max(stamps) if stamps
+                                else 0.0),
         }
 
     # -- leaderboards (§14): one organ, many boards --------------

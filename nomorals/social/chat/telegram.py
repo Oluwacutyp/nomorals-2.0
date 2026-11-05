@@ -2857,6 +2857,280 @@ class TelegramAdapter(ChatAdapter):
             return {"ok": False,
                     "error": f"broadcast stats failed: {exc}"}
 
+    # ── channel programming verbs (census gaps #8/#4) ──────────
+    # The queue's non-text transports and the published-post
+    # management reads/writes.  MTProto shapes here; the bot
+    # adapter carries the Bot API shapes of the same verbs, and
+    # the channel drive picks whichever adapter holds the
+    # channel key — a surface missing a verb is honest absence
+    # at the console, never a fake success.
+
+    async def _send_poll_coro(self, chat: ChatRef, question: str,
+                              options: list[str], *,
+                              anonymous: bool, multiple: bool,
+                              quiz: bool,
+                              correct_option: int | None,
+                              explanation: str) -> Any:
+        import random as _random
+
+        from telethon.tl.functions.messages import \
+            SendMediaRequest
+        from telethon.tl.types import InputMediaPoll, Poll, \
+            PollAnswer
+
+        entity = await self._resolve(chat)
+
+        def _poll() -> Any:
+            # Telethon ≥1.38 wants TextWithEntities for the
+            # question/answers; older pins take plain strings.
+            # Build the rich form, fall back on TypeError — the
+            # poll that goes out is identical either way.
+            try:
+                from telethon.tl.types import TextWithEntities
+
+                def _t(s: str) -> Any:
+                    return TextWithEntities(text=s, entities=[])
+
+                return Poll(
+                    id=_random.getrandbits(63), quiz=bool(quiz),
+                    public_voters=not anonymous,
+                    multiple_choice=bool(multiple),
+                    question=_t(question),
+                    answers=[PollAnswer(text=_t(o),
+                                        option=bytes([i]))
+                             for i, o in enumerate(options)],
+                    correct_answers=(
+                        [bytes([int(correct_option)])]
+                        if quiz and correct_option is not None
+                        else None),
+                    solution=str(explanation or "") or None)
+            except TypeError:
+                return Poll(
+                    id=_random.getrandbits(63), quiz=bool(quiz),
+                    public_voters=not anonymous,
+                    multiple_choice=bool(multiple),
+                    question=str(question),
+                    answers=[PollAnswer(text=str(o),
+                                        option=bytes([i]))
+                             for i, o in enumerate(options)],
+                    correct_answers=(
+                        [bytes([int(correct_option)])]
+                        if quiz and correct_option is not None
+                        else None),
+                    solution=str(explanation or "") or None)
+
+        result = await self._client(SendMediaRequest(
+            peer=entity, media=InputMediaPoll(poll=_poll()),
+            message="", random_id=_random.getrandbits(63)))
+        for upd in getattr(result, "updates", None) or []:
+            msg = getattr(upd, "message", None)
+            if msg is not None and getattr(msg, "id", None):
+                return msg
+        raise ValueError("poll send returned no message")
+
+    def send_poll(self, chat: ChatRef, question: str,
+                  options: list[str], *, anonymous: bool = True,
+                  multiple: bool = False, quiz: bool = False,
+                  correct_option: int | None = None,
+                  explanation: str = "") -> SendResult:
+        """Publish a poll to a channel/group via MTProto
+        (messages.sendMedia with InputMediaPoll).  The flags
+        are the ones Telegram itself supports: anonymous
+        voting (the default; public_voters is its inverse),
+        multiple answers, and quiz mode with a correct option
+        + explanation.  Telegram's own shape rules are checked
+        up front so a malformed poll fails in Devon's words,
+        not as a raw TL error."""
+        if self._client is None:
+            return SendResult(ok=False, platform=self.name,
+                              error="not connected")
+        opts = [str(o or "").strip() for o in options or []]
+        if not str(question or "").strip():
+            return SendResult(ok=False, platform=self.name,
+                              error="a poll needs a question")
+        if not 2 <= len(opts) <= 10 or any(
+                not o or len(o) > 100 for o in opts):
+            return SendResult(
+                ok=False, platform=self.name,
+                error="a poll needs 2–10 options of ≤100 "
+                      "characters each")
+        if len(str(question)) > 255:
+            return SendResult(ok=False, platform=self.name,
+                              error="poll questions cap at 255 "
+                                    "characters")
+        if quiz and (correct_option is None
+                     or not 0 <= int(correct_option) < len(opts)):
+            return SendResult(
+                ok=False, platform=self.name,
+                error="a quiz poll names its correct option")
+        started = time.perf_counter()
+        try:
+            msg = self._run_on_loop(self._send_poll_coro(
+                chat, str(question), opts, anonymous=anonymous,
+                multiple=multiple, quiz=quiz,
+                correct_option=correct_option,
+                explanation=explanation), timeout=60.0)
+            self.stats["sent"] += 1
+            views = getattr(msg, "views", None)
+            return SendResult(
+                ok=True, platform=self.name,
+                message_id=str(getattr(msg, "id", "") or ""),
+                seconds=time.perf_counter() - started,
+                views=views if isinstance(views, int) else None)
+        except Exception as exc:  # noqa: BLE001
+            self.stats["send_errors"] += 1
+            return SendResult(ok=False, platform=self.name,
+                              error=str(exc),
+                              seconds=time.perf_counter() - started)
+
+    def channel_poll_results(self, chat: ChatRef,
+                             message_id: str) -> dict[str, Any]:
+        """Read a published poll's CURRENT results back from
+        the platform: the counters live on the message's poll
+        media (total voters + per-option voters), re-read long
+        after posting like the view counters.  A message that
+        is not a poll, or a poll whose results Telegram does
+        not expose on this read, answers ok=False — absence,
+        never invented numbers."""
+        if self._client is None:
+            return {"ok": False, "error": "not connected"}
+
+        async def _do() -> dict[str, Any]:
+            entity = await self._resolve(chat)
+            msg = await self._client.get_messages(
+                entity, ids=int(message_id))
+            if isinstance(msg, list):
+                msg = msg[0] if msg else None
+            media = getattr(msg, "media", None)
+            poll = getattr(media, "poll", None)
+            if poll is None:
+                return {"ok": False,
+                        "error": "that post is not a poll"}
+            results = getattr(media, "results", None)
+            if results is None:
+                return {"ok": False,
+                        "error": "Telegram returned no results "
+                                 "for this poll"}
+            answers = list(getattr(poll, "answers", None) or [])
+            voters = {bytes(v.option): v for v in
+                      (getattr(results, "results", None) or [])}
+            correct = {bytes(c) for c in
+                       (getattr(poll, "correct_answers", None)
+                        or [])}
+            options = []
+            for answer in answers:
+                opt = bytes(getattr(answer, "option", b""))
+                row = voters.get(opt)
+                options.append({
+                    "text": self._answer_text(answer),
+                    "voters": (int(row.voters)
+                               if row is not None
+                               and getattr(row, "voters", None)
+                               is not None else None),
+                    "chosen": (bool(row.chosen)
+                               if row is not None else False),
+                    "correct": (opt in correct
+                                if correct else None),
+                })
+            total = getattr(results, "total_voters", None)
+            return {"ok": True,
+                    "total_voters": (int(total)
+                                     if total is not None
+                                     else None),
+                    "options": options}
+
+        try:
+            return self._run_on_loop(_do(), timeout=30.0)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False,
+                    "error": f"poll results failed: {exc}"}
+
+    def forward_post(self, from_chat: ChatRef, message_id: str,
+                     to_chat: ChatRef) -> SendResult:
+        """Native-forward one published post into another
+        channel (messages.forwardMessages): the forward keeps
+        Telegram's own attribution — it is the platform's
+        cross-post, not a re-typed copy."""
+        if self._client is None:
+            return SendResult(ok=False, platform=self.name,
+                              error="not connected")
+        started = time.perf_counter()
+
+        async def _do() -> Any:
+            src = await self._resolve(from_chat)
+            dst = await self._resolve(to_chat)
+            out = await self._client.forward_messages(
+                dst, [int(message_id)], from_peer=src)
+            if isinstance(out, list):
+                out = out[0] if out else None
+            if out is None or not getattr(out, "id", None):
+                raise ValueError(
+                    "forward returned no message")
+            return out
+
+        try:
+            msg = self._run_on_loop(_do(), timeout=60.0)
+            self.stats["sent"] += 1
+            views = getattr(msg, "views", None)
+            return SendResult(
+                ok=True, platform=self.name,
+                message_id=str(getattr(msg, "id", "") or ""),
+                seconds=time.perf_counter() - started,
+                views=views if isinstance(views, int) else None)
+        except Exception as exc:  # noqa: BLE001
+            self.stats["send_errors"] += 1
+            return SendResult(ok=False, platform=self.name,
+                              error=str(exc),
+                              seconds=time.perf_counter() - started)
+
+    def edit_post(self, chat: ChatRef, message_id: str,
+                  text: str) -> dict[str, Any]:
+        """Edit one of this account's own published posts
+        (messages.editMessage).  Telegram refuses edits to
+        polls and to other people's posts; the refusal is the
+        result, in Telegram's words."""
+        async def _do() -> None:
+            entity = await self._resolve(chat)
+            await self._client.edit_message(
+                entity, int(message_id), str(text or ""))
+
+        return self._admin(_do(), "edit post")
+
+    async def _discussion_link_coro(self, chat: ChatRef
+                                    ) -> str:
+        from telethon.tl.functions.channels import \
+            GetFullChannelRequest
+
+        entity = await self._resolve(chat)
+        full = await self._client(
+            GetFullChannelRequest(channel=entity))
+        linked = getattr(
+            getattr(full, "full_chat", None),
+            "linked_chat_id", None)
+        if not linked:
+            return ""
+        raw = str(linked)
+        # MTProto names the linked supergroup by its bare id;
+        # Devon's chat keys carry the marked -100 form the Bot
+        # API returns natively.
+        return raw if raw.startswith("-") else f"-100{raw}"
+
+    def channel_discussion_link(self, chat: ChatRef
+                                ) -> dict[str, Any]:
+        """The channel's linked discussion group, from the
+        platform itself (channels.getFullChannel →
+        linked_chat_id).  ``linked_chat_id`` is the marked
+        chat id in Devon key form, or "" when the channel has
+        no discussion group — a real state, not an error.  A
+        chat Telegram won't describe answers ok=False."""
+        try:
+            linked = self._run_on_loop(
+                self._discussion_link_coro(chat), timeout=30.0)
+            return {"ok": True, "linked_chat_id": linked}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False,
+                    "error": f"discussion link failed: {exc}"}
+
     def member_by_username(self, chat: ChatRef, username: str
                            ) -> dict[str, Any] | None:
         """One Telegram user by @handle, via the username
@@ -5138,6 +5412,116 @@ class TelegramBotAdapter(ChatAdapter):
     def admin_delete(self, chat: ChatRef, message_id: str) -> dict[str, Any]:
         return self._admin("deleteMessage", chat,
                            message_id=int(message_id))
+
+    # ── channel programming verbs (census gaps #8/#4) ──────────
+    # Bot API shapes of the userbot's programming verbs.  One
+    # honest asymmetry: the Bot API gives a bot NO read-back of
+    # a poll's results (results arrive only as poll updates for
+    # polls the bot itself sent, which is not a read path), so
+    # there is deliberately no channel_poll_results here — the
+    # console reports that absence on bot-held channels.
+
+    def send_poll(self, chat: ChatRef, question: str,
+                  options: list[str], *, anonymous: bool = True,
+                  multiple: bool = False, quiz: bool = False,
+                  correct_option: int | None = None,
+                  explanation: str = "") -> SendResult:
+        """Publish a poll via sendPoll.  Flags are the Bot
+        API's own: is_anonymous, allows_multiple_answers, and
+        type=quiz with correct_option_id + explanation."""
+        import json as _json
+
+        opts = [str(o or "").strip() for o in options or []]
+        if not str(question or "").strip():
+            return SendResult(ok=False, platform=self.name,
+                              error="a poll needs a question")
+        if not 2 <= len(opts) <= 10 or any(
+                not o or len(o) > 100 for o in opts):
+            return SendResult(
+                ok=False, platform=self.name,
+                error="a poll needs 2–10 options of ≤100 "
+                      "characters each")
+        if len(str(question)) > 255:
+            return SendResult(ok=False, platform=self.name,
+                              error="poll questions cap at 255 "
+                                    "characters")
+        if quiz and (correct_option is None
+                     or not 0 <= int(correct_option) < len(opts)):
+            return SendResult(
+                ok=False, platform=self.name,
+                error="a quiz poll names its correct option")
+        params: dict[str, Any] = {
+            "chat_id": int(chat.chat_id),
+            "question": str(question),
+            "options": _json.dumps([{"text": o} for o in opts]),
+            "is_anonymous": bool(anonymous),
+            "allows_multiple_answers": bool(multiple),
+            "type": "quiz" if quiz else "regular",
+        }
+        if quiz:
+            params["correct_option_id"] = int(correct_option)
+            if explanation:
+                params["explanation"] = str(explanation)[:200]
+        started = time.perf_counter()
+        try:
+            result = self._api("sendPoll", **params)
+            mid = ""
+            if isinstance(result, dict):
+                mid = str(result.get("message_id") or "")
+            return SendResult(
+                ok=True, platform=self.name, message_id=mid,
+                seconds=time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001
+            return SendResult(ok=False, platform=self.name,
+                              error=str(exc)[:200],
+                              seconds=time.perf_counter() - started)
+
+    def forward_post(self, from_chat: ChatRef, message_id: str,
+                     to_chat: ChatRef) -> SendResult:
+        """Native-forward one published post into another
+        channel (forwardMessage): Telegram's own attribution
+        rides the copy — the platform's cross-post."""
+        started = time.perf_counter()
+        try:
+            result = self._api(
+                "forwardMessage", chat_id=int(to_chat.chat_id),
+                from_chat_id=int(from_chat.chat_id),
+                message_id=int(message_id))
+            mid = ""
+            if isinstance(result, dict):
+                mid = str(result.get("message_id") or "")
+            return SendResult(
+                ok=True, platform=self.name, message_id=mid,
+                seconds=time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001
+            return SendResult(ok=False, platform=self.name,
+                              error=str(exc)[:200],
+                              seconds=time.perf_counter() - started)
+
+    def edit_post(self, chat: ChatRef, message_id: str,
+                  text: str) -> dict[str, Any]:
+        """Edit one of the bot's own published posts
+        (editMessageText).  Polls and media posts refuse on
+        the API; the refusal is the result."""
+        return self._admin(
+            "editMessageText", chat, message_id=int(message_id),
+            text=(str(text or "")
+                  [:for_platform("telegram-bot").max_text]))
+
+    def channel_discussion_link(self, chat: ChatRef
+                                ) -> dict[str, Any]:
+        """The channel's linked discussion group from getChat:
+        ``linked_chat_id`` in the Bot API's native marked
+        form, or "" when the channel has none."""
+        out = self._admin("getChat", chat)
+        if not out["ok"]:
+            return {"ok": False,
+                    "error": str(out.get("error") or "")}
+        result = out.get("result") or {}
+        linked = result.get("linked_chat_id")
+        return {"ok": True,
+                "linked_chat_id": (str(linked) if linked
+                                   else "")}
 
     def admin_member(self, chat: ChatRef, user_id: str) -> dict[str, Any]:
         """One member's status/role in a group/channel."""
