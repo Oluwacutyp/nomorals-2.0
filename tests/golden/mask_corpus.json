@@ -1,0 +1,266 @@
+{
+ "auto_floor_rule": "auto floors are cross-environment: auto lands on the best rung the machine has, so the auto floor is set from the weakest environment's landing. Each rung's own floor pins that rung wherever it exists, and the corpus test additionally asserts auto scores within 0.02 of the best rung the machine can run.",
+ "fixtures": [
+  {
+   "floors": {
+    "auto": 0.9,
+    "box": 0.55,
+    "flood": 0.9,
+    "grabcut": 0.9
+   },
+   "gt_fraction": 0.2671,
+   "measured": {
+    "auto": {
+     "iou": 0.9789,
+     "tier": "grabcut"
+    },
+    "box": {
+     "iou": 0.6503,
+     "tier": "box+feather"
+    },
+    "flood": {
+     "iou": 0.9789,
+     "tier": "flood"
+    },
+    "grabcut": {
+     "iou": 0.9789,
+     "tier": "grabcut"
+    }
+   },
+   "name": "disc_on_field",
+   "notes": "Flat disc on a flat field; every rung near-exact except box, whose ceiling is the bounding square of a disc (pi/4 before the point-derived pad).",
+   "prompt": {
+    "kind": "point",
+    "point": [
+     96,
+     96
+    ]
+   }
+  },
+  {
+   "floors": {
+    "auto": 0.9,
+    "box": 0.9,
+    "grabcut": 0.9
+   },
+   "gt_fraction": 0.2214,
+   "measured": {
+    "auto": {
+     "iou": 0.9711,
+     "tier": "grabcut"
+    },
+    "box": {
+     "iou": 0.9711,
+     "tier": "box+feather"
+    },
+    "grabcut": {
+     "iou": 0.9711,
+     "tier": "grabcut"
+    }
+   },
+   "name": "block_on_field",
+   "notes": "Axis-aligned block prompted with its exact box; flood not applicable (no point prompt).",
+   "prompt": {
+    "box": [
+     48,
+     60,
+     150,
+     140
+    ],
+    "kind": "box"
+   }
+  },
+  {
+   "floors": {
+    "auto": 0.9,
+    "box": 0.75,
+    "flood": 0.9,
+    "grabcut": 0.9
+   },
+   "gt_fraction": 0.2917,
+   "measured": {
+    "auto": {
+     "iou": 0.9781,
+     "tier": "grabcut"
+    },
+    "box": {
+     "iou": 0.8319,
+     "tier": "box+feather"
+    },
+    "flood": {
+     "iou": 0.9781,
+     "tier": "flood"
+    },
+    "grabcut": {
+     "iou": 0.9781,
+     "tier": "grabcut"
+    }
+   },
+   "name": "block_gradient_bg",
+   "notes": "Flat block on a smooth gradient field.",
+   "prompt": {
+    "kind": "point",
+    "point": [
+     96,
+     100
+    ]
+   }
+  },
+  {
+   "floors": {
+    "auto": 0.65,
+    "box": 0.55,
+    "flood": 0.6,
+    "grabcut": 0.9
+   },
+   "gt_fraction": 0.2864,
+   "measured": {
+    "auto": {
+     "iou": 0.9803,
+     "tier": "grabcut"
+    },
+    "box": {
+     "iou": 0.675,
+     "tier": "box+feather"
+    },
+    "flood": {
+     "iou": 0.7255,
+     "tier": "flood"
+    },
+    "grabcut": {
+     "iou": 0.9803,
+     "tier": "grabcut"
+    }
+   },
+   "name": "speckled_disc",
+   "notes": "Two-tone speckled disc: flood's seed-relative tolerance leaves the far-tone pixels behind (0.7255 measured); GrabCut's colour models span the speckle (0.9803). The flood floor pins the weakness so it cannot silently get worse. The auto floor (0.65) is cross-environment: without OpenCV, auto lands on flood (0.7255) instead of grabcut.",
+   "prompt": {
+    "kind": "point",
+    "point": [
+     96,
+     96
+    ]
+   }
+  },
+  {
+   "floors": {
+    "auto": 0.85,
+    "box": 0.32,
+    "flood": 0.85,
+    "grabcut": 0.85
+   },
+   "gt_fraction": 0.2123,
+   "measured": {
+    "auto": {
+     "iou": 0.9453,
+     "tier": "grabcut"
+    },
+    "box": {
+     "iou": 0.4043,
+     "tier": "box+feather"
+    },
+    "flood": {
+     "iou": 0.9453,
+     "tier": "flood"
+    },
+    "grabcut": {
+     "iou": 0.9453,
+     "tier": "grabcut"
+    }
+   },
+   "name": "thin_ring",
+   "notes": "Annulus: the hole is ground-truth background. Box is structurally wrong here (it fills the hole) and its floor records exactly how wrong.",
+   "prompt": {
+    "kind": "point",
+    "point": [
+     148,
+     96
+    ]
+   }
+  },
+  {
+   "floors": {
+    "auto": 0.85,
+    "box": 0.48,
+    "flood": 0.85,
+    "grabcut": 0.85
+   },
+   "gt_fraction": 0.0983,
+   "measured": {
+    "auto": {
+     "iou": 0.9371,
+     "tier": "grabcut"
+    },
+    "box": {
+     "iou": 0.5881,
+     "tier": "box+feather"
+    },
+    "flood": {
+     "iou": 0.9371,
+     "tier": "flood"
+    },
+    "grabcut": {
+     "iou": 0.9371,
+     "tier": "grabcut"
+    }
+   },
+   "name": "twin_discs",
+   "notes": "The point picks the left disc; the right disc (different colour) is background and must stay unmasked.",
+   "prompt": {
+    "kind": "point",
+    "point": [
+     58,
+     96
+    ]
+   }
+  },
+  {
+   "floors": {
+    "auto": 0.72,
+    "box": 0.7,
+    "grabcut": 0.9
+   },
+   "gt_fraction": 0.2671,
+   "measured": {
+    "auto": {
+     "iou": 0.9787,
+     "tier": "grabcut"
+    },
+    "box": {
+     "iou": 0.7996,
+     "tier": "box+feather"
+    },
+    "grabcut": {
+     "iou": 0.9787,
+     "tier": "grabcut"
+    }
+   },
+   "name": "disc_via_locator",
+   "notes": "disc_on_field reached through a text prompt; the recorded box is what a locator returns for the disc, so the auto path is scored end-to-end. Flood not applicable. The auto floor (0.72) is cross-environment: without OpenCV, auto lands on box+feather (0.7996) instead of grabcut.",
+   "prompt": {
+    "box": [
+     40,
+     40,
+     152,
+     152
+    ],
+    "kind": "text"
+   }
+  }
+ ],
+ "generator": "nomorals.media.imggen.mask_corpus",
+ "history": [
+  {
+   "date": "2026-11-05",
+   "note": "Corpus first run caught a live defect: GrabCut's point-mode seeding zero-filled its mask (GC_BGD is definite background), so point-prompted GrabCut returned an EMPTY mask on every fixture (IoU 0.0) and auto_mask accepted it as success instead of falling through to flood. Fixed in masks.py (probable-background seeding, definite seed kept, empty result = rung unable); all values above are post-fix."
+  }
+ ],
+ "iou_threshold": 127,
+ "kind": "mask_corpus",
+ "measured_env": "Python 3.12.3; grabcut measured with opencv-python-headless 5.0.0 / numpy 2.5.4; flood and box values verified byte-identical under numpy 1.26.4 without cv2. Floors sit below the measured values by a margin sized for library-version wobble; a rung falling under its floor is a regression, not weather.",
+ "sam": {
+  "floor": null,
+  "note": "The SAM rung is not scored: it needs a checkpoint and torch on the machine, and inventing a number would be the vibe this corpus exists to replace. When a machine has SAM usable, scoring it is one score_fixture call away; until then the manifest records the gap instead of a guess."
+ },
+ "version": 1
+}

@@ -24,6 +24,10 @@ Layout:
 - :mod:`.develop` — the develop stage (LightCraft controls as an op)
 - :mod:`.masks` — the mask ladder + MaskRef, the serializable mask
   value documents carry
+- :mod:`.mask_corpus` — the IoU-scored synthetic mask corpus
+  (fixtures with exact ground truth; §1.1d acceptance)
+- :mod:`.mask_provision` — the consent-to-download flow that
+  offers/installs the SAM rung when the probe finds it missing
 
 Torch-gated modules expose ``TORCH_AVAILABLE`` and raise a clear
 :class:`ImgGenError` (never a bare ImportError) when torch is missing.
@@ -37,6 +41,7 @@ __all__ = [
     "checkpoint_dir",
     "ImageDocument",
     "MaskRef",
+    "MaskProvisionFlow",
 ]
 
 try:  # optional: the whole organ degrades honestly without torch
@@ -60,6 +65,10 @@ def __getattr__(name: str):  # lazy: keep package import light
         from .masks import MaskRef
 
         return MaskRef
+    if name == "MaskProvisionFlow":
+        from .mask_provision import MaskProvisionFlow
+
+        return MaskProvisionFlow
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

@@ -8,6 +8,11 @@ Also exposes the render ledger those engines write
 (``media.motion_studio._core.ledger_status``) as the read-only
 ``motion_ledger_status`` tool — until Pass #98 the ledger's truth was
 reachable only from the ``nm video`` CLI and the /video list handler.
+And the mask ladder's truth: ``mask_rung_status`` serves
+``imggen.masks.mask_status()`` plus the SAM consent-to-download
+flow's state (§1.1d tail — until this, ``mask_status()`` had no
+consumer outside its own module), and ``mask_rung_provision``
+carries the owner's yes/no on that download.
 
 Native-first: the local pipelines run when the hardware allows;
 honest errors (never fake images) when it doesn't. APIs stay as
@@ -226,6 +231,53 @@ def register(registry: Any) -> None:
             out["recent"] = read_ledger(
                 limit=max(1, min(100, int(recent))))
         return out
+
+    @registry.register(
+        "mask_rung_status",
+        description=("Show the image-mask ladder's per-rung truth: SAM / "
+                     "GrabCut / flood / box / file — each rung usable or "
+                     "not, with the exact reason when not — plus the SAM "
+                     "provisioning state ('can Devon get better masks?', "
+                     "'why are my masks rough?', 'is SAM installed?'). "
+                     "When the SAM rung is missing and installable, the "
+                     "result carries the offer text to show the owner "
+                     "verbatim; asking never installs anything."),
+        capability=Capability.FS_READ,
+    )
+    def mask_rung_status() -> dict[str, Any]:
+        """Per-rung mask status + the consent flow's current state."""
+        from ..media.imggen.mask_provision import default_flow
+        from ..media.imggen.masks import mask_status
+        return {"ok": True, "rungs": mask_status(),
+                "sam_provision": default_flow().assess()}
+
+    @registry.register(
+        "mask_rung_provision",
+        description=("Carry the owner's answer to the SAM mask offer "
+                     "('install SAM', 'get the better mask model', "
+                     "'yes, download it' / 'no, don't download SAM'). "
+                     "decision='accept' installs the segment-anything "
+                     "package and/or the ViT-B checkpoint (~375 MB) "
+                     "herself and verifies with a fresh re-probe; "
+                     "decision='refuse' records the no so she stops "
+                     "offering; decision='reopen' clears a past refusal "
+                     "and offers again. Never call 'accept' without the "
+                     "owner's actual yes in this conversation."),
+        capability=Capability.MODEL_DOWNLOAD,
+    )
+    def mask_rung_provision(*, decision: str = "accept") -> dict[str, Any]:
+        """The owner's yes/no on the SAM download, carried out."""
+        from ..media.imggen.mask_provision import default_flow
+        flow = default_flow()
+        verb = (decision or "accept").strip().lower()
+        if verb == "accept":
+            return {"ok": True, "sam_provision": flow.accept()}
+        if verb == "refuse":
+            return {"ok": True, "sam_provision": flow.refuse()}
+        if verb == "reopen":
+            return {"ok": True, "sam_provision": flow.reopen()}
+        raise ValueError(
+            f"unknown decision {decision!r}; use accept|refuse|reopen")
 
 
 # ── style presets (tool surface; engines stay style-agnostic) ─────────────

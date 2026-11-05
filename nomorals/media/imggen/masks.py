@@ -88,6 +88,9 @@ def sam_status() -> dict:
         os.path.expanduser("~/.nomorals/models/sam_vit_h.pth"),
         os.path.expanduser("~/.nomorals/models/sam_vit_l.pth"),
         os.path.expanduser("~/.nomorals/models/sam2.1_b.pt"),
+        # The checkpoint the consent-to-download flow installs
+        # (mask_provision.py): smallest official SAM weights.
+        os.path.expanduser("~/.nomorals/models/sam_vit_b.pth"),
     ]
     ckpt = next((c for c in candidates if os.path.exists(c)), None)
     return {
@@ -468,9 +471,20 @@ def _grabcut_mask(image: Image.Image, box, point,
     elif point is not None:
         px, py = round(point[0]), round(point[1])
         r = max(8, min(w, h) // 12)
-        gc_mask[py, px] = _cv2.GC_FGD
+        # Seed semantics (measured by the §1.1d corpus — the old
+        # seeding zero-filled the mask, and GC_BGD is *definite*
+        # background: GrabCut could never grow the object past the
+        # seed patch and returned an empty mask on every point
+        # prompt, which auto_mask then accepted as success).
+        # Unmarked pixels start as probable background — free to
+        # flip; the patch is probable foreground; the seed pixel
+        # is definite foreground, set after the patch so the patch
+        # cannot overwrite it; the frame border stays definite
+        # background.
+        gc_mask[:] = _cv2.GC_PR_BGD
         gc_mask[max(0, py - r):py + r, max(0, px - r):px + r] = \
             _cv2.GC_PR_FGD
+        gc_mask[py, px] = _cv2.GC_FGD
         gc_mask[0, :] = gc_mask[-1, :] = _cv2.GC_BGD
         gc_mask[:, 0] = gc_mask[:, -1] = _cv2.GC_BGD
         _cv2.grabCut(bgr, gc_mask, None, bgd, fgd, 5,
@@ -481,6 +495,11 @@ def _grabcut_mask(image: Image.Image, box, point,
     binm = np.where((gc_mask == _cv2.GC_FGD)
                     | (gc_mask == _cv2.GC_PR_FGD), 255, 0
                     ).astype(np.uint8)
+    if not binm.any():
+        # An empty mask is not a mask: report the rung as unable
+        # so the ladder falls through instead of "succeeding"
+        # with nothing (the corpus caught exactly this shape).
+        return None
     _require_pil()
     m = Image.fromarray(binm, "L")
     if feather_radius > 0:

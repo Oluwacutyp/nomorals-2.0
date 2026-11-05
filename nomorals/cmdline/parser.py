@@ -2376,6 +2376,17 @@ def _parser() -> argparse.ArgumentParser:
     ig_lora.add_argument("--seed", type=int, default=None)
     ig_ck = ig_sub.add_parser("checkpoints", help="list native checkpoints")
     ig_ck.add_argument("--json", action="store_true")
+    ig_mk = ig_sub.add_parser(
+        "masks", help="mask ladder status + SAM download offer")
+    ig_mk.add_argument("--json", action="store_true")
+    ig_mk.add_argument("--accept", action="store_true",
+                       help="install the SAM rung now (package + "
+                            "ViT-B checkpoint) and re-probe")
+    ig_mk.add_argument("--refuse", action="store_true",
+                       help="record the owner's no to the SAM "
+                            "download offer")
+    ig_mk.add_argument("--reopen", action="store_true",
+                       help="clear a past refusal and offer again")
     ig_db = ig_sub.add_parser("dashboard", help="training dashboard for a run")
     ig_db.add_argument("run", help="run name")
     ig_mg = ig_sub.add_parser("merge", help="weighted merge of two checkpoints")

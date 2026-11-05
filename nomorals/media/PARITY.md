@@ -36,3 +36,13 @@ queue. Sections land with their waves.
 | Procedural paths on video segments (pan/rotation/blur over moving footage) | open remainder | video segments animate through the engine keyframe registry (`transform/zoom`, `opacity`) only; the CPU tier materializes stills/text. Named in the compile error, never silently dropped |
 | Procedural engines beyond `visualizer` (explainer family: diagrams, equations-as-text, chart builds) | deferred to plan §1.5d | MotionProject documents are their planned home; the compile error names the deferral |
 | Transition kinds wipe/circle through session directives | open remainder | engine session directives interpret cut/fade/dissolve/flash/dip/whip_pan; wipeleft/circleopen raise at compile, named |
+
+## Image — masks & selection, §1.1d tail (LightCraft consent pattern → `imggen`)
+
+| Row | State | Evidence / note |
+|---|---|---|
+| IoU-scored mask corpus: synthetic fixtures with ground truth exact by construction, per-fixture IoU floor per rung recorded in a manifest, the real ladder re-scored against the floors in tests | shipped (§1.1d tail) | `imggen/mask_corpus.py` (7 fixtures) + `tests/golden/mask_corpus.json` + `tests/test_mask_corpus.py`; grabcut measured on opencv 5.0.0, flood/box identical under numpy 1.26/2.5 |
+| GrabCut point-mode seeding defect (found by the corpus on its first run) | fixed (§1.1d tail) | the shipped seeding zero-filled the mask — GC_BGD is *definite* background, so point-prompted GrabCut returned an empty mask on every fixture (IoU 0.0) and `auto_mask` accepted it as success instead of falling through. `masks.py`: probable-background seeding, definite seed kept, empty result = rung unable |
+| Consent-to-download flow over `mask_status()`: probe → offer → owner's yes installs (pip package and/or ViT-B checkpoint) → fresh-process re-probe; refusal remembered; states not_needed/available/offered/installed/refused/failed | shipped (§1.1d tail) | `imggen/mask_provision.py` (`MaskProvisionFlow`, all seams injectable); `tests/test_mask_provision.py` covers every state with fakes |
+| `mask_status()` gains real consumers (it had none outside its own module) | shipped (§1.1d tail) | tools `mask_rung_status` / `mask_rung_provision` (`tools/media_gen.py`) + CLI `nm imggen masks [--accept\|--refuse\|--reopen]` |
+| SAM rung IoU | not scored — recorded, not invented | needs a checkpoint + torch on the scoring machine; the manifest's `sam` entry states the gap instead of a number. Scoring it is one `score_fixture` call away on a SAM machine |

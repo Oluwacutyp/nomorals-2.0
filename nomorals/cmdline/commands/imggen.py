@@ -9,6 +9,7 @@
     nm imggen train --data ./my_photos [--steps 5000] [--size 64]
     nm imggen lora-train --data ./style --base <ckpt> --rank 8
     nm imggen checkpoints [--json]
+    nm imggen masks [--json] [--accept | --refuse | --reopen]
     nm imggen dashboard <run>
     nm imggen merge base.pt other.pt --alpha 0.5
     nm imggen character "anchor prompt" "pose 1" "pose 2" --seed 42
@@ -252,6 +253,46 @@ def _cmd_imggen_checkpoints(args: argparse.Namespace, context) -> int:
     return 0
 
 
+def _cmd_imggen_masks(args: argparse.Namespace, context) -> int:
+    """Mask ladder status + the SAM consent-to-download flow.
+
+    Bare: every rung's usability + reason, and the flow's state
+    (with the offer text when SAM is missing-but-installable).
+    --accept runs the install herself and re-probes; --refuse
+    records the owner's no; --reopen clears a past refusal.
+    """
+    try:
+        from ...media.imggen.mask_provision import default_flow
+        from ...media.imggen.masks import mask_status
+
+        flow = default_flow()
+        if args.accept:
+            record = flow.accept()
+        elif args.refuse:
+            record = flow.refuse()
+        elif args.reopen:
+            record = flow.reopen()
+        else:
+            record = flow.assess()
+        rungs = mask_status()
+    except Exception as exc:  # noqa: BLE001 - CLI surfaces as text
+        return _err(str(exc))
+    if args.json:
+        print(json.dumps({"rungs": rungs, "sam_provision": record},
+                         indent=2))
+    else:
+        for rung, info in rungs.items():
+            mark = "ok " if info["usable"] else "-- "
+            print(f"{mark}{rung}: {info['reason']}")
+        print(f"sam provision: {record['state']}"
+              + (f" — {record['detail']}" if record["detail"] else ""))
+        if record["state"] == "offered":
+            print(record["offer"])
+        for attempt in record["attempts"]:
+            print(f"  tried: {attempt}")
+    return 1 if record["state"] == "failed" else 0
+
+
 def _cmd_imggen_dashboard(args: argparse.Namespace, context) -> int:
     try:
         from ...media.imggen.studio import training_dashboard
@@ -300,6 +341,7 @@ HANDLERS = {
     "train": _cmd_imggen_train,
     "lora-train": _cmd_imggen_lora_train,
     "checkpoints": _cmd_imggen_checkpoints,
+    "masks": _cmd_imggen_masks,
     "dashboard": _cmd_imggen_dashboard,
     "merge": _cmd_imggen_merge,
     "character": _cmd_imggen_character,
