@@ -40,6 +40,7 @@ __all__ = [
     "make_music_visualizer",
     "make_slideshow",
     "make_trailer",
+    "make_explainer",
     "quick_montage",
     "FORMATS",
 ]
@@ -204,6 +205,36 @@ def make_trailer(clips: Sequence[str | os.PathLike],
     path = _finish(path, out, grade_preset=grade_preset, format=format)
     record_ledger({"kind": "studio.trailer", "path": path,
                    "clips": len(clips), "format": format})
+    return path
+
+
+def make_explainer(scenes: Sequence[dict],
+                   out: str | os.PathLike | None = None, *,
+                   title: str = "",
+                   per_scene: float = 6.0,
+                   grade_preset: str = "",
+                   format: str = "",
+                   size: tuple[int, int] | None = None,
+                   fps: float | None = None,
+                   seed: int = 21) -> str:
+    """Code-driven explainer video (plan §1.5d): diagram / equation /
+    chart scenes that build step by step, rendered deterministically.
+
+    ``scenes`` are explainer design dicts — the same data
+    :func:`~nomorals.media.motion_studio.project.explainer_project`
+    turns into a saveable MotionProject; this is its one-call form.
+    """
+    from .project import explainer_project
+    proj = explainer_project(scenes, title=title,
+                             per_scene=per_scene, size=size, fps=fps,
+                             seed=seed)
+    res = proj.render()
+    path = _finish(res["output"], out, grade_preset=grade_preset,
+                   format=format)
+    record_ledger({"kind": "studio.explainer", "path": path,
+                   "scenes": len(proj.segments),
+                   "project_hash": res["motion_project"]["project_hash"],
+                   "format": format})
     return path
 
 

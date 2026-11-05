@@ -48,12 +48,19 @@ lands on exactly one rung, named in the compile record:
   zoom while the rest follows the segment transform; the compile
   record names the mask ladder rung that produced the mask (1.1d).
 
+The code-driven explainer family (plan §1.5d) ships as procedural
+engines beside the visualizer: ``diagram`` / ``equation`` /
+``chart`` scenes are declarative data in the segment's ``design``,
+rendered by :mod:`.explainers`' deterministic frame functions —
+builds that assemble step by step, text composited by the
+deterministic text path, never model-drawn.
+
 Deferred, named (never silently shrunk): ``camera3d/*`` property
 paths are *carried* by the document but refuse at compile — the 3D
 rung is the owner's open choice (plan §1.5e/§6.3), and this module
 will not fake a renderer for it. Procedural paths on video/text/
-visualizer segments and the code-driven explainer family (§1.5d)
-likewise refuse with their reason named in the error.
+procedural segments, and procedural engines outside the shipped
+family, likewise refuse with their reason named in the error.
 
 Rendering (``render``) goes through
 :func:`edit_engine.render.render_document`; the result carries the
@@ -93,6 +100,7 @@ from ._core import (
     probe_duration,
     record_ledger,
 )
+from .explainers import is_explainer_engine, render_explainer
 from .kenburns import MOVES, _crop_view, _load_cover, _pick_move
 from .typography import timing_sources, to_words
 from ..directed.motion_score import EASE_FUNCS, ease_value
@@ -119,6 +127,10 @@ __all__ = [
     "slideshow_project",
     "trailer_project",
     "visualizer_project",
+    "explainer_project",
+    "diagram_project",
+    "equation_project",
+    "chart_project",
 ]
 
 _DOC_KIND = "devon-motion-project"
@@ -357,8 +369,12 @@ class MotionSegment:
     measured when they come from a transcriber; label them via
     ``timing_source`` or per-word ``timing_source`` keys), plus a
     typography ``preset``. Procedural segments name their engine in
-    ``design["engine"]`` (``"visualizer"`` ships; the explainer
-    family is §1.5d, deferred and named at compile).
+    ``design["engine"]`` (``"visualizer"`` ships; the §1.5d
+    explainer family — ``"diagram"`` / ``"equation"`` / ``"chart"``,
+    or ``"explainer"`` + ``design["kind"]`` — ships beside it in
+    :mod:`.explainers`; anything else refuses at compile, named).
+    Explainer scenes take their narration from ``text``/``words`` +
+    ``timing_source`` exactly like text segments.
     """
     uid: str
     kind: str
@@ -942,30 +958,55 @@ def _compile_segment(seg: MotionSegment, *, grid: FrameGrid,
                 f"engines render their own frames; segment property "
                 f"paths do not reach inside them in this wave.")
         engine_name = str(seg.design.get("engine", ""))
-        if engine_name != "visualizer":
+        if engine_name == "visualizer":
+            audio = seg.src or project_audio
+            if not audio or not Path(audio).exists():
+                raise MotionStudioError(
+                    f"segment @{seg.uid}: visualizer needs an audio "
+                    f"source (segment src or project audio)")
+            from .visualizer import render_visualizer
+            out = tmp / f"seg-{seg.uid}.mp4"
+            render_visualizer(audio, out,
+                              preset=seg.preset or "phonk",
+                              images=[str(i) for i in
+                                      seg.design.get("images", [])],
+                              duration=seg.duration_s, size=size, fps=fps)
+            rec["tier"] = "procedural"
+            rec["rung"] = ("audio-reactive visualizer — "
+                           "motion_studio.visualizer.render_visualizer")
+            rec["note"] = "procedural segment (visualizer engine)"
+            clip = Clip(path=str(out), duration=seg.duration_s,
+                        id=seg.uid)
+        elif is_explainer_engine(engine_name):
+            out = tmp / f"seg-{seg.uid}.mp4"
+            info = render_explainer(
+                seg.design, out, duration=seg.duration_s, size=size,
+                fps=fps, seed=seed, text=seg.text, words=seg.words,
+                timing_source=seg.timing_source)
+            rec["tier"] = "procedural"
+            rec["rung"] = ("code-driven explainer — "
+                           "motion_studio.explainers.render_explainer "
+                           f"({info['kind']})")
+            rec["explainer"] = info
+            rec["timing_sources"] = info["timing_sources"]
+            rec["note"] = (
+                f"explainer segment ({info['kind']}): "
+                f"{info['steps']} build steps, deterministic frame "
+                f"functions; text on the deterministic text path"
+                + (f"; caption timing: " + ", ".join(
+                    f"{k}×{v}" for k, v in
+                    sorted(info["timing_sources"].items()))
+                   if info["timing_sources"] else ""))
+            clip = Clip(path=str(out), duration=seg.duration_s,
+                        id=seg.uid)
+        else:
             raise MotionStudioError(
                 f"segment @{seg.uid}: procedural engine "
-                f"{engine_name!r} is not built — 'visualizer' ships "
-                f"in this wave; the code-driven explainer family "
-                f"(diagrams, equations-as-text, chart builds) is "
-                f"plan §1.5d, a named deferral, not a stub")
-        audio = seg.src or project_audio
-        if not audio or not Path(audio).exists():
-            raise MotionStudioError(
-                f"segment @{seg.uid}: visualizer needs an audio "
-                f"source (segment src or project audio)")
-        from .visualizer import render_visualizer
-        out = tmp / f"seg-{seg.uid}.mp4"
-        render_visualizer(audio, out,
-                          preset=seg.preset or "phonk",
-                          images=[str(i) for i in
-                                  seg.design.get("images", [])],
-                          duration=seg.duration_s, size=size, fps=fps)
-        rec["tier"] = "procedural"
-        rec["rung"] = ("audio-reactive visualizer — "
-                       "motion_studio.visualizer.render_visualizer")
-        rec["note"] = "procedural segment (visualizer engine)"
-        clip = Clip(path=str(out), duration=seg.duration_s, id=seg.uid)
+                f"{engine_name!r} is not built — the procedural "
+                f"family ships 'visualizer' plus the plan §1.5d "
+                f"explainer engines ('diagram', 'equation', "
+                f"'chart'); anything else is outside §1.5d's scope "
+                f"and stays a named refusal, not a stub")
 
     else:  # pragma: no cover - __post_init__ already enforces kinds
         raise MotionStudioError(f"unknown segment kind {seg.kind!r}")
@@ -1225,3 +1266,98 @@ def visualizer_project(audio: str | os.PathLike, *,
                 "images": [str(i) for i in images]})
     return MotionProject(title=title or "visualizer", segments=[seg],
                          output=_out(size, fps), seed=seed)
+
+
+def explainer_project(scenes: Sequence[dict[str, Any]], *,
+                      title: str = "", per_scene: float = 6.0,
+                      size: tuple[int, int] | None = None,
+                      fps: float | None = None, seed: int = 21
+                      ) -> MotionProject:
+    """A code-driven explainer as a project (plan §1.5d).
+
+    ``scenes`` are explainer design dicts (see
+    :mod:`.explainers`): the scene data becomes the segment's
+    ``design`` verbatim; the segment-shaped keys — ``duration``,
+    ``text``, ``words``, ``timing_source`` — are lifted onto the
+    segment itself, so narration keeps the text segments' timing
+    discipline (measured words land on their measured times;
+    plain text is estimated and labelled).
+    """
+    if not scenes:
+        raise MotionStudioError("no scenes — nothing to explain")
+    segments: list[MotionSegment] = []
+    for i, scene in enumerate(scenes):
+        scene = dict(scene)
+        duration = float(scene.pop("duration", per_scene))
+        text = str(scene.pop("text", ""))
+        words = scene.pop("words", [])
+        timing_source = str(scene.pop("timing_source", ""))
+        segments.append(MotionSegment(
+            uid=f"scene{i + 1}", kind="procedural",
+            duration_s=duration, text=text,
+            words=[dict(w) for w in words],
+            timing_source=timing_source, design=scene))
+    return MotionProject(title=title or "explainer",
+                         segments=segments,
+                         output=_out(size, fps), seed=seed)
+
+
+def diagram_project(nodes: Sequence[dict[str, Any]],
+                    edges: Sequence[dict[str, Any]] = (), *,
+                    title: str = "", duration: float = 8.0,
+                    text: str = "",
+                    words: Sequence[dict[str, Any]] | None = None,
+                    timing_source: str = "",
+                    size: tuple[int, int] | None = None,
+                    fps: float | None = None, seed: int = 21
+                    ) -> MotionProject:
+    """A labelled diagram build as a project: one diagram scene."""
+    scene: dict[str, Any] = {"engine": "diagram", "title": title,
+                             "nodes": [dict(n) for n in nodes],
+                             "edges": [dict(e) for e in edges],
+                             "duration": duration, "text": text,
+                             "timing_source": timing_source}
+    if words:
+        scene["words"] = [dict(w) for w in words]
+    return explainer_project([scene], title=title or "diagram",
+                             size=size, fps=fps, seed=seed)
+
+
+def equation_project(lines: Sequence[Any], *,
+                     title: str = "", duration: float = 8.0,
+                     text: str = "",
+                     words: Sequence[dict[str, Any]] | None = None,
+                     timing_source: str = "",
+                     size: tuple[int, int] | None = None,
+                     fps: float | None = None, seed: int = 21
+                     ) -> MotionProject:
+    """An equation build as a project: lines accrue step by step."""
+    scene: dict[str, Any] = {"engine": "equation", "title": title,
+                             "lines": list(lines),
+                             "duration": duration, "text": text,
+                             "timing_source": timing_source}
+    if words:
+        scene["words"] = [dict(w) for w in words]
+    return explainer_project([scene], title=title or "equation",
+                             size=size, fps=fps, seed=seed)
+
+
+def chart_project(series: Sequence[dict[str, Any]], *,
+                  chart: str = "bar", title: str = "",
+                  ylabel: str = "", duration: float = 8.0,
+                  text: str = "",
+                  words: Sequence[dict[str, Any]] | None = None,
+                  timing_source: str = "",
+                  size: tuple[int, int] | None = None,
+                  fps: float | None = None, seed: int = 21
+                  ) -> MotionProject:
+    """A chart build as a project: bars grow / the line draws on."""
+    scene: dict[str, Any] = {"engine": "chart", "chart": chart,
+                             "title": title, "ylabel": ylabel,
+                             "series": [dict(p) for p in series],
+                             "duration": duration, "text": text,
+                             "timing_source": timing_source}
+    if words:
+        scene["words"] = [dict(w) for w in words]
+    return explainer_project([scene], title=title or "chart",
+                             size=size, fps=fps, seed=seed)
