@@ -138,7 +138,9 @@ def chain_scenes(scenes: Sequence[dict[str, Any] | str],
 
     Each scene: ``{"prompt", "mode": "t2v"|"i2v"|"image"|"text",
     "image"|"text", "duration_s", "seed"}`` — or a bare prompt string
-    (t2v, 5s). ``backend``: auto | ltx | wan | motion (force motion studio).
+    (t2v, 5s), or a canonical ``edit_engine.Scene`` (projected via
+    ``Scene.to_chain_scene``). ``backend``: auto | ltx | wan | motion
+    (force motion studio).
     ``model``/``lora``: chain-level registry selection (see
     :func:`pipeline.generate`); a scene may override them (and
     ``backend``) per scene — the chain choice stays the default, and
@@ -155,6 +157,12 @@ def chain_scenes(scenes: Sequence[dict[str, Any] | str],
     """
     if not scenes:
         raise VideogenError("no scenes — nothing to chain")
+    # Wave 1 (§1.5a): canonical edit_engine Scenes are accepted
+    # directly — they project to this module's dict vocabulary at the
+    # boundary (Scene.to_chain_scene), everything below is unchanged.
+    from ..edit_engine.scene import Scene as _CanonScene
+    scenes = [s.to_chain_scene() if isinstance(s, _CanonScene) else s
+              for s in scenes]
     import hashlib
 
     def _scene_seed(i: int, prompt: str, override: Any) -> int:

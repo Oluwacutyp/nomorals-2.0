@@ -30,26 +30,25 @@ def _scene_to_clip(scene: Any) -> Clip:
 
     Scene shape: {"image", "duration", "effect", "zoom_direction"} —
     the pipeline's scene vocabulary. Stills are materialised at render.
+
+    Wave 1 (§1.5a): this vocabulary is a projection of the canonical
+    :class:`~nomorals.media.edit_engine.scene.Scene` — the conversion
+    lives there now, and this stays as the spec layer's entry point.
+    A canonical Scene is accepted directly; a legacy dict/object goes
+    through :meth:`Scene.from_spec_scene`.
     """
-    if isinstance(scene, dict):
-        image = scene.get("image", "")
-        duration = scene.get("duration")
-        effect = (scene.get("effect") or "").strip().lower()
-        zoom_dir = (scene.get("zoom_direction") or "in").strip().lower()
-    else:
-        image = str(getattr(scene, "image", ""))
-        duration = getattr(scene, "duration", None)
-        effect = str(getattr(scene, "effect", "") or "").strip().lower()
-        zoom_dir = str(getattr(scene, "zoom_direction", "in") or "").strip().lower()
-    effects: tuple[Effect, ...] = ()
-    if effect:
-        params: dict[str, Any] = {}
-        if effect in ("kenburns", "ken_burns"):
-            params["direction"] = "out" if zoom_dir == "out" else "in"
-        effects = (Effect(name=effect, params=params),)
-    return Clip(path=image,
-                end=float(duration) if duration else None,
-                effects=effects)
+    from .scene import Scene
+    if isinstance(scene, Scene):
+        return scene.to_clip()
+    clip = Scene.from_spec_scene(scene).to_clip()
+    # Legacy parity: a spec scene with no duration left the clip's end
+    # open (the renderer probes the still's span); the canonical Scene
+    # always carries a span, so re-open the end for that shape only.
+    raw_duration = (scene.get("duration") if isinstance(scene, dict)
+                    else getattr(scene, "duration", None))
+    if not raw_duration:
+        clip.end = None
+    return clip
 
 
 def _coerce_text_layers(layers: Any) -> list[TextLayer]:

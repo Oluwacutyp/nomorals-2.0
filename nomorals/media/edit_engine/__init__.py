@@ -44,6 +44,7 @@ from .document import (
     transcript_document,
     voiceover_document,
 )
+from .scene import SCENE_KINDS, Scene, scenes_to_edit_spec
 from .render_queue import (
     PROXY_HEIGHT as RENDER_PROXY_HEIGHT,
     RenderFailure,

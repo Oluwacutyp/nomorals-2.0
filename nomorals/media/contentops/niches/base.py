@@ -73,7 +73,13 @@ class VoiceSpec:
 
 @dataclass
 class SceneVisual:
-    """One scene of the visual plan — one image + one motion directive."""
+    """One scene of the visual plan — one image + one motion directive.
+
+    Wave 1 (§1.5a): this is a *constructor* of the canonical
+    :class:`nomorals.media.edit_engine.Scene` — see :meth:`scene`.
+    The plan vocabulary stays; the Scene is the shared type it
+    converts to at the engine boundary.
+    """
 
     index: int
     imggen_prompt: str
@@ -81,6 +87,11 @@ class SceneVisual:
     duration_s: float = 4.0
     transition: str = "cut"
     caption_hook: str = ""         # word/phrase to emphasise in captions
+
+    def scene(self) -> Any:
+        """This plan entry as the canonical edit_engine Scene."""
+        from ...edit_engine.scene import Scene
+        return Scene.from_scene_visual(self)
 
 
 @dataclass

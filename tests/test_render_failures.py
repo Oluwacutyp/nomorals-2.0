@@ -4,11 +4,17 @@
 but silently about the underlying error: a broker whose ``select``
 raises looks like a registry with no ``select``; a registry whose
 ``cards`` raises looks empty; a card with a malformed quality looks
-unrated; a broken prompt engine looks like plain prompts; a broken
-imggen import looks like passthrough-by-design; a failed keyframe
-restyle looks like a full img2img shot. Each now leaves a trace in
-``nomorals.media.render_failures`` while returning exactly what it
-returned before.
+unrated; a broken prompt engine looks like plain prompts. Each now
+leaves a trace in ``nomorals.media.render_failures`` while returning
+exactly what it returned before.
+
+Genedit's v2v originally sat in this family too (a broken imggen
+import looked like passthrough-by-design; a failed keyframe restyle
+looked like a full img2img shot). Echelon Wave 1 item B0 superseded
+that: v2v now resolves its styler through the real imggen path and
+its RETURN SHAPE is honest — ``backend="passthrough"`` plus a
+user-visible ``note`` whenever frames went unstyled. The two v2v pins
+below assert the ledger trace AND the honest return.
 """
 
 import shutil
@@ -215,55 +221,65 @@ def _fake_subprocess(monkeypatch, tmp_path):
     return calls
 
 
-def test_video_to_shot_imgpipe_import_failure_records_and_passthrough(tmp_path, monkeypatch):
-    # A stub parent makes `from .imggen import pipeline` raise on import
-    # — the import failure, not the designed "no img2img attr" path
-    # (that is the hasattr check).
+def test_video_to_shot_styler_unavailable_records_and_labels_passthrough(tmp_path, monkeypatch):
+    # B0: the styler resolves through the real imggen path
+    # (imggen.studio.Studio → pipeline). A Studio whose pipeline cannot
+    # be built is the honest "no neural pipeline on this host" state:
+    # the failure is recorded, the frames pass through unchanged, and
+    # the shot SAYS SO — backend "passthrough" + the reason in note.
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"fake-video")
     monkeypatch.setattr(genedit, "_ffmpeg", lambda: "/usr/bin/ffmpeg")
     _fake_subprocess(monkeypatch, tmp_path)
-    saved_parent = sys.modules.get("nomorals.media.imggen")
-    saved_pipe = sys.modules.get("nomorals.media.imggen.pipeline")
-    sys.modules["nomorals.media.imggen"] = types.ModuleType("nomorals.media.imggen")
-    sys.modules.pop("nomorals.media.imggen.pipeline", None)
+
+    stub = types.ModuleType("nomorals.media.imggen.studio")
+
+    class _Studio:
+        def pipeline(self):
+            raise RuntimeError("no loadable checkpoint")
+
+    stub.Studio = _Studio
+    saved = _install_stub("nomorals.media.imggen.studio", stub)
     try:
         shot = genedit.video_to_shot(str(video), "a cat", workdir=str(tmp_path / "wd"))
     finally:
-        _restore_stub("nomorals.media.imggen", saved_parent)
-        _restore_stub("nomorals.media.imggen.pipeline", saved_pipe)
+        _restore_stub("nomorals.media.imggen.studio", saved)
     assert shot.backend == "passthrough"
-    assert _sites() == ["genedit.video_to_shot:imgpipe_import"]
+    assert "no loadable checkpoint" in shot.note
+    assert "NOT restyled" in shot.note
+    assert _sites() == ["genedit.video_to_shot:styler_unavailable"]
+    styled = tmp_path / "wd" / "styled"
+    assert (styled / "s_0000.png").read_bytes() == b"fake-frame"
 
 
-def test_video_to_shot_keyframe_failure_records_but_still_reports_img2img(tmp_path, monkeypatch):
+def test_video_to_shot_keyframe_failure_records_and_discloses_in_note(tmp_path, monkeypatch):
+    # B0: a failed keyframe is recorded AND disclosed — the shot keeps
+    # backend "img2img" only because the other keyframe really styled,
+    # and its note names the unstyled count. (The pre-B0 pin asserted
+    # the caller saw a full img2img shot with no sign of the failure;
+    # that invisibility is the defect B0 removed.)
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"fake-video")
     monkeypatch.setattr(genedit, "_ffmpeg", lambda: "/usr/bin/ffmpeg")
     _fake_subprocess(monkeypatch, tmp_path)
-    import nomorals.media.imggen  # noqa: F401 — real parent, stub pipeline below
 
     calls = {"n": 0}
-    stub = types.ModuleType("nomorals.media.imggen.pipeline")
 
-    def _img2img(src, prompt, strength=None, out_path=None):
+    def _styler(src, prompt, strength, dst):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("img2img down")
-        shutil.copy(src, out_path)
+        Path(dst).write_bytes(b"styled-frame")
 
-    stub.img2img = _img2img
-    saved_pipe = _install_stub("nomorals.media.imggen.pipeline", stub)
-    try:
-        shot = genedit.video_to_shot(str(video), "a cat", workdir=str(tmp_path / "wd"))
-    finally:
-        _restore_stub("nomorals.media.imggen.pipeline", saved_pipe)
-    # The caller still sees a full img2img shot — that invisibility is
-    # exactly why the per-frame failure is recorded.
+    monkeypatch.setattr(genedit, "_v2v_styler", lambda: (_styler, ""))
+    shot = genedit.video_to_shot(str(video), "a cat", workdir=str(tmp_path / "wd"))
     assert shot.backend == "img2img"
+    assert "1 of 2 keyframes failed" in shot.note
+    assert "img2img down" in shot.note
     assert _sites() == ["genedit.video_to_shot:keyframe_img2img"]
     styled = tmp_path / "wd" / "styled"
-    assert (styled / "s_0000.png").exists()
+    assert (styled / "s_0000.png").read_bytes() == b"fake-frame"
+    assert (styled / "s_0004.png").read_bytes() == b"styled-frame"
 
 
 # ── scan pin ───────────────────────────────────────────────────────────────

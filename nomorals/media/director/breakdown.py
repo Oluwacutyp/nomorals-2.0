@@ -65,6 +65,19 @@ class Shot:
             return ", ".join(self.characters)
         return self.description
 
+    def scene(self) -> Any:
+        """This shot as the canonical edit_engine Scene (Wave 1 §1.5a).
+
+        The director *produces* Scenes from Shots: the shot's scene
+        content (description, design, duration, any generated clip)
+        maps onto the Scene; production state (status, qa,
+        regen_count) stays here, recorded on the Scene only as
+        provenance. There is no reverse constructor — building a Shot
+        is the director's job.
+        """
+        from ..edit_engine.scene import Scene
+        return Scene.from_shot(self)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id, "scene_number": self.scene_number,

@@ -265,8 +265,13 @@ def register(registry: Any) -> None:
         else:
             return {"ok": False,
                     "reason": f"unknown mode {mode!r} — t2v|i2v|v2v|extend"}
-        return {"ok": True, "path": shot.path, "mode": shot.mode,
-                "backend": shot.backend, "duration_s": shot.duration_s}
+        result = {"ok": True, "path": shot.path, "mode": shot.mode,
+                  "backend": shot.backend, "duration_s": shot.duration_s}
+        if shot.note:
+            # honesty note (e.g. a v2v that passed through unstyled) —
+            # the caller must see the downgrade, not just the backend.
+            result["note"] = shot.note
+        return result
 
     @registry.register(
         "gen_shot_to_timeline",

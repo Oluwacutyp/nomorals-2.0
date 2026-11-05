@@ -1685,6 +1685,12 @@ class EditStudio:
     ``self`` (chainable). ``render()`` replays the stack from scratch —
     undo/redo, project save/load, and templates all build on that.
 
+    D1 layering: this class is a *session façade* — the canonical edit
+    document is :class:`nomorals.media.edit_engine.Document`, and
+    :meth:`to_document` / :attr:`document` compile the op stack into
+    it. The op stack is how a session is edited; the Document is what
+    the edit *is*.
+
     Image ops run synchronously through :mod:`.images` (extended with the
     studio ops registered above). Video ops compile to a single ffmpeg
     filter graph and render via :mod:`.jobs` (background) or blocking.
@@ -1698,6 +1704,8 @@ class EditStudio:
         self.ops: list[dict[str, Any]] = []
         self._undone: list[dict[str, Any]] = []
         self.created = time.time()
+        self._document: Any = None       # D1 façade mirror cache
+        self._document_ops: Any = None   # op snapshot the mirror reflects
 
     # -- stack mechanics -------------------------------------------------
     def _push(self, op_name: str, params: dict[str, Any],
@@ -1939,6 +1947,169 @@ class EditStudio:
             raise MediaEditError(
                 f"could not load studio project {path}: {exc}") from exc
         return cls.from_dict(data)
+
+    # -- canonical document (D1 façade) ------------------------------------
+    # D1 (Echelon Wave 1): edit_engine.Document is THE canonical edit
+    # document. EditStudio is a session façade over it — the op stack
+    # is the session's editing surface, and every op compiles to a
+    # Document edit. The two models are layers, not peers: there is no
+    # second document truth. The compilation mapping is total — every
+    # op lands somewhere named, nothing is silently dropped:
+    #
+    # * segments (the session source, ``v_clip``, ``v_image``) become
+    #   clips on the video/image tracks with their timing fields;
+    # * every other op becomes an Effect descriptor (name + params
+    #   verbatim) on the first clip of the primary track, in session
+    #   order — replay order IS effect order;
+    # * the session name becomes the document title; the document is
+    #   sealed, so its version/hash track the session's content.
+    def to_document(self) -> Any:
+        """Compile this session into the canonical ``Document``."""
+        from ..media.edit_engine.document import DocTrack, Document
+        from ..media.edit_engine.timeline import Clip, Effect
+
+        kind = self._resolve_kind()
+        if kind == "image":
+            if not self.source:
+                raise MediaEditError("image studio needs a source file")
+            if any(o["op"].startswith("v_") for o in self.ops):
+                raise MediaEditError("video ops in an image studio project")
+            from ..media.edit_engine.document import image_document
+            doc = image_document(self.source, title=self.name)
+            doc.tracks[0].clips[0].effects = tuple(
+                Effect(name=o["op"], params=dict(o["params"]))
+                for o in self.ops)
+            return doc.seal()
+
+        clips: list[Clip] = []
+        stills: list[Clip] = []
+        session_fx: list[Effect] = []
+        if self.source:
+            clips.append(Clip(path=self.source))
+        for o in self.ops:
+            n, p = o["op"], dict(o["params"])
+            if n == "v_clip":
+                clips.append(Clip(
+                    path=str(p["path"]),
+                    start=float(p.get("start") or 0.0),
+                    end=(float(p["end"]) if p.get("end") is not None
+                         else None),
+                    speed=float(p.get("speed", 1.0))))
+            elif n == "v_image":
+                stills.append(Clip(path=str(p["path"]),
+                                   duration=float(p.get("duration", 3.0))))
+            elif n in ("v_transition", "v_title", "v_lower_third",
+                       "v_duck", "v_speed", "v_trim", "v_chapter",
+                       "v_export"):
+                session_fx.append(Effect(name=n, params=p))
+            else:
+                raise MediaEditError(
+                    f"op {n!r} is not a video op (image studio?)")
+        if not clips and not stills:
+            raise MediaEditError("video studio needs a source or clips")
+        tracks = []
+        if clips:
+            if session_fx:
+                clips[0].effects = tuple(session_fx)
+            tracks.append(DocTrack(kind="video", clips=clips))
+        elif session_fx:
+            raise MediaEditError(
+                "session-level video ops need a video clip to land on")
+        if stills:
+            tracks.append(DocTrack(kind="image", clips=stills))
+        return Document(tracks=tracks, title=self.name).seal()
+
+    @property
+    def document(self) -> Any:
+        """The session's canonical Document, kept in agreement.
+
+        Rebuilt whenever the op stack changes (push/undo/redo/clear/
+        load), so an edit made through the façade is a Document edit —
+        the mirror can never drift from the session it façades.
+        """
+        snapshot = copy.deepcopy(self.ops)
+        cached = getattr(self, "_document", None)
+        if cached is None or getattr(self, "_document_ops", None) != snapshot:
+            cached = self.to_document()
+            self._document = cached
+            self._document_ops = snapshot
+        return cached
+
+    @classmethod
+    def from_document(cls, doc: Any, *, name: str = "") -> "EditStudio":
+        """Open a session over an existing canonical ``Document``.
+
+        The inverse of :meth:`to_document` for session-representable
+        documents. Structure a session cannot express (timed clip
+        placement, clip gain, multi-clip image documents, effects with
+        no EditStudio op) raises — never a silent drop.
+        """
+        from ..media.edit_engine.document import Document
+
+        if not isinstance(doc, Document):
+            raise MediaEditError(
+                f"from_document takes a Document, got {type(doc).__name__}")
+        segment_ops = ("v_clip", "v_image")
+        video = doc.track("video")
+        image = doc.track("image")
+
+        def _fx_to_ops(st: "EditStudio", clip: Any) -> None:
+            for e in clip.effects:
+                if e.name in segment_ops:
+                    raise MediaEditError(
+                        f"effect {e.name!r} is a segment op — it must "
+                        f"be a clip, not an effect, in a session document")
+                st._push(e.name, dict(e.params), e.name)
+
+        def _check_clip(clip: Any) -> None:
+            if clip.at:
+                raise MediaEditError(
+                    "clip timeline placement (at != 0) has no "
+                    "EditStudio session equivalent")
+            if clip.gain != 1.0:
+                raise MediaEditError(
+                    "clip gain has no EditStudio session equivalent")
+
+        if video is None and image is not None:
+            if len(image.clips) != 1:
+                raise MediaEditError(
+                    "an image session holds exactly one source clip; "
+                    f"this document has {len(image.clips)}")
+            clip = image.clips[0]
+            _check_clip(clip)
+            if clip.start or clip.end is not None:
+                raise MediaEditError(
+                    "an image session's source has no source window")
+            st = cls(clip.path, kind="image",
+                     name=name or doc.title or "untitled")
+            _fx_to_ops(st, clip)
+            return st
+        if video is None:
+            raise MediaEditError(
+                "document has no video or image track — not an "
+                "EditStudio session")
+        if not video.clips:
+            raise MediaEditError("video track has no clips")
+        for clip in video.clips:
+            _check_clip(clip)
+        st = cls(video.clips[0].path, kind="video",
+                 name=name or doc.title or "untitled")
+        _fx_to_ops(st, video.clips[0])
+        for clip in video.clips[1:]:
+            st.add_clip(clip.path,
+                        start=clip.start if clip.start else None,
+                        end=clip.end, speed=clip.speed)
+            _fx_to_ops(st, clip)
+        if image is not None:
+            for clip in image.clips:
+                _check_clip(clip)
+                if clip.duration is None:
+                    raise MediaEditError(
+                        "a still clip without a duration has no "
+                        "EditStudio session equivalent")
+                st.add_image(clip.path, duration=clip.duration)
+                _fx_to_ops(st, clip)
+        return st
 
     # -- render ------------------------------------------------------------
     def _resolve_kind(self) -> str:
