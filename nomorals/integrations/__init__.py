@@ -87,6 +87,15 @@ __all__ = [
     "sentinel_bridge",
     "SpeechToText",
     "TranscriptionResult",
+    # native home backends (Wave 6) — light, but kept behind the same
+    # lazy wall so the package import never grows new eager surface
+    "home",
+    "HomeBackend",
+    "HomeDevice",
+    "ControlGate",
+    "ControlNotEnabledError",
+    "WemoBackend",
+    "RazberryBackend",
 ]
 
 # module-name → real module, attr → attribute inside it. Resolved on first
@@ -95,6 +104,13 @@ _LAZY = {
     "sentinel_bridge": (".sentinel_bridge", None),  # the module itself
     "SpeechToText": (".stt", "SpeechToText"),
     "TranscriptionResult": (".stt", "TranscriptionResult"),
+    "home": (".home", None),  # the module itself
+    "HomeBackend": (".home", "HomeBackend"),
+    "HomeDevice": (".home", "HomeDevice"),
+    "ControlGate": (".home", "ControlGate"),
+    "ControlNotEnabledError": (".home", "ControlNotEnabledError"),
+    "WemoBackend": (".home", "WemoBackend"),
+    "RazberryBackend": (".home", "RazberryBackend"),
 }
 
 _LAZY_CACHE: dict[str, object] = {}

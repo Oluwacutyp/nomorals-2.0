@@ -2,7 +2,10 @@
 
 Supports:
 1. Home Assistant API (most flexible, supports 2000+ devices)
-2. Direct device APIs (Philips Hue, TP-Link Kasa, etc.)
+2. Native device backends (Echelon Wave 6, ``integrations/home/``):
+   WeMo over UPnP/SOAP and Z-Wave via a RaZberry/Z-Way controller —
+   discovery and reads open, control gated per device by the owner's
+   explicit enable (off by default)
 3. Voice bridge (via Alexa/Google Home)
 
 Usage:
@@ -38,6 +41,7 @@ from typing import Any, Callable, Optional
 
 from ..accounts.manager import AccountManager
 from ..accounts.sessions import SessionManager
+from ..core.errors import DependencyError
 from ..core.logging_setup import get_logger
 
 __all__ = ["SmartHomeIntegration", "Device", "DeviceState", "Scene",
@@ -129,17 +133,207 @@ class Scene:
 
 
 class SmartHomeIntegration:
-    """Multi-backend smart home integration."""
-    
+    """Multi-backend smart home integration.
+
+    Backends: Home Assistant (when its credential is configured) and
+    the native backends in :mod:`nomorals.integrations.home` — WeMo
+    (UPnP/SOAP) and Z-Wave (RaZberry/Z-Way) — when configured.  When HA
+    is absent the native backends serve discovery/reads/control; when
+    *nothing* is configured, discovery raises a named
+    ``dependency.failed`` error instead of returning an empty list
+    that reads as "no devices exist".
+
+    Control posture (owner rule): native-backend control is gated per
+    device — off until the owner enables it via
+    :meth:`enable_device_control`.  HA control keeps its existing
+    (credential-gated) behaviour.
+    """
+
     def __init__(
         self,
         account_manager: AccountManager,
         session_manager: SessionManager,
+        *,
+        wemo_backend: Any = None,
+        zwave_backend: Any = None,
+        control_gate: Any = None,
     ) -> None:
         self.account_manager = account_manager
         self.session_manager = session_manager
         self._device_cache: dict[str, Device] = {}
+        # Native backends (Wave 6): injected ones win; otherwise they
+        # are built lazily from credentials/env on first use.
+        self._wemo_backend = wemo_backend
+        self._zwave_backend = zwave_backend
+        self._control_gate = control_gate
+        self._native_backends_built = False
         _log.info("Smart home integration initialized")
+
+    # ── Native backends (WeMo / Z-Wave) ───────────────────────────────
+
+    def _gate(self) -> Any:
+        """The shared per-device control gate (built lazily)."""
+        if self._control_gate is None:
+            from pathlib import Path
+
+            from .home.gate import ControlGate
+
+            gate_path = os.environ.get("NM_HOME_CONTROL_GATE") or str(
+                Path.home() / ".nomorals" / "home_control_gate.json")
+            self._control_gate = ControlGate(gate_path)
+        return self._control_gate
+
+    def _native_backends(self) -> list[Any]:
+        """Configured native backends (WeMo, Z-Wave), built once.
+
+        Configuration, in order: an injected backend wins; then an
+        account credential (``wemo`` / ``zwave``, the HA idiom); then
+        env (``NM_WEMO_HOSTS``, ``NM_ZWAVE_URL`` /
+        ``NM_ZWAVE_USER`` / ``NM_ZWAVE_PASSWORD``).  Unconfigured
+        backends are simply absent from the list.
+        """
+        if not self._native_backends_built:
+            self._native_backends_built = True
+            gate = self._gate()
+            if self._wemo_backend is None:
+                self._wemo_backend = self._build_wemo(gate)
+            if self._zwave_backend is None:
+                self._zwave_backend = self._build_zwave(gate)
+        return [b for b in (self._wemo_backend, self._zwave_backend)
+                if b is not None]
+
+    def _credential(self, service: str) -> Any:
+        try:
+            cred = self.account_manager.get_credential(service, "default")
+            return cred if cred.is_active else None
+        except Exception as exc:  # noqa: BLE001 — absent credential = absent backend
+            _log.debug("smart-home credential probe (%s) failed: %s",
+                       service, exc)
+            return None
+
+    def _build_wemo(self, gate: Any) -> Any:
+        from .home.wemo import WemoBackend
+
+        hosts: tuple[str, ...] = ()
+        cred = self._credential("wemo")
+        if cred is not None:
+            raw = cred.metadata.get("hosts", "")
+            hosts = tuple(h.strip() for h in raw.split(",") if h.strip())
+            return WemoBackend(gate=gate, known_hosts=hosts)
+        env_hosts = os.environ.get("NM_WEMO_HOSTS", "")
+        hosts = tuple(h.strip() for h in env_hosts.split(",") if h.strip())
+        if hosts or os.environ.get("NM_WEMO_ENABLED"):
+            return WemoBackend(gate=gate, known_hosts=hosts)
+        return None
+
+    def _build_zwave(self, gate: Any) -> Any:
+        from .home.zwave import RazberryBackend
+
+        cred = self._credential("zwave")
+        if cred is not None:
+            return RazberryBackend(
+                gate=gate,
+                base_url=cred.metadata.get("url", ""),
+                username=cred.metadata.get("username", ""),
+                password=cred.password or "")
+        url = os.environ.get("NM_ZWAVE_URL", "")
+        if url:
+            return RazberryBackend(
+                gate=gate,
+                base_url=url,
+                username=os.environ.get("NM_ZWAVE_USER", ""),
+                password=os.environ.get("NM_ZWAVE_PASSWORD", ""))
+        return None
+
+    def _native_for(self, device_id_or_name: str) -> tuple[Any, Any]:
+        """Resolve a device id/name to (backend, HomeDevice) among the
+        native backends, discovering on a cold registry.  Returns
+        (None, None) when no native backend knows it."""
+        for backend in self._native_backends():
+            for device in backend.known_devices():
+                if device_id_or_name in (device.device_id, device.name):
+                    return backend, device
+        for backend in self._native_backends():
+            if backend.known_devices():
+                continue
+            try:
+                backend.discover()
+            except Exception as exc:  # noqa: BLE001 — one dead backend must not hide another
+                _log.debug("native discovery (%s) failed: %s",
+                           backend.name, exc)
+                continue
+            for device in backend.known_devices():
+                if device_id_or_name in (device.device_id, device.name):
+                    return backend, device
+        return None, None
+
+    def _native_cached(self, device_id_or_name: str) -> tuple[Any, Any]:
+        """(backend, HomeDevice) from the native registries' caches
+        only — no discovery is triggered (status/control routing must
+        not start network scans implicitly)."""
+        for backend in self._native_backends():
+            for device in backend.known_devices():
+                if device_id_or_name in (device.device_id, device.name):
+                    return backend, device
+        return None, None
+
+    @staticmethod
+    def _to_device(home_device: Any) -> Device:
+        return Device(
+            device_id=home_device.device_id,
+            name=home_device.name,
+            device_type=home_device.device_type,
+            room=home_device.room,
+            state=dict(home_device.state),
+            capabilities=list(home_device.capabilities),
+            manufacturer=home_device.address.get("manufacturer", ""),
+            model=home_device.address.get("model", ""),
+            available=home_device.available,
+        )
+
+    # ── Owner control-gate surface ────────────────────────────────────
+
+    def enable_device_control(
+        self,
+        backend: str,
+        device_id: str,
+        *,
+        by: str = "owner",
+        note: str = "",
+    ) -> dict[str, Any]:
+        """Owner action: enable control for ONE native device."""
+        return self._gate().set_enabled(
+            backend, device_id, True, by=by, note=note)
+
+    def disable_device_control(
+        self,
+        backend: str,
+        device_id: str,
+        *,
+        by: str = "owner",
+        note: str = "",
+    ) -> dict[str, Any]:
+        """Owner action: disable control for ONE native device."""
+        return self._gate().set_enabled(
+            backend, device_id, False, by=by, note=note)
+
+    def home_status(self) -> dict[str, Any]:
+        """Smart-home status as data: every backend's capabilities,
+        the native backends' device + gate state, and the recorded
+        gate decisions."""
+        backends: list[dict[str, Any]] = []
+        ha = self._detect_backend() == "homeassistant"
+        backends.append({
+            "backend": "homeassistant",
+            "configured": ha,
+            "transport": "Home Assistant REST + WebSocket",
+        })
+        for backend in self._native_backends():
+            backends.append(backend.status())
+        return {
+            "backends": backends,
+            "control_gate": self._gate().status(),
+        }
     
     # ── Device Discovery ─────────────────────────────────────────────────────
     
@@ -159,12 +353,47 @@ class SmartHomeIntegration:
             List of Device objects
         """
         backend = self._detect_backend()
-        
+
         if backend == "homeassistant":
             return await self._list_devices_ha(room, device_type)
-        else:
-            return []
-    
+
+        natives = self._native_backends()
+        if not natives:
+            # The retired anti-pattern returned [] here, which read
+            # as "no devices exist".  Name the real state instead.
+            raise DependencyError(
+                "no smart home backend is configured (Home Assistant "
+                "credential, zwave credential / NM_ZWAVE_URL, or "
+                "NM_WEMO_HOSTS / NM_WEMO_ENABLED)",
+                dependency="smarthome",
+                details={"reason": "no_backend_configured"})
+
+        devices: list[Device] = []
+        failures: list[str] = []
+        succeeded = False
+        for native in natives:
+            try:
+                found = await asyncio.to_thread(native.discover)
+            except Exception as exc:  # noqa: BLE001 — collected, then named below
+                failures.append(f"{native.name}: {exc}")
+                continue
+            succeeded = True
+            for home_device in found:
+                if room and home_device.room.lower() != room.lower():
+                    continue
+                if device_type and \
+                        home_device.device_type != device_type:
+                    continue
+                devices.append(self._to_device(home_device))
+        if not succeeded:
+            raise DependencyError(
+                "every native smart home backend failed discovery: "
+                + "; ".join(failures),
+                dependency="smarthome",
+                details={"reason": "discovery_failed",
+                         "failures": failures})
+        return devices
+
     async def get_device(self, device_id: str) -> Optional[Device]:
         """Get device details.
         
@@ -194,12 +423,39 @@ class SmartHomeIntegration:
         Returns:
             DeviceState object
         """
+        native_backend, native_device = self._native_cached(
+            device_id_or_name)
+        if native_backend is not None:
+            state = await asyncio.to_thread(
+                native_backend.read_state, native_device.device_id)
+            brightness = 0
+            if "brightness" in state:
+                brightness = round(state["brightness"] / 255 * 100)
+            elif "level" in state:
+                brightness = int(state["level"])
+            return DeviceState(
+                device_id=native_device.device_id,
+                is_on=bool(state.get("on", False)),
+                brightness=brightness,
+                attributes=dict(state),
+            )
+
         backend = self._detect_backend()
-        
+
         if backend == "homeassistant":
             return await self._get_status_ha(device_id_or_name)
-        else:
-            return DeviceState(device_id=device_id_or_name)
+
+        if self._native_backends():
+            from .home.errors import HomeDeviceNotFoundError
+
+            raise HomeDeviceNotFoundError(
+                backend="smarthome", device_id=device_id_or_name)
+        raise DependencyError(
+            "no smart home backend is configured (Home Assistant "
+            "credential, zwave credential / NM_ZWAVE_URL, or "
+            "NM_WEMO_HOSTS / NM_WEMO_ENABLED)",
+            dependency="smarthome",
+            details={"reason": "no_backend_configured"})
     
     # ── Light Control ────────────────────────────────────────────────────────
     
@@ -230,8 +486,20 @@ class SmartHomeIntegration:
         Returns:
             True if successful
         """
+        native_backend, native_device = self._native_cached(
+            device_id_or_name)
+        if native_backend is None and self._detect_backend() != \
+                "homeassistant":
+            native_backend, native_device = await asyncio.to_thread(
+                self._native_for, device_id_or_name)
+        if native_backend is not None:
+            return await self._set_light_native(
+                native_backend, native_device, on=on,
+                brightness=brightness, color=color,
+                color_temp=color_temp, effect=effect, hs_color=hs_color)
+
         backend = self._detect_backend()
-        
+
         if backend == "homeassistant":
             return await self._set_light_ha(
                 device_id_or_name, on, brightness, color, color_temp,
@@ -240,6 +508,57 @@ class SmartHomeIntegration:
         else:
             _log.warning("No smart home backend available")
             return False
+
+    async def _set_light_native(
+        self,
+        backend: Any,
+        device: Any,
+        *,
+        on: bool | None,
+        brightness: int | None,
+        color: str | None,
+        color_temp: int | None,
+        effect: str | None,
+        hs_color: tuple[float, float] | None,
+    ) -> bool:
+        """Control a native (WeMo/Z-Wave) light through the gated
+        backend seam.  The gate refusal propagates by name; features
+        the native device cannot do are refused by name too — never
+        silently dropped."""
+        unsupported = [name for name, value in (
+            ("color", color), ("color_temp", color_temp),
+            ("effect", effect), ("hs_color", hs_color),
+        ) if value is not None]
+        if unsupported:
+            raise DependencyError(
+                f"native backend {backend.name!r} cannot set "
+                f"{', '.join(unsupported)} on {device.name!r} "
+                f"(device capabilities: "
+                f"{sorted(device.capabilities)})",
+                dependency=backend.name,
+                details={"reason": "capability_unsupported",
+                         "features": unsupported,
+                         "device_id": device.device_id})
+        result: dict[str, Any] | None = None
+        if brightness is not None:
+            pct = max(0, min(100, int(brightness)))
+            if backend.name == "wemo":
+                result = await asyncio.to_thread(
+                    backend.control, device.device_id, "set_brightness",
+                    value=round(pct * 255 / 100))
+            else:
+                result = await asyncio.to_thread(
+                    backend.control, device.device_id, "set_level",
+                    value=pct)
+        if on is not None:
+            result = await asyncio.to_thread(
+                backend.control, device.device_id,
+                "turn_on" if on else "turn_off")
+        if result is None:
+            return True
+        if on is not None:
+            return bool(result["state"].get("on")) == on
+        return True
     
     async def turn_on(self, device_id_or_name: str | list[str]) -> bool:
         """Turn on a device (or a list of devices — one bulk call)."""
@@ -254,7 +573,19 @@ class SmartHomeIntegration:
         return await self.set_light(device_id_or_name, on=False)
 
     async def toggle(self, device_id_or_name: str) -> bool:
-        """Toggle a device (homeassistant.toggle works on any domain)."""
+        """Toggle a device (homeassistant.toggle works on any domain;
+        native devices toggle through the gated backend seam)."""
+        native_backend, native_device = self._native_cached(
+            device_id_or_name)
+        if native_backend is None and self._detect_backend() != \
+                "homeassistant":
+            native_backend, native_device = await asyncio.to_thread(
+                self._native_for, device_id_or_name)
+        if native_backend is not None:
+            result = await asyncio.to_thread(
+                native_backend.control, native_device.device_id,
+                "toggle")
+            return bool(result["state"].get("on"))
         backend = self._detect_backend()
         if backend != "homeassistant":
             _log.warning("No smart home backend available")

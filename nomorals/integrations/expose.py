@@ -141,15 +141,36 @@ def describe_calendar_backends() -> list[dict[str, Any]]:
 
 
 def describe_smart_home_backends() -> list[dict[str, Any]]:
-    """Smart-home backends: Home Assistant only."""
+    """Smart-home backends: Home Assistant + native WeMo / Z-Wave."""
     return [
         {
             "name": "homeassistant",
             "transport": "Home Assistant REST + WebSocket",
             "available": True,
             "evidence": "nomorals/integrations/smarthome_integration.py",
-            "note": "list_devices returns [] with no backend; all control calls "
-                    "require the Home Assistant backend.",
+            "note": "Primary backend when its credential is configured. "
+                    "With no backend at all, list_devices raises a named "
+                    "dependency.failed error (the silent [] is retired).",
+        },
+        {
+            "name": "wemo",
+            "transport": "UPnP/SOAP + SSDP discovery (native, sync)",
+            "available": True,
+            "evidence": "nomorals/integrations/home/wemo.py",
+            "note": "Native backend (Wave 6). Discovery/read-only by "
+                    "default; control per device requires the owner's "
+                    "enable (ControlGate, off by default). Configured "
+                    "via the 'wemo' credential or NM_WEMO_HOSTS.",
+        },
+        {
+            "name": "zwave",
+            "transport": "RaZberry/Z-Way controller HTTP JSON API (native, sync)",
+            "available": True,
+            "evidence": "nomorals/integrations/home/zwave.py",
+            "note": "Native backend (Wave 6). Discovery/read-only by "
+                    "default; control per device requires the owner's "
+                    "enable (ControlGate, off by default). Configured "
+                    "via the 'zwave' credential or NM_ZWAVE_URL.",
         },
         {
             "name": "mqtt",
@@ -268,8 +289,11 @@ async def deactivate_virtual_card(payments: Any, card_id: str) -> Any:
 
 async def list_smart_home_devices(home: Any, room: str = "",
                                   device_type: str = "") -> list[Any]:
-    """Delegate to ``SmartHomeIntegration.list_devices`` ([] with no backend)."""
-    return await home.list_devices(room, device_type)
+    """Delegate to ``SmartHomeIntegration.list_devices``.
+
+    Raises a named ``dependency.failed`` error when no backend is
+    configured — the silent empty list is retired."""
+    return await home.list_devices(room=room, device_type=device_type)
 
 
 async def smart_home_device_status(home: Any, device_id_or_name: str) -> Any:
@@ -286,6 +310,30 @@ async def set_smart_home_light(home: Any, device_id_or_name: str, *,
     return await home.set_light(device_id_or_name, on=on,
                                 brightness=brightness, color=color,
                                 color_temp=color_temp)
+
+
+def smart_home_status(home: Any) -> dict[str, Any]:
+    """Delegate to ``SmartHomeIntegration.home_status`` — backends,
+    discovered devices and per-device control-gate state, as data."""
+    return home.home_status()
+
+
+def enable_smart_home_device_control(home: Any, backend: str,
+                                     device_id: str, *,
+                                     by: str = "owner",
+                                     note: str = "") -> dict[str, Any]:
+    """Owner action: enable control for ONE native device."""
+    return home.enable_device_control(backend, device_id, by=by,
+                                      note=note)
+
+
+def disable_smart_home_device_control(home: Any, backend: str,
+                                      device_id: str, *,
+                                      by: str = "owner",
+                                      note: str = "") -> dict[str, Any]:
+    """Owner action: disable control for ONE native device."""
+    return home.disable_device_control(backend, device_id, by=by,
+                                       note=note)
 
 
 # ── digital twin: "what changed since I left?" ─────────────────────────────
