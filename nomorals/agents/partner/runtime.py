@@ -46,7 +46,7 @@ from .runtime_search import RuntimeSearchMixin
 from .runtime_wisdom import RuntimeWisdomMixin
 from .runtime_reach import RuntimeReachMixin
 from .failures import failure_count, recent_failures, record_failure
-from .reply_guard import guard_reply_parts
+from .reply_guard import guard_reply_parts, scrub_narration
 from .brain_gate import BrainGate, is_personal_platform
 _log = get_logger(__name__)
 
@@ -175,6 +175,54 @@ def _partner_failures_status(limit: int = 5) -> dict[str, Any]:
     }
 
 
+
+_BUTTON_CLAIM_RE = re.compile(
+    r"tap (?:a )?(?:button|tool) below|buttons? (?:are|on each screen)"
+    r"|tap (?:the )?\S+ to run",
+    re.IGNORECASE)
+
+
+def _claims_buttons(text: str) -> bool:
+    """True when reply copy tells the reader to tap buttons."""
+    return bool(_BUTTON_CLAIM_RE.search(str(text or "")))
+
+
+def _strip_button_claims(text: str) -> str:
+    """Remove button-claim lines (platform takes no buttons and
+    none were authored): the actions stay named in the body copy,
+    the false instruction goes."""
+    kept = [ln for ln in str(text or "").split("\n")
+            if not _BUTTON_CLAIM_RE.search(ln)]
+    return "\n".join(kept).strip("\n")
+
+
+def _numbered_button_fallback(runtime: Any, message: Any, text: str,
+                              rows: list) -> str:
+    """Rewrite a button claim into a numbered action list.
+
+    The authored buttons become ``reply 1 — <label>`` lines; the
+    picks are registered on the runtime so the owner's bare-number
+    reply runs the same command a tap would have (register #27:
+    the fallback must actually execute, not just describe).
+    """
+    flat = [pair for row in rows for pair in row]
+    lines = [ln for ln in str(text or "").split("\n")
+             if not _BUTTON_CLAIM_RE.search(ln)]
+    body = "\n".join(lines).rstrip("\n")
+    picks: list[str] = []
+    rendered = []
+    for i, (label, data) in enumerate(flat, start=1):
+        rendered.append(f"{i} — {label}")
+        picks.append(str(data))
+    register = getattr(runtime, "_register_button_picks", None)
+    if callable(register):
+        try:
+            register(message.chat.key, picks)
+        except Exception as exc:  # noqa: BLE001 - the list still reads honestly
+            _log.debug("button pick registration failed: %s", exc)
+    return (body + "\n\nno buttons on this surface — reply with a "
+            "number:\n" + "\n".join(rendered))
+
 class PartnerRuntime(
     RuntimeLiveMixin,
     RuntimeMetaMixin,
@@ -221,6 +269,12 @@ class PartnerRuntime(
         self.context = context
         self.settings = context.settings
         self.brain = brain or PartnerBrain(context)
+        # Register #28: the brain consults the SAME owner-replied
+        # ledger the runtime feeds from adapter own-echoes.
+        try:
+            self.brain._owner_reply_ledger_obj = self._owner_reply_ledger()
+        except Exception as exc:  # noqa: BLE001 - the brain forms its own ledger then
+            record_failure("runtime.PartnerRuntime.brain_ledger", exc)
         #: Two-tier memory (build-map #36): lazy, opt-in via
         #: memory.two_tier_enabled. None until the first observed exchange.
         self._two_tier: Any = None
@@ -1281,6 +1335,21 @@ class PartnerRuntime(
                     return
             except Exception:  # noqa: BLE001
                 _log.exception("meal photo flow failed")
+        # Owner-replied suppression ledger (register #28, restored
+        # 2026-11-05): every adapter's owner-sent echo lands here
+        # before anything else reads the turn, so the brain's
+        # conversational path can stay quiet on a message/thread
+        # the owner already answered himself. Control/command
+        # handling never consults the ledger — commands answer.
+        if (message.meta or {}).get("own_message"):
+            try:
+                self._owner_reply_ledger().record_owner_reply(
+                    message.chat.key,
+                    reply_to=str(
+                        (message.meta or {}).get("reply_to") or ""))
+            except Exception as exc:  # noqa: BLE001 - bookkeeping never eats a turn
+                record_failure(
+                    "runtime.PartnerRuntime.owner_reply_ledger", exc)
         # Trigger engine hook (nomorals/triggers): message-source triggers
         # evaluate the final inbound text here.  One call, no fork of the
         # dispatch path below; a no-op when no engine is attached, and a
@@ -1653,6 +1722,12 @@ class PartnerRuntime(
                     _arena_activity.record(self.context.db, "command", verb)
                 except Exception as e:
                     record_failure("runtime.PartnerRuntime._process_inner:1318", e)
+                # The kind is parsed HERE, in this scope: the
+                # exception path below names it, and it used to read
+                # a stale `command` left over from an earlier scope
+                # (a NameError waiting inside the error handler).
+                _cmd = parse_control(message.text)
+                _kind = _cmd.kind if _cmd is not None else "command"
                 try:
                     reply = self.handle_control(message.text, message.chat.key,
                                                 message=message)
@@ -1660,15 +1735,15 @@ class PartnerRuntime(
                     _log.exception("control command failed: %s", exc)
                     try:
                         from ...core.error_doctor import diagnose as _diagnose
-                        _diag = _diagnose(exc, context={"command": f"/{command.kind}"})
+                        _diag = _diagnose(exc, context={"command": f"/{_kind}"})
                         _log.info("error diagnosis for /%s: %s",
-                                  command.kind, _diag["summary"])
+                                  _kind, _diag["summary"])
                         _why = _diag["summary"]
                     except Exception as e:
                         record_failure("runtime.PartnerRuntime._process_inner:1331", e)
                         _why = f"{type(exc).__name__}: {exc}"
-                    reply = (f"/{command.kind} blew up on my end: {_why} — "
-                             f"/help {command.kind} shows the right usage")
+                    reply = (f"/{_kind} blew up on my end: {_why} — "
+                             f"/help {_kind} shows the right usage")
                 if reply:
                     try:
                         # Bare /start and /menu carry the bottom menu
@@ -1796,10 +1871,16 @@ class PartnerRuntime(
             # downloads that track — old-school WhatsApp-bot style.
             # Owner only, non-slash, never eats chat.
             try:
-                pick_reply = self._play_pick_hook(message)
+                pick_reply = self._button_pick_hook(message)
             except Exception:  # noqa: BLE001 - the hook must never eat chat
-                _log.exception("play-pick hook failed")
+                _log.exception("button-pick hook failed")
                 pick_reply = None
+            if pick_reply is None:
+                try:
+                    pick_reply = self._play_pick_hook(message)
+                except Exception:  # noqa: BLE001 - the hook must never eat chat
+                    _log.exception("play-pick hook failed")
+                    pick_reply = None
             if pick_reply is not None:
                 self._bump("controls")
                 try:
@@ -1831,12 +1912,7 @@ class PartnerRuntime(
                     self.brain.note_fast_turn(message, mind_reply)
                 except Exception as exc:  # noqa: BLE001 - never eat the chat
                     _log.warning("fast turn hook failed: %s", exc)
-                try:
-                    self._typing_for(message.chat, mind_reply)
-                    self.gateway.send(message.chat.platform, message.chat,
-                                      mind_reply)
-                except Exception as exc:  # noqa: BLE001
-                    _log.warning("mind reply send failed: %s", exc)
+                self._send_mind_reply(message, mind_reply)
                 return
         # While the brain works, the indicator stays up (own thread — the
         # model call must not be delayed by a blocking typing window).
@@ -3692,7 +3768,7 @@ class PartnerRuntime(
         for i, (seg, cmd) in enumerate(zip(segments, parsed)):
             expanded = expand_prev_placeholders(seg, outputs)
             try:
-                reply = self.handle_control(
+                reply = self._handle_control_inner(
                     expanded, chat_key, message=message, _no_stack=True)
                 # A stacked reply is composite TEXT — a step that
                 # returned an ActionableMessage contributes its text;
@@ -3761,6 +3837,48 @@ class PartnerRuntime(
         text = str(text or "")
         if not text and not buttons:
             return None
+        # Button honesty (register #27, 2026-11-05): copy may claim
+        # buttons only when buttons actually ride this send. When
+        # the platform cannot take them (limits say so, or none were
+        # attached to a reply whose copy claims them), the copy is
+        # rewritten HERE — before the gateway — to an honest
+        # numbered action list, and the picks are registered so a
+        # bare-number reply executes the same command a tap would.
+        # The failure this kills: /toolhub on WhatsApp said "tap a
+        # button below" while the gateway stripped the bundle.
+        btn_rows = None
+        if buttons:
+            try:
+                btn_rows = [
+                    [(str(label), str(data))
+                     for label, data in row]
+                    for row in buttons if row]
+            except Exception:  # noqa: BLE001 - malformed bundle -> honesty path
+                btn_rows = None
+            btn_rows = [r for r in (btn_rows or []) if r] or None
+        _limits = None
+        try:
+            from ...social.chat.platform_limits import for_platform
+            _limits = for_platform(message.chat.platform)
+        except Exception:  # noqa: BLE001 - unknown platform: honesty by copy
+            _limits = None
+        _takes_buttons = bool(
+            _limits is not None and _limits.supports_buttons)
+        if _claims_buttons(text) and not (btn_rows and _takes_buttons):
+            if btn_rows:
+                text = _numbered_button_fallback(self, message, text,
+                                                 btn_rows)
+                btn_rows = None
+                buttons = None
+            elif _limits is not None and not _takes_buttons:
+                text = _strip_button_claims(text) or (
+                    "buttons don't exist on this surface — the same "
+                    "actions run by typing their commands "
+                    "(/help lists them).")
+            # A button-capable platform with claim copy but no
+            # authored buttons is the adapter-derivation path
+            # (Telegram derives hub keyboards from the text):
+            # the claim stays, the adapter owns the buttons.
         # §16 ephemeral answers: handle_control stamps replies
         # of sensitive kinds in groups that opted in (p5
         # ephemeral).  The ladder, in order: the adapter's
@@ -3815,6 +3933,46 @@ class PartnerRuntime(
 
     def handle_control(self, text: str, chat_key: str,
                        message: Any = None, _no_stack: bool = False) -> str:
+        """Control-command entry point: every PARSED command answers.
+
+        The dispatch lives in :meth:`_handle_control_inner`; this
+        wrapper is the no-empty class fix (owner order 2026-11-05,
+        register #32: ``/sudo`` met total silence in the owner's
+        WhatsApp self-chat — the kind had no parse entry, and several
+        handler shapes return ``""` as a success sentinel). A parsed
+        command whose dispatch produced an empty reply gets an
+        honest plain-words fallback — named, journaled, never
+        silent. The ``""` contract for a NON-command (parse None —
+        ordinary chat text) is preserved untouched.
+        """
+        from ...social.chat.control import parse_control as _parse
+        reply = self._handle_control_inner(
+            text, chat_key, message=message, _no_stack=_no_stack)
+        command = _parse(text)
+        if command is None or command.kind == "error":
+            return reply
+        empty = reply is None or (
+            isinstance(reply, str) and not reply.strip()) or (
+            not isinstance(reply, str)
+            and not str(getattr(reply, "text", "") or "").strip())
+        if not empty:
+            return reply
+        try:
+            record_failure(
+                "runtime.PartnerRuntime.handle_control:empty_reply",
+                ValueError(
+                    f"/{command.kind} produced an empty control reply "
+                    f"(chat {chat_key})"))
+        except Exception as exc:  # noqa: BLE001 - journaling never breaks a reply
+            _log.debug("empty-reply journal failed: %s", exc)
+        return (
+            f"/{command.kind} ran but produced no reply — that's a "
+            f"bug on my end, not something you did. "
+            f"/help {command.kind} shows what it should do.")
+
+    def _handle_control_inner(self, text: str, chat_key: str,
+                              message: Any = None,
+                              _no_stack: bool = False) -> str:
         """Parse + dispatch one control command (or a stack). Returns the reply.
 
         A stacked message (one command per line — see
@@ -4085,6 +4243,9 @@ class PartnerRuntime(
 
         if kind == "ping":
             return self._control_ping(message)
+
+        if kind == "sudo":
+            return self._control_sudo(command.tail, message)
 
         if kind == "pair":
             return self._control_pair(command.tail, chat_key=chat_key,
@@ -5665,6 +5826,81 @@ class PartnerRuntime(
                 chat, owner_chats=getattr(self, "_owner_chats", ())):
             return False
         return True
+
+    def _owner_reply_ledger(self) -> Any:
+        """The owner-replied suppression ledger (register #28).
+
+        One per runtime, formed lazily so test doubles and partial
+        constructions still get the real behavior. The brain reaches
+        it through ``context.ledger``-style duck typing via
+        ``PartnerBrain.owner_reply_ledger``.
+        """
+        ledger = getattr(self, "_owner_reply_ledger_obj", None)
+        if ledger is None:
+            from .owner_replies import OwnerReplyLedger
+            ledger = OwnerReplyLedger()
+            self._owner_reply_ledger_obj = ledger
+        return ledger
+
+    def _button_pick_store(self) -> Any:
+        """The numbered button-fallback pick store (register #27)."""
+        store = getattr(self, "_button_pick_store_obj", None)
+        if store is None:
+            from .button_picks import ButtonPickStore
+            store = ButtonPickStore()
+            self._button_pick_store_obj = store
+        return store
+
+    def _register_button_picks(self, chat_key: str,
+                               commands: list) -> None:
+        self._button_pick_store().register(chat_key, list(commands))
+
+    def _button_pick_hook(self, message: ChatMessage) -> str | None:
+        """Bare number reply after a numbered button fallback.
+
+        Mirrors the /play pick hook's contract: a bare number with
+        a live pick list executes that pick's command through the
+        control dispatch (grant re-checked there); anything else
+        returns None and the turn flows on untouched. Never raises.
+        """
+        text = (message.text or "").strip()
+        if not text.isdigit():
+            return None
+        try:
+            command = self._button_pick_store().take(
+                message.chat.key, int(text))
+        except Exception as exc:  # noqa: BLE001 - hook never eats chat
+            record_failure(
+                "runtime.PartnerRuntime._button_pick_hook", exc)
+            return None
+        if not command:
+            return None
+        return self.handle_control(
+            "/" + command.lstrip("/"), message.chat.key, message=message)
+
+    def _send_mind_reply(self, message: ChatMessage, reply: str) -> None:
+        """Send a CoreMind reply through the narration scrub.
+
+        Personal surfaces (the owner's own accounts — wa.me,
+        Telegram MTProto, Discord personal) never see internal
+        narration: the router's ``(route: …)`` parentheticals and
+        "I'll report back" scaffold promises are stripped at this
+        boundary whatever composer produced them (owner order
+        2026-11-05, register #33 — the raw started notes used to be
+        sent verbatim). A reply that is narration through and
+        through sends nothing: the job's own artifact is the
+        message. Bot surfaces keep their text byte-identical;
+        degenerate-brain gating upstream is untouched.
+        """
+        if is_personal_platform(message.chat.platform):
+            reply = scrub_narration(reply)
+            if not str(reply or "").strip():
+                return
+        try:
+            self._typing_for(message.chat, reply)
+            self.gateway.send(message.chat.platform, message.chat, reply)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("mind reply send failed: %s", exc)
 
     def _typing_for(self, chat: ChatRef, text: str, *, cap: float = 10.0) -> None:
         """Length-scaled typing before a short outgoing reply (control

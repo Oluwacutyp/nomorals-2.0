@@ -2039,7 +2039,7 @@ class CoreMind:
         return self._send_async(
             chat_key, job, job_id,
             f"on it — researching “{intent.target[:80]}” with {workers} "
-            f"researchers (profile: {env}). findings land here.\n{self._route_line(intent)}",
+            f"researchers (profile: {env}).",
             kind="research")
 
     def _dispatch_account(self, intent: Intent, job_id: str, chat_key: str,
@@ -2099,9 +2099,8 @@ class CoreMind:
 
         return self._send_async(
             chat_key, job, job_id,
-            f"creating your {service} account — I'll report back here. "
-            f"Some services need your help (CAPTCHA/verification).\n"
-            f"{self._route_line(intent)}",
+            f"on it — creating your {service} account. Some services need "
+            f"your help (CAPTCHA/verification).",
             kind="account")
 
     def _dispatch_build(self, intent: Intent, job_id: str, chat_key: str,
@@ -2149,8 +2148,7 @@ class CoreMind:
 
         return self._send_async(
             chat_key, job, job_id,
-            f"building — “{intent.target[:80]}”. I'll report back here when "
-            f"it runs.\n{self._route_line(intent)}",
+            f"building — “{intent.target[:80]}”.",
             kind="build")
 
     def _dispatch_book(self, intent: Intent, job_id: str, chat_key: str,
@@ -2170,7 +2168,7 @@ class CoreMind:
             return f"the book organ failed to start: {exc}"
         return reply or (
             f"✍️ writing “{topic[:70]}” — research → outline → chapters → "
-            f"PDF, straight to this chat.\n{self._route_line(intent)}")
+            f"PDF, straight to this chat.")
 
     def _dispatch_music(self, intent: Intent, job_id: str, chat_key: str,
                         message: Any) -> str:
@@ -2189,8 +2187,7 @@ class CoreMind:
             reply = self.runtime._control_music(tail)
         except Exception as exc:  # noqa: BLE001
             return f"the music organ failed: {exc}"
-        return (reply or f"composed “{tail[:70]}”."
-                f"\n{self._route_line(intent)}")
+        return reply or f"composed “{tail[:70]}”."
 
     def _dispatch_play(self, intent: Intent, job_id: str, chat_key: str,
                        message: Any) -> str:
@@ -2219,8 +2216,7 @@ class CoreMind:
             reply = self.runtime._control_play(query, chat_key=chat_key)
         except Exception as exc:  # noqa: BLE001
             return f"the play organ failed: {exc}"
-        return (reply or f"queued “{query[:70]}”."
-                f"\n{self._route_line(intent)}")
+        return reply or f"queued “{query[:70]}”."
 
     def _dispatch_owner(self, intent: Intent, job_id: str, chat_key: str,
                         message: Any) -> str:
@@ -2292,7 +2288,7 @@ class CoreMind:
 
         return self._send_async(
             chat_key, job, job_id,
-            f"opening {url[:80]} — I'll post what's there.\n{self._route_line(intent)}",
+            f"opening {url[:80]}.",
             kind="browse")
 
     def _dispatch_download(self, intent: Intent, job_id: str, chat_key: str,
@@ -2312,7 +2308,7 @@ class CoreMind:
         return self._send_async(
             chat_key, job, job_id,
             f"downloading {intent.target[:80]} (profile cap: "
-            f"{max_mb:.0f} MB) — I'll confirm when it lands.\n{self._route_line(intent)}",
+            f"{max_mb:.0f} MB).",
             kind="download")
 
     def _directives(self):
@@ -2337,7 +2333,7 @@ class CoreMind:
             if not result.get("ok"):
                 return f"❌ could not queue it: {result.get('error')}"
             return (f"📋 mission queued {result['id'][:8]}: “{intent.target[:80]}” — "
-                    f"/task run to execute now.\n{self._route_line(intent)}")
+                    f"/task run to execute now.")
         if intent.action == "run":
             # executing a mission can take minutes (downloads, research) —
             # it is heavy work, so it runs off the chat thread like every
@@ -2351,8 +2347,7 @@ class CoreMind:
 
             return self._send_async(
                 chat_key, job, job_id,
-                f"running the mission — “{(intent.target or 'next queued')[:80]}”. "
-                f"I'll post the result here.\n{self._route_line(intent)}",
+                f"running the mission — “{(intent.target or 'next queued')[:80]}”.",
                 kind="mission")
         rows = agent.list(8)
         if not rows:
@@ -2485,7 +2480,7 @@ class CoreMind:
 
         return self._send_async(
             chat_key, job, job_id,
-            "🎨 generating — I'll send it when it's ready.",
+            "🎨 generating.",
             kind="image")
 
     def _dispatch_video(self, intent: Intent, job_id: str, chat_key: str,
@@ -2530,8 +2525,7 @@ class CoreMind:
 
         return self._send_async(
             chat_key, job, job_id,
-            "🎬 rendering your video — this takes a few minutes, "
-            "I'll send it when it's done.",
+            "🎬 rendering your video — this takes a few minutes.",
             kind="video")
 
     def _dispatch_avatar(self, intent: Intent, job_id: str, chat_key: str,
@@ -2760,7 +2754,7 @@ class CoreMind:
 
         return self._send_async(
             chat_key, job, job_id,
-            f"{labels[action]} — I'll send it when it's ready.",
+            f"{labels[action]} — working on it.",
             kind="video" if action in ("captions", "transcript_edit")
             else "image")
 
@@ -2831,7 +2825,7 @@ class CoreMind:
         return self._send_async(
             chat_key, job, job_id,
             f"multi-part goal — the orchestrator is planning it:\n"
-            f"“{intent.target[:120]}”\n{self._route_line(intent)}",
+            f"“{intent.target[:120]}”",
             kind="multi")
 
     def _dispatch_game(self, intent: Intent, job_id: str, chat_key: str,

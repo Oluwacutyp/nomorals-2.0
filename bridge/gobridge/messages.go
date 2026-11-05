@@ -335,12 +335,17 @@ func (b *bridge) onMessage(v *events.Message) {
 
 	kind := kindOf(chat)
 	if v.Info.IsFromMe {
+		ownReplyTo := ""
+		if ci := contextInfoOf(v.Message); ci != nil {
+			ownReplyTo = ci.GetStanzaID()
+		}
 		out := map[string]any{
 			"type": "own_message", "id": string(v.Info.ID),
 			"chat": map[string]any{
 				"id": chat.String(), "kind": kind, "title": b.titleOf(chat),
 			},
 			"text":      textOf(v.Message),
+			"reply_to":  ownReplyTo,
 			"view_once": v.IsViewOnce,
 			"ts":        tsMs,
 		}

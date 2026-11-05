@@ -16,6 +16,12 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: surface-laws
+        name: personal-surface laws gate
+        entry: python3 -m unittest tests.test_surface_laws
+        language: system
+        pass_filenames: false
+        types: [python]
       - id: ruff-ratchet
         name: ruff lint-debt ratchet
         entry: python3 -m nomorals.tools.ruff_ratchet

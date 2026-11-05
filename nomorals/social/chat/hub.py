@@ -45,6 +45,7 @@ __all__ = [
     "hub_help_text",
     "hub_keyboard",
     "hub_text",
+    "keyboard_for_screen",
     "is_hub_screen",
     "lookup_bin",
     "proxy_intro_text",

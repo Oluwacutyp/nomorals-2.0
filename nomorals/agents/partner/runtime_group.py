@@ -4672,6 +4672,67 @@ class RuntimeGroupMixin:
                 "mark <text> · rebind <platform> <new id> "
                 "<passphrase>")
 
+    def _control_sudo(self, tail, message):  # type: ignore[no-untyped-def]
+        """Top-level /sudo (owner order 2026-11-05, register #32).
+
+        ``/sudo`` met total silence in the owner's WhatsApp
+        self-chat: the rung existed only as a subcommand of
+        ``/owner``, so the bare word never parsed as a command at
+        all and the message fell into conversation. This is the
+        direct surface: ``add``/``remove`` delegate to the owner
+        grammar (one edit path, one held audit); anything else
+        answers the rung's state in plain words from the owner
+        registry — who holds sudo, or that nobody does.
+        """
+        words = (tail or "").strip().split()
+        head = words[0].lower() if words else ""
+        if head in ("add", "remove"):
+            if message is None:
+                # Console-seam caller: handle_control's message=None
+                # contract IS the owner (the same contract /owner's
+                # own dispatch relies on — its handler reads the
+                # caller as operator exactly then). The delegation
+                # runs against a minimal owner stand-in carrying the
+                # stamp _is_operator honors, rather than dying on
+                # the missing message.
+                from types import SimpleNamespace
+
+                from ...social.chat.base import ChatKind, ChatRef
+                message = SimpleNamespace(
+                    chat=ChatRef(platform="whatsapp", chat_id="owner",
+                                 kind=ChatKind.DM),
+                    sender_id="", sender="owner",
+                    sender_username="",
+                    meta={"is_owner": True, "from_owner": True})
+            return self._control_owner("sudo " + (tail or "").strip(),
+                                       message)
+        try:
+            from .failures import record_failure
+            registry = self._owner_registry()
+            by_platform = dict((registry.data or {}).get("sudo") or {})
+            grants = [
+                f"{platform}:{user_id}"
+                for platform, ids in by_platform.items()
+                for user_id in (ids or [])]
+        except Exception as exc:  # noqa: BLE001 - say it, never silence
+            try:
+                record_failure(
+                    "runtime.PartnerRuntime._control_sudo", exc)
+            except Exception as journal_exc:  # noqa: BLE001 - journaling never breaks a reply
+                _log.debug("sudo journal failed: %s", journal_exc)
+            return ("sudo: I couldn't read the owner record just "
+                    "now — /owner shows the same rung on its card.")
+        if grants:
+            return (f"sudo: {', '.join(grants)} — recognized on "
+                    "every surface, exempt from automatic actions, "
+                    "never the owner. /sudo remove <platform> <id> "
+                    "drops a grant.")
+        return ("sudo: none — nobody holds sudo. Sudo holders are "
+                "recognized on every surface and exempt from "
+                "automatic actions, but never the owner. Grant it "
+                "with /sudo add <platform> <id> "
+                "(or /owner sudo add <platform> <id>).")
+
     # ---- channels: settings write path + the drive (§16/P4a) ---
     def _channel_update(self, surface, key, **fields):  # type: ignore[no-untyped-def]
         """Mutate a channel's settings block through the

@@ -86,7 +86,7 @@ def _literal_keys(src: Path, name: str) -> list[str]:
 
 def _handle_control_source() -> str:
     src = RUNTIME_SRC.read_text()
-    start = src.index("    def handle_control(")
+    start = src.index("    def _handle_control_inner(")
     rest = src[start:]
     nxt = re.search(r"\n    def ", rest[1:])
     return rest[: nxt.start() + 1] if nxt else rest

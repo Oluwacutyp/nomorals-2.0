@@ -102,3 +102,17 @@ taken as proof of the resulting state. The verifier follows the
 health-gate idiom: the production construction gets it by default;
 scripted constructions (injected health gates, stubbed git seams) get
 one only when they pass it explicitly.
+
+## Personal-surface laws gate (2026-11-05)
+
+`tests/test_surface_laws.py` pins the owner's personal-surface laws
+as executable tests, after four live violations reached his own
+WhatsApp self-chat while the laws existed only as prose (register
+#27/#28/#32/#33): no internal narration (route parentheticals,
+scaffold acks, report-back promises) crosses a personal-surface
+send boundary; control commands never answer empty; an
+owner-replied message/thread stays Devon's silence on every
+surface; reply copy claims buttons only when buttons ride the
+send (or the copy degrades to a working numbered fallback). The
+module runs in `make gates`, in the pre-commit hooks, and in CI's
+full unittest discovery.

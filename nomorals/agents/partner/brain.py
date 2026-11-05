@@ -422,6 +422,30 @@ class PartnerBrain:
             _log.warning("persist turn failed: %s", exc)
         return now
 
+    def owner_reply_ledger(self) -> Any:
+        """The owner-replied suppression ledger (register #28).
+
+        The runtime attaches its ledger (fed by every adapter's
+        own-echo seam) after construction; a brain without one forms
+        its own, so the check degrades to the pre-existing
+        double-reply discipline rather than failing.
+        """
+        ledger = getattr(self, "_owner_reply_ledger_obj", None)
+        if ledger is None:
+            from .owner_replies import OwnerReplyLedger
+            ledger = OwnerReplyLedger()
+            self._owner_reply_ledger_obj = ledger
+        return ledger
+
+    def _owner_already_replied(self, message: ChatMessage) -> str:
+        """Ledger verdict for this message: "" or the reason."""
+        try:
+            return self.owner_reply_ledger().owner_answered(
+                message.chat.key,
+                str(getattr(message, "message_id", "") or ""))
+        except Exception:  # noqa: BLE001 - a ledger fault must not silence chat
+            return ""
+
     def _already_addressed(self, chat_key: str, persisted_at: float) -> bool:
         """True when something newer than this message was already answered.
 
@@ -677,6 +701,20 @@ class PartnerBrain:
             rng=self.presence_rng,
         )
         persisted_at = self._persist_inbound(message)
+        # 3c-owner. Owner-replied suppression (register #28,
+        # restored): the owner answered this message/thread himself
+        # — on ANY surface — so Devon stays quiet on it. The ledger
+        # is fed by the runtime's own-echo seam, independent of the
+        # persistence-based discipline below (which needs the echo
+        # to have been persisted under the owner marker AND newer;
+        # the ledger also covers targeted replies and the delayed
+        # path). Commands never reach this path.
+        owner_why = self._owner_already_replied(message)
+        if owner_why:
+            _log.info("owner-replied suppression in %s: %s",
+                      chat.key, owner_why)
+            self._refresh_profile_async(chat.key)
+            return PresenceOutcome()
         # 3c. Double-reply discipline: if the owner (or the bot itself) has
         #     already addressed something newer than this message, it is
         #     stale — stay silent instead of answering twice. The owner's
@@ -709,6 +747,11 @@ class PartnerBrain:
         landing once she's free. Returns the turn's outcome (parts +
         the brain-quality flag), like :meth:`handle_message`.
         """
+        # Owner-replied re-check (register #28): the owner may have
+        # answered while this reply waited out the busy delay — hold
+        # it rather than talk over him.
+        if self._owner_already_replied(message):
+            return PresenceOutcome()
         parts, degraded, degraded_note = self._generate_and_persist(
             message, self._chat_flags(message.chat))
         return PresenceOutcome(parts=parts, degraded=degraded,

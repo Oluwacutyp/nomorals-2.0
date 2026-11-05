@@ -1068,9 +1068,15 @@ class WhatsAppAdapter(ChatAdapter):
                 text=str(obj.get("text") or ""),
                 sender="",
                 message_id=message_id,
+                reply_to=str(obj.get("reply_to") or ""),
                 ts=ts,
             )
             msg.meta["own_message"] = True
+            # Owner-replied suppression (register #28): the quoted
+            # target rides along so the runtime's ledger can mark
+            # that exact message answered-by-owner.
+            if obj.get("reply_to"):
+                msg.meta["reply_to"] = str(obj.get("reply_to"))
             # The sender IS the owner — flag it for group recognition.
             msg.meta["from_owner"] = True
             self._deliver(handler, msg)

@@ -500,30 +500,35 @@ class RuntimeSystemMixin:
         (Named toolhub because /hub is already the media hub — see
         control.py. The card itself still says "Devon Hub".)
 
-        Buttons for every screen are derived by the adapter from the
-        reply text (header markers) / the toolhub origin — this method
-        returns text and sends the proxy file; it never builds a
-        keyboard itself. Gating is the existing grant: ``toolhub`` is
-        not a public kind, so non-owners are denied before dispatch.
+        Buttons: on Telegram the adapter derives each screen's
+        keyboard from the reply text (header markers) / the toolhub
+        origin. On WhatsApp there is no derivation, so the handler
+        returns the screen's keyboard explicitly (ActionableMessage
+        via :meth:`_hub_wrap`) — register #27: the card claimed
+        buttons that were silently dropped. Gating is the existing
+        grant: ``toolhub`` is not a public kind, so non-owners are
+        denied before dispatch.
         """
         from ...social.chat.hub import (bin_usage_text, format_bin_result,
-                                        hub_help_text, hub_text, lookup_bin,
+                                        hub_help_text, hub_text,
+                                        keyboard_for_screen, lookup_bin,
                                         proxy_intro_text)
 
         parts = (tail or "").split(None, 1)
         verb = parts[0].lower() if parts else ""
         rest = parts[1].strip() if len(parts) > 1 else ""
         if verb == "help":
-            return hub_help_text()
+            return self._hub_wrap(chat_key, hub_help_text(), "help")
         if verb == "bin":
             if not rest:
-                return bin_usage_text()
+                return self._hub_wrap(chat_key, bin_usage_text(), "bin")
             return format_bin_result(lookup_bin(rest))
         if verb == "proxy":
             # Stack: /toolhub proxy IS the tool screen (intro + Refresh +
             # Back); only "run" executes the flow.
             if not rest:
-                return proxy_intro_text()
+                return self._hub_wrap(
+                    chat_key, proxy_intro_text(), "proxy")
             if rest == "run":
                 return self._hub_proxy_flow(chat_key)
             return ("unknown proxy action — /toolhub proxy for the tool "
@@ -531,7 +536,32 @@ class RuntimeSystemMixin:
         if verb:
             return ("usage: /toolhub | /toolhub proxy [run] | /toolhub bin <digits> "
                     "| /toolhub help")
-        return hub_text(proxy_line=self._hub_proxy_line())
+        return self._hub_wrap(
+            chat_key, hub_text(proxy_line=self._hub_proxy_line()), "hub",
+            keyboard=keyboard_for_screen("hub"))
+
+    def _hub_wrap(self, chat_key: str, text: str, screen: str,
+                  keyboard: Any = None) -> Any:
+        """Attach a hub screen's buttons where the surface needs them.
+
+        Register #27 (2026-11-05): the hub copy says "tap a button
+        below" — on Telegram the bot adapter derives the keyboard
+        from the text, but WhatsApp has no derivation, so the reply
+        went out buttonless while claiming buttons. On WhatsApp the
+        handler returns an ActionableMessage carrying the screen's
+        real keyboard (the bridges render it natively); every other
+        surface keeps the plain-string derivation path. If the
+        platform cannot take buttons at send time,
+        ``_send_control_reply``'s honesty rule rewrites the copy to
+        a numbered fallback — the claim is never left standing
+        without the buttons.
+        """
+        platform = (chat_key or "").partition(":")[0].strip().lower()
+        if platform != "whatsapp":
+            return text
+        from ...social.chat.hub import keyboard_for_screen
+        from ...social.chat.tgbot_buttons import actionable
+        return actionable(text, keyboard or keyboard_for_screen(screen))
 
     def _hub_home(self) -> Any:
         """Devon's home dir (cooldown store lives under it)."""

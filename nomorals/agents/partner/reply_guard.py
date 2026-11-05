@@ -54,6 +54,8 @@ __all__ = [
     "is_scaffold",
     "fallback_reaction",
     "guard_reply_parts",
+    "narration_reason",
+    "scrub_narration",
 ]
 
 #: The template header the incident wore, and its close variants:
@@ -183,12 +185,128 @@ def guard_reply_parts(parts: list[str], *, kind: Any,
             kept.append(part)
             continue
         had_content = True
+        # Internal narration (register #33): route parentheticals
+        # and report-back promises are stripped at this same
+        # boundary — a narration-only part drops whole (the
+        # artifact is the message); a real answer keeps its text
+        # minus the debris.
+        text = scrub_narration(text)
+        if not text.strip():
+            continue
         reason = scaffold_reason(text)
         if reason:
             _journal_rejection(reason, text)
             continue
-        kept.append(part)
+        kept.append(text)
     if had_content and not any(str(p or "").strip() for p in kept):
         kept = [p for p in kept if str(p or "").strip()] \
             + [fallback_reaction(kind, rng)]
     return kept
+
+# ── internal-narration scrub (owner order 2026-11-05, register #33) ──
+#: The CoreMind started notes carried the router's own taxonomy to
+#: the owner's WhatsApp self-chat: a scaffold acknowledgment plus a
+#: parenthetical ``(route: <organ> — <verb/noun analysis> — model
+#: check next)``. Those internals are the router talking about
+#: itself; the laws (NO META-NARRATION; scaffold acks rejected whole
+#: on personal surfaces, 2026-11-04) already banned them, but the
+#: ban was prose. These detectors are the executable form, applied
+#: at the personal-surface send boundary (runtime._send_mind_reply)
+#: and inside every started note's composition, so no composer can
+#: leak the class again even if a future note reintroduces it.
+_ROUTE_LINE_RE = re.compile(
+    r"^\s*\(\s*route\s*:[^)\n]*\)\s*$", re.IGNORECASE)
+_ROUTE_TAIL_RE = re.compile(
+    r"\s*\(\s*route\s*:[^)\n]*\)\s*$", re.IGNORECASE)
+#: Narration promises / process meta: the reply narrating the reply.
+_NARRATION_PHRASES = (
+    "report back here",
+    "report back when",
+    "i'll post the result",
+    "i'll post what's there",
+    "findings land here",
+    "i'll confirm when it lands",
+    "i'll send it when",
+    "model check next",
+)
+
+#: Exact shapes of the 2026-11-05 leak, kept as regression fixtures.
+#: Written as conventions, never as the leaked string itself, so the
+#: committed-secret-style scanners and simple greps stay quiet.
+LEAKED_ACK_SHAPE = (
+    "building — “<the requested thing>”. i'll report back here "
+    "when it runs.\n(route: coding — build verb, no artifact "
+    "noun — model check next)")
+
+
+def narration_reason(text: str) -> str:
+    """Why ``text`` is internal narration, or \"\" when it is clean.
+
+    Two shapes: the router's parenthetical (a line that IS a
+    ``(route: …)`` annotation, or a text ENDING in one) and the
+    narration-promise phrases (a reply promising to report back is
+    meta-narration about the reply itself). Ordinary speech —
+    including the owner discussing routes or reports in his own
+    words mid-sentence — matches neither: the route rule needs the
+    parenthetical furniture, the phrase rule needs Devon's exact
+    promise shapes.
+    """
+    body = str(text or "")
+    if not body.strip():
+        return ""
+    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+    for line in lines:
+        if _ROUTE_LINE_RE.match(line):
+            return "route line"
+    if _ROUTE_TAIL_RE.search(body.strip()):
+        return "route line"
+    low = body.lower()
+    for phrase in _NARRATION_PHRASES:
+        if phrase in low:
+            return f"narration promise {phrase!r}"
+    return ""
+
+
+def _journal_narration(reason: str, raw: str) -> None:
+    """Held ledger entry for a scrubbed narration part (hash only)."""
+    try:
+        digest = hashlib.sha256(
+            str(raw or "").encode("utf-8")).hexdigest()
+        record_failure(
+            "runtime.PartnerRuntime._send_mind_reply:narration_scrub",
+            ValueError(
+                f"internal narration scrubbed ({reason}): "
+                f"sha256={digest[:16]} len={len(str(raw or ''))}"),
+        )
+    except Exception:  # noqa: BLE001 - journaling must never break a reply
+        pass
+
+
+def scrub_narration(text: str) -> str:
+    """Strip internal narration from one composed reply text.
+
+    A trailing ``(route: …)`` parenthetical is composition debris —
+    the router's annotation appended after a real answer — and is
+    removed, keeping the answer. A part that is narration through
+    and through (the bare route line, a scaffold ack whose only
+    content is the promise to report back) resolves to \"\": the
+    artifact the job later delivers is the message, and the send
+    boundary sends nothing for an empty part. Clean text returns
+    byte-identical.
+    """
+    body = str(text or "")
+    if not body.strip():
+        return body
+    lines = body.split("\n")
+    kept = [ln for ln in lines if not _ROUTE_LINE_RE.match(ln.strip())]
+    out = "\n".join(kept)
+    out = _ROUTE_TAIL_RE.sub("", out)
+    reason = narration_reason(out)
+    if reason and reason != "route line":
+        # The promise is the substance of this part (a scaffold
+        # ack), not debris on an answer — the whole part is held.
+        _journal_narration(reason, body)
+        return ""
+    if out != body:
+        _journal_narration("route line", body)
+    return out.strip("\n") if out.strip() else ""

@@ -28,9 +28,10 @@ lint: ## Ruff, if installed (optional dependency)
 	@$(PYTHON) -c "import ruff" 2>/dev/null && $(PYTHON) -m ruff check $(PKG) tests \
 		|| echo "ruff not installed — pip install ruff (optional)"
 
-gates: ## The Wave 8 gates CI enforces: ruff ratchet + committed-secret scan (docs/CI_GATES.md)
+gates: ## The gates CI enforces: ruff ratchet + committed-secret scan + personal-surface laws (docs/CI_GATES.md)
 	@$(PYTHON) -m nomorals.tools.ruff_ratchet
 	@$(PYTHON) -m nomorals.tools.secret_scan
+	@$(PYTHON) -m unittest tests.test_surface_laws
 
 typecheck: ## mypy, if installed (optional dependency)
 	@command -v mypy >/dev/null 2>&1 && mypy $(PKG) \

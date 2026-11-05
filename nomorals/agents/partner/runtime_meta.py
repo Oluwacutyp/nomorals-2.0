@@ -588,7 +588,7 @@ class RuntimeMetaMixin:
             runtime_src = open(
                 os.path.join(os.path.dirname(__file__), "runtime.py"),
                 encoding="utf-8").read()
-            start = runtime_src.index("    def handle_control(")
+            start = runtime_src.index("    def _handle_control_inner(")
             rest = runtime_src[start:]
             nxt = re.search(r"\n    def ", rest[1:])
             body = rest[: nxt.start() + 1] if nxt else rest

@@ -1124,9 +1124,14 @@ class TelegramAdapter(ChatAdapter):
                 # as inbound from the owner; everything else stays ignored.
                 @client.on(events.NewMessage(outgoing=True))
                 async def on_outgoing(event: Any) -> None:
-                    if not self._outgoing_is_self_chat(event):
+                    if self._outgoing_is_self_chat(event):
+                        await self._handle_inbound(event, client, handler, allow_check=False)
                         return
-                    await self._handle_inbound(event, client, handler, allow_check=False)
+                    # Owner-replied suppression feed (register #28):
+                    # an owner-sent message in any other chat is an
+                    # own-echo for the runtime's ledger — Devon
+                    # stays quiet on what he already answered.
+                    self._deliver_owner_echo(event, handler)
 
                 # Defense evidentiary feeds (brief §2.1): MTProto
                 # is the ONLY Telegram surface that can see edits
@@ -1197,6 +1202,58 @@ class TelegramAdapter(ChatAdapter):
             if self.stopped:
                 return
             raise exc
+
+    def _deliver_owner_echo(self, event: Any, handler: IncomingHandler) -> None:
+        """Deliver an owner-sent group/DM message as an own-echo.
+
+        Register #28 (owner-replied suppression): until now every
+        non-self-chat outgoing event was dropped, so on the MTProto
+        surface Devon could not know the owner had answered — she
+        replied over him. The echo carries ``incoming=False`` and
+        ``own_message`` meta; the runtime records it in the
+        owner-reply ledger and the brain never treats it as a turn
+        to answer. Devon's OWN sends are skipped via ``_sent_ids``
+        (the loop guard), service messages via the action check.
+        Never raises: an echo fault must not break the event loop.
+        """
+        try:
+            message = getattr(event, "message", None) or event
+            if getattr(message, "action", None):
+                return
+            try:
+                mid = int(getattr(message, "id", 0) or 0)
+            except (TypeError, ValueError):
+                mid = 0
+            if mid and mid in self._sent_ids:
+                return
+            chat_id = str(getattr(event, "chat_id", "") or "")
+            if not chat_id:
+                return
+            reply_head = getattr(message, "reply_to", None)
+            reply_to = str(
+                getattr(reply_head, "reply_to_msg_id", None)
+                or getattr(reply_head, "id", "") or "")
+            text = str(getattr(message, "message", None)
+                       or getattr(message, "text", "") or "")
+            kind = (ChatKind.DM if not chat_id.startswith("-")
+                    else ChatKind.GROUP)
+            echo = ChatMessage(
+                chat=ChatRef(platform=self.name, chat_id=chat_id,
+                             kind=kind),
+                incoming=False,
+                text=text,
+                sender="owner",
+                sender_id=str(self._me_id or ""),
+                reply_to=reply_to,
+                message_id=str(mid or getattr(message, "id", "") or ""),
+                ts=(time.time() if not getattr(message, "date", None)
+                    else message.date.timestamp()),
+                meta={"own_message": True, "from_owner": True,
+                      "reply_to": reply_to},
+            )
+            self._deliver(handler, echo)
+        except Exception as exc:  # noqa: BLE001 - echo is bookkeeping, never fatal
+            record_failure("telegram.TelegramAdapter._deliver_owner_echo", exc)
 
     async def _handle_inbound(self, event: Any, client: Any, handler: IncomingHandler, *,
                               allow_check: bool) -> None:

@@ -76,7 +76,7 @@ def _chat_namespaces() -> dict[str, set[str]]:
 def _handle_control_source() -> str:
     """The source text of PartnerRuntime.handle_control."""
     src = RUNTIME_SRC.read_text()
-    start = src.index("    def handle_control(")
+    start = src.index("    def _handle_control_inner(")
     rest = src[start:]
     # next method at the same indent level ends the body
     nxt = re.search(r"\n    def ", rest[1:])

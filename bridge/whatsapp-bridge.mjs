@@ -730,6 +730,7 @@ async function connect() {
             id: m.key.id || '',
             chat: { id: jid, kind: kindOf(jid), title: chatTitles.get(jid) || '' },
             text: textOf(mm),
+            reply_to: replyToOf(mm),
             view_once: unwrapped.viewOnce,
             ts: tsMs,
           };
