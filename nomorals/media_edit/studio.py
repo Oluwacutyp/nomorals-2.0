@@ -152,18 +152,19 @@ def find_font(query: str | None, size: int) -> Any:
 def _grade_lut(lift: tuple[float, float, float],
                gamma: tuple[float, float, float],
                gain: tuple[float, float, float]) -> list[int]:
-    """Per-channel LUT for out = ((in * gain + lift) ^ (1/gamma))."""
-    lut: list[int] = []
-    for c in range(3):
-        li, ga, gn = lift[c], gamma[c], gain[c]
-        ga = ga if ga > 0 else 1.0
-        channel = []
-        for i in range(256):
-            base = (i / 255.0) * gn + li
-            v = base ** (1.0 / ga) if base > 0 else 0.0
-            channel.append(max(0, min(255, int(round(v * 255)))))
-        lut.extend(channel)
-    return lut
+    """Per-channel LUT for out = ((in * gain + lift) ^ (1/gamma)).
+
+    Built by the canonical color engine's table builder
+    (``media/studio_color.channel_tables``) — stills and the video
+    engine share one LUT representation (§1.1c convergence)."""
+    from ..media.studio_color import channel_tables
+
+    def fn(c: int, x: float) -> float:
+        ga = gamma[c] if gamma[c] > 0 else 1.0
+        base = x * gain[c] + lift[c]
+        return base ** (1.0 / ga) if base > 0 else 0.0
+
+    return channel_tables(fn)
 
 
 def _temp_tint_gains(temperature: float,

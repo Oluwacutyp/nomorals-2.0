@@ -220,6 +220,20 @@ def register(registry: Any) -> None:
         out = _out_dir(context, "graded") / (Path(path).stem + f"_{look}.mp4")
         return apply_look(path, look, out=str(out))
 
+    @registry.register(
+        "studio_scopes",
+        description=("Measure a frame's color scopes — histogram, waveform, "
+                     "RGB parade, vectorscope plus luma/chroma/clipping "
+                     "measurements — computed from real frame data and "
+                     "returned as data for QC. ('scope this shot', 'check "
+                     "the exposure', 'is this clipping')."),
+        capability=Capability.FS_READ,
+    )
+    def studio_scopes(path: str, *, at: float = 1.0) -> dict[str, Any]:
+        """Frame scopes + measurements."""
+        from ..media.studio_color import scopes_for_media
+        return scopes_for_media(path, at=at)
+
     # ── keyframes ───────────────────────────────────────────────
 
     @registry.register(

@@ -148,7 +148,30 @@ _GRADES: dict[str, str] = {
 
 
 def _fx_color_grade(params: dict[str, Any], ctx: dict[str, Any]) -> str:
+    cdl = params.get("cdl")
+    if isinstance(cdl, dict) and cdl:
+        return color_grade_cdl_chain(cdl)
     return color_grade_chain(str(params.get("grade", "warm")))
+
+
+def color_grade_cdl_chain(cdl: dict[str, Any], *,
+                          cache_dir: str | None = None) -> str:
+    """ffmpeg chain for an ASC-CDL grade carried as timeline state.
+
+    A ``color_grade`` effect may carry ``params={"cdl": {...}}``
+    (slope/offset/power/saturation, e.g. from a Document look_lock)
+    instead of a named grade. The CDL is baked to a content-addressed
+    .cube by the canonical color engine (``media/studio_color``) and
+    applied via lut3d — the same single render path as every other
+    grade surface, never a separate re-encode.
+    """
+    from ..studio_color import CDL, StudioColorError, bake_cdl_cube_file
+    try:
+        decision = CDL.from_dict(dict(cdl))
+    except StudioColorError as exc:
+        raise MediaEditError(f"bad cdl grade: {exc}") from exc
+    path = bake_cdl_cube_file(decision, cache_dir=cache_dir)
+    return f"lut3d='{path}'"
 
 
 def list_color_grades() -> list[str]:
