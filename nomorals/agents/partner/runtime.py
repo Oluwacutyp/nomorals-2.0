@@ -5479,6 +5479,14 @@ class PartnerRuntime(
             return self._control_play(command.tail or arg, chat_key=chat_key)
         if kind == "download":
             return self._control_download(command.tail or arg, chat_key=chat_key)
+        if kind in {"tiktok", "ttdl"}:
+            return self._control_tiktok(command.tail or arg, chat_key=chat_key)
+        if kind == "instagram":
+            return self._control_instagram(command.tail or arg, chat_key=chat_key)
+        if kind == "spotify":
+            return self._control_spotify(command.tail or arg, chat_key=chat_key)
+        if kind == "aio":
+            return self._control_aio(command.tail or arg, chat_key=chat_key)
         if kind == "video":
             return self._control_video(command.tail or arg)
         if kind == "director":

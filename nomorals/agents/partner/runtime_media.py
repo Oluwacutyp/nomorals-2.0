@@ -998,14 +998,45 @@ class RuntimeMediaMixin:
             return (f"that doesn't look like a URL: {url[:80]!r}\n"
                     "paste the full link starting with https://")
 
+        # Platform routing (FEI gap wave A): one surface, the
+        # platform-shaped route per link — Spotify identifies and
+        # matches (its own audio is previews; the chain's descriptor
+        # gate would only refuse), TikTok gets the watermark-honest
+        # route, Instagram the login-wall-aware one.
+        from ...media.platforms import detect_platform
+        _platform = detect_platform(url)
+        if _platform == "spotify":
+            return self._control_spotify(url, chat_key)
+
         chat = self._ref_from_key(chat_key) if chat_key else None
         if chat is not None:
+            if _platform == "tiktok":
+                return self._play_download_bg(
+                    chat, chat_key,
+                    "⏳ fetching that TikTok in the background — I'll "
+                    "send the file here when it's ready.",
+                    lambda: self._tiktok_produce(url, audio_only, chat),
+                    title=url[:80])
+            if _platform == "instagram":
+                return self._play_download_bg(
+                    chat, chat_key,
+                    "⏳ fetching that Instagram post in the "
+                    "background — I'll send the file here when it's "
+                    "ready.",
+                    lambda: self._instagram_produce(url, chat),
+                    title=url[:80])
             return self._play_download_bg(
                 chat, chat_key,
                 f"⏳ downloading {url[:60]} in the background — I'll "
                 "send the file here when it's ready.",
                 lambda: self._download_produce(url, audio_only, chat),
                 title=url[:80])
+        if _platform == "tiktok":
+            text, _sent = self._tiktok_produce(url, audio_only, None)
+            return text
+        if _platform == "instagram":
+            text, _sent = self._instagram_produce(url, None)
+            return text
         text, _sent = self._download_produce(url, audio_only, None)
         return text
 
@@ -1020,6 +1051,404 @@ class RuntimeMediaMixin:
 
         reg = MediaDownloader(self.context).source_registry()
         return render_status_text(reg.status())
+
+    # ── dedicated platform downloaders (FEI gap wave A) ─────────────
+    #
+    # /tiktok, /instagram, /spotify and /aio are entry points into
+    # the SAME routes /download uses — nomorals.media.platforms does
+    # detection + the platform-shaped fetches over MediaDownloader,
+    # and /download itself routes Spotify/TikTok/Instagram links
+    # through them.  One implementation per platform, several doors.
+
+    @staticmethod
+    def _first_url(text: str) -> str:
+        """The first http(s) URL inside *text* ("" when none)."""
+        m = re.search(r"https?://[^\s<>\"']+", str(text or ""))
+        return m.group(0).rstrip(").,") if m else ""
+
+    def _send_platform_file(self, chat: Any, path: str, caption: str,
+                            size_bytes: int) -> tuple[str, bool]:
+        """Send a downloaded platform file to a chat.  (text, sent).
+
+        Over the platform's inline-media cap the gateway sends as a
+        document instead — the reply says so, so a big video never
+        looks like it vanished.  Never raises.
+        """
+        if chat is None:
+            return f"downloaded: {path}", False
+        note = ""
+        try:
+            from ...social.chat.platform_limits import for_platform
+            cap_mb = for_platform(chat.platform).max_file_mb
+            if cap_mb and size_bytes > cap_mb * 1024 * 1024:
+                note = (f"\n(it's {size_bytes // (1024 * 1024)}MB — over "
+                        f"{chat.platform}'s {cap_mb:g}MB inline-media "
+                        "cap, so it goes as a document)")
+        except Exception as e:  # noqa: BLE001 — the cap note is garnish
+            record_failure("runtime_media._send_platform_file.cap", e)
+        try:
+            self.gateway.send_file(
+                chat.platform, f"{chat.platform}:{chat.chat_id}",
+                path, caption=caption[:1024])
+            return note.strip(), True
+        except Exception as exc:  # noqa: BLE001
+            return (f"downloaded to {path} but couldn't send it: {exc}",
+                    False)
+
+    def _tiktok_produce(self, url: str, audio_only: bool,
+                        chat: Any) -> tuple[str, bool]:
+        """The /tiktok download+send body (job worker / sync CLI)."""
+        from ...core.jobs import report_progress
+        from ...media.downloader import MediaDownloader
+        from ...media.platforms import fetch_tiktok
+
+        report_progress(f"fetching TikTok {url[:60]}")
+        res = fetch_tiktok(url, downloader=MediaDownloader(self.context),
+                           audio_only=audio_only)
+        if not res.ok:
+            return f"couldn't fetch that TikTok — {res.failure}", False
+        title = res.title or "TikTok video"
+        if audio_only:
+            label = f"🎵 {title} — audio via {res.route}"
+        elif res.watermarked is False:
+            label = f"🎬 {title} — no watermark (via {res.route})"
+        elif res.watermarked is True:
+            label = (f"🎬 {title} — this one carries the TikTok "
+                     f"watermark (via {res.route})")
+        else:
+            label = f"🎬 {title} — via {res.route}"
+        if chat is None:
+            return f"{label}\ndownloaded: {res.path}", False
+        note, sent = self._send_platform_file(
+            chat, res.path, label, res.size_bytes)
+        if not sent:
+            return note, False
+        return (label + (f"\n{note}" if note else "")), True
+
+    def _control_tiktok(self, tail: str, chat_key: str = "") -> str:
+        """/tiktok <url> [audio] — fetch a TikTok video.
+
+        The no-watermark rendition is fetched when a route genuinely
+        provides one, and the reply names the route and the watermark
+        truth: "no watermark" is only ever said when a clean
+        rendition is what came down.
+        """
+        tail = (tail or "").strip()
+        audio_only = bool(re.search(r"(^|\s)(audio|--audio|-a)(\s|$)",
+                                    tail, re.I))
+        url = self._first_url(tail)
+        if not url:
+            return ("usage: /tiktok <tiktok url> [audio]\n"
+                    "paste the video's link — vm.tiktok.com and "
+                    "vt.tiktok.com share links work too.")
+        from ...media.platforms import detect_platform
+        if detect_platform(url) != "tiktok":
+            return (f"that's not a TikTok link: {url[:80]}\n"
+                    "/download takes any link; /tiktok is TikTok-only.")
+        chat = self._ref_from_key(chat_key) if chat_key else None
+        if chat is not None:
+            return self._play_download_bg(
+                chat, chat_key,
+                "⏳ fetching that TikTok in the background — I'll "
+                "send the file here when it's ready.",
+                lambda: self._tiktok_produce(url, audio_only, chat),
+                title=url[:80])
+        text, _sent = self._tiktok_produce(url, audio_only, None)
+        return text
+
+    def _instagram_produce(self, url: str,
+                           chat: Any) -> tuple[str, bool]:
+        """The /instagram download+send body (job worker / sync CLI)."""
+        from ...core.jobs import report_progress
+        from ...media.downloader import MediaDownloader
+        from ...media.platforms import fetch_instagram
+
+        report_progress(f"fetching Instagram {url[:60]}")
+        res = fetch_instagram(url,
+                              downloader=MediaDownloader(self.context))
+        if not res.ok:
+            return res.failure, False
+        title = res.title or "Instagram post"
+        label = f"📸 {title} — via {res.route}"
+        if chat is None:
+            return f"{label}\ndownloaded: {res.path}", False
+        note, sent = self._send_platform_file(
+            chat, res.path, label, res.size_bytes)
+        if not sent:
+            return note, False
+        return (label + (f"\n{note}" if note else "")), True
+
+    def _control_instagram(self, tail: str, chat_key: str = "") -> str:
+        """/instagram <url> — fetch a public Instagram reel/post.
+
+        Public content comes down through the download chain;
+        private, story and age-gated posts hit Instagram's login
+        wall, and the reply names the wall instead of failing raw.
+        """
+        url = self._first_url(tail or "")
+        if not url:
+            return ("usage: /instagram <instagram url>\n"
+                    "paste the reel/post link — public posts come "
+                    "down; private ones need a login I don't hold.")
+        from ...media.platforms import detect_platform
+        if detect_platform(url) != "instagram":
+            return (f"that's not an Instagram link: {url[:80]}\n"
+                    "/download takes any link; /instagram is "
+                    "Instagram-only.")
+        chat = self._ref_from_key(chat_key) if chat_key else None
+        if chat is not None:
+            return self._play_download_bg(
+                chat, chat_key,
+                "⏳ fetching that Instagram post in the background — "
+                "I'll send the file here when it's ready.",
+                lambda: self._instagram_produce(url, chat),
+                title=url[:80])
+        text, _sent = self._instagram_produce(url, None)
+        return text
+
+    #: Spotify collections resolve at most this many tracks per call —
+    #: each match is a full ladder run, and the summary says plainly
+    #: when a collection was capped.
+    _SPOTIFY_COLLECTION_CAP = 10
+
+    def _spotify_match(self, query: str, duration_hint: float = 0.0):
+        """One track through the /play full-source ladder.
+
+        Returns ``(item, attempts, source_label)`` — item None when
+        no full-track source has the track.  The preview law binds
+        here exactly as in /play: a resolution that is preview-only
+        or not downloadable is not a match, and the candidate sweep
+        only accepts full candidates.  Never raises.
+        """
+        from ...media.resolver import SourceResolver
+
+        attempts: list[str] = []
+        try:
+            resolver = SourceResolver(self.context)
+            res = resolver.resolve(query)
+            attempts.extend(res.attempts or [])
+            if res.ok and res.downloadable and not res.preview_only:
+                return ({
+                    "kind": res.kind, "path": res.path_or_url,
+                    "title": res.title or query,
+                    "artist": res.artist or "",
+                    "duration": res.duration or duration_hint or 0.0,
+                    "downloadable": True, "preview_only": False,
+                }, attempts, res.source_name or res.kind)
+            for c in resolver.search_candidates(query):
+                if c.downloadable and not getattr(
+                        c, "preview_only", False):
+                    return ({
+                        "kind": c.kind, "path": c.path_or_url,
+                        "title": c.title or query,
+                        "artist": c.artist or "",
+                        "duration": c.duration or duration_hint or 0.0,
+                        "downloadable": True, "preview_only": False,
+                    }, attempts, c.source_name or c.kind)
+        except Exception as e:  # noqa: BLE001
+            record_failure(
+                "runtime_media.RuntimeMediaMixin._spotify_match", e)
+        return None, attempts, ""
+
+    def _spotify_match_and_deliver(self, query: str, meta: Any,
+                                   chat: Any, chat_key: str,
+                                   track: Any = None) -> str:
+        """Match one Spotify-identified track and deliver it."""
+        from ...media.playback import PlaybackEngine
+
+        hint = float(getattr(track, "duration_s", 0.0) or 0.0)
+        item, attempts, label = self._spotify_match(query, hint)
+        name = (getattr(track, "title", "") or getattr(meta, "name", "")
+                or query)
+        artist = (getattr(track, "artist", "")
+                  or getattr(meta, "artist", "") or "")
+        head = f"🎧 “{name}”" + (f" — {artist}" if artist else "")
+        if item is None:
+            tried = "; ".join(str(a) for a in attempts[:8])
+            return (f"{head}\nfound it on Spotify, but no full-track "
+                    "source has it — the only audio out there is "
+                    "previews/metadata, and I won't pass a 30s preview "
+                    "off as the song."
+                    + (f"\ntried: {tried}" if tried else ""))
+        engine = PlaybackEngine(self.context)
+        added = engine._enqueue(
+            item["path"], item["kind"], item["title"],
+            artist=item["artist"], duration=item["duration"])
+        out = (f"{head}\nSpotify itself serves only previews — the "
+               f"full track was matched via {label}.")
+        if chat is not None:
+            return self._play_download_bg(
+                chat, chat_key, out,
+                lambda: self._play_send_in_chat_result(
+                    engine, added, out, chat),
+                title=str(added.get("title") or "audio"))
+        st = engine.play()
+        if st.get("status") == "playing":
+            out += f"\n▶ playing “{st.get('current', '')}” [{st.get('backend')}]"
+        else:
+            out += (f"\nqueued — playback status: {st.get('status')} "
+                    f"{st.get('error') or st.get('hint', '')}")
+        return out
+
+    def _spotify_send_many(self, engine: Any, items: list,
+                           summary: str, chat: Any) -> tuple[str, bool]:
+        """Chat produce for a Spotify collection: send each matched
+        file, then report the count honestly.  Never raises."""
+        sent = 0
+        failures: list[str] = []
+        for item in items:
+            text, ok = self._play_send_in_chat_result(
+                engine, item, "", chat)
+            if ok:
+                sent += 1
+            else:
+                failures.append(
+                    f"  - “{item.get('title') or 'track'}”: "
+                    f"{text.strip()}")
+        lines = [summary, f"sent {sent} of {len(items)} files"]
+        lines.extend(failures)
+        return "\n".join(lines), sent > 0
+
+    def _spotify_collection(self, meta: Any, chat: Any,
+                            chat_key: str) -> str:
+        """Match a Spotify album/playlist track by track (capped)."""
+        from ...media.playback import PlaybackEngine
+
+        cap = self._SPOTIFY_COLLECTION_CAP
+        tracks = list(meta.tracks or [])
+        shown = tracks[:cap]
+        engine = PlaybackEngine(self.context)
+        winners: list[tuple[Any, dict, str]] = []
+        misses: list[Any] = []
+        for track in shown:
+            item, _attempts, label = self._spotify_match(
+                track.query, track.duration_s)
+            if item is None:
+                misses.append(track)
+            else:
+                winners.append((track, item, label))
+        head = (f"🎧 Spotify {meta.kind} “{meta.name}”"
+                + (f" — {meta.artist}" if meta.artist else "")
+                + f" · {len(tracks)} tracks")
+        if len(tracks) > cap:
+            head += f" (fetching the first {cap} in full)"
+        lines = [head,
+                 f"matched {len(winners)} of {len(shown)} in full:"]
+        added_items = []
+        for track, item, label in winners:
+            added = engine._enqueue(
+                item["path"], item["kind"], item["title"],
+                artist=item["artist"], duration=item["duration"])
+            added_items.append(added)
+            lines.append(f"  ✓ “{track.title}”"
+                         + (f" — {track.artist}" if track.artist else "")
+                         + f" · via {label}")
+        if misses:
+            lines.append("no full-track match (previews/metadata only):")
+            for track in misses:
+                lines.append(f"  ✗ “{track.title}”"
+                             + (f" — {track.artist}"
+                                if track.artist else ""))
+        summary = "\n".join(lines)
+        if chat is not None:
+            if not added_items:
+                return summary
+            return self._play_download_bg(
+                chat, chat_key, summary,
+                lambda: self._spotify_send_many(
+                    engine, added_items, summary, chat),
+                title=meta.name or "spotify collection")
+        if added_items:
+            st = engine.play()
+            if st.get("status") == "playing":
+                summary += (f"\n▶ playing “{st.get('current', '')}” "
+                            f"[{st.get('backend')}]")
+        return summary
+
+    def _control_spotify(self, tail: str, chat_key: str = "") -> str:
+        """/spotify <url> — identify a Spotify link, fetch it in full.
+
+        Spotify's own audio is DRM previews, so the honest shape is:
+        identify the track/album/playlist from the link (keyless,
+        from Spotify's public pages), then fetch the FULL track
+        through the /play full-source ladder and label where it
+        actually came from ("matched via YouTube").  A bare title
+        instead of a link runs the same match as a text search.
+        Playlists/albums resolve track by track, capped, with a
+        matched/failed summary.
+        """
+        from ...media import spotify_meta as sm
+
+        tail = (tail or "").strip()
+        if not tail:
+            return ("usage: /spotify <spotify url>\n"
+                    "paste a track, album or playlist link — I'll "
+                    "identify it on Spotify and fetch the full track "
+                    "from a downloadable source, labeled by where it "
+                    "came from. Spotify's own files are 30s previews; "
+                    "those are never sent.")
+        chat = self._ref_from_key(chat_key) if chat_key else None
+        ref = sm.parse_spotify_ref(tail)
+        if ref is None and "spoti.fi" in tail:
+            short = self._first_url(tail)
+            if short:
+                from ...media.downloader import expand_short_url
+                ref = sm.parse_spotify_ref(expand_short_url(short))
+        if ref is None:
+            # Bare text: a title search through the same ladder.
+            return self._spotify_match_and_deliver(
+                tail, None, chat, chat_key)
+        kind, sid = ref
+        meta = sm.fetch_spotify_meta(kind, sid)
+        if meta is None:
+            return ("couldn't identify that Spotify link — it may be "
+                    "dead, region-locked, or Spotify changed its "
+                    f"pages.\n{tail[:80]}")
+        if kind in ("track", "episode"):
+            track = meta.tracks[0] if meta.tracks else sm.SpotifyTrack(
+                title=meta.name, artist=meta.artist,
+                duration_s=meta.duration_s)
+            return self._spotify_match_and_deliver(
+                track.query, meta, chat, chat_key, track=track)
+        if not meta.tracks:
+            note = meta.note or "couldn't list its tracks"
+            return (f"🎧 Spotify {kind} “{meta.name}” — {note}. Paste a "
+                    "single track link and I'll fetch that one in full.")
+        return self._spotify_collection(meta, chat, chat_key)
+
+    def _control_aio(self, tail: str, chat_key: str = "") -> str:
+        """/aio <url> [audio] — all-in-one downloader.
+
+        Paste any supported link; the platform is detected from the
+        URL and routed to the same fetch /download uses (TikTok and
+        Instagram get their dedicated routes, Spotify gets
+        identify-and-match, everything else the universal chain).
+        A link no route reaches gets an honest refusal naming what
+        IS supported, up front — not a burned download chain.
+        """
+        from ...media.platforms import (
+            SUPPORTED_PLATFORMS,
+            detect_platform,
+            is_media_file_url,
+            platform_label,
+        )
+
+        tail = (tail or "").strip()
+        url = self._first_url(tail)
+        if not url:
+            return ("usage: /aio <url> [audio]\n"
+                    "paste a link from: "
+                    + ", ".join(platform_label(p)
+                                for p in SUPPORTED_PLATFORMS)
+                    + " — or any direct media file link.")
+        if not detect_platform(url) and not is_media_file_url(url):
+            host = re.sub(r"^https?://", "", url).split("/")[0]
+            return (f"I can't fetch from {host} — no download route "
+                    "reaches that site.\nwhat I can fetch: "
+                    + ", ".join(platform_label(p)
+                                for p in SUPPORTED_PLATFORMS)
+                    + ", or a direct media file link (mp4/mp3/…).")
+        return self._control_download(tail, chat_key)
 
     # ── background downloads (owner decision 2026-10-19) ────────────────
     #

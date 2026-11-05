@@ -667,6 +667,11 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "distribute": (0, 1),   # /distribute [song.wav] | legal
     "play": (0, None),       # /play <paths…> | status | queue | pause | …
     "download": (1, None),   # /download <url> [audio] — any-URL media downloader
+    "tiktok": (1, None),     # /tiktok <url> [audio] — TikTok downloader (watermark-honest routes)
+    "ttdl": (1, None),       # alias of /tiktok
+    "instagram": (1, None),  # /instagram <url> — public reel/post downloader (login wall named)
+    "spotify": (1, None),    # /spotify <url> — identify on Spotify, fetch the full track elsewhere
+    "aio": (1, None),        # /aio <url> [audio] — all-in-one: any supported link, routed by platform
     "video": (0, None),      # /video <query> | download <url> | platforms
     "director": (0, None),   # /director cover|plan|shoot|regen|show — coverage → design → shoot → QA
     "caption": (0, 1),       # /caption [style] — burn AI subtitles into a video (attach or path)
@@ -2898,11 +2903,55 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "download": {"what": "any-URL media downloader: paste a link, get the file. "
                          "YouTube, TikTok, Instagram, X/Twitter, SoundCloud, "
                          "direct mp3/mp4 links — yt-dlp handles 1000+ sites, "
-                         "with proxy and browser fallback stages. The file is "
-                         "sent to this chat.",
+                         "with proxy and browser fallback stages. Spotify links "
+                         "identify-and-match (full track from a real source); "
+                         "TikTok/Instagram links take their dedicated routes. "
+                         "The file is sent to this chat.",
                  "usage": "/download <url> [audio]",
                  "example": "/download https://youtube.com/watch?v=... audio",
-                 "related": "/play (play/queue audio) · /video download (video search download)"},
+                 "related": "/play (play/queue audio) · /video download (video search download) · /tiktok · /instagram · /spotify · /aio"},
+    "tiktok": {"what": "TikTok downloader: paste a TikTok link (share links "
+                       "included), get the video file. Fetches the "
+                       "no-watermark rendition when a route genuinely "
+                       "provides one and says so; when the watermarked "
+                       "rendition is all a route has, the reply says that "
+                       "instead — the label is never upgraded.",
+               "usage": "/tiktok <url> [audio]",
+               "example": "/tiktok https://vm.tiktok.com/ZMhAbCdEf/",
+               "related": "/download (any link) · /aio (any supported link)"},
+    "ttdl": {"what": "alias of /tiktok — TikTok downloader.",
+             "usage": "/ttdl <url> [audio]",
+             "example": "/ttdl https://www.tiktok.com/@user/video/1234567890",
+             "related": "/tiktok · /download"},
+    "instagram": {"what": "Instagram downloader: public reels and posts "
+                          "come down as files. Private, story and "
+                          "age-gated posts hit Instagram's login wall — the "
+                          "reply names the wall; Devon holds no Instagram "
+                          "login for downloads and invents none.",
+                  "usage": "/instagram <url>",
+                  "example": "/instagram https://www.instagram.com/reel/AbCdEfGh/",
+                  "related": "/download (any link) · /aio (any supported link)"},
+    "spotify": {"what": "Spotify identify-and-match: a Spotify link names "
+                        "the track/album/playlist (from Spotify's public "
+                        "pages — Spotify's own audio is DRM 30s previews, "
+                        "never sent), then the FULL track is fetched "
+                        "through the /play source ladder and labeled by "
+                        "its real source ('matched via YouTube'). "
+                        "Playlists/albums resolve track by track (cap 10) "
+                        "with a matched/failed summary.",
+                "usage": "/spotify <url>",
+                "example": "/spotify https://open.spotify.com/track/0TnOYISbd1XYRBk9myaseg",
+                "related": "/play (the ladder it matches through) · /download (routes Spotify links here)"},
+    "aio": {"what": "all-in-one downloader: paste any supported link — "
+                    "TikTok, Instagram, Spotify, YouTube, SoundCloud, "
+                    "X/Twitter, Facebook, Vimeo, Dailymotion, Twitch, "
+                    "Reddit, Audiomack, Bandcamp, or a direct media file — "
+                    "and it routes to the right fetch, the same routes "
+                    "/download uses. A site no route reaches gets an "
+                    "honest refusal up front.",
+            "usage": "/aio <url> [audio]",
+            "example": "/aio https://www.tiktok.com/@user/video/1234567890",
+            "related": "/download (the universal surface) · /tiktok · /instagram · /spotify"},
     "video": {"what": "VideoFinder: finds videos across the open web — "
                       "multi-engine search, ranked by video-URL confidence + "
                       "relevance, enriched with oEmbed (author/thumbnail) and "
@@ -3053,7 +3102,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate"]),
     ("media system", ["music", "distribute", "play", "video", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
-                      "download", "shorts", "caption", "imggen", "sham", "musicnote",
+                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "caption", "imggen", "sham", "musicnote",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion",
@@ -3310,7 +3359,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "deliver", "checkpoint", "checkpoints", "rewind", "novel", "books"]),
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
-      "distribute", "dj", "download", "produce", "like", "dislike",
+      "distribute", "dj", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
       "shorts", "caption", "imggen", "sham", "musicnote",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
       "react"]),
@@ -3624,6 +3673,11 @@ LIST_ONELINERS: dict[str, str] = {
     "distribute": "release walk-through: /distribute [song.wav] | legal",
     "dj": "radio show with voice breaks: /dj [trending|<genre>]",
     "download": "any-URL media downloader: /download <url> [audio]",
+    "tiktok": "TikTok downloader (no-watermark route first, labeled honestly): /tiktok <url> [audio]",
+    "ttdl": "alias of /tiktok: /ttdl <url> [audio]",
+    "instagram": "Instagram reel/post downloader (public; login wall named): /instagram <url>",
+    "spotify": "identify a Spotify link, fetch the full track from a real source: /spotify <url>",
+    "aio": "all-in-one downloader — any supported link, routed by platform: /aio <url> [audio]",
     "exness": "Exness trading: /exness balance|positions|price|buy|sell|close",
     "heal": "self-healing loop: /heal [--dry] | /heal <cmd> — diagnose + auto-fix broken commands",
     "immune": "defensive immune system: /immune status|scan|antibodies|quarantine|disarm|arrest|fever|drift|casefile",
