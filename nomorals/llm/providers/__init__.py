@@ -1,75 +1,42 @@
-"""Provider backends."""
+"""Provider backends.
+
+Construction is data-driven (Echelon Wave 4): :func:`build_provider`
+walks the declarative registry in :mod:`.registry`, where every
+provider — kind, aliases, class path, transport, auth shape,
+capabilities, roster hook — is a :class:`ProviderSpec` entry.  Adding
+a provider is a data-only change; see the registry module.
+"""
 
 from __future__ import annotations
 
-from typing import Any
-
 from ..base import LLMProvider
+from .registry import (
+    AuthSpec,
+    ProviderSpec,
+    Verification,
+    build_provider,
+    canonical_kind,
+    expected_kinds,
+    get_provider_spec,
+    list_provider_specs,
+    register_provider_spec,
+    render_status_markdown,
+    require_provider_spec,
+    unregister_provider_spec,
+)
 
-
-def build_provider(kind: str, **kwargs: Any) -> LLMProvider:
-    """Instantiate a provider by name.
-
-    Imports are deferred so an unused backend never costs an import, and a missing
-    optional dependency in one backend cannot break the others.
-
-    Raises :class:`ValueError` for a missing/blank kind or an unknown one —
-    never an ``AttributeError`` off ``None``.
-    """
-    if not isinstance(kind, str) or not kind.strip():
-        raise ValueError(
-            f"provider kind must be a non-empty string, got {kind!r}"
-        )
-    kind = kind.strip().lower()
-    if kind in {"mock", "offline", "test"}:
-        from .mock import MockProvider
-
-        return MockProvider(**kwargs)
-    if kind in {"ollama", "ollama_native"}:
-        from .ollama import OllamaProvider
-
-        return OllamaProvider(**kwargs)
-    if kind == "groq":
-        from .groq import GroqProvider
-
-        return GroqProvider(**kwargs)
-    if kind in {"anthropic", "claude"}:
-        from .anthropic import AnthropicProvider
-
-        return AnthropicProvider(**kwargs)
-    if kind == "deepseek":
-        from .deepseek import DeepSeekProvider
-
-        return DeepSeekProvider(**kwargs)
-    if kind == "gemini":
-        from .gemini import GeminiProvider
-
-        return GeminiProvider(**kwargs)
-    if kind == "openrouter":
-        from .openrouter import OpenRouterProvider
-
-        return OpenRouterProvider(**kwargs)
-    if kind in {"openai", "openai_compat", "vllm", "lmstudio", "ollama_compat"}:
-        from .openai_compat import OpenAICompatProvider
-
-        return OpenAICompatProvider(**kwargs)
-    if kind in {"hf", "hf_serverless", "huggingface", "hf_endpoint"}:
-        from .hf_serverless import HFServerlessProvider
-
-        return HFServerlessProvider(**kwargs)
-    if kind in {"llama_cpp", "llamacpp", "gguf"}:
-        from .llama_cpp import LlamaCppProvider
-
-        return LlamaCppProvider(**kwargs)
-    if kind in {"ocr", "tesseract"}:
-        from .ocr import OCRProvider
-
-        return OCRProvider(**kwargs)
-    raise ValueError(
-        "unknown provider "
-        f"{kind!r}; expected mock | ollama | groq | anthropic | deepseek | "
-        "gemini | openrouter | openai_compat | hf_serverless | llama_cpp | ocr"
-    )
-
-
-__all__ = ["LLMProvider", "build_provider"]
+__all__ = [
+    "AuthSpec",
+    "LLMProvider",
+    "ProviderSpec",
+    "Verification",
+    "build_provider",
+    "canonical_kind",
+    "expected_kinds",
+    "get_provider_spec",
+    "list_provider_specs",
+    "register_provider_spec",
+    "render_status_markdown",
+    "require_provider_spec",
+    "unregister_provider_spec",
+]

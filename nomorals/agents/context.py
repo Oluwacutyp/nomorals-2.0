@@ -28,6 +28,12 @@ __all__ = ["AgentContext", "build_context", "build_router",
 
 _log = get_logger(__name__)
 
+#: Provider kinds whose only credential source is the environment (no
+#: LLMSettings field carries their key).  build_router skips them
+#: quietly when no key is set; the env names themselves come from each
+#: provider's registry spec (``ProviderSpec.auth.env_keys``, Wave 4).
+_ENV_KEYED_KINDS = frozenset({"anthropic", "gemini", "deepseek"})
+
 
 @dataclass
 class AgentContext:
@@ -487,7 +493,7 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
     setup wizard (``nm setup``) rebuilds the router after writing new
     credentials, and partner-runtime hot-swaps use it for live model changes.
     """
-    from ..llm.providers import build_provider
+    from ..llm.providers import build_provider, canonical_kind, get_provider_spec
     from ..llm.router import LLMRouter
 
     if db is not None:
@@ -496,9 +502,12 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
     llm = settings.llm
 
     def kwargs_for(kind: str) -> dict[str, Any]:
-        kind = kind.lower()
+        # Kinds canonicalize through the provider registry (Wave 4):
+        # alias sets live in the registry's ProviderSpec entries, not in
+        # this chain.  Unknown kinds keep the legacy default branch.
+        kind = canonical_kind(kind) or kind.lower()
         common = {"timeout": llm.timeout}
-        if kind in {"hf", "hf_serverless", "huggingface", "hf_endpoint"}:
+        if kind == "hf_serverless":
             return {
                 **common,
                 "token": llm.hf_token,
@@ -506,7 +515,7 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
                 "base_url": llm.hf_base_url,
                 "endpoint_url": llm.hf_endpoint_url,
             }
-        if kind in {"llama_cpp", "llamacpp", "gguf"}:
+        if kind == "llama_cpp":
             # Prefer the local GGUF's filename as the model label when the
             # owner configured NM_LLM_LOCAL_MODEL — clearer in logs than "local".
             _lm = str(getattr(llm, "local_model", "") or "").strip()
@@ -547,7 +556,7 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
             if openrouter_fallbacks:
                 kwargs["fallback_models"] = openrouter_fallbacks
             return kwargs
-        if kind in {"mock", "offline", "test"}:
+        if kind == "mock":
             return {**common, "model": llm.openai_model or "mock-7b"}
         if kind in {"anthropic", "gemini", "deepseek"}:
             # These providers own their endpoint, default model and env
@@ -584,14 +593,13 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
             return
         # Same rule for the providers whose keys live only in the env
         # (no LLMSettings field): no key → skip quietly, never register
-        # a provider that can only 401 at call time.
-        for keyed, env_names in (
-            ("anthropic", ("ANTHROPIC_API_KEY", "NM_ANTHROPIC_API_KEY")),
-            ("gemini", ("GEMINI_API_KEY", "NM_GEMINI_API_KEY")),
-            ("deepseek", ("DEEPSEEK_API_KEY", "NM_DEEPSEEK_API_KEY")),
-        ):
-            if kind == keyed and not any(
-                    os.environ.get(n) for n in env_names):
+        # a provider that can only 401 at call time.  The env names are
+        # the registry spec's auth shape (Wave 4) — data, not a second
+        # hardcoded table here.
+        _spec = get_provider_spec(kind)
+        if _spec is not None and _spec.id in _ENV_KEYED_KINDS:
+            env_names = _spec.auth.env_keys
+            if env_names and not any(os.environ.get(n) for n in env_names):
                 _log.info("skipping %s fallback: %s not set",
                           kind, env_names[0])
                 return
