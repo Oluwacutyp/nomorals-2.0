@@ -80,10 +80,17 @@ class UpscaleOpTests(unittest.TestCase):
 
 class BackendGenerateTests(unittest.TestCase):
     def test_base_generate_raises(self):
-        from nomorals.media_edit.generate import GenerativeBackend
+        # §1.1e contract: an unimplemented op is a typed
+        # GenerativeEditError (kind="unsupported_op") with a
+        # machine-readable code — never a bare NotImplementedError
+        # leaking to consumers.
+        from nomorals.media_edit.generate import (
+            GenerativeBackend, GenerativeEditError)
         be = GenerativeBackend()
-        with self.assertRaises(NotImplementedError):
+        with self.assertRaises(GenerativeEditError) as cm:
             be.generate("test")
+        self.assertEqual(cm.exception.kind, "unsupported_op")
+        self.assertEqual(cm.exception.code, "media.generative")
 
     def test_hf_generate_builds_params(self):
         from nomorals.media_edit.generate import HFInferenceBackend

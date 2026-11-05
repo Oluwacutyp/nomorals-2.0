@@ -43,23 +43,86 @@ providers don't take masks natively).
 
 No backend is contacted at import time, and no real model call happens
 without explicit configuration.
+
+Every backend also honors the §1.1e contract (the craft-ai provider
+trait, Devon-shaped): ``models()`` / ``estimate()`` / ``submit()`` /
+``poll()`` / ``cancel()`` returning comparable data — see
+:class:`ModelInfo`, :class:`Estimate`, :class:`JobStatus` — and every
+failure is a :class:`GenerativeEditError` carrying a machine-readable
+``kind`` (see :data:`ERROR_KINDS`) separate from its human message.
 """
 
 from __future__ import annotations
 
 import difflib
 import os
+import threading
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..core.errors import NoMoralsError
 from ..core.logging_setup import get_logger
 from .images import MediaEditError, _require_pillow
 
 _log = get_logger(__name__)
 
 
-class GenerativeEditError(MediaEditError):
-    """Generative edit unavailable or failed."""
+class GenerativeEditError(MediaEditError, NoMoralsError):
+    """Generative edit unavailable or failed.
+
+    Also a :class:`~nomorals.core.errors.NoMoralsError`, so every failure
+    carries the repo's typed shape — ``code`` (stable, machine-readable),
+    ``details`` and ``retryable`` — plus a contract ``kind`` (see
+    :data:`ERROR_KINDS`) kept separate from the human message: callers
+    branch on ``exc.kind`` / ``exc.code``, never on message text.
+    """
+
+    code = "media.generative"
+
+    def __init__(self, message: str = "", *,
+                 kind: str = "backend_error",
+                 details: dict[str, Any] | None = None,
+                 retryable: bool | None = None) -> None:
+        super().__init__(message, details=details, retryable=retryable)
+        self.kind = kind
+        self.details.setdefault("kind", kind)
+
+
+#: Machine-readable failure kinds for the backend contract (the Echelon
+#: rule: kinds are data, messages are prose). ``contract_error_kind()``
+#: maps any exception a backend raises onto one of these.
+ERROR_KINDS = (
+    "backend_error",       # unclassified backend failure
+    "invalid_request",     # caller error: bad op name, bad parameters
+    "unsupported_op",      # the backend does not implement this op
+    "unavailable",         # backend cannot run here: dep/server/key absent
+    "missing_credential",  # a credential is not configured at all
+    "provider_error",      # the upstream provider ran and failed
+    "busy",                # a bounded resource (GPU lock) is held
+    "timeout",             # the job exceeded its time budget
+    "cancelled",           # the job was cancelled
+    "unknown_job",         # poll/cancel named a job this backend never saw
+)
+
+
+def contract_error_kind(exc: BaseException) -> str:
+    """The contract kind for any exception escaping a backend verb.
+
+    ``GenerativeEditError`` carries its kind; the repo's typed errors map
+    by class/code (a missing credential stays distinguishable from a
+    rejected one); anything else is an unclassified backend error.
+    """
+    kind = getattr(exc, "kind", None)
+    if isinstance(kind, str) and kind:
+        return kind
+    from ..core.errors import MissingCredentialError
+    if isinstance(exc, MissingCredentialError):
+        return "missing_credential"
+    if isinstance(exc, NoMoralsError):
+        return exc.code
+    return "backend_error"
 
 
 DEFAULT_HF_MODEL = "black-forest-labs/FLUX.1-Kontext-dev"
@@ -193,14 +256,135 @@ def _resolve_gen_params(prompt: str,
 
 
 # ---------------------------------------------------------------------------
+# backend contract (INTEGRATION_PLAN §1.1e — the craft-ai provider trait,
+# Devon-shaped: models / estimate / submit / poll / cancel)
+# ---------------------------------------------------------------------------
+
+#: The ops every backend contract speaks about. A backend declares the
+#: subset it truly implements in ``supported_ops``; the rest fail typed.
+CONTRACT_OPS = ("edit", "generate", "img2img", "inpaint")
+
+#: Job states a ``poll()`` can report (craft-ai's JobState, Devon words).
+JOB_STATES = ("queued", "running", "succeeded", "failed",
+              "cancelled", "unknown")
+
+#: States after which a job never changes again.
+_TERMINAL_STATES = ("succeeded", "failed", "cancelled")
+
+
+@dataclass(frozen=True)
+class ModelInfo:
+    """One model a backend can serve — comparable data, not prose."""
+
+    id: str
+    #: subset of CONTRACT_OPS this model serves on this backend
+    ops: tuple[str, ...] = ()
+    #: "local" (this machine), "server" (a host we run), "remote" (API)
+    locality: str = ""
+    #: True when each call costs real money/credits
+    paid: bool = False
+    notes: str = ""
+
+
+@dataclass(frozen=True)
+class Estimate:
+    """What one call will cost — honestly.
+
+    Every field is either a real number with its source named in
+    ``basis`` or ``None`` with its name and reason in ``unknowns``.
+    A fabricated number is a contract violation: when a backend cannot
+    know, it says so here instead of guessing.
+    """
+
+    money: float | None = None    # USD per call
+    credits: float | None = None  # provider credits per call
+    seconds: float | None = None  # expected wall-clock per call
+    basis: str = ""               # where every non-None number came from
+    unknowns: tuple[str, ...] = ()
+
+    @classmethod
+    def unknown(cls, *reasons: str) -> "Estimate":
+        """An estimate that knows nothing — every field a named unknown."""
+        return cls(unknowns=(
+            "money: " + (reasons[0] if reasons else "no price data"),
+            "credits: " + (reasons[1] if len(reasons) > 1
+                           else "no price data"),
+            "seconds: " + (reasons[2] if len(reasons) > 2
+                           else "no timing data"),
+        ))
+
+
+@dataclass(frozen=True)
+class JobRef:
+    """Handle for one submitted job. ``job_id`` is the backend's own id
+    (for comfy it is the server's prompt id, so refs survive instances)."""
+
+    backend: str
+    job_id: str
+    op: str
+
+
+@dataclass
+class JobStatus:
+    """The comparable truth about one job (craft-ai's JobState + result).
+
+    ``state`` is one of :data:`JOB_STATES`; ``progress`` is 0..1 or
+    ``None`` when the backend cannot know; on failure ``error_kind`` is
+    a machine-readable :data:`ERROR_KINDS` value and ``error`` the human
+    text — the two never swap roles.
+    """
+
+    state: str
+    progress: float | None = None
+    result: Any = None
+    error_kind: str | None = None
+    error: str | None = None
+    detail: str = ""
+
+
+@dataclass
+class _JobRecord:
+    """One job in a synchronous backend's in-memory table."""
+
+    ref: JobRef
+    state: str = "running"
+    result: Any = None
+    exc: BaseException | None = None
+    detail: str = ""
+
+
+# ---------------------------------------------------------------------------
 # backend interface
 # ---------------------------------------------------------------------------
 
 class GenerativeBackend:
     """edit(image, instruction, ...) -> new PIL image.
-    generate(prompt, ...) -> new PIL image (text-to-image)."""
+    generate(prompt, ...) -> new PIL image (text-to-image).
+
+    Plus the §1.1e contract every backend honors —
+    ``models() / estimate() / submit() / poll() / cancel()`` — so status
+    and planning read comparable data instead of per-backend prose. The
+    synchronous ops above stay the execution path; the contract verbs
+    are introspection and job handles over them.
+    """
 
     name = "base"
+
+    #: Ops (subset of CONTRACT_OPS) this backend truly implements.
+    supported_ops: tuple[str, ...] = CONTRACT_OPS
+    #: True only when cancel() can really stop a running job (comfy).
+    #: Everyone else reports the inability through cancel()'s status.
+    cancellable: bool = False
+    #: Named contract gaps that remain after this port — declared here,
+    #: in code, never discovered by callers the hard way.
+    contract_gaps: tuple[str, ...] = ()
+
+    # -- synchronous ops (the original interface) ------------------------
+
+    def _unsupported(self, op: str) -> GenerativeEditError:
+        return GenerativeEditError(
+            f"generative backend '{self.name}' does not support {op}",
+            kind="unsupported_op")
 
     def edit(self, image: Any, instruction: str, *,
              mask: Any | None = None,
@@ -211,7 +395,7 @@ class GenerativeBackend:
              guidance_scale: float | None = None,
              width: int | None = None,
              height: int | None = None) -> Any:
-        raise NotImplementedError
+        raise self._unsupported("edit")
 
     def generate(self, prompt: str, *,
                  seed: int | None = None,
@@ -222,7 +406,7 @@ class GenerativeBackend:
                  height: int | None = None,
                  n: int = 1) -> list[Any]:
         """Text-to-image. Returns a list of PIL images (length n)."""
-        raise NotImplementedError
+        raise self._unsupported("generate")
 
     def img2img(self, image: Any, prompt: str, *,
                 strength: float = 0.6,
@@ -235,7 +419,7 @@ class GenerativeBackend:
         strength 0 = near-copy, 1 = near-total regeneration. Used for
         style transfer and variations.
         """
-        raise NotImplementedError
+        raise self._unsupported("img2img")
 
     def inpaint(self, image: Any, mask: Any, prompt: str, *,
                 seed: int | None = None,
@@ -247,10 +431,150 @@ class GenerativeBackend:
         ``mask``: (l,t,r,b) box, mask image path, or PIL L image
         (white = regenerate). The unmasked region is preserved.
         """
-        raise NotImplementedError
+        raise self._unsupported("inpaint")
 
     def describe(self) -> str:
         return f"generative backend '{self.name}'"
+
+    # -- contract verbs (§1.1e) ------------------------------------------
+
+    def _contract_model_id(self) -> str | None:
+        """The configured model id, when the backend has exactly one.
+
+        Backends with a real catalogue (native's registry, comfy's
+        server) override :meth:`models` instead.
+        """
+        return None
+
+    def models(self) -> list[ModelInfo]:
+        """Models this backend can serve right now, as data.
+
+        Default: the single configured model (or an empty list when the
+        backend declares none — an honest empty, never an invented id).
+        """
+        mid = self._contract_model_id()
+        if not mid:
+            return []
+        return [ModelInfo(id=mid, ops=tuple(self.supported_ops))]
+
+    def estimate(self, op: str = "generate", **params: Any) -> Estimate:
+        """Cost/time for one ``op`` call — real numbers or named unknowns.
+
+        Default: the backend publishes no price/timing data, so every
+        field is a named unknown. Backends override with what they can
+        actually know (local backends know the call is free; nobody
+        here invents a duration).
+        """
+        if op not in CONTRACT_OPS:
+            raise GenerativeEditError(
+                f"unknown generative op {op!r}; use {CONTRACT_OPS}",
+                kind="invalid_request")
+        return Estimate.unknown(
+            f"backend '{self.name}' publishes no price data",
+            f"backend '{self.name}' publishes no price data",
+            f"backend '{self.name}' publishes no timing data")
+
+    # -- synchronous job machinery (submit/poll/cancel over the ops) -----
+
+    @property
+    def _job_table(self) -> dict[str, _JobRecord]:
+        table = self.__dict__.get("_contract_job_table")
+        if table is None:
+            table = self.__dict__["_contract_job_table"] = {}
+        return table
+
+    @property
+    def _job_lock(self) -> threading.Lock:
+        lock = self.__dict__.get("_contract_job_lock")
+        if lock is None:
+            lock = self.__dict__["_contract_job_lock"] = threading.Lock()
+        return lock
+
+    def _new_job_ref(self, op: str) -> JobRef:
+        return JobRef(backend=self.name,
+                      job_id=f"{self.name}-{uuid.uuid4().hex[:16]}",
+                      op=op)
+
+    def _record_job(self, record: _JobRecord) -> JobRef:
+        with self._job_lock:
+            self._job_table[record.ref.job_id] = record
+        return record.ref
+
+    def _lookup_job(self, job: JobRef | str) -> _JobRecord:
+        job_id = job.job_id if isinstance(job, JobRef) else str(job)
+        record = self._job_table.get(job_id)
+        if record is None:
+            raise GenerativeEditError(
+                f"backend '{self.name}' has no job {job_id!r} — jobs are "
+                "known to the instance that submitted them",
+                kind="unknown_job")
+        return record
+
+    @staticmethod
+    def _status_of(record: _JobRecord) -> JobStatus:
+        if record.state == "succeeded":
+            return JobStatus(state="succeeded", progress=1.0,
+                             result=record.result, detail=record.detail)
+        if record.state == "failed":
+            exc = record.exc
+            return JobStatus(
+                state="failed", progress=1.0,
+                error_kind=contract_error_kind(exc) if exc else "backend_error",
+                error=str(exc) if exc else None,
+                detail=record.detail)
+        return JobStatus(state=record.state, detail=record.detail)
+
+    def submit(self, op: str, **params: Any) -> JobRef:
+        """Start one ``op`` job and return its ref.
+
+        Synchronous backends execute inline (craft-ai's trait is
+        synchronous by design): the job is already terminal when this
+        returns, and :meth:`poll` reports the outcome — a failed op is
+        a failed *job* (``error_kind`` + message via poll), never a
+        hidden exception. Only a malformed request raises: an op name
+        outside :data:`CONTRACT_OPS`. A known op this backend does not
+        implement becomes a failed job with kind ``unsupported_op``.
+        """
+        if op not in CONTRACT_OPS:
+            raise GenerativeEditError(
+                f"unknown generative op {op!r}; use {CONTRACT_OPS}",
+                kind="invalid_request")
+        ref = self._new_job_ref(op)
+        record = _JobRecord(ref=ref)
+        if op not in self.supported_ops:
+            record.state = "failed"
+            record.exc = self._unsupported(op)
+            return self._record_job(record)
+        try:
+            record.result = getattr(self, op)(**params)
+            record.state = "succeeded"
+        except Exception as exc:  # noqa: BLE001 - the job records it
+            record.state = "failed"
+            record.exc = exc
+        return self._record_job(record)
+
+    def poll(self, job: JobRef | str) -> JobStatus:
+        """Current status of a job submitted through this instance."""
+        return self._status_of(self._lookup_job(job))
+
+    def cancel(self, job: JobRef | str) -> JobStatus:
+        """Cancel a job — actually, or with the inability stated.
+
+        Synchronous backends run each job to completion inside
+        :meth:`submit`, so there is never a running job to stop: the
+        returned status keeps the job's real (terminal) state and its
+        ``detail`` says plainly that a running call cannot be
+        interrupted on this backend. Backends with a real job queue
+        (comfy) override this and cancel for real.
+        """
+        record = self._lookup_job(job)
+        status = self._status_of(record)
+        if status.state in _TERMINAL_STATES:
+            status.detail = (
+                f"job already {status.state}; backend '{self.name}' "
+                "executes synchronously, so a running call cannot be "
+                "interrupted")
+        return status
 
 
 def _as_mask(image_size: tuple[int, int], mask: Any) -> Any:
@@ -306,7 +630,8 @@ class HFInferenceBackend(GenerativeBackend):
             raise GenerativeEditError(
                 "generative edit needs huggingface_hub: "
                 "pip install huggingface_hub (or set MEDIA_GEN_BACKEND=diffusers "
-                "with diffusers+torch installed)") from exc
+                "with diffusers+torch installed)",
+                kind="unavailable") from exc
         kwargs: dict[str, Any] = {}
         if self.provider:
             kwargs["provider"] = self.provider
@@ -342,7 +667,8 @@ class HFInferenceBackend(GenerativeBackend):
                     service="huggingface", env_key="HF_TOKEN",
                     feature="media_edit.hf") from exc
         raise GenerativeEditError(
-            f"HF {action} failed for model {self.model!r}: {exc}") from exc
+            f"HF {action} failed for model {self.model!r}: {exc}",
+            kind="provider_error") from exc
 
     def edit(self, image: Any, instruction: str, *,
              mask: Any | None = None,
@@ -354,7 +680,7 @@ class HFInferenceBackend(GenerativeBackend):
              width: int | None = None,
              height: int | None = None) -> Any:
         if not instruction or not instruction.strip():
-            raise GenerativeEditError("generative edit needs an instruction")
+            raise GenerativeEditError("generative edit needs an instruction", kind="invalid_request")
         client = self._client()
         params: dict[str, Any] = {"strength": float(strength)}
         if seed is not None:
@@ -390,9 +716,9 @@ class HFInferenceBackend(GenerativeBackend):
                  n: int = 1) -> list[Any]:
         """Text-to-image via huggingface_hub.InferenceClient.text_to_image."""
         if not prompt or not prompt.strip():
-            raise GenerativeEditError("text-to-image needs a prompt")
+            raise GenerativeEditError("text-to-image needs a prompt", kind="invalid_request")
         if n < 1:
-            raise GenerativeEditError("n must be >= 1")
+            raise GenerativeEditError("n must be >= 1", kind="invalid_request")
         client = self._client()
         params: dict[str, Any] = {}
         if seed is not None:
@@ -431,10 +757,10 @@ class HFInferenceBackend(GenerativeBackend):
                 guidance_scale: float | None = None) -> Any:
         """Image-to-image / style transfer via image_to_image."""
         if not prompt or not prompt.strip():
-            raise GenerativeEditError("img2img needs a prompt")
+            raise GenerativeEditError("img2img needs a prompt", kind="invalid_request")
         if not 0 < strength <= 1:
             raise GenerativeEditError(
-                f"img2img strength must be in (0, 1], got {strength}")
+                f"img2img strength must be in (0, 1], got {strength}", kind="invalid_request")
         client = self._client()
         params: dict[str, Any] = {"strength": float(strength)}
         if seed is not None:
@@ -452,7 +778,8 @@ class HFInferenceBackend(GenerativeBackend):
                 image, prompt=prompt, model=self.model, **params)
         except Exception as exc:
             raise GenerativeEditError(
-                f"HF img2img failed for model {self.model!r}: {exc}") from exc
+                f"HF img2img failed for model {self.model!r}: {exc}",
+                kind="provider_error") from exc
         return result.convert("RGB")
 
     def inpaint(self, image: Any, mask: Any, prompt: str, *,
@@ -468,7 +795,7 @@ class HFInferenceBackend(GenerativeBackend):
         unmasked region is pixel-identical to the original.
         """
         if not prompt or not prompt.strip():
-            raise GenerativeEditError("inpaint needs a prompt")
+            raise GenerativeEditError("inpaint needs a prompt", kind="invalid_request")
         regenerated = self.img2img(
             image, prompt, strength=0.85, seed=seed,
             negative_prompt=negative_prompt, steps=steps,
@@ -478,6 +805,29 @@ class HFInferenceBackend(GenerativeBackend):
     def describe(self) -> str:
         return (f"generative backend 'hf' (model={self.model}, "
                 f"provider={self.provider or 'default'})")
+
+    # -- contract (§1.1e) --------------------------------------------------
+
+    def _contract_model_id(self) -> str | None:
+        return self.model
+
+    def models(self) -> list[ModelInfo]:
+        return [ModelInfo(
+            id=self.model, ops=tuple(self.supported_ops), locality="remote",
+            notes=("serverless; billing depends on the configured "
+                   "provider and the account's HF plan"))]
+
+    def estimate(self, op: str = "generate", **params: Any) -> Estimate:
+        if op not in CONTRACT_OPS:
+            raise GenerativeEditError(
+                f"unknown generative op {op!r}; use {CONTRACT_OPS}",
+                kind="invalid_request")
+        return Estimate.unknown(
+            "HF Inference pricing depends on the provider and plan; "
+            "no price table is published in-repo",
+            "HF Inference pricing depends on the provider and plan; "
+            "no price table is published in-repo",
+            "serverless latency varies with provider load and cold starts")
 
 
 # ---------------------------------------------------------------------------
@@ -532,7 +882,8 @@ class DiffusersBackend(GenerativeBackend):
             raise GenerativeEditError(
                 "generative edit needs diffusers+torch: "
                 "pip install diffusers torch (or set MEDIA_GEN_BACKEND=hf "
-                "with HF_TOKEN in the environment)") from exc
+                "with HF_TOKEN in the environment)",
+                kind="unavailable") from exc
         self._pipe = self._load_pipe(AutoPipelineForImage2Image, "_i2i_pipe")
         return self._pipe
 
@@ -546,7 +897,7 @@ class DiffusersBackend(GenerativeBackend):
              width: int | None = None,
              height: int | None = None) -> Any:
         if not instruction or not instruction.strip():
-            raise GenerativeEditError("generative edit needs an instruction")
+            raise GenerativeEditError("generative edit needs an instruction", kind="invalid_request")
         import torch
         pipe = self._pipe_for(image)
         rgb = image.convert("RGB")
@@ -568,8 +919,8 @@ class DiffusersBackend(GenerativeBackend):
                           generator=generator, **kwargs).images[0]
         except Exception as exc:
             raise GenerativeEditError(
-                f"diffusers edit failed for model {self.model!r}: {exc}"
-            ) from exc
+                f"diffusers edit failed for model {self.model!r}: {exc}",
+                kind="provider_error") from exc
         return _apply_mask(image, result, mask)
 
     def generate(self, prompt: str, *,
@@ -582,16 +933,16 @@ class DiffusersBackend(GenerativeBackend):
                  n: int = 1) -> list[Any]:
         """Text-to-image via diffusers AutoPipelineForText2Image."""
         if not prompt or not prompt.strip():
-            raise GenerativeEditError("text-to-image needs a prompt")
+            raise GenerativeEditError("text-to-image needs a prompt", kind="invalid_request")
         if n < 1:
-            raise GenerativeEditError("n must be >= 1")
+            raise GenerativeEditError("n must be >= 1", kind="invalid_request")
         import torch
         try:
             from diffusers import AutoPipelineForText2Image
         except ImportError as exc:
             raise GenerativeEditError(
-                "text-to-image needs diffusers: pip install diffusers torch"
-            ) from exc
+                "text-to-image needs diffusers: pip install diffusers torch",
+                kind="unavailable") from exc
         device = self.device or ("cuda" if torch.cuda.is_available()
                                  else "cpu")
         dtype = torch.float16 if device == "cuda" else torch.float32
@@ -619,8 +970,8 @@ class DiffusersBackend(GenerativeBackend):
             result = pipe(prompt, generator=generators, **kwargs).images
         except Exception as exc:
             raise GenerativeEditError(
-                f"diffusers txt2img failed for model {self.model!r}: {exc}"
-            ) from exc
+                f"diffusers txt2img failed for model {self.model!r}: {exc}",
+                kind="provider_error") from exc
         return list(result)
 
     def img2img(self, image: Any, prompt: str, *,
@@ -631,10 +982,10 @@ class DiffusersBackend(GenerativeBackend):
                 guidance_scale: float | None = None) -> Any:
         """Image-to-image / style transfer via AutoPipelineForImage2Image."""
         if not prompt or not prompt.strip():
-            raise GenerativeEditError("img2img needs a prompt")
+            raise GenerativeEditError("img2img needs a prompt", kind="invalid_request")
         if not 0 < strength <= 1:
             raise GenerativeEditError(
-                f"img2img strength must be in (0, 1], got {strength}")
+                f"img2img strength must be in (0, 1], got {strength}", kind="invalid_request")
         import torch
         pipe = self._pipe_for(image)
         kwargs: dict[str, Any] = {"strength": float(strength)}
@@ -651,8 +1002,8 @@ class DiffusersBackend(GenerativeBackend):
                           generator=generator, **kwargs).images[0]
         except Exception as exc:
             raise GenerativeEditError(
-                f"diffusers img2img failed for model {self.model!r}: {exc}"
-            ) from exc
+                f"diffusers img2img failed for model {self.model!r}: {exc}",
+                kind="provider_error") from exc
         return result.convert("RGB")
 
     def inpaint(self, image: Any, mask: Any, prompt: str, *,
@@ -666,14 +1017,14 @@ class DiffusersBackend(GenerativeBackend):
         is not an inpainting model.
         """
         if not prompt or not prompt.strip():
-            raise GenerativeEditError("inpaint needs a prompt")
+            raise GenerativeEditError("inpaint needs a prompt", kind="invalid_request")
         import torch
         try:
             from diffusers import AutoPipelineForInpainting
         except ImportError as exc:
             raise GenerativeEditError(
-                "inpainting needs diffusers: pip install diffusers torch"
-            ) from exc
+                "inpainting needs diffusers: pip install diffusers torch",
+                kind="unavailable") from exc
         m = _as_mask(image.size, mask)
         kwargs: dict[str, Any] = {}
         if negative_prompt:
@@ -703,6 +1054,27 @@ class DiffusersBackend(GenerativeBackend):
     def describe(self) -> str:
         return f"generative backend 'diffusers' (model={self.model})"
 
+    # -- contract (§1.1e) --------------------------------------------------
+
+    def _contract_model_id(self) -> str | None:
+        return self.model
+
+    def models(self) -> list[ModelInfo]:
+        return [ModelInfo(id=self.model, ops=tuple(self.supported_ops),
+                          locality="local")]
+
+    def estimate(self, op: str = "generate", **params: Any) -> Estimate:
+        if op not in CONTRACT_OPS:
+            raise GenerativeEditError(
+                f"unknown generative op {op!r}; use {CONTRACT_OPS}",
+                kind="invalid_request")
+        return Estimate(
+            money=0.0, credits=0.0,
+            basis="local diffusers inference on this machine; "
+                  "no per-call charge",
+            unknowns=("seconds: depends on the host GPU/CPU, the model "
+                      "and the step count — not measurable in advance",))
+
 
 # ---------------------------------------------------------------------------
 # Devon native backend — our own diffusion code (nomorals.media.imggen)
@@ -718,6 +1090,11 @@ class NativeBackend(GenerativeBackend):
     """
 
     name = "native"
+
+    #: The native pipeline generates; it has no edit/img2img/inpaint
+    #: path, so the contract declares generate only — the other ops
+    #: fail typed (unsupported_op) instead of leaking NotImplementedError.
+    supported_ops = ("generate",)
 
     @staticmethod
     def available() -> bool:
@@ -789,7 +1166,8 @@ class NativeBackend(GenerativeBackend):
                  n: int = 1) -> list:
         ok, reason = self.readiness()
         if not ok:
-            raise GenerativeEditError(f"native backend not ready: {reason}")
+            raise GenerativeEditError(
+                f"native backend not ready: {reason}", kind="unavailable")
         from ..media.imggen.pipeline import PipelineConfig
         from ..media.imggen.studio import Studio, StudioConfig
 
@@ -819,6 +1197,39 @@ class NativeBackend(GenerativeBackend):
         return (f"generative backend 'native' (Devon's own diffusion; "
                 f"{reason})" if ok else
                 f"generative backend 'native' (not ready: {reason})")
+
+    # -- contract (§1.1e) --------------------------------------------------
+
+    def models(self) -> list[ModelInfo]:
+        """The imggen registry's loadable checkpoints, as data.
+
+        Only loadable entries are models this backend can serve; a
+        registry that cannot even enumerate raises typed ``unavailable``
+        rather than reporting an empty catalogue.
+        """
+        try:
+            from ..media.imggen.registry import list_models
+            entries = list_models()
+        except Exception as exc:  # noqa: BLE001 - typed for the contract
+            raise GenerativeEditError(
+                f"native backend cannot enumerate its model registry: "
+                f"{exc}", kind="unavailable") from exc
+        return [ModelInfo(id=str(e.get("name") or e.get("path") or "?"),
+                          ops=("generate",), locality="local",
+                          notes=str(e.get("loadable_reason") or ""))
+                for e in entries if e.get("loadable")]
+
+    def estimate(self, op: str = "generate", **params: Any) -> Estimate:
+        if op not in CONTRACT_OPS:
+            raise GenerativeEditError(
+                f"unknown generative op {op!r}; use {CONTRACT_OPS}",
+                kind="invalid_request")
+        return Estimate(
+            money=0.0, credits=0.0,
+            basis="Devon's own local diffusion on this machine; "
+                  "no per-call charge",
+            unknowns=("seconds: depends on the host and the step count "
+                      "— not measurable in advance",))
 
 
 # ---------------------------------------------------------------------------
@@ -917,12 +1328,14 @@ class _PaidAPIBackend(GenerativeBackend):
         if factory is None:
             raise GenerativeEditError(
                 "paid backend %r: no connector factory injected — "
-                "the composition root wires one at boot" % self.name)
+                "the composition root wires one at boot" % self.name,
+                kind="unavailable")
         try:
             return factory(self.connector_id, self._vault)
         except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
             raise GenerativeEditError(
-                f"paid backend {self.name!r}: {exc}") from exc
+                f"paid backend {self.name!r}: {exc}",
+                kind="unavailable") from exc
 
     # -- shared converters ----------------------------------------------
     @staticmethod
@@ -934,8 +1347,8 @@ class _PaidAPIBackend(GenerativeBackend):
         except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
             raise GenerativeEditError(
                 "the backend returned undecodable image data "
-                f"({len(data)} bytes): {exc}"
-            ) from exc
+                f"({len(data)} bytes): {exc}",
+                kind="provider_error") from exc
 
     @staticmethod
     def _pil_to_png_bytes(image: Any) -> bytes:
@@ -954,7 +1367,8 @@ class _PaidAPIBackend(GenerativeBackend):
                 return resp.read()
         except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
             raise GenerativeEditError(
-                f"could not download the generated image: {exc}") from exc
+                f"could not download the generated image: {exc}",
+                kind="provider_error") from exc
 
     @staticmethod
     def _closest_aspect(width: int | None, height: int | None,
@@ -981,6 +1395,37 @@ class _PaidAPIBackend(GenerativeBackend):
     def describe(self) -> str:
         return f"generative backend '{self.name}' ({self.cost_note})"
 
+    # -- contract (§1.1e) --------------------------------------------------
+    # The paid connectors are called synchronously (even Leonardo's,
+    # whose connector polls its own job internally), so the base
+    # submit/poll/cancel machinery applies as-is: jobs complete inside
+    # submit() and cancel() honestly reports that a running call cannot
+    # be interrupted. Declared gap: the connectors expose no model
+    # catalogue, so models() reports the configured model only.
+
+    contract_gaps = (
+        "models(): the connector exposes no model catalogue — only the "
+        "configured model is reported",
+    )
+
+    def models(self) -> list[ModelInfo]:
+        mid = self._contract_model_id()
+        return [ModelInfo(id=mid or self.name, ops=tuple(self.supported_ops),
+                          locality="remote", paid=True,
+                          notes=self.cost_note)]
+
+    def estimate(self, op: str = "generate", **params: Any) -> Estimate:
+        if op not in CONTRACT_OPS:
+            raise GenerativeEditError(
+                f"unknown generative op {op!r}; use {CONTRACT_OPS}",
+                kind="invalid_request")
+        return Estimate.unknown(
+            f"{self.cost_note}; the connector publishes no per-call "
+            "price table, so no number is quoted",
+            f"{self.cost_note}; the connector publishes no per-call "
+            "price table, so no number is quoted",
+            "hosted API latency varies; no timing data is published")
+
 
 class LeonardoBackend(_PaidAPIBackend):
     """Leonardo AI text-to-image / image-to-image (paid).
@@ -1002,6 +1447,10 @@ class LeonardoBackend(_PaidAPIBackend):
         super().__init__(vault, connector_factory=connector_factory)
         self.model_id = os.environ.get("LEONARDO_MODEL_ID", "")
 
+    def _contract_model_id(self) -> str | None:
+        # "" means the connector falls back to Leonardo's default model.
+        return self.model_id or "leonardo-default"
+
     def generate(self, prompt: str, *,
                  seed: int | None = None,
                  negative_prompt: str | None = None,
@@ -1011,9 +1460,9 @@ class LeonardoBackend(_PaidAPIBackend):
                  height: int | None = None,
                  n: int = 1) -> list[Any]:
         if not prompt or not prompt.strip():
-            raise GenerativeEditError("text-to-image needs a prompt")
+            raise GenerativeEditError("text-to-image needs a prompt", kind="invalid_request")
         if n < 1:
-            raise GenerativeEditError("n must be >= 1")
+            raise GenerativeEditError("n must be >= 1", kind="invalid_request")
         conn = self._connector()
         _log.info("text-to-image via leonardo n=%d prompt=%.60r", n, prompt)
         try:
@@ -1028,8 +1477,8 @@ class LeonardoBackend(_PaidAPIBackend):
                 confirmed=True,
             )
         except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
-            raise GenerativeEditError(f"leonardo generation failed: {exc}"
-                                      ) from exc
+            raise GenerativeEditError(f"leonardo generation failed: {exc}",
+                                      kind="provider_error") from exc
         images = []
         for entry in entries[:n]:
             url = (entry.get("url") or "").strip()
@@ -1038,7 +1487,8 @@ class LeonardoBackend(_PaidAPIBackend):
             images.append(self._pil_from_bytes(self._download(url)))
         if not images:
             raise GenerativeEditError(
-                "leonardo returned no downloadable images")
+                "leonardo returned no downloadable images",
+                kind="provider_error")
         return images
 
     def edit(self, image: Any, instruction: str, *,
@@ -1051,7 +1501,7 @@ class LeonardoBackend(_PaidAPIBackend):
              width: int | None = None,
              height: int | None = None) -> Any:
         if not instruction or not instruction.strip():
-            raise GenerativeEditError("generative edit needs an instruction")
+            raise GenerativeEditError("generative edit needs an instruction", kind="invalid_request")
         result = self.img2img(
             image, instruction, strength=strength, seed=seed,
             negative_prompt=negative_prompt, steps=steps,
@@ -1065,10 +1515,10 @@ class LeonardoBackend(_PaidAPIBackend):
                 steps: int | None = None,
                 guidance_scale: float | None = None) -> Any:
         if not prompt or not prompt.strip():
-            raise GenerativeEditError("img2img needs a prompt")
+            raise GenerativeEditError("img2img needs a prompt", kind="invalid_request")
         if not 0 < strength <= 1:
             raise GenerativeEditError(
-                f"img2img strength must be in (0, 1], got {strength}")
+                f"img2img strength must be in (0, 1], got {strength}", kind="invalid_request")
         conn = self._connector()
         raw = self._pil_to_png_bytes(image)
         _log.info("img2img via leonardo strength=%.2f prompt=%.60r",
@@ -1084,11 +1534,13 @@ class LeonardoBackend(_PaidAPIBackend):
                 confirmed=True,
             )
         except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
-            raise GenerativeEditError(f"leonardo edit failed: {exc}") from exc
+            raise GenerativeEditError(f"leonardo edit failed: {exc}",
+                                      kind="provider_error") from exc
         url = ((entries[0].get("url") or "").strip()
                if entries else "")
         if not url:
-            raise GenerativeEditError("leonardo returned no image URL")
+            raise GenerativeEditError("leonardo returned no image URL",
+                                      kind="provider_error")
         return self._pil_from_bytes(self._download(url))
 
     def inpaint(self, image: Any, mask: Any, prompt: str, *,
@@ -1100,7 +1552,7 @@ class LeonardoBackend(_PaidAPIBackend):
         composite through the feathered mask — unmasked pixels stay
         pixel-identical to the original."""
         if not prompt or not prompt.strip():
-            raise GenerativeEditError("inpaint needs a prompt")
+            raise GenerativeEditError("inpaint needs a prompt", kind="invalid_request")
         regenerated = self.img2img(
             image, prompt, strength=0.85, seed=seed,
             negative_prompt=negative_prompt, steps=steps,
@@ -1130,6 +1582,9 @@ class StabilityAIBackend(_PaidAPIBackend):
         super().__init__(vault, connector_factory=connector_factory)
         self.model = os.environ.get("STABILITY_MODEL", "sd3.5-large")
 
+    def _contract_model_id(self) -> str | None:
+        return self.model
+
     def generate(self, prompt: str, *,
                  seed: int | None = None,
                  negative_prompt: str | None = None,
@@ -1139,9 +1594,9 @@ class StabilityAIBackend(_PaidAPIBackend):
                  height: int | None = None,
                  n: int = 1) -> list[Any]:
         if not prompt or not prompt.strip():
-            raise GenerativeEditError("text-to-image needs a prompt")
+            raise GenerativeEditError("text-to-image needs a prompt", kind="invalid_request")
         if n < 1:
-            raise GenerativeEditError("n must be >= 1")
+            raise GenerativeEditError("n must be >= 1", kind="invalid_request")
         conn = self._connector()
         aspect = self._closest_aspect(width, height, self.ASPECTS)
         _log.info("text-to-image via stability_ai model=%s aspect=%s n=%d",
@@ -1161,7 +1616,8 @@ class StabilityAIBackend(_PaidAPIBackend):
                 images.append(self._pil_from_bytes(result["image_bytes"]))
         except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
             raise GenerativeEditError(
-                f"stability_ai generation failed: {exc}") from exc
+                f"stability_ai generation failed: {exc}",
+                kind="provider_error") from exc
         return images
 
     def edit(self, image: Any, instruction: str, *,
@@ -1174,7 +1630,7 @@ class StabilityAIBackend(_PaidAPIBackend):
              width: int | None = None,
              height: int | None = None) -> Any:
         if not instruction or not instruction.strip():
-            raise GenerativeEditError("generative edit needs an instruction")
+            raise GenerativeEditError("generative edit needs an instruction", kind="invalid_request")
         result = self.img2img(
             image, instruction, strength=strength, seed=seed,
             negative_prompt=negative_prompt, steps=steps,
@@ -1188,10 +1644,10 @@ class StabilityAIBackend(_PaidAPIBackend):
                 steps: int | None = None,
                 guidance_scale: float | None = None) -> Any:
         if not prompt or not prompt.strip():
-            raise GenerativeEditError("img2img needs a prompt")
+            raise GenerativeEditError("img2img needs a prompt", kind="invalid_request")
         if not 0 < strength <= 1:
             raise GenerativeEditError(
-                f"img2img strength must be in (0, 1], got {strength}")
+                f"img2img strength must be in (0, 1], got {strength}", kind="invalid_request")
         conn = self._connector()
         raw = self._pil_to_png_bytes(image)
         _log.info("img2img via stability_ai strength=%.2f prompt=%.60r",
@@ -1208,7 +1664,8 @@ class StabilityAIBackend(_PaidAPIBackend):
             )
         except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
             raise GenerativeEditError(
-                f"stability_ai edit failed: {exc}") from exc
+                f"stability_ai edit failed: {exc}",
+                kind="provider_error") from exc
         return self._pil_from_bytes(result["image_bytes"])
 
     def inpaint(self, image: Any, mask: Any, prompt: str, *,
@@ -1219,7 +1676,7 @@ class StabilityAIBackend(_PaidAPIBackend):
         """No native inpainting endpoint: regenerate at high strength and
         composite through the feathered mask."""
         if not prompt or not prompt.strip():
-            raise GenerativeEditError("inpaint needs a prompt")
+            raise GenerativeEditError("inpaint needs a prompt", kind="invalid_request")
         regenerated = self.img2img(
             image, prompt, strength=0.85, seed=seed,
             negative_prompt=negative_prompt, steps=steps,
@@ -1250,6 +1707,9 @@ class NanoBananaBackend(_PaidAPIBackend):
         self.model = os.environ.get("NANO_BANANA_MODEL",
                                     "gemini-2.5-flash-image")
 
+    def _contract_model_id(self) -> str | None:
+        return self.model
+
     def generate(self, prompt: str, *,
                  seed: int | None = None,
                  negative_prompt: str | None = None,
@@ -1259,9 +1719,9 @@ class NanoBananaBackend(_PaidAPIBackend):
                  height: int | None = None,
                  n: int = 1) -> list[Any]:
         if not prompt or not prompt.strip():
-            raise GenerativeEditError("text-to-image needs a prompt")
+            raise GenerativeEditError("text-to-image needs a prompt", kind="invalid_request")
         if n < 1:
-            raise GenerativeEditError("n must be >= 1")
+            raise GenerativeEditError("n must be >= 1", kind="invalid_request")
         conn = self._connector()
         aspect = self._closest_aspect(width, height, self.ASPECTS)
         _log.info("text-to-image via nano_banana model=%s aspect=%s n=%d",
@@ -1282,9 +1742,11 @@ class NanoBananaBackend(_PaidAPIBackend):
                     break
         except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
             raise GenerativeEditError(
-                f"nano_banana generation failed: {exc}") from exc
+                f"nano_banana generation failed: {exc}",
+                kind="provider_error") from exc
         if not images:
-            raise GenerativeEditError("nano_banana returned no images")
+            raise GenerativeEditError("nano_banana returned no images",
+                                      kind="provider_error")
         return images[:n]
 
     def edit(self, image: Any, instruction: str, *,
@@ -1297,7 +1759,7 @@ class NanoBananaBackend(_PaidAPIBackend):
              width: int | None = None,
              height: int | None = None) -> Any:
         if not instruction or not instruction.strip():
-            raise GenerativeEditError("generative edit needs an instruction")
+            raise GenerativeEditError("generative edit needs an instruction", kind="invalid_request")
         regenerated = self.img2img(
             image, instruction, strength=strength, seed=seed,
             negative_prompt=negative_prompt, steps=steps,
@@ -1311,10 +1773,10 @@ class NanoBananaBackend(_PaidAPIBackend):
                 steps: int | None = None,
                 guidance_scale: float | None = None) -> Any:
         if not prompt or not prompt.strip():
-            raise GenerativeEditError("img2img needs a prompt")
+            raise GenerativeEditError("img2img needs a prompt", kind="invalid_request")
         if not 0 < strength <= 1:
             raise GenerativeEditError(
-                f"img2img strength must be in (0, 1], got {strength}")
+                f"img2img strength must be in (0, 1], got {strength}", kind="invalid_request")
         conn = self._connector()
         raw = self._pil_to_png_bytes(image)
         _log.info("edit via nano_banana model=%s prompt=%.60r",
@@ -1326,9 +1788,11 @@ class NanoBananaBackend(_PaidAPIBackend):
                 raw, prompt, model=self.model, confirmed=True)
         except Exception as exc:  # noqa: BLE001 - surfaced as a clear message
             raise GenerativeEditError(
-                f"nano_banana edit failed: {exc}") from exc
+                f"nano_banana edit failed: {exc}",
+                kind="provider_error") from exc
         if not entries:
-            raise GenerativeEditError("nano_banana returned no images")
+            raise GenerativeEditError("nano_banana returned no images",
+                                      kind="provider_error")
         return self._pil_from_bytes(entries[0]["image_bytes"])
 
     def inpaint(self, image: Any, mask: Any, prompt: str, *,
@@ -1339,7 +1803,7 @@ class NanoBananaBackend(_PaidAPIBackend):
         """Instruction edit + feathered mask composite (no native
         inpainting endpoint)."""
         if not prompt or not prompt.strip():
-            raise GenerativeEditError("inpaint needs a prompt")
+            raise GenerativeEditError("inpaint needs a prompt", kind="invalid_request")
         regenerated = self.img2img(
             image, prompt, strength=0.85, seed=seed,
             negative_prompt=negative_prompt, steps=steps,
@@ -1392,7 +1856,7 @@ def get_backend(name: str | None = None,
     """
     want = (name or os.environ.get("MEDIA_GEN_BACKEND", "auto")).lower()
     if want == "off":
-        raise GenerativeEditError(_NO_BACKEND_MSG)
+        raise GenerativeEditError(_NO_BACKEND_MSG, kind="unavailable")
     if want in PAID_IMAGE_BACKENDS:
         return _paid_backend(want, vault,
                              connector_factory=connector_factory)
@@ -1400,7 +1864,8 @@ def get_backend(name: str | None = None,
         if not NativeBackend.available():
             _ok, _reason = NativeBackend.readiness()
             raise GenerativeEditError(
-                f"MEDIA_GEN_BACKEND=native but {_reason}")
+                f"MEDIA_GEN_BACKEND=native but {_reason}",
+                kind="unavailable")
         return NativeBackend()
     if want == "hf":
         return HFInferenceBackend()
@@ -1411,7 +1876,7 @@ def get_backend(name: str | None = None,
         if not DiffusersBackend.available():
             raise GenerativeEditError(
                 "MEDIA_GEN_BACKEND=diffusers but diffusers/torch are not "
-                "installed")
+                "installed", kind="unavailable")
         return DiffusersBackend()
     if want == "auto":
         if NativeBackend.available():
@@ -1423,10 +1888,11 @@ def get_backend(name: str | None = None,
             return HFInferenceBackend()
         except ImportError:  # noqa: E103 - optional backend probe, absence is handled below
             pass
-        raise GenerativeEditError(_NO_BACKEND_MSG)
+        raise GenerativeEditError(_NO_BACKEND_MSG, kind="unavailable")
     raise GenerativeEditError(
         f"unknown MEDIA_GEN_BACKEND={want!r}; use auto|native|hf|diffusers|"
-        f"comfy|{'|'.join(PAID_IMAGE_BACKENDS)}|off")
+        f"comfy|{'|'.join(PAID_IMAGE_BACKENDS)}|off",
+        kind="invalid_request")
 
 
 def _paid_backend_status() -> dict[str, Any]:
@@ -1466,6 +1932,35 @@ def _paid_backend_status() -> dict[str, Any]:
     return out
 
 
+def _contract_status() -> dict[str, Any]:
+    """The §1.1e contract surface of every backend, as comparable data.
+
+    Built from the backend classes themselves — no instantiation, no
+    network — so the critique loop and honest fallback read the same
+    shape for every backend: which ops it serves, whether cancel() is
+    real there, and its declared remaining gaps.
+    """
+    from .comfy import ComfyUIBackend
+    classes = {
+        "native": NativeBackend,
+        "hf": HFInferenceBackend,
+        "diffusers": DiffusersBackend,
+        "comfy": ComfyUIBackend,
+        "leonardo": LeonardoBackend,
+        "stability_ai": StabilityAIBackend,
+        "nano_banana": NanoBananaBackend,
+    }
+    return {
+        name: {
+            "conformant": True,
+            "ops": list(cls.supported_ops),
+            "cancellable": bool(cls.cancellable),
+            "gaps": list(cls.contract_gaps),
+        }
+        for name, cls in classes.items()
+    }
+
+
 def backend_status() -> dict[str, Any]:
     """Report which generative backends are usable (no model calls)."""
     try:
@@ -1489,6 +1984,7 @@ def backend_status() -> dict[str, Any]:
         "comfy_port": int(os.environ.get("COMFYUI_PORT", "8188") or 8188),
         "paid": _paid_backend_status(),
         "selected": os.environ.get("MEDIA_GEN_BACKEND", "auto"),
+        "contract": _contract_status(),
     }
 
 

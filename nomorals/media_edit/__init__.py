@@ -34,8 +34,16 @@ try:
 except ImportError as _exc:  # zero-deps default: package imports fine
     _cv_ops_error = _exc
 from .generate import (
+    CONTRACT_OPS,
+    ERROR_KINDS,
+    JOB_STATES,
+    Estimate,
     GenerativeBackend,
     GenerativeEditError,
+    JobRef,
+    JobStatus,
+    ModelInfo,
+    contract_error_kind,
     get_backend,
     backend_status,
 )
@@ -124,6 +132,14 @@ __all__ = [
     "cv_ops",
     "GenerativeBackend",
     "GenerativeEditError",
+    "CONTRACT_OPS",
+    "ERROR_KINDS",
+    "JOB_STATES",
+    "Estimate",
+    "JobRef",
+    "JobStatus",
+    "ModelInfo",
+    "contract_error_kind",
     "get_backend",
     "backend_status",
     "cv2_available",

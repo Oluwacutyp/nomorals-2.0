@@ -13,6 +13,12 @@ other's lock — run one media worker per GPU host.
 
 Select with ``get_backend("comfy")`` or ``MEDIA_GEN_BACKEND=comfy``.
 Host/port from ``COMFYUI_HOST`` / ``COMFYUI_PORT`` (defaults 127.0.0.1:8188).
+
+This is the one backend with a real server-side job lifecycle, so its
+§1.1e contract verbs are real too: ``submit()`` returns the server's
+prompt id, ``poll()`` reads /history + /queue, ``cancel()`` deletes a
+queued prompt or interrupts the running one, and ``models()`` reads
+the server's installed checkpoints from /object_info.
 """
 
 from __future__ import annotations
@@ -32,7 +38,18 @@ from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
 from ..core.profiles import get_profile_kind
-from .generate import GenerativeBackend, GenerativeEditError, _as_mask
+from .generate import (
+    CONTRACT_OPS,
+    _TERMINAL_STATES,
+    Estimate,
+    GenerativeBackend,
+    GenerativeEditError,
+    JobRef,
+    JobStatus,
+    ModelInfo,
+    _as_mask,
+    contract_error_kind,
+)
 from .images import load_image
 
 _log = get_logger(__name__)
@@ -140,7 +157,7 @@ def _img2img_workflow(*, image_name: str, prompt: str,
                       checkpoint: str | None) -> dict[str, Any]:
     if not 0 < strength <= 1:
         raise GenerativeEditError(
-            f"img2img strength must be in (0, 1], got {strength}")
+            f"img2img strength must be in (0, 1], got {strength}", kind="invalid_request")
     wf = _load_workflow("img2img")
     _apply_common(wf, prompt=prompt, negative_prompt=negative_prompt,
                   seed=seed, steps=steps, guidance_scale=guidance_scale,
@@ -171,7 +188,7 @@ def _inpaint_workflow(*, image_name: str, mask_name: str, prompt: str,
 def _upscale_workflow(*, image_name: str,
                       scale: float) -> dict[str, Any]:
     if scale <= 0:
-        raise GenerativeEditError(f"upscale scale must be > 0, got {scale}")
+        raise GenerativeEditError(f"upscale scale must be > 0, got {scale}", kind="invalid_request")
     wf = _load_workflow("upscale")
     _single(wf, "LoadImage")["inputs"]["image"] = image_name
     _single(wf, "UpscaleImageBy")["inputs"]["scale_by"] = float(scale)
@@ -318,11 +335,12 @@ class ComfyUIBackend(GenerativeBackend):
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", "replace")[:2000]
             raise GenerativeEditError(
-                f"ComfyUI {method} {path} -> HTTP {exc.code}: {body}") from exc
+                f"ComfyUI {method} {path} -> HTTP {exc.code}: {body}",
+                kind="provider_error") from exc
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             raise GenerativeEditError(
                 f"ComfyUI unreachable at {self.host}:{self.port} "
-                f"({method} {path}): {exc}") from exc
+                f"({method} {path}): {exc}", kind="unavailable") from exc
 
     def _get_json(self, path: str, *,
                   timeout: float | None = None) -> Any:
@@ -332,7 +350,8 @@ class ComfyUIBackend(GenerativeBackend):
         except (ValueError, UnicodeDecodeError) as exc:
             raise GenerativeEditError(
                 f"ComfyUI {path} returned non-JSON: "
-                f"{body[:200].decode('utf-8', 'replace')}") from exc
+                f"{body[:200].decode('utf-8', 'replace')}",
+                kind="provider_error") from exc
 
     def available(self) -> bool:
         """True when a ComfyUI server answers. Never raises."""
@@ -376,7 +395,7 @@ class ComfyUIBackend(GenerativeBackend):
         except (ValueError, KeyError, UnicodeDecodeError) as exc:
             raise GenerativeEditError(
                 "ComfyUI /upload/image returned an unexpected response: "
-                f"{resp_body[:200]!r}") from exc
+                f"{resp_body[:200]!r}", kind="provider_error") from exc
 
     # -- prompt lifecycle ----------------------------------------------------
     def _submit(self, workflow: dict[str, Any]) -> str:
@@ -389,7 +408,8 @@ class ComfyUIBackend(GenerativeBackend):
             info = json.loads(body.decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as exc:
             raise GenerativeEditError(
-                f"ComfyUI /prompt returned non-JSON: {body[:200]!r}") from exc
+                f"ComfyUI /prompt returned non-JSON: {body[:200]!r}",
+                kind="provider_error") from exc
         node_errors = info.get("node_errors") or {}
         if node_errors:
             details = "; ".join(
@@ -397,11 +417,13 @@ class ComfyUIBackend(GenerativeBackend):
                 for nid, err_list in node_errors.items()
                 for err in (err_list if isinstance(err_list, list) else [err_list]))
             raise GenerativeEditError(
-                f"ComfyUI rejected the workflow: {details}")
+                f"ComfyUI rejected the workflow: {details}",
+                kind="provider_error")
         prompt_id = info.get("prompt_id")
         if not prompt_id:
             raise GenerativeEditError(
-                f"ComfyUI /prompt gave no prompt_id: {body[:200]!r}")
+                f"ComfyUI /prompt gave no prompt_id: {body[:200]!r}",
+                kind="provider_error")
         return str(prompt_id)
 
     def _wait(self, prompt_id: str,
@@ -422,12 +444,13 @@ class ComfyUIBackend(GenerativeBackend):
                     if status.get("status_str") == "error":
                         raise GenerativeEditError(
                             "ComfyUI workflow failed: "
-                            + _format_execution_error(status))
+                            + _format_execution_error(status),
+                            kind="provider_error")
                     return entry
             if time.time() >= deadline:
                 raise GenerativeEditError(
                     f"ComfyUI generation timed out after {self.timeout_s:.0f}s "
-                    f"(prompt {prompt_id})")
+                    f"(prompt {prompt_id})", kind="timeout")
             time.sleep(_POLL_INTERVAL)
 
     def _download_images(self, entry: dict[str, Any]) -> list[Any]:
@@ -446,7 +469,8 @@ class ComfyUIBackend(GenerativeBackend):
                 images.append(_png_bytes_to_pil(body))
         if not images:
             raise GenerativeEditError(
-                "ComfyUI finished but produced no images")
+                "ComfyUI finished but produced no images",
+                kind="provider_error")
         return images
 
     def _download_videos(self, entry: dict[str, Any],
@@ -478,7 +502,8 @@ class ComfyUIBackend(GenerativeBackend):
                 paths.append(path)
         if not paths:
             raise GenerativeEditError(
-                "ComfyUI finished but produced no video files")
+                "ComfyUI finished but produced no video files",
+                kind="provider_error")
         return paths
 
     def _run_workflow(self, workflow: dict[str, Any],
@@ -490,7 +515,8 @@ class ComfyUIBackend(GenerativeBackend):
         if not sem.acquire(timeout=self.queue_timeout_s):
             raise GenerativeEditError(
                 "timed out waiting for the ComfyUI GPU lock after "
-                f"{self.queue_timeout_s:.0f}s — another generation is running")
+                f"{self.queue_timeout_s:.0f}s — another generation is running",
+                kind="busy")
         try:
             prompt_id = self._submit(workflow)
             _log.info("comfy prompt %s submitted", prompt_id)
@@ -510,9 +536,9 @@ class ComfyUIBackend(GenerativeBackend):
                  n: int = 1,
                  progress_cb: Callable[[float], None] | None = None) -> list[Any]:
         if not prompt or not prompt.strip():
-            raise GenerativeEditError("text-to-image needs a prompt")
+            raise GenerativeEditError("text-to-image needs a prompt", kind="invalid_request")
         if n < 1:
-            raise GenerativeEditError("n must be >= 1")
+            raise GenerativeEditError("n must be >= 1", kind="invalid_request")
         wf = _txt2img_workflow(
             prompt=prompt, negative_prompt=negative_prompt, seed=seed,
             steps=steps, guidance_scale=guidance_scale, width=width,
@@ -528,7 +554,7 @@ class ComfyUIBackend(GenerativeBackend):
                 guidance_scale: float | None = None,
                 progress_cb: Callable[[float], None] | None = None) -> Any:
         if not prompt or not prompt.strip():
-            raise GenerativeEditError("img2img needs a prompt")
+            raise GenerativeEditError("img2img needs a prompt", kind="invalid_request")
         name = self._upload_image(image, f"devon_in_{uuid.uuid4().hex}.png")
         wf = _img2img_workflow(
             image_name=name, prompt=prompt, negative_prompt=negative_prompt,
@@ -544,7 +570,7 @@ class ComfyUIBackend(GenerativeBackend):
                 guidance_scale: float | None = None,
                 progress_cb: Callable[[float], None] | None = None) -> Any:
         if not prompt or not prompt.strip():
-            raise GenerativeEditError("inpaint needs a prompt")
+            raise GenerativeEditError("inpaint needs a prompt", kind="invalid_request")
         pil = _coerce_pil(image)
         mask_img = _as_mask(pil.size, mask)
         img_name = self._upload_image(pil, f"devon_in_{uuid.uuid4().hex}.png")
@@ -624,7 +650,8 @@ class ComfyUIBackend(GenerativeBackend):
         if not sem.acquire(timeout=self.queue_timeout_s):
             raise GenerativeEditError(
                 "timed out waiting for the ComfyUI GPU lock after "
-                f"{self.queue_timeout_s:.0f}s — another generation is running")
+                f"{self.queue_timeout_s:.0f}s — another generation is running",
+                kind="busy")
         try:
             try:
                 prompt_id = self._submit(wf)
@@ -677,7 +704,8 @@ class ComfyUIBackend(GenerativeBackend):
         if not sem.acquire(timeout=self.queue_timeout_s):
             raise GenerativeEditError(
                 "timed out waiting for the ComfyUI GPU lock after "
-                f"{self.queue_timeout_s:.0f}s — another generation is running")
+                f"{self.queue_timeout_s:.0f}s — another generation is running",
+                kind="busy")
         try:
             try:
                 prompt_id = self._submit(wf)
@@ -696,6 +724,304 @@ class ComfyUIBackend(GenerativeBackend):
         return (f"generative backend 'comfy' "
                 f"({self.host}:{self.port}, "
                 f"checkpoint={self.checkpoint or 'server default'})")
+
+    # -- contract (§1.1e): real submit / poll / cancel ----------------------
+    # The only backend with a genuine server-side job lifecycle:
+    # submit() posts to /prompt and the job id IS the server's prompt id
+    # (a ref stays meaningful across instances), poll() reads /history
+    # and /queue, and cancel() really cancels — a queue delete for a
+    # pending prompt, /interrupt for the running one. Queueing is the
+    # server's own (it executes one prompt at a time), so contract jobs
+    # do not take this process's GPU semaphore — that still guards the
+    # synchronous submit→wait→download path, unchanged.
+
+    cancellable = True
+    contract_gaps = (
+        "poll(): progress is unknown — ComfyUI exposes execution "
+        "progress only over its websocket, not the HTTP API used here",
+    )
+
+    @property
+    def _comfy_job_meta(self) -> dict[str, dict[str, Any]]:
+        meta = self.__dict__.get("_comfy_job_meta_store")
+        if meta is None:
+            meta = self.__dict__["_comfy_job_meta_store"] = {}
+        return meta
+
+    def models(self) -> list[ModelInfo]:
+        """Checkpoints installed on the server (live /object_info data).
+
+        Raises typed ``unavailable`` when the server cannot be reached —
+        an unreachable server has no models to report, and an empty
+        list would claim otherwise.
+        """
+        info = self._get_json("/object_info")
+        names: list[str] = []
+        if isinstance(info, dict):
+            loader = info.get("CheckpointLoaderSimple") or {}
+            try:
+                raw = loader["input"]["required"]["ckpt_name"][0]
+                names = [str(n) for n in raw]
+            except (KeyError, IndexError, TypeError):
+                names = []
+        return [ModelInfo(id=n, ops=CONTRACT_OPS, locality="server",
+                          notes="checkpoint installed on the ComfyUI "
+                                "server")
+                for n in names]
+
+    def estimate(self, op: str = "generate", **params: Any) -> Estimate:
+        if op not in CONTRACT_OPS:
+            raise GenerativeEditError(
+                f"unknown generative op {op!r}; use {CONTRACT_OPS}",
+                kind="invalid_request")
+        basis = "self-hosted ComfyUI server; no per-call charge"
+        try:
+            queue = self._get_json("/queue", timeout=_AVAIL_TIMEOUT)
+            running = len(queue.get("queue_running") or [])
+            pending = len(queue.get("queue_pending") or [])
+            basis += (f"; live queue at probe time: {running} running, "
+                      f"{pending} pending")
+        except GenerativeEditError as exc:
+            basis += f"; queue probe failed: {exc}"
+        return Estimate(
+            money=0.0, credits=0.0, basis=basis,
+            unknowns=("seconds: depends on the workflow, the checkpoint "
+                      "and the host GPU — the server publishes no "
+                      "per-job timing",))
+
+    def _workflow_for_op(self, op: str,
+                         params: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        """(workflow, result_mode) for a contract submit.
+
+        Mirrors the synchronous ops' validation and workflow building;
+        ``result_mode`` is "list" for generate (the op returns a list)
+        and "first" for the single-image ops.
+        """
+        def _need_prompt(text: Any, what: str) -> str:
+            if not text or not str(text).strip():
+                raise GenerativeEditError(f"{what} needs a prompt",
+                                          kind="invalid_request")
+            return str(text)
+
+        if op == "generate":
+            prompt = _need_prompt(params.get("prompt"), "text-to-image")
+            n = params.get("n", 1)
+            if n < 1:
+                raise GenerativeEditError("n must be >= 1",
+                                          kind="invalid_request")
+            return _txt2img_workflow(
+                prompt=prompt,
+                negative_prompt=params.get("negative_prompt"),
+                seed=params.get("seed"), steps=params.get("steps"),
+                guidance_scale=params.get("guidance_scale"),
+                width=params.get("width"), height=params.get("height"),
+                n=n, checkpoint=self.checkpoint), "list"
+        if op in ("img2img", "inpaint", "edit"):
+            image = params.get("image")
+            if image is None:
+                raise GenerativeEditError(f"{op} needs an image",
+                                          kind="invalid_request")
+            if op == "inpaint" or (op == "edit"
+                                   and params.get("mask") is not None):
+                prompt = _need_prompt(
+                    params.get("prompt") or params.get("instruction"),
+                    "inpaint")
+                mask = params.get("mask")
+                if mask is None:
+                    raise GenerativeEditError("inpaint needs a mask",
+                                              kind="invalid_request")
+                pil = _coerce_pil(image)
+                mask_img = _as_mask(pil.size, mask)
+                img_name = self._upload_image(
+                    pil, f"devon_in_{uuid.uuid4().hex}.png")
+                mask_name = self._upload_image(
+                    mask_img, f"devon_mask_{uuid.uuid4().hex}.png")
+                return _inpaint_workflow(
+                    image_name=img_name, mask_name=mask_name, prompt=prompt,
+                    negative_prompt=params.get("negative_prompt"),
+                    seed=params.get("seed"), steps=params.get("steps"),
+                    guidance_scale=params.get("guidance_scale"),
+                    checkpoint=self.checkpoint), "first"
+            prompt = _need_prompt(
+                params.get("prompt") or params.get("instruction"), op)
+            strength = params.get(
+                "strength", 0.75 if op == "edit" else 0.6)
+            name = self._upload_image(
+                image, f"devon_in_{uuid.uuid4().hex}.png")
+            return _img2img_workflow(
+                image_name=name, prompt=prompt,
+                negative_prompt=params.get("negative_prompt"),
+                strength=strength, seed=params.get("seed"),
+                steps=params.get("steps"),
+                guidance_scale=params.get("guidance_scale"),
+                checkpoint=self.checkpoint), "first"
+        raise GenerativeEditError(
+            f"unknown generative op {op!r}; use {CONTRACT_OPS}",
+            kind="invalid_request")
+
+    def _comfy_failed_ref(self, op: str, exc: BaseException) -> JobRef:
+        """A ref whose job failed before reaching the server queue."""
+        job_id = f"{self.name}-unsubmitted-{uuid.uuid4().hex[:12]}"
+        self._comfy_job_meta[job_id] = {
+            "op": op, "result_mode": "first",
+            "local_state": "failed", "local_exc": exc,
+            "detail": "the job never reached the server queue",
+        }
+        return JobRef(backend=self.name, job_id=job_id, op=op)
+
+    def submit(self, op: str, **params: Any) -> JobRef:
+        """Post one op to the server queue; the ref's id is the
+        server's prompt id. Failures before acceptance (bad params,
+        server down, workflow rejected) become failed jobs poll()
+        reports — the same uniform semantics as the synchronous
+        backends."""
+        if op not in CONTRACT_OPS:
+            raise GenerativeEditError(
+                f"unknown generative op {op!r}; use {CONTRACT_OPS}",
+                kind="invalid_request")
+        try:
+            workflow, result_mode = self._workflow_for_op(op, params)
+            prompt_id = self._submit(workflow)
+        except Exception as exc:  # noqa: BLE001 - recorded as a failed job
+            return self._comfy_failed_ref(op, exc)
+        self._comfy_job_meta[prompt_id] = {
+            "op": op, "result_mode": result_mode,
+            "local_state": None, "local_exc": None, "detail": "",
+        }
+        _log.info("comfy contract job %s submitted (%s)", prompt_id, op)
+        return JobRef(backend=self.name, job_id=prompt_id, op=op)
+
+    def poll(self, job: JobRef | str) -> JobStatus:
+        """Server truth for one job: /history first, then /queue.
+
+        Never raises for an unreachable server — the job's state is
+        then genuinely ``unknown`` and the status says why.
+        """
+        job_id = job.job_id if isinstance(job, JobRef) else str(job)
+        meta = self._comfy_job_meta.get(job_id)
+        if meta is not None and meta.get("local_state") == "failed":
+            exc = meta.get("local_exc")
+            return JobStatus(
+                state="failed", progress=1.0,
+                error_kind=(contract_error_kind(exc) if exc is not None
+                            else "backend_error"),
+                error=str(exc) if exc is not None else None,
+                detail=str(meta.get("detail") or ""))
+        try:
+            history = self._get_json(f"/history/{job_id}")
+        except GenerativeEditError as exc:
+            return JobStatus(state="unknown",
+                             detail=f"history probe failed: {exc}")
+        entry = history.get(job_id) if isinstance(history, dict) else None
+        if entry:
+            status = entry.get("status") or {}
+            if status.get("completed"):
+                return self._comfy_terminal_status(job_id, meta, entry,
+                                                   status)
+            return JobStatus(state="running",
+                             detail="the server reports the job in "
+                                    "progress")
+        if meta is not None and meta.get("local_state") == "cancelled":
+            return JobStatus(state="cancelled",
+                             detail=str(meta.get("detail") or "cancelled"))
+        try:
+            queue = self._get_json("/queue")
+        except GenerativeEditError as exc:
+            return JobStatus(state="unknown",
+                             detail=f"queue probe failed: {exc}")
+        if _queue_contains(queue.get("queue_running"), job_id):
+            return JobStatus(state="running",
+                             detail="running on the server")
+        if _queue_contains(queue.get("queue_pending"), job_id):
+            return JobStatus(state="queued",
+                             detail="waiting in the server queue")
+        return JobStatus(
+            state="unknown",
+            detail="no history entry and not in the server queue — "
+                   "never submitted, already purged, or the id is wrong")
+
+    def _comfy_terminal_status(self, job_id: str,
+                               meta: dict[str, Any] | None,
+                               entry: dict[str, Any],
+                               status: dict[str, Any]) -> JobStatus:
+        messages = status.get("messages") or []
+        interrupted = any(
+            isinstance(m, (list, tuple)) and m and
+            m[0] == "execution_interrupted" for m in messages)
+        if interrupted:
+            return JobStatus(state="cancelled", progress=1.0,
+                             detail="execution interrupted on the server")
+        if status.get("status_str") == "error":
+            return JobStatus(
+                state="failed", progress=1.0, error_kind="provider_error",
+                error="ComfyUI workflow failed: "
+                      + _format_execution_error(status))
+        try:
+            images = self._download_images(entry)
+        except GenerativeEditError as exc:
+            return JobStatus(state="failed", progress=1.0,
+                             error_kind=contract_error_kind(exc),
+                             error=str(exc))
+        if meta is not None and meta.get("result_mode") == "first":
+            return JobStatus(state="succeeded", progress=1.0,
+                             result=images[0])
+        return JobStatus(state="succeeded", progress=1.0, result=images)
+
+    def cancel(self, job: JobRef | str) -> JobStatus:
+        """Really cancel: queue delete for a pending prompt,
+        /interrupt for the running one (interrupt has no per-job
+        address on ComfyUI, so it is sent only when this job is the
+        running one). A job that already finished reports its real
+        terminal state — the cancel simply arrived too late."""
+        job_id = job.job_id if isinstance(job, JobRef) else str(job)
+        meta = self._comfy_job_meta.get(job_id)
+        if meta is not None and meta.get("local_state") == "failed":
+            status = self.poll(job)
+            status.detail = "the job never reached the server; " \
+                            "nothing to cancel"
+            return status
+        status = self.poll(job)
+        if status.state in _TERMINAL_STATES:
+            status.detail = (f"job already {status.state}; the cancel "
+                             "arrived too late")
+            return status
+        mechanisms: list[str] = []
+        try:
+            queue = self._get_json("/queue")
+            if _queue_contains(queue.get("queue_pending"), job_id):
+                payload = json.dumps({"delete": [job_id]}).encode()
+                self._request("POST", "/queue", payload=payload,
+                              content_type="application/json")
+                mechanisms.append("deleted from the server queue")
+            if _queue_contains(queue.get("queue_running"), job_id):
+                self._request("POST", "/interrupt", payload=b"{}",
+                              content_type="application/json")
+                mechanisms.append("interrupt sent to the running "
+                                  "execution")
+        except GenerativeEditError as exc:
+            mechanisms.append(f"cancel mechanism failed: {exc}")
+        if not mechanisms:
+            # Raced to a terminal state (or vanished) between the two
+            # probes — report the fresh truth instead of claiming a win.
+            return self.poll(job)
+        if meta is not None:
+            meta["local_state"] = "cancelled"
+            meta["detail"] = "; ".join(mechanisms)
+        return JobStatus(state="cancelled", detail="; ".join(mechanisms))
+
+
+def _queue_contains(entries: Any, prompt_id: str) -> bool:
+    """True when a /queue list (``queue_running`` / ``queue_pending``)
+    holds ``prompt_id``. Entries are ``[number, prompt_id, ...]`` lists;
+    dict-shaped entries are tolerated for forward compatibility."""
+    for item in entries or []:
+        if isinstance(item, (list, tuple)) and len(item) > 1 \
+                and str(item[1]) == prompt_id:
+            return True
+        if isinstance(item, dict) \
+                and str(item.get("prompt_id")) == prompt_id:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -770,5 +1096,5 @@ def _png_bytes_to_pil(data: bytes) -> Any:
     except Exception as exc:
         raise GenerativeEditError(
             f"ComfyUI returned undecodable image bytes "
-            f"({len(data)} bytes): {exc}") from exc
+            f"({len(data)} bytes): {exc}", kind="provider_error") from exc
     return img.convert("RGB")
