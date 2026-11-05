@@ -65,7 +65,21 @@ __all__ = [
     "MUSIC_SOURCE_REGIONS",
     "GLOBAL_REGIONS",
     "music_covered_regions",
+    "PREVIEW_ONLY_SOURCES",
+    "candidate_asset_class",
 ]
+
+#: Sources whose APIs serve ONLY a ~30-second preview as their audio
+#: field — proven from their response shapes, not their names:
+#: the iTunes Search API's only audio field is ``previewUrl`` (an
+#: ``AudioPreview…`` asset, ~30s) and Deezer's only audio field is
+#: ``preview`` (a ~30s MP3 clip).  Neither API has a full-track audio
+#: field at any tier.  Candidates from these sources are PREVIEW-class:
+#: identification/metadata (they prove the exact track exists, carry
+#: its real full-track duration and artwork) — never download
+#: candidates, never pick-list entries, never deliverables.
+PREVIEW_ONLY_SOURCES: frozenset[str] = frozenset({"itunes", "deezer"})
+
 
 #: User-Agent that looks like a real phone browser — download blogs and
 #: SPAs routinely 403 curl/python-urllib defaults.
@@ -90,6 +104,25 @@ class SourceCandidate:
     duration: float = 0.0
     downloadable: bool = True
     extra: dict[str, Any] = field(default_factory=dict)
+
+
+def candidate_asset_class(candidate: SourceCandidate) -> str:
+    """Classify what a candidate's downloadable asset actually IS.
+
+    Returns ``"full"`` (the whole track), ``"preview"`` (a ~30s clip
+    from a preview-only field) or ``"metadata"`` (no audio at all —
+    protected streams / catalog records).  The classification reads
+    the source's own markings: ``extra["preview_only"]`` is set at
+    parse time from the API field the URL came from (``previewUrl`` /
+    ``preview``), and ``downloadable=False`` is how metadata-only
+    sources (Boomplay, MusicBrainz) declare themselves.
+    """
+    extra = candidate.extra or {}
+    if extra.get("preview_only") or candidate.source in PREVIEW_ONLY_SOURCES:
+        return "preview"
+    if not candidate.downloadable:
+        return "metadata"
+    return "full"
 
 
 class AudioSource(abc.ABC):
@@ -586,11 +619,14 @@ class _JsonApiSource(AudioSource):
 class ITunesSource(_JsonApiSource):
     """iTunes Search API — keyless, official Apple endpoint.
 
-    Returns 30-second preview MP3s (``previewUrl``) + the store page
-    (``trackViewUrl``).  Previews are real downloadable files but only
-    30s — candidates carry that in ``extra`` so the resolver treats
-    them as last-resort (full tracks first, previews only when nothing
-    else hit).
+    Its ONLY audio field is ``previewUrl`` — a ~30-second preview
+    asset (``AudioPreview…`` path).  There is no full-track field.
+    Candidates are therefore PREVIEW-class: ``preview_only`` in
+    ``extra`` and ``downloadable=False``.  iTunes identifies the
+    exact track (title, artist, the track's real full length in
+    ``trackTimeMillis``, artwork, store page) — it may never supply
+    the audio.  The resolver excludes preview-class candidates from
+    downloads and pick-lists entirely.
     """
 
     name = "itunes"
@@ -616,17 +652,25 @@ class ITunesSource(_JsonApiSource):
                 url=page or preview, direct_url=preview,
                 duration=float(row.get("trackTimeMillis") or 0) / 1000.0
                 if row.get("trackTimeMillis") else 0.0,
-                downloadable=bool(preview),
+                # The preview asset is NOT a deliverable: identification
+                # only.  downloadable stays False so no consumer can
+                # mistake the 30s clip for the song.
+                downloadable=False,
                 extra={"preview_only": True,
-                       "note": "iTunes 30-second preview"}))
+                       "note": "iTunes 30-second preview — "
+                               "identification only, not the track"}))
         return out
 
 
 class DeezerSource(_JsonApiSource):
     """Deezer public search API — keyless, no account.
 
-    Same shape as iTunes: 30-second preview MP3s (``preview``) + the
-    track page (``link``).  Previews are last-resort in the resolver.
+    Same shape as iTunes: its only audio field is ``preview``, a
+    ~30-second MP3 clip (``duration`` is the FULL track's length —
+    identification data, not the clip's).  Candidates are
+    PREVIEW-class: ``preview_only`` in ``extra``,
+    ``downloadable=False`` — the resolver never downloads them and
+    never offers them as picks.
     """
 
     name = "deezer"
@@ -650,9 +694,10 @@ class DeezerSource(_JsonApiSource):
                 source=self.name, title=title or query, artist=artist,
                 url=page or preview, direct_url=preview,
                 duration=float(row.get("duration") or 0),
-                downloadable=bool(preview),
+                downloadable=False,
                 extra={"preview_only": True,
-                       "note": "Deezer 30-second preview"}))
+                       "note": "Deezer 30-second preview — "
+                               "identification only, not the track"}))
         return out
 
 

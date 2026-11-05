@@ -51,6 +51,7 @@ __all__ = [
     "ResolutionError",
     "YT_DLP_HINT",
     "ytdlp_available",
+    "ensure_ytdlp",
 ]
 
 
@@ -78,6 +79,56 @@ def ytdlp_available() -> bool:
         return shutil.which("yt-dlp") is not None
     except Exception:  # noqa: BLE001
         return False
+
+
+#: One self-provision attempt per process — a missing tool is Devon's
+#: job to fix, but a broken network must not turn every /play into a
+#: pip run.
+_YTDLP_PROVISION_ATTEMPTED = False
+
+
+def ensure_ytdlp() -> bool:
+    """Make yt-dlp usable, installing it herself when it's missing.
+
+    Devon self-provisions her tools (owner doctrine): when the
+    full-track routes (YouTube / YouTube Music / Bandcamp / Audiomack
+    via yt-dlp) fail only because yt-dlp is absent, ONE bounded
+    ``pip install`` attempt runs and availability is re-verified.
+    Returns True when yt-dlp is usable afterwards.  Never raises;
+    when every route fails the caller keeps the honest
+    not-installed failure — never a silent downgrade to a preview.
+
+    Under a test runner the availability state is simulated by the
+    tests, so provisioning never mutates the environment there.
+    """
+    global _YTDLP_PROVISION_ATTEMPTED
+    if ytdlp_available():
+        return True
+    if _YTDLP_PROVISION_ATTEMPTED:
+        return False
+    _YTDLP_PROVISION_ATTEMPTED = True
+    import sys
+    if "pytest" in sys.modules:
+        return False
+    try:
+        import subprocess
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-U", "yt-dlp"],
+            capture_output=True, text=True, timeout=120)
+        if proc.returncode != 0:
+            _log.info("yt-dlp self-provision failed (pip rc=%s): %s",
+                      proc.returncode,
+                      (proc.stderr or proc.stdout or "")[-300:])
+            return False
+    except Exception as exc:  # noqa: BLE001 — provisioning is best-effort;
+        # the honest not-installed failure stands when it can't run
+        _log.info("yt-dlp self-provision attempt failed: %s", exc)
+        return False
+    ok = ytdlp_available()
+    _log.info("yt-dlp self-provision %s", "succeeded" if ok else
+              "ran but yt-dlp is still not usable")
+    return ok
 
 #: Every text-search source /play tries, in chain order — single source
 #: of truth, imported from sources.py so the count is testable.
@@ -152,6 +203,11 @@ class ResolvedAudio:
     errors: list[str] = field(default_factory=list)
     hint: str = ""
     downloadable: bool = True  # False for Spotify (DRM, device playback)
+    #: True when the hit is a ~30s PREVIEW (iTunes/Deezer class): the
+    #: track was identified, but the only audio the source serves is
+    #: a preview clip.  Preview hits are never downloadable, never
+    #: pickable, never deliverable — see sources.PREVIEW_ONLY_SOURCES.
+    preview_only: bool = False
     extra_tracks: list["ResolvedAudio"] = field(default_factory=list)
 
 
@@ -729,6 +785,14 @@ class SourceResolver:
     def _preview_search_many(self, query: str, limit: int,
                              cls_name: str, kind: str,
                              label: str) -> list[ResolvedAudio]:
+        """Preview-class hits (iTunes/Deezer) for the candidate sweep.
+
+        Returned marked ``downloadable=False`` + ``preview_only=True``
+        — the sweep's candidate filter drops non-downloadable hits, so
+        a preview can never reach a pick-list or a download, exactly
+        like MusicBrainz metadata.  The attempts trail still records
+        that the source was consulted and identified the track.
+        """
         import importlib
 
         mod = importlib.import_module("nomorals.media.sources")
@@ -738,9 +802,9 @@ class SourceResolver:
             if not (c.extra or {}).get("preview_only"):
                 continue
             out.append(ResolvedAudio(
-                ok=True, path_or_url=c.direct_url or c.url,
+                ok=True, path_or_url=c.url,
                 title=c.title, artist=c.artist, kind=kind,
-                source_name=label,
+                source_name=label, downloadable=False, preview_only=True,
                 hint=str((c.extra or {}).get("note") or "")))
         return out
 
@@ -809,6 +873,7 @@ class SourceResolver:
             result.kind = out.kind
             result.source_name = out.source_name
             result.downloadable = out.downloadable
+            result.preview_only = out.preview_only
             result.extra_tracks = out.extra_tracks
             if out.hint and not result.hint:
                 result.hint = out.hint
@@ -824,6 +889,7 @@ class SourceResolver:
             result.kind = first_blocked.kind
             result.source_name = first_blocked.source_name
             result.downloadable = False
+            result.preview_only = first_blocked.preview_only
             result.extra_tracks = first_blocked.extra_tracks
             if first_blocked.hint and not result.hint:
                 result.hint = first_blocked.hint
@@ -1022,11 +1088,17 @@ class SourceResolver:
 
     def _s_preview_search(self, query: str, cls_name: str,
                           kind: str) -> ResolvedAudio:
-        """30s-preview APIs (iTunes/Deezer): last-resort only.
+        """Preview-only APIs (iTunes/Deezer): identification, never audio.
 
-        The candidate is a real preview MP3, but only 30s — the chain
-        reaches here only after every full-track source failed, and
-        the hint says so honestly.
+        A preview is not a deliverable — the chain must never WIN on
+        one.  A hit here is returned as found-but-blocked
+        (``downloadable=False``, ``preview_only=True``), the same
+        shape as Boomplay/MusicBrainz: ``_run_chain`` keeps going for
+        a full track and only surfaces this when nothing downloadable
+        exists anywhere, so the caller can say honestly "found it,
+        but only as a 30-second preview".  ``path_or_url`` is the
+        store PAGE (identification), never the preview asset URL —
+        nothing downstream can fetch the clip even by accident.
         """
         import importlib
 
@@ -1041,12 +1113,12 @@ class SourceResolver:
             raise ResolutionError(
                 f"{kind}-search", f"{cls_name} returned no preview for {query!r}")
         out = ResolvedAudio(
-            ok=True, path_or_url=c.direct_url or c.url, title=c.title,
-            artist=c.artist, kind=kind,
-            source_name=f"{cls_name} search (30s preview)")
-        out.hint = str((c.extra or {}).get("note") or
-                       "30-second preview only — full track not found "
-                       "on any source")
+            ok=True, path_or_url=c.url, title=c.title,
+            artist=c.artist, duration=c.duration, kind=kind,
+            source_name=f"{cls_name} search (30s preview)",
+            downloadable=False, preview_only=True)
+        out.hint = ("only a 30-second preview — no full version of "
+                    "this track on any source")
         return out
 
     # ── strategies: local ─────────────────────────────────────────────
@@ -1275,11 +1347,26 @@ class SourceResolver:
             hint=f"SoundCloud only serves a ~30s preview of {title!r} — "
                  f"playing the full track from YouTube instead")
 
+    def _youtube_search_id_or_provision(self, query: str,
+                                        prefix: str = "ytsearch") -> str:
+        """YouTube search id, with ONE self-provision + retry when the
+        only problem is a missing yt-dlp (Devon installs her own
+        tools; a still-missing tool after the attempt keeps the
+        honest error).  Raises whatever the search raised."""
+        from .playback import PlaybackEngine  # lazy: same layer
+
+        try:
+            return PlaybackEngine._youtube_search_id(query, prefix=prefix)
+        except Exception:
+            if ytdlp_available() or not ensure_ytdlp():
+                raise
+            return PlaybackEngine._youtube_search_id(query, prefix=prefix)
+
     def _s_youtube_search(self, query: str) -> ResolvedAudio:
         from .playback import PlaybackEngine  # lazy: same layer
 
         try:
-            video_id = PlaybackEngine._youtube_search_id(query)
+            video_id = self._youtube_search_id_or_provision(query)
         except Exception as exc:  # noqa: BLE001 — carries the
             # yt-dlp install hint when yt-dlp is missing
             raise ResolutionError("youtube-search", str(exc)) from exc
@@ -1298,7 +1385,7 @@ class SourceResolver:
         from .playback import PlaybackEngine  # lazy: same layer
 
         try:
-            video_id = PlaybackEngine._youtube_search_id(
+            video_id = self._youtube_search_id_or_provision(
                 query, prefix="ytmsearch")
         except Exception as exc:  # noqa: BLE001 — carries the
             # yt-dlp install hint when yt-dlp is missing

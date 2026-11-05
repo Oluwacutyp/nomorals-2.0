@@ -664,7 +664,9 @@ class RuntimeMediaMixin:
                          "title": c.title or c.path_or_url,
                          "artist": c.artist or "",
                          "duration": c.duration or 0.0,
-                         "downloadable": c.downloadable}
+                         "downloadable": c.downloadable,
+                         "preview_only": bool(
+                             getattr(c, "preview_only", False))}
                         for c in (cands or [])]
                     # The chain winner can carry the raw search query
                     # as its "title" (the YouTube search strategies do
@@ -685,8 +687,29 @@ class RuntimeMediaMixin:
                             if c.artist and not first_item.get("artist"):
                                 first_item["artist"] = c.artist
                             break
+                    # The chain verdict rides onto the first item: a
+                    # found-but-blocked resolution (protected streams,
+                    # metadata — or a PREVIEW) must not be attempted
+                    # as if it were downloadable.
+                    first_item["downloadable"] = resolution.downloadable
+                    first_item["preview_only"] = bool(
+                        getattr(resolution, "preview_only", False))
                     merged = self._merge_search_attempts(
                         resolution.attempts, detailed)
+                    # ── preview gate ────────────────────────────────
+                    # The best every source has is a 30s preview and
+                    # no full-track candidate exists: do NOT queue a
+                    # download job for a preview-grade candidate.
+                    # Drop the queue row, log the trail, and say the
+                    # honest thing in plain words.
+                    if self._play_is_preview_item(first_item) \
+                            and not any(
+                                fb.get("downloadable") is not False
+                                and not self._play_is_preview_item(fb)
+                                for fb in fallbacks):
+                        self._play_log_tried(merged)
+                        self._drop_matching_queued(engine, first_item)
+                        return self._play_preview_line(first_item)
                     return self._play_download_bg(
                         chat, chat_key, out,
                         lambda: (self._play_send_with_fallthrough(
@@ -1408,6 +1431,14 @@ class RuntimeMediaMixin:
                 msg += f"\n{BOT_COOKIE_SHORT_HELP}"
             return msg, False
         path = dl["path"]
+        # Verify what arrived: a preview-length file for a full-length
+        # track is a failed download, never the song — don't send it.
+        verify = self._play_verify_full_track(path, item)
+        if verify:
+            self._drop_matching_queued(engine, item)
+            return (out + f"\nthat download wasn't the song — "
+                          f"{verify}. I won't pass it off as the "
+                          "track."), False
         title = dl.get("title") or item.get("title", "audio")
         send_path = self._delivery_path(
             path, str(title), str(item.get("artist", "") or ""))
@@ -1549,6 +1580,133 @@ class RuntimeMediaMixin:
         "url": "direct-url",
     }
 
+    #: Kinds whose only audio is a ~30s preview (sources.py's
+    #: PREVIEW_ONLY_SOURCES — proven there from the APIs' response
+    #: shapes).  A preview-class item is never downloaded and never
+    #: offered as a pick: it only identifies a track.
+    _PREVIEW_KINDS = frozenset({"itunes", "deezer"})
+
+    @classmethod
+    def _play_is_preview_item(cls, item: Any) -> bool:
+        """Is this candidate preview-class (flag or preview kind)?"""
+        try:
+            if not isinstance(item, dict):
+                return False
+            if item.get("preview_only"):
+                return True
+            return str(item.get("kind", "") or "").lower() \
+                in cls._PREVIEW_KINDS
+        except Exception:  # noqa: BLE001
+            return False
+
+    @staticmethod
+    def _play_clean_reason(reason: Any) -> str:
+        """A download-block reason safe for a user reply: no raw URLs
+        (asset links are internal diagnostics), no doubled failure
+        wording ("download failed: download failed:"), whitespace
+        collapsed, length-capped.  Never raises."""
+        try:
+            text = re.sub(r"https?://\S+", "", str(reason or ""))
+            text = re.sub(
+                r"(?i)\b(download (?:failed|blocked):)"
+                r"(?:\s*download (?:failed|blocked):)+",
+                r"\1", text)
+            text = re.sub(r"\s+", " ", text).strip(" -—")
+            return text[:120]
+        except Exception:  # noqa: BLE001
+            return ""
+
+    @staticmethod
+    def _play_preview_line(item: Any) -> str:
+        """The honest-absence sentence for a preview-only find."""
+        title = str((item or {}).get("title") or "that track")
+        artist = str((item or {}).get("artist") or "").strip()
+        who = f" by {artist}" if artist else ""
+        return (f"I found “{title}”{who} — but only as a 30-second "
+                "preview. No source has the full track, so there's "
+                "nothing to send.")
+
+    @staticmethod
+    def _play_preview_note(item: Any) -> str:
+        """One-line preview fact for a mixed report (other facts
+        follow, so this doesn't claim nothing exists)."""
+        title = str((item or {}).get("title") or "that track")
+        artist = str((item or {}).get("artist") or "").strip()
+        who = f" by {artist}" if artist else ""
+        return (f"⚠ found “{title}”{who} — but only as a 30-second "
+                "preview; a preview is not the song, so I didn't "
+                "send it.")
+
+    @classmethod
+    def _play_blocked_line(cls, item: Any, reason: Any) -> str:
+        """One found-but-blocked fact for a user reply: the track,
+        the source's human label, and the block reason cleaned (no
+        raw URLs, no doubled wording)."""
+        try:
+            from ...media.picklist import _KIND_LABELS
+
+            kind = str((item or {}).get("kind", "") or "")
+            label = _KIND_LABELS.get(kind, "") or kind
+            who = (f" — {(item or {}).get('artist')}"
+                   if (item or {}).get("artist") else "")
+            clean = cls._play_clean_reason(reason)
+            suffix = f" ({clean})" if clean else ""
+            return (f"⚠ found “{(item or {}).get('title', '')}”{who} "
+                    f"on {label} — but couldn't download it{suffix}.")
+        except Exception:  # noqa: BLE001
+            return ""
+
+    @staticmethod
+    def _play_log_tried(search_attempts: Any,
+                        outcomes: Any = None) -> None:
+        """Record the per-source tried/outcome trail in the journal
+        (log).  The reply also carries the tried-list (owner design);
+        this is the durable copy.  Never raises."""
+        try:
+            from ...core.logging_setup import get_logger
+
+            lines = [str(a) for a in (search_attempts or [])
+                     if isinstance(a, str)]
+            for name, outcome in (outcomes or {}).items():
+                lines.append(f"{name} — {outcome}")
+            if lines:
+                get_logger(__name__).info(
+                    "play tried: %s", "; ".join(lines))
+        except Exception:  # noqa: BLE001
+            pass
+
+    @staticmethod
+    def _play_verify_full_track(path: str, item: Any) -> str:
+        """Verify a downloaded file is the FULL track, not a clip.
+
+        When the candidate's metadata carries the track's real
+        duration, the file on disk must not be preview-length: a
+        ~30s file for a minutes-long song is a FAILED download (a
+        source served its preview stream anyway), reported as such
+        and never sent as the song.  Returns "" when the file passes
+        — including when there is nothing to verify against (unknown
+        expected duration, or the file's own duration unprobeable:
+        absence of evidence is never fabricated into a failure).
+        Never raises.
+        """
+        try:
+            expected = float((item or {}).get("duration") or 0)
+            if expected < 90:
+                return ""
+            from ...media.library import read_metadata
+
+            actual = float(read_metadata(path).get("duration") or 0)
+            if actual > 0 and actual < min(45.0, expected * 0.5):
+                return (f"the file that came down is only "
+                        f"{actual:.0f}s long — a preview-length "
+                        f"clip, not the full {expected:.0f}s track")
+            return ""
+        except Exception as e:  # noqa: BLE001
+            record_failure(
+                "runtime_media.RuntimeMediaMixin._play_verify_full_track",
+                e)
+            return ""
+
     @staticmethod
     def _merge_search_attempts(resolution_attempts: Any,
                                detailed_attempts: Any) -> list[str]:
@@ -1608,6 +1766,15 @@ class RuntimeMediaMixin:
         the short /cookies hint ONLY when YouTube was actually
         attempted AND bot-blocked.  Never raises.
 
+        Preview law (owner, 2026-11-05): preview-class candidates
+        (iTunes/Deezer 30s clips) are partitioned out FIRST — never
+        download-attempted, never offered as picks; they only
+        identify the track for the honest report.  A download whose
+        file turns out preview-length for a full-length track is a
+        failed download too (verified on arrival, never sent).
+        Reasons quoted in the reply are cleaned: no raw asset URLs,
+        no doubled failure wording.
+
         Delivery contract (owner, 2026-10-20): when ``match`` is a
         ``(title, artist)`` pair parsed from the request, ONLY
         candidates that confidently match it
@@ -1634,6 +1801,33 @@ class RuntimeMediaMixin:
                 continue
             seen.add(key)
             items.append(it)
+        # ── preview partition ───────────────────────────────────────
+        # Preview-class candidates (iTunes/Deezer 30s clips) leave
+        # the candidate set HERE, before any download or pick logic:
+        # queueing a download for a preview is the defect this whole
+        # path exists to prevent.  They survive only as preview_finds
+        # — evidence for the honest report ("found it, but only as a
+        # preview").  In gated mode only previews that actually match
+        # the request count as finds; a namesake preview is not the
+        # song and is dropped silently.
+        preview_items = [it for it in items
+                         if self._play_is_preview_item(it)]
+        items = [it for it in items
+                 if not self._play_is_preview_item(it)]
+        preview_finds: list[dict[str, Any]] = []
+        if preview_items:
+            if match is not None:
+                from ...media.picklist import is_confident_match
+
+                q_t = str((match or ("", ""))[0] or "")
+                q_a = str((match or ("", ""))[1] or "")
+                preview_finds = [
+                    it for it in preview_items
+                    if is_confident_match(str(it.get("title", "") or ""),
+                                          str(it.get("artist", "") or ""),
+                                          q_t, q_a)]
+            else:
+                preview_finds = preview_items[:1]
         # ── delivery-contract partition ─────────────────────────────
         # Confident matches are attempted (best score first, chain
         # order breaking ties); everything else downloadable becomes
@@ -1698,6 +1892,16 @@ class RuntimeMediaMixin:
             if dl.get("ok"):
                 path = dl["path"]
                 dl_title = dl.get("title") or item.get("title", "audio")
+                # Verify what arrived before anything is sent: a
+                # preview-length file for a full-length track is a
+                # failed download — record it, keep falling through.
+                verify = self._play_verify_full_track(path, item)
+                if verify:
+                    outcomes[name] = (
+                        f"downloaded a clip, not the track ({verify})")
+                    if gated:
+                        blocked_matches.append((item, verify))
+                    continue
                 outcomes[name] = "downloaded ✓"
                 tried = self._format_tried_list(search_attempts, outcomes)
                 suffix = (f"\nsources tried ({len(tried)}): "
@@ -1737,12 +1941,14 @@ class RuntimeMediaMixin:
                         "bot-blocked")
                 else:
                     outcomes[name] = (
-                        f"download blocked ({reason[:120]}) — YouTube "
-                        "fallback also tried")
+                        f"download blocked "
+                        f"({self._play_clean_reason(reason)}) — "
+                        "YouTube fallback also tried")
                 continue
             if kind == "youtube" and is_bot_detection_error(reason):
                 youtube_bot_blocked = True
-            outcomes[name] = f"download blocked ({reason[:120]})"
+            outcomes[name] = (
+                f"download blocked ({self._play_clean_reason(reason)})")
         tried = self._format_tried_list(search_attempts, outcomes)
         # Total failure: the pre-enqueued first pick never downloaded —
         # drop its queue row like the single-send path does, so the
@@ -1753,14 +1959,27 @@ class RuntimeMediaMixin:
             # results exist: they are the owner's to choose from —
             # never auto-sent as if they were the request.
             offer = self._play_picklist_offer(
-                pick_items, blocked_matches, out, tried,
+                pick_items, blocked_matches, preview_finds, out, tried,
                 query or title, chat,
                 youtube_bot_blocked=youtube_bot_blocked)
             if offer:
                 return offer
         msg = (out + f"\nsources tried ({len(tried)}): "
                + "; ".join(tried))
-        msg += f"\ncouldn't download {title!r} from any source."
+        attempted_download = any(
+            isinstance(v, str)
+            and v.startswith(("download blocked", "downloaded"))
+            for v in outcomes.values())
+        if preview_finds and not blocked_matches \
+                and not attempted_download:
+            # Previews were the ONLY thing any source had: the plain
+            # honest-absence line instead of the generic failure
+            # line.  Nothing was sent, nothing queued for download.
+            msg += f"\n{self._play_preview_line(preview_finds[0])}"
+        else:
+            msg += f"\ncouldn't download {title!r} from any source."
+            if preview_finds:
+                msg += f"\n{self._play_preview_note(preview_finds[0])}"
         if youtube_bot_blocked:
             msg += f"\n{BOT_COOKIE_SHORT_HELP}"
         return msg
@@ -1768,23 +1987,27 @@ class RuntimeMediaMixin:
     def _play_picklist_offer(
             self, pick_items: list[dict[str, Any]],
             blocked_matches: list[tuple[dict[str, Any], str]],
+            preview_finds: list[dict[str, Any]],
             out: str, tried: list[str], query: str, chat: Any,
             *, youtube_bot_blocked: bool = False) -> str:
         """The no-confident-download outcome: honest report + choice.
 
         The reply carries (1) the full tried-list, (2) every
-        found-but-blocked match BY NAME with its block reason, and
-        (3) the standard pick-list over the remaining downloadable
-        results, stored in the PickCache so a number reply or a
-        button tap downloads exactly the chosen candidate.  Returns
-        "" when the pick-list can't be stored (caller falls back to
-        the plain failure report).  Never raises.
+        found-but-blocked match BY NAME with its block reason
+        (cleaned: no raw asset URLs, no doubled wording), (3) the
+        preview truth when the track also turned up as a 30s clip,
+        and (4) the standard pick-list over the remaining
+        downloadable FULL-TRACK results — preview-class results are
+        never in the list — stored in the PickCache so a number
+        reply or a button tap downloads exactly the chosen
+        candidate.  Returns "" when the pick-list can't be stored
+        (caller falls back to the plain failure report).  Never
+        raises.
         """
         try:
             from ...media.cookies import BOT_COOKIE_SHORT_HELP
             from ...media.picklist import (
                 PICK_LIMIT, PickCache, format_picklist)
-            from ...media.picklist import _KIND_LABELS
             from ...media.resolver import ResolvedAudio
 
             cands = [
@@ -1815,16 +2038,13 @@ class RuntimeMediaMixin:
                 return ""
             lines = [out,
                      f"sources tried ({len(tried)}): " + "; ".join(tried)]
-            if blocked_matches:
-                for it, reason in blocked_matches:
-                    kind = str(it.get("kind", "") or "")
-                    label = _KIND_LABELS.get(kind, "") or kind
-                    who = (f" — {it.get('artist')}"
-                           if it.get("artist") else "")
-                    lines.append(
-                        f"⚠ found “{it.get('title', '')}”{who} on "
-                        f"{label} — but couldn't download it "
-                        f"({str(reason)[:120]}).")
+            for it, reason in blocked_matches:
+                line = self._play_blocked_line(it, reason)
+                if line:
+                    lines.append(line)
+            for it in (preview_finds or [])[:1]:
+                lines.append(self._play_preview_note(it))
+            if blocked_matches or preview_finds:
                 lines.append(
                     "the other results didn't match your request "
                     "closely enough to send one blind — pick one:")

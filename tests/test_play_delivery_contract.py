@@ -425,7 +425,8 @@ def test_e2e_blocked_exact_match_no_substitution():
     dealer_cand = ResolvedAudio(
         ok=True, path_or_url=DEALER["path"], title="Dealer",
         artist="Some Dealer", kind="itunes",
-        source_name="iTunes search (30s preview)")
+        source_name="iTunes search (30s preview)",
+        downloadable=False, preview_only=True)
     attempts = ["netnaija-search — no results",
                 "soundcloud-search — ok (1)",
                 "itunes-search — ok (8)"]
@@ -445,8 +446,11 @@ def test_e2e_blocked_exact_match_no_substitution():
     rt.gateway.send_file.assert_not_called()
     text = "\n".join(_followup_texts(rt))
     assert "DRM" in text
-    assert "Dealer" in text  # offered as a pick, not delivered
-    assert re.search(r"pick:[0-9a-f]{8}", text)
+    # Preview law (2026-11-05): an iTunes hit is a 30s preview — it is
+    # NOT offered as a pick either.  A pick-list entry must be a
+    # genuine full-track candidate; with none here, there is no list.
+    assert "Dealer" not in text
+    assert not re.search(r"pick:[0-9a-f]{8}", text)
 
 
 def test_e2e_namesake_chain_pick_real_match_sent():
