@@ -1,0 +1,11 @@
+# ig catalog — Echelon Wave 7 (craft-i18n shape).
+# Rows: key<TAB>text · plurals: key<TAB>@plural<TAB>form per
+# plural category of the locale, in CLDR order. Keys are the
+# English source strings; see nomorals/i18n/PARITY.md.
+
+Welcome to **{group}**!	Nnọọ na **{group}**!
+{count} member	@plural	{count} onye otu
+Answer recorded. 👍	Edekọọla azịza ahụ. 👍
+Couldn't record that answer.	Enweghị ike idetụta azịza ahụ.
+Left the group.	Ị hapụla otu ahụ.
+Couldn't leave that group.	Enweghị ike ịhapụ otu ahụ.

@@ -20,7 +20,9 @@ Geneva-grade upgrades (mined 2026-10-10):
   −1 no-showed; the real Meetup attendance-guideline pattern).
 * **Icebreakers** — quiet-group nudges suggest a random icebreaker prompt.
 
-Isolation: this module imports stdlib + ``nomorals.core`` only.
+Isolation: this module imports stdlib + ``nomorals.core`` only —
+plus ``nomorals.i18n`` (Wave 7), whose catalogs are static string
+data: no owner data crosses that seam in either direction.
 No memory, no accounts, no vaults, no connectors — the package
 docstring is the law, ``tests/test_community_isolation.py`` the gate.
 
@@ -118,6 +120,7 @@ class ThemedGroup:
     # Geneva-grade fields — all defaulted, old JSON keeps loading fine.
     roles: dict[str, str] = field(default_factory=dict)  # member → owner/admin/member
     welcome: str = ""  # shown to new joiners
+    language: str = ""  # i18n locale for membership messages; "" = default
     join_question: str = ""  # optional gate question; answer recorded
     join_answers: dict[str, str] = field(default_factory=dict)
     pinned: list[str] = field(default_factory=list)  # post ids
@@ -138,6 +141,7 @@ class ThemedGroup:
             created_at=float(data.get("created_at") or 0.0),
             roles=roles,
             welcome=str(data.get("welcome", "")),
+            language=str(data.get("language", "")),
             join_question=str(data.get("join_question", "")),
             join_answers={str(k): str(v) for k, v in (data.get("join_answers") or {}).items()},
             pinned=[str(p) for p in (data.get("pinned") or [])],
@@ -326,6 +330,20 @@ class GroupStore:
 
         g = self._mutate(group_id, _leave)
         return g is not None and outcome["left"]
+
+    def set_language(self, group_id: str, language: str) -> bool:
+        """Set the group's i18n locale for membership messages.
+
+        The tag is stored normalized (``pt_br`` → ``pt-BR``); an
+        unusable tag clears the setting back to the default.
+        Returns False when the group does not exist.
+        """
+        from ..i18n.locale import normalize_locale
+
+        def _lang(g: ThemedGroup) -> None:
+            g.language = normalize_locale(language)
+
+        return self._mutate(group_id, _lang) is not None
 
     def member_groups(self, member: str) -> list[ThemedGroup]:
         """All groups a member belongs to — the warm pool for discovery."""
@@ -576,10 +594,32 @@ def _usage() -> str:
         "/cgroup post <group_id> <text> · announce <group_id> <text>\n"
         "/cgroup show <group_id> · pin <group_id> <post_id> · unpin …\n"
         "/cgroup role <group_id> <member> <owner|admin|member>\n"
-        "/cgroup welcome <group_id> <text> · events <group_id>\n"
+        "/cgroup welcome <group_id> <text> · lang <group_id> <locale> · events <group_id>\n"
         "/cgroup rep <member> · nudge · discover <member>\n"
         "Also: /cgroup event … · /cgroup meetup … — see events.py / meetups.py."
     )
+
+
+def _group_message(key: str, grp: ThemedGroup | None, *,
+                   count: float | None = None, **params: Any) -> str:
+    """Render a membership message from the i18n catalogs (Wave 7).
+
+    The locale is the group's stored ``language`` (default when
+    unset).  When a fallback serves — the group's locale has no
+    catalog row and a chain relative or the source string served —
+    that fact is recorded in the log with both locales named; the
+    chat text itself is just the message, as members should see it.
+    """
+    from ..i18n import translate_detailed
+
+    locale = grp.language if grp is not None else ""
+    rendered = translate_detailed(key, locale or None,
+                                  count=count, **params)
+    if rendered.fell_back or rendered.source != "catalog":
+        _log.info("cgroup i18n: %r requested=%s served=%s source=%s",
+                  key, rendered.requested_locale,
+                  rendered.served_locale, rendered.source)
+    return rendered.text
 
 
 def control_cgroup(tail: str, context=None, chat=None,
@@ -624,21 +664,44 @@ def _control_cgroup(tail: str, context, chat,
         if g is None:
             return f"No group `{gid}`. /cgroup list to see them."
         msg = store.join_group(gid, who)
-        n = len(store.get(gid).members) if store.get(gid) else 0
+        g = store.get(gid) or g
+        n = len(g.members)
         note = f"\n{msg}" if msg else ""
-        return f"Welcome to **{g.name}**! ({n} member{'s' if n != 1 else ''}){note}"
+        welcome = _group_message("Welcome to **{group}**!", g, group=g.name)
+        members = _group_message("{count} member", g, count=n)
+        return f"{welcome} ({members}){note}"
+
+    if cmd == "lang":
+        segs = rest.split(None, 1)
+        gid = segs[0] if segs else ""
+        g = store.get(gid)
+        if g is None:
+            return f"No group `{gid}`. /cgroup list to see them."
+        if len(segs) < 2:
+            current = g.language or "en (default)"
+            return (f"Group language: {current}. "
+                    f"Set it: /cgroup lang {gid} <locale, e.g. es, pt-BR, yo>")
+        if store.set_language(gid, segs[1]):
+            g = store.get(gid) or g
+            return f"Group language set to {g.language or 'en (default)'}."
+        return f"No group `{gid}`. /cgroup list to see them."
 
     if cmd == "answer":
         segs = rest.split(None, 2)
         if len(segs) < 3:
             return "Usage: /cgroup answer <group_id> <your answer>"
         ok = store.answer_join_question(segs[0], who, segs[2])
-        return "Answer recorded. 👍" if ok else "Couldn't record that answer."
+        g = store.get(segs[0])
+        if ok:
+            return _group_message("Answer recorded. 👍", g)
+        return _group_message("Couldn't record that answer.", g)
 
     if cmd == "leave":
-        if store.leave_group(rest.strip(), who):
-            return "Left the group."
-        return "Couldn't leave that group."
+        gid = rest.strip()
+        g = store.get(gid)
+        if store.leave_group(gid, who):
+            return _group_message("Left the group.", g)
+        return _group_message("Couldn't leave that group.", g)
 
     if cmd == "list":
         groups = store.list_groups()

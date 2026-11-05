@@ -28,6 +28,12 @@ LAYERS: dict[str, int] = {
     "storage": 2,
     "memory": 3,
     "llm": 3,
+    # i18n/ is the internationalization organ (Echelon Wave 7): TSV
+    # message catalogs as data + locale/plural runtime. L3 beside
+    # llm — its bridge touches llm.languages/translation_quality
+    # (same layer) and family.locales (unmapped/shared); first
+    # consumer is community (L4) rendering group messages.
+    "i18n": 3,
     "training": 3,
     "cognition": 3,
     "ta": 3,

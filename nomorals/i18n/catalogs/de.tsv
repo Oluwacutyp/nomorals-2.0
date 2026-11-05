@@ -1,0 +1,11 @@
+# de catalog — Echelon Wave 7 (craft-i18n shape).
+# Rows: key<TAB>text · plurals: key<TAB>@plural<TAB>form per
+# plural category of the locale, in CLDR order. Keys are the
+# English source strings; see nomorals/i18n/PARITY.md.
+
+Welcome to **{group}**!	Willkommen bei **{group}**!
+{count} member	@plural	{count} Mitglied	{count} Mitglieder
+Answer recorded. 👍	Antwort gespeichert. 👍
+Couldn't record that answer.	Diese Antwort konnte nicht gespeichert werden.
+Left the group.	Du hast die Gruppe verlassen.
+Couldn't leave that group.	Die Gruppe konnte nicht verlassen werden.

@@ -1,0 +1,11 @@
+# pcm catalog — Echelon Wave 7 (craft-i18n shape).
+# Rows: key<TAB>text · plurals: key<TAB>@plural<TAB>form per
+# plural category of the locale, in CLDR order. Keys are the
+# English source strings; see nomorals/i18n/PARITY.md.
+
+Welcome to **{group}**!	You don join **{group}** — welcome!
+{count} member	@plural	{count} member dem
+Answer recorded. 👍	We don record your answer. 👍
+Couldn't record that answer.	We no fit record that answer.
+Left the group.	You don comot for the group.
+Couldn't leave that group.	We no fit comot you for the group.

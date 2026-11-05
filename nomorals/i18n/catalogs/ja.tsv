@@ -1,0 +1,11 @@
+# ja catalog — Echelon Wave 7 (craft-i18n shape).
+# Rows: key<TAB>text · plurals: key<TAB>@plural<TAB>form per
+# plural category of the locale, in CLDR order. Keys are the
+# English source strings; see nomorals/i18n/PARITY.md.
+
+Welcome to **{group}**!	**{group}** へようこそ！
+{count} member	@plural	{count} メンバー
+Answer recorded. 👍	回答を記録しました。👍
+Couldn't record that answer.	その回答を記録できませんでした。
+Left the group.	グループを退会しました。
+Couldn't leave that group.	グループを退会できませんでした。

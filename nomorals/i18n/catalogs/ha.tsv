@@ -1,0 +1,11 @@
+# ha catalog — Echelon Wave 7 (craft-i18n shape).
+# Rows: key<TAB>text · plurals: key<TAB>@plural<TAB>form per
+# plural category of the locale, in CLDR order. Keys are the
+# English source strings; see nomorals/i18n/PARITY.md.
+
+Welcome to **{group}**!	Barka da zuwa **{group}**!
+{count} member	@plural	{count} memba
+Answer recorded. 👍	An rubuta amsar. 👍
+Couldn't record that answer.	Ba a iya rubuta amsar ba.
+Left the group.	Ka bar ƙungiyar.
+Couldn't leave that group.	Ba a iya barin ƙungiyar ba.

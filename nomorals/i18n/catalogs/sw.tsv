@@ -1,0 +1,11 @@
+# sw catalog — Echelon Wave 7 (craft-i18n shape).
+# Rows: key<TAB>text · plurals: key<TAB>@plural<TAB>form per
+# plural category of the locale, in CLDR order. Keys are the
+# English source strings; see nomorals/i18n/PARITY.md.
+
+Welcome to **{group}**!	Karibu **{group}**!
+{count} member	@plural	{count} mwanachama	{count} wanachama
+Answer recorded. 👍	Jibu limerekodiwa. 👍
+Couldn't record that answer.	Halikuweza kurekodi jibu hilo.
+Left the group.	Umeondoka kwenye kikundi.
+Couldn't leave that group.	Haikuwezekana kuondoka kwenye kikundi.
