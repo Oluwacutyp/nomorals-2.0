@@ -114,23 +114,30 @@ class RuntimeExpressionMixin:
         return person_key(platform, user_id)
 
     # ---- sending -------------------------------------------------
-    def _expression_send(self, message, ref):  # type: ignore[no-untyped-def]
+    def _expression_send(self, message, ref, caption: str = ""):  # type: ignore[no-untyped-def]
         """Send one MediaRef through the room's own adapter
         (native media path — Telegram stickers/animations,
         Discord uploads, the WhatsApp bridge).  Falls back to
         the gateway's file send; reports honestly when neither
-        exists on this platform path."""
+        exists on this platform path.  ``caption`` rides the
+        media message itself (every adapter's send_media and
+        the gateway's send_file carry one) — it is only passed
+        when non-empty, so existing callers and adapter shapes
+        are untouched."""
         from types import SimpleNamespace
 
         platform = str(getattr(message.chat, "platform", "") or "")
         adapter = self._group_adapter(platform)
         fn = getattr(adapter, "send_media", None) if adapter else None
         if fn is not None:
+            if caption:
+                return fn(message.chat, ref, caption=caption)
             return fn(message.chat, ref)
         gateway = getattr(self, "gateway", None)
         send_file = getattr(gateway, "send_file", None)
         if send_file is not None and ref.path:
-            return send_file(platform, message.chat, ref.path)
+            return send_file(platform, message.chat, ref.path,
+                             caption=caption)
         return SimpleNamespace(
             ok=False, platform=platform, message_id="",
             media_file_id="",
@@ -586,6 +593,64 @@ class RuntimeExpressionMixin:
         if out.get("sent"):
             return ""
         return str(out.get("reason") or "no GIF for that yet")
+
+    # ---- per-emotion reactions (/hug, /pat, … — wave C) -------------
+    def _control_reaction(self, kind: str, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
+        """One per-emotion reaction GIF, captioned on the
+        media message itself — one message total, so success
+        returns "" (the media WAS the reply; the kind rides
+        MEDIA_DELIVERED_KINDS + REACTION_GIF_COMMANDS on the
+        control path).  The target resolves reply-first, then
+        @mention/name through the §29 resolver, else the
+        reaction is solo and Devon performs it.  A name that
+        resolves nowhere earns the resolver's honest line —
+        never a silent solo at the wrong person."""
+        if message is None:
+            return (f"usage: /{kind} — or /{kind} @someone, or "
+                    f"reply to their message with /{kind}.")
+        if not self._group_gate(message, kind):
+            return ("this room isn't claimed for my bot systems "
+                    "(§33) — my reaction GIFs only play where my "
+                    "bot runs.")
+        from ...social.chat.expression import reaction_caption
+
+        target_name = ""
+        named = bool(str(tail or "").strip())
+        if named or getattr(message, "reply_to", ""):
+            try:
+                resolution = self._resolver(
+                    self._group_surface()).resolve_command(
+                        message.chat.key, message, str(tail or ""))
+            except Exception as exc:  # noqa: BLE001 - resolution never breaks a fun command
+                record_failure("expression.reaction.resolve", exc)
+                resolution = None
+            if resolution is not None:
+                if resolution.member is not None:
+                    member = resolution.member
+                    target_name = str(member.name or "") or (
+                        f"@{member.username}" if member.username
+                        else str(member.user_id or ""))
+                elif named and not resolution.via_reply \
+                        and not resolution.channel_post:
+                    return resolution.exhaustion_text()
+        actor = str(getattr(message, "sender", "") or "").strip() \
+            or "Someone"
+        owner = False
+        try:
+            owner = bool(self._operator_or_false(message))
+        except Exception:  # noqa: BLE001 - no authority surface here
+            owner = False
+        caption = reaction_caption(kind, actor=actor,
+                                   target=target_name, owner=owner)
+        service = self._expression_service()
+        out = service.reaction_gif(
+            kind, room=message.chat.key,
+            platform=str(message.chat.platform or ""),
+            send=lambda ref: self._expression_send(
+                message, ref, caption=caption))
+        if out.get("sent"):
+            return ""
+        return str(out.get("reason") or f"no /{kind} GIF yet")
 
     # ---- /emoji ---------------------------------------------------------
     def _control_emoji(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]

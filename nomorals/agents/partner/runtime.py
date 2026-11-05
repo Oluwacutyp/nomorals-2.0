@@ -4121,6 +4121,22 @@ class PartnerRuntime(
             and not str(getattr(reply, "text", "") or "").strip())
         if not empty:
             return reply
+        from ...social.chat.expression import (
+            MEDIA_DELIVERED_KINDS,
+            REACTION_GIF_COMMANDS,
+        )
+
+        if command.kind in MEDIA_DELIVERED_KINDS \
+                or command.kind in REACTION_GIF_COMMANDS:
+            # These handlers answer by SENDING media — the
+            # GIF / sticker / reaction WAS the reply, and ""
+            # is the only shape their success takes (see
+            # expression.MEDIA_DELIVERED_KINDS).  The #32 law
+            # targets silence, not a delivered media message;
+            # converting this "" into the fallback text would
+            # post a false "bug on my end" after every
+            # successful send (probe-proven on /gif, 2026-11-05).
+            return reply
         try:
             record_failure(
                 "runtime.PartnerRuntime.handle_control:empty_reply",
@@ -5683,6 +5699,22 @@ class PartnerRuntime(
             return self._control_customemoji(command.tail or "", message)
         if kind == "react":
             return self._control_react(command.tail or "", message)
+        if kind in {
+                "awoo", "baka", "bite", "blush", "bonk", "bored",
+                "bully", "cringe", "cry", "cuddle", "dance",
+                "facepalm", "feed", "glomp", "handhold",
+                "handshake", "happy", "highfive", "hug",
+                "kiss", "laugh", "lick", "nom", "pat",
+                "poke", "pout", "shrug", "slap", "sleep", "smile",
+                "smug", "stare", "thumbsup", "tickle", "wave",
+                "wink", "yeet"}:
+            # The per-emotion reaction GIFs (wave C): the set
+            # is spelled out so the catalog's handler-path scan
+            # sees every kind; expression.REACTION_GIFS is the
+            # same set with its sources + captions, and
+            # tests/test_reaction_gifs.py pins the two equal.
+            return self._control_reaction(
+                kind, command.tail or "", message)
         if kind == "pulse":
             return self._control_pulse(command.tail or arg)
         if kind == "code":

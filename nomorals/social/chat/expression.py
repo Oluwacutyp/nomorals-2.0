@@ -78,6 +78,9 @@ __all__ = [
     "AUTO_COLLECT_ROOM_CAP", "auto_collected_from",
     "ProviderHealth", "TenorProvider", "GiphyProvider",
     "default_providers", "download_to_library",
+    "WaifuPicsProvider", "NekosBestProvider",
+    "REACTION_GIFS", "REACTION_GIF_COMMANDS",
+    "MEDIA_DELIVERED_KINDS", "reaction_caption",
     "MOMENT_TAGS", "DRY_MOMENTS", "ExpressionService",
     "REACTION_SETS", "reaction_allowed", "pick_reaction",
     "classify_notice_moment",
@@ -1121,6 +1124,268 @@ def download_to_library(url: str, dest_dir: Path | str, *,
     return dest
 
 
+# ── reaction GIF providers (keyless category seeds) ──────────────
+
+class WaifuPicsProvider:
+    """waifu.pics reaction GIFs — a keyless category API: one
+    GET per category answers ``{"url": …}``.  Its SFW category
+    list is the per-emotion command set's primary seed (the
+    FEI XMD reaction menu is this shape).  Category APIs are
+    not search APIs — ``search`` honestly returns nothing, so
+    the moment chain walks past this source untouched."""
+
+    name = "waifu.pics"
+
+    def __init__(self, *,
+                 fetcher: Callable[[str], dict[str, Any]] | None = None
+                 ) -> None:
+        self._fetch = fetcher or _http_json
+
+    def fetch(self, category: str) -> dict[str, Any]:
+        data = self._fetch(
+            "https://api.waifu.pics/sfw/" + str(category))
+        url = str((data or {}).get("url") or "")
+        return {"url": url, "title": str(category), "kind": "gif"}
+
+    def search(self, query: str, *, limit: int = 4
+               ) -> list[dict[str, Any]]:
+        return []
+
+
+class NekosBestProvider:
+    """nekos.best reaction GIFs — the second seed: one GET per
+    category answers ``{"results": [{"url": …,
+    "anime_name": …}]}``.  Its action categories cover the
+    emotions waifu.pics doesn't carry (baka, pout, stare…)."""
+
+    name = "nekos.best"
+
+    def __init__(self, *,
+                 fetcher: Callable[[str], dict[str, Any]] | None = None
+                 ) -> None:
+        self._fetch = fetcher or _http_json
+
+    def fetch(self, category: str) -> dict[str, Any]:
+        data = self._fetch(
+            "https://nekos.best/api/v2/" + str(category))
+        rows = (data or {}).get("results") or []
+        first = rows[0] if rows else {}
+        return {"url": str(first.get("url") or ""),
+                "title": str(first.get("anime_name") or category),
+                "kind": "gif"}
+
+    def search(self, query: str, *, limit: int = 4
+               ) -> list[dict[str, Any]]:
+        return []
+
+
+def default_reaction_providers() -> list[Any]:
+    """The keyless reaction chain, in seed order.  Settings
+    may grow it later; the two seeds are never a closed list
+    in spirit — the health breaker sheds a dead one and the
+    library floor stays."""
+    return [WaifuPicsProvider(), NekosBestProvider()]
+
+
+# ── the per-emotion reaction commands (FEI gap wave C) ───────────
+
+_WP = "waifu.pics"
+_NB = "nekos.best"
+
+#: command → its seed chain ((provider, category), … in the
+#: order tried), the caption's verb phrases, and its glyph.
+#: ``obj`` is the targeted phrase ("Ada " + obj + " 💞");
+#: a transitive command's solo form borrows ``obj`` with
+#: Devon as actor, an intransitive one uses ``plain``.
+#: Every category named here is a REAL category of its
+#: source (the canonical waifu.pics SFW / nekos.best v2
+#: lists) — a command whose emotion neither source carries
+#: is not shipped at all (see the wave report: think, love),
+#: and a name Devon already owns for another job is never
+#: hijacked (kick = member moderation, kill = the conflict
+#: system; the FEI reactions of those names stay unshipped).
+REACTION_GIFS: dict[str, dict[str, Any]] = {
+    "awoo": {"sources": ((_WP, "awoo"),),
+             "obj": "awoos at {obj}", "plain": "awoos",
+             "transitive": False, "emoji": "🐺"},
+    "baka": {"sources": ((_NB, "baka"),),
+             "obj": "calls {obj} a baka", "plain": "",
+             "transitive": True, "emoji": "💢"},
+    "bite": {"sources": ((_WP, "bite"), (_NB, "bite")),
+             "obj": "bites {obj}", "plain": "",
+             "transitive": True, "emoji": "😬"},
+    "blush": {"sources": ((_WP, "blush"), (_NB, "blush")),
+              "obj": "blushes at {obj}", "plain": "blushes",
+              "transitive": False, "emoji": "😊"},
+    "bonk": {"sources": ((_WP, "bonk"),),
+             "obj": "bonks {obj}", "plain": "",
+             "transitive": True, "emoji": "🔨"},
+    "bored": {"sources": ((_NB, "bored"),),
+              "obj": "yawns at {obj}", "plain": "is bored",
+              "transitive": False, "emoji": "🥱"},
+    "bully": {"sources": ((_WP, "bully"),),
+              "obj": "bullies {obj}", "plain": "",
+              "transitive": True, "emoji": "😈"},
+    "cringe": {"sources": ((_WP, "cringe"),),
+               "obj": "cringes at {obj}", "plain": "cringes",
+               "transitive": False, "emoji": "😖"},
+    "cry": {"sources": ((_WP, "cry"), (_NB, "cry")),
+            "obj": "cries beside {obj}", "plain": "cries",
+            "transitive": False, "emoji": "😭"},
+    "cuddle": {"sources": ((_WP, "cuddle"), (_NB, "cuddle")),
+               "obj": "cuddles {obj}", "plain": "",
+               "transitive": True, "emoji": "🥰"},
+    "dance": {"sources": ((_WP, "dance"), (_NB, "dance")),
+              "obj": "dances with {obj}", "plain": "dances",
+              "transitive": False, "emoji": "💃"},
+    "facepalm": {"sources": ((_NB, "facepalm"),),
+                 "obj": "facepalms at {obj}", "plain": "facepalms",
+                 "transitive": False, "emoji": "🤦"},
+    "feed": {"sources": ((_NB, "feed"),),
+             "obj": "feeds {obj}", "plain": "",
+             "transitive": True, "emoji": "🍜"},
+    "glomp": {"sources": ((_WP, "glomp"),),
+              "obj": "glomps {obj}", "plain": "",
+              "transitive": True, "emoji": "🤗"},
+    "handhold": {"sources": ((_WP, "handhold"), (_NB, "handhold")),
+                 "obj": "holds hands with {obj}",
+                 "plain": "holds out a hand",
+                 "transitive": False, "emoji": "🫶"},
+    "handshake": {"sources": ((_NB, "handshake"),),
+                  "obj": "shakes hands with {obj}",
+                  "plain": "offers a handshake",
+                  "transitive": False, "emoji": "🤝"},
+    "happy": {"sources": ((_WP, "happy"), (_NB, "happy")),
+              "obj": "smiles at {obj}", "plain": "is happy",
+              "transitive": False, "emoji": "☺️"},
+    "highfive": {"sources": ((_WP, "highfive"), (_NB, "highfive")),
+                 "obj": "high-fives {obj}", "plain": "",
+                 "transitive": True, "emoji": "✋"},
+    "hug": {"sources": ((_WP, "hug"), (_NB, "hug")),
+            "obj": "hugs {obj}", "plain": "",
+            "transitive": True, "emoji": "💞"},
+    "kiss": {"sources": ((_WP, "kiss"), (_NB, "kiss")),
+             "obj": "kisses {obj}", "plain": "",
+             "transitive": True, "emoji": "💋"},
+    "laugh": {"sources": ((_NB, "laugh"),),
+              "obj": "laughs at {obj}", "plain": "laughs",
+              "transitive": False, "emoji": "😂"},
+    "lick": {"sources": ((_WP, "lick"),),
+             "obj": "licks {obj}", "plain": "",
+             "transitive": True, "emoji": "😛"},
+    "nom": {"sources": ((_WP, "nom"), (_NB, "nom")),
+            "obj": "noms {obj}", "plain": "",
+            "transitive": True, "emoji": "😋"},
+    "pat": {"sources": ((_WP, "pat"), (_NB, "pat")),
+            "obj": "pats {obj}", "plain": "",
+            "transitive": True, "emoji": "🫳"},
+    "poke": {"sources": ((_WP, "poke"), (_NB, "poke")),
+             "obj": "pokes {obj}", "plain": "",
+             "transitive": True, "emoji": "👉"},
+    "pout": {"sources": ((_NB, "pout"),),
+             "obj": "pouts at {obj}", "plain": "pouts",
+             "transitive": False, "emoji": "😤"},
+    "shrug": {"sources": ((_NB, "shrug"),),
+              "obj": "shrugs at {obj}", "plain": "shrugs",
+              "transitive": False, "emoji": "🤷"},
+    "slap": {"sources": ((_WP, "slap"), (_NB, "slap")),
+             "obj": "slaps {obj}", "plain": "",
+             "transitive": True, "emoji": "🖐️"},
+    "sleep": {"sources": ((_NB, "sleep"),),
+              "obj": "sleeps beside {obj}", "plain": "sleeps",
+              "transitive": False, "emoji": "😴"},
+    "smile": {"sources": ((_WP, "smile"), (_NB, "smile")),
+              "obj": "smiles at {obj}", "plain": "smiles",
+              "transitive": False, "emoji": "😄"},
+    "smug": {"sources": ((_WP, "smug"), (_NB, "smug")),
+             "obj": "looks smug at {obj}", "plain": "looks smug",
+             "transitive": False, "emoji": "😏"},
+    "stare": {"sources": ((_NB, "stare"),),
+              "obj": "stares at {obj}", "plain": "stares",
+              "transitive": False, "emoji": "👀"},
+    "thumbsup": {"sources": ((_NB, "thumbsup"),),
+                 "obj": "gives {obj} a thumbs up", "plain": "",
+                 "transitive": True, "emoji": "👍"},
+    "tickle": {"sources": ((_NB, "tickle"),),
+               "obj": "tickles {obj}", "plain": "",
+               "transitive": True, "emoji": "🤣"},
+    "wave": {"sources": ((_WP, "wave"), (_NB, "wave")),
+             "obj": "waves at {obj}", "plain": "waves",
+             "transitive": False, "emoji": "👋"},
+    "wink": {"sources": ((_WP, "wink"), (_NB, "wink")),
+             "obj": "winks at {obj}", "plain": "winks",
+             "transitive": False, "emoji": "😉"},
+    "yeet": {"sources": ((_WP, "yeet"), (_NB, "yeet")),
+             "obj": "yeets {obj}", "plain": "",
+             "transitive": True, "emoji": "🙌"},
+}
+
+#: Every per-emotion reaction command name.
+REACTION_GIF_COMMANDS: frozenset[str] = frozenset(REACTION_GIFS)
+
+#: Commands whose handlers answer by SENDING media through
+#: the expression path (the moments' send, a steal, a made
+#: sticker…): for these, an empty text result from the
+#: handler means "the media WAS the reply" — the only shape
+#: their success takes.  The control path's never-empty law
+#: (register #32) reads this set: a media kind's silence is a
+#: delivery, never the /sudo defect.
+MEDIA_DELIVERED_KINDS: frozenset[str] = frozenset(
+    {"steal", "sticker", "convert", "gif", "react"})
+
+
+def reaction_caption(command: str, *, actor: str, target: str = "",
+                     owner: bool = False) -> str:
+    """The caption riding a reaction GIF.  Targeted: "Ada
+    hugs Bola 💞".  Solo, Devon is the actor: "Devon hugs
+    you 💞" when the owner summons it on himself, "Devon
+    hugs Ada 💞" for a member's transitive solo, "Devon
+    dances 💃" for a one-person reaction."""
+    entry = REACTION_GIFS.get(str(command or "").strip().lower())
+    if entry is None:
+        return ""
+    emoji = str(entry["emoji"])
+    actor = str(actor or "").strip() or "Someone"
+    target = str(target or "").strip()
+    if target:
+        return f"{actor} {entry['obj'].format(obj=target)} {emoji}"
+    if entry["transitive"]:
+        obj = "you" if owner else actor
+        return f"Devon {entry['obj'].format(obj=obj)} {emoji}"
+    return f"Devon {entry['plain']} {emoji}"
+
+
+def _sniff_animation(data: bytes) -> tuple[str, str] | None:
+    """(extension, library kind) for REAL animation bytes —
+    the magic decides, never the URL's claim: GIF, MP4 (an
+    animation on the chat platforms), WebM, animated-capable
+    WebP.  A still image (PNG/JPEG) is not an animation and
+    never rides a reaction command."""
+    head = bytes(data or b"")[:16]
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return (".gif", "gif")
+    if head[4:8] == b"ftyp":
+        return (".mp4", "gif")
+    if head[:4] == b"\x1a\x45\xdf\xa3":
+        return (".webm", "video")
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return (".webp", "sticker")
+    return None
+
+
+def _store_media_bytes(data: bytes, ext: str,
+                       dest_dir: Path | str) -> Path:
+    """Hold fetched bytes in the media dir, content-named —
+    the twin of download_to_library for bytes already in
+    hand (the reaction path sniffs before it stores)."""
+    digest = hashlib.sha256(data).hexdigest()[:16]
+    dest = Path(dest_dir) / f"gif_{digest}{ext}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if not dest.exists():
+        dest.write_bytes(data)
+    return dest
+
+
 # ── moments ──────────────────────────────────────────────────────
 
 #: Moment → (library tags, moods).  The moment vocabulary is
@@ -1185,7 +1450,10 @@ class ExpressionService:
                  health: ProviderHealth | None = None,
                  rng: random.Random | None = None,
                  clock: Callable[[], float] = time.time,
-                 cooldown_s: float = DEFAULT_COOLDOWN_S) -> None:
+                 cooldown_s: float = DEFAULT_COOLDOWN_S,
+                 reaction_providers: Any = None,
+                 bytes_fetcher: Callable[[str], bytes] | None = None
+                 ) -> None:
         self.library = library
         self.providers = list(providers or ())
         self.media_dir = Path(media_dir) if media_dir else None
@@ -1193,6 +1461,13 @@ class ExpressionService:
         self.rng = rng or random.Random()
         self.clock = clock
         self.cooldown_s = float(cooldown_s)
+        # The reaction commands' own seed chain + the byte
+        # fetcher behind it (injectable, like every provider
+        # fetcher here — tests never touch the network).
+        self.reaction_providers = list(
+            default_reaction_providers() if reaction_providers is None
+            else reaction_providers)
+        self.bytes_fetcher = bytes_fetcher or _http_bytes
 
     # -- gating, in the group's own terms ----------------------
     def _allowed(self, moment: str,
@@ -1349,6 +1624,121 @@ class ExpressionService:
             self.library.note_file_id(
                 str(item.get("id")), platform, captured)
         return {"sent": True, "item_id": item.get("id")}
+
+    # -- per-emotion reaction commands (wave C) -----------------
+    def _reaction_provider(self, name: str) -> Any:
+        for provider in self.reaction_providers:
+            if str(getattr(provider, "name", "")) == name:
+                return provider
+        return None
+
+    def _fetch_reaction_item(self, command: str,
+                             entry: dict[str, Any]
+                             ) -> dict[str, Any] | None:
+        """Walk the command's seed chain in order: a source
+        is health-checked, its answer's bytes are fetched and
+        SNIFFED as a real animation before they can ride —
+        a still, a dead source or an empty answer falls
+        through to the next seed, and every outcome is noted
+        in the source's health.  A good fetch joins the
+        library tagged with the command (the floor grows)."""
+        for provider_name, category in entry["sources"]:
+            provider = self._reaction_provider(str(provider_name))
+            if provider is None:
+                continue
+            if not self.health.available(str(provider_name),
+                                         now=self.clock()):
+                continue
+            try:
+                hit = provider.fetch(str(category))
+            except Exception as exc:  # noqa: BLE001 - a dead source sheds
+                _log.debug("reaction provider %s failed: %s",
+                           provider_name, exc)
+                self.health.note(str(provider_name), False,
+                                 now=self.clock())
+                continue
+            url = str((hit or {}).get("url") or "")
+            if not url:
+                self.health.note(str(provider_name), False,
+                                 now=self.clock())
+                continue
+            try:
+                data = self.bytes_fetcher(url)
+            except Exception as exc:  # noqa: BLE001
+                _log.debug("reaction download failed: %s", exc)
+                self.health.note(str(provider_name), False,
+                                 now=self.clock())
+                continue
+            sniffed = _sniff_animation(data)
+            if sniffed is None:
+                # The source answered with something that is
+                # not an animation — a wrong asset; it is noted
+                # against the source and NEVER sent.
+                _log.debug(
+                    "reaction provider %s served a non-animation "
+                    "for %s", provider_name, command)
+                self.health.note(str(provider_name), False,
+                                 now=self.clock())
+                continue
+            self.health.note(str(provider_name), True,
+                             now=self.clock())
+            if self.media_dir is None:
+                continue
+            ext, kind = sniffed
+            path = _store_media_bytes(data, ext, self.media_dir)
+            return self.library.add_item(
+                kind=kind, path=str(path), tags=[command],
+                source=f"provider:{provider_name}")
+        return None
+
+    def reaction_gif(self, command: str, *, room: str = "",
+                     platform: str = "",
+                     send: Callable[[Any], Any]) -> dict[str, Any]:
+        """One per-emotion reaction command (/hug, /pat, …):
+        the command's seed chain first (a fresh fetch), then
+        her library floor — items earlier fetches tagged with
+        this command — then one honest line.  Never a bare
+        URL, never a still, never an unrelated GIF.  Like
+        every expression path: never raises."""
+        command = str(command or "").strip().lower()
+        entry = REACTION_GIFS.get(command)
+        if entry is None:
+            return {"sent": False,
+                    "reason": f"no reaction called /{command}"}
+        try:
+            item = self._fetch_reaction_item(command, entry)
+            if item is None:
+                item = self.library.pick(tags=(command,),
+                                         room=room, rng=self.rng)
+            if item is None:
+                return {"sent": False, "reason": (
+                    f"no /{command} GIF reached me — every "
+                    "source is down and my library has none yet")}
+            from .base import MediaRef
+
+            file_id = str((item.get("file_ids") or {}).get(platform)
+                          or "")
+            ref = MediaRef(path=str(item.get("path") or ""),
+                           kind=self._send_kind(item, platform),
+                           file_id=file_id,
+                           name=f"reaction {command}")
+            result = send(ref)
+            if not getattr(result, "ok", False):
+                return {"sent": False,
+                        "reason": f"send failed: "
+                                  f"{getattr(result, 'error', '')}"[:160],
+                        "item_id": item.get("id")}
+            self.library.note_use(str(item.get("id")), room=room)
+            captured = str(getattr(result, "media_file_id", "")
+                           or "")
+            if captured:
+                self.library.note_file_id(
+                    str(item.get("id")), platform, captured)
+            return {"sent": True, "item_id": item.get("id")}
+        except Exception as exc:  # noqa: BLE001 - expression never breaks its host
+            _log.debug("reaction gif %s failed: %s", command, exc)
+            return {"sent": False,
+                    "reason": f"expression error: {exc}"[:120]}
 
 
 # ── reactions (§22) ──────────────────────────────────────────────
