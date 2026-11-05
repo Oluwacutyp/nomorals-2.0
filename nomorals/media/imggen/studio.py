@@ -7,6 +7,11 @@ gated at call time with clear messages, never silently missing.
 - :class:`Studio`: generate/batch/img2img/inpaint/outpaint/upscale,
   backed by the best available pipeline (native checkpoint first,
   then the legacy generative backends).
+- Documents (Echelon Wave 2): the edit methods are
+  :class:`~.document.ImageDocument` renders underneath, and the
+  ``*_document`` builders + :meth:`Studio.render_document` expose
+  the same edits as unrendered, non-destructive documents whose
+  sidecars record which rung produced each stage.
 - Checkpoint management: list, describe, merge (EMA + LoRA bake).
 - LoRA management: list trained adapters, train new ones.
 - :func:`training_dashboard`: read a run's loss.jsonl → summary with
@@ -199,38 +204,28 @@ class Studio:
 
     def img2img(self, image_path: str, prompt: str,
                 strength: float = 0.6, **kwargs):
-        from PIL import Image
-
-        from .edit import img2img as _i2i
-
         save_to = kwargs.pop("save_to", None)
-        img = Image.open(image_path)
-        out = _i2i(self.pipeline(), img, prompt, strength=strength,
-                   **kwargs)
-        return self._finalize(out, prompt, save_to)
+        doc = self.img2img_document(image_path, prompt,
+                                    strength=strength, **kwargs)
+        return self.render_document(doc, save_to=save_to,
+                                    prompt=prompt)
 
     def inpaint(self, image_path: str, mask_path: str, prompt: str,
                 **kwargs):
-        from PIL import Image
-
-        from .edit import inpaint as _inp
-
         save_to = kwargs.pop("save_to", None)
-        out = _inp(self.pipeline(), Image.open(image_path),
-                   Image.open(mask_path), prompt, **kwargs)
-        return self._finalize(out, prompt, save_to)
+        doc = self.inpaint_document(image_path, mask_path, prompt,
+                                    method="neural", **kwargs)
+        return self.render_document(doc, save_to=save_to,
+                                    prompt=prompt)
 
     def outpaint(self, image_path: str, prompt: str, **kwargs):
-        from PIL import Image
-
-        from .edit import outpaint as _out
-
         save_to = kwargs.pop("save_to", None)
         ext = {k: kwargs.pop(k) for k in
                ("left", "right", "top", "bottom") if k in kwargs}
-        out = _out(self.pipeline(), Image.open(image_path), prompt,
-                   **ext, **kwargs)
-        return self._finalize(out, prompt, save_to)
+        doc = self.outpaint_document(image_path, prompt,
+                                     tier="neural", **ext, **kwargs)
+        return self.render_document(doc, save_to=save_to,
+                                    prompt=prompt)
 
     def upscale(self, image_path: str, scale: float = 2.0,
                 diffusion: bool = False, prompt: str = "",
@@ -241,23 +236,152 @@ class Studio:
         ``creativity`` (0..1, diffusion only): structure-preserving →
         creative reinterpretation slider (see upscale.upscale_diffusion).
         """
-        from PIL import Image
+        if not diffusion and creativity is not None:
+            raise ImgGenError(
+                "creativity needs diffusion=True (classical "
+                "upscale is always structure-preserving)")
+        doc = self.upscale_document(image_path, scale=scale,
+                                    diffusion=diffusion, prompt=prompt,
+                                    creativity=creativity)
+        return self.render_document(
+            doc, save_to=save_to, prompt=f"upscale x{scale}")
 
-        from .upscale import upscale_classical, upscale_diffusion
+    # -- documents (Echelon Wave 2 · plan §2.1a) ----------------------
+    # The classic methods above are document renders underneath:
+    # each builds an ImageDocument (source ref + op list) and
+    # render_document() replays it. The *_document builders expose
+    # the same edits as unrendered, non-destructive documents —
+    # chain more ops, undo, branch, save the project, render later.
 
-        img = Image.open(image_path)
+    def document(self, image_path: str, *, title: str = ""):
+        """Open an :class:`ImageDocument` session over a file."""
+        from .document import ImageDocument
+
+        return ImageDocument(image_path, title=title)
+
+    def generate_document(self, prompt: str, **kwargs):
+        """Generate, then hand back the result as an ImageDocument
+        whose source provenance names the producing rung."""
+        from .document import ImageDocument
+
+        paths = self.generate(prompt, **kwargs)
+        pipe = self._pipeline
+        rung = (f"imggen generate via {type(pipe).__name__}"
+                if pipe is not None else "imggen generate")
+        notes = list(self.last_warnings)
+        if kwargs.get("seed") is not None:
+            notes.append(f"seed={kwargs['seed']}")
+        return ImageDocument(
+            paths[0], title=prompt[:48], source_prompt=prompt,
+            source_rung=rung, notes=notes)
+
+    def img2img_document(self, image_path: str, prompt: str,
+                         strength: float = 0.6, **kwargs):
+        """An unrendered document holding one img2img op."""
+        from .document import ImageDocument
+
+        return ImageDocument(image_path).img2img(
+            prompt, strength=strength, **kwargs)
+
+    def inpaint_document(self, image_path: str, mask, prompt: str,
+                         *, method: str = "auto", **kwargs):
+        """An unrendered document holding one inpaint op.
+
+        ``mask``: a mask file path, a :class:`MaskRef`, or its
+        dict. A PIL mask cannot be embedded — a document is data;
+        save the mask and pass its path instead.
+        """
+        from .document import ImageDocument
+        from .masks import MaskRef
+
+        if isinstance(mask, MaskRef):
+            ref = mask
+        elif isinstance(mask, dict):
+            ref = MaskRef.from_dict(mask)
+        elif isinstance(mask, (str, os.PathLike)):
+            ref = MaskRef.file(str(mask))
+        else:
+            raise ImgGenError(
+                "inpaint mask must be a file path or a MaskRef — "
+                "a document is data and cannot embed mask pixels; "
+                "save the mask and pass its path")
+        feather = kwargs.pop("feather", 8)
+        return ImageDocument(image_path).inpaint(
+            prompt, mask=ref, method=method, feather=feather, **kwargs)
+
+    def outpaint_document(self, image_path: str, prompt: str, *,
+                          tier: str = "auto", **kwargs):
+        """An unrendered document holding one outpaint op
+        (extents as left/right/top/bottom kwargs)."""
+        from .document import ImageDocument
+
+        feather = kwargs.pop("feather", 12)
+        return ImageDocument(image_path).outpaint(
+            prompt, tier=tier, feather=feather, **kwargs)
+
+    def upscale_document(self, image_path: str, scale: float = 2.0,
+                         *, diffusion: bool = False, prompt: str = "",
+                         creativity: float | None = None):
+        """An unrendered document holding one upscale op."""
+        from .document import ImageDocument
+
         if diffusion:
             self._gate("diffusion upscaling", "laptop")
-            out = upscale_diffusion(self.pipeline(), img, prompt,
-                                    scale=scale,
-                                    creativity=creativity)
-        else:
-            if creativity is not None:
-                raise ImgGenError(
-                    "creativity needs diffusion=True (classical "
-                    "upscale is always structure-preserving)")
-            out = upscale_classical(img, scale=scale)
-        return self._finalize([out], f"upscale x{scale}", save_to)
+        return ImageDocument(image_path).upscale(
+            scale=scale, diffusion=diffusion, prompt=prompt,
+            creativity=creativity)
+
+    def render_document(self, doc, save_to: str | None = None,
+                        prompt: str = "") -> list[str]:
+        """Replay an ImageDocument and save the result.
+
+        The Studio pipeline is built when an op requires it
+        (img2img, neural inpaint/outpaint, diffusion upscale) —
+        its absence then raises honestly. Tiered ops (inpaint /
+        outpaint ``auto``) get the pipeline opportunistically: if
+        it cannot be built, they render on their CPU rungs and the
+        reason is written into the output sidecar, never silent.
+        The sidecar also records every op's rung.
+        """
+        required = any(
+            o.op == "img2img"
+            or (o.op == "inpaint"
+                and o.params.get("method") == "neural")
+            or (o.op == "outpaint"
+                and o.params.get("tier") == "neural")
+            or (o.op == "upscale" and o.params.get("diffusion"))
+            for o in doc.ops)
+        opportunistic = any(
+            (o.op == "inpaint"
+             and o.params.get("method", "auto") == "auto")
+            or (o.op == "outpaint"
+                and o.params.get("tier", "auto") == "auto")
+            for o in doc.ops)
+        pipeline = None
+        notes: list[str] = []
+        if required:
+            pipeline = self.pipeline()
+        elif opportunistic:
+            try:
+                pipeline = self.pipeline()
+            except ImgGenError as exc:
+                notes.append(
+                    f"neural pipeline unavailable ({exc}); "
+                    "CPU rungs used where they exist")
+        rendered = doc.render(pipeline=pipeline)
+        sidecar_prompt = (prompt or doc.source_prompt or doc.title
+                          or "image document")
+        paths = self._finalize([rendered.image], sidecar_prompt,
+                               save_to)
+        lines = [f"rung: {p['op']}: {p['rung']}"
+                 + (f" — {p['note']}" if p["note"] else "")
+                 for p in rendered.provenance]
+        lines += [f"note: {n}" for n in notes]
+        if lines:
+            for path in paths:
+                with open(path + ".txt", "a") as f:
+                    f.write("\n" + "\n".join(lines))
+        return paths
 
     @staticmethod
     def _default_name(i: int) -> str:

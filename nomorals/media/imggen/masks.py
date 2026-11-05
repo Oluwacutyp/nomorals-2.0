@@ -54,10 +54,12 @@ from . import ImgGenError
 
 __all__ = [
     "MaskResult",
+    "MaskRef",
     "auto_mask",
     "box_mask",
     "point_flood_mask",
     "sam_status",
+    "mask_status",
     "SAM_AVAILABLE",
     "CV2_AVAILABLE",
 ]
@@ -109,6 +111,204 @@ class MaskResult:
     mask: Image.Image  # L mode, white = repaint
     tier: str          # e.g. "sam", "grabcut", "flood", "box+feather"
     detail: str        # human-readable provenance
+
+
+def mask_status() -> dict:
+    """Per-rung probe of the whole mask ladder — LightCraft honesty
+    shape: every rung states whether it is usable and, when it is
+    not, the exact reason (and the install/provisioning step that
+    would enable it). Data, not prose: callers (documents, brain,
+    QC) compare rungs from this instead of guessing.
+    """
+    sam = sam_status()
+    return {
+        "sam": {
+            "usable": bool(sam["usable"]),
+            "reason": sam["reason"],
+            "package": sam["package"],
+            "checkpoint": sam["checkpoint"],
+        },
+        "grabcut": {
+            "usable": bool(CV2_AVAILABLE),
+            "reason": ("ok" if CV2_AVAILABLE else
+                       "OpenCV not installed "
+                       "(pip install opencv-python)"),
+        },
+        "flood": {
+            "usable": bool(NUMPY_AVAILABLE),
+            "reason": ("ok" if NUMPY_AVAILABLE else
+                       "numpy not installed (pip install numpy)"),
+        },
+        "box": {
+            "usable": bool(PIL_AVAILABLE),
+            "reason": ("ok" if PIL_AVAILABLE else
+                       "Pillow not installed (pip install Pillow)"),
+        },
+        "file": {
+            "usable": bool(PIL_AVAILABLE),
+            "reason": ("ok" if PIL_AVAILABLE else
+                       "Pillow not installed (pip install Pillow)"),
+        },
+    }
+
+
+@dataclass(frozen=True)
+class MaskRef:
+    """A serializable reference to a mask — the first-class mask
+    value documents carry (Echelon Wave 2 · plan §2.1d).
+
+    A MaskRef is a *recipe or a file*, never embedded pixels, so an
+    :class:`~nomorals.media.imggen.document.ImageDocument` (or an
+    ``edit_engine`` op's params dict) stays pure JSON and replays
+    deterministically: the mask is re-derived from the target image
+    at render time through the same ladder :func:`auto_mask` uses.
+
+    Kinds:
+    - ``"file"``  — a mask image on disk (``path``).
+    - ``"box"``   — ``box`` + feather → :func:`box_mask`.
+    - ``"point"`` — ``point`` + ``tolerance`` → region-grow flood.
+    - ``"auto"``  — the full ladder (SAM → GrabCut → flood/box)
+      over ``text``/``point``/``box``; ``text`` needs a
+      ``box_predictor`` at resolve time when no SAM checkpoint
+      exists.
+
+    ``rung``/``detail`` are provenance: empty until :meth:`resolve`
+    runs; :meth:`resolved` returns a copy stamped with the tier
+    that actually produced the mask — a mask never travels without
+    saying which rung made it.
+    """
+
+    kind: str = "file"
+    path: str = ""
+    box: tuple | None = None
+    point: tuple | None = None
+    text: str = ""
+    feather: int = 8
+    tolerance: int = 32
+    tier: str = "auto"
+    rung: str = ""
+    detail: str = ""
+
+    # -- constructors -------------------------------------------------
+    @classmethod
+    def file(cls, path: str, *, feather: int = 0) -> "MaskRef":
+        return cls(kind="file", path=str(path), feather=feather)
+
+    @classmethod
+    def of_box(cls, box, *, feather: int = 8) -> "MaskRef":
+        return cls(kind="box",
+                   box=tuple(float(v) for v in box), feather=feather)
+
+    @classmethod
+    def of_point(cls, point, *, tolerance: int = 32,
+                 feather: int = 6) -> "MaskRef":
+        return cls(kind="point",
+                   point=(float(point[0]), float(point[1])),
+                   tolerance=tolerance, feather=feather)
+
+    @classmethod
+    def auto(cls, *, text: str = "", point=None, box=None,
+             feather: int = 8, tier: str = "auto") -> "MaskRef":
+        return cls(kind="auto", text=text,
+                   point=(tuple(float(v) for v in point)
+                          if point is not None else None),
+                   box=(tuple(float(v) for v in box)
+                        if box is not None else None),
+                   feather=feather, tier=tier)
+
+    # -- resolution ---------------------------------------------------
+    def resolve(self, image, box_predictor=None) -> MaskResult:
+        """Materialize the mask for ``image`` through the ladder.
+
+        Returns a :class:`MaskResult` (mask + tier + detail); stamp
+        it back onto the ref with :meth:`resolved` so the document
+        record shows which rung produced the mask.
+        """
+        _require_pil()
+        if self.kind == "file":
+            if not self.path:
+                raise ImgGenError("MaskRef(kind='file') has no path")
+            m = Image.open(self.path).convert("L")
+            if m.size != image.size:
+                m = m.resize(image.size, Image.BILINEAR)
+            if self.feather > 0:
+                m = m.filter(ImageFilter.GaussianBlur(self.feather))
+            return MaskResult(
+                mask=m, tier="file",
+                detail=f"mask loaded from {self.path}")
+        if self.kind == "box":
+            if self.box is None:
+                raise ImgGenError("MaskRef(kind='box') has no box")
+            m = box_mask(image.size, self.box,
+                         feather_radius=self.feather)
+            return MaskResult(
+                mask=m, tier="box+feather",
+                detail=f"box {tuple(round(v) for v in self.box)} "
+                       f"+ feather {self.feather}")
+        if self.kind == "point":
+            if self.point is None:
+                raise ImgGenError("MaskRef(kind='point') has no point")
+            m = point_flood_mask(image, self.point,
+                                 tolerance=self.tolerance,
+                                 feather_radius=self.feather)
+            return MaskResult(
+                mask=m, tier="flood",
+                detail="numpy region-grow from point "
+                       "(solid-ish objects; may leak on busy texture)")
+        if self.kind == "auto":
+            return auto_mask(
+                image, text=self.text or None, point=self.point,
+                box=self.box, box_predictor=box_predictor,
+                feather_radius=self.feather, tier=self.tier)
+        raise ImgGenError(
+            f"unknown MaskRef kind {self.kind!r}; "
+            "use file|box|point|auto")
+
+    def resolved(self, result: MaskResult) -> "MaskRef":
+        """A copy of this ref stamped with the producing rung."""
+        from dataclasses import replace
+
+        return replace(self, rung=result.tier, detail=result.detail)
+
+    # -- serialization --------------------------------------------------
+    def to_dict(self) -> dict:
+        return {
+            "kind": self.kind,
+            "path": self.path,
+            "box": list(self.box) if self.box is not None else None,
+            "point": (list(self.point)
+                      if self.point is not None else None),
+            "text": self.text,
+            "feather": self.feather,
+            "tolerance": self.tolerance,
+            "tier": self.tier,
+            "rung": self.rung,
+            "detail": self.detail,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "MaskRef":
+        if not isinstance(d, dict):
+            raise ImgGenError(f"MaskRef needs a dict, got {d!r}")
+        kind = d.get("kind", "file")
+        if kind not in ("file", "box", "point", "auto"):
+            raise ImgGenError(
+                f"unknown MaskRef kind {kind!r}; use file|box|point|auto")
+        box = d.get("box")
+        point = d.get("point")
+        return cls(
+            kind=kind,
+            path=str(d.get("path", "")),
+            box=tuple(float(v) for v in box) if box is not None else None,
+            point=(tuple(float(v) for v in point)
+                   if point is not None else None),
+            text=str(d.get("text", "")),
+            feather=int(d.get("feather", 8)),
+            tolerance=int(d.get("tolerance", 32)),
+            tier=str(d.get("tier", "auto")),
+            rung=str(d.get("rung", "")),
+            detail=str(d.get("detail", "")),
+        )
 
 
 def box_mask(image_size: tuple[int, int], box: tuple[int, int, int, int],
