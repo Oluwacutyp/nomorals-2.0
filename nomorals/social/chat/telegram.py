@@ -1683,6 +1683,23 @@ class TelegramAdapter(ChatAdapter):
                         "id": str(getattr(_action, "user_id", "")
                                   or ""),
                         "username": "", "name": ""}}
+            elif _action_name == "MessageActionTopicCreate":
+                # Forum topic birth (§16 P5).  MTProto carries
+                # no is_name_implicit flag — the record notes
+                # the topic; the rename duty's trigger is the
+                # bot surface's flag, so implicit stays False
+                # here and the duty never fires off this
+                # surface's word alone.
+                service_meta = {
+                    "service": "forum_topic_created",
+                    "topic": {
+                        "title": str(getattr(_action, "title", "")
+                                     or ""),
+                        "icon_color": getattr(_action,
+                                              "icon_color", None),
+                        "implicit": False},
+                    "thread_id": str(getattr(message, "id", "")
+                                     or "")}
         # Defense envelope (brief §1.3) + the antiedit marker when
         # this delivery is an edit event (see the MessageEdited
         # registration in the connect loop).
@@ -2434,6 +2451,146 @@ class TelegramAdapter(ChatAdapter):
         return self._admin(
             self._join_request_coro(chat, user_id, approve),
             "join_request")
+
+    # ── §16 P5 verbs (userbot surface) ─────────────────────────
+    # MTProto carries two of the P5 acts itself (sender-chat
+    # ban, topic rename); the rest are Bot-API-only affordances
+    # and answer with the honest unsupported result in the same
+    # shape the bot surface returns — never a silent no-op.
+
+    async def _ban_sender_chat_coro(self, chat: ChatRef,
+                                    sender_chat_id: str) -> None:
+        from telethon.tl import functions
+        from telethon.tl.types import ChatBannedRights
+        entity = await self._resolve(chat)
+        channel = await self._client.get_entity(int(sender_chat_id))
+        await self._client(functions.channels.EditBannedRequest(
+            channel=entity, participant=channel,
+            banned_rights=ChatBannedRights(
+                until_date=None, view_messages=True)))
+
+    def admin_ban_sender_chat(self, chat: ChatRef,
+                              sender_chat_id: str) -> dict[str, Any]:
+        """Ban a CHANNEL identity from the room (MTProto: the
+        same EditBannedRequest as a user ban, with the channel
+        as the participant)."""
+        return self._admin(
+            self._ban_sender_chat_coro(chat, sender_chat_id),
+            "ban_sender_chat")
+
+    async def _unban_sender_chat_coro(self, chat: ChatRef,
+                                      sender_chat_id: str) -> None:
+        from telethon.tl import functions
+        from telethon.tl.types import ChatBannedRights
+        entity = await self._resolve(chat)
+        channel = await self._client.get_entity(int(sender_chat_id))
+        await self._client(functions.channels.EditBannedRequest(
+            channel=entity, participant=channel,
+            banned_rights=ChatBannedRights(until_date=None)))
+
+    def admin_unban_sender_chat(self, chat: ChatRef,
+                                sender_chat_id: str
+                                ) -> dict[str, Any]:
+        """Lift a sender-chat ban."""
+        return self._admin(
+            self._unban_sender_chat_coro(chat, sender_chat_id),
+            "unban_sender_chat")
+
+    async def _edit_forum_topic_coro(self, chat: ChatRef,
+                                     thread_id: str,
+                                     name: str) -> None:
+        from telethon.tl import functions
+        entity = await self._resolve(chat)
+        await self._client(functions.channels.EditForumTopicRequest(
+            channel=entity, topic_id=int(thread_id),
+            title=str(name or "")))
+
+    def admin_forum_topic_edit(self, chat: ChatRef,
+                               thread_id: str, name: str
+                               ) -> dict[str, Any]:
+        """Rename a forum topic over MTProto.  Note the duty's
+        TRIGGER (is_name_implicit) is a Bot API flag — MTProto
+        topics are recorded without it and never auto-renamed
+        from this surface; the rename ACT works here."""
+        return self._admin(
+            self._edit_forum_topic_coro(chat, thread_id, name),
+            "edit_forum_topic")
+
+    def admin_set_member_tag(self, chat: ChatRef, user_id: str,
+                             tag: str) -> dict[str, Any]:
+        """Member tags are a Bot API affordance
+        (setChatMemberTag, behind the bot's can_manage_tags
+        right); MTProto has no equivalent."""
+        return {"ok": False, "error": "unsupported: member tags "
+                "are set by the bot surface (Bot API "
+                "setChatMemberTag)"}
+
+    def admin_reaction_wipe(self, chat: ChatRef, user_id: str
+                            ) -> dict[str, Any]:
+        """Reaction wipes are Bot-API-only
+        (deleteAllMessageReactions)."""
+        return {"ok": False, "error": "unsupported: reaction "
+                "wipes run on the bot surface (Bot API "
+                "deleteAllMessageReactions)"}
+
+    def admin_answer_join_query(self, query_id: str, result: str
+                                ) -> dict[str, Any]:
+        """The join-request "queue" verdict is a guard-BOT
+        affordance (answerChatJoinRequestQuery); the query id
+        is minted for the bot that received the request."""
+        return {"ok": False, "error": "unsupported: the queue "
+                "verdict is answered by the bot that received "
+                "the join query"}
+
+    def admin_dm_applicant(self, user_chat_id: str, text: str
+                           ) -> dict[str, Any]:
+        """The applicant DM window keys off the Bot API's
+        user_chat_id, which MTProto cannot address."""
+        return {"ok": False, "error": "unsupported: the "
+                "applicant DM window opens on the bot surface "
+                "(user_chat_id is a Bot API address)"}
+
+    def admin_user_boosts(self, chat: ChatRef, user_id: str
+                          ) -> dict[str, Any]:
+        """Per-user boost lookup is getUserChatBoosts (Bot
+        API); boost intel reaches this surface's rooms
+        through the bot's boost updates."""
+        return {"ok": False, "error": "unsupported: per-user "
+                "boost lookup runs on the bot surface (Bot API "
+                "getUserChatBoosts)"}
+
+    def admin_set_member_commands(self, chat: ChatRef,
+                                  user_id: str,
+                                  commands: Any) -> dict[str, Any]:
+        """Command scopes are the BOT's own menu
+        (setMyCommands) — a userbot has no bot menu to scope."""
+        return {"ok": False, "error": "unsupported: command "
+                "scopes belong to the bot surface (setMyCommands)"}
+
+    def admin_clear_member_commands(self, chat: ChatRef,
+                                    user_id: str) -> dict[str, Any]:
+        return {"ok": False, "error": "unsupported: command "
+                "scopes belong to the bot surface (setMyCommands)"}
+
+    def admin_set_admin_commands(self, chat: ChatRef,
+                                 commands: Any) -> dict[str, Any]:
+        return {"ok": False, "error": "unsupported: command "
+                "scopes belong to the bot surface (setMyCommands)"}
+
+    def admin_clear_admin_commands(self, chat: ChatRef
+                                   ) -> dict[str, Any]:
+        return {"ok": False, "error": "unsupported: command "
+                "scopes belong to the bot surface (setMyCommands)"}
+
+    def send_ephemeral(self, chat: ChatRef, user_id: str,
+                       text: str, *,
+                       reply_to_message_id: str = ""
+                       ) -> dict[str, Any]:
+        """Ephemeral answers are a Bot API 10.2 affordance; a
+        userbot message is visible to the whole room."""
+        return {"ok": False, "error": "unsupported: ephemeral "
+                "answers are sent by the bot surface (Bot API "
+                "ephemeral_message_parameters)"}
 
     async def _member_photo_coro(self, user_id: str) -> bool:
         user = await self._client.get_entity(int(user_id))
@@ -3371,7 +3528,10 @@ class TelegramBotAdapter(ChatAdapter):
                                     allowed_updates=["message", "edited_message",
                                                      "channel_post", "callback_query",
                                                      "inline_query",
-                                                     "message_reaction"])
+                                                     "message_reaction",
+                                                     "chat_join_request",
+                                                     "chat_boost",
+                                                     "removed_chat_boost"])
             except Exception as exc:  # noqa: BLE001 - transient, back off a little
                 # A persistent failure (revoked token, dead DNS) must not
                 # hot-spin the poll loop every 5s — back off exponentially,
@@ -3454,6 +3614,23 @@ class TelegramBotAdapter(ChatAdapter):
                 if converted is not None:
                     self._deliver(handler, converted)
                 return
+            # Boost updates (§16 boost intel): who is boosting
+            # the room, delivered as service events for the
+            # group surface's ledger — never conversed with.
+            if "chat_boost" in update or "removed_chat_boost" in update:
+                _boost_key = ("removed_chat_boost" if
+                              "removed_chat_boost" in update
+                              else "chat_boost")
+                boost = update[_boost_key]
+                if not isinstance(boost, dict):
+                    _log.warning("telegram-bot: dropping non-dict %s %r",
+                                 _boost_key, type(boost).__name__)
+                    return
+                converted = self._convert_boost(
+                    boost, removed=_boost_key == "removed_chat_boost")
+                if converted is not None:
+                    self._deliver(handler, converted)
+                return
             message = self._convert(update)
             if message is not None:
                 # At-most-once: a restarted poll loop can re-fetch
@@ -3499,6 +3676,60 @@ class TelegramBotAdapter(ChatAdapter):
                       text=self.deny_text)
         except Exception as exc:  # noqa: BLE001 - denial is best-effort
             _log.debug("telegram-personal: denial send failed: %s", exc)
+
+    def _convert_boost(self, payload: dict[str, Any], *,
+                       removed: bool) -> ChatMessage | None:
+        """A ``chat_boost`` / ``removed_chat_boost`` update → a
+        service ChatMessage (meta.service == "chat_boost" /
+        "chat_boost_removed") carrying exactly what Telegram
+        said: the boost id, its add/expiration dates, and its
+        source — with the boosting user ONLY when the source
+        names one (a claimed Premium/gift boost does; an
+        unclaimed giveaway does not, and the surface counts
+        those for the room, attributed to nobody)."""
+        from .group_p5 import boost_source_kind
+
+        chat = payload.get("chat") or {}
+        if not isinstance(chat, dict):
+            return None
+        chat_id = str(chat.get("id", "") or "")
+        if not chat_id:
+            return None
+        boost = payload.get("boost") or {}
+        if not isinstance(boost, dict):
+            boost = {}
+        source = boost.get("source") or {}
+        if not isinstance(source, dict):
+            source = {}
+        src_user = source.get("user") or {}
+        if not isinstance(src_user, dict):
+            src_user = {}
+        chat_type = chat.get("type", "")
+        kind = _BOT_CHAT_TYPES.get(
+            chat_type if isinstance(chat_type, str) else "",
+            ChatKind.DM)
+        if kind == ChatKind.DM:
+            return None
+        meta = {
+            "service": "chat_boost_removed" if removed
+                       else "chat_boost",
+            "boost": {
+                "boost_id": str(boost.get("boost_id") or ""),
+                "add_date": boost.get("add_date"),
+                "expiration_date": boost.get("expiration_date"),
+                "source_kind": boost_source_kind(source),
+                "user_id": str(src_user.get("id") or "")}}
+        return ChatMessage(
+            chat=ChatRef(platform=self.name, chat_id=chat_id,
+                         kind=kind,
+                         title=str(chat.get("title", "") or "")),
+            incoming=True, text="",
+            sender=str(src_user.get("first_name") or ""),
+            sender_id=str(src_user.get("id") or ""),
+            sender_username=str(src_user.get("username") or ""),
+            ts=_safe_ts(payload.get("date")
+                        or boost.get("add_date") or time.time()),
+            message_id="", meta=meta)
 
     def _convert_reaction(self, reaction: dict[str, Any],
                           update: dict[str, Any]) -> ChatMessage | None:
@@ -3737,6 +3968,22 @@ class TelegramBotAdapter(ChatAdapter):
                 "id": str(_left.get("id", "") or ""),
                 "username": str(_left.get("username") or ""),
                 "name": str(_left.get("first_name") or "")}
+        # Forum topics (§16 P5): a topic's birth is a service
+        # message too.  Telegram flags auto-named topics with
+        # is_name_implicit — "likely needs to be changed by
+        # the bot" — which is the rename duty's trigger.
+        _topic = msg.get("forum_topic_created")
+        if isinstance(_topic, dict) and _topic:
+            meta["service"] = "forum_topic_created"
+            meta["topic"] = {
+                "title": str(_topic.get("name") or ""),
+                "icon_color": _topic.get("icon_color"),
+                "implicit": bool(_topic.get("is_name_implicit"))}
+        if msg.get("message_thread_id"):
+            # Topic traffic: the thread id rides meta so the
+            # rename duty can find its topic (the bot surface
+            # doesn't fold threads into ChatRef).
+            meta["thread_id"] = str(msg["message_thread_id"])
         who = sender.get("username") or sender.get("first_name") or str(sender.get("id", ""))
         if not isinstance(who, str):
             who = str(who)
@@ -3953,7 +4200,15 @@ class TelegramBotAdapter(ChatAdapter):
                       "last_name": last,
                       "is_bot": bool(user.get("is_bot"))},
                   "user_chat_id": str(
-                      request.get("user_chat_id") or "")},
+                      request.get("user_chat_id") or ""),
+                  # The §16 P5 guard-bot query: when Telegram
+                  # mints one, the verdict may be answered as
+                  # approve / decline / QUEUE through
+                  # answerChatJoinRequestQuery (within 10s).
+                  # Absent on ordinary requests — the classic
+                  # approve/decline calls then carry the day.
+                  "join_query_id": str(
+                      request.get("query_id") or "")},
         )
         self._deliver(handler, message)
 
@@ -4589,7 +4844,8 @@ class TelegramBotAdapter(ChatAdapter):
                 "can_restrict_members": bool(member.get("can_restrict_members")),
                 "can_promote_members": bool(member.get("can_promote_members")),
                 "can_pin_messages": bool(member.get("can_pin_messages")),
-                "can_invite_users": bool(member.get("can_invite_users"))}
+                "can_invite_users": bool(member.get("can_invite_users")),
+                "can_manage_tags": bool(member.get("can_manage_tags"))}
 
     def admin_pin(self, chat: ChatRef, message_id: str,
                  silent: bool = True) -> dict[str, Any]:
@@ -4659,6 +4915,178 @@ class TelegramBotAdapter(ChatAdapter):
         method = ("approveChatJoinRequest" if approve
                   else "declineChatJoinRequest")
         return self._admin(method, chat, user_id=int(user_id))
+
+    # ── §16 P5 verbs (bot surface) ─────────────────────────────
+    # The P5 layer's platform acts.  Every one is Bot-API-only
+    # by Telegram's own design; the userbot adapter carries
+    # honest unsupported results for the same names so callers
+    # read one shape on both surfaces.
+
+    def admin_set_member_tag(self, chat: ChatRef, user_id: str,
+                             tag: str) -> dict[str, Any]:
+        """setChatMemberTag: the member's tag (0–16 chars, no
+        emoji; "" clears).  Telegram gates it on the bot's own
+        can_manage_tags admin right — without that right the
+        API refuses and the refusal is the result."""
+        return self._admin("setChatMemberTag", chat,
+                           user_id=int(user_id),
+                           tag=str(tag or ""))
+
+    def admin_ban_sender_chat(self, chat: ChatRef,
+                              sender_chat_id: str) -> dict[str, Any]:
+        """banChatSenderChat: ban a CHANNEL identity from the
+        room.  While banned, the channel's owner cannot post
+        in this chat as ANY of their channels."""
+        return self._admin("banChatSenderChat", chat,
+                           sender_chat_id=int(sender_chat_id))
+
+    def admin_unban_sender_chat(self, chat: ChatRef,
+                                sender_chat_id: str
+                                ) -> dict[str, Any]:
+        """unbanChatSenderChat: lift a sender-chat ban."""
+        return self._admin("unbanChatSenderChat", chat,
+                           sender_chat_id=int(sender_chat_id))
+
+    def admin_reaction_wipe(self, chat: ChatRef, user_id: str
+                            ) -> dict[str, Any]:
+        """deleteAllMessageReactions: wipe up to 10,000 of one
+        member's recent reactions in this chat.  Needs the
+        bot's can_delete_messages right."""
+        return self._admin("deleteAllMessageReactions", chat,
+                           user_id=int(user_id))
+
+    def admin_answer_join_query(self, query_id: str, result: str
+                                ) -> dict[str, Any]:
+        """answerChatJoinRequestQuery (§16 queue verdict): a
+        guard bot resolves the join query it was handed as
+        "approve" | "decline" | "queue" — queue hands the
+        decision to the chat's other admins; the query id
+        expires in seconds, so a late answer fails honestly."""
+        try:
+            out = self._api(
+                "answerChatJoinRequestQuery",
+                chat_join_request_query_id=str(query_id),
+                result=str(result))
+            return {"ok": True, "result": out}
+        except Exception as exc:  # noqa: BLE001 - honest error
+            return {"ok": False, "error": str(exc)[:200]}
+
+    def admin_dm_applicant(self, user_chat_id: str, text: str
+                           ) -> dict[str, Any]:
+        """The §16 DM window: message a join applicant at the
+        user_chat_id their request carried.  Telegram opens
+        the window for 5 minutes after the request and only
+        if no other admin contacted them first — outside it
+        the API refuses and the refusal is the result."""
+        try:
+            out = self._api("sendMessage",
+                            chat_id=int(user_chat_id),
+                            text=str(text or ""))
+            return {"ok": True, "result": out}
+        except Exception as exc:  # noqa: BLE001 - honest error
+            return {"ok": False, "error": str(exc)[:200]}
+
+    def admin_user_boosts(self, chat: ChatRef, user_id: str
+                          ) -> dict[str, Any]:
+        """getUserChatBoosts: the boosts ONE user applied to
+        this chat (admin rights required; a refusal is the
+        result, never an empty list dressed as fact)."""
+        return self._admin("getUserChatBoosts", chat,
+                           user_id=int(user_id))
+
+    def admin_forum_topic_edit(self, chat: ChatRef,
+                               thread_id: str, name: str
+                               ) -> dict[str, Any]:
+        """editForumTopic: rename a forum topic (the §16
+        auto-rename duty's act)."""
+        return self._admin("editForumTopic", chat,
+                           message_thread_id=int(thread_id),
+                           name=str(name or ""))
+
+    def _set_command_scope(self, scope: dict[str, Any],
+                           commands: list[tuple[str, str]] | None
+                           ) -> dict[str, Any]:
+        """setMyCommands / deleteMyCommands for one scope
+        (§16 per-member command scopes).  commands=None clears
+        the scope back to the wider defaults."""
+        try:
+            if commands is None:
+                out = self._api("deleteMyCommands",
+                                scope=json.dumps(scope))
+            else:
+                out = self._api(
+                    "setMyCommands",
+                    commands=json.dumps(
+                        [{"command": name, "description": desc}
+                         for name, desc in commands]),
+                    scope=json.dumps(scope))
+            return {"ok": True, "result": out}
+        except Exception as exc:  # noqa: BLE001 - honest error
+            return {"ok": False, "error": str(exc)[:200]}
+
+    def admin_set_member_commands(self, chat: ChatRef,
+                                  user_id: str,
+                                  commands: list[tuple[str, str]]
+                                  ) -> dict[str, Any]:
+        """The command list ONE member of this chat sees
+        (BotCommandScopeChatMember) — scope sync uses it to
+        give this room's admins their full surface."""
+        return self._set_command_scope(
+            {"type": "chat_member", "chat_id": int(chat.chat_id),
+             "user_id": int(user_id)}, commands)
+
+    def admin_clear_member_commands(self, chat: ChatRef,
+                                    user_id: str) -> dict[str, Any]:
+        """Drop one member's scoped list (back to the chat /
+        default scopes)."""
+        return self._set_command_scope(
+            {"type": "chat_member", "chat_id": int(chat.chat_id),
+             "user_id": int(user_id)}, None)
+
+    def admin_set_admin_commands(self, chat: ChatRef,
+                                 commands: list[tuple[str, str]]
+                                 ) -> dict[str, Any]:
+        """The command list this chat's ADMINS see
+        (BotCommandScopeChatAdministrators)."""
+        return self._set_command_scope(
+            {"type": "chat_administrators",
+             "chat_id": int(chat.chat_id)}, commands)
+
+    def admin_clear_admin_commands(self, chat: ChatRef
+                                   ) -> dict[str, Any]:
+        """Drop the administrators scope (deleteMyCommands) —
+        admins fall back to the chat / default scopes."""
+        return self._set_command_scope(
+            {"type": "chat_administrators",
+             "chat_id": int(chat.chat_id)}, None)
+
+    def send_ephemeral(self, chat: ChatRef, user_id: str,
+                       text: str, *,
+                       reply_to_message_id: str = ""
+                       ) -> dict[str, Any]:
+        """Bot API 10.2 ephemeral answers (§16): the message
+        is visible only to ``user_id`` and the bot inside the
+        group.  Eligibility is Telegram's — an admin bot may
+        send to any non-bot member any time; a non-admin bot
+        only within 15s of an eligible action (a callback tap
+        or a reply to an ephemeral message), so
+        ``reply_to_message_id`` carries that anchor when there
+        is one.  Delivery is never guaranteed by the API; a
+        refusal returns ok=False and the caller falls back —
+        an ephemeral answer is never faked."""
+        params: dict[str, Any] = {
+            "chat_id": int(chat.chat_id),
+            "text": str(text or ""),
+            "ephemeral_message_parameters": json.dumps(
+                {"receiver_user_id": int(user_id)})}
+        if reply_to_message_id:
+            params["reply_parameters"] = json.dumps(
+                {"message_id": int(reply_to_message_id)})
+        try:
+            out = self._api("sendMessage", **params)
+            return {"ok": True, "result": out}
+        except Exception as exc:  # noqa: BLE001 - honest error
+            return {"ok": False, "error": str(exc)[:200]}
 
     def admin_member_photo(self, chat: ChatRef, user_id: str
                            ) -> dict[str, Any]:

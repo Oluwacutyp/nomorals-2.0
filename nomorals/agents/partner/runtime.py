@@ -3761,6 +3761,45 @@ class PartnerRuntime(
         text = str(text or "")
         if not text and not buttons:
             return None
+        # §16 ephemeral answers: handle_control stamps replies
+        # of sensitive kinds in groups that opted in (p5
+        # ephemeral).  The ladder, in order: the adapter's
+        # ephemeral send (visible only to the asker + the bot
+        # in-group) → the same text by DM → a bare pointer in
+        # the group.  The content itself is NEVER posted
+        # publicly as a fallback — that would defeat the point
+        # silently.
+        _eph = (getattr(message, "meta", None) or {}).get(
+            "ephemeral_reply")
+        if isinstance(_eph, dict) and text:
+            _uid = str(_eph.get("user_id") or "")
+            _adapter = (getattr(self.gateway, "adapters", {})
+                        or {}).get(message.chat.platform)
+            _verb = getattr(_adapter, "send_ephemeral", None)
+            if _uid and callable(_verb):
+                try:
+                    _out = _verb(message.chat, _uid, text)
+                except Exception:  # noqa: BLE001 - fall to DM
+                    _out = None
+                if isinstance(_out, dict) and _out.get("ok"):
+                    return _out
+            if _uid:
+                from ...social.chat.base import (
+                    ChatKind as _CK, ChatRef as _CR)
+                try:
+                    _sent = self.gateway.send(
+                        message.chat.platform,
+                        _CR(platform=message.chat.platform,
+                            chat_id=_uid, kind=_CK.DM),
+                        text, fresh=True)
+                except Exception:  # noqa: BLE001 - fall to pointer
+                    _sent = None
+                if _sent is not None and getattr(_sent, "ok", False):
+                    return _sent
+            return self.gateway.send(
+                message.chat.platform, message.chat,
+                "that's yours alone — check your DMs with me.",
+                fresh=True)
         self._typing_for(message.chat, text)
         parse_mode = "HTML" if ("<b>" in text or "<code>" in text) \
             else ""
@@ -3792,7 +3831,8 @@ class PartnerRuntime(
         """
         from ...social.chat.control import (
             CONFIRMABLE_COMMANDS, ControlCommand, GAME_START_COMMANDS,
-            TELEGRAM_CLEANUP_KINDS, WHATSAPP_UNSUPPORTED_KINDS,
+            TELEGRAM_CLEANUP_KINDS, TELEGRAM_P5_KINDS,
+            WHATSAPP_UNSUPPORTED_KINDS,
             caller_may_run, detailed_help, parse_control,
             public_menu_text)
         from ..power import power_mode_for
@@ -3945,6 +3985,14 @@ class PartnerRuntime(
                         "WhatsApp gives me no member list to "
                         "scan and no deleted-account markers "
                         "to find.")
+            if kind in TELEGRAM_P5_KINDS:
+                # The §16 P5 kinds are Telegram affordances
+                # (member tags, channel-identity bans, reaction
+                # wipes, boosts) — WhatsApp has none of the
+                # four systems underneath them.
+                return ("that's a Telegram tool — WhatsApp "
+                        "has no member tags, channel posts, "
+                        "reaction wipes or boosts to run it on.")
             return ("WhatsApp has no per-person mute — a "
                     "member here can only be removed, or left "
                     "as they are.")
@@ -4081,7 +4129,28 @@ class PartnerRuntime(
             return self._control_gsettings(command.tail, message)
 
         if kind == "balance":
-            return self._control_balance(message)
+            reply = self._control_balance(message)
+            # §16 ephemeral answers: a sensitive kind's group
+            # reply goes only to the asker when the group's p5
+            # settings say so (bot surface).  The stamp is read
+            # by _send_control_reply, which owns the fallback
+            # ladder (ephemeral → DM → pointer) — the reply is
+            # never silently public.
+            if platform == "telegram-bot":
+                try:
+                    _key = self._group_key_or_none(message)
+                    if _key is not None and (
+                            self._group_surface().store.settings(
+                                _key).get("p5") or {}).get(
+                                    "ephemeral") \
+                            and isinstance(
+                                getattr(message, "meta", None),
+                                dict):
+                        message.meta["ephemeral_reply"] = {
+                            "user_id": str(message.sender_id or "")}
+                except Exception:  # noqa: BLE001 - delivery detail
+                    pass            # never blocks the reply itself
+            return reply
 
         if kind == "mine":
             return self._control_mine(message)
@@ -4279,6 +4348,19 @@ class PartnerRuntime(
 
         if kind == "report":
             return self._control_report(command.tail, message)
+
+        if kind == "tag":
+            return self._control_tag(command.tail, message)
+
+        if kind in ("bansender", "unbansender"):
+            return self._control_bansender(command.tail, message,
+                                           unban=kind == "unbansender")
+
+        if kind == "reactwipe":
+            return self._control_reactwipe(command.tail, message)
+
+        if kind == "boosters":
+            return self._control_boosters(command.tail, message)
 
         if kind == "cleanup":
             return self._control_cleanup(command.tail, message)

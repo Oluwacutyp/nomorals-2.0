@@ -74,6 +74,7 @@ from ...security.payload_inspection import (
 from .failures import record_failure
 from .group_acceptance import ACCEPTANCE_DEFAULTS
 from .group_cleanup import CLEANUP_DEFAULTS
+from .group_p5 import P5_DEFAULTS
 from .group_reputation import (
     CATEGORIES as REPUTATION_CATEGORIES,
 )
@@ -225,6 +226,12 @@ def _default_settings() -> dict[str, Any]:
                                         # in days) — the class
                                         # the DESIGN gap list
                                         # named since 2026-10-25
+        "p5": copy.deepcopy(P5_DEFAULTS),
+                                        # the §16 P5 layer:
+                                        # forum-topic rename
+                                        # duty + per-member
+                                        # command scopes — both
+                                        # ship OFF (§28 precedent)
         "system_claim": {"designated": False,
                          "bot_admin": None},
                                         # the §33 claim: may
@@ -435,6 +442,9 @@ class GroupStore:
         merged["cleanup"] = _deep_merge(
             copy.deepcopy(CLEANUP_DEFAULTS),
             stored.get("cleanup") or {})
+        merged["p5"] = _deep_merge(
+            copy.deepcopy(P5_DEFAULTS),
+            stored.get("p5") or {})
         return merged
 
 
@@ -1167,6 +1177,15 @@ class GroupSurface:
             "missing": list(missing), "reasons": list(reasons),
             "unknown": list(unknown or []),
             "state": "pending", "ts": now, "decided_by": ""}
+        # The §16 P5 join-request extras ride the record when
+        # the platform supplied them: the guard-bot query id
+        # (the "queue" verdict is answered through it) and the
+        # applicant DM window (user_chat_id, open for 5 minutes
+        # from the request).  Absent on platforms that never
+        # offered them — the record simply lacks the keys.
+        for extra in ("query_id", "user_chat_id"):
+            if facts.get(extra):
+                record[extra] = str(facts[extra])
         entry.setdefault("join_requests", {})[req_id] = record
         return record
 
@@ -1307,6 +1326,180 @@ class GroupSurface:
             self._clear_acceptance(entry, user_id)
         self.store.save()
         return {"ok": True, "execute": execute, "record": record}
+
+    # ---- §16 P5 layer state ------------------------------------
+    # Member tags, boost intel, and the forum-topic rename
+    # duty's bookkeeping.  The platform acts happen in the
+    # runtime through the adapters; this is the ledger they
+    # leave behind — what /member, /boosters and the duty's
+    # next turn read.
+
+    def member_set_tag(self, group_key: str, user_id: str, *,
+                       tag: str, by: str = "",
+                       now: float | None = None) -> dict[str, Any]:
+        """Record a member's bot-assigned tag ("" clears).
+        The member must already be in the ledger — a tag on a
+        stranger Devon has never seen is refused by shape:
+        tags decorate the roster, they don't create it."""
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        member = entry["members"].get(user_id)
+        if member is None:
+            return {"ok": False, "reason": "not in the ledger"}
+        old = str(member.get("tag") or "")
+        member["tag"] = str(tag or "")
+        self._audit(group_key, "member_tag", user_id=user_id,
+                    by=by, old=old, new=str(tag or ""))
+        self.store.save()
+        return {"ok": True, "old": old, "tag": member["tag"]}
+
+    def note_boost(self, group_key: str, *, boost_id: str,
+                   user_id: str = "", source_kind: str = "unknown",
+                   add_ts: float | None = None,
+                   expiration_ts: float | None = None,
+                   now: float | None = None) -> dict[str, Any]:
+        """Record one chat_boost update (§16 boost intel).
+        Attribution follows the update's own source: a boost
+        whose source names no user (an unclaimed giveaway)
+        counts for the room and for nobody else.  Idempotent
+        per boost id — a re-delivered update never double
+        counts."""
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        boosts = entry.setdefault("boosts", {})
+        active = boosts.setdefault("active", {})
+        if boost_id and boost_id in active:
+            return {"ok": True, "duplicate": True}
+        record = {"boost_id": str(boost_id or ""),
+                  "user_id": str(user_id or ""),
+                  "source": str(source_kind or "unknown"),
+                  "add_ts": add_ts if add_ts is not None else now,
+                  "expiration_ts": expiration_ts}
+        if boost_id:
+            active[str(boost_id)] = record
+        boosts["last_event_ts"] = now
+        self._audit(group_key, "boost_added",
+                    user_id=str(user_id or ""),
+                    boost_id=str(boost_id or ""),
+                    source=record["source"])
+        self.store.save()
+        return {"ok": True, "record": record}
+
+    def note_boost_removed(self, group_key: str, *,
+                           boost_id: str, user_id: str = "",
+                           now: float | None = None
+                           ) -> dict[str, Any]:
+        """Record one removed_chat_boost update: the boost
+        leaves the active set; the removal itself is audited
+        with whatever attribution the update carried."""
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        boosts = entry.setdefault("boosts", {})
+        active = boosts.setdefault("active", {})
+        record = active.pop(str(boost_id or ""), None)
+        boosts["last_event_ts"] = now
+        self._audit(group_key, "boost_removed",
+                    user_id=str(user_id or (record or {}).get(
+                        "user_id") or ""),
+                    boost_id=str(boost_id or ""))
+        self.store.save()
+        return {"ok": True, "was_active": record is not None}
+
+    def boost_summary(self, group_key: str,
+                      user_id: str) -> dict[str, Any]:
+        """One member's boost standing: active count + the
+        source mix + when they first boosted."""
+        entry = self.store.group(group_key)
+        active = (entry.get("boosts") or {}).get("active") or {}
+        mine = [r for r in active.values()
+                if str(r.get("user_id") or "") == str(user_id)]
+        if not mine:
+            return {"count": 0, "sources": {}, "first_ts": None}
+        sources: dict[str, int] = {}
+        for record in mine:
+            kind = str(record.get("source") or "unknown")
+            sources[kind] = sources.get(kind, 0) + 1
+        return {"count": len(mine), "sources": sources,
+                "first_ts": min(float(r.get("add_ts") or 0)
+                                for r in mine) or None}
+
+    def boosters(self, group_key: str) -> list[dict[str, Any]]:
+        """The room's boost leaderboard: one row per member
+        with active boosts, strongest first.  Unattributed
+        boosts (no user in the source) are counted in the
+        room total, never as a phantom member row."""
+        entry = self.store.group(group_key)
+        active = (entry.get("boosts") or {}).get("active") or {}
+        by_user: dict[str, dict[str, Any]] = {}
+        unattributed = 0
+        for record in active.values():
+            uid = str(record.get("user_id") or "")
+            if not uid:
+                unattributed += 1
+                continue
+            row = by_user.setdefault(uid, {
+                "user_id": uid, "count": 0, "sources": {},
+                "first_ts": float(record.get("add_ts") or 0)})
+            row["count"] += 1
+            kind = str(record.get("source") or "unknown")
+            row["sources"][kind] = row["sources"].get(kind, 0) + 1
+            row["first_ts"] = min(row["first_ts"],
+                                  float(record.get("add_ts") or 0))
+        rows = sorted(by_user.values(),
+                      key=lambda r: (-r["count"], r["first_ts"]))
+        return {"rows": rows, "total_active": len(active),
+                "unattributed": unattributed}
+
+    def topic_note_created(self, group_key: str, *,
+                           thread_id: str, title: str = "",
+                           implicit: bool = False,
+                           now: float | None = None
+                           ) -> dict[str, Any]:
+        """Record a forum topic's birth.  An auto-named topic
+        (the platform's is_name_implicit flag) is noted as a
+        rename candidate for the duty; a member-chosen name is
+        recorded and never touched."""
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        topics = entry.setdefault("topics", {})
+        record = topics.setdefault(str(thread_id), {})
+        record.update({"thread_id": str(thread_id),
+                       "title": str(title or ""),
+                       "created_ts": record.get("created_ts")
+                       or now})
+        if implicit and not record.get("renamed"):
+            record["rename_pending"] = True
+        self.store.save()
+        return record
+
+    def topic_rename_candidate(self, group_key: str,
+                               thread_id: str
+                               ) -> dict[str, Any] | None:
+        """The pending-rename record for a topic, or None —
+        the duty asks this on the topic's traffic."""
+        entry = self.store.group(group_key)
+        record = (entry.get("topics") or {}).get(str(thread_id))
+        if record and record.get("rename_pending"):
+            return record
+        return None
+
+    def topic_mark_renamed(self, group_key: str, *,
+                           thread_id: str, title: str,
+                           now: float | None = None) -> None:
+        """Close the duty for one topic: the new name is the
+        record, and the pending flag clears either way the
+        rename went (a duty that failed is audited by the
+        caller, not retried on every message)."""
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        record = (entry.get("topics") or {}).get(str(thread_id))
+        if record is None:
+            return
+        record["rename_pending"] = False
+        record["renamed"] = True
+        record["title"] = str(title or record.get("title") or "")
+        record["renamed_ts"] = now
+        self.store.save()
 
     def acceptance_recheck(self, group_key: str, user_id: str, *,
                            username: str = "", name: str = "",

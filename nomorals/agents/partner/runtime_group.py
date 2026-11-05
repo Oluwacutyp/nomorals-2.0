@@ -885,6 +885,42 @@ class RuntimeGroupMixin:
                                or ""))
             surface.store.save()
             return True
+        if service in ("chat_boost", "chat_boost_removed"):
+            # Boost intel (§16): who is boosting the room,
+            # journaled into the surface's boost ledger —
+            # counted, attributed exactly as Telegram's source
+            # named it, never answered and never narrated
+            # (reading the room, not system output).
+            boost = meta.get("boost") or {}
+            if isinstance(boost, dict) and boost.get("boost_id"):
+                if service == "chat_boost":
+                    surface.note_boost(
+                        key, boost_id=str(boost["boost_id"]),
+                        user_id=str(boost.get("user_id") or ""),
+                        source_kind=str(boost.get("source_kind")
+                                        or "unknown"),
+                        add_ts=boost.get("add_date"),
+                        expiration_ts=boost.get("expiration_date"))
+                else:
+                    surface.note_boost_removed(
+                        key, boost_id=str(boost["boost_id"]),
+                        user_id=str(boost.get("user_id") or ""))
+            return True
+        if service == "forum_topic_created":
+            # A forum topic's birth (§16): recorded in the
+            # surface's topic ledger.  An auto-named topic
+            # (the bot surface's is_name_implicit flag) becomes
+            # a rename candidate — the duty itself rides the
+            # topic's first real message, below.
+            topic = meta.get("topic") or {}
+            thread = str(getattr(message.chat, "thread_id", "")
+                         or meta.get("thread_id") or "")
+            if thread and isinstance(topic, dict):
+                surface.topic_note_created(
+                    key, thread_id=thread,
+                    title=str(topic.get("title") or ""),
+                    implicit=bool(topic.get("implicit")))
+            return True
         if service == "join":
             adapter = self._group_adapter(message.chat.platform)
             acc_cfg = (surface.store.settings(key)
@@ -990,6 +1026,16 @@ class RuntimeGroupMixin:
             requester = meta.get("requester") or {}
             if isinstance(requester, dict) and requester.get("id"):
                 facts = self._acceptance_facts(requester)
+                # §16 P5: the guard-bot query id and the
+                # applicant DM window ride the queue record —
+                # the "queue" verdict is answered through the
+                # query, and /joinq ask writes through the
+                # window while it stands.
+                if meta.get("join_query_id"):
+                    facts["query_id"] = str(meta["join_query_id"])
+                if meta.get("user_chat_id"):
+                    facts["user_chat_id"] = str(
+                        meta["user_chat_id"])
                 user_id = facts["user_id"]
                 acc_cfg = (surface.store.settings(key)
                            .get("acceptance") or {})
@@ -1068,6 +1114,32 @@ class RuntimeGroupMixin:
                 else:  # queued — a human decides
                     record = out.get("record") or {}
                     if record:
+                        # §16 queue verdict: when Telegram
+                        # handed the bot a join QUERY, holding
+                        # the request is itself an answer —
+                        # "queue" defers the decision to the
+                        # chat's other admins (the classic
+                        # approve/decline calls remain for the
+                        # human who later decides from /joinq).
+                        # Best-effort by design — the query
+                        # expires in ~10 seconds — and the queue
+                        # record stands either way.
+                        _qid = str(record.get("query_id") or "")
+                        _answer = getattr(
+                            adapter, "admin_answer_join_query",
+                            None)
+                        if _qid and callable(_answer):
+                            try:
+                                _res = _answer(_qid, "queue")
+                            except Exception:  # noqa: BLE001
+                                _res = None
+                            surface._audit(
+                                key, "join_query_deferred",
+                                request=str(record.get("id")
+                                            or ""),
+                                ok=bool(isinstance(_res, dict)
+                                        and _res.get("ok")))
+                            surface.store.save()
                         self._send_acceptance_queue_note(
                             surface, key, message, record,
                             out.get("reasons") or [])
@@ -1194,6 +1266,10 @@ class RuntimeGroupMixin:
         # its door (throttled per group inside the drive) and
         # feeds new requesters into the same queue.
         self._wa_join_request_drive(surface, key, message)
+        # §16's topic duty rides the same beat: a pending
+        # auto-named forum topic gets a proper name derived
+        # from its traffic (claimed rooms, duty switched on).
+        self._p5_topic_duty(surface, key, message)
         actions = result.get("actions") or []
         # §21 auto-collect rides the same cycle: a sticker
         # that landed in a claimed room whose admin enabled
@@ -2526,6 +2602,22 @@ class RuntimeGroupMixin:
              "🧹 member cleanup is a Telegram tool — WhatsApp "
              "gives me no member list to scan and no "
              "deleted-account markers to find."),
+            # The §16 P5 kinds, same treatment as cleanup:
+            # listed where the platform can run them; on
+            # WhatsApp the line states the truth instead.
+            ("🏷️ the §16 kit: /tag @member <words> — a "
+             "member's tag (16 characters, no emoji; shows on "
+             "/member) · /bansender — reply to a channel post "
+             "to ban that CHANNEL identity (never its owner); "
+             "/unbansender lifts it · /reactwipe @member — "
+             "wipe their recent reactions · /boosters — who's "
+             "boosting this room · auto-named forum topics "
+             "rename themselves when the duty is on "
+             "(/gsettings p5)"
+             if not on_whatsapp else
+             "🏷️ member tags, channel bans, reaction wipes "
+             "and boosts are Telegram systems — WhatsApp has "
+             "none of them."),
             "/glog — the group audit log (I keep it; I only show "
             "it when an admin asks)",
             "/strikes — the defense strike ledger: who is on "
@@ -3049,6 +3141,28 @@ class RuntimeGroupMixin:
                 "Telegram groups only; admins, bots and my own "
                 "accounts are never removed",
             ], title="Member cleanup")
+            # The §16 P5 layer's switches — Telegram rooms
+            # only: the block doesn't render on WhatsApp, whose
+            # surface carries none of these systems.
+            _on_wa = str(key).partition(":")[0].strip().lower() \
+                in ("whatsapp", "wa")
+            if not _on_wa:
+                p5 = s.get("p5") or {}
+                card.block_lines([
+                    f"topic auto-rename: "
+                    f"{'on' if p5.get('topics_rename') else 'OFF'}"
+                    f" · admin command scopes: "
+                    f"{'on' if p5.get('member_scopes') else 'OFF'}"
+                    f" · ephemeral answers: "
+                    f"{'on' if p5.get('ephemeral') else 'OFF'}",
+                    "auto-named forum topics get a proper name "
+                    "from their first message · scopes sync "
+                    "gives this room's admins their full "
+                    "command menu (bot surface) · ephemeral "
+                    "sends sensitive replies (/balance) to the "
+                    "asker only · /tag, /bansender, "
+                    "/reactwipe and /boosters ride along",
+                ], title="P5 layer")
             # The ladder's step menu (§30): on WhatsApp the
             # mute/restrict steps are not offered — the
             # platform cannot fire them (see
@@ -3269,6 +3383,18 @@ class RuntimeGroupMixin:
                 return out
             return ("usage: /gsettings cleanup on|off · "
                     "cleanup auto on|off · cleanup days N")
+        if head in ("p5", "topics", "scopes", "ephemeral"):
+            # The §16 P5 layer's switches: the topic
+            # auto-rename duty, per-member command scopes, and
+            # ephemeral answers — the same helper the console's
+            # p5 section applies.
+            out = self._apply_p5_grammar(
+                surface, key, text.split(),
+                by=str(message.sender_id or ""), message=message)
+            if out is not None:
+                return out
+            return ("usage: /gsettings topics on|off · scopes "
+                    "on|off|sync|clear · ephemeral on|off")
         if head == "review":
             # §26 contribution review: the mode and the queue —
             # the same helper the console's rhythm section
@@ -3647,6 +3773,34 @@ class RuntimeGroupMixin:
                     "kick": "they come in muted for the grace "
                             "window, then are removed if still "
                             "unfixed"}[rest2.lower()]
+                if key.partition(":")[0].strip().lower() in (
+                        "whatsapp", "wa"):
+                    # Platform truth (join-queue build):
+                    # WhatsApp has no restricted state and no
+                    # per-person mute — a restricted/kick
+                    # verdict on a request-mode group QUEUES
+                    # for a human instead, and the decision
+                    # set there is approve or decline.  The
+                    # stored action is unchanged; what it
+                    # DOES on this platform is what the
+                    # explainer must say.
+                    explain = {
+                        "decline": "their join request is "
+                                   "refused, reason on the "
+                                   "record",
+                        "restricted": "WhatsApp admits fully "
+                                      "or not at all — the "
+                                      "request queues for a "
+                                      "human to approve or "
+                                      "decline; there is no "
+                                      "restricted state to "
+                                      "admit them into",
+                        "kick": "WhatsApp admits fully or "
+                                "not at all — the request "
+                                "queues for a human to approve "
+                                "or decline; there is no "
+                                "muted grace window here"
+                        }[rest2.lower()]
                 return (f"a failed check now means: "
                         f"{rest2.lower()} ({explain}).")
             if sub == "grace" and rest2.rstrip("m").isdigit():
@@ -4675,7 +4829,8 @@ class RuntimeGroupMixin:
     _CONSOLE_SECTIONS = ("defense", "acceptance", "economy",
                          "estate", "presentation", "welcome",
                          "expression", "reputation", "conflict",
-                         "rhythm", "boards", "cleanup", "police")
+                         "rhythm", "boards", "cleanup", "police",
+                         "p5")
     _CONSOLE_CHANNEL_SECTIONS = ("queue", "post", "analytics",
                                  "settings")
 
@@ -4979,7 +5134,9 @@ class RuntimeGroupMixin:
               f"console {token} rhythm")],
             [("cleanup", "Cleanup",
               f"console {token} cleanup"),
-             ("back", "All groups", "console")],
+             ("p5", "P5 layer",
+              f"console {token} p5")],
+            [("back", "All groups", "console")],
         ], settings=s)
         card.note("tap a section, or type its grammar — every "
                   "change lands in the group's /glog with your "
@@ -5407,6 +5564,46 @@ class RuntimeGroupMixin:
                 "/cleanup (scan) · /rmdeleted · /rminactive "
                 "[days]",
             ], title="Grammar")
+        elif section == "p5":
+            # The §16 layer's switches, read from the same
+            # block the grammar writes.  Telegram rooms only —
+            # on WhatsApp the section states the truth.
+            p5 = s.get("p5") or {}
+            if str(key).partition(":")[0].strip().lower() in (
+                    "whatsapp", "wa"):
+                card.block_lines([
+                    "the §16 P5 layer is Telegram machinery — "
+                    "member tags, sender-chat bans, reaction "
+                    "wipes, forum topics, command scopes and "
+                    "boosts have no WhatsApp underneath them, "
+                    "so there is nothing to configure here.",
+                ])
+            else:
+                card.block_lines([
+                    f"topic auto-rename: "
+                    f"{'on' if p5.get('topics_rename') else 'OFF'}"
+                    f" — auto-named forum topics get a proper "
+                    f"name from their first message (the bot "
+                    f"surface flags them; journaled in /glog)",
+                    f"admin command scopes: "
+                    f"{'on' if p5.get('member_scopes') else 'OFF'}"
+                    f" — the bot publishes this room's admin "
+                    f"command menu per member + as a class "
+                    f"(setMyCommands, bot surface only)",
+                    f"ephemeral answers: "
+                    f"{'on' if p5.get('ephemeral') else 'OFF'}"
+                    f" — sensitive replies (/balance) go to "
+                    f"the asker only: in-group ephemeral on the "
+                    f"bot surface, else their DMs",
+                    "riding along, no switches: /tag · "
+                    "/bansender · /unbansender · /reactwipe · "
+                    "/boosters — the acts live in the group; "
+                    "their outcomes land in /glog.",
+                ])
+                card.block_lines([
+                    "`topics on|off` · `scopes on|off|sync|clear`"
+                    " · `ephemeral on|off`",
+                ], title="Grammar")
         elif section == "police":
             # §36: the owner's override card.  OWNER-ONLY — a
             # group admin opening it sees the gate, not the
@@ -5821,6 +6018,12 @@ class RuntimeGroupMixin:
             # gsettings grammar.
             return self._apply_cleanup_grammar(
                 surface, key, list(words))
+        if section == "p5":
+            # Same rule (§16): the console's p5 words are the
+            # gsettings grammar.
+            return self._apply_p5_grammar(
+                surface, key, list(words), by=sender,
+                message=message)
         if section == "police":
             # §36: NOT a settings grammar — the owner's police
             # override.  Its own apply, owner-gated inside.
@@ -6630,6 +6833,72 @@ class RuntimeGroupMixin:
                     key, str(record.get("user_id") or ""))
                 or "someone")
 
+    def _joinq_ask(self, surface, key, adapter, message,  # type: ignore[no-untyped-def]
+                   req_id, text, *, by="") -> str:
+        """The §16 DM window: write to a waiting applicant
+        BEFORE deciding.  Telegram opens the window for 5
+        minutes from the request, and only if no other admin
+        contacted them first — outside it the platform refuses
+        and the refusal is the answer.  WhatsApp requesters
+        are reachable at their own chat while the request
+        stands.  The ask is journaled either way; the request
+        itself stays queued."""
+        record = None
+        for row in surface.acceptance_queue(key):
+            if str(row.get("id") or "") == str(req_id):
+                record = row
+                break
+        if record is None:
+            return ("that request isn't waiting anymore — "
+                    "/joinq shows what's live.")
+        label = self._joinq_label(surface, key, record)
+        platform = str(message.chat.platform or "")
+        sent, why = False, ""
+        if platform.startswith("telegram"):
+            chat_id = str(record.get("user_chat_id") or "")
+            verb = getattr(adapter, "admin_dm_applicant", None)
+            if not chat_id or not callable(verb):
+                why = ("this request never opened a DM window "
+                       "(it arrived without one)")
+            elif time.time() - float(record.get("ts") or 0) \
+                    > 300:
+                why = ("the 5-minute window has closed — "
+                       "Telegram only lets the bot write first "
+                       "within 5 minutes of the request")
+            else:
+                out = verb(chat_id, str(text))
+                sent = isinstance(out, dict) \
+                    and bool(out.get("ok"))
+                if not sent:
+                    why = str((out or {}).get("error")
+                              or "the platform refused")
+        elif platform == "whatsapp":
+            from ...social.chat.base import ChatKind, ChatRef
+
+            dm = ChatRef(platform=platform,
+                         chat_id=str(record.get("user_id")
+                                     or ""),
+                         kind=ChatKind.DM)
+            try:
+                result = self._send(dm, str(text))
+                sent = bool(getattr(result, "ok", False))
+                if not sent:
+                    why = str(getattr(result, "error", "")
+                              or "the send didn't land")
+            except Exception as exc:  # noqa: BLE001 - reported
+                why = f"{type(exc).__name__}: {exc}"
+        else:
+            why = "this platform has no applicant window"
+        surface._audit(key, "join_request_asked",
+                       request=str(req_id), by=by, ok=sent,
+                       reason=why)
+        surface.store.save()
+        if sent:
+            return (f"✉️ sent to {label} — they're still in "
+                    "the queue; decide when they answer.")
+        return (f"couldn't reach {label}: {why}. The request "
+                "stays queued either way.")
+
     def _joinq_execute(self, surface, key, adapter, message,  # type: ignore[no-untyped-def]
                        decided: dict, *, approve: bool) -> str:
         """Perform one decided queue record; returns the outcome
@@ -6759,6 +7028,15 @@ class RuntimeGroupMixin:
             return self._joinq_execute(
                 surface, key, adapter, message, decided,
                 approve=approve)
+        if parts and parts[0].lower() == "ask":
+            if len(parts) < 3:
+                return ("usage: /joinq ask <id> <message> — "
+                        "write to the applicant while their "
+                        "window is open; the id is on the "
+                        "queue list.")
+            return self._joinq_ask(
+                surface, key, adapter, message, parts[1],
+                " ".join(parts[2:]), by=by)
         pending = surface.acceptance_queue(key)
         if not pending:
             return ("the join queue is empty — nobody's waiting "
@@ -7235,6 +7513,187 @@ class RuntimeGroupMixin:
         block.update(fields)
         surface.update_settings(key, cleanup=block)
         return block
+
+    # ---- §16 P5 layer: settings grammar + scope sync ----------
+
+    def _p5_update(self, surface, key, **fields):  # type: ignore[no-untyped-def]
+        """Mutate the p5 settings block through the store's own
+        settings machinery (the _cleanup_update shape)."""
+        import copy as _copy
+
+        current = surface.store.settings(key)
+        block = _copy.deepcopy(current.get("p5") or {})
+        block.update(fields)
+        surface.update_settings(key, p5=block)
+        return block
+
+    #: The command set a scope sync publishes: the room's
+    #: admin surface (settings, moderation, the §16 kinds) —
+    #: what BotCommandScopeChatAdministrators / ChatMember
+    #: exist to show the people who run the room.
+    _P5_SCOPE_KINDS = (
+        "gsettings", "glog", "member", "rules", "strikes",
+        "recheck", "joinq", "console", "undonotice", "flag",
+        "rep", "mute", "unmute", "ban", "unban", "kick", "warn",
+        "pin", "unpin", "purge", "report", "cleanup",
+        "rmdeleted", "rminactive", "tag", "bansender",
+        "unbansender", "reactwipe", "boosters", "grant", "tax",
+        "treasury")
+
+    def _p5_scope_commands(self):  # type: ignore[no-untyped-def]
+        """(name, description) pairs for a scope publish, from
+        the catalog's own words — the first clause of each
+        kind's "what", capped to the API's description size."""
+        from ...social.chat.control import COMMAND_DETAILS
+
+        out = []
+        for kind in self._P5_SCOPE_KINDS:
+            detail = COMMAND_DETAILS.get(kind) or {}
+            what = str(detail.get("what") or kind)
+            desc = what.split(":")[0].split(".")[0].strip()
+            out.append((kind, (desc or kind)[:100]))
+        return out
+
+    def _p5_scope_sync(self, surface, key, *, chat, platform,  # type: ignore[no-untyped-def]
+                       clear=False):
+        """Apply (or clear) this room's Telegram command
+        scopes on the BOT surface: the administrators scope
+        plus one chat-member scope per admin the platform
+        lists.  Returns (ok_count, total, note) — partial
+        application is reported as partial, never dressed as
+        a full sync."""
+        adapter = self._group_adapter(platform)
+        if adapter is None:
+            return 0, 0, "no adapter for this platform"
+        set_admin = getattr(adapter, "admin_set_admin_commands",
+                            None)
+        if not callable(set_admin) and not clear:
+            return 0, 0, ("command scopes belong to the bot "
+                          "surface — this surface has no bot "
+                          "menu to scope")
+        admins_out = getattr(adapter, "admin_administrators",
+                             None)
+        admins = []
+        if callable(admins_out):
+            try:
+                res = admins_out(chat)
+            except Exception:  # noqa: BLE001 - reported below
+                res = None
+            if isinstance(res, dict) and res.get("ok"):
+                admins = [str(a.get("id") or "")
+                          for a in res.get("administrators") or []
+                          if str(a.get("id") or "")]
+        commands = self._p5_scope_commands()
+        calls = []
+        if clear:
+            clear_member = getattr(
+                adapter, "admin_clear_member_commands", None)
+            if callable(clear_member):
+                for uid in admins:
+                    calls.append(clear_member(chat, uid))
+            clear_admin = getattr(
+                adapter, "admin_clear_admin_commands", None)
+            if callable(clear_admin):
+                calls.append(clear_admin(chat))
+        else:
+            if callable(set_admin):
+                calls.append(set_admin(chat, commands))
+            set_member = getattr(
+                adapter, "admin_set_member_commands", None)
+            if callable(set_member):
+                for uid in admins:
+                    calls.append(set_member(chat, uid, commands))
+        ok = sum(1 for c in calls
+                 if isinstance(c, dict) and c.get("ok"))
+        return ok, len(calls), ""
+
+    def _apply_p5_grammar(self, surface, key, words, *,  # type: ignore[no-untyped-def]
+                          by="", message=None):
+        """The §16 P5 grammar, shared by /gsettings (words
+        from the `p5`/`topics`/`scopes`/`ephemeral` head) and
+        the console's p5 section.  Forms: `topics on|off` ·
+        `ephemeral on|off` · `scopes on|off|sync|clear`.
+        Returns the reply line, or None when the words don't
+        parse."""
+        w = [str(x) for x in words or []]
+        low = [x.lower() for x in w]
+        if low and low[0] == "p5":
+            low = low[1:]
+            w = w[1:]
+        if not low:
+            return None
+        head = low[0]
+        platform = str(key).partition(":")[0].strip().lower()
+        if head == "topics" and len(low) == 2 \
+                and low[1] in ("on", "off"):
+            on = low[1] == "on"
+            self._p5_update(surface, key, topics_rename=on)
+            surface._audit(key, "p5_setting", by=by,
+                           field="topics_rename", value=on)
+            surface.store.save()
+            return (f"topic auto-rename {'on' if on else 'off'}"
+                    " — auto-named forum topics get a proper "
+                    "name from their first message (the bot "
+                    "surface flags them; MTProto topics are "
+                    "recorded, never auto-renamed).") \
+                if on else "topic auto-rename off."
+        if head == "ephemeral" and len(low) == 2 \
+                and low[1] in ("on", "off"):
+            on = low[1] == "on"
+            self._p5_update(surface, key, ephemeral=on)
+            surface._audit(key, "p5_setting", by=by,
+                           field="ephemeral", value=on)
+            surface.store.save()
+            return (f"ephemeral answers {'on' if on else 'off'}"
+                    " — sensitive replies (/balance) go to "
+                    "the asker only: in-group ephemeral on the "
+                    "bot surface, else their DMs.") if on else \
+                "ephemeral answers off — replies post in the " \
+                "room as usual."
+        if head == "scopes" and len(low) == 2 \
+                and low[1] in ("on", "off", "sync", "clear"):
+            verb = low[1]
+            if verb == "off":
+                self._p5_update(surface, key, member_scopes=False)
+                surface._audit(key, "p5_setting", by=by,
+                               field="member_scopes", value=False)
+                surface.store.save()
+                return ("admin command scopes off — the "
+                        "published scopes stay as they are "
+                        "until a `scopes clear`; the setting "
+                        "only stops future syncs.")
+            if not platform.startswith("telegram-bot"):
+                return ("command scopes are the bot surface's "
+                        "menu (setMyCommands) — this room's "
+                        "surface has no bot menu to scope.")
+            chat = getattr(message, "chat", None)
+            if chat is None:
+                from ...social.chat.base import (
+                    ChatKind, ChatRef)
+                chat = ChatRef.parse(key, kind=ChatKind.GROUP)
+            ok, total, note = self._p5_scope_sync(
+                surface, key, chat=chat, platform=platform,
+                clear=verb == "clear")
+            if total == 0:
+                return note or ("scope sync found nothing to "
+                                "do — no administrators scope "
+                                "verb on this surface.")
+            if verb == "clear":
+                surface._audit(key, "p5_scopes_cleared", by=by,
+                               applied=ok, of=total)
+                surface.store.save()
+                return (f"member scopes cleared ({ok}/{total} "
+                        "calls landed) — members fall back to "
+                        "the chat and default scopes.")
+            self._p5_update(surface, key, member_scopes=True)
+            surface._audit(key, "p5_scopes_synced", by=by,
+                           applied=ok, of=total)
+            surface.store.save()
+            return (f"admin command scopes synced ({ok}/{total} "
+                    "calls landed) — this room's admins get "
+                    "the full group command menu, per member "
+                    "and as a class.")
+        return None
 
     def _apply_cleanup_grammar(self, surface, key, words):  # type: ignore[no-untyped-def]
         """The member-cleanup grammar, shared by /gsettings
@@ -7824,6 +8283,325 @@ class RuntimeGroupMixin:
                 "creator", "administrator") and bool(
                     out.get("can_restrict_members", True))
         return True
+
+    # ---- §16 P5 layer: duty + commands -------------------------
+
+    def _p5_gate(self, message):  # type: ignore[no-untyped-def]
+        """(key, None) for an admin in a CLAIMED Telegram
+        group, else (None, text).  The §16 kinds are Telegram
+        machinery (§33: her group systems act where she is
+        claimed); WhatsApp never reaches them (dispatch answers
+        with its own platform truth first)."""
+        key = self._group_key_or_none(message)
+        if key is None:
+            return None, ("that's a group command — run it "
+                          "inside the group.")
+        platform = str(message.chat.platform or "")
+        if not platform.startswith("telegram"):
+            return None, ("that's a Telegram tool — this "
+                          "platform has none of the systems "
+                          "underneath it (member tags, channel "
+                          "posts, reaction wipes, boosts).")
+        if not self._group_admin_ok(message):
+            return None, ("that's an admin call — I'm not "
+                          "taking it from a non-admin.")
+        surface = self._group_surface()
+        if not surface.claim_state(key)["claimed"]:
+            return None, ("this room isn't switched on for my "
+                          "group systems yet — the §16 tools "
+                          "run where I'm claimed (my bot "
+                          "operating here, or the owner's "
+                          "designation).")
+        return key, None
+
+    def _p5_topic_duty(self, surface, key, message) -> None:  # type: ignore[no-untyped-def]
+        """The forum-topic auto-rename duty (§16): a topic
+        Telegram auto-named (is_name_implicit — "likely needs
+        to be changed by the bot") gets a proper name derived
+        from its first real message.  Gates, mirroring the
+        cleanup upkeep: claimed room · the group's p5 duty
+        switch · defense autonomy (it is an automatic admin
+        act).  Journal-only — a rename is never announced.
+        Failure-isolated: the duty closes for the topic either
+        way (audited), so one bad rename never retries on
+        every message."""
+        try:
+            meta = message.meta or {}
+            thread = str(getattr(message.chat, "thread_id", "")
+                         or meta.get("thread_id") or "")
+            if not thread:
+                return
+            if not (surface.store.settings(key).get("p5")
+                    or {}).get("topics_rename"):
+                return
+            record = surface.topic_rename_candidate(key, thread)
+            if record is None:
+                return
+            if not surface.claim_state(key)["claimed"]:
+                return
+            settings = surface.store.settings(key)
+            if not (settings.get("defense") or {}).get(
+                    "autonomy", True):
+                return
+            from ...social.chat.group_p5 import derive_topic_name
+
+            name = derive_topic_name(str(message.text or ""))
+            if not name:
+                return  # nothing nameable yet — a later
+                        # message in the topic may carry it
+            adapter = self._group_adapter(message.chat.platform)
+            verb = getattr(adapter, "admin_forum_topic_edit",
+                           None)
+            if not callable(verb):
+                surface.topic_mark_renamed(
+                    key, thread_id=thread,
+                    title=str(record.get("title") or ""))
+                surface._audit(key, "topic_rename_unsupported",
+                               thread_id=thread)
+                surface.store.save()
+                return
+            out = verb(message.chat, thread, name)
+            ok = isinstance(out, dict) and bool(out.get("ok"))
+            surface.topic_mark_renamed(
+                key, thread_id=thread,
+                title=name if ok else str(record.get("title")
+                                          or ""))
+            surface._audit(
+                key, "topic_renamed" if ok
+                else "topic_rename_failed",
+                thread_id=thread, title=name,
+                error="" if ok else str(
+                    (out or {}).get("error") or "platform refused"))
+            surface.store.save()
+        except Exception:  # noqa: BLE001 - upkeep never breaks
+            pass                # a group turn
+
+    def _control_tag(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        """§16 member tags: /tag @member <words> sets, /tag
+        @member off clears, /tag @member shows.  The native
+        tag is the BOT surface's setChatMemberTag (behind its
+        can_manage_tags right); the ledger record is Devon's
+        on every surface, and /member renders it."""
+        key, err = self._p5_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        res = self._mod_target(surface, key, tail, message)
+        if not res.found:
+            note = self._mod_no_target(res, "tag")
+            if note:
+                return note
+            return ("who should I tag? /tag @member <words> — "
+                    "or reply to their message.")
+        user_id, label = res.member.user_id, res.member.label
+        words = str(res.rest or "").strip()
+        member = surface.member(key, user_id) or {}
+        if not words:
+            current = str(member.get("tag") or "")
+            return (f"{label}'s tag: “{current}”." if current
+                    else f"{label} has no tag — /tag {label} "
+                         "<words> sets one.")
+        from ...social.chat.group_p5 import validate_tag
+
+        if words.lower() in ("off", "clear", "none", "-"):
+            cleaned, clearing = "", True
+        else:
+            ok, cleaned, why = validate_tag(words)
+            if not ok:
+                return f"can't tag that: {why}"
+            clearing = False
+        adapter = self._group_adapter(message.chat.platform)
+        verb = getattr(adapter, "admin_set_member_tag", None)
+        native = None  # None: no native verb on this surface
+        if callable(verb):
+            out = verb(message.chat, user_id, cleaned)
+            if isinstance(out, dict) and out.get("ok"):
+                native = True
+            elif isinstance(out, dict) and "unsupported" in str(
+                    out.get("error") or ""):
+                native = False  # the ledger carries it here
+            else:
+                reason = str((out or {}).get("error")
+                             or "platform refused")
+                surface._audit(key, "admin_action_failed",
+                               action="tag", user_id=user_id,
+                               by=str(message.sender_id or ""),
+                               reason=reason)
+                surface.store.save()
+                hint = (" — the bot needs its manage-tags "
+                        "admin right for native tags."
+                        if "tag" in reason.lower() else "")
+                return (f"Telegram refused the tag: "
+                        f"{reason}{hint}")
+        record = surface.member_set_tag(
+            key, user_id, tag=cleaned,
+            by=str(message.sender_id or ""))
+        if not record.get("ok"):
+            return (f"{label} isn't in this group's ledger "
+                    "yet — tags decorate the roster, they "
+                    "don't create it.")
+        if clearing:
+            text = f"🏷️ {label}'s tag is cleared."
+        else:
+            text = f"🏷️ {label} is tagged “{cleaned}”."
+        if native is False:
+            text += (" — in my member book; the native "
+                     "in-group tag is set by my bot surface "
+                     "(it needs the manage-tags right).")
+        return text
+
+    def _control_bansender(self, tail, message, *, unban=False) -> str:  # type: ignore[no-untyped-def]
+        """§16 sender-chat ban: ban the CHANNEL identity
+        behind a channel post — never the person who owns it.
+        Target: the replied-to post's sender chat, or a
+        numeric channel id named outright."""
+        key, err = self._p5_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        meta = message.meta or {}
+        rsc = meta.get("reply_to_sender_chat") or {}
+        sender_chat_id = str(rsc.get("id") or "")
+        title = str(rsc.get("title") or "")
+        token = str(tail or "").strip().split()[0] \
+            if str(tail or "").strip() else ""
+        if not sender_chat_id and token.lstrip("-").isdigit():
+            sender_chat_id = token
+        if not sender_chat_id:
+            return ("reply to a post made as a channel, then "
+                    "/bansender — or name the channel's numeric "
+                    "id. (A channel post is its channel's act; "
+                    "there's no member to ban here.)")
+        label = title or "that channel"
+        verb_name = ("admin_unban_sender_chat" if unban
+                     else "admin_ban_sender_chat")
+
+        def call(adapter):  # type: ignore[no-untyped-def]
+            fn = getattr(adapter, verb_name, None)
+            if fn is None:
+                raise RuntimeError(
+                    "this platform path cannot "
+                    + ("unban" if unban else "ban")
+                    + " a sender chat")
+            return fn(message.chat, sender_chat_id)
+
+        if not self._mod_run(surface, key, message,
+                             "unban_sender_chat" if unban
+                             else "ban_sender_chat",
+                             sender_chat_id, call):
+            return (f"the {'unban' if unban else 'ban'} didn't "
+                    "go through — the platform refused it "
+                    "(it's in /glog).")
+        if unban:
+            return f"📣 {label} may post here again."
+        return (f"🔇 {label} is banned from posting here — "
+                "its owner can't post in this group as any of "
+                "their channels while it stands.")
+
+    def _control_reactwipe(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        """§16 reaction wipe: deleteAllMessageReactions on
+        the bot surface; the userbot answers honestly (its
+        stub's refusal is what /glog records)."""
+        key, err = self._p5_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        res = self._mod_target(surface, key, tail, message)
+        if not res.found:
+            note = self._mod_no_target(res, "wipe reactions for")
+            if note:
+                return note
+            return ("whose reactions should I wipe? "
+                    "/reactwipe @member — or reply to their "
+                    "message.")
+        user_id, label = res.member.user_id, res.member.label
+
+        def call(adapter):  # type: ignore[no-untyped-def]
+            fn = getattr(adapter, "admin_reaction_wipe", None)
+            if fn is None:
+                raise RuntimeError("this platform path cannot "
+                                   "wipe reactions")
+            return fn(message.chat, user_id)
+
+        if not self._mod_run(surface, key, message,
+                             "reaction_wipe", user_id, call):
+            return ("the wipe didn't go through — the "
+                    "platform refused it (it's in /glog).")
+        return (f"🧹 wiped {label}'s recent reactions here "
+                "(Telegram clears up to 10,000).")
+
+    def _control_boosters(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        """§16 boost intel: the room's boost board from the
+        ledger Telegram's own updates filled, or one member's
+        standing plus the bot surface's live per-user lookup."""
+        key, err = self._p5_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        token = str(tail or "").strip()
+
+        def src_label(kind):  # type: ignore[no-untyped-def]
+            return {"premium": "Premium",
+                    "gift_code": "gift code",
+                    "giveaway": "giveaway"}.get(
+                        str(kind or ""), "boost")
+
+        if token:
+            res = self._resolver(surface).resolve_token(
+                key, message, token)
+            if not res.found:
+                return res.exhaustion_text()
+            user_id, label = res.member.user_id, res.member.label
+            summary = surface.boost_summary(key, user_id)
+            lines = []
+            if summary["count"]:
+                mix = " · ".join(
+                    f"{src_label(k)} ×{v}" for k, v in
+                    sorted(summary["sources"].items()))
+                lines.append(f"{label} is boosting this room "
+                             f"×{summary['count']} ({mix}).")
+            else:
+                lines.append(f"{label} has no active boosts "
+                             "here that I've seen.")
+            adapter = self._group_adapter(message.chat.platform)
+            verb = getattr(adapter, "admin_user_boosts", None)
+            if callable(verb):
+                out = verb(message.chat, user_id)
+                if isinstance(out, dict) and out.get("ok"):
+                    result = out.get("result") or {}
+                    live = result.get("boosts") or []
+                    lines.append(
+                        f"Telegram's own list: {len(live)} "
+                        "boost(s) on record for them here.")
+                elif isinstance(out, dict) and "unsupported" \
+                        not in str(out.get("error") or ""):
+                    lines.append("(Telegram's per-user lookup "
+                                 "refused just now — the ledger "
+                                 "above is what I've seen.)")
+            return "\n".join(lines)
+        board = surface.boosters(key)
+        rows = board["rows"]
+        if not rows and not board["total_active"]:
+            return ("no boosts seen here yet — when members "
+                    "boost this room, Telegram's updates land "
+                    "them on this board.")
+        lines = [f"🚀 Boosts here: {board['total_active']} "
+                 "active"]
+        for row in rows[:10]:
+            member = surface.member(key, row["user_id"]) or {}
+            name = (str(member.get("name") or "")
+                    or (f"@{member['username']}"
+                        if member.get("username") else "")
+                    or "a member")
+            mix = " · ".join(
+                f"{src_label(k)} ×{v}" for k, v in
+                sorted(row["sources"].items()))
+            lines.append(f"· {name} — ×{row['count']} ({mix})")
+        if board["unattributed"]:
+            lines.append(f"· {board['unattributed']} more "
+                         "boost(s) name nobody (unclaimed "
+                         "giveaways) — counted for the room.")
+        return "\n".join(lines)
 
     def _cleanup_auto_drive(self, surface, key, message) -> None:  # type: ignore[no-untyped-def]
         """Automatic deleted-account removal (owner order
@@ -12576,6 +13354,14 @@ def _member_card(surface, key: str, member: dict) -> str:
     # is here — and a worn-face flag is shown, never hidden.
     if member.get("role"):
         rows.append(("Standing", str(member["role"])))
+    # §16: the member's tag (set by /tag; literal text, like
+    # every identity field here) and their boost standing.
+    if member.get("tag"):
+        rows.append(("Tag", str(member["tag"])))
+    _boosts = surface.boost_summary(
+        key, str(member.get("user_id") or ""))
+    if _boosts["count"]:
+        rows.append(("Boosts", f"×{_boosts['count']}"))
     if member.get("impersonation_flag"):
         rows.append(("⚠️ Flag",
                      str(member["impersonation_flag"])))

@@ -81,12 +81,31 @@ PLATFORMS = ("telegram", "discord", "whatsapp", "local")
 #: (runtime.handle_control).  Telegram executes them fine; the
 #: global catalog is untouched.
 WHATSAPP_UNSUPPORTED_KINDS: frozenset[str] = frozenset(
-    {"mute", "unmute", "cleanup", "rmdeleted", "rminactive"})
+    {"mute", "unmute", "cleanup", "rmdeleted", "rminactive",
+     "tag", "bansender", "unbansender", "reactwipe", "boosters"})
 
 #: The Telegram-only member-cleanup kinds — on WhatsApp they get
 #: their own dispatch truth line (see the constant above).
 TELEGRAM_CLEANUP_KINDS: frozenset[str] = frozenset(
     {"cleanup", "rmdeleted", "rminactive"})
+
+#: The §16 P5 kinds (member tags, sender-chat ban, reaction
+#: wipe, boost intel): Telegram affordances with no WhatsApp
+#: equivalent at all — WhatsApp has no member tags, no
+#: channel-identity posting to ban, no reaction wipe, and no
+#: boost system.  Same treatment as the cleanup trio: absent
+#: from WhatsApp menus and group help; typed there, they get
+#: the platform truth at dispatch (runtime.handle_control).
+TELEGRAM_P5_KINDS: frozenset[str] = frozenset(
+    {"tag", "bansender", "unbansender", "reactwipe", "boosters"})
+
+#: Kinds whose GROUP replies are delivered as Telegram
+#: ephemeral answers (§16: visible only to the asker and the
+#: bot) on the telegram-bot surface when the group's p5
+#: settings allow — personal state never needs a public
+#: audience.  A failed ephemeral attempt falls back to DM,
+#: then to a pointer line: it is never silently public.
+EPHEMERAL_GROUP_KINDS: frozenset[str] = frozenset({"balance"})
 
 #: wave 87: the commands that start a game directly.  The Social Operator
 #: lets these through in EVERY chat (games are social); the Core Mind only
@@ -200,6 +219,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
     "unpin", "purge", "report",
     "cleanup", "rmdeleted", "rminactive",
+    "tag", "bansender", "unbansender", "reactwipe", "boosters",
     "game",
     *PUBLIC_GAME_COMMANDS,
 ])
@@ -571,6 +591,11 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "cleanup": (0, 1),        # /cleanup [page] — admin: Telegram group cleanup SCAN (dry run, removes nothing): deleted accounts + members inactive past the window
     "rmdeleted": (0, 0),      # /rmdeleted — admin: remove the deleted accounts the scan finds (kick, not ban; journaled per member)
     "rminactive": (0, 1),     # /rminactive [days] — admin: remove members inactive past the window (setting, or days for this run)
+    "tag": (0, None),         # /tag @member <words>|off — admin: set/clear a member's tag on the Telegram bot surface (§16 P5)
+    "bansender": (0, None),   # /bansender — admin: ban the CHANNEL identity behind a replied-to channel post (§16 P5)
+    "unbansender": (0, None), # /unbansender — admin: lift a sender-chat ban (§16 P5)
+    "reactwipe": (0, None),   # /reactwipe @member — admin: wipe a member's recent reactions in this chat (§16 P5)
+    "boosters": (0, 1),       # /boosters [@member] — the room's boost board, or one member's boosts (§16 P5)
     "notion": (0, None),      # /notion dbs|query|add — Notion reads + page writes
     "gcal": (0, None),        # /gcal [agenda] | add — Google Calendar
     "trello": (0, None),      # /trello boards|lists|cards|add — Trello
@@ -2245,9 +2270,9 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/recheck",
             "example": "/recheck",
             "related": "/joinq /gsettings /rules"},
-    "joinq": {"what": "the admin join queue (§28): join requests the rules held for a human, plus members held by the raid posture. Approve lets them in (restricted, if their check said so), decline refuses the request or removes the held member; 'all' decides the whole queue at once. The notice on each request carries the same decisions as buttons.",
-            "usage": "/joinq | /joinq approve <id> | /joinq decline <id> | /joinq approve all",
-            "example": "/joinq",
+    "joinq": {"what": "the admin join queue (§28): join requests the rules held for a human, plus members held by the raid posture. Approve lets them in (restricted, if their check said so), decline refuses the request or removes the held member; 'all' decides the whole queue at once. The notice on each request carries the same decisions as buttons. Where Telegram handed the bot a join query, holding a request in the queue is itself the answer ('queue' — the decision passes to the chat's other admins). 'ask' messages an applicant while their DM window is open (Telegram: 5 minutes from the request, if no other admin wrote first; WhatsApp: while their request stands).",
+            "usage": "/joinq | /joinq approve <id> | /joinq decline <id> | /joinq approve all | /joinq ask <id> <message>",
+            "example": "/joinq ask jr-0003 where did you hear about us?",
             "related": "/gsettings /glog /recheck"},
     "console": {"what": "the DM admin console (§30): message Devon privately and she lists the groups where YOU hold admin — pick one and configure its systems there in tappable sections (defense + the warn ladder, acceptance, economy + governance, estate levers, presentation, welcome/rules), with runtime status (uptime, per-platform connection, userbot session) on the home card. Changes apply at once and land in the group's /glog with your name on them. Owner-only switches stay owner-only, judged in the target group.",
             "usage": "/console | /console g1 | /console g1 defense escalation limit 5",
@@ -2498,6 +2523,26 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/rminactive [days]",
             "example": "/rminactive 180",
             "related": "/cleanup /rmdeleted /gsettings /member"},
+    "tag": {"what": "set a member's tag (§16): a short label — up to 16 characters, no emoji — that Telegram shows beside their name in this group, set by the bot (it needs the manage-tags admin right). Devon records it in the member ledger too, so /member shows it on every surface. A tag is presentation, never power: it changes nothing the member can do. Telegram-only; WhatsApp has no member tags.",
+            "usage": "/tag @member <words> | /tag @member off",
+            "example": "/tag @ada night owl",
+            "related": "/member /boosters"},
+    "bansender": {"what": "ban the CHANNEL identity behind a channel post (§16): reply to a message posted as a channel and that channel is banned from this group — while banned, its owner can't post here as any of their channels. This bans the channel, never the person who owns it. Telegram-only.",
+            "usage": "reply to a channel post, then /bansender",
+            "example": "/bansender",
+            "related": "/unbansender /ban"},
+    "unbansender": {"what": "lift a sender-chat ban (§16): reply to a post from the banned channel, or name its @handle, and the channel may post here again. Telegram-only.",
+            "usage": "/unbansender [@channel]",
+            "example": "/unbansender",
+            "related": "/bansender /unban"},
+    "reactwipe": {"what": "wipe a member's recent reactions in this chat (§16): Telegram clears up to 10,000 of them; the bot needs its delete-messages right. Use it on reaction spam/raids. Telegram-only — WhatsApp gives no way to remove another member's reactions.",
+            "usage": "/reactwipe @member (or reply to their message)",
+            "example": "/reactwipe @ada",
+            "related": "/purge /warn"},
+    "boosters": {"what": "this group's boost board (§16): who is boosting the room and how much — Premium boosts, gift-code boosts and giveaways counted as Telegram reports them; a boost whose source names nobody counts for the room and for no member. With a member named, their boosts plus a live per-user lookup on the bot surface. Telegram-only — WhatsApp has no boosts.",
+            "usage": "/boosters | /boosters @member",
+            "example": "/boosters",
+            "related": "/member /tag"},
     "notion": {"what": "Notion: list databases, query rows, create pages — through your connected Notion integration.",
             "usage": "/notion dbs [query] | /notion query <db> [text] | /notion add <page-id> <title> [| <body>]",
             "example": "/notion add <page-id> Shopping list | milk | eggs",
@@ -2960,7 +3005,9 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "contributions", "boards", "webshot",
                             "mute", "unmute", "ban", "unban", "kick",
                             "warn", "pin", "unpin", "purge", "report",
-                            "cleanup", "rmdeleted", "rminactive"]),
+                            "cleanup", "rmdeleted", "rminactive",
+                            "tag", "bansender", "unbansender",
+                            "reactwipe", "boosters"]),
     ("discovery", ["list", "commands", "menu", "help", "tour", "heal"]),
 ]
 
@@ -3233,7 +3280,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "webshot",
       "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
       "unpin", "purge", "report",
-      "cleanup", "rmdeleted", "rminactive"]),
+      "cleanup", "rmdeleted", "rminactive",
+      "tag", "bansender", "unbansender", "reactwipe", "boosters"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
