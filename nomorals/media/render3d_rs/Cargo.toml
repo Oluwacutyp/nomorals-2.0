@@ -1,0 +1,19 @@
+# devon-render3d — the native Rust 3D renderer rung (§1.5e).
+#
+# Zero external crates on purpose: the build is hermetic (rustup is
+# the only download), the PNG encoder is a pinned stored-block
+# writer (byte-identical output by construction), and the JSON
+# reader is the small order-preserving parser in src/json.rs.
+# Determinism is a declared capability of this rung — it does not
+# ride on a dependency's float or threading behavior.
+[package]
+name = "devon-render3d"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "render3d_rs"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3

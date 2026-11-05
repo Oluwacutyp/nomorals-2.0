@@ -281,6 +281,22 @@ __all__ = [
     "registered_renderers", "get_renderer", "renderer_status",
     "scene_requirements", "capability_gaps", "resolve_renderer",
     "render_scene",
+    # the native Rust 3D rung (§1.5e engine 1 of 2)
+    "RustSceneRenderer", "register_rust_renderer",
+    "RENDERER_BOOTSTRAP_ISSUES",
     # private-but-stable (tests + compat shims)
     "_effect_filter",
 ]
+
+# §1.5e engine rungs register at import — registration is pure
+# data (capabilities + a probe handle); toolchain provisioning
+# waits for the rung's probe(). A rung module that fails to import
+# is recorded here, never fatal, never silent (the formats
+# bootstrap_issues discipline).
+try:
+    from .render3d_rust import RustSceneRenderer, register_rust_renderer
+
+    register_rust_renderer()
+    RENDERER_BOOTSTRAP_ISSUES: list[str] = []
+except Exception as _rung_exc:  # noqa: BLE001 — recorded, not raised
+    RENDERER_BOOTSTRAP_ISSUES = [f"render3d_rust: {_rung_exc}"]

@@ -82,3 +82,22 @@ queue. Sections land with their waves.
 | Consent-to-download flow over `mask_status()`: probe → offer → owner's yes installs (pip package and/or ViT-B checkpoint) → fresh-process re-probe; refusal remembered; states not_needed/available/offered/installed/refused/failed | shipped (§1.1d tail) | `imggen/mask_provision.py` (`MaskProvisionFlow`, all seams injectable); `tests/test_mask_provision.py` covers every state with fakes |
 | `mask_status()` gains real consumers (it had none outside its own module) | shipped (§1.1d tail) | tools `mask_rung_status` / `mask_rung_provision` (`tools/media_gen.py`) + CLI `nm imggen masks [--accept\|--refuse\|--reopen]` |
 | SAM rung IoU | not scored — recorded, not invented | needs a checkpoint + torch on the scoring machine; the manifest's `sam` entry states the gap instead of a number. Scoring it is one `score_fixture` call away on a SAM machine |
+
+## 3D — the native Rust rung (§1.5e engine 1 of 2): the surpass ledger, as data
+
+The rung (`edit_engine/render3d_rust.py` + crate
+`media/render3d_rs/`, binary `devon-render3d`) renders the core's
+evaluated frame states — it never re-evaluates a scene. The ledger
+below is the owner's bar stated as measurements and construction
+facts, not adjectives; Blender-rung numbers are NOT stated here
+(the Blender rung's own build records its side; no figure is
+invented for it).
+
+| Axis | This rung, measured / by construction |
+|---|---|
+| Cold start | 2.5 ms mean (min 2.1 ms, 20 runs) for spawn + `--version` + exit of the zero-dependency binary on this box. One spawn serves a whole frame batch — the job is data, so a 24-frame render pays the start once. |
+| Determinism | Byte-identical PNG for the same document + frame, proven in tests (`test_byte_identical_double_render`, sha256 compared): single-threaded f64 rasterizer, document-order draw, pinned stored-block PNG encoder, no wall clock in the render path. The encoder trades file size for byte-stability (a 1080p reference frame is 6.2 MB stored) — a deflate rung must re-pin hashes before it may serve. |
+| Data-native control | The whole control surface is the Scene3D document + the frame-state JSON: an agent authors data, calls `render_scene`, and reads back paths + state hashes. There is no GUI-shaped API, no scene-file dialect to translate, nothing to click. |
+| Render speed, reference scene | 13 nodes (9 phong cubes, lambert ground, 32-segment phong sphere; directional + point + ambient lights), measured on this box 2026-11-05: 640×360 ≈ 98–102 ms/frame in-binary over 24 frames (two samples), ≈104 ms/frame end-to-end through `render_scene` (state evaluation + job + spawn included); 1920×1080 single frame 1076 ms. Single-threaded scalar f64 by design (determinism first) — a parallel/SIMD rung is headroom, not a silent change: it lands only behind the same byte-identity goldens. |
+| Scope, honestly | flat/lambert/phong, ambient/directional/point/spot (1/(1+d²) attenuation, penumbra-smoothed cone), the core's five primitives + explicit meshes, near/far clipping, translucent source-over pass. No shadows, no textures, no refraction/raytracing in this stage — absence is declared in the rung's capabilities notes, never faked. |
+| Provisioning | The rung installs its own toolchain: rustup + pinned toolchain 1.85.0 into the workspace tools dir, cargo build from the in-repo crate, `build_record.json` (source fingerprint + versions) beside the installed binary. Unavailable states name their reason in the probe. |

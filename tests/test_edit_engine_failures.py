@@ -69,9 +69,12 @@ def test_direct_import_surface_and_all_unchanged():
     # failures wave, 113 after Echelon Wave 3 (video port exports),
     # 122 after Echelon Wave 5 (effect property registry exports),
     # 127 after the §1.5c QC tail (measurer + contact-sheet exports),
-    # 140 after the §1.5b format registry exports landed on top of it.
+    # 140 after the §1.5b format registry exports landed on top of it,
+    # 174 after the §1.5e Scene3D spine exports, 177 after the §1.5e
+    # Rust rung exports (RustSceneRenderer, register_rust_renderer,
+    # RENDERER_BOOTSTRAP_ISSUES).
     assert "failures" not in edit_engine_all
-    assert len(edit_engine_all) == 140
+    assert len(edit_engine_all) == 177
 
 
 # --- document.duration / timeline.duration --------------------------------

@@ -329,13 +329,29 @@ def test_compile_refusals_name_their_reasons(tmp_path):
                       transition="wipeleft")])
     with pytest.raises(MotionStudioError, match="no engine rung"):
         p.to_document(workdir=tmp_path / "c5")
-    # camera3d: carried by the document, refused at compile
+    # camera3d: carried by the document, refused at compile while
+    # no 3D rung is chosen — the refusal is the empty-registry
+    # state (§1.5e); with a rung registered the segment resolves
+    # through it instead.
     p = MotionProject(segments=[MotionSegment(
         uid="d", kind="image", src=img, duration_s=1.0,
         properties={"camera3d/fov": 35.0})])
     assert p.to_dict()["segments"][0]["properties"]["camera3d/fov"] == 35.0
-    with pytest.raises(MotionStudioError, match="3D rung is not chosen"):
-        p.to_document(workdir=tmp_path / "c6")
+    from nomorals.media.edit_engine.scene3d import (
+        get_renderer,
+        register_renderer,
+        registered_renderers,
+        unregister_renderer,
+    )
+    saved = {name: get_renderer(name) for name in registered_renderers()}
+    for name in saved:
+        unregister_renderer(name)
+    try:
+        with pytest.raises(MotionStudioError, match="3D rung is not chosen"):
+            p.to_document(workdir=tmp_path / "c6")
+    finally:
+        for renderer in saved.values():
+            register_renderer(renderer)
 
 
 def test_compile_transitions_ride_session_directives(tmp_path):

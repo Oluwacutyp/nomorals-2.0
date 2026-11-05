@@ -474,7 +474,9 @@ class TestScaffoldAndLoad:
 
 
 # ---------------------------------------------------------------------------
-# The §1.5e seam — camera3d resolves as data, refuses at apply
+# The §1.5e seam — camera3d resolves as data; at apply it refuses
+# by name with no rung registered and records the serving rung
+# with one
 # ---------------------------------------------------------------------------
 
 class TestCamera3dSeam:
@@ -487,9 +489,42 @@ class TestCamera3dSeam:
         assert row["renderer"] == "camera3d"
 
     def test_camera3d_refuses_at_apply(self):
+        # The refusal is the NO-RUNG state (§1.5e): with the
+        # renderer registry emptied the seam refuses by name,
+        # verbatim. With a rung registered the apply resolves
+        # instead — pinned by the next test.
+        from nomorals.media.edit_engine.scene3d import (
+            get_renderer,
+            register_renderer,
+            registered_renderers,
+            unregister_renderer,
+        )
+        saved = {name: get_renderer(name)
+                 for name in registered_renderers()}
+        for name in saved:
+            unregister_renderer(name)
+        try:
+            spec = EditSpec(clips=[{"path": "a.mp4", "duration": 1.0}])
+            with pytest.raises(FormatError, match="unavailable"):
+                apply_format(spec, "camera3d")
+        finally:
+            for renderer in saved.values():
+                register_renderer(renderer)
+
+    def test_camera3d_apply_records_the_serving_rung(self):
+        # With a §1.5e rung registered, apply resolves through the
+        # registry and the record names the rung serving the
+        # format3d surface. (Registered explicitly here: the
+        # registry is shared session state — test_scene3d's
+        # fixture deliberately leaves it empty.)
+        from nomorals.media.edit_engine import register_rust_renderer
+        from nomorals.media.edit_engine.scene3d import registered_renderers
+        register_rust_renderer()
+        assert registered_renderers()
         spec = EditSpec(clips=[{"path": "a.mp4", "duration": 1.0}])
-        with pytest.raises(FormatError, match="unavailable"):
-            apply_format(spec, "camera3d")
+        _spec, record = apply_format(spec, "camera3d")
+        assert record["renderer3d"]["renderer"] in registered_renderers()
+        assert record["renderer3d"]["surface"] == "format3d"
 
 
 # ---------------------------------------------------------------------------
