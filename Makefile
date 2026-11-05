@@ -6,7 +6,7 @@ PKG    := nomorals
 NM     := $(PYTHON) -m $(PKG)
 
 .DEFAULT_GOAL := help
-.PHONY: help test test-verbose test-one lint fmt typecheck doctor tools config \
+.PHONY: help test test-verbose test-one lint gates fmt typecheck doctor tools config \
         ask run serve backup models memory clean lines
 
 help: ## Show this help
@@ -27,6 +27,10 @@ test-one: ## Run one module: make test-one M=tests.test_agents
 lint: ## Ruff, if installed (optional dependency)
 	@$(PYTHON) -c "import ruff" 2>/dev/null && $(PYTHON) -m ruff check $(PKG) tests \
 		|| echo "ruff not installed — pip install ruff (optional)"
+
+gates: ## The Wave 8 gates CI enforces: ruff ratchet + committed-secret scan (docs/CI_GATES.md)
+	@$(PYTHON) -m nomorals.tools.ruff_ratchet
+	@$(PYTHON) -m nomorals.tools.secret_scan
 
 typecheck: ## mypy, if installed (optional dependency)
 	@command -v mypy >/dev/null 2>&1 && mypy $(PKG) \

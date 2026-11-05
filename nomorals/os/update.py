@@ -80,6 +80,7 @@ from typing import Any
 from ..core.filelock import lock_exclusive_nb, unlock as _unlock_file
 from ..core.logging_setup import get_logger
 from .snapshots import SnapshotManager, SnapshotRefused
+from .verify_install import verify_install
 
 __all__ = [
     "HealthCheckFn",
@@ -383,10 +384,25 @@ class UpdateManager:
         health_checks: list[HealthCheckFn] | None = None,
         advisory_checks: list[HealthCheckFn] | None = None,
         git_bin: str = "git",
+        verifier: Any | None = None,
     ) -> None:
         self.repo_dir = Path(repo_dir)
         self.snapshots = snapshots
         self.git_bin = git_bin
+        # Verify-then-install (Wave 8): after a pull moves HEAD, the
+        # landed state is verified before the update proceeds. The
+        # default follows the health-gate idiom above: the production
+        # construction (no injected health checks) gets the real
+        # verifier; an injected construction's gates are scripted
+        # wholes (their git seams are stubbed, so a real-repo verifier
+        # could only lie about them) and gets one only when it passes
+        # a verifier explicitly.
+        if verifier is not None:
+            self._verifier = verifier
+        elif health_checks is None:
+            self._verifier = verify_install
+        else:
+            self._verifier = None
         if health_checks is not None:
             self.health_checks = list(health_checks)
             # Injected gates (tests, embedders) get no advisory checks
@@ -578,6 +594,40 @@ class UpdateManager:
             self._journal({"run_id": run_id, "event": "step", "step": "git_pull",
                            "ts": time.time(), "ok": True,
                            "detail": "skipped (--no-pull)"})
+
+        # Step 2.25: verify-then-install. The pull claims it landed
+        # new_sha; a transport's success line is not proof (the
+        # push_nm20 lesson), so grep the resulting state — HEAD,
+        # ancestry, object presence, worktree content, new-blob
+        # sizes — before anything else runs on the new code. A failed
+        # verification undoes the pull exactly like the quarantined
+        # pull above: the tree must not sit on unverified code.
+        if pull and new_sha and previous_sha and new_sha != previous_sha \
+                and self._verifier is not None:
+            verdict = self._verifier(self.repo_dir, new_sha, previous_sha,
+                                     git_bin=self.git_bin)
+            report.record("verify_install", bool(verdict.get("ok")),
+                          str(verdict.get("detail", "")))
+            self._journal({"run_id": run_id, "event": "step",
+                           "step": "verify_install", "ts": time.time(),
+                           "ok": bool(verdict.get("ok")),
+                           "detail": str(verdict.get("detail", ""))})
+            if not verdict.get("ok"):
+                undone, undo_detail = self._restore_tree(previous_sha)
+                report.record("git_restore", undone, undo_detail)
+                report.error = (
+                    f"pulled version {new_sha[:12]} failed install "
+                    f"verification ({verdict.get('detail', '')}) — "
+                    "refusing to run unverified code."
+                    + (f" The pull was undone; the tree is back at"
+                       f" {previous_sha[:12]}." if undone else
+                       f" Undo the pull with: git -C {self.repo_dir} "
+                       f"reset --hard {previous_sha[:12]}"))
+                report.seconds = time.time() - started
+                self._journal({"run_id": run_id, "event": "aborted",
+                               "ts": time.time(), "error": report.error})
+                self._append_history(report)
+                return report
 
         # Step 2.5: no-op short-circuit. The pull landed nothing —
         # HEAD is exactly where it started. Migrating, health-gating,

@@ -1,0 +1,24 @@
+# Pre-commit hooks for the Wave 8 gates (see docs/CI_GATES.md).
+#
+# The gates live in nomorals.tools — the hooks below are the local,
+# pre-push face of the exact checks CI enforces; there is one
+# implementation of each gate, not a hook copy and a CI copy.
+#
+# Enable once per clone:  pre-commit install
+# Run on demand:          pre-commit run --all-files
+
+repos:
+  - repo: local
+    hooks:
+      - id: secret-scan
+        name: committed-secret gate
+        entry: python3 -m nomorals.tools.secret_scan
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: ruff-ratchet
+        name: ruff lint-debt ratchet
+        entry: python3 -m nomorals.tools.ruff_ratchet
+        language: system
+        pass_filenames: false
+        types: [python]

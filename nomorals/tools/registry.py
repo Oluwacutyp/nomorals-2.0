@@ -467,6 +467,7 @@ class ToolRegistry:
             "edit_loop",
             "errorsys",  # system health / error budgets / incident history
             "error_scan",
+            "ruff_ratchet", "secret_scan", "landability",  # Wave 8 gates
             "macros", "media", "media_edit", "media_gen", "media_director", "media_pipeline", "metadata",
             "music", "studio",
             "network", "osint", "osint_people", "parsers",

@@ -2,8 +2,9 @@
 
 Tier: unit. Parses ``.github/workflows/ci.yml`` and asserts it runs the four
 required stages (repo linter, layering contract, error scan, offline unit
-suite), keeps the secret scan advisory-only, and does not fake a
-Termux/aarch64 job.
+suite), that lint runs under the Wave-8 ruff ratchet with a pinned ruff,
+that the secret scan is a real gate (Wave 8 — it was advisory-only before),
+and does not fake a Termux/aarch64 job.
 """
 
 from __future__ import annotations
@@ -58,16 +59,39 @@ class CiConfigTests(unittest.TestCase):
         self.assertIn("unittest discover", text)
         self.assertIn("NM_RUN_INTEGRATION", text)
 
-    def test_secret_scan_is_advisory_only(self) -> None:
+    def test_secret_scan_is_a_real_gate(self) -> None:
+        # Wave 8 reversed the pre-Wave-8 contract: the scan was advisory
+        # by design (continue-on-error + explicit exit 0) and could never
+        # block a push. It is a gate now: no continue-on-error anywhere
+        # on the job, no advisory exit 0, and it runs the repo's one
+        # gate module over the shared pattern battery.
         scan = self.jobs.get("secret-scan", {})
         self.assertTrue(scan, "expected a secret-scan job")
-        self.assertTrue(
-            scan.get("continue-on-error") is True,
-            "secret-scan must be continue-on-error so it can never block a push",
+        self.assertNotEqual(
+            scan.get("continue-on-error"), True,
+            "secret-scan is a gate (Wave 8): continue-on-error would "
+            "make it advisory again",
         )
+        self.assertIn("gate", scan.get("name", "").lower())
         text = self._job_text(scan)
-        self.assertIn("advisory", scan.get("name", "").lower())
-        self.assertIn("exit 0", text)
+        self.assertIn("nomorals.tools.secret_scan", text)
+        self.assertNotIn("exit 0", text)
+
+    def test_lint_runs_under_the_ratchet_with_a_pinned_ruff(self) -> None:
+        # Wave 8: the raw advisory `ruff check` step is replaced by the
+        # ratchet gate, and the install step pins the ruff version the
+        # ratchet was measured with (counts are not comparable across
+        # ruff releases).
+        ci = self.jobs.get("ci", {})
+        text = self._job_text(ci)
+        self.assertIn("nomorals.tools.ruff_ratchet", text)
+        self.assertIn('ruff==', text.replace('"', ""))
+        for step in ci.get("steps", []):
+            self.assertNotEqual(
+                step.get("continue-on-error"), True,
+                f"step {step.get('name')!r} must not be advisory: the "
+                "Wave-8 gates block",
+            )
 
     def test_no_faked_termux_or_aarch64_job(self) -> None:
         for name in self.jobs:

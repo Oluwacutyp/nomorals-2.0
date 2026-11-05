@@ -7,9 +7,11 @@
 #   - offline unit suite: `python3 -m unittest discover -s tests` with
 #     NM_RUN_INTEGRATION unset, so only the offline tiers run.
 #
-# Advisory (never blocks): secret-scan. It is grep-based, runs with
-# continue-on-error, and exits 0 by design — hygiene signal for the operator,
-# not a gate on their pushes.
+# Gates (block): the ruff lint-debt RATCHET (ruff-ratchet.json — per-code
+# ceilings that may only decrease) and the committed-secret scan
+# (nomorals.tools.secret_scan over the repo's own pattern battery, with
+# .secret-scan-allowlist.json excusing adjudicated non-secrets by exact
+# value hash). Both were advisory until Wave 8; see docs/CI_GATES.md.
 #
 # Deliberately OMITTED: Termux / aarch64.
 #   GitHub has no first-party aarch64 Termux runner, and third-party
@@ -72,19 +74,21 @@ jobs:
           # are added to the package's own extras on purpose: the package
           # keeps zero mandatory dependencies.
           python3 -m pip install -e ".[dev,fast,media,media-edit]" \
-            "pandas>=2" "pyyaml>=6" "python-docx>=1.1" "openpyxl>=3.1"
+            "pandas>=2" "pyyaml>=6" "python-docx>=1.1" "openpyxl>=3.1" \
+            "ruff==0.17.3"
 
       - name: Validate this workflow parses
         run: python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"
 
-      # Lint (ruff) is ADVISORY until the lint-debt paydown: the repo carries
-      # ~3,990 pre-existing findings (measured 2026-10-02), so a hard gate
-      # would be red on day one and train everyone to ignore CI. New code
-      # must still be ruff-clean (Wave J files are). Flip to a hard gate
-      # after the paydown wave.
-      - name: Lint (ruff — advisory until lint-debt paydown)
-        continue-on-error: true
-        run: ruff check nomorals/ tests/
+      # Lint debt is RATCHETED (Wave 8): ruff-ratchet.json records the
+      # per-code ceilings measured with the pinned ruff (0.17.3). The gate
+      # fails when any code's count rises above its ceiling, when a new
+      # code appears, or when a ceiling is stale (debt paid down but the
+      # ratchet not tightened). Pay debt down, then re-record with
+      # `python3 -m nomorals.tools.ruff_ratchet --update`. See
+      # docs/CI_GATES.md.
+      - name: Lint ratchet (ruff — debt may only decrease)
+        run: python3 -m nomorals.tools.ruff_ratchet
 
       - name: Layering contract
         run: python3 -m unittest tests.test_layering
@@ -117,14 +121,15 @@ jobs:
           grep -E "^(FAIL|ERROR):" /tmp/suite.log | head -30 || true
           exit ${CODE:-0}
 
-  # ── Advisory hygiene: informational only. continue-on-error + an explicit
-  # exit 0 mean this job can NEVER block the operator's push, even if every
-  # pattern below matches. It exists to catch an accidental credential commit
-  # early, not to gate merges.
+  # ── Committed-secret GATE (Wave 8): runs the repo's own secret-pattern
+  # battery (nomorals.security.audit_patterns) over every tracked file and
+  # FAILS the run on any hit not excused by .secret-scan-allowlist.json
+  # (entries key on path + pattern + SHA-256 of the matched value, so a
+  # different secret at the same path still fails). One battery, one gate —
+  # no grep copy. Disclosure playbook: docs/CI_GATES.md.
   secret-scan:
-    name: "secret-scan (advisory — never blocks)"
+    name: "secret-scan (gate)"
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -134,27 +139,10 @@ jobs:
       # NOTE: vendor/sentinel is private — the runner cannot fetch it.
       # (Skipped here; nothing secret lives in the submodule checkout.)
 
-      - name: Grep for committed secrets (advisory)
-        run: |
-          set +e
-          # gitleaks when the runner happens to have it, plain grep otherwise.
-          if command -v gitleaks >/dev/null 2>&1; then
-            gitleaks detect --source . --no-git -v || true
-          else
-            grep -rEni --exclude-dir=.git --exclude-dir=__pycache__ --exclude='*.pyc' \
-              -e 'sk-[A-Za-z0-9]{20,}' \
-              -e 'ghp_[A-Za-z0-9]{36}' \
-              -e 'gho_[A-Za-z0-9]{36}' \
-              -e 'AKIA[0-9A-Z]{16}' \
-              -e 'xox[baprs]-[A-Za-z0-9-]{10,}' \
-              -e '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' \
-              -e "(api[_-]?key|client[_-]?secret|auth[_-]?token)[\"']?[[:space:]]*[:=][[:space:]]*[\"'][A-Za-z0-9_.~/+-]{16,}['\"]" \
-              . > /tmp/secret_hits.txt || true
-            if [ -s /tmp/secret_hits.txt ]; then
-              echo "::warning::advisory secret-scan found possible committed secrets:"
-              cat /tmp/secret_hits.txt
-            else
-              echo "advisory secret-scan: no hits"
-            fi
-          fi
-          exit 0  # advisory by design — never fails the run
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Committed-secret gate
+        run: python3 -m nomorals.tools.secret_scan
