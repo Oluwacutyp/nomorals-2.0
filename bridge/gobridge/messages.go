@@ -83,6 +83,8 @@ func (b *bridge) handleCommand(cc *clientConn, req request) {
 	switch cmd {
 	case "send":
 		b.cmdSend(ctx, cc, id, req)
+	case "edit":
+		b.cmdEdit(ctx, cc, id, req)
 	case "send_media":
 		b.cmdSendMedia(ctx, cc, id, req)
 	case "typing":
@@ -102,7 +104,7 @@ func (b *bridge) handleCommand(cc *clientConn, req request) {
 		if b.cli.IsLoggedIn() {
 			state = "open"
 		}
-		b.reply(cc, id, map[string]any{"ok": true, "user": b.meJID, "lid": b.myLID(), "state": state})
+		b.reply(cc, id, map[string]any{"ok": true, "user": b.meJID, "user_name": b.myPushName(), "lid": b.myLID(), "state": state})
 	default:
 		if b.handleGroupCommand(ctx, cc, id, req) {
 			return
@@ -159,6 +161,24 @@ func textOf(m *waE2E.Message) string {
 		return m.GetVideoMessage().GetCaption()
 	}
 	return ""
+}
+
+// fromOf builds the wire "from" object for an inbound event:
+// the sender's addressing id + push name, plus "alt" — the
+// sender's OTHER addressing form (LID ↔ phone JID) when
+// whatsmeow reports one. Identity resolution on the Python
+// side folds both forms of one person into one identity;
+// without alt, an LID-addressed sender and the same person
+// number-addressed look like two different people.
+func fromOf(v *events.Message) map[string]any {
+	from := map[string]any{
+		"id":   v.Info.Sender.ToNonAD().String(),
+		"name": v.Info.PushName,
+	}
+	if alt := v.Info.SenderAlt.ToNonAD(); !alt.IsEmpty() {
+		from["alt"] = alt.String()
+	}
+	return from
 }
 
 func contextInfoOf(m *waE2E.Message) *waE2E.ContextInfo {
@@ -324,7 +344,7 @@ func (b *bridge) onMessage(v *events.Message) {
 		}
 		b.broadcast(map[string]any{
 			"type": "status_post", "id": string(v.Info.ID),
-			"from":      map[string]any{"id": sender.String(), "name": v.Info.PushName},
+			"from":      fromOf(v),
 			"text":      textOf(v.Message),
 			"media":     media,
 			"view_once": v.IsViewOnce,
@@ -339,11 +359,21 @@ func (b *bridge) onMessage(v *events.Message) {
 		if ci := contextInfoOf(v.Message); ci != nil {
 			ownReplyTo = ci.GetStanzaID()
 		}
+		ownName := v.Info.PushName
+		if ownName == "" {
+			ownName = b.myPushName()
+		}
 		out := map[string]any{
 			"type": "own_message", "id": string(v.Info.ID),
 			"chat": map[string]any{
 				"id": chat.String(), "kind": kind, "title": b.titleOf(chat),
 			},
+			// The sender IS the account itself. Name it: the
+			// adapter resolves the owner's display identity from
+			// this — without it, his own turns arrive nameless
+			// and downstream identity resolution degrades to a
+			// placeholder (register #29).
+			"from":      map[string]any{"id": sender.String(), "name": ownName},
 			"text":      textOf(v.Message),
 			"reply_to":  ownReplyTo,
 			"view_once": v.IsViewOnce,
@@ -379,10 +409,11 @@ func (b *bridge) onMessage(v *events.Message) {
 	if ci := contextInfoOf(v.Message); ci != nil {
 		replyTo = ci.GetStanzaID()
 	}
+	from := fromOf(v)
 	out := map[string]any{
 		"type": "message", "id": string(v.Info.ID),
 		"chat":      map[string]any{"id": chat.String(), "kind": kind, "title": title},
-		"from":      map[string]any{"id": sender.String(), "name": v.Info.PushName},
+		"from":      from,
 		"text":      textOf(v.Message),
 		"media":     media,
 		"reply_to":  replyTo,
@@ -588,6 +619,19 @@ func (b *bridge) cmdSend(ctx context.Context, cc *clientConn, id string, req req
 		if err != nil {
 			return "", err
 		}
+		// Remember our own sends: the edit command (progressive
+		// display) may only target messages this bridge sent,
+		// and chat history should show them too. whatsmeow does
+		// not echo a client's own SendMessage back as an event,
+		// so without this the send is invisible to both.
+		rec := &remembered{
+			incoming: false, text: textOf(msg),
+			id: resp.ID, chatJID: chat, tsMs: time.Now().UnixMilli(),
+		}
+		if b.cli.Store != nil && b.cli.Store.ID != nil {
+			rec.senderJID = b.cli.Store.ID.ToNonAD()
+		}
+		b.remember(chat, rec)
 		return resp.ID, nil
 	}
 
@@ -665,6 +709,59 @@ func (b *bridge) textMessage(text string, quote *waE2E.ContextInfo) *waE2E.Messa
 		}}
 	}
 	return &waE2E.Message{Conversation: proto.String(text)}
+}
+
+// cmdEdit edits one of this bridge's OWN already-sent text
+// messages in place (progressive display, register #31):
+// WhatsApp message edits are a protocol message wrapping the
+// replacement body (whatsmeow BuildEdit). The protocol only
+// allows editing your own messages, and only within WhatsApp's
+// edit window (~15 minutes) — both are enforced server-side and
+// any refusal comes back as the send error, surfaced verbatim.
+// The bridge additionally refuses a target it never sent (not in
+// its own remembered history for the chat), so a stale or
+// foreign id fails fast with a named reason instead of a
+// protocol round-trip.
+func (b *bridge) cmdEdit(ctx context.Context, cc *clientConn, id string, req request) {
+	chat, err := parseJID(req.str("chat"))
+	if err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	mid := strings.TrimSpace(req.str("message_id"))
+	if mid == "" {
+		b.reply(cc, id, map[string]any{"ok": false, "error": "edit needs a message_id"})
+		return
+	}
+	text := req.str("text")
+	key := chat.String()
+	b.memMu.Lock()
+	var target *remembered
+	for _, rec := range b.recent[key] {
+		if rec != nil && !rec.incoming && string(rec.id) == mid {
+			target = rec
+			break
+		}
+	}
+	b.memMu.Unlock()
+	if target == nil {
+		b.reply(cc, id, map[string]any{
+			"ok": false,
+			"error": "edit target " + mid + " is not one of this bridge's own " +
+				"messages in that chat (only own messages can be edited)",
+		})
+		return
+	}
+	edit := b.cli.BuildEdit(chat, types.MessageID(mid),
+		&waE2E.Message{Conversation: proto.String(text)})
+	if _, err := b.cli.SendMessage(ctx, chat, edit); err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	b.memMu.Lock()
+	target.text = text
+	b.memMu.Unlock()
+	b.reply(cc, id, map[string]any{"ok": true, "message_id": mid})
 }
 
 var extMIME = map[string]string{

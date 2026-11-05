@@ -285,6 +285,21 @@ func (b *bridge) myLID() string {
 	return b.meLID
 }
 
+// myPushName returns the account's own WhatsApp profile (push)
+// name from the device store — the display name the account
+// itself carries. The adapter needs it to name the owner on
+// his own turns: whatsmeow reports no push name for the
+// account's own messages (the own_message event has no sender
+// name at all), so without this the Python side sees an empty
+// sender name for everything the owner types and downstream
+// identity resolution degrades to a placeholder.
+func (b *bridge) myPushName() string {
+	if b.cli != nil && b.cli.Store != nil {
+		return b.cli.Store.PushName
+	}
+	return ""
+}
+
 func (b *bridge) statusPayload() map[string]any {
 	b.stateMu.Lock()
 	defer b.stateMu.Unlock()
@@ -296,6 +311,7 @@ func (b *bridge) statusPayload() map[string]any {
 		"type":                  "status",
 		"state":                 b.connState,
 		"user":                  b.meJID,
+		"user_name":             b.myPushName(),
 		"lid":                   b.myLID(),
 		"reconnect_attempt":     b.cli.AutoReconnectErrors,
 		"next_retry_in_s":       0,

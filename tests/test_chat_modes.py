@@ -132,9 +132,12 @@ class ChatmodeRegistrationTest(unittest.TestCase):
         self.assertIsNotNone(parse_control("/chatmode status"))
 
     def test_too_many_args_is_error(self) -> None:
-        # The feature form takes up to 4 words (feature <f> <on|off>
-        # <target>), so a 3-word mode form parses — the handler rejects
-        # it as too many arguments — while a 5-word form fails parsing.
+        # Register #30 changed the contract: a chatmode target is a
+        # free-form chat NAME (any number of words), a phone number,
+        # or a full key — so long tails now PARSE, and a target that
+        # resolves to nothing is the handler's honest error, not a
+        # parse error. (The old (0, 4) arg cap made a multi-word
+        # group name untypeable.)
         cmd = parse_control("/chatmode games-only telegram:1 extra")
         self.assertIsNotNone(cmd)
         assert cmd is not None
@@ -142,7 +145,7 @@ class ChatmodeRegistrationTest(unittest.TestCase):
         cmd = parse_control("/chatmode feature music off telegram:1 extra")
         self.assertIsNotNone(cmd)
         assert cmd is not None
-        self.assertEqual(cmd.kind, "error")
+        self.assertEqual(cmd.kind, "chatmode")
 
 
 class ChatmodeCommandTest(unittest.TestCase):
@@ -220,11 +223,16 @@ class ChatmodeCommandTest(unittest.TestCase):
         self.assertFalse(chat_modes.is_games_only("telegram:999"))
 
     def test_bad_target_key_is_usage_error(self) -> None:
+        # Register #30: a target that is no key, no number and no
+        # known chat name is an honest resolution error naming what
+        # was tried — and nothing is applied anywhere.
         out = self.runtime.handle_control(
             "/chatmode games-only 555", "telegram:999",
             message=_msg("/chatmode games-only 555", owner=True))
-        self.assertIn("telegram:123456", out)
+        self.assertIn("no chat matches '555'", out)
+        self.assertIn("I tried", out)
         self.assertFalse(chat_modes.is_games_only("555"))
+        self.assertFalse(chat_modes.is_games_only("telegram:999"))
 
     def test_non_owner_cannot_set(self) -> None:
         out = self.runtime.handle_control(

@@ -504,6 +504,18 @@ class WhatsAppAdapter(ChatAdapter):
         # has no LID). The self-chat may be addressed by it instead
         # of the phone JID — see _is_self_chat.
         self.user_lid: str = ""
+        # The account's own WhatsApp profile (push) name, from the
+        # bridge's status events ("user_name"). The bridge reports
+        # NO sender name for the account's own messages, so this is
+        # the name the owner's own turns are resolved with — without
+        # it his identity degrades to a placeholder downstream
+        # (register #29: /stats answered "unknown's attributes").
+        self.user_name: str = ""
+        # Progressive-display edit throttle (same seam as the
+        # Telegram bot adapter's edit_progress): ~1 edit / 3s, on
+        # change only.
+        from .progress_throttle import ProgressThrottler
+        self._progress = ProgressThrottler()
         # last QR login code, so the owner/app can surface it without
         # watching stdout (the bridge re-emits a QR whenever the session
         # needs re-linking)
@@ -691,6 +703,27 @@ class WhatsAppAdapter(ChatAdapter):
         since = float(entry.get("dispatched_at") or 0.0)
         return ("sent" if self._history_find_own(chat, text, since=since)
                 else "held")
+
+    def _own_display_name(self, obj: dict[str, Any]) -> str:
+        """The owner's display name for one of his own turns.
+
+        Resolution chain (member-resolution law: every path, ends
+        at the identity or an honest label — never an empty name
+        that downstream code turns into a placeholder):
+        1. the event's own name field (older wire shapes carried
+           it flat; the Go bridge carries it as from.name),
+        2. the account's WhatsApp profile name, learned from the
+           bridge's status events (``user_name``),
+        3. the account's own number — his id as the honest label.
+        """
+        name = str(obj.get("name") or "").strip()
+        if not name:
+            name = str((obj.get("from") or {}).get("name") or "").strip()
+        if not name:
+            name = (self.user_name or "").strip()
+        if not name:
+            name = _jid_user_part(self.user_jid)
+        return name
 
     def _is_self_chat(self, chat_id: str, kind: str) -> bool:
         """True when *chat_id* is this account's own "Message
@@ -917,6 +950,9 @@ class WhatsAppAdapter(ChatAdapter):
         if kind == "status":
             self.user_jid = str(obj.get("user") or "")
             self.user_lid = str(obj.get("lid") or "")
+            # An older bridge reports no user_name — never let its
+            # empty value clobber a name already learned.
+            self.user_name = str(obj.get("user_name") or "") or self.user_name
             state = str(obj.get("state") or "")
             self.bridge_state = state
             if state == "open":
@@ -1012,7 +1048,7 @@ class WhatsAppAdapter(ChatAdapter):
                     ),
                     incoming=True,
                     text=str(obj.get("text") or ""),
-                    sender=str(obj.get("name") or ""),
+                    sender=self._own_display_name(obj),
                     sender_id=self.user_jid,
                     message_id=message_id,
                     ts=ts,
@@ -1042,7 +1078,7 @@ class WhatsAppAdapter(ChatAdapter):
                     ),
                     incoming=True,
                     text=str(obj.get("text") or ""),
-                    sender=str(obj.get("name") or ""),
+                    sender=self._own_display_name(obj),
                     sender_id=self.user_jid,
                     message_id=message_id,
                     reply_to=str(obj.get("reply_to") or ""),
@@ -1217,6 +1253,14 @@ class WhatsAppAdapter(ChatAdapter):
                     ts=ts,
                 )
             wa_msg.meta["envelope"] = _wa_envelope(obj, wa_msg.text)
+            _alt = str((obj.get("from") or {}).get("alt") or "").strip()
+            if _alt:
+                # The sender's other addressing form (LID ↔ phone
+                # JID), reported by the bridge alongside from.id:
+                # identity resolution folds both forms of one
+                # person into one identity instead of minting a
+                # second one per form (register #29).
+                wa_msg.meta["sender_alt_id"] = _alt
             if ts and (time.time() - ts) > STALE_INBOUND_S:
                 # Offline-delivered / history-replayed on (re)connect:
                 # observed by the runtime, never answered or executed
@@ -1455,6 +1499,51 @@ class WhatsAppAdapter(ChatAdapter):
                 return result
         assert result is not None
         return result
+
+    def edit_progress(self, chat: ChatRef, message_id: str,
+                      new_text: str) -> dict[str, Any] | None:
+        """Edit one of this account's OWN sent messages in place —
+        the progressive-display seam (register #31), same contract
+        as the Telegram bot adapter's ``edit_progress``:
+        ``ProgressReporter`` flows bind this as their emit.
+
+        WhatsApp edits are real but narrow: the Go bridge sends a
+        protocol edit (whatsmeow BuildEdit) for a message this
+        bridge itself sent, inside WhatsApp's edit window; the
+        server refuses anything else (someone else's message, a
+        window-expired message) and the refusal comes back by
+        name. Returns the bridge's verdict dict on success, None
+        when the edit was throttled (unchanged / too soon) or
+        refused — refusals are logged, never hidden, and a None
+        here never blocks the caller's real result. Never raises.
+        """
+        if not self.connected.is_set():
+            return None
+        if not message_id:
+            return None
+        if not self._progress.should_edit(new_text):
+            return None
+        try:
+            from .platforms import format_for_platform
+            wire = format_for_platform(new_text or "", "whatsapp")
+        except Exception as exc:  # noqa: BLE001 - raw text beats no edit
+            record_failure("whatsapp.WhatsAppAdapter.edit_progress", exc)
+            wire = new_text or ""
+        try:
+            response = self._send_cmd(
+                {"cmd": "edit", "chat": self._jid(chat),
+                 "message_id": str(message_id),
+                 "text": wire[:for_platform("whatsapp").max_text]},
+                timeout=15)
+        except Exception as exc:  # noqa: BLE001 - progress is best-effort
+            record_failure("whatsapp.WhatsAppAdapter.edit_progress", exc)
+            return None
+        if not response.get("ok"):
+            _log.debug("whatsapp: edit refused for %s in %s: %s",
+                       message_id, chat.key,
+                       response.get("error") or "bridge error")
+            return None
+        return response
 
     def send_media(self, chat: ChatRef, media: MediaRef, *,
                    caption: str = "", parse_mode: str = "") -> SendResult:

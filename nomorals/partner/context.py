@@ -203,6 +203,39 @@ class PartnerContextBuilder:
         return "\n".join(lines)
 
     @staticmethod
+    def _catalog_block() -> str:
+        """Her REAL command catalog — what she can actually do.
+
+        Register #34: asked "what can you do?" with nothing about
+        her abilities in the prompt, the base model answered with
+        its stock assistant list ("Answer questions — factual,
+        technical, creative… What are you working on?") — a
+        stranger's self-description in Devon's mouth.  The content
+        now comes from the one catalog /help renders
+        (capability_brief, computed from the live registry); the
+        brain still phrases the answer, in her voice — but the
+        substance is hers, and the stock shapes are named as
+        not-her so the model can tell the difference.
+        """
+        try:
+            from ..social.chat.control import capability_brief
+            brief = capability_brief()
+        except Exception:  # noqa: BLE001 — catalog unavailable
+            return ""
+        if not brief.strip():
+            return ""
+        return (
+            "What you actually do — your real systems, from your own "
+            "catalog (this is the ground truth about your abilities):\n"
+            + brief + "\n"
+            "If anyone asks what you can do, answer from THIS — a few "
+            "highlights in your own voice, not the whole list, and "
+            "never a generic assistant list ('answer questions, write "
+            "and debug code, creative writing…'). Those stock phrases "
+            "are a base model's self-description, not yours."
+        )
+
+    @staticmethod
     def _output_contract(short_reply: bool, max_chars: int) -> str:
         mode = (
             f"You are answering in a short burst: at most a few words. 'k', 'mhm', 'wym?' "
@@ -293,6 +326,7 @@ class PartnerContextBuilder:
             ("background", self._background_block(background_lines)),
             ("dialogue", self._dialogue_block(persona, mood_label)),
             ("capabilities", self._capabilities_block() if include_capabilities else ""),
+            ("catalog", self._catalog_block() if include_capabilities else ""),
             ("platform", platform_note),
             ("output", self._output_contract(short_reply, max_chars)),
             # Post-history: always last, highest salience, never shrunk.
@@ -301,8 +335,8 @@ class PartnerContextBuilder:
         blocks = [(name, block) for name, block in blocks if block]
 
         # Budget: identity/mood/relationship/gate/output/capabilities/
-        # platform/post_history are protected; the SHRINK_ORDER blocks are
-        # truncated in priority order when total exceeds budget.
+        # catalog/platform/post_history are protected; the SHRINK_ORDER
+        # blocks are truncated in priority order when total exceeds budget.
         shrinkable_names = set(SHRINK_ORDER)
         protected = [b for name, b in blocks if name not in shrinkable_names]
         by_name = {name: block for name, block in blocks if name in shrinkable_names}

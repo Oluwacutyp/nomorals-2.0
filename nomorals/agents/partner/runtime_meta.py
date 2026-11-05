@@ -306,7 +306,8 @@ class RuntimeMetaMixin:
             _log.warning("agent mode switch failed: %s", exc)
             return f"agent command failed: {exc}"
 
-    def _control_chatmode(self, command: Any, chat_key: str) -> str:
+    def _control_chatmode(self, command: Any, chat_key: str,
+                          message=None) -> str:
         """Per-chat reply mode + per-chat feature toggles — the single
         entry point for group controls. Owner-only (enforced by the
         grant check in handle_control before dispatch).
@@ -314,7 +315,7 @@ class RuntimeMetaMixin:
         ::
 
             /chatmode                          status for this chat
-            /chatmode status [platform:chat_id]
+            /chatmode status [target]
             /chatmode list                     every chat with custom settings
             /chatmode games-only [target]     silent for normal chat, games work
             /chatmode games-off [target]      normal chat works, games refused
@@ -324,9 +325,16 @@ class RuntimeMetaMixin:
             /chatmode feature <games|music|voice|images|proactive> <on|off> [target]
             /chatmode feature games.<game> <on|off> [target]
 
-        No target sets the chat the command was sent in; a target sets a
-        remote chat by key. ``feature`` changes one toggle in one chat
-        only — disabling games in Group A never affects Group B or DMs.
+        No target sets the chat the command was sent in. A target
+        names a remote chat the way a human would (register #30 —
+        see nomorals/partner/chat_targets.py): a full key
+        (``platform:chat_id``), a phone number (that person's
+        WhatsApp DM), or the chat's NAME, resolved against the
+        title index and adapter chat listings. A name matching
+        several chats lists the candidates instead of guessing;
+        a name matching none reports what was tried. ``feature``
+        changes one toggle in one chat only — disabling games in
+        Group A never affects Group B or DMs.
         Modes gate reply-vs-silence; toggles gate features; no toggle
         re-enables what a mode silences. Turning games off while a game
         is live ends it honestly — scores kept, no further moves.
@@ -338,19 +346,45 @@ class RuntimeMetaMixin:
             set_chat_mode, set_feature, set_game)
 
         usage = ("usage: /chatmode [games-only|games-off|games-on|quiet|"
-                 "normal|status|list] [platform:chat_id]  ·  /chatmode feature "
+                 "normal|status|list] [target]  ·  /chatmode feature "
                  "<games|music|voice|images|proactive|games.<game>> <on|off> "
-                 "[platform:chat_id]")
+                 "[target]  ·  a target is a chat name, a phone number, "
+                 "or a full key (platform:chat_id)")
         words = (command.tail or "").split()
         sub = (words[0].lower() if words else "status")
 
-        def _valid_target(target: str) -> str | None:
-            # A remote target must look like a chat key, or the set
-            # would silently apply to a key nothing ever matches.
-            platform, _, chat_id = target.partition(":")
-            if not platform or not chat_id:
-                return f"chat keys look like telegram:123456 — {usage}"
-            return None
+        def _resolve(raw: str) -> tuple[str, str, str | None]:
+            """Resolve a target reference → (key, title, error).
+
+            Exactly one of key / error is set. Resolution follows
+            chat_targets: full key, phone number, chat name — with
+            ambiguity and exhaustion reported, never guessed.
+            """
+            from ...partner.chat_targets import resolve_chat_target
+
+            chat = getattr(message, "chat", None)
+            adapters: list = []
+            gateway = getattr(self, "gateway", None)
+            if gateway is not None:
+                try:
+                    adapters = list(gateway.adapters.values())
+                except Exception:  # noqa: BLE001 - listing is a hint
+                    adapters = []
+            res = resolve_chat_target(
+                raw,
+                current_key=chat_key,
+                current_title=str(getattr(chat, "title", "") or ""),
+                current_platform=str(getattr(chat, "platform", "") or ""),
+                db=getattr(self.context, "db", None),
+                adapters=adapters)
+            if res.resolved:
+                return res.key, res.title, None
+            return "", "", res.describe(raw)
+
+        def _where(target: str, title: str = "") -> str:
+            if target == chat_key:
+                return "this chat"
+            return f"{title} ({target})" if title else target
 
         def _end_live_game(target: str, *, game: str = "") -> str:
             """D2: games going off ends the live game honestly — scores
@@ -380,12 +414,12 @@ class RuntimeMetaMixin:
             return (f" Games are now off in this chat — ending the live "
                     f"{live_game or 'game'}, scores kept.")
 
-        def _status_line(target: str) -> str:
+        def _status_line(target: str, title: str = "") -> str:
             settings = get_chat_settings(target)
             mode = settings["mode"]
             disabled = settings["disabled"]
             games_off = settings.get("games_disabled", [])
-            where = "this chat" if target == chat_key else target
+            where = _where(target, title)
             toggles = ", ".join(
                 f"{f} {'off' if f in disabled else 'on'}" for f in FEATURES)
             extra = ""
@@ -447,14 +481,13 @@ class RuntimeMetaMixin:
             state = words[2].lower()
             if state not in ("on", "off"):
                 return f"want on or off, got {state!r} — {usage}"
-            if len(words) > 4:
-                return f"too many arguments — {usage}"
-            target = words[3] if len(words) > 3 else chat_key
-            if len(words) > 3:
-                err = _valid_target(target)
-                if err:
-                    return err
-            where = "this chat" if target == chat_key else target
+            # The target is the rest of the line — a chat NAME may
+            # be several words ("think creativity think peace").
+            target_raw = " ".join(words[3:])
+            target, target_title, err = _resolve(target_raw)
+            if err:
+                return err
+            where = _where(target, target_title)
             verb = "back on" if state == "on" else "off"
             if feature.startswith("games."):
                 # Per-game toggle (D5): /chatmode feature games.chess off
@@ -493,14 +526,11 @@ class RuntimeMetaMixin:
             return f"{feature} is {verb} in {where}.{extra}"
 
         if sub == "status":
-            if len(words) > 2:
-                return f"too many arguments — {usage}"
-            target = words[1] if len(words) > 1 else chat_key
-            if len(words) > 1:
-                err = _valid_target(target)
-                if err:
-                    return err
-            return _status_line(target)
+            target_raw = " ".join(words[1:])
+            target, target_title, err = _resolve(target_raw)
+            if err:
+                return err
+            return _status_line(target, target_title)
 
         if sub in ("games-only", "games_only", "gamesonly", "games"):
             mode: str | None = MODE_GAMES_ONLY
@@ -511,15 +541,12 @@ class RuntimeMetaMixin:
         elif sub in ("games-on", "games_on"):
             # games-on = games back on: clear the games toggle AND any
             # games-off mode. set_feature("games", True) does both.
-            if len(words) > 2:
-                return f"too many arguments — {usage}"
-            target = words[1] if len(words) > 1 else chat_key
-            if len(words) > 1:
-                err = _valid_target(target)
-                if err:
-                    return err
+            target_raw = " ".join(words[1:])
+            target, target_title, err = _resolve(target_raw)
+            if err:
+                return err
             set_feature(target, "games", True)
-            where = "this chat" if target == chat_key else target
+            where = _where(target, target_title)
             return (f"games are back on in {where} — game commands work "
                     f"here again.")
         elif sub in ("quiet", "silent"):
@@ -530,14 +557,11 @@ class RuntimeMetaMixin:
             mode_word = "normal"
         else:
             return f"unknown mode {sub!r} — {usage}"
-        if len(words) > 2:
-            return f"too many arguments — {usage}"
-        target = words[1] if len(words) > 1 else chat_key
-        if len(words) > 1:
-            err = _valid_target(target)
-            if err:
-                return err
-        where = "this chat" if target == chat_key else target
+        target_raw = " ".join(words[1:])
+        target, target_title, err = _resolve(target_raw)
+        if err:
+            return err
+        where = _where(target, target_title)
         set_chat_mode(target, mode)
         if mode == MODE_GAMES_ONLY:
             return (f"{where} is now games-only — I'll stay silent for "

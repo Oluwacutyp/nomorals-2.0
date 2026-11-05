@@ -55,7 +55,7 @@ from .failures import record_failure
 
 __all__ = ["CONTROL_COMMANDS", "COMMAND_DETAILS", "ControlCommand",
            "parse_control", "PLATFORMS", "help_text", "help_menu", "whatsapp_menu",
-           "detailed_help",
+           "detailed_help", "capability_brief",
            "list_catalog", "LIST_GROUPS", "LIST_ONELINERS", "GAME_COMMANDS",
            "GAME_START_COMMANDS",
            "PUBLIC_COMMANDS", "PUBLIC_GAME_COMMANDS", "caller_may_run",
@@ -300,7 +300,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "mood": (0, 10),  # label, or several dim=NN pairs
     "mode": (1, 1),
     "agent": (0, None),  # /agent [adaptive|autonomous|planning|+x|-x|status|off|tick]
-    "chatmode": (0, 4),  # /chatmode [mode|status|list|feature <f> <on|off>] [chat_key] — per-chat mode + feature toggles (feature form takes 4 words with a target)
+    "chatmode": (0, None),  # /chatmode [mode|status|list|feature <f> <on|off>] [target] — per-chat mode + feature toggles; the target is a chat NAME (any length), a phone number, or a full key, so the tail is unbounded
     "style": (0, 3),  # /style | /style <field> <value> [target] | /style reset [target] | /style list — inspect + tune the mined style profile (owner-only)
     "doctor": (0, 0),  # /doctor — system health: registry + config + stores + adapters + providers (owner-only)
     "model": (0, 6),  # provider + up to 5 fallback providers
@@ -1509,8 +1509,8 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "example": "/agent adaptive+planning",
               "related": "/mode /mind"},
     "chatmode": {"what": "this chat's reply mode + per-chat feature toggles — the single entry point for group controls. Modes: normal (she answers everything) | games-only (silent for normal chat, game commands still work) | games-off (normal chat works, game commands refused honestly) | quiet (never messages first here, replies when addressed). Features: /chatmode feature <games|music|voice|images|proactive> <on|off> disables one feature in THIS chat only — Group A never affects Group B or DMs. Per-game: /chatmode feature games.<game> <on|off>. Turning games off while a game is live ends it honestly (scores kept). Voice off = text replies only, voice notes still transcribe. Owner-only; run it in the chat to set that chat. In games-only, ALL non-game messages are silenced — including voice notes (even after transcription). Game commands + in-game moves still work. /chatmode normal restores replies. /chatmode list shows every chat with custom settings.",
-             "usage": "/chatmode [games-only|games-off|games-on|quiet|normal|status|list] [platform:chat_id]  ·  /chatmode feature <games|music|voice|images|proactive|games.<game>> <on|off> [platform:chat_id]",
-             "example": "/chatmode games-off   ·   /chatmode feature music off   ·   /chatmode quiet   ·   /chatmode feature games.chess off   ·   /chatmode list",
+             "usage": "/chatmode [games-only|games-off|games-on|quiet|normal|status|list] [target]  ·  /chatmode feature <games|music|voice|images|proactive|games.<game>> <on|off> [target]  ·  a target is a chat name, a phone number, or a full key (platform:chat_id); no target = this chat",
+             "example": "/chatmode games-off   ·   /chatmode feature music off   ·   /chatmode quiet   ·   /chatmode feature games.chess off   ·   /chatmode games-only Think Creativity   ·   /chatmode list",
              "related": "/status /game"},
     "doctor": {"what": "system health — the Telegram twin of nm doctor: registry (every command dispatched + documented), config (ignored keys must be 0), stores (chat-modes + style-overrides + database), adapters (running state + real error), providers (LLM chain keys present). Each check passes or fails with the real cause. Owner-only.",
              "usage": "/doctor", "example": "/doctor",
@@ -3618,6 +3618,35 @@ for _kind in CONTROL_COMMANDS:
 for _kind in CONTROL_COMMANDS:
     if _kind not in LIST_ONELINERS:
         LIST_ONELINERS[_kind] = COMMAND_DETAILS[_kind]["what"]
+
+
+def capability_brief(*, per_group: int = 5) -> str:
+    """Her real capabilities — rendered from THIS catalog.
+
+    The ground truth the brain answers "what can you do?" from
+    (register #34): the same registry /help renders — the grouped
+    systems (LIST_GROUPS), each with real command names and their
+    catalog one-liners, and the command total computed from
+    CONTROL_COMMANDS, never a hardcoded count.  Compact on
+    purpose: a map for the prompt, not the manual — /help carries
+    the full text.  When the catalog grows, this grows with it;
+    there is no second list to drift.
+    """
+    total = len(CONTROL_COMMANDS)
+    lines = [f"{total} commands across {len(LIST_GROUPS)} systems:"]
+    for title, kinds in LIST_GROUPS:
+        picks: list[str] = []
+        for kind in kinds[:per_group]:
+            what = str((COMMAND_DETAILS.get(kind) or {}).get("what")
+                       or "").strip()
+            what = what.split(" — ")[0].split(". ")[0].rstrip(".")
+            picks.append(f"/{kind} — {what}" if what else f"/{kind}")
+        more = (f" (+{len(kinds) - len(picks)} more)"
+                if len(kinds) > len(picks) else "")
+        lines.append(f"- {title}: " + "; ".join(picks) + more)
+    lines.append("/help renders the full catalog; "
+                 "/help <command> details any one of them.")
+    return "\n".join(lines)
 
 
 def list_catalog(topic: str = "", *, public_only: bool = False) -> str:

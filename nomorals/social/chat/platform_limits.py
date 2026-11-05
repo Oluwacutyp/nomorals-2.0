@@ -19,6 +19,13 @@ Field semantics:
   that cannot render them instead of sending bytes the platform ignores.
 * ``supports_html`` — the platform accepts an HTML parse mode.
 * ``supports_media_edit`` — in-place media editing is implemented.
+* ``supports_text_edit`` — in-place TEXT editing of the account's
+  own already-sent messages is implemented (the progressive-display
+  seam: adapters expose ``edit_progress``). ``text_edit_scope``
+  names, in plain words, exactly what that edit path covers and
+  what remains absent — an absence is recorded BY NAME here, never
+  faked downstream and never silently whole-message when an edit
+  path exists.
 * ``rate_per_hour`` — outbound hourly budget. ``0`` means unlimited
   (the gateway's own windows govern); a positive value is a hard cap.
 * ``cost_model`` — ``"free"`` or ``"per_segment"`` (SMS bills per segment).
@@ -57,17 +64,24 @@ class PlatformLimits:
     cost_model: str
     gateway_chunks: bool = True
     utf16_lengths: bool = False
+    supports_text_edit: bool = False
+    text_edit_scope: str = ""
 
 
 #: One row per platform. This is the whole table — see the descriptor rule.
 _LIMITS: dict[str, PlatformLimits] = {
-    # Telegram userbot (MTProto). No edit_media on the userbot adapter.
+    # Telegram userbot (MTProto). No edit_media on the userbot adapter,
+    # and no edit_progress seam either — progressive display is a
+    # Bot API surface today; that absence is named, not hidden.
     "telegram": PlatformLimits(
         platform="telegram",
         max_text=4096, max_caption=1024, max_file_mb=50,
         supports_buttons=True, supports_html=True, supports_media_edit=False,
         rate_per_hour=0, cost_model="free",
         utf16_lengths=True,
+        supports_text_edit=False,
+        text_edit_scope=("absent: the MTProto userbot adapter has no "
+                         "edit_progress seam (the Bot API adapters do)"),
     ),
     # Telegram Bot API. editMessageMedia is implemented.
     "telegram-bot": PlatformLimits(
@@ -76,6 +90,9 @@ _LIMITS: dict[str, PlatformLimits] = {
         supports_buttons=True, supports_html=True, supports_media_edit=True,
         rate_per_hour=0, cost_model="free",
         utf16_lengths=True,
+        supports_text_edit=True,
+        text_edit_scope=("own messages via editMessageText; progress "
+                         "edits throttled (~1/3s, on change only)"),
     ),
     # Second BotFather bot (personal, owner-only). Same Bot API limits
     # as the gated bot — a separate row so chunking/gateway routing
@@ -87,6 +104,9 @@ _LIMITS: dict[str, PlatformLimits] = {
         supports_buttons=True, supports_html=True, supports_media_edit=True,
         rate_per_hour=0, cost_model="free",
         utf16_lengths=True,
+        supports_text_edit=True,
+        text_edit_scope=("own messages via editMessageText; progress "
+                         "edits throttled (~1/3s, on change only)"),
     ),
     # WhatsApp via the local bridges. max_text is the protocol cap:
     # WhatsApp text messages allow 65,536 characters, and neither
@@ -110,6 +130,16 @@ _LIMITS: dict[str, PlatformLimits] = {
         supports_buttons=True, supports_html=False, supports_media_edit=False,
         rate_per_hour=0, cost_model="free",
         utf16_lengths=True,
+        # Progressive display (register #31): real, via the Go
+        # bridge's edit command (whatsmeow BuildEdit) behind the
+        # adapter's edit_progress. The scope names the edges.
+        supports_text_edit=True,
+        text_edit_scope=(
+            "own messages only, inside WhatsApp's ~15-minute edit "
+            "window, via the Go bridge's edit command; absent by "
+            "name: editing other people's messages (the protocol "
+            "cannot), media/caption edits, and any edit on the "
+            "Node/Baileys bridge rung (it has no edit command)"),
     ),
     # Discord: 2000-char hard cap, 25 MB free-tier upload cap.
     "discord": PlatformLimits(
@@ -118,6 +148,9 @@ _LIMITS: dict[str, PlatformLimits] = {
         supports_buttons=False, supports_html=False, supports_media_edit=False,
         rate_per_hour=0, cost_model="free",
         utf16_lengths=True,
+        supports_text_edit=False,
+        text_edit_scope=("absent: Discord's API can edit own messages, "
+                         "but this adapter has no edit seam yet"),
     ),
     # SMS: single-segment GSM-7 budget; the adapter owns multi-part
     # segmentation (encoding-aware), so the gateway does not chunk.

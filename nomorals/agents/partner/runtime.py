@@ -995,6 +995,14 @@ class PartnerRuntime(
         except Exception as e:  # noqa: BLE001 - a stamp must never break intake
             record_failure("runtime.PartnerRuntime._process_inner:stamp", e)
         self._bump("messages")
+        # Chat-title index (register #30): record this chat's title
+        # so owner commands can target chats BY NAME later. Writes
+        # only on change; failure-isolated like every intake beat.
+        try:
+            from ...partner.chat_targets import note_chat_title
+            note_chat_title(self.context.db, message.chat)
+        except Exception as e:  # noqa: BLE001
+            record_failure("runtime.PartnerRuntime._process_inner:title", e)
         # Background /play + /download jobs: surface any that died in
         # this chat without reporting (crashed worker, heartbeat
         # silence).  The happy path delivers itself from the job
@@ -4702,7 +4710,7 @@ class PartnerRuntime(
             return self._control_agent(command.tail or arg, chat_key)
 
         if kind == "chatmode":
-            return self._control_chatmode(command, chat_key)
+            return self._control_chatmode(command, chat_key, message)
 
         if kind == "style":
             return self._control_style(command, chat_key, message)

@@ -29,7 +29,8 @@ from ..core.logging_setup import get_logger
 from .failures import record_failure
 
 __all__ = ["AI_PLAYER", "Player", "PlayerStore", "Leaderboard",
-           "GAME_IDENTITY_ALIASES", "SOFT_DELETE_RESTORE_S"]
+           "GAME_IDENTITY_ALIASES", "SOFT_DELETE_RESTORE_S",
+           "canonical_whatsapp_sender_id", "sender_id_label"]
 
 _log = get_logger(__name__)
 
@@ -116,6 +117,46 @@ def is_placeholder_name(name: str) -> bool:
     """
     n = (name or "").strip()
     return n.startswith("user_") and n[5:].isdigit() and len(n) > 5
+
+
+def canonical_whatsapp_sender_id(*candidates: str) -> str:
+    """One WhatsApp human, one game sender id.
+
+    WhatsApp addresses the same person two ways: the phone JID
+    (``<number>@s.whatsapp.net``) and the privacy LID
+    (``<lid>@lid``).  Which form an event carries depends on the
+    account's addressing migration, so keying a player off the raw
+    form mints TWO players for one human (register #29).  The
+    phone form is canonical — it is the person's number, stable
+    across migrations — so when any candidate carries it, it wins;
+    a bare digit string (no domain) is that same number; otherwise
+    the first non-empty candidate stands (an LID-only sender keeps
+    their LID key until a phone form is ever seen for them).
+    """
+    ids = [(c or "").strip() for c in candidates]
+    ids = [c for c in ids if c]
+    if not ids:
+        return ""
+    for cand in ids:
+        if cand.endswith("@s.whatsapp.net") or cand.endswith("@c.us"):
+            return cand
+    for cand in ids:
+        if "@" not in cand and cand.lstrip("+").isdigit():
+            return cand
+    return ids[0]
+
+
+def sender_id_label(sender_id: str) -> str:
+    """The honest display label for a sender id: its user part.
+
+    A member whose display name genuinely never arrived is shown
+    as their number/id — a real fact about them — never as the
+    literal placeholder \"unknown\" (register #29).
+    """
+    s = (sender_id or "").strip()
+    if not s:
+        return ""
+    return s.split("@", 1)[0].strip()
 
 
 @dataclass(frozen=True)
@@ -520,6 +561,24 @@ class PlayerStore:
                                        exc_info=True)
         except Exception:  # noqa: BLE001
             _log.debug("game_players purge failed", exc_info=True)
+
+    def fold_alias_key(self, id_key: str, alias_key: str) -> None:
+        """Fold a same-human alias-keyed profile into the ID key.
+
+        WhatsApp addresses one person by phone JID and by LID;
+        profiles minted under the LID form before the resolution
+        fold existed (register #29) are the same human's record,
+        not a second player.  The merge is the nothing-dropped
+        legacy merge (sums, maxes, unions) — after it, the alias
+        row is gone and the ID key holds everything.  No-op when
+        either key is empty, the keys match, or no alias row
+        exists.  Best-effort: never raises.
+        """
+        if not id_key or not alias_key or id_key == alias_key \
+                or self.db is None:
+            return
+        with self._lock:
+            self._merge_one_legacy_key(id_key, alias_key)
 
     # ── stable-ID identity: sighting registry ──────────────────────────
     # One human can be sighted under several display names (userbot

@@ -2317,10 +2317,50 @@ class RuntimeGamesMixin:
     def _game_player(self, message: Any) -> Any:
         from dataclasses import replace
 
-        from ...games.players import Player, is_placeholder_name
+        from ...games.players import (
+            Player,
+            canonical_whatsapp_sender_id,
+            is_placeholder_name,
+            sender_id_label,
+        )
 
-        sender = (message.sender or "").strip() or "unknown"
         sender_id = (getattr(message, "sender_id", "") or "").strip()
+        wa_alias_key = ""
+        if (getattr(message.chat, "platform", "") or "").lower() == "whatsapp":
+            # One human, one game identity (register #29): the
+            # bridge reports the sender's phone JID and LID as the
+            # pair (sender_id, sender_alt_id) in either order,
+            # depending on the account's addressing migration.
+            # The phone form is canonical; folding happens HERE,
+            # at resolution, so every game surface sees one player.
+            meta = getattr(message, "meta", None)
+            alt_id = ""
+            if isinstance(meta, dict):
+                alt_id = str(meta.get("sender_alt_id") or "").strip()
+            orig_id = sender_id
+            sender_id = canonical_whatsapp_sender_id(sender_id, alt_id)
+            # The alias is whichever reported form is NOT the
+            # canonical one — a profile minted under it is the
+            # same human's record, folded into the canonical key
+            # below, once the player exists.
+            for cand in (orig_id, alt_id):
+                if cand and cand != sender_id:
+                    wa_alias_key = f"whatsapp:{cand}"
+                    break
+        sender = (message.sender or "").strip()
+        if not sender:
+            # Never a literal "unknown" player: a member whose
+            # display name genuinely didn't arrive is labelled by
+            # their id — an honest fact, not a placeholder. The
+            # chat peer is the last resort (a DM's peer IS the
+            # sender).
+            sender = sender_id_label(sender_id)
+            if not sender:
+                peer = (getattr(message.chat, "peer", "") or "").strip()
+                sender = sender_id_label(peer)
+            if not sender:
+                sender = sender_id_label(
+                    (getattr(message.chat, "chat_id", "") or "").strip())
         username = (getattr(message, "sender_username", "") or "").strip()
         if sender_id:
             # Stable platform user id: one human, one game identity —
@@ -2346,6 +2386,13 @@ class RuntimeGamesMixin:
                 return None
             player = Player.from_sender(message.chat.platform, sender, sender,
                                         username=username)
+        if wa_alias_key:
+            try:
+                self._game_engine().store.fold_alias_key(
+                    player.key, wa_alias_key)
+            except Exception as e:  # noqa: BLE001 - fold is recovery, not a gate
+                record_failure(
+                    "runtime_games.RuntimeGamesMixin._game_player_fold", e)
         # Canonical display name: the per-message sender label can be a
         # synthetic `user_<id>` placeholder when the sender entity was
         # unresolvable (e.g. group messages).  The stored profile holds
@@ -2366,14 +2413,17 @@ class RuntimeGamesMixin:
     @staticmethod
     def _game_player_for_key(chat_key: str) -> Any:
         """A stable player for console-style calls that only carry a key."""
-        from ...games.players import Player
+        from ...games.players import Player, sender_id_label
 
         try:
             ref = ChatRef.parse(chat_key)
         except Exception as e:
             record_failure("runtime_games.RuntimeGamesMixin._game_player_for_key", e)
             ref = ChatRef(platform="local", chat_id="console")
-        return Player.from_sender(ref.platform, ref.chat_id, ref.chat_id[:40])
+        # The display label is the id's user part (a WhatsApp DM's
+        # number), never the raw JID with its domain attached.
+        label = sender_id_label(ref.chat_id) or ref.chat_id[:40]
+        return Player.from_sender(ref.platform, ref.chat_id, label)
 
     @staticmethod
     @staticmethod
