@@ -44,16 +44,20 @@ Usage:
 
 from .scheduler import Scheduler, CronJob, Reminder, EventHook, ScheduledTask
 from .recurrence import (
+    CronNeverMatchesError,
     CronSpec,
+    CronTimezoneError,
     RRule,
     describe_cron,
     describe_rrule,
+    next_cron,
     parse_cron,
     parse_natural_datetime,
     parse_natural_schedule,
     parse_rrule,
     parse_rrule_set,
     prev_cron,
+    validate_cron,
 )
 
 __all__ = [
@@ -63,13 +67,17 @@ __all__ = [
     "EventHook",
     "ScheduledTask",
     "CronSpec",
+    "CronNeverMatchesError",
+    "CronTimezoneError",
     "RRule",
     "describe_cron",
     "describe_rrule",
+    "next_cron",
     "parse_cron",
     "parse_natural_datetime",
     "parse_natural_schedule",
     "parse_rrule",
     "parse_rrule_set",
     "prev_cron",
+    "validate_cron",
 ]

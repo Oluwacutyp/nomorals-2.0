@@ -1,29 +1,45 @@
-"""One scheduler facade over the four scheduler implementations.
+"""One scheduler facade over the scheduler implementations.
 
-Skip-list consolidation: scheduling lives in FOUR places —
+Scheduling engines (all stay; the facade fronts them in place):
 
-* :mod:`nomorals.scheduler` (``UnifiedScheduler`` — cron / interval /
-  mission / organ-tick views, the consolidation target),
-* :mod:`nomorals.agents.scheduler` (agent ``Scheduler`` — DB-backed,
-  blackouts, dependencies, missed-fire policy),
+* :mod:`nomorals.scheduler.unified_scheduler` (``UnifiedScheduler`` —
+  cron / interval / mission / organ-tick views over one JSON store,
+  the consolidation target),
+* :mod:`nomorals.scheduler.scheduler` (user-facing ``Scheduler`` —
+  DB-backed cron / reminders / event hooks),
+* :mod:`nomorals.agents.scheduler` (agent ``Scheduler`` — DB-backed
+  ``schedule_jobs``, blackouts, dependencies, missed-fire and overlap
+  policies),
 * :mod:`nomorals.missions.runner` (``MissionRunner`` — mission
   execution with retries / heartbeats),
 * :mod:`nomorals.autonomy.idle` (``IdleMonitor`` — idle stages /
   inhibitors).
 
-All four stay. This facade gives callers ONE API:
+This facade gives callers ONE API:
 
 * ``add_job`` / ``remove_job`` / ``list_jobs`` / ``due_jobs`` /
   ``mark_fired`` — delegate to ``UnifiedScheduler`` (the default
   backend), so one call site schedules anything.
-* ``parse_schedule_spec`` — passthrough to the agent scheduler's
-  parser (same function, same result).
+* ``parse_spec`` — delegates to the agent scheduler's full parser
+  when the composition root injects it (``spec_parser=``; layering
+  forbids importing it here).  Uninjected, it falls back to the
+  local minimal :func:`parse_schedule_spec`, whose results are a
+  *subset* shape — the parity suite pins exactly where the two
+  agree and where the full parser is required.
+* ``add_agent_job`` / ``list_agent_jobs`` / ``remove_agent_job`` /
+  ``set_agent_enabled`` — delegate to the injected agent
+  ``Scheduler`` (``agent_scheduler=``); the missed-fire / overlap
+  policy surface lives there and is delegated, never re-implemented.
+* ``validate_cron`` / ``next_cron`` — delegate to the shared
+  recurrence engine, so schedule-time refusal (garbage / impossible
+  / unknown zone, by name) is reachable through the same one API.
 * ``mission_runner`` / ``idle_state`` — lazy accessors for the other
   two systems, never re-implemented here.
 
 Facade rule: PRESERVE APIs — the facade delegates, it does not
 re-implement scheduling semantics. A call through the facade returns
-the same result as the direct call on the underlying scheduler.
+the same result as the direct call on the underlying scheduler
+(proven by ``tests/test_scheduler_facade_parity.py``).
 """
 
 from __future__ import annotations
@@ -65,12 +81,16 @@ class SchedulerFacade:
                  store_path: str | Path | None = None,
                  workspace_dir: str | Path | None = None,
                  mission_runner: Any | None = None,
-                 idle_fn: Any | None = None) -> None:
+                 idle_fn: Any | None = None,
+                 agent_scheduler: Any | None = None,
+                 spec_parser: Any | None = None) -> None:
         self._unified = unified
         self._store_path = store_path
         self._workspace_dir = workspace_dir
         self._mission_runner: Any | None = mission_runner
         self._idle_fn = idle_fn
+        self._agent_scheduler: Any | None = agent_scheduler
+        self._spec_parser = spec_parser
 
     @property
     def unified(self) -> Any:
@@ -107,7 +127,56 @@ class SchedulerFacade:
 
     # ── agent scheduler: spec parsing passthrough ──────────────────────────
     def parse_spec(self, spec: str) -> Any:
+        """Parse a schedule spec.
+
+        With the composition root's injected full parser (the agent
+        scheduler's ``parse_schedule_spec``) the result is exactly the
+        direct call's.  Uninjected, the local minimal parser answers —
+        same ``(kind, details)`` shape for the specs it knows, a
+        subset of the full grammar.
+        """
+        if self._spec_parser is not None:
+            return self._spec_parser(spec)
         return parse_schedule_spec(spec)
+
+    # ── agent scheduler: policy-bearing surface (delegated) ────────────────
+    @property
+    def agent_scheduler(self) -> Any:
+        if self._agent_scheduler is None:
+            raise RuntimeError(
+                "SchedulerFacade.agent_scheduler requires an injected "
+                "scheduler: pass agent_scheduler=... to __init__ "
+                "(layering: facade must not import L5 implementations)")
+        return self._agent_scheduler
+
+    def add_agent_job(self, name: str, spec: str, payload_kind: str,
+                      payload: dict[str, Any], **kwargs: Any) -> Any:
+        """Delegate to the agent Scheduler's ``add`` — same arguments,
+        same result, same missed-fire / overlap policy validation."""
+        return self.agent_scheduler.add(
+            name, spec, payload_kind, payload, **kwargs)
+
+    def list_agent_jobs(self, **kwargs: Any) -> Any:
+        return self.agent_scheduler.list_jobs(**kwargs)
+
+    def remove_agent_job(self, ref: str) -> Any:
+        return self.agent_scheduler.remove(ref)
+
+    def set_agent_enabled(self, ref: str, enabled: bool) -> Any:
+        return self.agent_scheduler.set_enabled(ref, enabled)
+
+    # ── recurrence engine passthrough (schedule-time refusal) ──────────────
+    def validate_cron(self, expr: str, timezone: str = "") -> Any:
+        """Parse + prove a cron expression schedulable (by-name refusal)."""
+        from .recurrence import validate_cron
+
+        return validate_cron(expr, timezone)
+
+    def next_cron(self, expr: str, after: Any, timezone: str = "") -> float:
+        """Next firing strictly after ``after`` (unix timestamp)."""
+        from .recurrence import next_cron
+
+        return next_cron(expr, after, timezone)
 
     # ── missions runner: accessor, not a re-implementation ────────────────
     @property

@@ -44,6 +44,7 @@ from .recurrence import (
     parse_natural_datetime as _parse_natural_datetime,
     parse_natural_schedule as _parse_natural_schedule,
     parse_rrule as _rec_parse_rrule,
+    validate_cron as _validate_cron,
 )
 from .failures import record_failure
 
@@ -302,7 +303,11 @@ def _interpret_naive(dt: datetime, tz: str | None) -> datetime:
 
 
 def _validate_tz(tz: str | None) -> str | None:
-    """Validate an IANA timezone name (None/'' stays None).  Raises ValueError."""
+    """Validate an IANA timezone name (None/'' stays None).
+
+    Raises :class:`~nomorals.scheduler.recurrence.CronTimezoneError`
+    (a ValueError) so an unknown zone is refused by the same named
+    type on every scheduling surface."""
     tz = (tz or "").strip()
     if not tz:
         return None
@@ -310,7 +315,9 @@ def _validate_tz(tz: str | None) -> str | None:
         from zoneinfo import ZoneInfo
         ZoneInfo(tz)
     except Exception:
-        raise ValueError(f"unknown timezone: {tz!r}")
+        from .recurrence import CronTimezoneError
+
+        raise CronTimezoneError(f"unknown timezone: {tz!r}")
     return tz
 
 
@@ -778,6 +785,11 @@ class Scheduler:
             overlap_policy, OVERLAP_POLICIES, "overlap_policy")
         skips = _normalize_skip_dates(skip_dates)
         cron_expr = self._resolve_cron_expr(cron_expr)
+        # Refuse unschedulable expressions BY NAME at schedule time:
+        # a well-formed expression that can never fire (e.g. Feb 31)
+        # raises CronNeverMatchesError here instead of being stored
+        # dead.  (Parse garbage already raised in _resolve_cron_expr.)
+        _validate_cron(cron_expr, tz or "")
         metadata = {
             "heavy": heavy, "weight": weight, "tz": tz or "",
             "missed_fire_policy": missed_fire_policy,
@@ -1007,6 +1019,7 @@ class Scheduler:
         now_ts = time.time()
         if cron_expr is not None:
             new_expr = self._resolve_cron_expr(cron_expr)
+            _validate_cron(new_expr, tz or "")  # refuse never-matching by name
             recurrence = "cron"
             nxt = self._next_valid(
                 {"cron_expr": new_expr, "task_id": task_id,

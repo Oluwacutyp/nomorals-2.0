@@ -18,6 +18,18 @@ Stdlib only (``datetime`` / ``zoneinfo`` / ``calendar``).  Two engines:
    ``a,b,c``.  Weekday 0 and 7 both mean Sunday.  When day-of-month *and*
    day-of-week are both restricted they keep classic cron OR semantics.
 
+   ``next_cron`` / ``prev_cron`` search a full leap-cycle horizon
+   (2930 days — the longest possible gap between firings of a
+   satisfiable expression is Feb 29 across a non-leap century), so an
+   expression that can never match is *proven* impossible and refused
+   by name (:class:`CronNeverMatchesError`), and an unknown IANA zone
+   is refused by name (:class:`CronTimezoneError`) instead of silently
+   scheduling in the wrong zone.  All schedule math is
+   timezone-explicit: wall times that never occur (spring-forward gap)
+   are skipped; wall times that occur twice (fall-back overlap) fire
+   at the first occurrence unless the pivot already sits between the
+   two.  The returned instant, localized, always satisfies the spec.
+
 2. **RFC 5545 RRULE** (subset) — the recurrence language of Google
    Calendar and Outlook::
 
@@ -40,16 +52,19 @@ from __future__ import annotations
 import calendar as _calendar
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as _dt_timezone
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 __all__ = [
     "CronSpec",
+    "CronNeverMatchesError",
+    "CronTimezoneError",
     "parse_cron",
     "cron_matches",
     "next_cron",
     "prev_cron",
+    "validate_cron",
     "describe_cron",
     "describe_rrule",
     "parse_natural_schedule",
@@ -62,6 +77,9 @@ __all__ = [
 
 #: Monday=0 … Sunday=6, the ``datetime.weekday()`` convention.
 WEEKDAYS = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
+
+#: Fixed UTC reference for zone-independent proofs (validate_cron).
+_UTC = _dt_timezone.utc
 
 _CRON_RE = re.compile(r"^\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*$")
 
@@ -79,7 +97,8 @@ def _parse_simple_set(field: str, lo: int, hi: int) -> set[int]:
         if not part:
             continue
         step = 1
-        if "/" in part:
+        stepped = "/" in part
+        if stepped:
             part, step_s = part.split("/", 1)
             step = int(step_s)
             if step < 1:
@@ -89,6 +108,10 @@ def _parse_simple_set(field: str, lo: int, hi: int) -> set[int]:
         elif "-" in part:
             a_s, b_s = part.split("-", 1)
             lo_p, hi_p = int(a_s), int(b_s)
+        elif stepped:
+            # Vixie cron semantics: "a/n" means a..max step n — NOT
+            # just {a} (the old reading silently dropped the step).
+            lo_p, hi_p = int(part), hi
         else:
             lo_p = hi_p = int(part)
         if lo_p < lo or hi_p > hi or lo_p > hi_p:
@@ -124,7 +147,7 @@ class _DomMatcher:
                 if not 1 <= day <= 31:
                     raise ValueError(f"bad W day in {field!r}")
                 self.nearest.add(day)
-            elif re.fullmatch(r"\d+(-\d+)?(/\d+)?", part):
+            elif re.fullmatch(r"[\d*]+(-\d+)?(/\d+)?", part):
                 self.days.update(_parse_simple_set(part, 1, 31))
             else:
                 raise ValueError(f"bad day-of-month value {part!r} in {field!r}")
@@ -213,7 +236,7 @@ class _DowMatcher:
             if m:
                 self.last.add(int(m.group(1)) % 7)
                 continue
-            if re.fullmatch(r"[0-7](-[0-7])?(/[0-9]+)?", part):
+            if re.fullmatch(r"[\d*]+(-[0-7])?(/[0-9]+)?", part):
                 for v in _parse_simple_set(part, 0, 7):
                     self.days.add(v % 7)
                 continue
@@ -337,29 +360,197 @@ def cron_matches(expr: str, dt: datetime) -> bool:
     return CronSpec(expr).matches(dt)
 
 
-def next_cron(expr: str, after: datetime, timezone: str = "") -> float:
-    """Next minute strictly after ``after`` matching the cron expression.
+# ── next/prev solver ─────────────────────────────────────────────────────
+#
+# The search descends field-by-field (month → day → hour/minute sets)
+# instead of stepping minute-by-minute, over a horizon of one full
+# leap-cycle span: the longest possible gap between two firings of a
+# *satisfiable* 5-field cron is Feb 29 across a non-leap century
+# (2096-02-29 → 2104-02-29 = 2922 days).  A 2930-day horizon covers
+# that with margin, so exhausting the search PROVES the expression can
+# never match — the horizon is a proof bound, not a heuristic cap.
+_CRON_SEARCH_DAYS = 2930
 
-    ``timezone`` is an IANA name — the wall-clock scan runs in that zone
-    (DST-safe).  Scans forward minute-by-minute, cap 366 days.  Returns a
-    unix timestamp.
+
+class CronNeverMatchesError(ValueError):
+    """A well-formed cron expression that can never match any instant.
+
+    Raised by :func:`next_cron` / :func:`prev_cron` after the
+    exhaustive leap-cycle search (e.g. ``0 0 31 2 *`` — February has
+    no 31st).  Distinct from a parse error: the expression is valid,
+    the calendar simply contains no day it can fire on.  Subclasses
+    ValueError so existing ``except ValueError`` callers keep working.
     """
-    spec = CronSpec(expr)  # parsed once
-    tz: Any = None
-    if (timezone or "").strip():
-        try:
-            tz = ZoneInfo(timezone.strip())
-        except ZoneInfoNotFoundError:
-            tz = None
-    probe = after.astimezone(tz) if tz else after
-    # strictly after: start at the next minute boundary
-    probe = probe.replace(second=0, microsecond=0) + timedelta(minutes=1)
-    limit = probe + timedelta(days=366)
-    while probe <= limit:
-        if spec.matches(probe):
-            return probe.timestamp()
-        probe += timedelta(minutes=1)
-    raise ValueError(f"cron expression never matches within a year: {expr!r}")
+
+
+class CronTimezoneError(ValueError):
+    """An IANA timezone name that does not resolve.
+
+    Scheduling never falls back silently to another zone: a typo'd
+    zone is refused by name (message mirrors ``unknown timezone: …``)
+    instead of the job firing at the wrong wall time.
+    """
+
+
+def _resolve_cron_tz(timezone: str) -> ZoneInfo | None:
+    """Resolve an IANA name → ZoneInfo; ``""`` → None (caller's zone).
+
+    Raises :class:`CronTimezoneError` for a non-empty unknown name —
+    the previous behaviour silently scheduled in the caller's zone.
+    """
+    name = (timezone or "").strip()
+    if not name:
+        return None
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, KeyError, ValueError) as exc:
+        raise CronTimezoneError(f"unknown timezone: {name!r}") from exc
+
+
+def _cron_day_matches(spec: CronSpec, probe: datetime) -> bool:
+    """Day-level match for the calendar date of ``probe``.
+
+    Same dom/dow combination rule as :meth:`CronSpec.matches` (both
+    restricted → OR; otherwise each restricted field must match).
+    """
+    if spec.dom.restricted and spec.dow.restricted:
+        return spec.dom.matches(probe) or spec.dow.matches(probe)
+    return spec.dom.matches(probe) and spec.dow.matches(probe)
+
+
+def _wall_occurrences(day: Any, hour: int, minute: int,
+                      frame: Any) -> list[datetime]:
+    """Every real instant whose wall time in ``frame`` is day@hour:minute.
+
+    Chronological, de-duplicated.  Empty when the wall time never
+    occurs (spring-forward gap); two entries inside a fall-back
+    overlap (fold 0, then fold 1).  A candidate counts only when the
+    round trip instant → wall lands back on the requested wall fields,
+    so gap phantoms (whose ``timestamp()`` would point at a *different*
+    wall time that does not match the expression) are excluded.  With
+    ``frame=None`` (naive footing) the single naive candidate stands.
+    """
+    naive = datetime(day.year, day.month, day.day, hour, minute)
+    if frame is None:
+        return [naive]
+    out: list[datetime] = []
+    seen: set[float] = set()
+    for fold in (0, 1):
+        cand = naive.replace(tzinfo=frame, fold=fold)
+        ts = cand.timestamp()
+        if ts in seen:
+            continue
+        back = datetime.fromtimestamp(ts, frame)
+        if (back.year, back.month, back.day, back.hour, back.minute) != (
+                day.year, day.month, day.day, hour, minute):
+            continue  # gap phantom: this wall time never happens
+        seen.add(ts)
+        out.append(cand)
+    return out
+
+
+def _cron_search(spec: CronSpec, pivot: datetime, tz: ZoneInfo | None,
+                 *, forward: bool) -> float | None:
+    """Field-driven search for the firing nearest ``pivot``.
+
+    ``forward=True`` → the first firing strictly after ``pivot``;
+    ``False`` → the last firing strictly before it.  Returns a unix
+    timestamp, or None when the exhaustive leap-cycle horizon holds no
+    firing (proof the expression can never match).  The frame is
+    timezone-explicit: ``tz`` when given, else ``pivot``'s own zone
+    (naive pivots stay naive — the caller's footing, as before).
+
+    DST semantics, pinned: wall times that never occur (gap) are
+    skipped — the firing does not happen that day; wall times that
+    occur twice (overlap) fire at the first occurrence, unless the
+    pivot already sits between the two occurrences, in which case the
+    second is the next firing.  Invariant: the returned instant,
+    localized to the frame, satisfies :meth:`CronSpec.matches`.
+    """
+    frame = tz if tz is not None else pivot.tzinfo
+    local = pivot.astimezone(frame) if frame is not None else pivot
+    # Aware candidates are compared as INSTANTS (timestamps): comparing
+    # two aware datetimes that share a tzinfo object compares wall
+    # fields instead (documented CPython behaviour), which inside a
+    # fall-back overlap would rank the first 01:30 before a pivot of
+    # 01:15 fold=1 — i.e. return a firing in the past.  Naive
+    # candidates (frame=None) compare as wall times, as before.
+    aware = frame is not None
+    pivot_ts = pivot.timestamp() if aware else None
+    start_day = local.date()
+    step = 1 if forward else -1
+    for offset in range(_CRON_SEARCH_DAYS + 1):
+        day = start_day + timedelta(days=step * offset)
+        if day.month not in spec.month:
+            continue
+        probe = datetime(day.year, day.month, day.day, 12, 0,
+                         tzinfo=frame)
+        if not _cron_day_matches(spec, probe):
+            continue
+        cands: list[datetime] = []
+        for hour in sorted(spec.hour):
+            for minute in sorted(spec.minute):
+                cands.extend(_wall_occurrences(day, hour, minute, frame))
+        if aware:
+            cands.sort(key=lambda c: (c.timestamp(), c.fold))
+        else:
+            cands.sort()
+        if not forward:
+            cands.reverse()
+        for cand in cands:
+            if aware:
+                ts = cand.timestamp()
+                if forward and not ts > pivot_ts:
+                    continue
+                if not forward and not ts < pivot_ts:
+                    continue
+            else:
+                if forward and not cand > local:
+                    continue
+                if not forward and not cand < local:
+                    continue
+            if spec.matches(cand):
+                return cand.timestamp()
+    return None
+
+
+def next_cron(expr: str, after: datetime, timezone: str = "") -> float:
+    """Next firing strictly after ``after`` matching the cron expression.
+
+    ``timezone`` is an IANA name — the search runs on that zone's wall
+    clock (DST semantics in :func:`_cron_search`); an unknown name
+    raises :class:`CronTimezoneError` rather than silently using
+    another zone.  Raises :class:`CronNeverMatchesError` when the
+    expression can never match (e.g. ``0 0 31 2 *``).  Returns a unix
+    timestamp.
+    """
+    spec = CronSpec(expr)  # parsed once; raises ValueError on garbage
+    tz = _resolve_cron_tz(timezone)
+    found = _cron_search(spec, after, tz, forward=True)
+    if found is None:
+        raise CronNeverMatchesError(
+            f"cron expression can never match (no matching day in a "
+            f"full leap cycle): {expr!r}")
+    return found
+
+
+def validate_cron(expr: str, timezone: str = "") -> CronSpec:
+    """Parse + prove a cron expression is schedulable in ``timezone``.
+
+    Schedule-time surfaces call this so an unschedulable expression is
+    refused by name when the job is created — never silently stored
+    dead.  Raises ValueError on garbage, :class:`CronTimezoneError` on
+    an unknown zone, :class:`CronNeverMatchesError` when no instant
+    can ever match.  Returns the parsed :class:`CronSpec`.
+    """
+    spec = CronSpec(expr)
+    tz = _resolve_cron_tz(timezone)
+    pivot = datetime(2024, 1, 1, tzinfo=_UTC)
+    if _cron_search(spec, pivot, tz, forward=True) is None:
+        raise CronNeverMatchesError(
+            f"cron expression can never match (no matching day in a "
+            f"full leap cycle): {expr!r}")
+    return spec
 
 
 # ── RFC 5545 RRULE (subset) ────────────────────────────────────────────────
@@ -800,30 +991,21 @@ def parse_rrule_set(text: str, dtstart: datetime | None = None) -> RRule:
 
 
 def prev_cron(expr: str, before: datetime, timezone: str = "") -> float:
-    """Most recent minute strictly before ``before`` matching the cron.
+    """Most recent firing strictly before ``before`` matching the cron.
 
-    Mirror of :func:`next_cron`, scanning backwards (cap 366 days).
-    ``timezone`` is an IANA name — the wall-clock scan runs in that zone.
-    Returns a unix timestamp.
+    Mirror of :func:`next_cron` (same exhaustive horizon, same DST
+    semantics, same named errors).  ``timezone`` is an IANA name —
+    the search runs on that zone's wall clock.  Returns a unix
+    timestamp.
     """
     spec = CronSpec(expr)  # parsed once; raises on garbage
-    tz: Any = None
-    if (timezone or "").strip():
-        try:
-            tz = ZoneInfo(timezone.strip())
-        except ZoneInfoNotFoundError:
-            tz = None
-    probe = before.astimezone(tz) if tz else before
-    probe = probe.replace(second=0, microsecond=0)
-    if probe == before:
-        # exactly on a minute boundary → strictly before
-        probe -= timedelta(minutes=1)
-    limit = probe - timedelta(days=366)
-    while probe >= limit:
-        if spec.matches(probe):
-            return probe.timestamp()
-        probe -= timedelta(minutes=1)
-    raise ValueError(f"cron expression never matches within a year: {expr!r}")
+    tz = _resolve_cron_tz(timezone)
+    found = _cron_search(spec, before, tz, forward=False)
+    if found is None:
+        raise CronNeverMatchesError(
+            f"cron expression can never match (no matching day in a "
+            f"full leap cycle): {expr!r}")
+    return found
 
 
 # ── human-readable schedule descriptions ───────────────────────────────────

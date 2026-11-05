@@ -95,8 +95,10 @@ DEFAULT_JITTER_FRAC = 0.10
 #: replay a million runs.
 MAX_BACKFILL = 100
 
-#: Cron scan cap: reuse the recurrence engine's own horizon (366 days).
-_CRON_HORIZON_DAYS = 366
+#: Cron search horizon: the recurrence engine's exhaustive leap-cycle
+#: bound (2930 days — a satisfiable cron fires within it, so a miss
+#: proves the expression can never match).
+_CRON_HORIZON_DAYS = 2930
 
 
 def decorrelated_jitter(period_s: float, jitter_frac: float,
@@ -221,8 +223,19 @@ class UnifiedJob:
         if not self.recurrence:
             raise ValueError("recurrence is required (type + spec)")
         # Validate the recurrence eagerly — fail fast, not at 3am.
-        next_occurrence(self.recurrence, self.created_at,
-                        tz=self.timezone)
+        # Cron recurrences go through validate_cron so a garbage,
+        # impossible (never-matching), or bad-zone expression is
+        # refused BY NAME at construction (= schedule time); the plain
+        # next_occurrence probe would swallow the engine's ValueError
+        # into a silently-dead job.
+        if str(self.recurrence.get("type") or "").lower() == "cron":
+            from .recurrence import validate_cron
+
+            validate_cron(str(self.recurrence.get("spec") or ""),
+                          self.timezone)
+        else:
+            next_occurrence(self.recurrence, self.created_at,
+                            tz=self.timezone)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -239,7 +252,7 @@ def missed_firings(job: UnifiedJob, now: float,
 
     The missed set a ``backfill`` policy replays. For interval jobs
     this walks the phase grid; for cron jobs it walks the cron series
-    (bounded by the 366-day scan horizon of the recurrence engine and
+    (bounded by the recurrence engine's leap-cycle search horizon and
     by ``cap``). One-shot jobs have at most one missed firing.
     """
     start = job.last_run if job.last_run is not None else job.created_at
