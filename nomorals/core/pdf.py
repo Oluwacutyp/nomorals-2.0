@@ -11,14 +11,16 @@ file), word wrapping, per-page headers/footers, and a correct xref table.
 """
 from __future__ import annotations
 
+import math
 import re
+import struct
 import time
 import zlib
 from dataclasses import dataclass, field
 from typing import Iterable
 
 __all__ = ["PdfError", "PdfPage", "render_pdf", "pdf_write", "read_pdf_text",
-           "pdf_read"]
+           "pdf_read", "render_pdf_embedded"]
 
 
 class PdfError(ValueError):
@@ -1071,3 +1073,689 @@ def pdf_read(path: str, *, max_pages: int = 100) -> str:
     """Read the text of the PDF at ``path``."""
     with open(path, "rb") as handle:
         return read_pdf_text(handle.read(), max_pages=max_pages)
+
+
+# ── embedded TrueType (Wave 2: PDF write fidelity) ──────────────────────────
+#
+# The legacy writer above is WinAnsi-only: any character outside
+# Latin-1 + the special table is transliterated or replaced with '?'.
+# ``render_pdf_embedded`` closes that gap the way the PDF spec intends:
+# a TrueType font is subsetted to the glyphs the document actually
+# uses, embedded as a /FontFile2 stream, and text is drawn as Identity-H
+# CIDs with a /ToUnicode CMap — so Greek, Cyrillic, CJK, math, emoji-free
+# BMP text (and anything else the font carries) renders *and* extracts
+# exactly.  Everything is stdlib: the TTF is parsed and rebuilt with
+# ``struct``; no fontTools, no external engine.  CFF-flavored OpenType
+# (.otf) is refused with a named error — the subsetter is TrueType-only.
+
+_TTF_SCALER_TRUETYPE = (0x00010000, 0x74727565)  # 1.0 / 'true'
+
+
+def _ttf_u16(data: bytes, off: int) -> int:
+    return struct.unpack_from(">H", data, off)[0]
+
+
+def _ttf_i16(data: bytes, off: int) -> int:
+    return struct.unpack_from(">h", data, off)[0]
+
+
+def _ttf_u32(data: bytes, off: int) -> int:
+    return struct.unpack_from(">I", data, off)[0]
+
+
+def _ttf_tables(data: bytes) -> dict[str, tuple[int, int]]:
+    """tag -> (offset, length) for a TrueType font, or PdfError."""
+    if len(data) < 12:
+        raise PdfError("font file too small to be a TrueType font")
+    scaler = _ttf_u32(data, 0)
+    if scaler == 0x4F54544F:  # 'OTTO'
+        raise PdfError(
+            "CFF-flavored OpenType (.otf) cannot be embedded by the "
+            "stdlib subsetter; supply a TrueType (.ttf) font")
+    if scaler not in _TTF_SCALER_TRUETYPE:
+        if data[:4] == b"ttcf":
+            raise PdfError(
+                "TrueType collections (.ttc) are not supported; supply "
+                "a single .ttf font")
+        raise PdfError("not a TrueType font (bad scaler type)")
+    num = _ttf_u16(data, 4)
+    tables: dict[str, tuple[int, int]] = {}
+    for i in range(num):
+        rec = 12 + i * 16
+        tag = data[rec:rec + 4].decode("latin-1")
+        tables[tag] = (_ttf_u32(data, rec + 8), _ttf_u32(data, rec + 12))
+    for required in ("head", "hhea", "maxp", "hmtx", "cmap", "glyf", "loca"):
+        if required not in tables:
+            raise PdfError(f"TrueType font is missing its {required!r} table")
+    return tables
+
+
+def _ttf_cmap(data: bytes, tables: dict[str, tuple[int, int]]) -> dict[int, int]:
+    """Unicode codepoint -> glyph id, best subtable (12 beats 4)."""
+    off, _length = tables["cmap"]
+    n = _ttf_u16(data, off + 2)
+    fmt12: int | None = None
+    fmt4: int | None = None
+    for i in range(n):
+        rec = off + 4 + i * 8
+        platform, encoding = _ttf_u16(data, rec), _ttf_u16(data, rec + 2)
+        sub = off + _ttf_u32(data, rec + 4)
+        fmt = _ttf_u16(data, sub)
+        if fmt == 12 and (platform in (0, 3)):
+            fmt12 = sub
+        elif fmt == 4 and (platform, encoding) in ((3, 1), (0, 3), (0, 2),
+                                                   (0, 1), (0, 0)):
+            if fmt4 is None:
+                fmt4 = sub
+    cmap: dict[int, int] = {}
+    if fmt12 is not None:
+        groups = _ttf_u32(data, fmt12 + 12)
+        for g in range(groups):
+            grec = fmt12 + 16 + g * 12
+            start, end, base = (_ttf_u32(data, grec), _ttf_u32(data, grec + 4),
+                                _ttf_u32(data, grec + 8))
+            for cp in range(start, min(end, start + 0x110000) + 1):
+                cmap[cp] = base + (cp - start)
+        return cmap
+    if fmt4 is None:
+        raise PdfError("TrueType font has no format-4/12 cmap subtable")
+    seg_count = _ttf_u16(data, fmt4 + 6) // 2
+    end_off = fmt4 + 14
+    start_off = end_off + 2 * seg_count + 2
+    delta_off = start_off + 2 * seg_count
+    range_off = delta_off + 2 * seg_count
+    for s in range(seg_count):
+        end = _ttf_u16(data, end_off + 2 * s)
+        start = _ttf_u16(data, start_off + 2 * s)
+        delta = _ttf_i16(data, delta_off + 2 * s)
+        ro = _ttf_u16(data, range_off + 2 * s)
+        for cp in range(start, end + 1):
+            if cp == 0xFFFF:
+                continue
+            if ro == 0:
+                gid = (cp + delta) & 0xFFFF
+            else:
+                gi_off = range_off + 2 * s + ro + 2 * (cp - start)
+                gid = _ttf_u16(data, gi_off)
+                if gid:
+                    gid = (gid + delta) & 0xFFFF
+            if gid:
+                cmap[cp] = gid
+    return cmap
+
+
+class _TtfFont:
+    """Parsed TrueType facts the embedder needs."""
+
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        self.tables = _ttf_tables(data)
+        self.cmap = _ttf_cmap(data, self.tables)
+        head_off = self.tables["head"][0]
+        self.units_per_em = _ttf_u16(data, head_off + 18)
+        self.bbox = tuple(_ttf_i16(data, head_off + 36 + 2 * i)
+                          for i in range(4))
+        self.loc_format = _ttf_i16(data, head_off + 50)
+        hhea_off = self.tables["hhea"][0]
+        self.ascent = _ttf_i16(data, hhea_off + 4)
+        self.descent = _ttf_i16(data, hhea_off + 6)
+        self.num_h_metrics = _ttf_u16(data, hhea_off + 34)
+        maxp_off = self.tables["maxp"][0]
+        self.num_glyphs = _ttf_u16(data, maxp_off + 4)
+        self.cap_height = int(self.ascent * 0.7)
+        if "OS/2" in self.tables:
+            os2_off, os2_len = self.tables["OS/2"]
+            if os2_len >= 90:
+                cap = _ttf_i16(data, os2_off + 88)
+                if cap:
+                    self.cap_height = cap
+        self.name = self._postscript_name()
+
+    def _postscript_name(self) -> str:
+        if "name" not in self.tables:
+            return "EmbeddedFont"
+        off, _length = self.tables["name"]
+        count = _ttf_u16(self.data, off + 2)
+        storage = off + _ttf_u16(self.data, off + 4)
+        fallback = ""
+        for i in range(count):
+            rec = off + 6 + i * 12
+            platform = _ttf_u16(self.data, rec)
+            name_id = _ttf_u16(self.data, rec + 6)
+            if name_id != 6:
+                continue
+            length = _ttf_u16(self.data, rec + 8)
+            noff = storage + _ttf_u16(self.data, rec + 10)
+            raw = self.data[noff:noff + length]
+            try:
+                text = raw.decode("utf-16-be") if platform in (0, 3) \
+                    else raw.decode("latin-1")
+            except UnicodeDecodeError:
+                continue
+            text = re.sub(r"[^A-Za-z0-9-]", "-", text).strip("-")
+            if platform in (0, 3) and text:
+                return text
+            fallback = fallback or text
+        return fallback or "EmbeddedFont"
+
+    def glyph_offset(self, gid: int) -> tuple[int, int]:
+        """(offset, length) of a glyph's glyf data; (0, 0) when empty."""
+        loca_off, _ = self.tables["loca"]
+        glyf_off, _ = self.tables["glyf"]
+        if self.loc_format == 0:
+            start = _ttf_u16(self.data, loca_off + 2 * gid) * 2
+            end = _ttf_u16(self.data, loca_off + 2 * (gid + 1)) * 2
+        else:
+            start = _ttf_u32(self.data, loca_off + 4 * gid)
+            end = _ttf_u32(self.data, loca_off + 4 * (gid + 1))
+        return glyf_off + start, end - start
+
+    def advance(self, gid: int) -> int:
+        """Advance width of a glyph, in font units."""
+        hmtx_off, _ = self.tables["hmtx"]
+        if gid < self.num_h_metrics:
+            return _ttf_u16(self.data, hmtx_off + 4 * gid)
+        return _ttf_u16(
+            self.data, hmtx_off + 4 * (self.num_h_metrics - 1))
+
+    def width1000(self, gid: int) -> int:
+        """Advance width normalized to a 1000-unit em (PDF /W units)."""
+        return round(self.advance(gid) * 1000 / self.units_per_em)
+
+
+def _ttf_component_gids(font: _TtfFont, gid: int) -> list[int]:
+    """Glyph ids a composite glyph references (empty for simple glyphs)."""
+    off, length = font.glyph_offset(gid)
+    if length < 10:
+        return []
+    data = font.data
+    if _ttf_i16(data, off) >= 0:
+        return []
+    out: list[int] = []
+    pos = off + 10
+    while True:
+        flags = _ttf_u16(data, pos)
+        out.append(_ttf_u16(data, pos + 2))
+        pos += 4
+        pos += 4 if flags & 0x0001 else 2       # args
+        if flags & 0x0008:
+            pos += 2                            # scale
+        elif flags & 0x0040:
+            pos += 4                            # x/y scale
+        elif flags & 0x0080:
+            pos += 8                            # 2x2
+        if not flags & 0x0020:                  # MORE_COMPONENTS
+            return out
+
+
+def _ttf_rewrite_glyph(font: _TtfFont, gid: int,
+                       gid_map: dict[int, int]) -> bytes:
+    """A glyph's glyf bytes with composite references remapped."""
+    off, length = font.glyph_offset(gid)
+    raw = bytearray(font.data[off:off + length])
+    if length < 10 or _ttf_i16(font.data, off) >= 0:
+        return bytes(raw)
+    pos = 10
+    while True:
+        flags = _ttf_u16(font.data, off + pos)
+        old = _ttf_u16(font.data, off + pos + 2)
+        struct.pack_into(">H", raw, pos + 2, gid_map[old])
+        pos += 4
+        pos += 4 if flags & 0x0001 else 2
+        if flags & 0x0008:
+            pos += 2
+        elif flags & 0x0040:
+            pos += 4
+        elif flags & 0x0080:
+            pos += 8
+        if not flags & 0x0020:
+            return bytes(raw)
+
+
+def _ttf_table_checksum(blob: bytes) -> int:
+    padded = blob + b"\0" * (-len(blob) % 4)
+    total = 0
+    for i in range(0, len(padded), 4):
+        total = (total + int.from_bytes(padded[i:i + 4], "big")) & 0xFFFFFFFF
+    return total
+
+
+def _ttf_subset_cmap(cmap: dict[int, int]) -> bytes:
+    """Format-4 cmap covering the used BMP codepoints -> NEW glyph ids.
+
+    ``cmap`` here maps codepoint -> new glyph id (already subset-space).
+    """
+    cps = sorted(cp for cp in cmap if cp <= 0xFFFE)
+    segments: list[tuple[int, int, list[int]]] = []
+    for cp in cps:
+        if segments and cp == segments[-1][1] + 1:
+            segments[-1][2].append(cmap[cp])
+            segments[-1] = (segments[-1][0], cp, segments[-1][2])
+        else:
+            segments.append((cp, cp, [cmap[cp]]))
+    # (start, end, delta|None, glyph-array|None)
+    built: list[tuple[int, int, int | None, list[int] | None]] = []
+    glyph_array: list[int] = []
+    for start, end, gids in segments:
+        if all(gids[i] == gids[0] + i for i in range(len(gids))):
+            built.append((start, end, (gids[0] - start) & 0xFFFF, None))
+        else:
+            built.append((start, end, None, gids))
+            glyph_array.extend(gids)
+    built.append((0xFFFF, 0xFFFF, 1, None))
+    seg_count = len(built)
+    range_offsets: list[int] = []
+    positions: dict[int, int] = {}
+    cursor = 0
+    for idx, (_s, _e, _d, gids) in enumerate(built):
+        if gids is not None:
+            positions[idx] = cursor
+            cursor += len(gids)
+    for idx, (_s, _e, _d, gids) in enumerate(built):
+        if gids is None:
+            range_offsets.append(0)
+        else:
+            # idRangeOffset is measured from its own slot to the first
+            # glyphId for this segment.
+            slot_distance = 2 * (seg_count - idx)
+            range_offsets.append(slot_distance + 2 * positions[idx])
+    length = 16 + 8 * seg_count + 2 * len(glyph_array)
+    pow2 = 1 << int(math.log2(seg_count))
+    entry_selector = int(math.log2(pow2)) if pow2 else 0
+    out = bytearray()
+    out += struct.pack(">HHHHHHH", 4, length, 0, seg_count * 2,
+                       pow2 * 2, entry_selector,
+                       seg_count * 2 - pow2 * 2)
+    for _s, end, _d, _g in built:
+        out += struct.pack(">H", end)
+    out += struct.pack(">H", 0)
+    for start, _e, _d, _g in built:
+        out += struct.pack(">H", start)
+    for _s, _e, delta, _g in built:
+        out += struct.pack(">H", delta if delta is not None else 0)
+    for ro in range_offsets:
+        out += struct.pack(">H", ro)
+    for gid in glyph_array:
+        out += struct.pack(">H", gid)
+    header = struct.pack(">HHHHI", 0, 1, 3, 1, 12)
+    return header + bytes(out)
+
+
+def _ttf_subset(font: _TtfFont, used: dict[int, int]) -> tuple[bytes, dict[int, int]]:
+    """Subset ``font`` to ``used`` (codepoint -> old gid).
+
+    Returns (subset TTF bytes, codepoint -> new glyph id).  Glyph 0 is
+    always kept; composite components are pulled in by closure.
+    """
+    keep = {0}
+    keep.update(used.values())
+    queue = list(keep)
+    while queue:
+        gid = queue.pop()
+        for comp in _ttf_component_gids(font, gid):
+            if comp not in keep:
+                keep.add(comp)
+                queue.append(comp)
+    ordered = sorted(keep)
+    gid_map = {old: new for new, old in enumerate(ordered)}
+
+    src = font.data
+    tables = font.tables
+
+    def table_bytes(tag: str) -> bytes:
+        off, length = tables[tag]
+        return src[off:off + length]
+
+    # glyf + loca
+    glyf_parts: list[bytes] = []
+    loca: list[int] = [0]
+    for old in ordered:
+        blob = _ttf_rewrite_glyph(font, old, gid_map)
+        blob += b"\0" * (-len(blob) % 4)
+        glyf_parts.append(blob)
+        loca.append(loca[-1] + len(blob))
+    glyf = b"".join(glyf_parts)
+    use_long_loca = loca[-1] > 0x1FFFC
+    if use_long_loca:
+        loca_blob = b"".join(struct.pack(">I", v) for v in loca)
+    else:
+        loca_blob = b"".join(struct.pack(">H", v // 2) for v in loca)
+
+    head = bytearray(table_bytes("head"))
+    struct.pack_into(">I", head, 8, 0)  # checkSumAdjustment, fixed last
+    struct.pack_into(">h", head, 50, 1 if use_long_loca else 0)
+    maxp = bytearray(table_bytes("maxp"))
+    struct.pack_into(">H", maxp, 4, len(ordered))
+    hhea = bytearray(table_bytes("hhea"))
+    struct.pack_into(">H", hhea, 34, len(ordered))
+    hmtx = bytearray()
+    for old in ordered:
+        goff, glen = font.glyph_offset(old)
+        # hmtx is (advance, lsb) pairs; a glyph's lsb is its glyf xMin.
+        lsb = _ttf_i16(src, goff + 2) if glen >= 10 else 0
+        hmtx += struct.pack(">Hh", font.advance(old), lsb)
+    cmap = _ttf_subset_cmap({cp: gid_map[gid] for cp, gid in used.items()})
+    post = struct.pack(">IihhIIIII", 0x00030000, 0, 0, 0, 0, 0, 0, 0, 0)
+    out_tables: dict[str, bytes] = {
+        "cmap": cmap,
+        "glyf": glyf,
+        "head": bytes(head),
+        "hhea": bytes(hhea),
+        "hmtx": bytes(hmtx),
+        "loca": loca_blob,
+        "maxp": bytes(maxp),
+        "post": post,
+    }
+    for tag in ("name", "OS/2", "cvt ", "fpgm", "prep", "gasp"):
+        if tag in tables:
+            blob = table_bytes(tag)
+            if tag == "OS/2" and len(blob) >= 68:
+                blob = bytearray(blob)
+                cps = sorted(used)
+                if cps:
+                    struct.pack_into(">H", blob, 64, min(cps[0], 0xFFFF))
+                    struct.pack_into(">H", blob, 66, min(cps[-1], 0xFFFF))
+                blob = bytes(blob)
+            out_tables[tag] = blob
+
+    tags = sorted(out_tables)
+    num = len(tags)
+    pow2 = 1 << int(math.log2(num))
+    header = struct.pack(">IHHHH", 0x00010000, num, pow2 * 16,
+                         int(math.log2(pow2)), num * 16 - pow2 * 16)
+    offset = 12 + num * 16
+    records = bytearray()
+    body = bytearray()
+    head_offset = 0
+    for tag in tags:
+        blob = out_tables[tag]
+        if tag == "head":
+            head_offset = offset
+        records += tag.encode("latin-1")
+        records += struct.pack(">III", _ttf_table_checksum(blob), offset,
+                               len(blob))
+        body += blob
+        pad = -len(blob) % 4
+        body += b"\0" * pad
+        offset += len(blob) + pad
+    font_bytes = bytearray(header + bytes(records) + bytes(body))
+    adjustment = (0xB1B0AFBA - _ttf_table_checksum(bytes(font_bytes))) \
+        & 0xFFFFFFFF
+    struct.pack_into(">I", font_bytes, head_offset + 8, adjustment)
+    return bytes(font_bytes), {cp: gid_map[gid] for cp, gid in used.items()}
+
+
+def _tounicode_cmap(mapping: dict[int, int]) -> bytes:
+    """A /ToUnicode CMap: new glyph id (CID) -> unicode, from codepoint
+    -> new gid."""
+    entries = sorted((gid, cp) for cp, gid in mapping.items())
+    lines = [
+        "/CIDInit /ProcSet findresource begin",
+        "12 dict begin",
+        "begincmap",
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) "
+        "/Supplement 0 >> def",
+        "/CMapName /Adobe-Identity-UCS def",
+        "/CMapType 2 def",
+        "1 begincodespacerange",
+        "<0000> <FFFF>",
+        "endcodespacerange",
+    ]
+    for i in range(0, len(entries), 100):
+        chunk = entries[i:i + 100]
+        lines.append(f"{len(chunk)} beginbfchar")
+        for gid, cp in chunk:
+            if cp <= 0xFFFF:
+                uni = f"{cp:04X}"
+            else:  # surrogate pair
+                v = cp - 0x10000
+                uni = f"{0xD800 + (v >> 10):04X}{0xDC00 + (v & 0x3FF):04X}"
+            lines.append(f"<{gid:04X}> <{uni}>")
+        lines.append("endbfchar")
+    lines += ["endcmap", "CMapName currentdict /CMap defineresource pop",
+              "end", "end"]
+    return "\n".join(lines).encode("ascii")
+
+
+def _embed_wrap(lines_text: list[tuple[str, str]], font: _TtfFont,
+                *, size: int, max_width: float,
+                cmap: dict[int, int]) -> list[list[tuple[str, str]]]:
+    """Wrap (kind, text) blocks into pages of (kind, line) using real
+    glyph advances (points), not character counts."""
+    max_lines = 54
+
+    def text_width(text: str, size: int) -> float:
+        total = 0.0
+        for ch in text:
+            gid = cmap.get(ord(ch))
+            if gid is not None:
+                total += font.advance(gid)
+        return total * size / font.units_per_em
+
+    pages: list[list[tuple[str, str]]] = []
+    current: list[tuple[str, str]] = []
+    for kind, text in lines_text:
+        eff_size = size + 6 if kind == _BLOCK_H1 else \
+            size + 3 if kind == _BLOCK_H2 else \
+            size if kind != _BLOCK_H3 else size
+        wrapped: list[str] = []
+        for raw_line in text.split("\n"):
+            words = raw_line.split(" ")
+            line = ""
+            for word in words:
+                candidate = f"{line} {word}".strip()
+                if not line or text_width(candidate, eff_size) <= max_width:
+                    line = candidate
+                else:
+                    wrapped.append(line)
+                    while text_width(word, eff_size) > max_width \
+                            and len(word) > 1:
+                        cut = len(word) // 2
+                        while cut > 1 and text_width(
+                                word[:cut], eff_size) > max_width:
+                            cut //= 2
+                        wrapped.append(word[:cut])
+                        word = word[cut:]
+                    line = word
+            wrapped.append(line)
+        for line in wrapped:
+            if len(current) >= max_lines:
+                pages.append(current)
+                current = []
+            current.append((kind, line))
+    if current or not pages:
+        pages.append(current)
+    return pages
+
+
+def render_pdf_embedded(
+    text: str,
+    *,
+    font_data: bytes,
+    title: str = "Report",
+    page_size: str = "A4",
+    font_size: int = 10,
+    header: str = "",
+    footer: str = "",
+    headings: bool = False,
+    metadata: dict | None = None,
+) -> bytes:
+    """Render ``text`` to PDF with a subsetted TrueType font embedded.
+
+    The non-WinAnsi path: any character the font carries renders and
+    extracts exactly (Identity-H CIDs + /ToUnicode).  Characters the
+    font lacks fall back to ``?`` when the font has one, else are
+    dropped — the same never-fail posture as the WinAnsi writer, but
+    the fallback set is now the font's real coverage, not Latin-1.
+
+    Layout is the plain/structured block model of :func:`render_pdf`
+    with one face: headings scale the same font (no synthetic bold).
+    Raises :class:`PdfError` for a bad page size, empty text, or a
+    font that is not subsettable TrueType.
+    """
+    if page_size not in {"A4", "Letter"}:
+        raise PdfError(f"unknown page size {page_size!r}; use A4 or Letter")
+    text = (text or "").strip()
+    if not text:
+        raise PdfError("refusing to render an empty PDF")
+    font = _TtfFont(font_data)
+    page_width, page_height = (595, 842) if page_size == "A4" else (612, 792)
+
+    if headings:
+        _title, blocks = _parse_blocks(text, strip_title_line=False)
+    else:
+        cleaned = [re.sub(r"\*\*(.+?)\*\*", r"\1", ln)
+                   for ln in text.split("\n")]
+        blocks = [(_BLOCK_BODY, ln) for ln in cleaned if ln.strip()]
+    if not blocks:
+        raise PdfError("refusing to render an empty PDF")
+
+    # Header/footer defaults are settled BEFORE subsetting: the subset
+    # must contain every glyph the finished pages will draw, including
+    # the timestamp and page-number digits that only exist at render
+    # time (hence the explicit digit run in the coverage text).
+    if title and not header:
+        header = title
+    now = time.strftime("%Y-%m-%d %H:%M", time.gmtime())
+    if not footer:
+        footer = f"{title} — page N — {now}"
+
+    # Which codepoints does the document actually use?
+    used: dict[int, int] = {}
+    all_text = ("\n".join(t for _k, t in blocks) + header + footer + title
+                + "0123456789")
+    for ch in all_text:
+        cp = ord(ch)
+        if cp in font.cmap:
+            used.setdefault(cp, font.cmap[cp])
+    subset, new_cmap = _ttf_subset(font, used)
+
+    max_width = page_width - 112
+    pages = _embed_wrap(blocks, font, size=font_size,
+                        max_width=max_width, cmap=new_cmap)
+
+    def glyphs_of(line: str) -> bytes:
+        out = bytearray()
+        for ch in line:
+            gid = new_cmap.get(ord(ch))
+            if gid is None and ch != " ":
+                gid = new_cmap.get(ord("?"))
+            if gid is None:
+                continue
+            out += struct.pack(">H", gid)
+        return bytes(out)
+
+    # /W widths keyed by NEW glyph id: recompute the subset's glyph
+    # order the same way _ttf_subset built it (sorted kept set, with
+    # composite components pulled in by closure), so new id -> the old
+    # glyph whose advance belongs in the /W array.
+    keep = {0} | set(used.values())
+    queue = list(keep)
+    while queue:
+        g = queue.pop()
+        for comp in _ttf_component_gids(font, g):
+            if comp not in keep:
+                keep.add(comp)
+                queue.append(comp)
+    widths = {new: font.width1000(old)
+              for new, old in enumerate(sorted(keep))}
+
+    slots: dict[int, bytes] = {}
+    n_pages = len(pages)
+    # Object plan: 1 catalog, 2 pages, 3 Type0 font, 4 CIDFont, 5
+    # FontDescriptor, 6 FontFile2, 7 ToUnicode, 8 info (optional),
+    # then per page: page + content.
+    base = 8
+    page_obj_ids = [base + 2 * i for i in range(n_pages)]
+    content_obj_ids = [base + 1 + 2 * i for i in range(n_pages)]
+    info_id = base + 2 * n_pages
+
+    left = 56
+    top = page_height - 56
+    for i, page in enumerate(pages):
+        ops: list[bytes] = []
+        y = top
+        if header:
+            ops.append(
+                b"BT /F1 8 Tf 1 0 0 1 %d %d Tm <%s> Tj ET"
+                % (left, top + 16, glyphs_of(header).hex().encode()))
+            y = top
+        for kind, line in page:
+            size = font_size + 6 if kind == _BLOCK_H1 else \
+                font_size + 3 if kind == _BLOCK_H2 else font_size
+            if line.strip():
+                ops.append(
+                    b"BT /F1 %d Tf 1 0 0 1 %d %d Tm <%s> Tj ET"
+                    % (size, left, y, glyphs_of(line).hex().encode()))
+            y -= size + 4
+        if footer:
+            foot = footer.replace("N", str(i + 1)).replace(
+                "{total}", str(n_pages))
+            ops.append(
+                b"BT /F1 8 Tf 1 0 0 1 %d 40 Tm <%s> Tj ET"
+                % (left, glyphs_of(foot).hex().encode()))
+        stream = b"\n".join(ops)
+        compressed = zlib.compress(stream)
+        slots[content_obj_ids[i]] = (
+            f"<< /Length {len(compressed)} /Filter /FlateDecode >>\n"
+            "stream\n".encode() + compressed + b"\nendstream")
+        slots[page_obj_ids[i]] = (
+            f"<< /Type /Page /Parent 2 0 R /MediaBox "
+            f"[0 0 {page_width} {page_height}] "
+            f"/Resources << /Font << /F1 3 0 R >> >> "
+            f"/Contents {content_obj_ids[i]} 0 R >>".encode())
+
+    w_runs: list[str] = []
+    for gid in sorted(widths):
+        w_runs.append(f"{gid} [{widths[gid]}]")
+    x_min, y_min, x_max, y_max = [
+        round(v * 1000 / font.units_per_em) for v in font.bbox]
+    slots[3] = (
+        f"<< /Type /Font /Subtype /Type0 /BaseFont /{font.name} "
+        f"/Encoding /Identity-H /DescendantFonts [4 0 R] "
+        f"/ToUnicode 7 0 R >>").encode()
+    slots[4] = (
+        f"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{font.name} "
+        f"/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) "
+        f"/Supplement 0 >> /FontDescriptor 5 0 R "
+        f"/DW {widths.get(0, 500)} /W [{' '.join(w_runs)}] >>").encode()
+    slots[5] = (
+        f"<< /Type /FontDescriptor /FontName /{font.name} /Flags 4 "
+        f"/FontBBox [{x_min} {y_min} {x_max} {y_max}] /ItalicAngle 0 "
+        f"/Ascent {round(font.ascent * 1000 / font.units_per_em)} "
+        f"/Descent {round(font.descent * 1000 / font.units_per_em)} "
+        f"/CapHeight {round(font.cap_height * 1000 / font.units_per_em)} "
+        f"/StemV 80 /FontFile2 6 0 R >>").encode()
+    compressed_font = zlib.compress(subset)
+    slots[6] = (
+        f"<< /Length {len(compressed_font)} /Length1 {len(subset)} "
+        f"/Filter /FlateDecode >>\nstream\n".encode()
+        + compressed_font + b"\nendstream")
+    touni = _tounicode_cmap(new_cmap)
+    slots[7] = (
+        f"<< /Length {len(touni)} >>\nstream\n".encode()
+        + touni + b"\nendstream")
+    catalog = "<< /Type /Catalog /Pages 2 0 R"
+    if metadata:
+        catalog += f" /Info {info_id} 0 R"
+        slots[info_id] = _info_dict(metadata)
+    slots[1] = (catalog + " >>").encode()
+    children = " ".join(f"{pid} 0 R" for pid in page_obj_ids)
+    slots[2] = f"<< /Type /Pages /Kids [{children}] /Count {n_pages} >>".encode()
+
+    out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets: dict[int, int] = {}
+    for obj_id in sorted(slots):
+        offsets[obj_id] = len(out)
+        out += f"{obj_id} 0 obj\n".encode()
+        out += slots[obj_id]
+        out += b"\nendobj\n"
+    xref_pos = len(out)
+    max_id = max(offsets)
+    out += f"xref\n0 {max_id + 1}\n".encode()
+    out += b"0000000000 65535 f \n"
+    for obj_id in range(1, max_id + 1):
+        out += f"{offsets[obj_id]:010d} 00000 n \n".encode()
+    out += (f"trailer\n<< /Size {max_id + 1} /Root 1 0 R >>\n"
+            f"startxref\n{xref_pos}\n%%EOF\n".encode())
+    return bytes(out)

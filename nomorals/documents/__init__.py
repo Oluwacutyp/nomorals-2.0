@@ -9,7 +9,11 @@ Parse with :func:`parse_bytes` / :func:`parse_path`, sniff with
 :func:`detect_format`, convert with the ``to_*`` helpers, search with
 :class:`DocumentIndex`, OCR scanned PDFs with :func:`ocr_pdf`, diff
 documents with :func:`compare_documents`, and summarize with
-:func:`summarize`.
+:func:`summarize`.  Wave 2 adds the XLSX/PPTX writers
+(:func:`to_xlsx` / :func:`to_pptx`, stdlib) and moves
+:class:`DocumentError` into the ``NoMoralsError`` code system
+(``code`` + ``kind`` on every raise; see ``documents/PARITY.md`` for
+the measured fidelity rows).
 """
 
 from __future__ import annotations
@@ -18,8 +22,9 @@ from .compare import (DocumentComparison, compare_documents, diff_documents,
                       render_html, render_markdown, render_terminal,
                       similarity, word_diff)
 from .convert import (to_csv, to_csv_all, to_docx, to_epub, to_html, to_json,
-                      to_markdown, to_pdf, to_text)
-from .errors import DocumentError
+                      to_markdown, to_pdf, to_pdf_embedded, to_pptx, to_text,
+                      to_xlsx)
+from .errors import DOCUMENT_ERROR_KINDS, DocumentError
 from .index import DocumentIndex
 from .model import Document, Section, Table, full_text, new_document
 from .ocr import (ocr_available, ocr_image, ocr_languages, ocr_pdf,
@@ -31,6 +36,7 @@ from .summarize import (bullet_digest, keyphrases, keywords, summarize,
                         summarize_sections, summarize_text, tldr)
 
 __all__ = [
+    "DOCUMENT_ERROR_KINDS",
     "Document",
     "DocumentComparison",
     "Section",
@@ -73,6 +79,9 @@ __all__ = [
     "to_json",
     "to_markdown",
     "to_pdf",
+    "to_pdf_embedded",
+    "to_pptx",
     "to_text",
+    "to_xlsx",
     "word_diff",
 ]

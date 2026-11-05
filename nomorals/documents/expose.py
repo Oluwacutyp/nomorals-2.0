@@ -8,7 +8,9 @@ from ``parsers._EXTENSIONS`` (see :func:`supported_formats`).
 
 Output caveat, stated honestly: ``to_docx`` needs the optional
 ``python-docx`` package and fails fast with an install hint when it
-is missing (``convert.py:380``). Every other converter is stdlib.
+is missing (``convert.py:380``). Every other converter is stdlib —
+including the Wave 2 ``to_xlsx`` / ``to_pptx`` writers
+(``writers.py``, stdlib ``zipfile``).
 """
 
 from __future__ import annotations
@@ -26,7 +28,9 @@ from .convert import (
     to_json as _to_json,
     to_markdown as _to_markdown,
     to_pdf as _to_pdf,
+    to_pptx as _to_pptx,
     to_text as _to_text,
+    to_xlsx as _to_xlsx,
 )
 from .model import Document
 from .parsers import _EXTENSIONS, detect_format as _detect_format
@@ -53,6 +57,7 @@ SUPPORTED_FORMATS: tuple[str, ...] = tuple(sorted(set(_EXTENSIONS.values())))
 #: Converter targets ``convert_document`` accepts.
 CONVERT_TARGETS: tuple[str, ...] = (
     "markdown", "text", "html", "pdf", "csv", "csv_all", "json", "epub", "docx",
+    "xlsx", "pptx",
 )
 
 #: Notes that only apply to specific formats/targets.
@@ -127,7 +132,8 @@ def convert_document(doc: Document, target: str, **kw: Any) -> Any:
     Targets: ``markdown``, ``text``, ``html``, ``pdf``, ``csv``
     (one table; ``table=`` index or name), ``csv_all`` (every table),
     ``json``, ``epub`` (stdlib zipfile), ``docx`` (needs optional
-    ``python-docx`` — fails fast with an install hint when missing).
+    ``python-docx`` — fails fast with an install hint when missing),
+    ``xlsx`` / ``pptx`` (Wave 2 writers, stdlib zipfile — bytes out).
     """
     t = (target or "").strip().lower()
     if t == "markdown":
@@ -148,6 +154,10 @@ def convert_document(doc: Document, target: str, **kw: Any) -> Any:
         return _to_epub(doc, **kw)
     if t == "docx":
         return _to_docx(doc)
+    if t == "xlsx":
+        return _to_xlsx(doc)
+    if t == "pptx":
+        return _to_pptx(doc)
     raise ValueError(
         f"unknown convert target {target!r}; expected one of "
         f"{list(CONVERT_TARGETS)}")
@@ -175,6 +185,8 @@ def document_capabilities() -> dict[str, Any]:
         "optional_deps": {
             "docx_output": "python-docx (only for convert target 'docx'; "
                            "reading .docx is stdlib)",
+            "xlsx_output": "none — stdlib zipfile writer (Wave 2)",
+            "pptx_output": "none — stdlib zipfile writer (Wave 2)",
         },
         "notes": "Every parser is stdlib (zipfile / xml / csv / json). "
                  "No network, no API key, phone-offline safe.",

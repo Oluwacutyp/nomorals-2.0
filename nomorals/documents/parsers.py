@@ -162,21 +162,23 @@ def _sniff_zip(data: bytes) -> str:
                 if part in names:
                     return fmt
     except zipfile.BadZipFile as exc:
-        raise DocumentError(f"not a readable ZIP archive: {exc}") from exc
+        raise DocumentError(f"not a readable ZIP archive: {exc}",
+                        kind="unsupported_format") from exc
     raise DocumentError(
         "ZIP archive is not a recognized document "
-        "(docx/xlsx/pptx/odt/ods/epub)")
+        "(docx/xlsx/pptx/odt/ods/epub)", kind="unsupported_format")
 
 
 def _sniff(data: bytes, filename: str, mime: str) -> str:
     """Return the format key for ``data`` or raise DocumentError."""
     if not data:
-        raise DocumentError("cannot parse empty input")
+        raise DocumentError("cannot parse empty input", kind="empty")
     ext = Path(filename).suffix.lower() if filename else ""
     if ext in _EXTENSIONS:
         return _EXTENSIONS[ext]
     if ext:
-        raise DocumentError(f"unsupported file extension {ext!r} for {filename!r}")
+        raise DocumentError(f"unsupported file extension {ext!r} for {filename!r}",
+                        kind="unsupported_format")
     if data[:4] == _PDF_MAGIC:
         return "pdf"
     if data[:4] == _ZIP_MAGIC:
@@ -188,14 +190,15 @@ def _sniff(data: bytes, filename: str, mime: str) -> str:
         raise DocumentError(
             "legacy OLE Office document (could be .xls, .doc, or .ppt): "
             "pass filename= with the real extension so the right parser "
-            "is chosen")
+            "is chosen", kind="unsupported_format")
     if data.lstrip()[:5] == b"{\\rtf":
         return "rtf"
     if mime:
         fmt = _MIMES.get(mime.split(";")[0].strip().lower())
         if fmt:
             return fmt
-        raise DocumentError(f"unsupported MIME type {mime!r}")
+        raise DocumentError(f"unsupported MIME type {mime!r}",
+                        kind="unsupported_format")
     text_start = data.lstrip()[:4096]
     if _HTML_START_RE.match(text_start.decode("utf-8", "replace")):
         return "html"
@@ -219,9 +222,10 @@ def _sniff(data: bytes, filename: str, mime: str) -> str:
     except UnicodeDecodeError:
         raise DocumentError(
             "unrecognized binary input: not PDF, not an Office document, "
-            "not decodable text") from None
+            "not decodable text", kind="unsupported_format") from None
     if "\x00" in decoded:
-        raise DocumentError("unrecognized binary input: NUL bytes in text stream")
+        raise DocumentError("unrecognized binary input: NUL bytes in text stream",
+                        kind="unsupported_format")
     return "txt"
 
 
@@ -674,7 +678,8 @@ def _parse_xlsx(data: bytes, doc: Document) -> Document:
     except ImportError as exc:
         raise DocumentError(
             "parsing .xlsx requires the optional 'openpyxl' package "
-            "(pip install openpyxl)") from exc
+            "(pip install openpyxl)", kind="missing_dependency",
+            code="document.missing_dependency") from exc
 
     try:
         workbook = openpyxl.load_workbook(io.BytesIO(data), read_only=True,
@@ -1059,7 +1064,8 @@ def _parse_xls(data: bytes, doc: Document) -> Document:
     except ImportError as exc:
         raise DocumentError(
             "parsing .xls requires the optional 'xlrd' package "
-            "(pip install xlrd)") from exc
+            "(pip install xlrd)", kind="missing_dependency",
+            code="document.missing_dependency") from exc
     try:
         book = xlrd.open_workbook(file_contents=data)
     except Exception as exc:
@@ -1605,10 +1611,19 @@ def parse_bytes(data: bytes, *, filename: str = "", mime: str = "") -> Document:
     fmt = _sniff(data, filename, mime)
     doc = new_document(format=fmt, title=_stem(filename),
                        source=filename or mime or "")
-    if fmt in ("csv", "tsv"):
-        doc = _parse_delimited(data, doc, "\t" if fmt == "tsv" else ",", fmt)
-    else:
-        doc = _PARSERS[fmt](data, doc)
+    try:
+        if fmt in ("csv", "tsv"):
+            doc = _parse_delimited(data, doc, "\t" if fmt == "tsv" else ",", fmt)
+        else:
+            doc = _PARSERS[fmt](data, doc)
+    except DocumentError as exc:
+        if exc.kind == "error":
+            # The parse funnel: a format parser's unclassified failure is
+            # a parse failure — classify it here so every error leaving
+            # parse_bytes carries a taxonomy kind.
+            exc.kind = "parse"
+            exc.details["kind"] = "parse"
+        raise
     _emit("document.parsed", {
         "doc_id": doc.id,
         "format": doc.format,
@@ -1624,11 +1639,11 @@ def parse_path(path: str | Path) -> Document:
     """Parse the file at ``path``.  Raises DocumentError when missing or bad."""
     file_path = Path(path)
     if not file_path.is_file():
-        raise DocumentError(f"no such file: {file_path}")
+        raise DocumentError(f"no such file: {file_path}", kind="io")
     try:
         data = file_path.read_bytes()
     except OSError as exc:
-        raise DocumentError(f"cannot read {file_path}: {exc}") from exc
+        raise DocumentError(f"cannot read {file_path}: {exc}", kind="io") from exc
     doc = parse_bytes(data, filename=file_path.name)
     doc.source = str(file_path)
     return doc

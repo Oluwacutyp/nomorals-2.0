@@ -7,6 +7,10 @@ auto-generated table of contents with anchor links, section numbering,
 and responsive tables.  ``to_epub`` builds a real EPUB 3 file with
 stdlib ``zipfile`` only; ``to_docx`` needs the optional ``python-docx``
 package and fails fast with an install hint when it is missing.
+``to_xlsx`` / ``to_pptx`` (Wave 2) live in
+:mod:`nomorals.documents.writers` — stdlib ``zipfile`` like the EPUB
+writer — and are re-exported here so the converter surface is one
+place.
 """
 
 from __future__ import annotations
@@ -19,12 +23,14 @@ import zipfile
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
 
-from ..core.pdf import PdfError, render_pdf
+from ..core.pdf import PdfError, render_pdf, render_pdf_embedded
 from .errors import DocumentError
 from .model import Document, Table
+from .writers import to_pptx, to_xlsx
 
 __all__ = ["to_csv", "to_csv_all", "to_docx", "to_epub", "to_html",
-           "to_json", "to_markdown", "to_pdf", "to_text"]
+           "to_json", "to_markdown", "to_pdf", "to_pdf_embedded",
+           "to_pptx", "to_text", "to_xlsx"]
 
 
 def _heading_line(level: int, heading: str) -> str:
@@ -128,7 +134,8 @@ def to_markdown(doc: Document, *, front_matter: bool = False,
             parts.append("")
     out = "\n".join(parts).strip()
     if not out:
-        raise DocumentError("document has no content to render as markdown")
+        raise DocumentError("document has no content to render as markdown",
+                        kind="empty")
     return out + "\n"
 
 
@@ -158,7 +165,8 @@ def to_text(doc: Document) -> str:
         parts.append("")
     out = "\n".join(parts).strip()
     if not out:
-        raise DocumentError("document has no content to render as text")
+        raise DocumentError("document has no content to render as text",
+                        kind="empty")
     return out + "\n"
 
 
@@ -236,7 +244,7 @@ def to_html(doc: Document, *, theme: str = "light",
     if theme not in _HTML_CSS:
         raise DocumentError(
             f"unknown HTML theme {theme!r}: choose from "
-            f"{sorted(_HTML_CSS)}")
+            f"{sorted(_HTML_CSS)}", kind="invalid_argument")
     esc = html_module.escape
     anchors: list[str] = []
     for section in doc.sections:
@@ -322,24 +330,52 @@ def to_pdf(doc: Document) -> bytes:
     try:
         return render_pdf(markdown, title=doc.title or "Document", headings=True)
     except PdfError as exc:
-        raise DocumentError(f"PDF rendering failed: {exc}") from exc
+        raise DocumentError(f"PDF rendering failed: {exc}", kind="write") from exc
+
+
+def to_pdf_embedded(doc: Document, font_path: str) -> bytes:
+    """Render a Document to PDF with a TrueType font embedded (Wave 2).
+
+    The WinAnsi writer transliterates or drops characters outside
+    Latin-1; this path subsets and embeds the TTF at ``font_path`` so
+    non-WinAnsi text (Greek, Cyrillic, CJK, symbols — whatever the
+    font carries) renders and extracts exactly.  Raises
+    :class:`DocumentError` (``kind="io"``) when the font file cannot
+    be read, ``kind="write"`` when it is not subsettable TrueType.
+    """
+    from pathlib import Path
+
+    markdown = to_markdown(doc)  # raises DocumentError when there is no content
+    try:
+        font_data = Path(font_path).expanduser().read_bytes()
+    except OSError as exc:
+        raise DocumentError(
+            f"cannot read font file {font_path}: {exc}", kind="io") from exc
+    try:
+        return render_pdf_embedded(
+            markdown, font_data=font_data,
+            title=doc.title or "Document", headings=True)
+    except PdfError as exc:
+        raise DocumentError(f"PDF rendering failed: {exc}", kind="write") from exc
 
 
 def _resolve_table(doc: Document, table: int | str) -> Table:
     """Pick a table by index or (case-insensitive) name."""
     if not doc.tables:
-        raise DocumentError("document has no tables to export as CSV")
+        raise DocumentError("document has no tables to export as CSV",
+                        kind="empty")
     if isinstance(table, str):
         for index, candidate in enumerate(doc.tables):
             if candidate.name.lower() == table.lower():
                 return doc.tables[index]
         names = [t.name for t in doc.tables]
         raise DocumentError(
-            f"no table named {table!r}: document has {names}")
+            f"no table named {table!r}: document has {names}",
+            kind="invalid_argument")
     if table < 0 or table >= len(doc.tables):
         raise DocumentError(
             f"table index {table} out of range: document has "
-            f"{len(doc.tables)} table(s)")
+            f"{len(doc.tables)} table(s)", kind="invalid_argument")
     return doc.tables[table]
 
 
@@ -360,7 +396,8 @@ def to_csv(doc: Document, table: int | str = 0) -> str:
 def to_csv_all(doc: Document) -> dict[str, str]:
     """Render every table as CSV text, keyed by table name."""
     if not doc.tables:
-        raise DocumentError("document has no tables to export as CSV")
+        raise DocumentError("document has no tables to export as CSV",
+                        kind="empty")
     out: dict[str, str] = {}
     for index, table in enumerate(doc.tables):
         name = table.name or f"Table {index + 1}"
@@ -377,7 +414,8 @@ def to_json(doc: Document, *, indent: int = 2) -> str:
     """Render a Document as JSON text (round-trips via
     ``Document.from_dict``)."""
     if indent < 0:
-        raise DocumentError(f"indent must be >= 0, got {indent}")
+        raise DocumentError(f"indent must be >= 0, got {indent}",
+                        kind="invalid_argument")
     return doc.to_json(indent=indent) + "\n"
 
 
@@ -388,9 +426,11 @@ def to_docx(doc: Document) -> bytes:
     except ImportError as exc:
         raise DocumentError(
             "rendering .docx requires the optional 'python-docx' package "
-            "(pip install python-docx)") from exc
+            "(pip install python-docx)", kind="missing_dependency",
+            code="document.missing_dependency") from exc
     if not doc.title and not doc.sections and not doc.tables:
-        raise DocumentError("document has no content to render as docx")
+        raise DocumentError("document has no content to render as docx",
+                        kind="empty")
     oxml = DocxDocument()
     if doc.title:
         oxml.core_properties.title = doc.title
@@ -472,7 +512,8 @@ def to_epub(doc: Document, *, epub_title: str = "") -> bytes:
     One chapter per section, tables appended after the prose.
     """
     if not doc.title and not doc.sections and not doc.tables:
-        raise DocumentError("document has no content to render as epub")
+        raise DocumentError("document has no content to render as epub",
+                        kind="empty")
     title = epub_title or doc.title or "Document"
     chapters: list[tuple[str, bytes]] = []
     for i, section in enumerate(doc.sections):

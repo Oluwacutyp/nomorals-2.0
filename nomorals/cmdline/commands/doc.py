@@ -13,7 +13,7 @@ def _cmd_doc(args: Any, context: Any) -> int:
     words = list(getattr(args, "task", None) or [])
     if not words:
         print("usage: nm doc parse <file> [--json]\n"
-              "       nm doc convert <file> --to md|html|txt|pdf|csv [--out PATH]\n"
+              "       nm doc convert <file> --to md|html|txt|pdf|csv|xlsx|pptx [--out PATH]\n"
               "       nm doc search <query> --dir DIR [--limit N] [--json]\n"
               "       nm doc show <file>\n"
               "       nm doc diff <file-a> <file-b> [--json]\n"
@@ -68,17 +68,19 @@ def _doc_parse(args: Any, rest: list[str]) -> int:
 
 
 def _doc_convert(args: Any, rest: list[str]) -> int:
-    from ...documents import parse_path, to_csv, to_html, to_markdown, to_pdf, to_text
+    from ...documents import (parse_path, to_csv, to_html, to_markdown,
+                              to_pdf, to_pptx, to_text, to_xlsx)
 
     if not rest:
-        print("usage: nm doc convert <file> --to md|html|txt|pdf|csv [--out PATH]",
+        print("usage: nm doc convert <file> --to "
+              "md|html|txt|pdf|csv|xlsx|pptx [--out PATH]",
               file=sys.stderr)
         return 2
     target = (getattr(args, "to", "") or "").lower()
     converters = {"md": to_markdown, "html": to_html, "txt": to_text,
                   "csv": to_csv}
-    if target == "pdf":
-        convert = to_pdf
+    if target in ("pdf", "xlsx", "pptx"):
+        convert = {"pdf": to_pdf, "xlsx": to_xlsx, "pptx": to_pptx}[target]
     else:
         convert = converters.get(target)
     if convert is None:

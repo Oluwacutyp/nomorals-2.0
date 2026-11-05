@@ -51,13 +51,15 @@ def _require_pytesseract() -> Any:
     except ImportError as exc:
         raise DocumentError(
             "OCR needs the optional 'pytesseract' package: "
-            f"{_PIP_HINT}.  Also install {_TESSERACT_HINT}.") from exc
+            f"{_PIP_HINT}.  Also install {_TESSERACT_HINT}.",
+            kind="ocr_unavailable", code="document.ocr_unavailable") from exc
     try:
         pytesseract.get_tesseract_version()
     except Exception as exc:
         raise DocumentError(
             "OCR needs the Tesseract binary on PATH and it was not found: "
-            f"install {_TESSERACT_HINT}.  ({exc})") from exc
+            f"install {_TESSERACT_HINT}.  ({exc})",
+            kind="ocr_unavailable", code="document.ocr_unavailable") from exc
     return pytesseract
 
 
@@ -68,7 +70,8 @@ def _require_pdf2image() -> Any:
     except ImportError as exc:
         raise DocumentError(
             "OCR of PDFs needs the optional 'pdf2image' package: "
-            f"{_PIP_HINT}.  Also install {_POPPLER_HINT}.") from exc
+            f"{_PIP_HINT}.  Also install {_POPPLER_HINT}.",
+            kind="ocr_unavailable", code="document.ocr_unavailable") from exc
     return pdf2image
 
 
