@@ -1331,7 +1331,11 @@ REACTION_GIF_COMMANDS: frozenset[str] = frozenset(REACTION_GIFS)
 #: (register #32) reads this set: a media kind's silence is a
 #: delivery, never the /sudo defect.
 MEDIA_DELIVERED_KINDS: frozenset[str] = frozenset(
-    {"steal", "sticker", "convert", "gif", "react"})
+    {"steal", "sticker", "convert", "gif", "react",
+     # the wave-D image one-shots: /dog /cat /fox /meme /nasa
+     # /pokemon answer by attaching the picture, caption riding
+     # it — the same delivery contract as the kinds above.
+     "dog", "cat", "fox", "meme", "nasa", "pokemon"})
 
 
 def reaction_caption(command: str, *, actor: str, target: str = "",

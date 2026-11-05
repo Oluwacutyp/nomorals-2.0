@@ -39,6 +39,7 @@ from .runtime_games import RuntimeGamesMixin
 from .runtime_provision import RuntimeProvisionMixin
 from .runtime_group import RuntimeGroupMixin
 from .runtime_expression import RuntimeExpressionMixin
+from .runtime_fun import RuntimeFunMixin
 from .runtime_system import RuntimeSystemMixin
 from .runtime_media import RuntimeMediaMixin
 from .runtime_intel import RuntimeIntelMixin
@@ -237,6 +238,7 @@ class PartnerRuntime(
     RuntimeProvisionMixin,
     RuntimeGroupMixin,
     RuntimeExpressionMixin,
+    RuntimeFunMixin,
     RuntimeMediaMixin,
     RuntimeIntelMixin,
     RuntimeSearchMixin,
@@ -5729,6 +5731,19 @@ class PartnerRuntime(
             # same set with its sources + captions, and
             # tests/test_reaction_gifs.py pins the two equal.
             return self._control_reaction(
+                kind, command.tail or "", message)
+        if kind in {
+                "joke", "dadjoke", "progjoke", "chuck", "fact", "fact2",
+                "catfact", "numfact", "advice", "quote",
+                "dog", "cat", "fox", "meme", "riddle", "8ball",
+                "choose", "activity", "pokemon", "history", "nasa",
+                "calc"}:
+            # The fun one-shots (FEI gap wave D): the set is
+            # spelled out so the catalog's handler-path scan
+            # sees every kind; social/chat/fun.py's FUN_COMMANDS
+            # is the same set with its sources + chains, and
+            # tests/test_fun_oneshots.py pins the two equal.
+            return self._control_fun(
                 kind, command.tail or "", message)
         if kind == "pulse":
             return self._control_pulse(command.tail or arg)

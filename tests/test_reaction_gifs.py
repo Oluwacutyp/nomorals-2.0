@@ -126,7 +126,11 @@ def test_registry_presence_for_every_command():
         assert f"/{name}" in menu, name
     assert frozenset(
         {"steal", "sticker", "convert", "gif", "react"}) \
-        == MEDIA_DELIVERED_KINDS
+        <= MEDIA_DELIVERED_KINDS
+    # wave D extended the same delivery contract to its image
+    # one-shots (dog/cat/fox/meme/nasa/pokemon) — the wave-C
+    # five must always remain members, never the whole set by
+    # assumption; tests/test_fun_oneshots.py pins the full set.
 
 
 # ── captions ──────────────────────────────────────────────────
