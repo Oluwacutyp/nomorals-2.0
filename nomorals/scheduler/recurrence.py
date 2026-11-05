@@ -44,7 +44,10 @@ Stdlib only (``datetime`` / ``zoneinfo`` / ``calendar``).  Two engines:
    "every 2nd Tuesday" = ``FREQ=MONTHLY;BYDAY=2TU``.
    "last weekday of the month" = ``FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1``.
 
-Layering: L4, pure math — no imports from anywhere else in nomorals.
+Layering: pure math — no imports from anywhere else in nomorals.
+The module is pinned at L2 in ``tests/test_layering.py`` (its true
+dependency layer: a stdlib-only leaf) so L2 storage shares this one
+engine; the rest of the scheduler package is L4.
 """
 
 from __future__ import annotations

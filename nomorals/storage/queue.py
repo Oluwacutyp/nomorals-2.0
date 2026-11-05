@@ -17,16 +17,32 @@ import random
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from ..core.errors import NotFound, StorageError
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..core.style import active_theme, header, kv_lines, styled_table
+from ..scheduler.recurrence import (
+    CronNeverMatchesError,
+    CronSpec,
+    CronTimezoneError,
+    next_cron,
+    validate_cron,
+)
 from .db import Database
 from .failures import record_failure
 
-__all__ = ["Job", "QueueFull", "WorkQueue", "next_cron_fire", "parse_cron"]
+__all__ = [
+    "CronNeverMatchesError",
+    "CronTimezoneError",
+    "Job",
+    "QueueFull",
+    "WorkQueue",
+    "next_cron_fire",
+    "parse_cron",
+]
 
 _log = get_logger(__name__)
 
@@ -525,18 +541,20 @@ class WorkQueue:
         idle_sleep: float = 0.25,
         should_stop: Callable[[], bool] | None = None,
         tick_recurring: bool = True,
+        timezone: str = "",
     ) -> int:
         """Like :meth:`run_worker` but never exits on empty; also fires cron.
 
         The daemon shape: one thread runs this per topic, ``tick_recurring``
         fires due recurring schedules inline so cron jobs don't need their
-        own loop.
+        own loop. ``timezone`` (IANA name) is passed through to the tick;
+        empty computes recurring schedules on the system-local wall clock.
         """
         processed = 0
         while should_stop is None or not should_stop():
             if tick_recurring:
                 try:
-                    self.tick_recurring()
+                    self.tick_recurring(timezone=timezone)
                 except Exception as exc:  # noqa: BLE001 - cron must not kill the worker
                     _log.error("recurring tick failed: %s", exc)
             self.reclaim_expired()
@@ -608,12 +626,26 @@ class WorkQueue:
         max_attempts: int = 5,
         queueing_lock: str = "",
         enabled: bool = True,
+        timezone: str = "",
     ) -> float:
-        """Register (or update) a cron schedule. Returns the next fire time."""
-        parse_cron(cron)  # validate eagerly
+        """Register (or update) a cron schedule. Returns the next fire time.
+
+        The expression is *proven* schedulable at registration time
+        (:func:`~nomorals.scheduler.recurrence.validate_cron`): garbage
+        raises ``ValueError``, an unknown ``timezone`` raises
+        :class:`CronTimezoneError`, and an expression that can never
+        match raises :class:`CronNeverMatchesError` — a dead schedule
+        is refused by name instead of being stored with
+        ``next_fire_at = 0`` (the retired engine's silent fallback).
+        ``timezone`` is an IANA name; empty computes on the
+        system-local wall clock. The zone is a computation-time
+        parameter of the registering/ticking caller — it is not
+        stored (the ``recurring_jobs`` schema is unchanged).
+        """
+        validate_cron(cron, timezone)  # refuse unschedulable by name
         self._ensure_recurring_table()
         now = time.time()
-        nxt = next_cron_fire(cron, after=now) or 0.0
+        nxt = next_cron_fire(cron, after=now, timezone=timezone)
         with self.db.transaction():
             self.db.execute(
                 f'INSERT INTO "{self.RECURRING_TABLE}" '
@@ -655,20 +687,74 @@ class WorkQueue:
             out.append({**row, "payload": payload})
         return out
 
-    def tick_recurring(self, now: float | None = None) -> list[str]:
-        """Enqueue every due recurring job. Returns the fired schedule names."""
+    def tick_recurring(self, now: float | None = None, *,
+                       timezone: str = "") -> list[str]:
+        """Enqueue every due recurring job. Returns the fired schedule names.
+
+        Rows written before the cron consolidation are healed in
+        place (the ``recurring_jobs`` schema is unchanged):
+
+        * a row stored dead with ``next_fire_at = 0`` — the retired
+          engine's silent ``or 0.0`` fallback — is recomputed; when
+          its expression can never match, the failure is recorded by
+          name in the failure ledger and the row stays dead instead
+          of being silently re-skipped on every tick;
+        * a row whose stored next fire came from the retired
+          AND-semantics engine is tightened to the canonical (OR)
+          next fire whenever that is earlier — canonical semantics
+          can only move a fire earlier than AND from the same anchor,
+          never later, so a stored value is only ever corrected
+          toward the true schedule.
+
+        ``timezone`` is an IANA name; empty computes on the
+        system-local wall clock.
+        """
         self._ensure_recurring_table()
         self._ensure_lock_column()
         now = time.time() if now is None else now
         fired: list[str] = []
         with self.db.transaction():
-            due = self.db.query(
-                f'SELECT * FROM "{self.RECURRING_TABLE}" '
-                f"WHERE enabled = 1 AND next_fire_at > 0 AND next_fire_at <= ?",
-                (now,),
+            rows = self.db.query(
+                f'SELECT * FROM "{self.RECURRING_TABLE}" WHERE enabled = 1'
             )
-            for row in due:
+            for row in rows:
                 name = row["name"]
+                stored_next = float(row["next_fire_at"])
+                if stored_next <= 0.0:
+                    # Stored dead by the retired engine's silent
+                    # fallback: recompute, or record by name.
+                    try:
+                        stored_next = next_cron_fire(
+                            row["cron"], after=now, timezone=timezone)
+                    except ValueError as exc:
+                        self._note_dead_schedule(name, exc)
+                        continue
+                    self.db.execute(
+                        f'UPDATE "{self.RECURRING_TABLE}" '
+                        f"SET next_fire_at = ? WHERE name = ?",
+                        (stored_next, name),
+                    )
+                else:
+                    # Tighten-only correction, anchored at the last
+                    # instant the stored value was computed against
+                    # (the last firing, else registration).
+                    anchor = max(float(row["last_fired_at"]),
+                                 float(row["created_at"]))
+                    try:
+                        canonical = next_cron_fire(
+                            row["cron"], after=anchor, timezone=timezone)
+                    except ValueError as exc:
+                        self._note_dead_schedule(name, exc)
+                        continue
+                    if canonical < stored_next:
+                        stored_next = canonical
+                        self.db.execute(
+                            f'UPDATE "{self.RECURRING_TABLE}" '
+                            f"SET next_fire_at = ? WHERE name = ?",
+                            (stored_next, name),
+                        )
+                if stored_next > now:
+                    continue
                 lock = row["queueing_lock"] or f"recurring:{name}"
                 try:
                     payload = json.loads(row["payload"]) if row["payload"] else {}
@@ -681,7 +767,14 @@ class WorkQueue:
                     max_attempts=int(row["max_attempts"]),
                     queueing_lock=lock,
                 )
-                nxt = next_cron_fire(row["cron"], after=now) or 0.0
+                try:
+                    nxt = next_cron_fire(row["cron"], after=now,
+                                         timezone=timezone)
+                except ValueError as exc:
+                    # It fired (a due row always fires); no next
+                    # occurrence exists — record by name, park dead.
+                    self._note_dead_schedule(name, exc)
+                    nxt = 0.0
                 self.db.execute(
                     f'UPDATE "{self.RECURRING_TABLE}" SET last_fired_at = ?, '
                     f"next_fire_at = ? WHERE name = ?",
@@ -689,6 +782,16 @@ class WorkQueue:
                 )
                 fired.append(name)
         return fired
+
+    def _note_dead_schedule(self, name: str, exc: ValueError) -> None:
+        """Record a recurring schedule that can never fire, by name.
+
+        The failure ledger + error log are the surface: the schedule
+        is *reported* dead, never silently skipped (the retired
+        engine stored ``next_fire_at = 0`` without a word).
+        """
+        record_failure(f"queue.WorkQueue.tick_recurring:{name}", exc)
+        _log.error("recurring schedule %r can never fire: %s", name, exc)
 
     def format_status(self, theme: Any = None) -> str:
         """Human-readable queue overview through the shared style layer."""
@@ -740,78 +843,51 @@ class WorkQueue:
         )
 
 
-# ── minimal cron ─────────────────────────────────────────────────────────────
+# ── cron (the canonical engine) ──────────────────────────────────────────────
 #
-# Five fields: minute hour dom month dow. Each field accepts ``*``, ``*/n``,
-# ``a-b``, ``a-b/n``, ``a,b,c``. Month/dow names are not supported (numbers
-# only); dow is 0–6 with 0 = Sunday. Stdlib only — no croniter dependency.
-
-_CRON_BOUNDS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 6))
-
-
-def _parse_cron_field(field: str, low: int, high: int) -> frozenset[int]:
-    values: set[int] = set()
-    for part in field.split(","):
-        part = part.strip()
-        if not part:
-            raise ValueError(f"empty cron field part in {field!r}")
-        step = 1
-        if "/" in part:
-            part, step_s = part.split("/", 1)
-            step = int(step_s)
-            if step < 1:
-                raise ValueError(f"bad cron step in {field!r}")
-        if part == "*":
-            start, end = low, high
-        elif "-" in part:
-            start_s, end_s = part.split("-", 1)
-            start, end = int(start_s), int(end_s)
-        else:
-            start = end = int(part)
-        if not (low <= start <= high and low <= end <= high and start <= end):
-            raise ValueError(f"cron value out of range in {field!r}")
-        values.update(range(start, end + 1, step))
-    if not values:
-        raise ValueError(f"empty cron field {field!r}")
-    return frozenset(values)
+# This module used to run a private minimal cron engine: AND semantics
+# for day-of-month + day-of-week, system-local time only, its own
+# minute-stepping search capped at a year, and None when nothing fired
+# (which ``schedule_recurring`` then stored as ``next_fire_at = 0`` —
+# a schedule that silently never fired). That engine is retired: the
+# wrappers below delegate to the one canonical engine,
+# ``nomorals.scheduler.recurrence``, that every scheduling surface
+# uses (Echelon Wave 5 + its follow-up). Deliberate behaviour deltas:
+#
+# * dom+dow both restricted → classic cron OR (was: AND);
+# * the timezone is explicit — ``timezone`` is an IANA name and the
+#   search runs on that zone's wall clock (DST-correct); the empty
+#   default keeps the caller's footing, the system-local wall clock
+#   via a naive local pivot (the unified scheduler's idiom). An
+#   unknown name raises CronTimezoneError; nothing falls back to UTC
+#   silently;
+# * an expression that can never match raises CronNeverMatchesError
+#   by name (was: None → a silently dead stored schedule);
+# * the grammar is the canonical extended one: month/dow names, ``L``
+#   / ``LW`` / ``nW``, ``n#k`` / ``nL``, dow 0 and 7 both Sunday, and
+#   Vixie ``a/n`` steps (``a``..max step n, not just ``{a}``).
 
 
-def parse_cron(expr: str) -> tuple[frozenset[int], ...]:
-    """Parse a 5-field cron expression. Raises :class:`ValueError` if bad."""
-    fields = expr.split()
-    if len(fields) != 5:
-        raise ValueError(
-            f"cron needs 5 fields (minute hour dom month dow), got {len(fields)}: {expr!r}"
-        )
-    try:
-        return tuple(
-            _parse_cron_field(field, low, high)
-            for field, (low, high) in zip(fields, _CRON_BOUNDS)
-        )
-    except ValueError as exc:
-        raise ValueError(f"invalid cron {expr!r}: {exc}") from exc
+def parse_cron(expr: str) -> CronSpec:
+    """Parse a 5-field cron expression → the canonical :class:`CronSpec`.
 
-
-def next_cron_fire(expr: str, *, after: float | None = None) -> float | None:
-    """Next fire time (unix seconds, local time) strictly after ``after``.
-
-    Returns None when nothing fires within a year (e.g. Feb 30).
+    Raises :class:`ValueError` on garbage. (Before the consolidation
+    this returned five frozensets from the private parser; the parsed
+    representation is now the shared ``CronSpec``, as on every other
+    surface.)
     """
-    minutes, hours, doms, months, dows = parse_cron(expr)
+    return CronSpec(expr)
+
+
+def next_cron_fire(expr: str, *, after: float | None = None,
+                   timezone: str = "") -> float:
+    """Next fire time (unix seconds) strictly after ``after``.
+
+    ``timezone`` is an IANA name; empty (the default) computes on the
+    system-local wall clock. Raises :class:`CronNeverMatchesError`
+    when the expression can never match (e.g. ``0 0 30 2 *``),
+    :class:`CronTimezoneError` for an unknown zone, and
+    :class:`ValueError` for garbage — never a silent ``None``.
+    """
     base = after if after is not None else time.time()
-    # Start at the next minute boundary.
-    cursor = int(base // 60) * 60 + 60
-    limit = cursor + 366 * 24 * 3600
-    while cursor <= limit:
-        local = time.localtime(cursor)
-        cron_dow = (local.tm_wday + 1) % 7  # cron: 0 = Sunday
-        if (
-            local.tm_min in minutes
-            and local.tm_hour in hours
-            and local.tm_mday in doms
-            and local.tm_mon in months
-            and cron_dow in dows
-        ):
-            return float(cursor)
-        cursor += 60
-    return None
+    return next_cron(expr, datetime.fromtimestamp(base), timezone)

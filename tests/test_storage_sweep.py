@@ -42,6 +42,7 @@ from nomorals.storage.fts import (
 from nomorals.storage.kv import KVStore
 from nomorals.storage.models import AgentRecord, MissionRecord, TaskRecord
 from nomorals.storage.queue import (
+    CronNeverMatchesError,
     QueueFull,
     WorkQueue,
     next_cron_fire,
@@ -668,10 +669,13 @@ class QueueSweepTest(unittest.TestCase):
         self.assertEqual(self.q.get(jid).attempts, 0)
 
     def test_parse_cron(self):
-        fields = parse_cron("*/15 9-17 * * 1-5")
-        self.assertEqual(len(fields), 5)
-        self.assertIn(0, fields[0])
-        self.assertIn(30, fields[0])
+        # Since the Wave-5 follow-up, queue's parse_cron returns the
+        # canonical engine's CronSpec (was: five frozensets from the
+        # retired private parser).
+        spec = parse_cron("*/15 9-17 * * 1-5")
+        self.assertIn(0, spec.minute)
+        self.assertIn(30, spec.minute)
+        self.assertEqual(spec.hour, set(range(9, 18)))
         with self.assertRaises(ValueError):
             parse_cron("not a cron")
         with self.assertRaises(ValueError):
@@ -679,11 +683,12 @@ class QueueSweepTest(unittest.TestCase):
 
     def test_next_cron_fire(self):
         nxt = next_cron_fire("* * * * *")
-        self.assertIsNotNone(nxt)
         self.assertGreater(nxt, time.time())
         self.assertLess(nxt - time.time(), 120)
-        # Feb 30 never fires.
-        self.assertIsNone(next_cron_fire("0 0 30 2 *"))
+        # Feb 30 can never fire: refused by name, not a silent None
+        # (the retired engine returned None -> stored next_fire_at 0).
+        with self.assertRaises(CronNeverMatchesError):
+            next_cron_fire("0 0 30 2 *")
 
     def test_recurring_tick_idempotent(self):
         name = f"cron-{time.time_ns()}"

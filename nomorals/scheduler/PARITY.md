@@ -83,13 +83,31 @@ fronts them in place.
 
 ## Ranked gaps carried (not fixed here)
 
-1. **`nomorals/storage/queue.py` runs a divergent sixth cron
-   engine** — its own `parse_cron` / `next_cron_fire` with AND
-   semantics for dom+dow (classic cron is OR), local-time only,
-   its own minute-stepping, and a silent `or 0.0` fallback when no
-   firing is found. It sits outside the Wave 5 plan scope
-   (storage, not scheduling surfaces); converging it onto
-   `recurrence.py` is the top follow-up.
+1. **CLOSED (Wave 5 follow-up) — `nomorals/storage/queue.py`'s
+   divergent sixth cron engine is retired.** It had its own
+   `parse_cron` / `next_cron_fire` with AND semantics for dom+dow
+   (classic cron is OR), local-time only, its own minute-stepping,
+   and a silent `or 0.0` fallback when no firing was found. Queue's
+   cron surface now delegates to `recurrence.py`: `parse_cron`
+   returns the canonical `CronSpec`, `next_cron_fire` /
+   `schedule_recurring` / `tick_recurring` take an explicit
+   `timezone` (IANA name; the empty default keeps the caller's
+   system-local footing, never a silent UTC), `schedule_recurring`
+   proves schedulability at registration via `validate_cron`, and
+   never-matching expressions raise `CronNeverMatchesError` by name
+   instead of being stored dead. `tick_recurring` heals legacy rows
+   in place (schema unchanged): dead-zero rows are recomputed or
+   reported by name in the failure ledger; AND-computed next fires
+   are tightened to the canonical OR value. The layer cost is one
+   pin: `nomorals.scheduler.recurrence` is pinned at L2 in
+   `tests/test_layering.py` (a stdlib-only leaf; the pin rule
+   0 ≤ 2 ≤ 2 holds once storage.queue imports it). Survey facts:
+   the recurring surface had no production callers (only tests),
+   and no persisted database on the build host holds a
+   `recurring_jobs` row — the EC2 store, if any, is covered by the
+   tick-time healing. Proof: `tests/test_queue_cron_parity.py`
+   (corpus parity vs the canonical engine, delta pins, healing
+   tests) + the updated sweep pins.
 2. **Two classes named `UnifiedScheduler`** — `scheduler/
    unified_scheduler.py` (the facade's backend) and
    `autonomy/unified.py` (organ ticks / missions). Name collision

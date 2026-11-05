@@ -10,7 +10,15 @@ from .failures import (Failure, clear_failures, failure_count,
                        format_failures, recent_failures, record_failure)
 from .fts import FTSIndex, SearchHit, build_match_query, escape_fts, near_query, phrase_query
 from .kv import KVStore
-from .queue import Job, QueueFull, WorkQueue, next_cron_fire, parse_cron
+from .queue import (
+    CronNeverMatchesError,
+    CronTimezoneError,
+    Job,
+    QueueFull,
+    WorkQueue,
+    next_cron_fire,
+    parse_cron,
+)
 from .replication import SnapshotInfo, SqliteReplicator
 from .s3blob import S3BlobStore, S3Config, open_blob_store, presign_url
 from .schema import Migration, MigrationRunner, SchemaError
@@ -23,6 +31,8 @@ __all__ = [
     "BackupManager",
     "BlobInfo",
     "BlobStore",
+    "CronNeverMatchesError",
+    "CronTimezoneError",
     "Database",
     "DuckDBAnalytics",
     "FTSIndex",

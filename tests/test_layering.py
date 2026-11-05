@@ -266,6 +266,13 @@ MODULE_PINS: dict[str, int] = {
     "nomorals.tools.decoder_agent": 5, # tool over agents.decoder/context
     "nomorals.tools.weather": 5,       # tool surface over agents.weather
     "nomorals.tools.workspace": 5,     # tool surface over workspace/goals/projects
+    # recurrence is a pure-math leaf (stdlib only, zero intra-project
+    # imports) that lives in the L4 scheduler package. storage.queue
+    # (L2) delegates its cron to it — the Wave-5 follow-up retired
+    # queue's private engine so one cron engine serves every surface.
+    # Pin rule: max_imported (0) <= 2 <= min importer (storage.queue,
+    # L2); every other importer is L4+. Same shape as research.costs.
+    "nomorals.scheduler.recurrence": 2,
     # Low-level adapters inside higher-level packages.
     "nomorals.integrations.voice_integration": 1,
     "nomorals.integrations.sentinel_bridge": 2,  # vendored-sentinel bridge
