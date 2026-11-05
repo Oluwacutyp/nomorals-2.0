@@ -47,6 +47,7 @@ from .runtime_search import RuntimeSearchMixin
 from .runtime_wisdom import RuntimeWisdomMixin
 from .runtime_reach import RuntimeReachMixin
 from .runtime_anime import RuntimeAnimeMixin
+from .runtime_makers import RuntimeMakersMixin
 from .failures import failure_count, recent_failures, record_failure
 from .reply_guard import guard_reply_parts, scrub_narration
 from .brain_gate import BrainGate, is_personal_platform
@@ -245,6 +246,7 @@ class PartnerRuntime(
     RuntimeWisdomMixin,
     RuntimeReachMixin,
     RuntimeAnimeMixin,
+    RuntimeMakersMixin,
 ):
     """Runs the partner across all configured platforms, at the same time."""
 
@@ -5744,6 +5746,20 @@ class PartnerRuntime(
             # is the same set with its sources + chains, and
             # tests/test_fun_oneshots.py pins the two equal.
             return self._control_fun(
+                kind, command.tail or "", message)
+        if kind in {
+                "qcard", "canvasquote", "iqc", "wndwqute", "meme2",
+                "fakemsg", "fakettc", "nokiamsg", "fakeff",
+                "fakeffduo", "ffgirl",
+                "removebg", "qr", "shorturl", "unshorten", "bible",
+                "couplepp", "pp"}:
+            # The makers & tools (FEI gap wave E): the set is
+            # spelled out so the catalog's handler-path scan
+            # sees every kind; social/chat/makers.py's
+            # MAKER_COMMANDS is the same set with its sources,
+            # rungs and renderer, and tests/test_maker_tools.py
+            # pins the two equal.
+            return self._control_makers(
                 kind, command.tail or "", message)
         if kind == "pulse":
             return self._control_pulse(command.tail or arg)

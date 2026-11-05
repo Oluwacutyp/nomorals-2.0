@@ -1335,7 +1335,13 @@ MEDIA_DELIVERED_KINDS: frozenset[str] = frozenset(
      # the wave-D image one-shots: /dog /cat /fox /meme /nasa
      # /pokemon answer by attaching the picture, caption riding
      # it — the same delivery contract as the kinds above.
-     "dog", "cat", "fox", "meme", "nasa", "pokemon"})
+     "dog", "cat", "fox", "meme", "nasa", "pokemon",
+     # the wave-E makers: the quote cards, /removebg, /qr and
+     # /couplepp (+ /pp) answer by attaching their render or
+     # cutout — the same delivery contract again.
+     "qcard", "canvasquote", "iqc", "wndwqute", "meme2",
+     "fakemsg", "fakettc", "nokiamsg", "fakeff", "fakeffduo",
+     "ffgirl", "removebg", "qr", "couplepp", "pp"})
 
 
 def reaction_caption(command: str, *, actor: str, target: str = "",

@@ -121,9 +121,14 @@ def test_dispatch_literal_set_matches_fun_commands():
 
 
 def test_image_kinds_ride_media_delivered():
+    # subset pin (wave E): the wave-E makers legitimately
+    # extended the set under the same delivery contract; the
+    # FULL set is pinned in tests/test_maker_tools.py — the
+    # same hand-off wave D took from wave C's exact pin.
     assert frozenset({
         "steal", "sticker", "convert", "gif", "react",
-        "dog", "cat", "fox", "meme", "nasa", "pokemon"}) == MEDIA_DELIVERED_KINDS
+        "dog", "cat", "fox", "meme", "nasa", "pokemon"}) \
+        <= MEDIA_DELIVERED_KINDS
     from nomorals.social.chat.fun import FUN_IMAGE_KINDS
 
     assert FUN_IMAGE_KINDS <= MEDIA_DELIVERED_KINDS
