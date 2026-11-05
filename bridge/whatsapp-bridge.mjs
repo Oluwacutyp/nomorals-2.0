@@ -672,6 +672,24 @@ async function connect() {
     }
   });
 
+  // Incoming call offers (chat & privacy wave): forwarded,
+  // never acted on here — rejection is the owner's anticall
+  // toggle, decided on the Python side like every other
+  // personal-surface act.  Baileys is a signaling observer: it
+  // can see offers and reject them, nothing more.
+  wa.ev.on('call', (calls) => {
+    try {
+      for (const c of calls || []) {
+        if (!c || c.status !== 'offer') continue;
+        broadcast({ type: 'call_offer', id: c.id || '',
+          from: jidNormalizedUser(c.from || c.chatId || ''),
+          ts: c.date ? new Date(c.date).getTime() : Date.now() });
+      }
+    } catch (e) {
+      log('call handler error:', e?.message || e);
+    }
+  });
+
   wa.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
     for (const m of messages) {
@@ -778,6 +796,10 @@ async function connect() {
           media: media ? [media] : [],
           reply_to: replyToOf(mm),
           mentioned,
+          // The full mention payload (chat & privacy wave — the
+          // antitag sensor counts it; additive, the Python
+          // envelope already reads a "mentions" list).
+          mentions: mentionedJidOf(mm).map(String),
           view_once: unwrapped.viewOnce,
           ts: tsMs,
         };
@@ -797,7 +819,7 @@ function extOf(p) {
   return i >= 0 ? p.slice(i).toLowerCase() : '';
 }
 
-async function cmdSend({ chat, text, reply_to, buttons }) {
+async function cmdSend({ chat, text, reply_to, buttons, mentions }) {
   const opts = {};
   if (reply_to && msgCache.has(reply_to)) {
     opts.quoted = msgCache.get(reply_to); // raw WAMessage -> quoted reply
@@ -838,7 +860,13 @@ async function cmdSend({ chat, text, reply_to, buttons }) {
         opts);
     }
   }
-  return wa.sendMessage(chat, { text: text || '' }, opts);
+  // Mentions (chat & privacy wave — /tagall): Baileys takes the
+  // JID list natively; the names need not appear in the text.
+  const payload = { text: text || '' };
+  if (Array.isArray(mentions) && mentions.length) {
+    payload.mentions = mentions.map(String);
+  }
+  return wa.sendMessage(chat, payload, opts);
 }
 
 async function cmdSendMedia({ chat, path: p, caption, ptt }) {
@@ -857,6 +885,22 @@ async function cmdSendMedia({ chat, path: p, caption, ptt }) {
     return wa.sendMessage(chat, { audio: { url: p }, mimetype: mime || 'audio/ogg', ptt: !!ptt });
   }
   return wa.sendMessage(chat, { document: { url: p }, mimetype: mime || 'application/octet-stream', fileName: name, caption: cap });
+}
+
+// The anchor Baileys' archive / mark-read patches need: the
+// chat's last message as a WAMessage (its raw cached form when
+// the cache holds it, a key-only shell otherwise).  No message
+// in bridge memory → null, and the caller refuses honestly —
+// the same memory discipline as message_delete.
+function lastMessagesFor(jid) {
+  const arr = recentByChat.get(jid) || [];
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const entry = arr[i];
+    if (entry && entry.key && entry.key.id) {
+      return [msgCache.get(entry.key.id) || { key: entry.key }];
+    }
+  }
+  return null;
 }
 
 async function handleCommand(sock, req) {
@@ -887,6 +931,7 @@ async function handleCommand(sock, req) {
         const arr = recentByChat.get(jidNormalizedUser(req.chat || '')) || [];
         const limit = Math.max(1, parseInt(req.limit || '20', 10));
         const msgs = arr.slice(-limit).map((m) => ({
+          id: (m.key && m.key.id) || m.id || '',
           incoming: m.incoming !== false,
           text: m.text || '',
           sender: m.sender || (m.from && m.from.name) || '',
@@ -924,6 +969,140 @@ async function handleCommand(sock, req) {
         }
         await wa.readMessages([{ remoteJid: 'status@broadcast', id: String(req.id), participant: String(req.from), fromMe: false }]);
         return reply(sock, id, { ok: true });
+      }
+      case 'edit': {
+        // Edit one of the account's OWN messages (the Python
+        // adapter's edit_message): Baileys edits by re-sending
+        // with the original key.  The key comes from the bridge's
+        // own message cache — a message it never saw, or one
+        // that isn't the account's own, is an honest refusal.
+        // WhatsApp's ~15-minute edit window is enforced
+        // server-side and its refusal surfaces as the error.
+        const jid = jidNormalizedUser(req.chat || '');
+        const mid = String(req.message_id || '').trim();
+        if (!mid) return reply(sock, id, { ok: false, error: 'edit needs a message_id' });
+        const cached = msgCache.get(mid);
+        if (!cached || !cached.key) {
+          return reply(sock, id, { ok: false, error: 'edit target is not in bridge memory — only messages this bridge has seen can be edited' });
+        }
+        if (!cached.key.fromMe) {
+          return reply(sock, id, { ok: false, error: 'only the account\'s own messages can be edited' });
+        }
+        await wa.sendMessage(jid, { text: String(req.text || ''), edit: cached.key });
+        return reply(sock, id, { ok: true, message_id: mid });
+      }
+      case 'chat_modify': {
+        // Chat-state ops (chat & privacy wave): Baileys
+        // chatModify — archive / pin / mute / mark read-unread.
+        // Tri-state like the Go bridge: only present keys apply.
+        const jid = jidNormalizedUser(req.chat || '');
+        let applied = 0;
+        if ('archive' in req || 'read' in req) {
+          const last = lastMessagesFor(jid);
+          if (!last) {
+            return reply(sock, id, { ok: false, error: 'no message from that chat in bridge memory to anchor the change' });
+          }
+          if ('archive' in req) {
+            await wa.chatModify({ archive: !!req.archive, lastMessages: last }, jid);
+            applied++;
+          }
+          if ('read' in req) {
+            await wa.chatModify({ markRead: !!req.read, lastMessages: last }, jid);
+            applied++;
+          }
+        }
+        if ('pin' in req) {
+          await wa.chatModify({ pin: !!req.pin }, jid);
+          applied++;
+        }
+        if ('mute_seconds' in req) {
+          const secs = Number(req.mute_seconds || 0);
+          // Baileys passes the value through as the mute END
+          // timestamp in seconds; null unmutes.
+          const mute = secs === 0 ? null
+            : Math.floor(Date.now() / 1000)
+              + (secs < 0 ? 10 * 365 * 86400 : secs);
+          await wa.chatModify({ mute }, jid);
+          applied++;
+        }
+        if (!applied) {
+          return reply(sock, id, { ok: false, error: 'chat_modify needs at least one of: archive, pin, mute_seconds, read' });
+        }
+        return reply(sock, id, { ok: true });
+      }
+      case 'message_star': {
+        const jid = jidNormalizedUser(req.chat || '');
+        const mid = String(req.message_id || '').trim();
+        if (!mid) return reply(sock, id, { ok: false, error: 'message_star needs a message_id' });
+        const cached = msgCache.get(mid);
+        if (!cached || !cached.key) {
+          return reply(sock, id, { ok: false, error: 'message not in bridge memory — its star key cannot be built' });
+        }
+        await wa.chatModify({
+          star: {
+            messages: [{ id: mid, fromMe: !!cached.key.fromMe }],
+            star: !!req.star,
+          },
+        }, jid);
+        return reply(sock, id, { ok: true });
+      }
+      case 'status_react': {
+        // React to one contact status post as the owner (the
+        // status_react toggle's verb): a reaction keyed on the
+        // status message at status@broadcast.
+        if (!req.id || !req.from || !req.emoji) {
+          return reply(sock, id, { ok: false, error: 'status_react needs the status message id, the poster jid and an emoji' });
+        }
+        await wa.sendMessage('status@broadcast', {
+          react: {
+            text: String(req.emoji),
+            key: { remoteJid: 'status@broadcast', id: String(req.id), participant: String(req.from), fromMe: false },
+          },
+        });
+        return reply(sock, id, { ok: true });
+      }
+      case 'reject_call': {
+        if (!req.id || !req.from) {
+          return reply(sock, id, { ok: false, error: 'reject_call needs the call id and the caller jid' });
+        }
+        await wa.rejectCall(String(req.id), String(req.from));
+        return reply(sock, id, { ok: true });
+      }
+      case 'blocklist': {
+        const jid = jidNormalizedUser(req.jid || '');
+        if (!jid) return reply(sock, id, { ok: false, error: 'blocklist needs a jid' });
+        if (req.action !== 'block' && req.action !== 'unblock') {
+          return reply(sock, id, { ok: false, error: 'blocklist action must be block or unblock' });
+        }
+        await wa.updateBlockStatus(jid, req.action);
+        return reply(sock, id, { ok: true });
+      }
+      case 'chat_disappear': {
+        // Disappearing-messages timer: Baileys carries the verb
+        // for GROUPS only (groupToggleEphemeral).  DM timers
+        // ride the Go bridge engine — this rung refuses
+        // honestly instead of pretending.
+        const jid = jidNormalizedUser(req.chat || '');
+        const secs = Number(req.seconds);
+        if (!Number.isFinite(secs) || secs < 0) {
+          return reply(sock, id, { ok: false, error: 'chat_disappear needs seconds >= 0 (0 turns disappearing messages off)' });
+        }
+        if (!jid.endsWith('@g.us')) {
+          return reply(sock, id, { ok: false, error: 'this Baileys build can only set disappearing timers in groups — DM timers ride the Go bridge engine' });
+        }
+        await wa.groupToggleEphemeral(jid, secs);
+        return reply(sock, id, { ok: true });
+      }
+      case 'check_number': {
+        // The one registration question WhatsApp publishes
+        // (banchecker's number signal).  Nothing about bans is
+        // returned because WhatsApp publishes nothing about bans.
+        const digits = String(req.phone || '').replace(/[^\d]/g, '');
+        if (!digits) return reply(sock, id, { ok: false, error: 'check_number needs a phone number' });
+        const rows = await wa.onWhatsApp(`${digits}@s.whatsapp.net`);
+        const row = Array.isArray(rows) ? rows[0] : null;
+        if (!row) return reply(sock, id, { ok: false, error: 'WhatsApp returned no answer for that number' });
+        return reply(sock, id, { ok: true, exists: !!row.exists, jid: row.jid || '' });
       }
       case 'chats': {
         const limit = Math.max(1, parseInt(req.limit || '30', 10));

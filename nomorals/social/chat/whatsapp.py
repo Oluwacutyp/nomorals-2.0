@@ -834,10 +834,12 @@ class WhatsAppAdapter(ChatAdapter):
                 # The first chunk is what a later reconciliation looks
                 # for in the bridge's history (formatted, as sent).
                 entry["_dispatched_text"] = chunks[0]
+            entry_mentions = entry.get("mentions") or None
             for i, chunk in enumerate(chunks):
                 result, outcome_known = self._send_text_outcome(
                     chat, chunk, reply_to=reply_to if i == 0 else "",
-                    buttons=entry_buttons if i == 0 else None)
+                    buttons=entry_buttons if i == 0 else None,
+                    mentions=entry_mentions if i == 0 else None)
                 if not result.ok:
                     if outcome_known:
                         entry["_outcome_known"] = True
@@ -1116,6 +1118,42 @@ class WhatsAppAdapter(ChatAdapter):
             # The sender IS the owner — flag it for group recognition.
             msg.meta["from_owner"] = True
             self._deliver(handler, msg)
+        elif kind == "call_offer":
+            # Personal surface feed (chat & privacy wave): a call
+            # ringing this account, forwarded by the bridges
+            # (whatsmeow CallOffer / Baileys 'call').  Delivered
+            # as a service message — the runtime's personal hook
+            # may reject it under the owner's anticall toggle and
+            # consumes it; it is never conversation.  An older
+            # bridge never sends these, and then anticall simply
+            # has no feed — nothing here invents one.
+            caller = str(obj.get("from") or "")
+            call_id = str(obj.get("id") or "")
+            if not caller or not call_id:
+                return
+            ts = obj.get("ts") or 0
+            try:
+                ts = float(ts) / 1000.0
+            except (TypeError, ValueError):
+                ts = time.time()
+            msg = ChatMessage(
+                chat=ChatRef(
+                    platform=self.name,
+                    chat_id=caller,
+                    kind=ChatKind.DM,
+                    title="",
+                    peer=caller,
+                ),
+                incoming=True,
+                text="",
+                sender="",
+                sender_id=caller,
+                message_id="",
+                ts=ts,
+            )
+            msg.meta["service"] = "call_offer"
+            msg.meta["call_id"] = call_id
+            self._deliver(handler, msg)
         elif kind == "status_post":
             # Personal surface feed (§15): a status post this
             # account can see, media already downloaded by the
@@ -1353,6 +1391,7 @@ class WhatsAppAdapter(ChatAdapter):
     def _send_text_outcome(self, chat: ChatRef, text: str,
                            *, reply_to: str = "",
                            buttons: Any = None,
+                           mentions: Any = None,
                            fresh: bool = False) -> tuple[SendResult, bool]:
         """One text send; returns ``(result, outcome_known)``.
 
@@ -1406,6 +1445,11 @@ class WhatsAppAdapter(ChatAdapter):
         last_error = "bridge rejected send"
         request: dict[str, Any] = {"cmd": "send", "chat": jid,
                                    "text": text, "reply_to": reply_to}
+        if mentions:
+            # /tagall's payload: the bridges attach these JIDs as
+            # the message's mention set (they notify whether or
+            # not the text names them — hidetag rides this).
+            request["mentions"] = [str(m) for m in mentions if m]
         if buttons:
             # The bridge renders what WhatsApp supports natively
             # and degrades the rest to text action lines — the
@@ -1452,10 +1496,12 @@ class WhatsAppAdapter(ChatAdapter):
     def _send_with_retry(self, chat: ChatRef, text: str,
                          *, reply_to: str = "",
                          buttons: Any = None,
+                         mentions: Any = None,
                          fresh: bool = False) -> SendResult:
         """One text send with a single retry on transient bridge failure."""
         result, _outcome_known = self._send_text_outcome(
-            chat, text, reply_to=reply_to, buttons=buttons, fresh=fresh)
+            chat, text, reply_to=reply_to, buttons=buttons,
+            mentions=mentions, fresh=fresh)
         return result
 
     def send(self, chat: ChatRef, text: str, *,
@@ -1463,6 +1509,7 @@ class WhatsAppAdapter(ChatAdapter):
              buttons: list[list[tuple[str, str]]] | None = None,
              reply_keyboard: list[list[str]] | None = None,
              parse_mode: str = "",
+             mentions: list[str] | None = None,
              fresh: bool = False) -> SendResult:
         started = time.perf_counter()
         if not self.connected.is_set():
@@ -1477,6 +1524,8 @@ class WhatsAppAdapter(ChatAdapter):
                              for label, data in row]
                             for row in buttons if row]
                            if buttons else None,
+                "mentions": [str(m) for m in mentions if m]
+                            if mentions else None,
             })
         # Convert Telegram HTML / canonical markdown to WhatsApp markdown
         # (game output and styled menus are authored Telegram-first).
@@ -1494,6 +1543,7 @@ class WhatsAppAdapter(ChatAdapter):
                 chat, chunk,
                 reply_to=reply_to if i == 0 else "",
                 buttons=buttons if i == 0 else None,
+                mentions=mentions if i == 0 else None,
                 fresh=fresh)
             if not result.ok:
                 return result
@@ -1658,6 +1708,153 @@ class WhatsAppAdapter(ChatAdapter):
         return self._admin_cmd("status_view", {
             "id": message_id, "from": poster_id,
             "ts": int(float(ts or 0) * 1000)}, timeout=10)
+
+    # ── chat & privacy ops (FEI gap wave F) ─────────────────────
+    # Owner-invoked verbs on his own account, each riding a
+    # bridge command both engines implement (Go/whatsmeow +
+    # Baileys — see bridge/gobridge/messages.go and
+    # bridge/whatsapp-bridge.mjs).  Every method returns the
+    # bridge's verdict dict: ok:false carries the honest reason
+    # (a rung that lacks the verb says so), never a fake success.
+
+    def edit_message(self, chat: ChatRef, message_id: str,
+                     text: str) -> dict[str, Any]:
+        """Edit one of this account's OWN messages — the bridge's
+        ``edit`` verb WITHOUT edit_progress's throttle (that one
+        serves progressive display; this is the owner's /editmsg).
+        Both bridges refuse a target that isn't the account's own
+        or isn't in their memory, and WhatsApp's ~15-minute edit
+        window is enforced server-side — refusals come back in
+        the verdict, verbatim."""
+        message_id = str(message_id or "").strip()
+        if not message_id:
+            return {"ok": False, "error": "edit needs a message_id"}
+        return self._admin_cmd("edit", {
+            "chat": self._jid(chat), "message_id": message_id,
+            "text": str(text or "")}, timeout=15)
+
+    def chat_modify(self, chat: ChatRef, *,
+                    archive: bool | None = None,
+                    pin: bool | None = None,
+                    mute_seconds: int | None = None,
+                    read: bool | None = None) -> dict[str, Any]:
+        """Chat-state changes on one chat — archive / pin / mute /
+        mark read-or-unread — via the bridges' ``chat_modify``
+        (whatsmeow app-state patches / Baileys chatModify).
+        Tri-state: a field left None is not sent, so the bridge
+        leaves that aspect alone.  mute_seconds: -1 = no end,
+        0 = unmute, >0 = that many seconds."""
+        payload: dict[str, Any] = {"chat": self._jid(chat)}
+        if archive is not None:
+            payload["archive"] = bool(archive)
+        if pin is not None:
+            payload["pin"] = bool(pin)
+        if mute_seconds is not None:
+            payload["mute_seconds"] = int(mute_seconds)
+        if read is not None:
+            payload["read"] = bool(read)
+        if len(payload) == 1:
+            return {"ok": False,
+                    "error": "chat_modify needs at least one change"}
+        return self._admin_cmd("chat_modify", payload, timeout=20)
+
+    def chat_archive(self, chat: ChatRef,
+                     archived: bool) -> dict[str, Any]:
+        return self.chat_modify(chat, archive=archived)
+
+    def chat_mute(self, chat: ChatRef, *,
+                  seconds: int | None) -> dict[str, Any]:
+        """Mute/unmute one CHAT (not a member): seconds -1 = no
+        end, 0 = unmute, >0 = mute for that long."""
+        return self.chat_modify(chat, mute_seconds=seconds)
+
+    def chat_mark_read(self, chat: ChatRef,
+                       read: bool) -> dict[str, Any]:
+        """Mark a whole chat read (True) or unread (False) — the
+        chat-list state, distinct from mark_read's receipts."""
+        return self.chat_modify(chat, read=read)
+
+    def star_message(self, chat: ChatRef, message_id: str,
+                     star: bool = True) -> dict[str, Any]:
+        """Star/unstar one message (bridges' ``message_star``):
+        the key is built from bridge memory — a message neither
+        bridge has seen is an honest refusal."""
+        message_id = str(message_id or "").strip()
+        if not message_id:
+            return {"ok": False,
+                    "error": "star needs a message_id"}
+        return self._admin_cmd("message_star", {
+            "chat": self._jid(chat), "message_id": message_id,
+            "star": bool(star)}, timeout=15)
+
+    def react_status(self, poster_id: str, message_id: str,
+                     emoji: str) -> dict[str, Any]:
+        """React to one contact status post as the owner (the
+        status_react toggle's verb): the bridges' ``status_react``
+        — a reaction keyed on the post at status@broadcast."""
+        poster_id = str(poster_id or "").strip()
+        message_id = str(message_id or "").strip()
+        emoji = str(emoji or "").strip()
+        if not poster_id or not message_id or not emoji:
+            return {"ok": False,
+                    "error": "status_react needs the poster's jid, "
+                             "the status message id and an emoji"}
+        return self._admin_cmd("status_react", {
+            "id": message_id, "from": poster_id,
+            "emoji": emoji}, timeout=15)
+
+    def reject_call(self, call_id: str,
+                    from_jid: str) -> dict[str, Any]:
+        """Reject one ringing call (the anticall toggle's verb):
+        the bridges' ``reject_call`` — both engines can see call
+        offers and reject them; neither can answer one."""
+        call_id = str(call_id or "").strip()
+        from_jid = str(from_jid or "").strip()
+        if not call_id or not from_jid:
+            return {"ok": False,
+                    "error": "reject_call needs the call id and "
+                             "the caller's jid"}
+        return self._admin_cmd("reject_call", {
+            "id": call_id, "from": from_jid}, timeout=15)
+
+    def block_user(self, jid: str,
+                   action: str) -> dict[str, Any]:
+        """Block/unblock one user on this account (bridges'
+        ``blocklist``: whatsmeow UpdateBlocklist / Baileys
+        updateBlockStatus)."""
+        jid = str(jid or "").strip()
+        action = str(action or "").strip().lower()
+        if not jid:
+            return {"ok": False, "error": "blocklist needs a jid"}
+        if action not in ("block", "unblock"):
+            return {"ok": False,
+                    "error": "blocklist action must be block "
+                             "or unblock"}
+        return self._admin_cmd("blocklist", {
+            "jid": jid, "action": action}, timeout=15)
+
+    def set_disappearing(self, chat: ChatRef,
+                         seconds: int) -> dict[str, Any]:
+        """Set one chat's disappearing-messages timer (bridges'
+        ``chat_disappear``; 0 = off).  The Go engine sets it for
+        DMs and groups (whatsmeow SetDisappearingTimer); the
+        Baileys rung carries groups only and refuses DMs in its
+        verdict — the caller surfaces whichever truth came back."""
+        return self._admin_cmd("chat_disappear", {
+            "chat": self._jid(chat),
+            "seconds": int(seconds)}, timeout=15)
+
+    def check_number(self, phone: str) -> dict[str, Any]:
+        """The one registration question WhatsApp publishes
+        (bridges' ``check_number``): {"ok", "exists", "jid"}.
+        There is deliberately no ban field — WhatsApp publishes
+        nothing about other numbers' ban state."""
+        phone = str(phone or "").strip()
+        if not phone:
+            return {"ok": False,
+                    "error": "check_number needs a phone number"}
+        return self._admin_cmd("check_number", {
+            "phone": phone}, timeout=15)
 
     def chats(self, limit: int = 30) -> list[dict[str, Any]]:
         """Recent chats (id, title, kind, last_ts). Best-effort: returns []
@@ -2467,6 +2664,7 @@ class WhatsAppAdapter(ChatAdapter):
                     incoming=bool(entry.get("incoming", True)),
                     text=str(entry.get("text") or ""),
                     sender=str(entry.get("sender") or ""),
+                    message_id=str(entry.get("id") or ""),
                     media=[
                         MediaRef(path=str(m.get("path") or ""),
                                  mime=str(m.get("mime") or ""),

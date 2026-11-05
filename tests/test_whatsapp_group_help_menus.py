@@ -282,8 +282,20 @@ NO_MUTE_LINE = ("WhatsApp has no per-person mute — a member "
 
 def test_whatsapp_menu_omits_mute_family():
     menu = whatsapp_menu()
-    assert "/mute" not in menu
-    assert "/unmute" not in menu
+    # Token-level, not substring: wave F's /mutechat is a real
+    # WhatsApp capability (chat-LEVEL mute via app state) and
+    # legitimately renders — the family this guard exists for
+    # is the per-PERSON /mute + /unmute, still absent.
+    tokens = set()
+    for line in menu.split("\n"):
+        parts = line.split("│", 1)
+        if len(parts) == 2:
+            head = parts[1].strip().split(" ", 1)[0]
+            if head.startswith("/"):
+                tokens.add(head)
+    assert "/mute" not in tokens
+    assert "/unmute" not in tokens
+    assert "/mutechat" in tokens  # the chat-level namesake is real
     # the global catalog and the Telegram menu keep them
     assert "/mute" in help_text()
     assert "/mute" in public_menu_text()

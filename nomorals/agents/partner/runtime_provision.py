@@ -603,13 +603,58 @@ class RuntimeProvisionMixin:
                     "runtime_provision.story_viewer", exc)
                 return False
 
+        def _status_reactor(rec: Any, item: dict[str, Any]) -> bool:
+            """React to one contact's status post as the owner
+            (chat & privacy wave — the status_react toggle's
+            verb): the WhatsApp adapter's react_status (bridge
+            status_react).  Telegram grows no seam here: MTProto
+            exposes no status-reaction verb on this surface, so
+            the toggle simply never fires there — absence, not
+            a fake."""
+            adapter = self._adapter_for("whatsapp")
+            fn = getattr(adapter, "react_status", None)
+            if not callable(fn):
+                return False
+            try:
+                res = fn(str(item.get("poster_id") or ""),
+                         str(item.get("source_id") or ""),
+                         str(item.get("emoji") or "❤️"))
+            except Exception as exc:  # noqa: BLE001
+                record_failure(
+                    "runtime_provision.status_reactor", exc)
+                return False
+            if isinstance(res, dict):
+                return bool(res.get("ok"))
+            return bool(res)
+
+        def _call_rejector(rec: Any, item: dict[str, Any]) -> bool:
+            """Reject one ringing call as the owner (chat &
+            privacy wave — the anticall toggle's verb): the
+            WhatsApp adapter's reject_call (bridge reject_call)."""
+            adapter = self._adapter_for("whatsapp")
+            fn = getattr(adapter, "reject_call", None)
+            if not callable(fn):
+                return False
+            try:
+                res = fn(str(item.get("call_id") or ""),
+                         str(item.get("from_id") or ""))
+            except Exception as exc:  # noqa: BLE001
+                record_failure(
+                    "runtime_provision.call_rejector", exc)
+                return False
+            if isinstance(res, dict):
+                return bool(res.get("ok"))
+            return bool(res)
+
         personal = PersonalSurfaces(
             sup.registry,
             PersonalVault(ws / "data" / "social" / "personal"),
             story_fetcher=_story_fetcher,
             presence_setter=_presence_setter,
             status_viewer=_status_viewer,
-            story_viewer=_story_viewer)
+            story_viewer=_story_viewer,
+            status_reactor=_status_reactor,
+            call_rejector=_call_rejector)
         svc = {
             "supervisor": sup, "registry": sup.registry,
             "pairer": pairer, "personal": personal,
@@ -1002,6 +1047,20 @@ class RuntimeProvisionMixin:
                  for m in (getattr(message, "media", None) or [])
                  if getattr(m, "path", "")]
         ts = float(getattr(message, "ts", 0.0) or now)
+        if service == "call_offer":
+            # Chat & privacy wave: a call ringing his WhatsApp
+            # account.  The personal organ rejects it when his
+            # anticall toggle is on (and stays completely silent
+            # under a standing owner stop).  Consumed either way —
+            # a call offer is never conversation.
+            personal.observe_call(
+                platform,
+                from_id=str(getattr(message, "sender_id", "")
+                            or counterpart),
+                from_name=str(getattr(message, "sender", "") or ""),
+                call_id=str(meta.get("call_id") or ""),
+                ts=ts)
+            return True
         if service == "status_post":
             personal.observe_status_post(
                 platform, poster_id=str(
@@ -1023,6 +1082,17 @@ class RuntimeProvisionMixin:
                              (meta.get("deleted_ids") or [])],
                 ts=ts)
             return True
+        if kind == "group":
+            # Chat & privacy wave — the antitag sensor: a group
+            # message whose mention payload mass-tags the owner.
+            # Detection only: the organ journals it (toggle on)
+            # and hands back a flag entry at most once an hour
+            # per chat, which lands in his DM — never a callout
+            # in the room.  The message itself flows on to the
+            # conversation pipeline untouched.
+            self._antitag_observe(message, personal, platform,
+                                  chat_key=chat_key, ts=ts)
+            return False
         if kind != "dm":
             return False
         if meta.get("edited"):
@@ -1057,6 +1127,92 @@ class RuntimeProvisionMixin:
                 ts=ts)
         return False
 
+    def _antitag_observe(self, message: Any, personal: Any,
+                         platform: str, *, chat_key: str,
+                         ts: float) -> None:
+        """The antitag sensor's live half (chat & privacy wave):
+        count one group message's mention payload from its
+        defense envelope, confirm the owner's own mention is in
+        it (the adapters' ``mentioned`` flag), and hand the
+        detection to the personal organ.  A returned flag entry
+        is delivered to the owner's DM — his own chat with
+        himself on the same surface — best-effort: a failed
+        delivery is ledgered, never retried into a storm, and
+        the organ's cooldown has already consumed the slot.
+        Never raises: a sensor must not break intake."""
+        try:
+            if not bool(getattr(message, "mentioned", False)):
+                return
+            meta = getattr(message, "meta", None) or {}
+            envelope = meta.get("envelope") or {}
+            mentions = envelope.get("mentions") or []
+            count = len([m for m in mentions if m])
+            if not count:
+                count = len([
+                    e for e in (envelope.get("entities") or [])
+                    if str(e.get("type") or "") in (
+                        "mention", "text_mention")])
+            from ...social.chat.chatops import is_mass_tag
+
+            if not is_mass_tag(count):
+                return
+            entry = personal.observe_mass_tag(
+                platform, chat_key=chat_key,
+                sender_id=str(getattr(message, "sender_id", "")
+                              or ""),
+                sender_name=str(getattr(message, "sender", "")
+                                or ""),
+                mention_count=count, ts=ts)
+            if not entry:
+                return
+            title = str(getattr(message.chat, "title", "")
+                        or chat_key)
+            who = str(entry.get("poster_name") or "someone")
+            line = (f"🏷️ mass tag: {who} mentioned "
+                    f"{int(entry.get('mention_count') or 0)} "
+                    f"people including you in “{title}”.")
+            suppressed = int(entry.get("suppressed_before") or 0)
+            if suppressed:
+                line += (f" ({suppressed} more mass tag"
+                         f"{'' if suppressed == 1 else 's'} "
+                         f"there since the last flag.)")
+            self._antitag_deliver(platform, line)
+        except Exception as exc:  # noqa: BLE001 - sensor discipline
+            record_failure("runtime_provision.antitag_observe",
+                           exc)
+
+    def _antitag_deliver(self, platform: str, line: str) -> None:
+        """Send one antitag flag to the owner's self-chat on the
+        surface it happened on (WhatsApp: his own JID chat;
+        Telegram: Saved Messages).  No self-chat address on the
+        adapter → no delivery; the journal entry already
+        recorded the detection."""
+        gateway = getattr(self, "gateway", None)
+        if gateway is None:
+            return
+        ref = None
+        adapter = self._adapter_for(platform)
+        if platform == "whatsapp":
+            jid = str(getattr(adapter, "user_jid", "") or "")
+            if jid:
+                from ...social.chat.base import ChatKind, ChatRef
+
+                ref = ChatRef(platform="whatsapp", chat_id=jid,
+                              kind=ChatKind.DM, title="you",
+                              peer=jid)
+        elif platform == "telegram":
+            saved = getattr(adapter, "saved_messages_ref", None)
+            if callable(saved):
+                ref = saved()
+        if ref is None:
+            return
+        result = gateway.send(platform, ref, line)
+        if not getattr(result, "ok", False):
+            record_failure(
+                "runtime_provision.antitag_deliver",
+                RuntimeError(str(getattr(result, "error", "")
+                                 or "self-chat send refused")))
+
     def _control_pair(self, tail: str, *, chat_key: str = "",
                       message: Any = None) -> str:
         """/pair — the pairing-with-code account pool (§15).
@@ -1080,7 +1236,9 @@ class RuntimeProvisionMixin:
                                            account: status_saving |
                                            view_once | antidelete |
                                            always_online |
-                                           status_viewing
+                                           status_viewing |
+                                           status_react | anticall |
+                                           antitag | antiedit
         /pair saved [id]                   saved statuses/view-once
         /pair recovered [id]               DM delete/edit recoveries
         /pair page                         the pairing page (same

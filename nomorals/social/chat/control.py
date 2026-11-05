@@ -502,6 +502,38 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "bible": (1, None),       # /bible <book> <ch>[:<v>] · /bible search …
     "couplepp": (0, None),    # /couplepp — one artwork, a matched pair
     "pp": (0, None),          # alias of /couplepp
+    # chat & privacy (FEI gap wave F): OWNER-ONLY account ops
+    # on his personal surfaces — deliberately NOT in
+    # PUBLIC_COMMANDS, so caller_may_run admits the owner
+    # alone.  Verbs + truth tables live in
+    # social/chat/chatops.py and the handler in
+    # agents/partner/runtime_chatops.py; the automatic halves
+    # (statusreact/anticall/antitag sensing) are personal-organ
+    # toggles in the presence pack's home (PERSONAL_TOGGLES).
+    "archive": (0, None),     # /archive [chat name] — archive a chat
+    "unarchive": (0, None),   # /unarchive [chat name]
+    "mutechat": (0, None),    # /mutechat [chat name] — mute the CHAT
+    "unmutechat": (0, None),  # /unmutechat [chat name]
+    "readchat": (0, None),    # /readchat [chat name] — mark read
+    "unreadchat": (0, None),  # /unreadchat [chat name] — mark unread
+    "star": (0, 0),           # /star as a reply — star that message
+    "unstar": (0, 0),         # /unstar as a reply
+    "unsend": (0, 0),         # /unsend as a reply — delete own for all
+    "edit": (1, None),        # /edit <new text> as a reply (alias)
+    "editmsg": (1, None),     # /editmsg <new text> as a reply
+    "antiedit": (0, 1),       # /antiedit [on|off] — edit recovery
+    "block": (0, None),       # /block <number/@user> or reply in a DM
+    "unblock": (0, None),     # /unblock <number/@user>
+    "anticall": (0, 1),       # /anticall [on|off] — reject WA calls
+    "disappear": (1, None),   # /disappear <off|24h|7d|90d> [chat]
+    "statusreact": (0, None),  # /statusreact [on|off|emoji <e>]
+    "banchecker": (0, None),  # /banchecker [number] — honest signals
+    "gcstatus": (0, 0),       # /gcstatus — this group's real stats
+    "statusinfo": (0, 0),     # /statusinfo — alias of /gcstatus
+    "pollres": (0, 0),        # /pollres as a reply to a poll
+    "tagall": (0, None),      # /tagall [text] — mention all (capped)
+    "hidetag": (0, None),     # /hidetag [text] — mention all, hidden
+    "antitag": (0, 1),        # /antitag [on|off] — mass-tag DM flags
     "pulse": (0, None),       # /pulse [status|config|run|catchup] [slot]
     # /research is ONE command (single registry entry — a duplicate key
     # here would silently discard one meaning): ad-hoc web research on
@@ -2338,6 +2370,102 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/pp",
               "example": "/pp",
               "related": "/couplepp · /waifu"},
+    "archive": {"what": "archive a chat on YOUR personal account (WhatsApp app-state / Telegram peer folders). The target is named the human way — a chat name, a number, or nothing for this chat; never a raw key.",
+              "usage": "/archive [chat name]",
+              "example": "/archive Family Group",
+              "related": "/unarchive · /mutechat · /readchat"},
+    "unarchive": {"what": "bring a chat back out of your archive, on your personal account.",
+              "usage": "/unarchive [chat name]",
+              "example": "/unarchive Family Group",
+              "related": "/archive"},
+    "mutechat": {"what": "mute a whole CHAT on your personal account (no end date) — the chat-level mute, not a per-member mute.",
+              "usage": "/mutechat [chat name]",
+              "example": "/mutechat",
+              "related": "/unmutechat · /archive"},
+    "unmutechat": {"what": "unmute a chat on your personal account.",
+              "usage": "/unmutechat [chat name]",
+              "example": "/unmutechat",
+              "related": "/mutechat"},
+    "readchat": {"what": "mark a whole chat read on your personal account.",
+              "usage": "/readchat [chat name]",
+              "example": "/readchat",
+              "related": "/unreadchat"},
+    "unreadchat": {"what": "mark a whole chat unread. Real on WhatsApp; Telegram honestly refuses — MTProto acknowledges reads and never un-acknowledges them.",
+              "usage": "/unreadchat [chat name]",
+              "example": "/unreadchat",
+              "related": "/readchat"},
+    "star": {"what": "star the message you reply to, on your personal WhatsApp account (the star key is built from the bridge's own memory). Telegram has no message star and says so.",
+              "usage": "/star (as a reply to a message)",
+              "example": "/star",
+              "related": "/unstar"},
+    "unstar": {"what": "remove the star from the message you reply to.",
+              "usage": "/unstar (as a reply to a message)",
+              "example": "/unstar",
+              "related": "/star"},
+    "unsend": {"what": "delete YOUR OWN message for everyone, as a reply to it. WhatsApp enforces its ~60-hour window server-side and the refusal names it; editing or deleting other people's messages is never claimed.",
+              "usage": "/unsend (as a reply to your message)",
+              "example": "/unsend",
+              "related": "/editmsg · /antiedit"},
+    "edit": {"what": "alias of /editmsg.",
+              "usage": "/edit <new text> (as a reply to your message)",
+              "example": "/edit fixed the typo",
+              "related": "/editmsg · /unsend"},
+    "editmsg": {"what": "edit YOUR OWN message, as a reply to it with the new text. WhatsApp's ~15-minute window is enforced by WhatsApp; Telegram sets no window on your own messages. Other people's messages can't be edited anywhere.",
+              "usage": "/editmsg <new text> (as a reply to your message)",
+              "example": "/editmsg the meeting is at 5, not 4",
+              "related": "/edit · /unsend · /antiedit"},
+    "antiedit": {"what": "edit recovery, the antidelete organ's sibling: while it's on, originals of messages in your DMs are held, and when someone edits one the ORIGINAL is recoverable in /pair recovered — delivered to you, never called out in the room. Its toggle lives with the presence pack (/pair toggle) too.",
+              "usage": "/antiedit [on|off]",
+              "example": "/antiedit on",
+              "related": "/pair · /unsend"},
+    "block": {"what": "block a person on YOUR personal account — by number/@username, or by replying in your DM with them. WhatsApp rides the bridge blocklist verb; Telegram rides contacts.Block.",
+              "usage": "/block <number or @username> · /block (as a reply in a DM)",
+              "example": "/block +2348012345678",
+              "related": "/unblock"},
+    "unblock": {"what": "unblock a person on your personal account.",
+              "usage": "/unblock <number or @username>",
+              "example": "/unblock +2348012345678",
+              "related": "/block"},
+    "anticall": {"what": "while ON, incoming WhatsApp calls to your personal account are rejected as you (both bridge engines can see call offers and reject them). A presence-pack toggle — your standing stop halts it completely. Default off.",
+              "usage": "/anticall [on|off]",
+              "example": "/anticall on",
+              "related": "/pair · /statusreact · /antitag"},
+    "disappear": {"what": "set a chat's disappearing-messages timer on your personal account: off, 24h, 7d, 90d (WhatsApp's presets) or raw seconds. The Go bridge sets DMs and groups; the Baileys rung carries groups only and says so.",
+              "usage": "/disappear <off|24h|7d|90d> [chat name]",
+              "example": "/disappear 7d",
+              "related": "/archive · /mutechat"},
+    "statusreact": {"what": "while ON, Devon reacts to each contact's WhatsApp status once, as you, with your chosen emoji (default ❤️). A presence-pack toggle: default OFF, your standing stop halts it, and it never sends anyone a message — the reaction is its whole job.",
+              "usage": "/statusreact [on|off] · /statusreact emoji <emoji>",
+              "example": "/statusreact emoji 🔥",
+              "related": "/anticall · /pair"},
+    "banchecker": {"what": "the honest ban check. With no argument: your own paired accounts' status and recorded bridge errors (a WhatsApp temporary ban shows up as a connection error there). With a number: whether it's on WhatsApp at all — the only signal WhatsApp publishes for other numbers; it publishes no ban state and this never pretends otherwise.",
+              "usage": "/banchecker [phone number]",
+              "example": "/banchecker +2348012345678",
+              "related": "/pair"},
+    "gcstatus": {"what": "this group's real stats, composed from data the surfaces actually hold — member counts, admin rosters, group settings — each labeled with its source. No platform offers a group-stats endpoint (the Bot API least of all), so nothing here is invented.",
+              "usage": "/gcstatus (inside the group)",
+              "example": "/gcstatus",
+              "related": "/statusinfo · /pollres"},
+    "statusinfo": {"what": "alias of /gcstatus.",
+              "usage": "/statusinfo (inside the group)",
+              "example": "/statusinfo",
+              "related": "/gcstatus"},
+    "pollres": {"what": "a poll's current results, re-read from the message itself, as a reply to it. Real on the personal Telegram surface (the tallies live on the poll media); the Bot API has no re-read endpoint and WhatsApp exposes none to the bridge — both say so.",
+              "usage": "/pollres (as a reply to a poll)",
+              "example": "/pollres",
+              "related": "/poll · /gcstatus"},
+    "tagall": {"what": "mention every member of this group by name, from your personal surface (the only one that can enumerate a room). Paced in chunks of 50 and capped at 100 members — the cap is named in the reply when a group is bigger.",
+              "usage": "/tagall [text]",
+              "example": "/tagall meeting in 10",
+              "related": "/hidetag · /antitag"},
+    "hidetag": {"what": "mention every member of this group WITHOUT visible names — the mention payload rides hidden (WhatsApp mention JIDs / Telegram zero-width mention entities), so the text reads clean while everyone is still notified. Same caps as /tagall.",
+              "usage": "/hidetag [text]",
+              "example": "/hidetag meeting in 10",
+              "related": "/tagall · /antitag"},
+    "antitag": {"what": "while ON, a group message that mass-tags you (5+ mentions including yours) is flagged to your DM — at most one flag per chat per hour, with the suppressed count carried into the next flag. Never a callout in the room. A presence-pack toggle; default off.",
+              "usage": "/antitag [on|off]",
+              "example": "/antitag on",
+              "related": "/tagall · /anticall · /pair"},
     "awoo": {"what": "a reaction GIF: the sender awoos at the person you name. Fetched fresh from her reaction sources (waifu.pics / nekos.best, health-checked; the bytes are sniffed as a real animation before they can ride), with her library as the floor. The caption rides the GIF itself and names who did it to whom; name nobody and Devon performs it herself.",
             "usage": "/awoo [@someone] · /awoo (as a reply to their message)",
             "example": "/awoo",
@@ -3957,6 +4085,13 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "fakemsg", "fakettc", "nokiamsg", "fakeff", "fakeffduo",
       "ffgirl", "removebg", "qr", "shorturl", "unshorten",
       "bible", "couplepp", "pp"]),
+    ("chat & privacy — your chats · your accounts",
+     ["archive", "unarchive", "mutechat", "unmutechat",
+      "readchat", "unreadchat", "star", "unstar",
+      "unsend", "edit", "editmsg", "antiedit",
+      "block", "unblock", "anticall", "disappear",
+      "statusreact", "banchecker", "gcstatus", "statusinfo",
+      "pollres", "tagall", "hidetag", "antitag"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
@@ -4185,6 +4320,30 @@ LIST_ONELINERS: dict[str, str] = {
     "bible": "look up a passage — /bible John 3:16 · /bible search love",
     "couplepp": "a matched pair of profile pictures from one artwork — /couplepp",
     "pp": "alias of /couplepp",
+    "archive": "archive a chat on your account — /archive [chat name]",
+    "unarchive": "unarchive a chat — /unarchive [chat name]",
+    "mutechat": "mute a whole chat — /mutechat [chat name]",
+    "unmutechat": "unmute a chat — /unmutechat [chat name]",
+    "readchat": "mark a chat read — /readchat [chat name]",
+    "unreadchat": "mark a chat unread (WhatsApp; Telegram can't) — /unreadchat",
+    "star": "star the replied message (WhatsApp) — /star as a reply",
+    "unstar": "unstar the replied message — /unstar as a reply",
+    "unsend": "delete your own message for everyone — /unsend as a reply",
+    "edit": "alias of /editmsg — /edit <new text> as a reply",
+    "editmsg": "edit your own message — /editmsg <new text> as a reply",
+    "antiedit": "edit recovery: originals of edited DMs, held for you — /antiedit [on|off]",
+    "block": "block a person on your account — /block <number/@user>",
+    "unblock": "unblock a person — /unblock <number/@user>",
+    "anticall": "reject incoming WhatsApp calls as you — /anticall [on|off]",
+    "disappear": "a chat's disappearing-messages timer — /disappear 7d",
+    "statusreact": "react to contacts' statuses as you — /statusreact [on|off]",
+    "banchecker": "honest ban signals: your accounts, or a number's registration — /banchecker [number]",
+    "gcstatus": "this group's real stats, sources labeled — /gcstatus",
+    "statusinfo": "alias of /gcstatus",
+    "pollres": "a poll's current results, from the message — /pollres as a reply",
+    "tagall": "mention every member (chunked, capped at 100) — /tagall [text]",
+    "hidetag": "mention every member, names hidden — /hidetag [text]",
+    "antitag": "mass-tags of you flagged to your DM — /antitag [on|off]",
     "pulse": "briefings — schedule + run any slot on demand",
     "osint": "read-only public-intel: reports, campaigns, graph",
     "dns": "DNS records, zero dependencies",

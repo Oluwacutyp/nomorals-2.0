@@ -512,9 +512,18 @@ def account_id_for(platform: str, identity: str) -> str:
 #: plus the presence pack).  All default OFF — the owner enables
 #: each surface per account; Devon never starts saving a man's
 #: statuses, holding his account online, or reading his contacts'
-#: statuses as him because a default said so.
+#: statuses as him because a default said so.  The chat & privacy
+#: wave (FEI gap wave F) added four more, same law: status_react
+#: (react to contacts' statuses as him), anticall (reject WhatsApp
+#: calls as him), antitag (DM him when a group message mass-tags
+#: him) and antiedit (edit recovery — the recovery organ's edit
+#: half; it shares the antidelete message cache, so observe gates
+#: read antidelete OR antiedit and delete recovery itself stays
+#: antidelete's).
 PERSONAL_TOGGLES = ("status_saving", "view_once", "antidelete",
-                    "always_online", "status_viewing")
+                    "always_online", "status_viewing",
+                    "status_react", "anticall", "antitag",
+                    "antiedit")
 
 
 def default_toggles() -> dict[str, bool]:
@@ -544,6 +553,11 @@ class AccountRecord:
     #: before this field load unchanged, and older code reading a
     #: newer file filters it out (from_dict keeps known keys).
     last_error: str = ""
+    # ── chat & privacy wave (FEI gap wave F) ──
+    #: The emoji the status_react toggle reacts with, per account
+    #: (the owner's pick, set by /statusreact emoji).  Additive
+    #: with a default, exactly like last_error above.
+    status_react_emoji: str = "❤️"
 
     def toggle(self, name: str) -> bool:
         return bool((self.toggles or {}).get(name, False))

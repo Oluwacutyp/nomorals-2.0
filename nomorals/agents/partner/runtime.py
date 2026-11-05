@@ -47,6 +47,7 @@ from .runtime_search import RuntimeSearchMixin
 from .runtime_wisdom import RuntimeWisdomMixin
 from .runtime_reach import RuntimeReachMixin
 from .runtime_anime import RuntimeAnimeMixin
+from .runtime_chatops import RuntimeChatOpsMixin
 from .runtime_makers import RuntimeMakersMixin
 from .failures import failure_count, recent_failures, record_failure
 from .reply_guard import guard_reply_parts, scrub_narration
@@ -247,6 +248,7 @@ class PartnerRuntime(
     RuntimeReachMixin,
     RuntimeAnimeMixin,
     RuntimeMakersMixin,
+    RuntimeChatOpsMixin,
 ):
     """Runs the partner across all configured platforms, at the same time."""
 
@@ -5760,6 +5762,23 @@ class PartnerRuntime(
             # rungs and renderer, and tests/test_maker_tools.py
             # pins the two equal.
             return self._control_makers(
+                kind, command.tail or "", message)
+        if kind in {
+                "archive", "unarchive", "mutechat", "unmutechat",
+                "readchat", "unreadchat", "star", "unstar",
+                "unsend", "edit", "editmsg", "antiedit",
+                "block", "unblock", "anticall", "disappear",
+                "statusreact", "banchecker", "gcstatus",
+                "statusinfo", "pollres", "tagall", "hidetag",
+                "antitag"}:
+            # The chat & privacy set (FEI gap wave F): the set
+            # is spelled out so the catalog's handler-path scan
+            # sees every kind; social/chat/chatops.py's
+            # CHATOPS_COMMANDS is the same set, and
+            # tests/test_chatops_wavef.py pins the two equal.
+            # Owner-only account ops on his personal surfaces —
+            # none of these kinds is in PUBLIC_COMMANDS.
+            return self._control_chatops(
                 kind, command.tail or "", message)
         if kind == "pulse":
             return self._control_pulse(command.tail or arg)

@@ -506,6 +506,17 @@ func (b *bridge) handleEvent(evt any) {
 		b.onMessage(v)
 	case *events.Receipt:
 		b.onReceipt(v)
+	case *events.CallOffer:
+		// Chat & privacy wave: the anticall surface's feed.
+		// Forwarded, never acted on here — whether a ringing
+		// call gets rejected is the owner's toggle, decided on
+		// the Python side like every other personal-surface act.
+		b.broadcast(map[string]any{
+			"type": "call_offer",
+			"id":   v.CallID,
+			"from": v.From.String(),
+			"ts":   v.Timestamp.UnixMilli(),
+		})
 	}
 }
 

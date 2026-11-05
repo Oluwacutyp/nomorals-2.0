@@ -2323,6 +2323,190 @@ class TelegramAdapter(ChatAdapter):
         """Unpin the pinned message."""
         return self._admin(self._unpin_coro(chat), "unpin")
 
+    # ── chat & privacy ops (FEI gap wave F) ─────────────────────
+    # Owner-invoked verbs on his own account, same _admin pipe
+    # as the group-admin surface above.  Two honest ABSENCES
+    # carry no method at all: Telegram has no mark-as-unread
+    # and no message star — the command layer says so instead
+    # of pretending.
+
+    async def _mark_read_coro(self, chat: ChatRef) -> None:
+        entity = await self._resolve(chat)
+        await self._client.send_read_acknowledge(entity)
+
+    def mark_read(self, chat: ChatRef) -> dict[str, Any]:
+        """Acknowledge everything pending in one chat — it
+        drops out of the unread list (read receipts ride the
+        same MTProto call)."""
+        return self._admin(self._mark_read_coro(chat), "read state")
+
+    async def _edit_coro(self, chat: ChatRef, message_id: str,
+                         text: str) -> None:
+        entity = await self._resolve(chat)
+        await self._client.edit_message(entity, int(message_id),
+                                        str(text or ""))
+
+    def edit_message(self, chat: ChatRef, message_id: str,
+                     text: str) -> dict[str, Any]:
+        """Edit one message — MTProto edits the account's OWN
+        messages; Telethon raises on anyone else's and that
+        refusal surfaces verbatim.  Telegram sets no age window
+        on editing own messages."""
+        if not str(message_id).strip().lstrip("-").isdigit():
+            return {"ok": False,
+                    "error": "message_id must be the numeric "
+                             "Telegram message id"}
+        return self._admin(
+            self._edit_coro(chat, message_id, text), "edit_message")
+
+    async def _revoke_coro(self, chat: ChatRef,
+                           message_id: str) -> None:
+        entity = await self._resolve(chat)
+        await self._client.delete_messages(
+            entity, [int(message_id)], revoke=True)
+
+    def revoke_message(self, chat: ChatRef,
+                       message_id: str) -> dict[str, Any]:
+        """Delete one message FOR EVERYONE (revoke=True): the
+        account's own messages anywhere; anyone else's only
+        where the account holds the rights — MTProto decides
+        and its refusal surfaces."""
+        if not str(message_id).strip().lstrip("-").isdigit():
+            return {"ok": False,
+                    "error": "message_id must be the numeric "
+                             "Telegram message id"}
+        return self._admin(
+            self._revoke_coro(chat, message_id), "revoke_message")
+
+    async def _archive_coro(self, chat: ChatRef,
+                            archived: bool) -> None:
+        from telethon.tl import functions
+        from telethon.tl.types import InputFolderPeer
+        entity = await self._resolve(chat)
+        folder = 1 if archived else 0
+        await self._client(functions.folders.EditPeerFoldersRequest(
+            id=folder,
+            folder_peers=[InputFolderPeer(peer=entity,
+                                          folder_id=folder)]))
+
+    def archive_chat(self, chat: ChatRef,
+                     archived: bool) -> dict[str, Any]:
+        """Move a chat into (folder 1) or out of (folder 0) the
+        archive — MTProto peer folders."""
+        return self._admin(
+            self._archive_coro(chat, archived), "archive state")
+
+    async def _mute_coro(self, chat: ChatRef, muted: bool) -> None:
+        from telethon.tl import functions
+        from telethon.tl.types import InputNotifyPeer, InputPeerNotifySettings
+        entity = await self._resolve(chat)
+        await self._client(
+            functions.account.UpdateNotifySettingsRequest(
+                peer=InputNotifyPeer(entity),
+                settings=InputPeerNotifySettings(
+                    mute_until=2147483647 if muted else 0)))
+
+    def mute_chat(self, chat: ChatRef, *,
+                  muted: bool) -> dict[str, Any]:
+        """Chat-level mute via the account's notify settings:
+        mute_until at int32 max is Telegram's "forever"; 0
+        unmutes.  (Per-MEMBER mute is the group-admin verb —
+        a different thing, deliberately not conflated.)"""
+        return self._admin(self._mute_coro(chat, muted),
+                           "mute state")
+
+    async def _block_coro(self, target: str, action: str) -> None:
+        from telethon.tl import functions
+        entity = await self._client.get_input_entity(str(target))
+        if action == "unblock":
+            await self._client(
+                functions.contacts.UnblockRequest(id=entity))
+        else:
+            await self._client(
+                functions.contacts.BlockRequest(id=entity))
+
+    def block_user(self, target: str,
+                   action: str) -> dict[str, Any]:
+        """Block/unblock a user on this account.  ``target`` is
+        anything the account can resolve — @username, numeric
+        id, or a contact's phone."""
+        return self._admin(self._block_coro(target, action),
+                           "block state")
+
+    async def _disappear_coro(self, chat: ChatRef,
+                              seconds: int) -> None:
+        from telethon.tl import functions
+        fn = getattr(functions.messages, "SetHistoryTTLRequest",
+                     None)
+        if fn is None:
+            raise RuntimeError(
+                "this Telethon build has no SetHistoryTTLRequest "
+                "— disappearing timers are unavailable on this "
+                "surface")
+        entity = await self._resolve(chat)
+        await self._client(fn(peer=entity, period=int(seconds)))
+
+    def set_disappearing(self, chat: ChatRef,
+                         seconds: int) -> dict[str, Any]:
+        """Set one chat's message TTL where the linked Telethon
+        build carries messages.SetHistoryTTL — an honest
+        absence where it doesn't."""
+        return self._admin(
+            self._disappear_coro(chat, seconds),
+            "disappearing timer")
+
+    async def _tagged_coro(self, chat: ChatRef, text: str,
+                           members: list[tuple[str, str]],
+                           hidden: bool,
+                           holder: dict[str, Any]) -> None:
+        from telethon.tl.types import InputMessageEntityMentionName
+
+        def u16(s: str) -> int:
+            return len(s.encode("utf-16-le")) // 2
+
+        entity = await self._resolve(chat)
+        entities: list[Any] = []
+        parts: list[str] = []
+        offset = 0
+        for uid, name in members:
+            try:
+                user_id = int(str(uid))
+            except (TypeError, ValueError):
+                continue
+            label = "​" if hidden else f"@{name or uid}"
+            if parts:
+                parts.append(" ")
+                offset += 1
+            parts.append(label)
+            entities.append(InputMessageEntityMentionName(
+                offset=offset, length=u16(label), user_id=user_id))
+            offset += u16(label)
+        if not entities:
+            raise RuntimeError(
+                "no member ids this surface can mention")
+        body = "".join(parts)
+        if text:
+            body = f"{body}\n{text}"
+        await self._client.send_message(
+            entity, body, formatting_entities=entities)
+        holder["mentioned"] = len(entities)
+
+    def send_tagged(self, chat: ChatRef, text: str,
+                    members: list[tuple[str, str]], *,
+                    hidden: bool) -> dict[str, Any]:
+        """Send a message mentioning members by id — /tagall
+        (names visible) or /hidetag (the mention entities ride
+        on zero-width characters: the text reads clean while
+        every member is still notified).  MTProto mention-name
+        entities resolve to the user even with no @username."""
+        holder: dict[str, Any] = {}
+        verdict = self._admin(
+            self._tagged_coro(chat, text, members, hidden, holder),
+            "tagged send")
+        if verdict.get("ok"):
+            verdict["mentioned"] = int(holder.get("mentioned") or 0)
+        return verdict
+
     async def _ban_coro(self, chat: ChatRef, user_id: str) -> None:
         from telethon.tl import functions
         from telethon.tl.types import ChatBannedRights

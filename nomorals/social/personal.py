@@ -70,6 +70,11 @@ DM_CACHE_CHATS = 200           # conversations kept per account
 SAVED_PER_ACCOUNT = 500        # saved status/view-once items
 SAVED_MAX_BYTES = 512 * 1024 * 1024
 JOURNAL_TAIL = 500             # entries returned by one listing
+#: Mass-tag DM flags (wave F): at most one delivered flag per
+#: (account, chat) per hour — a tagall-heavy room journals one
+#: flag an hour with the suppressed count carried into it, not
+#: a DM per message.
+MASS_TAG_FLAG_COOLDOWN = 3600.0
 
 
 class PersonalStoreError(RuntimeError):
@@ -340,6 +345,12 @@ class PersonalSurfaces:
                  = None,
                  story_viewer: Callable[[AccountRecord, str, int],
                                         bool] | None = None,
+                 status_reactor: Callable[[AccountRecord,
+                                           dict[str, Any]], bool] | None
+                 = None,
+                 call_rejector: Callable[[AccountRecord,
+                                          dict[str, Any]], bool] | None
+                 = None,
                  clock: Callable[[], float] = time.time) -> None:
         self.registry = registry
         self.vault = vault
@@ -351,11 +362,25 @@ class PersonalSurfaces:
         self.presence_setter = presence_setter
         self.status_viewer = status_viewer
         self.story_viewer = story_viewer
+        #: The chat & privacy wave's acting seams, same contract:
+        #: status_reactor places one reaction on a contact's status
+        #: post as the owner; call_rejector rejects one incoming
+        #: WhatsApp call as the owner.  Both are ACTIONS on his
+        #: account, so their observe paths additionally honor the
+        #: owner's sticky stop — a stopped platform never acts.
+        self.status_reactor = status_reactor
+        self.call_rejector = call_rejector
         self._clock = clock
         self._seen_status: set[tuple[str, str]] = set()
         self._seen_stories: set[tuple[str, str]] = set()
         self._viewed_status: set[tuple[str, str]] = set()
         self._viewed_stories: set[tuple[str, str]] = set()
+        self._reacted_status: set[tuple[str, str]] = set()
+        #: Mass-tag DM flags: (account, chat_key) → last delivered
+        #: flag ts, and the count suppressed since (carried into
+        #: the next delivered flag so he sees the volume, once).
+        self._mass_tag_last: dict[tuple[str, str], float] = {}
+        self._mass_tag_suppressed: dict[tuple[str, str], int] = {}
         #: account_id -> {"asserted": bool, "state": str} — the
         #: presence truth the last cycle_presence computed.
         self._presence: dict[str, dict[str, Any]] = {}
@@ -429,7 +454,12 @@ class PersonalSurfaces:
         out: list[dict[str, Any]] = []
         media = media or []
         ts = float(ts or self._clock())
-        if rec.toggle("antidelete") and message_id:
+        # The cache feeds BOTH recovery halves: delete recovery is
+        # antidelete's, edit recovery is antiedit's — either toggle
+        # on means originals are worth holding.  (Delete recovery
+        # itself still gates on antidelete alone, in observe_delete.)
+        if (rec.toggle("antidelete") or rec.toggle("antiedit")) \
+                and message_id:
             self.vault.note_message(rec.id, chat_key, {
                 "message_id": message_id, "sender_id": sender_id,
                 "sender_name": sender_name, "text": text,
@@ -521,9 +551,14 @@ class PersonalSurfaces:
         """Counterpart edited a DM message.  When the cached
         original differs, the pair (original, new) is journaled and
         the cache moves to the new text — a second edit compares
-        against the newest, never a ghost."""
+        against the newest, never a ghost.  Gated on antidelete OR
+        antiedit: edit recovery historically rode the antidelete
+        toggle, and antiedit (wave F) is its own switch over the
+        same organ — either one on keeps it alive, both off is
+        silence, exactly like the cache gate in observe_message."""
         rec = self.resolve_event_account(platform, account_id)
-        if not rec.toggle("antidelete") or not message_id:
+        if not (rec.toggle("antidelete") or rec.toggle("antiedit")) \
+                or not message_id:
             return None
         ts = float(ts or self._clock())
         cached = self.vault.get_message(rec.id, chat_key,
@@ -566,7 +601,12 @@ class PersonalSurfaces:
         status-saving toggle is on; the same post never saves
         twice.  Marked viewed as the owner when the status-viewing
         toggle is on — independently of saving, at most once per
-        post per process."""
+        post per process.  Reacted to as the owner when the
+        status-react toggle is on (wave F): one reaction with the
+        account's configured emoji, at most once per post per
+        process, journaled — and never while an owner stop order
+        stands for the platform, because a reaction is an ACTION
+        on his account, not an observation."""
         rec = self.resolve_event_account(platform, account_id)
         out: list[dict[str, Any]] = []
         ts = float(ts or self._clock())
@@ -583,6 +623,30 @@ class PersonalSurfaces:
                     viewed = False     # records its own failures;
                 if viewed:             # a miss just stays unviewed
                     self._viewed_status.add(vkey)
+        if source_id and rec.toggle("status_react") \
+                and self.status_reactor is not None \
+                and not self.registry.owner_stopped(platform):
+            rkey = (rec.id, str(source_id))
+            if rkey not in self._reacted_status:
+                emoji = str(rec.status_react_emoji or "❤️")
+                try:
+                    reacted = bool(self.status_reactor(rec, {
+                        "poster_id": poster_id,
+                        "poster_name": poster_name,
+                        "source_id": str(source_id),
+                        "emoji": emoji, "ts": ts}))
+                except Exception:  # noqa: BLE001 - the wired seam
+                    reacted = False    # records its own failures;
+                if reacted:            # a miss just stays unreacted
+                    self._reacted_status.add(rkey)
+                    _append_jsonl(self.vault.journal_path, {
+                        "ts": ts, "kind": "status_react",
+                        "account": rec.id, "platform": platform,
+                        "counterpart_id": poster_id,
+                        "poster_name": poster_name,
+                        "media_kind": "", "source_id": str(source_id),
+                        "path": "", "bytes": 0,
+                        "note": f"reacted {emoji}"})
         if not rec.toggle("status_saving"):
             return out
         dedupe_key = (rec.id, str(source_id or ""))
@@ -688,6 +752,107 @@ class PersonalSurfaces:
                     for sid in sids:
                         self._viewed_stories.add((rec.id, sid))
         return out
+
+    # ── calls & mass tags (chat & privacy wave) ─────────────────
+    def observe_call(self, platform: str, *, from_id: str = "",
+                     from_name: str = "", call_id: str = "",
+                     account_id: str = "",
+                     ts: float = 0.0) -> dict[str, Any] | None:
+        """One incoming call offer on the account (WhatsApp — the
+        only surface whose bridges forward call events).  When
+        the anticall toggle is on the call is rejected as the
+        owner through the wired seam and the outcome is journaled
+        either way — a rejection is an ACTION on his account, so
+        an owner stop order standing for the platform suppresses
+        it completely (no seam call, no journal: the surface is
+        stopped, not performing).  Returns the journal entry when
+        a rejection was attempted, else None."""
+        rec = self.resolve_event_account(platform, account_id)
+        if not rec.toggle("anticall"):
+            return None
+        if self.registry.owner_stopped(platform):
+            return None
+        ts = float(ts or self._clock())
+        rejected = False
+        if self.call_rejector is not None and call_id:
+            try:
+                rejected = bool(self.call_rejector(rec, {
+                    "from_id": from_id, "from_name": from_name,
+                    "call_id": str(call_id), "ts": ts}))
+            except Exception:  # noqa: BLE001 - the wired seam
+                rejected = False       # records its own failures
+        entry = {
+            "ts": ts, "kind": "call_offer", "account": rec.id,
+            "platform": platform, "counterpart_id": from_id,
+            "poster_name": from_name, "media_kind": "",
+            "source_id": str(call_id), "path": "", "bytes": 0,
+            "note": ("rejected (anticall on)" if rejected else
+                     "anticall on, but the rejection did not land "
+                     "— no reject verb wired or it refused"),
+        }
+        _append_jsonl(self.vault.journal_path, entry)
+        return entry
+
+    def observe_mass_tag(self, platform: str, *, chat_key: str,
+                         sender_id: str = "", sender_name: str = "",
+                         mention_count: int = 0,
+                         account_id: str = "",
+                         ts: float = 0.0) -> dict[str, Any] | None:
+        """One group message that mass-tagged the owner (the
+        caller counted the mention payload and confirmed his own
+        mention is in it).  When the antitag toggle is on, the
+        detection is journaled and — at most once per chat per
+        cooldown — an entry marked ``deliver`` comes back for the
+        runtime to DM him; repeats inside the cooldown only bump
+        the suppressed count the next delivered flag carries.
+        A standing owner stop suppresses delivery (the flag is a
+        send as him-adjacent surface traffic) but the journal
+        still records the detection."""
+        rec = self.resolve_event_account(platform, account_id)
+        if not rec.toggle("antitag"):
+            return None
+        ts = float(ts or self._clock())
+        key = (rec.id, str(chat_key))
+        last = self._mass_tag_last.get(key)
+        stopped = self.registry.owner_stopped(platform)
+        deliver = not stopped and (
+            last is None
+            or (ts - float(last)) >= MASS_TAG_FLAG_COOLDOWN)
+        suppressed = int(self._mass_tag_suppressed.get(key) or 0)
+        entry = {
+            "ts": ts, "kind": "mass_tag", "account": rec.id,
+            "platform": platform, "chat_key": str(chat_key),
+            "counterpart_id": sender_id,
+            "poster_name": sender_name,
+            "mention_count": int(mention_count),
+            "deliver": bool(deliver),
+            "suppressed_before": (0 if deliver else suppressed),
+            "note": ("owner mass-tagged in a group message"
+                     + (" — flag suppressed by owner stop"
+                        if stopped and not deliver else "")),
+        }
+        _append_jsonl(self.vault.journal_path, entry)
+        if deliver:
+            self._mass_tag_last[key] = ts
+            self._mass_tag_suppressed[key] = 0
+            entry["suppressed_before"] = suppressed
+            return entry
+        self._mass_tag_suppressed[key] = suppressed + 1
+        return None
+
+    def set_status_react_emoji(self, account_id: str,
+                               emoji: str) -> AccountRecord:
+        """Set one account's status-react emoji (the /statusreact
+        emoji surface).  Unknown account / empty emoji → ValueError
+        with the plain reason; the caller turns it into its line."""
+        emoji = str(emoji or "").strip()
+        if not emoji:
+            raise ValueError("the emoji is empty")
+        rec = self.registry.get(str(account_id or ""))
+        if rec is None:
+            raise ValueError(f"no paired account {account_id!r}")
+        rec.status_react_emoji = emoji
+        return self.registry.upsert(rec)
 
     # ── presence (always online) ────────────────────────────────
     def presence_state(self, account_id: str) -> str:

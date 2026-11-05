@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/appstate"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -52,6 +53,14 @@ func (r request) num(key string, def int) int {
 func (r request) boolean(key string) bool {
 	v, _ := r[key].(bool)
 	return v
+}
+
+// has reports whether the key is present at all — chat_modify's
+// fields are tri-state (absent = leave it, present = set it),
+// which a zero-value read cannot express.
+func (r request) has(key string) bool {
+	_, ok := r[key]
+	return ok
 }
 
 // ── TCP client serving + command dispatch ─────────────────────────
@@ -97,6 +106,20 @@ func (b *bridge) handleCommand(cc *clientConn, req request) {
 		b.cmdPresence(ctx, cc, id, req)
 	case "status_view":
 		b.cmdStatusView(ctx, cc, id, req)
+	case "status_react":
+		b.cmdStatusReact(ctx, cc, id, req)
+	case "chat_modify":
+		b.cmdChatModify(ctx, cc, id, req)
+	case "message_star":
+		b.cmdMessageStar(ctx, cc, id, req)
+	case "reject_call":
+		b.cmdRejectCall(ctx, cc, id, req)
+	case "blocklist":
+		b.cmdBlocklist(ctx, cc, id, req)
+	case "chat_disappear":
+		b.cmdChatDisappear(ctx, cc, id, req)
+	case "check_number":
+		b.cmdCheckNumber(ctx, cc, id, req)
 	case "chats":
 		b.cmdChats(cc, id, req)
 	case "status":
@@ -393,15 +416,16 @@ func (b *bridge) onMessage(v *events.Message) {
 		media = []map[string]any{m}
 	}
 	mentioned := false
+	mentionList := []string{}
 	if ci := contextInfoOf(v.Message); ci != nil {
 		for _, mj := range ci.GetMentionedJID() {
+			mentionList = append(mentionList, mj)
 			parsed, err := types.ParseJID(mj)
 			if err != nil {
 				continue
 			}
 			if b.isMe(parsed.ToNonAD()) {
 				mentioned = true
-				break
 			}
 		}
 	}
@@ -418,6 +442,10 @@ func (b *bridge) onMessage(v *events.Message) {
 		"media":     media,
 		"reply_to":  replyTo,
 		"mentioned": mentioned,
+		// The full mention payload (chat & privacy wave — the
+		// antitag sensor counts it; the Python envelope already
+		// reads a "mentions" list when a bridge sends one).
+		"mentions":  mentionList,
 		"view_once": v.IsViewOnce,
 		"ts":        tsMs,
 	}
@@ -693,7 +721,31 @@ func (b *bridge) cmdSend(ctx context.Context, cc *clientConn, id string, req req
 		return
 	}
 
-	mid, err := send(b.textMessage(text, quote))
+	// Mentions (chat & privacy wave — /tagall): JID strings the
+	// text must notify without necessarily naming.  They ride
+	// the extended text's context info, merged over any quote.
+	var mentionJIDs []string
+	if raw, ok := req["mentions"].([]any); ok {
+		for _, m := range raw {
+			if s, ok := m.(string); ok && strings.TrimSpace(s) != "" {
+				mentionJIDs = append(mentionJIDs, s)
+			}
+		}
+	}
+	var plain *waE2E.Message
+	if len(mentionJIDs) > 0 {
+		ci := &waE2E.ContextInfo{}
+		if quote != nil {
+			ci = quote
+		}
+		ci.MentionedJID = mentionJIDs
+		plain = &waE2E.Message{ExtendedTextMessage:
+			&waE2E.ExtendedTextMessage{
+				Text: proto.String(text), ContextInfo: ci}}
+	} else {
+		plain = b.textMessage(text, quote)
+	}
+	mid, err := send(plain)
 	if err != nil {
 		b.fail(cc, id, err)
 		return
@@ -917,6 +969,7 @@ func (b *bridge) cmdHistory(cc *clientConn, id string, req request) {
 			ts = time.Now().UnixMilli()
 		}
 		msgs = append(msgs, map[string]any{
+			"id": string(m.id),
 			"incoming": m.incoming, "text": m.text, "sender": m.sender,
 			"media": media, "reply_to": m.replyTo, "ts": ts,
 		})
@@ -984,6 +1037,248 @@ func (b *bridge) cmdStatusView(ctx context.Context, cc *clientConn, id string, r
 		return
 	}
 	b.reply(cc, id, map[string]any{"ok": true})
+}
+
+// ── chat & privacy wave (FEI gap wave F) ──────────────────────
+// Owner-invoked ops on his own account.  Each maps to the
+// whatsmeow verb that actually exists for it; a refusal comes
+// back as the send/app-state error, verbatim.
+
+// lastRemembered returns the newest remembered message in a
+// chat (zero values when the bridge has seen none) — archive /
+// mark-read app-state patches carry the last message's range
+// when it's known and accept zero values when it isn't.
+func (b *bridge) lastRemembered(chat types.JID) (time.Time, bool) {
+	b.memMu.Lock()
+	defer b.memMu.Unlock()
+	arr := b.recent[chat.String()]
+	if len(arr) == 0 {
+		return time.Time{}, false
+	}
+	last := arr[len(arr)-1]
+	if last.tsMs <= 0 {
+		return time.Time{}, false
+	}
+	return time.UnixMilli(last.tsMs), true
+}
+
+// cmdChatModify applies chat-state changes — archive, pin,
+// mute, mark read/unread — as whatsmeow app-state patches (the
+// same patches the phone's own chat-list actions produce).
+// Fields are tri-state: only the keys present are applied.
+// mute_seconds: -1 = mute with no end (far future), 0 = unmute,
+// >0 = mute for that many seconds.
+func (b *bridge) cmdChatModify(ctx context.Context, cc *clientConn, id string, req request) {
+	chat, err := parseJID(req.str("chat"))
+	if err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	var patches []appstate.PatchInfo
+	if req.has("archive") {
+		lastTs, _ := b.lastRemembered(chat)
+		patches = append(patches, appstate.BuildArchive(
+			chat, req.boolean("archive"), lastTs, nil))
+	}
+	if req.has("pin") {
+		patches = append(patches, appstate.BuildPin(
+			chat, req.boolean("pin")))
+	}
+	if req.has("mute_seconds") {
+		secs := req.num("mute_seconds", 0)
+		switch {
+		case secs == 0:
+			patches = append(patches, appstate.BuildMute(
+				chat, false, 0))
+		case secs < 0:
+			end := time.Now().AddDate(10, 0, 0).Unix()
+			patches = append(patches, appstate.BuildMuteAbs(
+				chat, true, &end))
+		default:
+			patches = append(patches, appstate.BuildMute(
+				chat, true, time.Duration(secs)*time.Second))
+		}
+	}
+	if req.has("read") {
+		lastTs, _ := b.lastRemembered(chat)
+		patches = append(patches, appstate.BuildMarkChatAsRead(
+			chat, req.boolean("read"), lastTs, nil))
+	}
+	if len(patches) == 0 {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "chat_modify needs at least one of: " +
+				"archive, pin, mute_seconds, read"})
+		return
+	}
+	for _, patch := range patches {
+		if err := b.cli.SendAppState(ctx, patch); err != nil {
+			b.fail(cc, id, err)
+			return
+		}
+	}
+	b.reply(cc, id, map[string]any{"ok": true})
+}
+
+// cmdMessageStar stars/unstars one message: an app-state patch
+// whose key needs the message's author, resolved from the
+// bridge's own memory like message_pin — a message it never
+// saw is an honest refusal, never a guessed key.
+func (b *bridge) cmdMessageStar(ctx context.Context, cc *clientConn, id string, req request) {
+	chat, err := parseJID(req.str("chat"))
+	if err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	mid := strings.TrimSpace(req.str("message_id"))
+	if mid == "" {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "message_star needs a message_id"})
+		return
+	}
+	b.memMu.Lock()
+	var target *remembered
+	for _, rec := range b.recent[chat.String()] {
+		if rec != nil && string(rec.id) == mid {
+			target = rec
+			break
+		}
+	}
+	b.memMu.Unlock()
+	if target == nil {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "message not in bridge memory — its author " +
+				"is unknown, so its star key cannot be built"})
+		return
+	}
+	patch := appstate.BuildStar(chat, target.senderJID,
+		types.MessageID(mid), !target.incoming,
+		req.boolean("star"))
+	if err := b.cli.SendAppState(ctx, patch); err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	b.reply(cc, id, map[string]any{"ok": true})
+}
+
+// cmdStatusReact reacts to one contact status post as the
+// owner (the status_react toggle's verb): a reaction message
+// addressed to status@broadcast keyed on the post, the same
+// construction the phone sends.
+func (b *bridge) cmdStatusReact(ctx context.Context, cc *clientConn, id string, req request) {
+	msgID := strings.TrimSpace(req.str("id"))
+	poster, err := parseJID(req.str("from"))
+	emoji := strings.TrimSpace(req.str("emoji"))
+	if err != nil || msgID == "" || emoji == "" {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "status_react needs the status message id, " +
+				"the poster's jid and an emoji"})
+		return
+	}
+	msg := b.cli.BuildReaction(types.StatusBroadcastJID, poster,
+		types.MessageID(msgID), emoji)
+	if _, err := b.cli.SendMessage(ctx, types.StatusBroadcastJID,
+		msg); err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	b.reply(cc, id, map[string]any{"ok": true})
+}
+
+// cmdRejectCall rejects one ringing call (the anticall toggle's
+// verb): whatsmeow RejectCall against the offer's id + caller.
+func (b *bridge) cmdRejectCall(ctx context.Context, cc *clientConn, id string, req request) {
+	callID := strings.TrimSpace(req.str("id"))
+	from, err := parseJID(req.str("from"))
+	if err != nil || callID == "" {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "reject_call needs the call id and the " +
+				"caller's jid"})
+		return
+	}
+	if err := b.cli.RejectCall(ctx, from, callID); err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	b.reply(cc, id, map[string]any{"ok": true})
+}
+
+// cmdBlocklist blocks/unblocks one user: whatsmeow's blocklist
+// update, which needs the current list hash — fetched fresh
+// each time so a stale hash never eats the refusal silently.
+func (b *bridge) cmdBlocklist(ctx context.Context, cc *clientConn, id string, req request) {
+	target, err := parseJID(req.str("jid"))
+	if err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	action := events.BlocklistChangeAction(req.str("action"))
+	if action != events.BlocklistChangeActionBlock &&
+		action != events.BlocklistChangeActionUnblock {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "blocklist action must be block or unblock"})
+		return
+	}
+	bl, err := b.cli.GetBlocklist(ctx, "")
+	if err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	if _, err := b.cli.UpdateBlocklist(ctx, target, action,
+		bl.DHash); err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	b.reply(cc, id, map[string]any{"ok": true})
+}
+
+// cmdChatDisappear sets a chat's disappearing-messages timer:
+// whatsmeow SetDisappearingTimer (a protocol setting message);
+// 0 turns it off.  Works for DMs and groups alike.
+func (b *bridge) cmdChatDisappear(ctx context.Context, cc *clientConn, id string, req request) {
+	chat, err := parseJID(req.str("chat"))
+	if err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	secs := req.num("seconds", -1)
+	if secs < 0 {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "chat_disappear needs seconds >= 0 " +
+				"(0 turns disappearing messages off)"})
+		return
+	}
+	if err := b.cli.SetDisappearingTimer(ctx, chat,
+		time.Duration(secs)*time.Second, time.Now()); err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	b.reply(cc, id, map[string]any{"ok": true})
+}
+
+// cmdCheckNumber answers the one registration question WhatsApp
+// publishes (the banchecker's number signal): is this phone
+// number on WhatsApp, and under which JID.  Nothing about bans
+// is returned because WhatsApp publishes nothing about bans —
+// the Python side says exactly that.
+func (b *bridge) cmdCheckNumber(ctx context.Context, cc *clientConn, id string, req request) {
+	phone := strings.TrimSpace(req.str("phone"))
+	if phone == "" {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "check_number needs a phone number"})
+		return
+	}
+	resp, err := b.cli.IsOnWhatsApp(ctx, []string{phone})
+	if err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	if len(resp) == 0 {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "WhatsApp returned no answer for that number"})
+		return
+	}
+	b.reply(cc, id, map[string]any{"ok": true,
+		"exists": resp[0].IsIn, "jid": resp[0].JID.String()})
 }
 
 func (b *bridge) cmdChats(cc *clientConn, id string, req request) {
