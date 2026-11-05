@@ -22,7 +22,13 @@ from ...media_edit.videos import (
     video_probe,
 )
 from .audio import AudioLayer, AudioMix, mix_layers
-from .effects import _ctx, _effect_filter, EFFECTS
+from .effects import (
+    DEFERRED_EFFECTS,
+    _ctx,
+    _effect_filter,
+    EFFECTS,
+    effect_rung,
+)
 from .frametime import FrameGrid
 from .keyframes import (
     KeyframeTrack,
@@ -240,23 +246,105 @@ def _perf_for(profile: str | None) -> dict[str, Any]:
 # chain machinery — apply effects (optionally windowed) to a labelled stream
 # ---------------------------------------------------------------------------
 
+def _fx_record(fx: Effect, *, kind: str = "builder") -> dict[str, Any]:
+    """One honesty record for one effect application (Wave 5).
+
+    Names the producing rung, the window, the record's source (the
+    clip's own effect list, a Document look_lock, a keyframe track)
+    and — for a regional effect — the mask rung that anchored it.
+    """
+    params = fx.params or {}
+    rec: dict[str, Any] = {
+        "effect": fx.name, "rung": effect_rung(fx.name), "kind": kind,
+        "window": ([float(fx.at[0]), float(fx.at[1])] if fx.at else None),
+        "source": str(params.get("_source", "clip"))}
+    if params.get("_mask_png"):
+        rec["mask"] = {
+            "rung": str(params.get("_mask_rung", "")),
+            "detail": str(params.get("_mask_detail", "")),
+            "anchor": "source frame at the clip window start "
+                      "(masks do not track motion)"}
+    return rec
+
+
+def _chain_masked(parts: list[str], cur: str, filt: str,
+                  mask_label: str, tag: str) -> str:
+    """Apply ``filt`` to ``cur`` through a mask stream; return label.
+
+    The effected branch takes (its own alpha × the mask) as its
+    alpha and composites over the untouched base — the overlay
+    machinery the composite already trusts, in-chain. NOT
+    maskedmerge: on this ffmpeg maskedmerge blends per-plane against
+    the mask's constant chroma planes, washing the unmasked region
+    with the effected stream (proven on fixtures, see PARITY.md).
+    """
+    parts.append(f"[{cur}]split=2[{tag}mb][{tag}mf]")
+    parts.append(f"[{tag}mf]{filt},format=yuva420p[{tag}md]")
+    parts.append(f"[{tag}md]split=2[{tag}mc][{tag}mx]")
+    parts.append(f"[{tag}mx]alphaextract[{tag}ea]")
+    parts.append(f"[{tag}ea][{mask_label}]blend=all_mode=multiply"
+                 f"[{tag}am]")
+    parts.append(f"[{tag}mc][{tag}am]alphamerge[{tag}ma]")
+    # the composite lands exactly on the requested tag — the chain
+    # contract every caller (plain, windowed, segment) relies on.
+    parts.append(f"[{tag}mb][{tag}ma]overlay=0:0[{tag}]")
+    return tag
+
+
 def _chain_effect(parts: list[str], cur: str, fx: Effect,
-                  ctx: dict[str, Any], tag: str) -> str:
+                  ctx: dict[str, Any], tag: str,
+                  rec: list[dict[str, Any]] | None = None) -> str:
     """Append filters applying ``fx`` to stream ``cur``; return new label.
 
     Windowed effects (``fx.at``) split the stream into head/window/tail,
     filter the window, and concat — works for every filter, including the
     ones without timeline support (noise, vignette, ...).
+
+    A regional effect (the renderer resolved its ``mask`` param to
+    ``_mask_png``) applies through the mask composite
+    (:func:`_chain_masked`) — plain or windowed alike. ``rec``, when
+    given, collects the per-effect honesty record.
     """
+    params = fx.params or {}
+    masked = bool(params.get("_mask_png"))
     if fx.name == "velocity_ramp":
-        return _chain_velocity(parts, cur, fx, ctx, tag)
-    if fx.name == "rgb_split" and (fx.params or {}).get("animate"):
-        return _chain_rgb_animated(parts, cur, fx, ctx, tag)
+        if masked:
+            raise MediaEditError(
+                "velocity_ramp is structural (it rewrites the chain "
+                "as trim/setpts pieces) — a regional velocity ramp "
+                "has no rung; mask a picture effect instead")
+        out = _chain_velocity(parts, cur, fx, ctx, tag)
+        if rec is not None:
+            rec.append(_fx_record(fx, kind="structural"))
+        return out
+    if fx.name == "rgb_split" and params.get("animate"):
+        out = _chain_rgb_animated(parts, cur, fx, ctx, tag)
+        if rec is not None:
+            rec.append(_fx_record(fx, kind="animated-discretized"))
+        return out
+    mask_label: str | None = None
+    if masked:
+        mask_label = (ctx.get("mask_labels") or {}).get(
+            params["_mask_png"])
+        if mask_label is None:
+            raise MediaEditError(
+                f"effect {fx.name!r} carries a resolved mask but no "
+                f"mask stream is registered in this render — masks "
+                f"are resolved by the renderer before chaining")
+
+    def apply(src: str, out_tag: str) -> str:
+        if mask_label is None:
+            parts.append(f"[{src}]{filt}[{out_tag}]")
+            return out_tag
+        return _chain_masked(parts, src, filt, mask_label, out_tag)
+
     filt = _effect_filter(fx.name, fx.params, ctx)
     at = fx.at
     if not at:
-        parts.append(f"[{cur}]{filt}[{tag}]")
-        return tag
+        out = apply(cur, tag)
+        if rec is not None:
+            rec.append(_fx_record(fx))
+        return out
     a, b = float(at[0]), float(at[1])
     dur = ctx["duration"]
     a, b = max(0.0, a), min(dur, b)
@@ -271,19 +359,28 @@ def _chain_effect(parts: list[str], cur: str, fx: Effect,
     if b < dur - eps:
         segs.append((f"start={b:.4f}", f"{tag}p2"))
     if len(segs) == 1:
-        parts.append(f"[{cur}]trim={segs[0][0]},setpts=PTS-STARTPTS,"
-                     f"{filt}[{tag}]")
-        return tag
+        parts.append(f"[{cur}]trim={segs[0][0]},setpts=PTS-STARTPTS"
+                     f"[{tag}w]")
+        out = apply(f"{tag}w", tag)
+        if rec is not None:
+            rec.append(_fx_record(fx))
+        return out
     outs = "".join(f"[{tag}s{i}]" for i in range(len(segs)))
     parts.append(f"[{cur}]split={len(segs)}{outs}")
     srcs = [f"{tag}s{i}" for i in range(len(segs))]
     concat_in = ""
     for (trim_args, ptag), s in zip(segs, srcs):
-        extra = f",{filt}" if ptag == f"{tag}p1" else ""
-        parts.append(f"[{s}]trim={trim_args},setpts=PTS-STARTPTS{extra}"
-                     f"[{ptag}]")
+        if ptag == f"{tag}p1":
+            parts.append(f"[{s}]trim={trim_args},setpts=PTS-STARTPTS"
+                         f"[{ptag}w]")
+            apply(f"{ptag}w", ptag)
+        else:
+            parts.append(f"[{s}]trim={trim_args},setpts=PTS-STARTPTS"
+                         f"[{ptag}]")
         concat_in += f"[{ptag}]"
     parts.append(f"{concat_in}concat=n={len(segs)}:v=1:a=0[{tag}]")
+    if rec is not None:
+        rec.append(_fx_record(fx))
     return tag
 
 
@@ -310,13 +407,19 @@ def _chain_rgb_animated(parts: list[str], cur: str, fx: Effect,
     a0 = float(base_at[0]) if base_at else 0.0
     b0 = float(base_at[1]) if base_at else dur
     span = b0 - a0
+    # a resolved mask (and the record source) rides into every
+    # sub-window — the discretization must never drop the anchor.
+    carried = {k: params[k] for k in
+               ("_mask_png", "_mask_rung", "_mask_detail", "_source")
+               if k in params}
     for i in range(steps):
         a = a0 + span * i / steps
         b = a0 + span * (i + 1) / steps
         # sample the envelope at the sub-window midpoint
         tmid = (a + b) / 2.0 - a0
         env = shift * math.sin(2 * math.pi * tmid / period + s1)
-        sub = Effect(name="rgb_split", params={"shift": round(env, 2)},
+        sub = Effect(name="rgb_split",
+                     params={"shift": round(env, 2), **carried},
                      at=(a, b))
         cur = _chain_effect(parts, cur, sub, ctx, f"{tag}q{i}")
     return cur
@@ -395,6 +498,114 @@ def _atempo_chain(speed: float) -> str:
         s /= 0.5
     chain.append(f"atempo={s:.4f}")
     return ",".join(chain)
+
+
+class _MaskStreams:
+    """Per-render registry of resolved effect masks.
+
+    Each resolved mask PNG becomes ONE extra ffmpeg input (a looped
+    still) and ONE graph label; every masked effect in the render
+    references the label. Input order = registration order, so the
+    caller can compute stream indices deterministically.
+    """
+
+    def __init__(self) -> None:
+        self.labels: dict[str, str] = {}   # png path → graph label
+        self.inputs: list[str] = []        # png paths, in input order
+
+    def register(self, png: str) -> str:
+        if png not in self.labels:
+            self.labels[png] = f"msk{len(self.inputs)}"
+            self.inputs.append(png)
+        return self.labels[png]
+
+    def preamble(self, parts: list[str], *, first_index: int,
+                 width: int, height: int) -> None:
+        """Graph preambles turning each mask input into its label."""
+        for j, png in enumerate(self.inputs):
+            parts.append(
+                f"[{first_index + j}:v]scale={width}:{height},"
+                f"format=gray[{self.labels[png]}]")
+
+    def input_args(self, *, fps: int, duration: float) -> list[str]:
+        """cmd args adding the mask inputs (looped stills, bounded)."""
+        args: list[str] = []
+        for png in self.inputs:
+            args += ["-loop", "1", "-framerate", str(fps),
+                     "-t", f"{max(duration, 0.1):.3f}", "-i", png]
+        return args
+
+
+def _grab_anchor_image(source_path: str | os.PathLike[str], at_s: float,
+                       width: int, height: int, tmp: Path,
+                       tag: str) -> Any:
+    """The frame a mask anchors to: the source frame at ``at_s``,
+    scaled to the canvas (mask coordinates are canvas pixels)."""
+    from PIL import Image
+    p = Path(source_path)
+    if _is_still(p):
+        with Image.open(p) as im:
+            return im.convert("RGB").resize((width, height))
+    png = tmp / f"anchor{tag}.png"
+    run_ffmpeg(["-ss", f"{max(0.0, at_s):.3f}", "-i", str(p),
+                "-frames:v", "1", "-y", str(png)])
+    with Image.open(png) as im:
+        img = im.convert("RGB")
+    return img.resize((width, height)) if img.size != (width, height) \
+        else img
+
+
+def _prepare_effects(effects: Any, *, source_path: str,
+                     source_start: float, width: int, height: int,
+                     tmp: Path, masks: _MaskStreams,
+                     tag_prefix: str) -> list[Effect]:
+    """Resolve ``mask`` params on effects → renderer-internal copies.
+
+    An effect may carry ``params["mask"]`` = a MaskRef dict (the
+    imggen carrier — the same shape ImageDocument ops and the motion
+    brush use). Resolution runs the MaskRef ladder against the
+    source frame at the clip's window start, writes the mask PNG
+    into ``tmp`` and registers its stream; the prepared copy carries
+    ``_mask_png``/``_mask_rung``/``_mask_detail`` instead of the ref.
+    Authored effects are never mutated. A mask that cannot resolve
+    raises MediaEditError with the ladder's reason — before any
+    ffmpeg run, never a silent unmasked render.
+    """
+    out: list[Effect] = []
+    for i, fx in enumerate(effects):
+        params = fx.params or {}
+        ref_d = params.get("mask")
+        if ref_d is None:
+            out.append(fx)
+            continue
+        from ..imggen.masks import MaskRef
+        try:
+            ref = ref_d if isinstance(ref_d, MaskRef) \
+                else MaskRef.from_dict(dict(ref_d))
+        except Exception as exc:
+            raise MediaEditError(
+                f"effect {fx.name!r}: bad mask ref: {exc}") from exc
+        anchor = _grab_anchor_image(source_path, source_start,
+                                    width, height, tmp,
+                                    f"{tag_prefix}{i}")
+        try:
+            result = ref.resolve(anchor)
+        except Exception as exc:
+            raise MediaEditError(
+                f"effect {fx.name!r}: mask did not resolve: {exc}"
+            ) from exc
+        png = tmp / f"mask{tag_prefix}{i}.png"
+        m = result.mask
+        if m.size != (width, height):
+            m = m.resize((width, height))
+        m.save(str(png))
+        masks.register(str(png))
+        new_params = {k: v for k, v in params.items() if k != "mask"}
+        new_params["_mask_png"] = str(png)
+        new_params["_mask_rung"] = result.tier
+        new_params["_mask_detail"] = result.detail
+        out.append(Effect(name=fx.name, params=new_params, at=fx.at))
+    return out
 
 
 def _is_still(path: str | os.PathLike[str]) -> bool:
@@ -483,12 +694,17 @@ def apply_effect(src: str | os.PathLike[str], effect: str, *,
                  still_duration: float | None = None,
                  fps: int = 30,
                  suffix: str | None = None,
+                 profile: str | None = None,
                  progress_cb: Any = None,
                  **params: Any) -> dict[str, Any]:
     """Apply one named effect to ``src`` → new video file.
 
     ``at`` windows the effect to (start, end) seconds. ``still_duration``
-    treats an image input as a still of that many seconds.
+    treats an image input as a still of that many seconds. ``profile``
+    selects the encode knobs (the surface has always accepted it —
+    Wave 5 wires it to _perf_for instead of letting it fall into the
+    effect params, where the property registry now rightly rejects
+    undeclared keys).
 
     Raises MediaEditError on unknown effects — never silently ignores.
     """
@@ -496,6 +712,10 @@ def apply_effect(src: str | os.PathLike[str], effect: str, *,
     if not p.exists():
         raise MediaEditError(f"no such video: {src}")
     fx = Effect(name=effect, params=dict(params), at=at)
+    reason = DEFERRED_EFFECTS.get(fx.name)
+    if reason is not None:
+        raise MediaEditError(
+            f"effect {effect!r} is deferred, not unknown: {reason}")
     if fx.name not in EFFECTS and fx.name != "velocity_ramp":
         raise MediaEditError(
             f"unknown effect {effect!r}; use: {sorted(EFFECTS)}")
@@ -511,20 +731,38 @@ def apply_effect(src: str | os.PathLike[str], effect: str, *,
         raise MediaEditError(f"could not determine duration of {src}")
     ctx = _ctx(w, h, fps, dur, seed)
     parts: list[str] = []
-    final = _chain_effect(parts, "0:v", fx, ctx, "fx")
+    masks = _MaskStreams()
+    fx_rec: list[dict[str, Any]] = []
+    if (fx.params or {}).get("mask") is not None:
+        mtmp = Path(tempfile.mkdtemp(prefix="fxmask-"))
+        fx = _prepare_effects(
+            [fx], source_path=str(p),
+            source_start=float(at[0]) if at else 0.0,
+            width=w, height=h, tmp=mtmp, masks=masks,
+            tag_prefix="single")[0]
+        ctx["mask_labels"] = masks.labels
+        masks.preamble(parts, first_index=1, width=w, height=h)
+    final = _chain_effect(parts, "0:v", fx, ctx, "fx", rec=fx_rec)
     out_p = Path(out) if out else p.with_name(
         f"{p.stem}.{suffix or effect}.mp4")
     cmd: list[str] = []
     if is_still:
         cmd += ["-loop", "1", "-framerate", str(fps), "-t", f"{dur:.3f}"]
-    cmd += ["-i", str(p), "-filter_complex", ";".join(parts),
+    enc_preset, enc_crf = "veryfast", 20
+    if profile is not None:
+        perf = _perf_for(profile)
+        enc_preset, enc_crf = perf["preset"], perf["crf"]
+    cmd += ["-i", str(p)]
+    cmd += masks.input_args(fps=fps, duration=dur)
+    cmd += ["-filter_complex", ";".join(parts),
             "-map", f"[{final}]", "-fps_mode", "cfr", "-r", str(fps),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:v", "libx264", "-preset", enc_preset,
+            "-crf", str(enc_crf),
             "-pix_fmt", "yuv420p", str(out_p)]
     run = run_ffmpeg(cmd, progress_cb=progress_cb, duration=dur)
     return {"input": str(p), "output": str(out_p),
             "bytes": out_p.stat().st_size, "seconds": run["seconds"],
-            "effect": effect}
+            "effect": effect, "effects_applied": fx_rec}
 
 
 # ---------------------------------------------------------------------------
@@ -672,6 +910,16 @@ def assemble_segments(clips: list[Clip], *,
     to the overlay composite — passing them here raises, directing
     the caller to :func:`render_timeline`.
 
+    Wave 5: ``sampled``-family tracks (any other registry-declared
+    param — blur radius, grain strength, …) are discretized on the
+    frame grid into constant-value windowed sub-effects of the same
+    effect; a same-named static effect on the clip becomes the
+    sampled base (two or more is an ambiguity error). Effects may
+    carry a ``mask`` MaskRef param — resolved once per clip against
+    its window-start frame and applied through the mask composite.
+    Every application is recorded in the result's
+    ``effects_applied``.
+
     ``host`` (Wave 1.2d): a :class:`~.host.RenderHost` to take the
     encode plan from, instead of re-probing the profile.
 
@@ -744,7 +992,40 @@ def assemble_segments(clips: list[Clip], *,
     has_audio = [any(s.get("type") == "audio" for s in i.get("streams", []))
                  for i in infos]
 
+    # Wave 5: resolve effect masks once per clip (anchored to the
+    # clip's window-start frame), then work out the sampled-keyframe
+    # bookkeeping against the PREPARED effects: a sampled track's
+    # static base is the clip's one same-named effect (which the
+    # track then replaces in the chain); two or more is ambiguous.
+    masks = _MaskStreams()
+    prepared_fx: list[list[Effect]] = [
+        _prepare_effects(c.effects, source_path=c.path,
+                         source_start=windows[i][0], width=width,
+                         height=height, tmp=tmp, masks=masks,
+                         tag_prefix=f"c{i}_")
+        for i, c in enumerate(clips)]
+    fx_applied: list[dict[str, Any]] = []
+    sampled_base: dict[tuple[int, str], dict[str, Any]] = {}
+    consumed_static: set[int] = set()   # id() of consumed Effect objs
+    for ci, tracks in kf_by_clip.items():
+        for kt in tracks:
+            if kf_families[id(kt)] != "sampled":
+                continue
+            statics = [fx for fx in prepared_fx[ci]
+                       if fx.name == kt.effect]
+            if len(statics) > 1:
+                raise MediaEditError(
+                    f"keyframe track {kt.effect}.{kt.param}: clip "
+                    f"{ci} carries {len(statics)} static {kt.effect} "
+                    f"effects — ambiguous base for the sampled curve")
+            if statics:
+                sampled_base[(ci, kt.effect)] = dict(
+                    statics[0].params or {})
+                consumed_static.add(id(statics[0]))
+
     parts: list[str] = []
+    masks.preamble(parts, first_index=len(clips), width=width,
+                   height=height)
     v_labels: list[str] = []
     v_durs: list[float] = []
     a_labels: list[str] = []
@@ -797,8 +1078,16 @@ def assemble_segments(clips: list[Clip], *,
         vcur = f"{tag}norm"
         ctx = _ctx(width, height, fps, play_d, seed + n * 131,
                    beats=[0.0, play_d])
-        for k, fx in enumerate(clip.effects):
-            vcur = _chain_effect(parts, vcur, fx, ctx, f"{tag}e{k}")
+        ctx["mask_labels"] = masks.labels
+        rec_mark = len(fx_applied)
+        for k, fx in enumerate(prepared_fx[ci]):
+            if id(fx) in consumed_static:
+                continue  # a sampled track owns this effect now
+            vcur = _chain_effect(parts, vcur, fx, ctx, f"{tag}e{k}",
+                                 rec=fx_applied)
+        for entry in fx_applied[rec_mark:]:
+            entry["clip"] = clip.id or ci
+            entry["segment"] = n
         # keyframed animation for this segment's window of the clip's
         # play time (Wave 1.2c): the track is re-based to segment-local
         # time. Zoom becomes one expression filter; opacity is sampled
@@ -810,7 +1099,7 @@ def assemble_segments(clips: list[Clip], *,
                                        height=height)
                 parts.append(f"[{vcur}]{filt}[{tag}kf{j}]")
                 vcur = f"{tag}kf{j}"
-            else:  # opacity
+            elif kf_families[id(kt)] == "opacity":
                 parts.append(f"[{vcur}]format=yuva420p[{tag}alp{j}]")
                 vcur = f"{tag}alp{j}"
                 for w_i, (a, b, v) in enumerate(discretize(window)):
@@ -818,6 +1107,26 @@ def assemble_segments(clips: list[Clip], *,
                                  params={"alpha": round(v, 4)}, at=(a, b))
                     vcur = _chain_effect(parts, vcur, sub, ctx,
                                          f"{tag}op{j}_{w_i}")
+            else:  # sampled (Wave 5): frame-grid windows of the same
+                # effect, built by the same chain builder, over the
+                # consumed static base (or the builder defaults).
+                base = sampled_base.get((ci, kt.effect), {})
+                wins = discretize(window, fps=fps)
+                for w_i, (a, b, v) in enumerate(wins):
+                    sub_params = dict(base)
+                    sub_params[kt.param] = round(v, 4)
+                    sub = Effect(name=kt.effect, params=sub_params,
+                                 at=(a, b))
+                    vcur = _chain_effect(parts, vcur, sub, ctx,
+                                         f"{tag}sm{j}_{w_i}")
+                entry = _fx_record(
+                    Effect(name=kt.effect, params=dict(base)))
+                entry.update({
+                    "kind": "keyframe-sampled",
+                    "source": f"keyframe:{kt.param}",
+                    "clip": clip.id or ci, "segment": n,
+                    "windows": len(wins)})
+                fx_applied.append(entry)
             kf_applied.append({"clip_id": kt.clip_id,
                                "effect": kt.effect, "param": kt.param,
                                "family": kf_families[id(kt)],
@@ -917,6 +1226,7 @@ def assemble_segments(clips: list[Clip], *,
     cmd = []
     for c in clips:
         cmd += ["-i", c.path]
+    cmd += masks.input_args(fps=fps, duration=total_dur)
     cmd += ["-filter_complex", ";".join(parts), *maps,
             "-fps_mode", "cfr", "-r", str(fps),
             "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
@@ -936,7 +1246,8 @@ def assemble_segments(clips: list[Clip], *,
                                  "edit_engine.render.assemble_segments",
                          "note": f"profile {perf['profile']}, "
                                  f"preset {preset}, crf {crf}"}],
-              "keyframes_applied": kf_applied}
+              "keyframes_applied": kf_applied,
+              "effects_applied": fx_applied}
     if host_plan is not None:
         result["host"] = host_plan
     return result
@@ -1128,7 +1439,8 @@ def _render_overlay_track(track: OverlayTrack, *,
                           duration: float, fps: int, width: int,
                           height: int, seed: int = 0,
                           keyframes: list[KeyframeTrack] | None = None,
-                          tmp: Path, index: int) -> Path:
+                          tmp: Path, index: int,
+                          rec: list[dict[str, Any]] | None = None) -> Path:
     """One overlay track → a full-duration alpha-carrying file.
 
     One ffmpeg graph: a transparent canvas, each clip placed at its
@@ -1138,6 +1450,10 @@ def _render_overlay_track(track: OverlayTrack, *,
     lossless with an alpha channel, an honest intermediate format.
     Clip audio is not part of a picture track (audio rides the
     document's audio tracks / mix).
+
+    Wave 5: sampled keyframes and masked effects ride the same
+    preparation as the base assembly (see :func:`assemble_segments`);
+    ``rec`` collects the per-effect record.
     """
     pw = int(track.width or width)
     ph = int(track.height or height)
@@ -1147,13 +1463,39 @@ def _render_overlay_track(track: OverlayTrack, *,
                  if classify_track(t) == "opacity"]
     ex_tracks = [t for t in (keyframes or [])
                  if classify_track(t) == "expression"]
+    sm_tracks = [t for t in (keyframes or [])
+                 if classify_track(t) == "sampled"]
     pos_by_clip = _match_keyframes(track.clips, pos_tracks)
     op_by_clip = _match_keyframes(track.clips, op_tracks)
     ex_by_clip = _match_keyframes(track.clips, ex_tracks)
+    sm_by_clip = _match_keyframes(track.clips, sm_tracks)
 
     clips = _materialize_stills(list(track.clips), fps=fps, width=pw,
                                 height=ph, crf=21, preset="veryfast",
                                 profile="pc", tmp=tmp)
+    masks = _MaskStreams()
+    prepared_fx: list[list[Effect]] = [
+        _prepare_effects(c.effects, source_path=c.path,
+                         source_start=_clip_window(c)[0], width=pw,
+                         height=ph, tmp=tmp, masks=masks,
+                         tag_prefix=f"ov{index}c{i}_")
+        for i, c in enumerate(clips)]
+    sampled_base: dict[tuple[int, str], dict[str, Any]] = {}
+    consumed_static: set[int] = set()
+    for ci, tracks in sm_by_clip.items():
+        for kt in tracks:
+            statics = [fx for fx in prepared_fx[ci]
+                       if fx.name == kt.effect]
+            if len(statics) > 1:
+                raise MediaEditError(
+                    f"keyframe track {kt.effect}.{kt.param}: overlay "
+                    f"clip {ci} carries {len(statics)} static "
+                    f"{kt.effect} effects — ambiguous base for the "
+                    f"sampled curve")
+            if statics:
+                sampled_base[(ci, kt.effect)] = dict(
+                    statics[0].params or {})
+                consumed_static.add(id(statics[0]))
     order = sorted(range(len(clips)), key=lambda i: clips[i].at)
     cmd: list[str] = []
     cmd += ["-f", "lavfi", "-i",
@@ -1166,6 +1508,8 @@ def _render_overlay_track(track: OverlayTrack, *,
                     "-t", f"{max(span, 0.1):.4f}"]
         cmd += ["-i", clip.path]
     parts: list[str] = ["[0:v]format=yuva420p[ovbase]"]
+    masks.preamble(parts, first_index=1 + len(clips), width=pw,
+                   height=ph)
     cur = "ovbase"
     for n, ci in enumerate(order):
         clip = clips[ci]
@@ -1190,8 +1534,13 @@ def _render_overlay_track(track: OverlayTrack, *,
         vcur = f"{tag}norm"
         ctx = _ctx(pw, ph, fps, play_d, seed + ci * 131,
                    beats=[0.0, play_d])
-        for k, fx in enumerate(clip.effects):
-            vcur = _chain_effect(parts, vcur, fx, ctx, f"{tag}e{k}")
+        ctx["mask_labels"] = masks.labels
+        rec_mark = len(rec) if rec is not None else 0
+        for k, fx in enumerate(prepared_fx[ci]):
+            if id(fx) in consumed_static:
+                continue  # a sampled track owns this effect now
+            vcur = _chain_effect(parts, vcur, fx, ctx, f"{tag}e{k}",
+                                 rec=rec)
         for j, kt in enumerate(ex_by_clip.get(ci, [])):
             window = shifted(kt, 0.0, play_d)
             filt = keyframe_filter(window, width=pw, height=ph)
@@ -1206,6 +1555,29 @@ def _render_overlay_track(track: OverlayTrack, *,
                              params={"alpha": round(v, 4)}, at=(a, b))
                 vcur = _chain_effect(parts, vcur, sub, ctx,
                                      f"{tag}op{j}_{w_i}")
+        for j, kt in enumerate(sm_by_clip.get(ci, [])):
+            window = shifted(kt, 0.0, play_d)
+            base = sampled_base.get((ci, kt.effect), {})
+            wins = discretize(window, fps=fps)
+            for w_i, (a, b, v) in enumerate(wins):
+                sub_params = dict(base)
+                sub_params[kt.param] = round(v, 4)
+                sub = Effect(name=kt.effect, params=sub_params,
+                             at=(a, b))
+                vcur = _chain_effect(parts, vcur, sub, ctx,
+                                     f"{tag}sm{j}_{w_i}")
+            if rec is not None:
+                entry = _fx_record(
+                    Effect(name=kt.effect, params=dict(base)))
+                entry.update({
+                    "kind": "keyframe-sampled",
+                    "source": f"keyframe:{kt.param}",
+                    "windows": len(wins)})
+                rec.append(entry)
+        if rec is not None:
+            for entry in rec[rec_mark:]:
+                entry["clip"] = clip.id or ci
+                entry["track"] = track.label or index
         parts.append(f"[{vcur}]format=yuva420p,"
                      f"setpts=PTS-STARTPTS+{clip.at:.4f}/TB[{tag}v]")
         # placement: position keyframes (clip-time → canvas-time by
@@ -1225,6 +1597,7 @@ def _render_overlay_track(track: OverlayTrack, *,
             f"[{tag}c]")
         cur = f"{tag}c"
     out_p = tmp / f"overlay{index}.mkv"
+    cmd += masks.input_args(fps=fps, duration=duration)
     cmd += ["-filter_complex", ";".join(parts), "-map", f"[{cur}]",
             "-t", f"{duration:.4f}", "-c:v", "ffv1", "-pix_fmt",
             "yuva420p", str(out_p)]
@@ -1325,8 +1698,9 @@ def render_timeline(timeline: Timeline, *,
                     progress_cb: Any = None) -> dict[str, Any]:
     """Render a :class:`Timeline` → finished mp4.
 
-    1. base video track → assemble_segments (effects, transitions,
-       expression + opacity keyframes)
+    1. base video track → assemble_segments (effects — static,
+       mask-anchored and keyframed — transitions, expression +
+       opacity + sampled keyframes)
     2. overlay tracks → per-track alpha renders → composite
        (blend modes, track opacity, position keyframes)
     3. audio_mix → mix_layers (or clip audio when keep_clip_audio)
@@ -1345,7 +1719,9 @@ def render_timeline(timeline: Timeline, *,
     ``render_report`` (:class:`RenderReport`) — call ``.self_review()``
     on it for ffprobe assertions before presenting the file — plus
     the Wave-1.2 honesty record: ``backend``, per-stage ``rungs``,
-    ``keyframes_applied`` and the composited ``tracks``.
+    ``keyframes_applied`` and the composited ``tracks`` — plus the
+    Wave-5 ``effects_applied`` record (every effect application with
+    its producing rung, its source and its mask rung when anchored).
     """
     if not timeline.video.clips:
         raise MediaEditError("Timeline needs at least one video clip")
@@ -1370,7 +1746,7 @@ def render_timeline(timeline: Timeline, *,
             raise MediaEditError(str(exc)) from exc
     base_clips = list(timeline.video.clips)
     assemble_kf = [t for t in kf_all
-                   if fam[id(t)] in ("expression", "opacity")
+                   if fam[id(t)] in ("expression", "opacity", "sampled")
                    and _kf_targets(t, base_clips)]
     consumed = {id(t) for t in assemble_kf}
     overlay_kf: dict[int, list[KeyframeTrack]] = {}
@@ -1405,6 +1781,8 @@ def render_timeline(timeline: Timeline, *,
     rungs: list[dict[str, Any]] = list(video.get("rungs", []))
     kf_applied: list[dict[str, Any]] = list(
         video.get("keyframes_applied", []))
+    fx_applied: list[dict[str, Any]] = list(
+        video.get("effects_applied", []))
     track_report: list[dict[str, Any]] = []
     comp_out: dict[str, Any] | None = None
 
@@ -1420,7 +1798,7 @@ def render_timeline(timeline: Timeline, *,
             ot, duration=video_dur, fps=timeline.fps,
             width=timeline.width, height=timeline.height,
             seed=timeline.seed, keyframes=overlay_kf.get(oi),
-            tmp=tmp, index=oi)
+            tmp=tmp, index=oi, rec=fx_applied)
         live_layers.append((ot, rendered))
         rungs.append({
             "stage": f"overlay:{ot.label or oi}",
@@ -1487,6 +1865,17 @@ def render_timeline(timeline: Timeline, *,
     if final.resolve() != out_p.resolve():
         run_ffmpeg(["-i", str(final), "-c", "copy", str(out_p)],
                    duration=video_dur)
+    if fx_applied:
+        masked_n = sum(1 for e in fx_applied if "mask" in e)
+        rungs.append({
+            "stage": "effects",
+            "rung": "edit_engine.effects (per-effect property "
+                    "builders, Wave 5 registry)",
+            "note": f"{len(fx_applied)} effect application(s)"
+                    + (f", {masked_n} mask-anchored" if masked_n
+                       else "")
+                    + " — the per-effect record is in "
+                      "effects_applied"})
     report = RenderReport(
         output=str(out_p), bytes=out_p.stat().st_size,
         duration=video_dur, width=timeline.width, height=timeline.height,
@@ -1508,7 +1897,8 @@ def render_timeline(timeline: Timeline, *,
               "workdir": str(tmp), "render_report": report,
               "quality": quality or "", "crf": crf,
               "backend": "edit_engine.ffmpeg", "rungs": rungs,
-              "keyframes_applied": kf_applied, "tracks": track_report,
+              "keyframes_applied": kf_applied,
+              "effects_applied": fx_applied, "tracks": track_report,
               "caption_timing": caption_timing}
     if video.get("host") is not None:
         result["host"] = video["host"]
@@ -1792,6 +2182,46 @@ def _session_directives(doc: Any, tmp: Path, *, width: int,
     return doc2, transitions, post, notes
 
 
+def _look_lock_effects(doc: Any) -> tuple[list[Effect],
+                                          dict[str, Any] | None]:
+    """A Document's ``look_lock`` as engine effects (plan §1.1c(d)).
+
+    The look is timeline state: the renderable keys become
+    ``color_grade``/``grain`` effects appended to every base-track
+    clip — applied in the single render graph through the canonical
+    grade chain, never a separate re-encode pass. ``grade`` names a
+    canonical grade; ``cdl`` carries an ASC-CDL decision (baked by
+    studio_color); ``grain`` is a strength. The remaining LookLock
+    keys (``name``/``palette``/``lens``) steer generation and QC,
+    not the compositor — they are reported as carried, never
+    silently treated as applied.
+    """
+    lock = getattr(doc, "look_lock", None)
+    if not lock:
+        return [], None
+    fx: list[Effect] = []
+    applied: list[str] = []
+    cdl = lock.get("cdl")
+    grade = lock.get("grade")
+    if cdl:
+        fx.append(Effect(name="color_grade", params={
+            "cdl": dict(cdl), "_source": "look_lock"}))
+        applied.append("color_grade(cdl)")
+    elif grade:
+        fx.append(Effect(name="color_grade", params={
+            "grade": str(grade), "_source": "look_lock"}))
+        applied.append(f"color_grade({grade})")
+    grain = lock.get("grain")
+    if grain:
+        fx.append(Effect(name="grain", params={
+            "strength": float(grain), "_source": "look_lock"}))
+        applied.append(f"grain({float(grain):g})")
+    carried = sorted(k for k in lock
+                     if k not in ("grade", "cdl", "grain"))
+    return fx, {"name": str(lock.get("name", "")),
+                "applied": applied, "carried": carried}
+
+
 def render_document(doc: Any, *,
                     out: str | os.PathLike[str] | None = None,
                     host: Any = None,
@@ -1828,6 +2258,16 @@ def render_document(doc: Any, *,
     doc2, transitions, post, notes = _session_directives(
         doc, tmp, width=int(spec.get("width", 1080)),
         height=int(spec.get("height", 1920)))
+    # the Document's look_lock is grade state on the base track
+    # (Wave 5): its effects ride the clips into the single render
+    # graph, after each clip's own effects. Overlay tracks carry
+    # their own effects — the look grades the program track.
+    look_fx, look_note = _look_lock_effects(doc2)
+    if look_fx and doc2.picture_tracks():
+        for c in doc2.picture_tracks()[0].clips:
+            c.effects = tuple(c.effects) + tuple(
+                Effect(name=f.name, params=dict(f.params), at=f.at)
+                for f in look_fx)
     tl = doc2.to_edit_spec().to_timeline()
     # a document's clips carry their own audio (the session model's
     # reading — the old compiler kept it too); an authored audio mix
@@ -1959,6 +2399,16 @@ def render_document(doc: Any, *,
     if cur.resolve() != out_p.resolve():
         run_ffmpeg(["-i", str(cur), "-c", "copy", str(out_p)],
                    duration=cur_dur)
+    if look_note is not None:
+        rungs.append({
+            "stage": "look_lock",
+            "rung": "edit_engine.effects.color_grade_chain / grain "
+                    "(Document.look_lock as base-track effects)",
+            "note": "applied: "
+                    + (", ".join(look_note["applied"]) or "none")
+                    + "; carried (generation/QC keys, not compositor "
+                      "state): "
+                    + (", ".join(look_note["carried"]) or "none")})
     res.update({
         "output": str(out_p), "bytes": out_p.stat().st_size,
         "duration": round(cur_dur, 3),
@@ -1970,6 +2420,7 @@ def render_document(doc: Any, *,
             "clips": sum(len(t.clips) for t in doc.tracks),
             "keyframes": len(doc.keyframes),
             "text_layers": len(doc.text_layers),
+            "look_lock": look_note,
             "output": dict(spec),
         },
     })

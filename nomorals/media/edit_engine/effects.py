@@ -16,6 +16,7 @@ Proven ffmpeg truths (verified against ffmpeg 8.1.2, migrated):
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Any
 
 from ...media_edit.videos import MediaEditError
@@ -222,37 +223,357 @@ EFFECTS: dict[str, Any] = {
     "opacity": _fx_opacity,
 }
 
-#: Keyframable params per effect (Wave 1.2c — EffectCraft's property
-#: paths, Devon-shaped): each effect declares which of its params a
-#: :class:`~.keyframes.KeyframeTrack` may animate. ``zoom`` is the
-#: keyframe layer's own zoom property (the ``zoom_ramp`` helper's
-#: effect name); ``position`` addresses an overlay clip's placement
-#: in the composite. A track naming anything outside this table is a
-#: render error — never a silent no-op. Expression templates for the
-#: zoom family live in :mod:`keyframes`; opacity/position are applied
-#: by the renderer's composite/finishing passes.
-KEYFRAMABLE_PARAMS: dict[str, tuple[str, ...]] = {
-    "zoom": ("z",),
-    "ken_burns": ("zoom",),
-    "punch_zoom": ("zmax",),
-    "opacity": ("alpha",),
-    "position": ("x", "y"),
+#: ── the property registry (Echelon Wave 5 — EffectCraft's property
+#: tree, Devon-shaped). Every effect is a set of Properties at paths
+#: ``effects/<name>/<param>``; each param declares its kind, default,
+#: range and whether a :class:`~.keyframes.KeyframeTrack` may animate
+#: it (and through which application family). A param outside this
+#: registry is an authoring error — :func:`validate_effect_params`
+#: raises naming the path, never a silent no-op. ``KEYFRAMABLE_PARAMS``
+#: below is DERIVED from this table (single source of truth).
+#:
+#: Application families: ``expression`` (one per-frame ffmpeg
+#: expression — the zoom family), ``opacity`` (alpha windows over the
+#: composite), ``position`` (overlay placement expressions) and
+#: ``sampled`` (the renderer discretizes the curve into constant-
+#: value windowed sub-effects — the doctrine this ffmpeg's
+#: expression-rejecting filters already forced for animated
+#: rgb_split and opacity). Params that are placement, identity or
+#: shape rather than value curves (a flash's centre, a shake's seed)
+#: declare ``keyframable=None`` and say why.
+@dataclass(frozen=True)
+class ParamSpec:
+    """One declared property of one effect."""
+    kind: str                    # number|int|bool|string|expr|enum|list|dict
+    default: Any = None
+    lo: float | None = None
+    hi: float | None = None
+    keyframable: str | None = None   # family name, or None
+    choices: tuple = ()
+    doc: str = ""
+
+
+#: effect name → {param name: ParamSpec}. Covers every param every
+#: builder reads (the builders' ``params.get`` defaults ARE the
+#: registry defaults — the table describes the code, and
+#: :func:`validate_effect_params` enforces it at the chain funnel).
+EFFECT_PROPERTIES: dict[str, dict[str, ParamSpec]] = {
+    "shake": {
+        "amplitude": ParamSpec(
+            "number", 14.0, 0.0, 500.0, "sampled",
+            doc="peak displacement (px) of the seeded sine wobble"),
+        "seed_offset": ParamSpec(
+            "int", 0,
+            doc="deterministic phase shift of the wobble — identity, "
+                "not a value curve; not keyframable"),
+    },
+    "punch_zoom": {
+        "zmax": ParamSpec(
+            "number", 1.18, 1.0, 8.0, "expression",
+            doc="end zoom factor; animates through the zoom "
+                "expression family"),
+    },
+    "flash": {
+        "time": ParamSpec(
+            "number", None,
+            doc="flash centre (s, clip-relative); placement, not a "
+                "value curve — not keyframable"),
+        "at": ParamSpec(
+            "number", None,
+            doc="alias of ``time`` (the older spelling)"),
+        "duration": ParamSpec(
+            "number", 0.12, 0.0, 10.0,
+            doc="pulse width (s) — the shape of the blink, authored "
+                "statically; the level carries the curve"),
+        "level": ParamSpec(
+            "number", 0.85, 0.0, 1.0, "sampled",
+            doc="peak brightness of the triangular pulse"),
+    },
+    "grain": {
+        "strength": ParamSpec(
+            "number", 9.0, 0.0, 100.0, "sampled",
+            doc="ffmpeg noise alls strength"),
+    },
+    "vignette": {
+        "angle": ParamSpec(
+            "expr", "PI/4.2",
+            doc="ffmpeg angle expression (e.g. 'PI/4.2') — a string "
+                "expression, not a scalar curve; not keyframable"),
+    },
+    "rgb_split": {
+        "shift": ParamSpec(
+            "number", 10.0, -200.0, 200.0, "sampled",
+            doc="horizontal channel shift (px): red +, blue −"),
+        "animate": ParamSpec(
+            "bool", False,
+            doc="sine-wobble mode — render.py discretizes it; a "
+                "``shift`` keyframe track samples the static shift "
+                "instead"),
+        "period": ParamSpec(
+            "number", 0.5, 0.0, 60.0,
+            doc="wobble period (s); animate mode only"),
+    },
+    "ken_burns": {
+        "zoom": ParamSpec(
+            "number", 1.25, 1.0, 8.0, "expression",
+            doc="end zoom factor over the clip (direction in) or "
+                "start factor (out)"),
+        "direction": ParamSpec(
+            "enum", "in", choices=("in", "out"),
+            doc="zoom direction"),
+        "pan_x": ParamSpec(
+            "number", 0.0, -1000.0, 1000.0, "sampled",
+            doc="horizontal drift (px/sec)"),
+        "pan_y": ParamSpec(
+            "number", 0.0, -1000.0, 1000.0, "sampled",
+            doc="vertical drift (px/sec)"),
+    },
+    "beat_pulse": {
+        "beats": ParamSpec(
+            "list", None,
+            doc="beat times (s, clip-relative); falls back to the "
+                "ctx beats — the grid is data, not a curve"),
+        "strength": ParamSpec(
+            "number", 0.10, 0.0, 2.0, "sampled",
+            doc="zoom bump height per beat"),
+        "width": ParamSpec(
+            "number", 0.14, 0.0, 5.0, "sampled",
+            doc="bump width (s)"),
+    },
+    "blur": {
+        "radius": ParamSpec(
+            "number", 8.0, 0.0, 200.0, "sampled",
+            doc="boxblur luma radius (px); the builder additionally "
+                "requires > 0"),
+    },
+    "color_grade": {
+        "grade": ParamSpec(
+            "enum", "warm",
+            choices=tuple(sorted(_GRADES)),
+            doc="canonical grade name — resolved by "
+                "color_grade_chain(), never re-implemented"),
+        "cdl": ParamSpec(
+            "dict", None,
+            doc="ASC-CDL decision dict — baked to a .cube by "
+                "studio_color (the canonical chain) and applied via "
+                "lut3d. A grade is a cut, not a curve: neither "
+                "color_grade param is keyframable"),
+    },
+    "opacity": {
+        "alpha": ParamSpec(
+            "number", 1.0, 0.0, 1.0, "opacity",
+            doc="constant alpha; keyframes render as alpha windows "
+                "over the composite"),
+    },
+    "velocity_ramp": {
+        "speed": ParamSpec(
+            "number", 2.0, 0.0, 16.0,
+            doc="constant speed factor — structural: render.py "
+                "rewrites the chain (trim/setpts/concat), so there "
+                "is no value curve to bind; not keyframable"),
+        "ramps": ParamSpec(
+            "list", None,
+            doc="explicit (start, end, speed) pieces"),
+    },
+}
+
+#: Keyframe-layer pseudo-effects: animation targets that are not
+#: chain builders. ``zoom`` is the keyframe layer's own zoom property
+#: (the ``zoom_ramp`` helper's effect name); ``position`` addresses
+#: an overlay clip's placement in the composite.
+PROPERTY_EFFECTS: dict[str, dict[str, ParamSpec]] = {
+    "zoom": {
+        "z": ParamSpec(
+            "number", 1.0, 0.05, 20.0, "expression",
+            doc="zoom factor (the keyframe layer's own property)"),
+    },
+    "position": {
+        "x": ParamSpec(
+            "number", 0.0, -8192.0, 8192.0, "position",
+            doc="overlay placement x (px)"),
+        "y": ParamSpec(
+            "number", 0.0, -8192.0, 8192.0, "position",
+            doc="overlay placement y (px)"),
+    },
+}
+
+#: Effects the plan carries as named deferrals. They are NOT in
+#: EFFECTS and never render — naming one raises with the reason
+#: (a named refusal, never a stub, never a silent unknown-effect).
+DEFERRED_EFFECTS: dict[str, str] = {
+    "camera3d": (
+        "the 3D rung is the owner's unmade choice (plan §1.5e/§6.3: "
+        "a Blender-class external engine vs a Rust rung is a "
+        "hardware-bearing decision) — no 3D renderer exists in the "
+        "engine and none is substituted"),
 }
 
 
+def effect_property_path(name: str, param: str) -> str:
+    """EffectCraft-shaped property path: ``effects/<name>/<param>``."""
+    return f"effects/{name}/{param}"
+
+
+def _derive_keyframable() -> dict[str, tuple[str, ...]]:
+    out: dict[str, tuple[str, ...]] = {}
+    for src in (EFFECT_PROPERTIES, PROPERTY_EFFECTS):
+        for name, params in src.items():
+            ks = tuple(p for p, s in params.items() if s.keyframable)
+            if ks:
+                out[name] = ks
+    return out
+
+
+#: Keyframable params per effect — DERIVED from EFFECT_PROPERTIES +
+#: PROPERTY_EFFECTS (Wave 1.2c declarations, Wave 5 registry).
+KEYFRAMABLE_PARAMS: dict[str, tuple[str, ...]] = _derive_keyframable()
+
+
 def keyframable_params() -> dict[str, tuple[str, ...]]:
-    """Effect → keyframable params (the 1.2c property declarations)."""
+    """Effect → keyframable params (derived from the registry)."""
     return dict(KEYFRAMABLE_PARAMS)
+
+
+def keyframable_family(name: str, param: str) -> str | None:
+    """The application family a keyframe on ``name.param`` renders
+    through (``expression`` | ``opacity`` | ``position`` |
+    ``sampled``), or None when the target is not keyframable."""
+    for src in (EFFECT_PROPERTIES, PROPERTY_EFFECTS):
+        spec = src.get(name, {}).get(param)
+        if spec is not None:
+            return spec.keyframable
+    return None
+
+
+def effect_rung(name: str) -> str:
+    """The code rung that produces ``name``'s pixels (honesty
+    records name it): the builder function, the structural chain
+    builder, or the keyframe layer for pseudo-effects."""
+    builder = EFFECTS.get(name)
+    if builder is not None:
+        return f"edit_engine.effects.{builder.__name__}"
+    if name == "velocity_ramp":
+        return "edit_engine.render._chain_velocity"
+    if name in PROPERTY_EFFECTS:
+        return "edit_engine.keyframes (keyframe layer)"
+    return "unknown"
+
+
+def validate_effect_params(name: str, params: dict[str, Any]) -> None:
+    """Enforce the property registry for one effect's params.
+
+    Raises MediaEditError naming the property path on: an undeclared
+    param, a kind mismatch, an out-of-range number, an unlisted enum
+    value. Reserved keys pass: ``mask`` (a MaskRef dict — the
+    regional anchor, resolved by the renderer) and ``_``-prefixed
+    renderer-internal keys. A param explicitly None is accepted only
+    where the declared default is None.
+    """
+    specs = EFFECT_PROPERTIES.get(name)
+    if specs is None:
+        return  # unknown effect — the builder lookup raises its error
+    for key, value in (params or {}).items():
+        if key == "mask" or key.startswith("_"):
+            continue
+        spec = specs.get(key)
+        path = effect_property_path(name, key)
+        if spec is None:
+            raise MediaEditError(
+                f"effect {name!r} has no property {path}; declared: "
+                f"{sorted(specs)}")
+        if value is None:
+            if spec.default is None:
+                continue
+            raise MediaEditError(f"{path} may not be null")
+        kind = spec.kind
+        ok = True
+        if kind == "number":
+            ok = isinstance(value, (int, float)) \
+                and not isinstance(value, bool)
+        elif kind == "int":
+            ok = isinstance(value, int) and not isinstance(value, bool)
+        elif kind == "bool":
+            ok = isinstance(value, bool)
+        elif kind == "string":
+            ok = isinstance(value, str)
+        elif kind == "expr":
+            ok = isinstance(value, (str, int, float)) \
+                and not isinstance(value, bool)
+        elif kind == "enum":
+            ok = isinstance(value, str) \
+                and value.strip().lower() in spec.choices
+        elif kind == "list":
+            ok = isinstance(value, (list, tuple))
+        elif kind == "dict":
+            ok = isinstance(value, dict)
+        if not ok:
+            raise MediaEditError(
+                f"{path} must be {kind}"
+                + (f" (one of {list(spec.choices)})"
+                   if kind == "enum" else "")
+                + f", got {value!r}")
+        if kind in ("number", "int") and (
+                spec.lo is not None or spec.hi is not None):
+            v = float(value)
+            if (spec.lo is not None and v < spec.lo) or (
+                    spec.hi is not None and v > spec.hi):
+                raise MediaEditError(
+                    f"{path}={v} outside the declared range "
+                    f"[{spec.lo}, {spec.hi}]")
+
+
+def effect_properties() -> dict[str, Any]:
+    """The whole property registry as comparable data (JSON-safe).
+
+    The brain/QC surface over the registry: per effect, its rung and
+    per param its path, kind, default, range, keyframable family and
+    doc — the same discipline §1.1e gave the generation backends.
+    Deferred effects are listed separately, with their reasons.
+    """
+    def dump(src: dict[str, dict[str, ParamSpec]], *,
+             structural: bool = False) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for name, params in src.items():
+            out[name] = {
+                "rung": effect_rung(name),
+                "params": {
+                    p: {"path": effect_property_path(name, p),
+                        "kind": s.kind, "default": s.default,
+                        "min": s.lo, "max": s.hi,
+                        "keyframable": s.keyframable,
+                        "choices": list(s.choices),
+                        "doc": s.doc}
+                    for p, s in params.items()},
+            }
+        return out
+
+    return {"effects": dump(EFFECT_PROPERTIES),
+            "keyframe_targets": dump(PROPERTY_EFFECTS),
+            "deferred": dict(DEFERRED_EFFECTS),
+            "reserved_params": {
+                "mask": "a MaskRef dict anchoring the effect to a "
+                        "region (imggen.masks.MaskRef); resolved by "
+                        "the renderer, which records the mask rung"}}
+
+
+def deferred_effect_reason(name: str) -> str | None:
+    """The named reason an effect name is a deferral, or None."""
+    return DEFERRED_EFFECTS.get(name)
 
 
 def _effect_filter(name: str, params: dict[str, Any],
                    ctx: dict[str, Any]) -> str:
     from .timeline import canonical_effect
     name = canonical_effect(name)
+    reason = DEFERRED_EFFECTS.get(name)
+    if reason is not None:
+        raise MediaEditError(
+            f"effect {name!r} is deferred, not unknown: {reason}")
     builder = EFFECTS.get(name)
     if builder is None:
         raise MediaEditError(
             f"unknown effect {name!r}; use: {sorted(EFFECTS)}")
+    validate_effect_params(name, params or {})
     return builder(params or {}, ctx)
 
 

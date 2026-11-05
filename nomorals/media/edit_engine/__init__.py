@@ -14,11 +14,20 @@ from .audio import (
     normalize_loudness,
 )
 from .effects import (
+    DEFERRED_EFFECTS,
     EFFECTS,
+    EFFECT_PROPERTIES,
     KEYFRAMABLE_PARAMS,
+    PROPERTY_EFFECTS,
+    ParamSpec,
     _effect_filter,
+    effect_properties,
+    effect_property_path,
+    effect_rung,
+    keyframable_family,
     keyframable_params,
     list_effects,
+    validate_effect_params,
 )
 from .frametime import (
     FrameGrid,
@@ -145,6 +154,10 @@ __all__ = [
     "HostCapabilities", "RenderHost", "LocalHost", "probe_host",
     # effects / transitions
     "EFFECTS", "list_effects", "list_transitions", "validate_transition",
+    # effect property registry (Wave 5 — EffectCraft property paths)
+    "EFFECT_PROPERTIES", "PROPERTY_EFFECTS", "DEFERRED_EFFECTS",
+    "ParamSpec", "effect_properties", "effect_property_path",
+    "effect_rung", "keyframable_family", "validate_effect_params",
     # text
     "TextLayer", "words_to_ass", "layer_to_ass", "estimate_word_timings",
     "build_captions", "burn_text_layers",

@@ -302,6 +302,34 @@ def register(registry: Any) -> None:
                         "as a per-frame zoom expression in the "
                         "assembly"}
 
+    @registry.register(
+        "studio_effect_properties",
+        description=("The effect property registry as data: every "
+                     "video effect's params with kind, default, range "
+                     "and which params keyframes may animate (and "
+                     "through which family). Pass an effect name for "
+                     "just that effect. Deferred effects are listed "
+                     "with their reasons."),
+        capability=Capability.FS_READ,
+    )
+    def studio_effect_properties(effect: str = "") -> dict[str, Any]:
+        """Effect property registry (Wave 5)."""
+        from ..media.edit_engine.effects import effect_properties
+        data = effect_properties()
+        if effect:
+            name = effect.strip().lower()
+            for section in ("effects", "keyframe_targets"):
+                if name in data[section]:
+                    return {"ok": True, "effect": name,
+                            section: data[section][name]}
+            if name in data["deferred"]:
+                return {"ok": True, "effect": name,
+                        "deferred": data["deferred"][name]}
+            return {"ok": False,
+                    "reason": f"unknown effect {effect!r}; use: "
+                              f"{sorted(data['effects'])}"}
+        return {"ok": True, **data}
+
     # ── timeline ────────────────────────────────────────────────
 
     @registry.register(

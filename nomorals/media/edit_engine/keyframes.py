@@ -176,9 +176,10 @@ def ffmpeg_expr(track: KeyframeTrack) -> str:
 
 
 # ── Wave 1.2c: the renderer's keyframe wire ────────────────────────
-# KeyframeTrack declarations live in effects.KEYFRAMABLE_PARAMS (each
-# effect states which params are keyframable — the property-path
-# idea). Three application families:
+# KeyframeTrack declarations live in the effects property registry
+# (effects.EFFECT_PROPERTIES, from which KEYFRAMABLE_PARAMS derives —
+# each effect states which params are keyframable: the property-path
+# idea). Four application families:
 #
 # * ``expression`` — zoom-family tracks become ONE ffmpeg filter via
 #   :func:`track_to_filter` with :data:`ZOOM_TEMPLATE` (scale with
@@ -189,7 +190,13 @@ def ffmpeg_expr(track: KeyframeTrack) -> str:
 #   _chain_rgb_animated doctrine: this ffmpeg rejects per-frame
 #   expressions in several filters, so curves are sampled);
 # * ``position`` — overlay placement: the composite's overlay()
-#   call takes the track's expression for x/y directly.
+#   call takes the track's expression for x/y directly;
+# * ``sampled`` (Wave 5) — every other declared param (blur radius,
+#   grain strength, rgb shift, ken-burns pan, …): the renderer
+#   discretizes the curve into constant-value windowed sub-effects
+#   of the SAME effect, built by the SAME chain builder a static
+#   effect uses — one registry, one rung, sampled where ffmpeg
+#   expressions cannot go.
 
 #: scale-eval template for zoom-family tracks; ``{v}`` is the zoom
 #: factor expression, ``{w}``/``{h}`` the canvas. The static
@@ -209,8 +216,15 @@ def classify_track(track: KeyframeTrack) -> str:
     Raises ValueError when (effect, param) is not declared keyframable
     in :data:`effects.KEYFRAMABLE_PARAMS` — an undeclared animation
     target is a build error, never a silent no-op at render time.
+    A track naming a deferred effect raises with the deferral's
+    reason (a named refusal, not an unknown target).
     """
-    from .effects import KEYFRAMABLE_PARAMS
+    from .effects import DEFERRED_EFFECTS, KEYFRAMABLE_PARAMS
+    reason = DEFERRED_EFFECTS.get(track.effect)
+    if reason is not None:
+        raise ValueError(
+            f"keyframe target {track.effect}.{track.param}: effect "
+            f"{track.effect!r} is deferred, not unknown: {reason}")
     allowed = KEYFRAMABLE_PARAMS.get(track.effect)
     if allowed is None or track.param not in allowed:
         declared = ", ".join(
@@ -223,7 +237,9 @@ def classify_track(track: KeyframeTrack) -> str:
         return "expression"
     if track.effect == "opacity":
         return "opacity"
-    return "position"
+    if track.effect == "position":
+        return "position"
+    return "sampled"
 
 
 def keyframe_filter(track: KeyframeTrack, *, width: int,
@@ -277,12 +293,20 @@ def shifted(track: KeyframeTrack, offset: float,
 
 
 def discretize(track: KeyframeTrack, *, step_s: float = 0.125,
-               max_steps: int = 64) -> list[tuple[float, float, float]]:
+               max_steps: int = 64, fps: Any = None
+               ) -> list[tuple[float, float, float]]:
     """Sample a curve into constant (start, end, value) windows.
 
     For filters without per-frame expression support (the opacity
     pass): each window takes the curve's value at its midpoint, the
     same sampling doctrine as render.py's animated rgb_split.
+
+    With ``fps`` given (the sampled keyframe family's binding), the
+    windows are computed in INTEGER FRAMES on the timeline's
+    :class:`~.frametime.FrameGrid`: every boundary is an exact frame
+    multiple and each window's value is the curve sampled at the
+    window's middle frame — keyframe binding pinned at exact frames,
+    no float-step drift.
     """
     if not track.keys:
         raise ValueError("track has no keyframes")
@@ -290,6 +314,28 @@ def discretize(track: KeyframeTrack, *, step_s: float = 0.125,
     end = track.keys[-1].time
     if end <= start:
         return [(start, end, track.keys[0].value)]
+    if fps is not None:
+        from fractions import Fraction
+
+        from .frametime import FrameGrid
+        grid = FrameGrid(fps)
+        f0, f1 = grid.frames(start), grid.frames(end)
+        total = f1 - f0
+        if total <= 0:
+            return [(start, end, track.keys[0].value)]
+        step_f = max(1, round(step_s * grid.fps_float))
+        if (total + step_f - 1) // step_f > max_steps:
+            step_f = max(1, (total + max_steps - 1) // max_steps)
+        out_f: list[tuple[float, float, float]] = []
+        fa = f0
+        while fa < f1:
+            fb = min(fa + step_f, f1)
+            mid = float(grid.seconds(Fraction(fa + fb, 2)))
+            out_f.append((float(grid.seconds(fa)),
+                          float(grid.seconds(fb)),
+                          track.sample(mid)))
+            fa = fb
+        return out_f
     steps = max(1, min(max_steps, int((end - start) / step_s) or 1))
     span = (end - start) / steps
     out: list[tuple[float, float, float]] = []

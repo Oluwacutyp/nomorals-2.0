@@ -66,9 +66,10 @@ def test_direct_import_surface_and_all_unchanged():
     assert callable(format_failures) and Failure is not None
     # Deliberately NO package export for failures itself. The __all__
     # length moves only with deliberate surface waves: 94 at the
-    # failures wave, 113 after Echelon Wave 3 (video port exports).
+    # failures wave, 113 after Echelon Wave 3 (video port exports),
+    # 122 after Echelon Wave 5 (effect property registry exports).
     assert "failures" not in edit_engine_all
-    assert len(edit_engine_all) == 113
+    assert len(edit_engine_all) == 122
 
 
 # --- document.duration / timeline.duration --------------------------------
