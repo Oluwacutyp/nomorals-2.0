@@ -272,6 +272,17 @@ class PartnerRuntime(
         self._inflight: set[Future] = set()
         self._inflight_guard = threading.Lock()
         self._autonomy: Any = None
+        #: THE autonomy side-ledger handle (idle clock + pattern /
+        #: interest writers). One lazily-opened Database for the whole
+        #: process, via autonomy.idle.workspace_db — never a fresh
+        #: Database per message (see _autonomy_db for the failure
+        #: history that rule comes from).
+        self._autonomy_db_handle: Any = None
+        self._autonomy_db_guard = threading.Lock()
+        #: Monotonic deadline before which a failed ledger open/write
+        #: is not retried: one journal entry per outage episode.
+        self._autonomy_db_retry_at: float = 0.0
+        self._autonomy_db_episode: bool = False
         #: Boot mission-resumption thread (see _start_boot_mission_resume).
         self._boot_resume_thread: Any = None
         self.stats = {"messages": 0, "replies": 0, "errors": 0, "controls": 0}
@@ -776,6 +787,124 @@ class PartnerRuntime(
             _log.debug("music voice-note detection failed", exc_info=True)
             return False
 
+    #: Seconds before a failed autonomy-ledger open/write is retried.
+    #: The ledger is best-effort bookkeeping: a dead workspace must
+    #: cost one journal entry per outage episode, not one per message.
+    _AUTONOMY_DB_RETRY_S = 300.0
+
+    def _autonomy_db_lock(self) -> threading.Lock:
+        guard = getattr(self, "_autonomy_db_guard", None)
+        if guard is None:
+            guard = self._autonomy_db_guard = threading.Lock()
+        return guard
+
+    def _autonomy_db_outage(self, exc: BaseException, site: str) -> None:
+        """Enter/refresh the ledger outage episode.
+
+        Drops the handle (a later retry reopens from scratch), arms
+        the retry deadline, and journals the episode exactly once —
+        repeated failures inside the cooldown stay silent.
+        """
+        with self._autonomy_db_lock():
+            handle = getattr(self, "_autonomy_db_handle", None)
+            self._autonomy_db_handle = None
+            self._autonomy_db_retry_at = (
+                time.monotonic() + self._AUTONOMY_DB_RETRY_S)
+            first = not getattr(self, "_autonomy_db_episode", False)
+            self._autonomy_db_episode = True
+        if handle is not None:
+            try:
+                handle.close()
+            except Exception:  # noqa: BLE001 - teardown is best-effort
+                pass
+        if first:
+            record_failure(site, exc)
+
+    def _autonomy_db(self) -> Any:
+        """The process-lifetime autonomy ledger handle, or None.
+
+        ONE lazily-opened Database for the idle/pattern/interest
+        writers, opened through :func:`autonomy.idle.workspace_db` —
+        the canonical seam mapping a workspace DIRECTORY to its DB
+        file (``<dir>/nomorals.db``, the same file IdleMonitor,
+        IdleCoordinator and presence read). The primary context DB
+        is a different file (``data/nomorals.db``), so it cannot
+        substitute: the monitor would never see these writes.
+
+        History: the per-message block in ``_process_inner`` used to
+        construct ``Database(workspace_dir)`` directly — handing
+        SQLite a directory, which cannot open (OperationalError
+        "unable to open database file") on every single message,
+        each one journaled as a failure. The writes never landed
+        and the failure ledger filled with the same row forever.
+
+        Failure contract: never raises. A failed open journals ONE
+        entry for the whole outage episode (via _autonomy_db_outage)
+        and callers skip quietly until the retry deadline passes; a
+        successful open after an episode logs the recovery.
+        """
+        handle = getattr(self, "_autonomy_db_handle", None)
+        if handle is not None:
+            return handle
+        outage: BaseException | None = None
+        with self._autonomy_db_lock():
+            handle = getattr(self, "_autonomy_db_handle", None)
+            if handle is not None:
+                return handle
+            if time.monotonic() < getattr(
+                    self, "_autonomy_db_retry_at", 0.0):
+                return None
+            try:
+                from pathlib import Path as _Path
+
+                from ...autonomy.idle import workspace_db
+                ws_dir = getattr(
+                    self.context.settings, "workspace_dir", ".")
+                # The DB file's parent IS the workspace dir; ensure
+                # it exists at open (fresh installs, bare settings).
+                _Path(ws_dir).mkdir(parents=True, exist_ok=True)
+                handle = workspace_db(ws_dir)
+            except Exception as e:  # noqa: BLE001 - best-effort ledger
+                outage = e
+            else:
+                self._autonomy_db_handle = handle
+                if getattr(self, "_autonomy_db_episode", False):
+                    self._autonomy_db_episode = False
+                    _log.info("autonomy ledger open again after an "
+                              "outage episode")
+                return handle
+        # Journal/arm the cooldown outside the lock: record_failure
+        # does its own locking and disk I/O.
+        self._autonomy_db_outage(
+            outage, "runtime.PartnerRuntime.autonomy_ledger_open")
+        return None
+
+    def _note_autonomy_activity(self, message: ChatMessage) -> None:
+        """Feed the autonomy idle/pattern/interest models one message.
+
+        Cheap, best-effort, never blocks and never raises — the
+        ``_process_inner`` contract. Rides the one shared ledger
+        handle from :meth:`_autonomy_db`; while the ledger is in a
+        failure cooldown the note is skipped silently.
+        """
+        db = self._autonomy_db()
+        if db is None:
+            return
+        try:
+            from ...autonomy.idle import note_activity
+            from ...autonomy.patterns import (
+                record_activity,
+                record_interests,
+            )
+            note_activity(db)
+            if message.incoming:
+                record_activity(db)
+                if message.text:
+                    record_interests(db, message.text)
+        except Exception as e:  # noqa: BLE001 - never break intake
+            self._autonomy_db_outage(
+                e, "runtime.PartnerRuntime.autonomy_ledger_write")
+
     def _process(self, message: ChatMessage) -> None:
         """Inbound entry: process one message under its idempotency scope.
 
@@ -944,20 +1073,9 @@ class PartnerRuntime(
         except Exception:  # noqa: BLE001 - intake never breaks chat
             _log.exception("login intake consume failed")
         # Autonomy: every inbound message resets the idle clock and feeds
-        # the pattern/interest models. Cheap, never blocks.
-        try:
-            from ...autonomy.idle import note_activity
-            from ...autonomy.patterns import record_activity, record_interests
-            from ...storage.db import Database
-            ws_dir = getattr(self.context.settings, "workspace_dir", ".")
-            _adb = Database(ws_dir)
-            note_activity(_adb)
-            if message.incoming:
-                record_activity(_adb)
-                if message.text:
-                    record_interests(_adb, message.text)
-        except Exception as e:
-            record_failure("runtime.PartnerRuntime._process_inner:786", e)
+        # the pattern/interest models. Cheap, never blocks — and never
+        # raises (the shared-ledger helper owns its failure episodes).
+        self._note_autonomy_activity(message)
         # Pending voice-clone naming: /voice clone with no name holds the
         # audio and asks; the next short text message in that chat is the
         # name. Checked before anything else so it can't be misread as chat.
@@ -2431,12 +2549,15 @@ class PartnerRuntime(
                     self._idle_coordinator.subscribe()
                     ensure_heartbeat_job(self._scheduler)
                     # Seed the activity clock so we don't start "idle".
-                    try:
-                        from ...storage.db import Database
-                        _adb = Database(ws_dir)
-                        note_activity(_adb)
-                    except Exception as e:
-                        record_failure("runtime.PartnerRuntime.start:2149", e)
+                    # Rides the same shared ledger handle as the
+                    # per-message writers (see _autonomy_db).
+                    _adb = self._autonomy_db()
+                    if _adb is not None:
+                        try:
+                            note_activity(_adb)
+                        except Exception as e:  # noqa: BLE001
+                            self._autonomy_db_outage(
+                                e, "runtime.PartnerRuntime.start:2149")
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("autonomy nervous system not started: %s",
                                  exc)
@@ -3019,6 +3140,13 @@ class PartnerRuntime(
                 self._autonomy.stop()
             except Exception as e:
                 record_failure("runtime.PartnerRuntime.stop:2728", e)
+        _ledger = getattr(self, "_autonomy_db_handle", None)
+        if _ledger is not None:
+            self._autonomy_db_handle = None
+            try:
+                _ledger.close()
+            except Exception as e:  # noqa: BLE001 - best-effort teardown
+                record_failure("runtime.PartnerRuntime.stop:ledger", e)
         if getattr(self, "_scheduler", None) is not None:
             try:
                 self._scheduler.stop()
