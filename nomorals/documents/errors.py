@@ -32,6 +32,10 @@ DOCUMENT_ERROR_KINDS = frozenset({
     "io",                  # file read/write failure
     "write",               # a writer failed to produce its output
     "ocr_unavailable",     # OCR stack absent (tesseract / pytesseract)
+    "upstream",            # a backing engine/service the operation depends
+                           # on (LLM brain, search backend, index storage)
+                           # was present but failed or vanished at runtime —
+                           # distinct from missing_dependency (absent)
 })
 
 

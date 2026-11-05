@@ -161,8 +161,8 @@ class DocumentIndex:
             raise DocumentError(
                 "FTS5 is not available in this SQLite build; DocumentIndex "
                 "requires FTS5-backed BM25 ranking and refuses to degrade to "
-                "silent empty results"
-            )
+                "silent empty results",
+                kind="missing_dependency")
         self._db = db if db is not None else Database(":memory:")
         _ensure_schema(self._db)
         self._fts = FTSIndex(self._db, _FTS_TABLE, columns=["title", "text"])
@@ -171,8 +171,8 @@ class DocumentIndex:
             # means the table vanished under us.
             raise DocumentError(
                 f"FTS table {_FTS_TABLE!r} is unavailable; refusing to serve "
-                "unranked (empty) search results"
-            )
+                "unranked (empty) search results",
+                kind="upstream")
 
     def __len__(self) -> int:
         return int(
@@ -187,10 +187,10 @@ class DocumentIndex:
     def add(self, doc: Document) -> None:
         """Index ``doc``.  Re-adding an existing id replaces the entry."""
         if not doc.id:
-            raise DocumentError("cannot index a document without an id")
+            raise DocumentError("cannot index a document without an id", kind="invalid_argument")
         text = full_text(doc)
         if not text.strip():
-            raise DocumentError(f"document {doc.id} has no indexable text")
+            raise DocumentError(f"document {doc.id} has no indexable text", kind="empty")
         self.remove(doc.id)
         rowid = self._db.insert(
             _META_TABLE,
@@ -280,7 +280,7 @@ class DocumentIndex:
         try:
             rows = self._db.query(sql, (match, limit))
         except (sqlite3.OperationalError, StorageError) as exc:
-            raise DocumentError(f"bad search query: {exc}") from exc
+            raise DocumentError(f"bad search query: {exc}", kind="invalid_argument") from exc
         return [(int(r["rowid"]), -float(r["rank"]), r["snip"]) for r in rows]
 
     def search(self, query: str, limit: int = 10, *,
@@ -304,19 +304,19 @@ class DocumentIndex:
         """
         terms = _tokenize(query or "")
         if not terms:
-            raise DocumentError("search query has no indexable terms")
+            raise DocumentError("search query has no indexable terms", kind="empty")
         if limit <= 0:
-            raise DocumentError(f"limit must be positive, got {limit}")
+            raise DocumentError(f"limit must be positive, got {limit}", kind="invalid_argument")
         if operator.upper() not in ("AND", "OR"):
             raise DocumentError(
-                f"operator must be AND or OR, got {operator!r}")
+                f"operator must be AND or OR, got {operator!r}", kind="invalid_argument")
         if not self._fts.available:
             raise DocumentError(
-                "FTS backend became unavailable; refusing to return empty results"
-            )
+                "FTS backend became unavailable; refusing to return empty results",
+                kind="upstream")
         match = self._build_match(query, operator, prefix)
         if not match:
-            raise DocumentError("search query has no indexable terms")
+            raise DocumentError("search query has no indexable terms", kind="empty")
         raw_hits = self._run_match(match, limit, highlight)
         if not raw_hits:
             return []
@@ -380,24 +380,24 @@ class DocumentIndex:
         :meth:`search`)."""
         terms = _tokenize(query or "")
         if not terms:
-            raise DocumentError("search query has no indexable terms")
+            raise DocumentError("search query has no indexable terms", kind="empty")
         match = self._build_match(query, operator, prefix)
         if not match:
-            raise DocumentError("search query has no indexable terms")
+            raise DocumentError("search query has no indexable terms", kind="empty")
         try:
             return int(self._db.scalar(
                 f'SELECT COUNT(*) FROM "{_FTS_TABLE}" '
                 f'WHERE "{_FTS_TABLE}" MATCH ?',
                 (match,), default=0))
         except (sqlite3.OperationalError, StorageError) as exc:
-            raise DocumentError(f"bad search query: {exc}") from exc
+            raise DocumentError(f"bad search query: {exc}", kind="invalid_argument") from exc
 
     def suggest(self, prefix: str, limit: int = 8) -> list[str]:
         """Term completions for ``prefix`` from the FTS5 vocabulary
         (search-as-you-type hook).  Returns [] when the prefix is too
         short or the vocab table is unavailable — never raises."""
         if limit <= 0:
-            raise DocumentError(f"limit must be positive, got {limit}")
+            raise DocumentError(f"limit must be positive, got {limit}", kind="invalid_argument")
         clean = (prefix or "").strip().lower()
         if len(clean) < 2:
             return []
@@ -417,13 +417,13 @@ class DocumentIndex:
         hook).  Currently ``field`` must be ``"format"``."""
         if field != "format":
             raise DocumentError(
-                f"cannot facet on {field!r}: only 'format' is facetable")
+                f"cannot facet on {field!r}: only 'format' is facetable", kind="invalid_argument")
         try:
             rows = self._db.query(
                 f'SELECT "format", COUNT(*) AS n FROM "{_META_TABLE}" '
                 f'GROUP BY "format" ORDER BY n DESC')
         except StorageError as exc:
-            raise DocumentError(f"facet failed: {exc}") from exc
+            raise DocumentError(f"facet failed: {exc}", kind="upstream") from exc
         return {str(r["format"]) or "(unknown)": int(r["n"]) for r in rows}
 
     def stats(self) -> dict[str, Any]:
@@ -443,7 +443,7 @@ class DocumentIndex:
         """
         file_path = Path(path)
         if file_path.is_dir():
-            raise DocumentError(f"cannot write index to {file_path}: is a directory")
+            raise DocumentError(f"cannot write index to {file_path}: is a directory", kind="io")
         if (
             self._db.path is not None
             and file_path.resolve() == self._db.path.resolve()
@@ -458,12 +458,12 @@ class DocumentIndex:
                 file_path.unlink()
         except OSError as exc:
             raise DocumentError(
-                f"cannot write index to {file_path}: {exc}") from exc
+                f"cannot write index to {file_path}: {exc}", kind="io") from exc
         try:
             dest = Database(file_path)
         except (OSError, sqlite3.Error) as exc:
             raise DocumentError(
-                f"cannot write index to {file_path}: {exc}") from exc
+                f"cannot write index to {file_path}: {exc}", kind="io") from exc
         try:
             _ensure_schema(dest)
             self._write_version(dest)
@@ -505,13 +505,13 @@ class DocumentIndex:
         """
         file_path = Path(path)
         if not file_path.is_file():
-            raise DocumentError(f"cannot load index from {file_path}: no such file")
+            raise DocumentError(f"cannot load index from {file_path}: no such file", kind="io")
         try:
             with open(file_path, "rb") as handle:
                 magic = handle.read(len(_SQLITE_MAGIC))
         except OSError as exc:
             raise DocumentError(
-                f"cannot load index from {file_path}: {exc}") from exc
+                f"cannot load index from {file_path}: {exc}", kind="io") from exc
         if magic == _SQLITE_MAGIC:
             return cls._load_sqlite(file_path)
         return cls._load_legacy_json(file_path)
@@ -522,17 +522,17 @@ class DocumentIndex:
             source = Database(file_path)
         except (OSError, sqlite3.Error) as exc:
             raise DocumentError(
-                f"cannot load index from {file_path}: {exc}") from exc
+                f"cannot load index from {file_path}: {exc}", kind="io") from exc
         try:
             try:
                 has_schema = source.table_exists(_VERSION_TABLE) and \
                     source.table_exists(_META_TABLE)
             except StorageError as exc:
                 raise DocumentError(
-                    f"cannot load index from {file_path}: {exc}") from exc
+                    f"cannot load index from {file_path}: {exc}", kind="io") from exc
             if not has_schema:
                 raise DocumentError(
-                    f"not a document index file: {file_path}")
+                    f"not a document index file: {file_path}", kind="unsupported_format")
             try:
                 version = source.scalar(
                     f'SELECT "value" FROM "{_VERSION_TABLE}" '
@@ -541,12 +541,12 @@ class DocumentIndex:
                 )
             except StorageError as exc:
                 raise DocumentError(
-                    f"cannot load index from {file_path}: {exc}") from exc
+                    f"cannot load index from {file_path}: {exc}", kind="io") from exc
             if str(version) not in (str(_INDEX_VERSION),
                                     str(_PREVIOUS_SQLITE_VERSION)):
                 raise DocumentError(
                     f"unsupported document index version {version!r} in "
-                    f"{file_path} (expected {_INDEX_VERSION})")
+                    f"{file_path} (expected {_INDEX_VERSION})", kind="unsupported_format")
             try:
                 rows = source.query(
                     f'SELECT "doc_id", "title", "text", "format" '
@@ -560,7 +560,7 @@ class DocumentIndex:
                     )
                 except StorageError as exc:
                     raise DocumentError(
-                        f"cannot load index from {file_path}: {exc}") from exc
+                        f"cannot load index from {file_path}: {exc}", kind="io") from exc
         finally:
             source.close()
         index = cls()
@@ -580,12 +580,12 @@ class DocumentIndex:
             payload = json.loads(file_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise DocumentError(
-                f"cannot load index from {file_path}: {exc}") from exc
+                f"cannot load index from {file_path}: {exc}", kind="io") from exc
         if (
             not isinstance(payload, dict)
             or payload.get("version") != _LEGACY_JSON_VERSION
         ):
-            raise DocumentError(f"not a document index file: {file_path}")
+            raise DocumentError(f"not a document index file: {file_path}", kind="unsupported_format")
         index = cls()
         for entry in payload.get("docs", []):
             doc = Document(id=str(entry.get("id", "")),

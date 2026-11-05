@@ -109,10 +109,10 @@ def diff_documents(first: Document, second: Document, *,
     either document has no text to diff.
     """
     if not isinstance(first, Document) or not isinstance(second, Document):
-        raise DocumentError("diff_documents needs two Document objects")
+        raise DocumentError("diff_documents needs two Document objects", kind="invalid_argument")
     a_text, b_text = full_text(first), full_text(second)
     if not a_text.strip() or not b_text.strip():
-        raise DocumentError("cannot diff documents with no text")
+        raise DocumentError("cannot diff documents with no text", kind="empty")
     diff = difflib.unified_diff(
         a_text.splitlines(), b_text.splitlines(),
         fromfile=first.title or first.id or "a",
@@ -132,7 +132,7 @@ def word_diff(before: str, after: str) -> list[tuple[str, str]]:
     of character-soup fragments.
     """
     if not isinstance(before, str) or not isinstance(after, str):
-        raise DocumentError("word_diff needs two strings")
+        raise DocumentError("word_diff needs two strings", kind="invalid_argument")
     a_words = re.findall(r"\S+|\s+", before)
     b_words = re.findall(r"\S+|\s+", after)
     matcher = difflib.SequenceMatcher(a=a_words, b=b_words, autojunk=False)
@@ -176,7 +176,7 @@ def word_diff(before: str, after: str) -> list[tuple[str, str]]:
 def similarity(first: Document, second: Document) -> float:
     """0..1 textual similarity of two documents (SequenceMatcher ratio)."""
     if not isinstance(first, Document) or not isinstance(second, Document):
-        raise DocumentError("similarity needs two Document objects")
+        raise DocumentError("similarity needs two Document objects", kind="invalid_argument")
     return round(difflib.SequenceMatcher(
         None, full_text(first), full_text(second),
         autojunk=False).ratio(), 4)
@@ -257,7 +257,7 @@ def compare_documents(first: Document, second: Document, *,
     differences are reported, not errors.
     """
     if not isinstance(first, Document) or not isinstance(second, Document):
-        raise DocumentError("compare_documents needs two Document objects")
+        raise DocumentError("compare_documents needs two Document objects", kind="invalid_argument")
 
     a_sections = {_section_key(i, s.heading): s
                   for i, s in enumerate(first.sections)}

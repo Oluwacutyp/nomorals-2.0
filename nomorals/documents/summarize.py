@@ -260,7 +260,7 @@ def _resolve_method(method: str) -> str:
     if method not in _METHODS:
         raise DocumentError(
             f"unknown summarize method {method!r}: choose from "
-            f"{list(_METHODS)}")
+            f"{list(_METHODS)}", kind="invalid_argument")
     return method
 
 
@@ -274,13 +274,13 @@ def summarize_text(text: str, *, sentences: int = 5, method: str = "tf",
     :class:`DocumentError` on empty text or a non-positive sentence count.
     """
     if sentences <= 0:
-        raise DocumentError(f"sentences must be positive, got {sentences}")
+        raise DocumentError(f"sentences must be positive, got {sentences}", kind="invalid_argument")
     if not text or not text.strip():
-        raise DocumentError("cannot summarize empty text")
+        raise DocumentError("cannot summarize empty text", kind="empty")
     _resolve_method(method)
     sents = _sentences_or_fallback(text)
     if not sents:
-        raise DocumentError("no summarizable sentences found in text")
+        raise DocumentError("no summarizable sentences found in text", kind="empty")
     scores = _SCORERS[method](sents)
     return _select(sents, scores, sentences, diversity=diversity,
                    position_bias=position_bias, query=query)
@@ -295,7 +295,7 @@ def summarize(doc: Document, *, sentences: int = 5, method: str = "tf",
     text.
     """
     if not isinstance(doc, Document):
-        raise DocumentError("summarize needs a Document object")
+        raise DocumentError("summarize needs a Document object", kind="invalid_argument")
     return summarize_text(full_text(doc), sentences=sentences, method=method,
                           diversity=diversity, position_bias=position_bias,
                           query=query)
@@ -310,9 +310,9 @@ def summarize_sections(doc: Document, *, sentences: int = 2,
     skipped.
     """
     if not isinstance(doc, Document):
-        raise DocumentError("summarize_sections needs a Document object")
+        raise DocumentError("summarize_sections needs a Document object", kind="invalid_argument")
     if sentences <= 0:
-        raise DocumentError(f"sentences must be positive, got {sentences}")
+        raise DocumentError(f"sentences must be positive, got {sentences}", kind="invalid_argument")
     _resolve_method(method)
     out: list[dict[str, Any]] = []
     for section in doc.sections:
@@ -326,7 +326,7 @@ def summarize_sections(doc: Document, *, sentences: int = 2,
             out.append({"heading": section.heading, "level": section.level,
                         "page": section.page, "summary": summary})
     if not out:
-        raise DocumentError("document has no summarizable sections")
+        raise DocumentError("document has no summarizable sections", kind="empty")
     return out
 
 
@@ -334,7 +334,7 @@ def summarize_query(text: str | Document, query: str, *,
                     sentences: int = 3, method: str = "tf") -> list[str]:
     """Query-focused summary: sentences most relevant to ``query``."""
     if not query or not query.strip():
-        raise DocumentError("summarize_query needs a non-empty query")
+        raise DocumentError("summarize_query needs a non-empty query", kind="invalid_argument")
     body = full_text(text) if isinstance(text, Document) else text
     return summarize_text(body, sentences=sentences, method=method,
                           query=query)
@@ -344,14 +344,14 @@ def tldr(text: str | Document, *, words: int = 60,
          method: str = "textrank") -> str:
     """Ultra-short summary: top-ranked sentences within a word budget."""
     if words <= 0:
-        raise DocumentError(f"words must be positive, got {words}")
+        raise DocumentError(f"words must be positive, got {words}", kind="invalid_argument")
     body = full_text(text) if isinstance(text, Document) else text
     if not body or not body.strip():
-        raise DocumentError("cannot summarize empty text")
+        raise DocumentError("cannot summarize empty text", kind="empty")
     _resolve_method(method)
     sents = _sentences_or_fallback(body)
     if not sents:
-        raise DocumentError("no summarizable sentences found in text")
+        raise DocumentError("no summarizable sentences found in text", kind="empty")
     scores = _SCORERS[method](sents)
     ranked = sorted(range(len(sents)), key=lambda i: (-scores[i], i))
     picked: list[str] = []
@@ -370,7 +370,7 @@ def bullet_digest(doc: Document, *, sentences: int = 5,
                   method: str = "textrank") -> str:
     """A markdown bullet digest of a document (chat/paste friendly)."""
     if not isinstance(doc, Document):
-        raise DocumentError("bullet_digest needs a Document object")
+        raise DocumentError("bullet_digest needs a Document object", kind="invalid_argument")
     summary = summarize(doc, sentences=sentences, method=method)
     title = f"# {doc.title}\n\n" if doc.title else ""
     return title + "\n".join(f"- {sentence}" for sentence in summary) + "\n"
@@ -384,16 +384,16 @@ def summarize_abstractive(doc: Document | str, *, max_words: int = 150,
     caller should fall back to :func:`summarize`.
     """
     if max_words <= 0:
-        raise DocumentError(f"max_words must be positive, got {max_words}")
+        raise DocumentError(f"max_words must be positive, got {max_words}", kind="invalid_argument")
     body = full_text(doc) if isinstance(doc, Document) else doc
     if not body or not body.strip():
-        raise DocumentError("cannot summarize empty text")
+        raise DocumentError("cannot summarize empty text", kind="empty")
     try:
         from ..llm.brain import get_brain
         brain = get_brain()
     except Exception as exc:
         raise DocumentError(
-            f"abstractive summarization needs the LLM brain: {exc}") from exc
+            f"abstractive summarization needs the LLM brain: {exc}", kind="missing_dependency") from exc
     prompt = (
         f"Summarize the following document in at most {max_words} words. "
         "Write a fluent paragraph, no bullet points, no preamble."
@@ -404,11 +404,11 @@ def summarize_abstractive(doc: Document | str, *, max_words: int = 150,
         response = brain.complete(prompt)
     except Exception as exc:
         raise DocumentError(
-            f"abstractive summarization failed: {exc}") from exc
+            f"abstractive summarization failed: {exc}", kind="upstream") from exc
     text = getattr(response, "text", "") or str(response)
     text = text.strip()
     if not text:
-        raise DocumentError("the LLM returned an empty summary")
+        raise DocumentError("the LLM returned an empty summary", kind="empty")
     return text
 
 
@@ -421,12 +421,12 @@ def keywords(text: str, *, top_n: int = 10) -> list[str]:
     Raises :class:`DocumentError` on empty text or non-positive top_n.
     """
     if top_n <= 0:
-        raise DocumentError(f"top_n must be positive, got {top_n}")
+        raise DocumentError(f"top_n must be positive, got {top_n}", kind="invalid_argument")
     if not text or not text.strip():
-        raise DocumentError("cannot extract keywords from empty text")
+        raise DocumentError("cannot extract keywords from empty text", kind="empty")
     freq = Counter(_content_words(text))
     if not freq:
-        raise DocumentError("no keyword candidates found in text")
+        raise DocumentError("no keyword candidates found in text", kind="empty")
     ranked = sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))
     return [word for word, _ in ranked[:top_n]]
 
@@ -444,11 +444,11 @@ def keyphrases(text: str, *, top_n: int = 10,
     Raises :class:`DocumentError` on empty text or non-positive top_n.
     """
     if top_n <= 0:
-        raise DocumentError(f"top_n must be positive, got {top_n}")
+        raise DocumentError(f"top_n must be positive, got {top_n}", kind="invalid_argument")
     if max_words < 1:
-        raise DocumentError(f"max_words must be >= 1, got {max_words}")
+        raise DocumentError(f"max_words must be >= 1, got {max_words}", kind="invalid_argument")
     if not text or not text.strip():
-        raise DocumentError("cannot extract keyphrases from empty text")
+        raise DocumentError("cannot extract keyphrases from empty text", kind="empty")
     # Candidate phrases: content-word runs between stopwords/punctuation,
     # extracted per sentence so phrases never span sentence boundaries.
     phrases: list[list[str]] = []
@@ -467,7 +467,7 @@ def keyphrases(text: str, *, top_n: int = 10,
             phrases.append(current)
     phrases = [p for p in phrases if 1 <= len(p) <= max_words]
     if not phrases:
-        raise DocumentError("no keyphrase candidates found in text")
+        raise DocumentError("no keyphrase candidates found in text", kind="empty")
     freq: Counter[str] = Counter()
     degree: Counter[str] = Counter()
     for phrase in phrases:

@@ -43,7 +43,7 @@ The WinAnsi PDF writer cannot represent 11 of the fixture's non-Latin-1 characte
 | Row | State | Evidence / note |
 |---|---|---|
 | `DocumentError` joins the NoMoralsError code system: stable `code` (`document.error`, refined per raise, e.g. `document.missing_dependency`, `document.ocr_unavailable`), `details`, `retryable`, registry membership, `to_dict()` | shipped (Wave 2) | `documents/errors.py`; it also stays a `ValueError` subclass so every pre-existing `except DocumentError`/`except ValueError` handler keeps working — the fold is additive |
-| Machine-readable `kind` on every raise, separate from the human message (Echelon standard): parse / unsupported_format / missing_dependency / empty / invalid_argument / io / write / ocr_unavailable / error (unclassified) | shipped (Wave 2) | kinds assigned at raise sites across `parsers.py` (with the parse funnel classifying parser failures), `convert.py`, `ocr.py`, `writers.py`; mirrored into `details["kind"]`. `index.py` / `compare.py` / `summarize.py` raise sites still carry the unclassified kind — see open remainders |
+| Machine-readable `kind` on every raise, separate from the human message (Echelon standard): parse / unsupported_format / missing_dependency / empty / invalid_argument / io / write / ocr_unavailable / upstream / error (unclassified) | shipped (Wave 2) | kinds assigned at raise sites across `parsers.py` (with the parse funnel classifying parser failures), `convert.py`, `ocr.py`, `writers.py`; mirrored into `details["kind"]`. The `index.py` / `compare.py` / `summarize.py` sites were classified by the burn-down sweep (all 59 sites; messages byte-identical, kind metadata only), which added one kind, `upstream` — a backing engine/service present but failed or vanished at runtime, distinct from `missing_dependency` (absent) |
 
 ## Writers (plan item (b) — owner-visible choice)
 
@@ -81,7 +81,7 @@ The WinAnsi PDF writer cannot represent 11 of the fixture's non-Latin-1 characte
 
 | Row | State | Note |
 |---|---|---|
-| Error-kind classification in `index.py` / `compare.py` / `summarize.py` | open remainder | their raise sites carry the unclassified kind (`error`) today; the code system membership already applies to them. A classification sweep of those three organs is ranked below the remaining waves |
+| Error-kind classification in `index.py` / `compare.py` / `summarize.py` | closed (burn-down) | the Wave-2 open remainder, closed by the burn-down sweep: all 59 raise sites carry an explicit taxonomy kind, proven per-site by `tests/test_documents_error_kinds.py` (each kind asserted by triggering the raise); human messages byte-identical to before the sweep. The taxonomy gained one kind, `upstream`, for the four sites whose failure is a present-but-failed backing engine/service (FTS table / backend loss, facet storage failure, LLM completion failure) |
 | CFF-flavored OpenType (.otf) embedding | refused, named | the stdlib subsetter is TrueType-only; `render_pdf_embedded` raises `PdfError` naming the reason. A CFF subsetter is an L4 engine decision, not an L1 gap |
 | OCR fidelity rows | gated — environment | see the OCR section; they un-gate where Tesseract is installed |
 
