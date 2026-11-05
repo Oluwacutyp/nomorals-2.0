@@ -363,7 +363,25 @@ def fetch_piper_voice(voice_id: str, dest_dir: str = "") -> str:
             shutil.move(got, flat)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    return os.path.join(target, voice_id + ".onnx")
+    onnx_path = os.path.join(target, voice_id + ".onnx")
+    # Ingest gate (Wave 3b): what was fetched is validated before it
+    # may be served — a malformed download is refused with the coded
+    # ModelFileError and removed, so a bad file never sits in the
+    # voices dir waiting to be picked up as a "found" voice.
+    from .model_files import ModelFileError, validate_model_file
+
+    try:
+        validate_model_file(onnx_path)
+    except ModelFileError:
+        from .failures import record_failure
+
+        for fetched in (onnx_path, onnx_path + ".json"):
+            try:
+                os.remove(fetched)
+            except OSError as exc:
+                record_failure("fetch.fetch_piper_voice:cleanup", exc)
+        raise
+    return onnx_path
 
 
 def fetch_model(name: str, dest: str = "", repo: str = "",

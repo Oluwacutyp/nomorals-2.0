@@ -163,6 +163,26 @@ def _simple_g2p(word: str) -> list[str]:
     return chunks or [w]
 
 
+def _english_phonemes(word: str) -> list[str]:
+    """Arpabet phonemes for one lyric word via the English G2P rung.
+
+    The rung (``nomorals/media/g2p_en.py``, Wave 3c) answers from its
+    CMUdict-pattern lexicon or its letter-to-sound rules; stress
+    digits are stripped (note phonemes carry no stress). The naive
+    chunker above remains the per-word fallback when the rung
+    cannot answer or is unavailable — the incumbent behavior, kept.
+    """
+    try:
+        from ..media.g2p_en import base_phoneme, g2p_en
+
+        result = g2p_en(word)
+        if result.phonemes:
+            return [base_phoneme(p) for p in result.phonemes]
+    except Exception as exc:  # noqa: BLE001 — fallback is the chunker
+        record_failure("singing._english_phonemes", exc)
+    return _simple_g2p(word)
+
+
 def _f0_curve(notes: list[Note], sr: int, hop: int = 256,
               vibrato_rate: float = 5.5,
               vibrato_depth: float = 0.6) -> list[float]:
@@ -393,7 +413,7 @@ class DiffSingerBackend:
             elif n.lyric == "-":
                 phonemes.append("v_sustain")
             else:
-                phonemes.extend(_simple_g2p(n.lyric))
+                phonemes.extend(_english_phonemes(n.lyric))
         import numpy as np
         f0_arr = np.array(f0, dtype=np.float32)[None, :]
         # Duration: frames per phoneme (even split across its note)

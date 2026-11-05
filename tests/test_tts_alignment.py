@@ -228,9 +228,18 @@ class _FakePiperVoice:
 
 
 def _piper_with(voice) -> PiperBackend:
+    # Constructed by hand with a pre-loaded "default" voice — through
+    # the lifecycle manager that governs loaded sessions (Wave 3a),
+    # which replaced the backend's old ad-hoc _voices dict.
+    from nomorals.voice.lifecycle import (
+        LifecyclePolicy,
+        ModelLifecycleManager,
+    )
+
     be = PiperBackend.__new__(PiperBackend)
     be._PiperVoice = None
-    be._voices = {"default": voice}
+    be._lifecycle = ModelLifecycleManager(LifecyclePolicy())
+    be._lifecycle.acquire("default", lambda: voice)
     be.voice_path = "fake.onnx"
     be.sample_rate = 1000
     return be

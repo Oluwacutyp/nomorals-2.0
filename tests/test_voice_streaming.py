@@ -445,7 +445,11 @@ class FetchPiperVoiceTest(unittest.TestCase):
             dest = os.path.join(local_dir, filename)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             with open(dest, "wb") as fh:
-                fh.write(b"fake")
+                # fetched files are ingest-validated (Wave 3b), so
+                # the fake payloads carry valid shapes: a protobuf-
+                # headed model and a parseable JSON config.
+                fh.write(b"{}" if filename.endswith(".json")
+                         else b"\x08\x07fake")
             return dest
 
         mod.hf_hub_download = hf_hub_download

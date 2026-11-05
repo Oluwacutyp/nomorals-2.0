@@ -3,11 +3,27 @@
 XTTS is mocked — no model needed. Voice catalogue uses a temp dir.
 """
 import os
+import struct
 import tempfile
 import unittest
+import wave
 from unittest import mock
 
 from nomorals.voice.catalogue import VoiceCatalogue, default_catalogue
+
+
+def _write_ref_wav(path):
+    """A real (tiny, silent) WAV as a clone source.
+
+    Uploads are ingest-validated (Wave 3b), so the source fixture
+    must be an actual WAV, not RIFF-flavoured bytes.
+    """
+    with wave.open(path, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(struct.pack("<1600h", *([0] * 1600)))
+    return path
 
 
 def _make_catalogue():
@@ -90,9 +106,8 @@ class CloneVoiceCommandTests(unittest.TestCase):
 
     def test_clonevoice_success(self):
         h = self._handler()
-        wav = os.path.join(tempfile.gettempdir(), "clone_test_src.wav")
-        with open(wav, "wb") as fh:
-            fh.write(b"RIFF....fake")
+        wav = _write_ref_wav(
+            os.path.join(tempfile.gettempdir(), "clone_test_src.wav"))
         msg = mock.MagicMock()
         media = mock.MagicMock()
         media.kind = "voice"
@@ -227,9 +242,7 @@ class PersistenceRoundtripTests(unittest.TestCase):
         from nomorals.voice.catalogue import VoiceCatalogue
 
         tmp = tempfile.mkdtemp(prefix="voices_persist_")
-        wav = os.path.join(tmp, "src.wav")
-        with open(wav, "wb") as fh:
-            fh.write(b"RIFF....fake-audio")
+        wav = _write_ref_wav(os.path.join(tmp, "src.wav"))
 
         cat1 = VoiceCatalogue(voices_dir=tmp)
         profile = cat1.library.upload_voice("bob", wav, backend="xtts")
@@ -258,9 +271,7 @@ class PersistenceRoundtripTests(unittest.TestCase):
         from nomorals.voice.tts import UniversalTTS
 
         tmp = tempfile.mkdtemp(prefix="voices_resolve_")
-        wav = os.path.join(tmp, "src.wav")
-        with open(wav, "wb") as fh:
-            fh.write(b"RIFF....fake-audio")
+        wav = _write_ref_wav(os.path.join(tmp, "src.wav"))
 
         cat = VoiceCatalogue(voices_dir=tmp)
         profile = cat.library.upload_voice("alice", wav, backend="xtts")
@@ -280,9 +291,7 @@ class PersistenceRoundtripTests(unittest.TestCase):
         from nomorals.voice import tts as tts_mod
 
         tmp = tempfile.mkdtemp(prefix="voices_xtts_")
-        wav = os.path.join(tmp, "src.wav")
-        with open(wav, "wb") as fh:
-            fh.write(b"RIFF....fake-audio")
+        wav = _write_ref_wav(os.path.join(tmp, "src.wav"))
 
         cat = VoiceCatalogue(voices_dir=tmp)
         profile = cat.library.upload_voice("bob", wav, backend="xtts")

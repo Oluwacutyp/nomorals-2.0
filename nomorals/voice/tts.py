@@ -83,6 +83,8 @@ from typing import Any, List, Optional
 from .director import CANONICAL_BURSTS
 from ..core.text import safe_filename
 from .failures import record_failure
+from .lifecycle import LifecyclePolicy, ModelLifecycleManager
+from .model_files import validate_model_file, validate_reference_audio
 
 _log = logging.getLogger(__name__)
 
@@ -138,6 +140,11 @@ class VoiceProfile:
     #: plus a clone-quality verdict. Powers ``/voice match`` and the
     #: clone-time quality gate. Empty for preset (non-cloned) voices.
     voice_print: dict = field(default_factory=dict)
+    #: Ingest validation record for the reference clip, written by
+    #: :func:`validate_reference_audio` at upload (Wave 3b): sniffed
+    #: format, byte size, SHA-256, parsed rate/channels/duration.
+    #: Empty for profiles registered without a validated ingest.
+    ingest: dict = field(default_factory=dict)
 
     def validate_for_cloning(self, backend: str = "unknown") -> None:
         """Validate voice for cloning (audit-logged, no consent gate)."""
@@ -173,6 +180,7 @@ class VoiceProfile:
             "backend": self.backend,
             "extra_samples": list(self.extra_samples),
             "voice_print": dict(self.voice_print or {}),
+            "ingest": dict(self.ingest or {}),
         }
 
 
@@ -223,7 +231,15 @@ class VoiceLibrary:
         ``backend`` records which backend family this voice was cloned
         for (e.g. "xtts", "chatterbox") — the engine enforces audience
         licensing from it.
+
+        The clip is validated BEFORE the copy (:mod:`.model_files`):
+        a malformed file — video bytes, a truncated WAV, an empty or
+        oversized file — is refused with a coded
+        :class:`~.model_files.ModelFileError` and never enters
+        managed storage. The validation record lands on the profile
+        as ``ingest``.
         """
+        info = validate_reference_audio(audio_file_path)
         # Only the on-disk name is sanitised (a voice named "a:b" or
         # "my/voice" must not raise OSError on Windows); the profile's
         # display name stays exactly as given.
@@ -240,6 +256,7 @@ class VoiceLibrary:
             language=language,
             description=description,
             backend=(backend or "").lower(),
+            ingest=info.to_dict(),
         )
         # acoustic voice-print at upload: quality verdict + matching basis
         try:
@@ -278,6 +295,8 @@ class VoiceLibrary:
         profile = self.profiles.get(name)
         if profile is None:
             raise KeyError(f"unknown voice profile {name!r}")
+        # same ingest gate as upload_voice: validated before copy
+        validate_reference_audio(audio_file_path)
         n = len(profile.extra_samples) + 1
         dest = os.path.join(
             self.storage_dir,
@@ -1560,6 +1579,12 @@ class PiperBackend:
     supports_streaming = False  # RTF ~0.28 already — one-shot is fast
                                 # enough; the engine sentence-chunks it
 
+    #: Lifecycle policy for loaded voice sessions (Wave 3a): at
+    #: most 4 piper voices (~60MB each) resident at once; beyond
+    #: that the least-recently-used session is evicted. Policy is
+    #: data — read or override it, don't hunt constants.
+    LIFECYCLE_POLICY = LifecyclePolicy(max_loaded=4)
+
     def __init__(self, voice_path: str = "") -> None:
         try:
             from piper import PiperVoice
@@ -1567,7 +1592,10 @@ class PiperBackend:
             raise RuntimeError(
                 "piper backend needs: pip install piper-tts") from exc
         self._PiperVoice = PiperVoice
-        self._voices: dict[str, Any] = {}
+        # Loaded sessions are governed by the lifecycle manager —
+        # load/LRU-evict/failure state, visible via
+        # lifecycle_status() — not an ad-hoc unbounded dict.
+        self._lifecycle = ModelLifecycleManager(self.LIFECYCLE_POLICY)
         self.sample_rate = 22050
         self.voice_path = voice_path or self._find_default_voice()
         if self.voice_path:
@@ -1602,12 +1630,26 @@ class PiperBackend:
         return ""
 
     def _load_named(self, key: str, path: str) -> Any:
-        voice = self._PiperVoice.load(path)
-        self._voices[key] = voice
+        def _load() -> Any:
+            # Validated before load (Wave 3b): a malformed model
+            # file is refused with a coded ModelFileError — never an
+            # opaque ONNX-runtime crash or a silent bad load.
+            validate_model_file(path)
+            return self._PiperVoice.load(path)
+
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
+        voice = self._lifecycle.acquire(key, _load, size_bytes=size)
         rate = getattr(getattr(voice, "config", None), "sample_rate", 0)
         if rate:
             self.sample_rate = int(rate)
         return voice
+
+    def lifecycle_status(self) -> dict[str, Any]:
+        """Loaded/evicted voice sessions as data (Wave 3a)."""
+        return self._lifecycle.status()
 
     def _resolve(self, voice: Optional[VoiceProfile]) -> Any:
         if voice and voice.preset_id:
@@ -1615,7 +1657,7 @@ class PiperBackend:
                 candidate = os.path.join(
                     directory, f"{voice.preset_id}.onnx")
                 if os.path.isfile(candidate):
-                    return self._voices.get(voice.preset_id) or \
+                    return self._lifecycle.peek(voice.preset_id) or \
                         self._load_named(voice.preset_id, candidate)
             # a named voice that does not resolve is a config error —
             # never silently speak in a different voice
@@ -1624,8 +1666,9 @@ class PiperBackend:
                 f"{voice.preset_id!r} — download one with "
                 f"'python -m piper.download_voices {voice.preset_id}' "
                 f"into PIPER_VOICES_DIR")
-        if "default" in self._voices:
-            return self._voices["default"]
+        default = self._lifecycle.peek("default")
+        if default is not None:
+            return default
         raise RuntimeError(
             "piper: no voice file found — download one with "
             "'python -m piper.download_voices en_US-lessac-medium' "
@@ -3068,7 +3111,7 @@ class UniversalTTS:
         name = (name or self.backend_name).lower()
         cap = dict(BACKEND_CAPABILITIES.get(name, {}))
         installed = name in available_backends()
-        return {
+        info: dict[str, Any] = {
             "name": name,
             "installed": installed,
             "quality": cap.get("quality", 1),
@@ -3089,10 +3132,52 @@ class UniversalTTS:
                 _BACKENDS.get(name), "word_alignment", "none"))
             if name in _BACKENDS else "none",
         }
+        # Model lifecycle (Wave 3a): when the described backend is
+        # the one loaded in this engine and it governs its models
+        # through the lifecycle manager, its loaded/evicted state
+        # rides along — lifecycle is visible in capability reports,
+        # not hidden in the backend.
+        if (self._impl is not None
+                and getattr(self._impl, "name", "") == name
+                and hasattr(self._impl, "lifecycle_status")):
+            info["lifecycle"] = self._impl.lifecycle_status()
+        return info
 
     def list_backend_info(self) -> list[dict[str, Any]]:
         """backend_info() for every registered backend, install order."""
         return [self.backend_info(n) for n in _BACKENDS]
+
+    def lifecycle_status(self) -> dict[str, Any]:
+        """The loaded backend's model lifecycle, as data (Wave 3a).
+
+        ``{"backend": None, "loaded": False}`` when no backend has
+        been loaded into this engine yet; otherwise the backend name
+        plus its lifecycle manager's full status (entries, states,
+        evictions, failure reasons) for backends that govern models
+        through :class:`ModelLifecycleManager`, or
+        ``{"governed": False}`` for single-model backends whose one
+        impl *is* the model.
+        """
+        if self._impl is None:
+            return {"backend": None, "loaded": False}
+        name = getattr(self._impl, "name", "")
+        status = getattr(self._impl, "lifecycle_status", None)
+        if callable(status):
+            return {"backend": name, "loaded": True, **status()}
+        return {"backend": name, "loaded": True, "governed": False}
+
+    def pronounce(self, text: str) -> list[dict[str, Any]]:
+        """English pronunciations for ``text`` via the G2P rung.
+
+        The TTS front-end surface for :mod:`nomorals.media.g2p_en`
+        (Wave 3c): one dict per word — ``{word, phonemes, source,
+        rung}`` — arpabet with lexical stress, where ``source``
+        separates dictionary pronunciations (``lexicon``) from
+        letter-to-sound approximations (``rules``).
+        """
+        from ..media.g2p_en import phonemize
+
+        return [gw.to_dict() for gw in phonemize(text)]
 
     def speak_batch(self, texts: list[str],
                     voice_name: Optional[str] = None, *,

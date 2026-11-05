@@ -55,7 +55,10 @@ class TestPiper(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.voice_file = os.path.join(self.tmp, "en_US-test-medium.onnx")
         with open(self.voice_file, "wb") as fh:
-            fh.write(b"fake-onnx")
+            # protobuf-shaped header (\x08 = ModelProto field 1):
+            # piper loads are ingest-validated (Wave 3b), so the
+            # fake model file must sniff as an ONNX model.
+            fh.write(b"\x08\x07fake-onnx")
         _stub_piper()
         os.environ["PIPER_VOICES_DIR"] = self.tmp
         os.environ.pop("PIPER_VOICE", None)
@@ -86,7 +89,7 @@ class TestPiper(unittest.TestCase):
     def test_preset_id_resolves_voice(self):
         alt = os.path.join(self.tmp, "en_GB-alan-medium.onnx")
         with open(alt, "wb") as fh:
-            fh.write(b"fake")
+            fh.write(b"\x08\x07fake")
         backend = PiperBackend()
         voice = VoiceProfile(name="alan", preset_id="en_GB-alan-medium")
         backend.synthesize("hello", voice)

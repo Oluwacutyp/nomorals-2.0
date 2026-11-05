@@ -42,6 +42,19 @@ from .biometrics import (
     verify_voice,
 )
 from .catalogue import VoiceCatalogue, default_catalogue
+from .lifecycle import (
+    LifecyclePolicy,
+    ModelEntry,
+    ModelLifecycleManager,
+)
+from .model_files import (
+    IngestPolicy,
+    ModelFileError,
+    ModelFileInfo,
+    sniff_format,
+    validate_model_file,
+    validate_reference_audio,
+)
 from .design import (
     VoiceDesign,
     blend_voices,
