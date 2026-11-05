@@ -2537,6 +2537,10 @@ def _parser() -> argparse.ArgumentParser:
     mo_ex.add_argument("--format", default="9:16",
                        help="9:16|16:9|1:1|4:5")
     mo_ex.add_argument("--out", default="")
+    mo_pr = mo_sub.add_parser(
+        "project", help="render a saved MotionProject document (JSON)")
+    mo_pr.add_argument("file", help="project file (MotionProject.save)")
+    mo_pr.add_argument("--out", default="")
     mo_sub.add_parser("moves", help="list Ken Burns camera moves")
     mo_sub.add_parser("presets", help="list lyric/visualizer/grade presets")
     v_ch = v_sub.add_parser("chain", help="multi-scene film from scenes.json")

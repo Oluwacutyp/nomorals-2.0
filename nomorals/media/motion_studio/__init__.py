@@ -11,6 +11,8 @@ and the honest fallback when the GPU isn't there.
 
 from ._core import MotionStudioError, profile_defaults
 from . import kenburns, visualizer, typography, montage, grading, studio
+from . import project
+from .project import MotionProject, MotionSegment, PropertyTrack
 
 __all__ = [
     "MotionStudioError",
@@ -21,4 +23,8 @@ __all__ = [
     "montage",
     "grading",
     "studio",
+    "project",
+    "MotionProject",
+    "MotionSegment",
+    "PropertyTrack",
 ]

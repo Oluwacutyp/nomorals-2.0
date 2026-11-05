@@ -68,7 +68,7 @@ from ...core.logging_setup import get_logger
 _log = get_logger(__name__)
 
 __all__ = [
-    "STYLE_PRESETS", "list_presets", "Word", "to_words",
+    "STYLE_PRESETS", "list_presets", "Word", "to_words", "timing_sources",
     "render_lyrics", "render_quote_card",
 ]
 
@@ -78,6 +78,13 @@ class Word:
     text: str
     start: float
     end: float
+    #: Timing provenance (Echelon Wave 4 · plan §2.4 label discipline):
+    #: ``"measured"`` when a transcriber/TTS alignment produced these
+    #: times, ``"estimated"`` when they were spaced from text + wpm,
+    #: ``"authored"`` when a caller supplied the times as data.
+    #: Empty = unlabelled (legacy construction); consumers that state
+    #: provenance read only the labelled values — never guess.
+    timing_source: str = ""
 
 
 #: preset name → look. ``animation``: fade | slide_up | pop | karaoke.
@@ -139,12 +146,23 @@ def list_presets() -> list[dict[str, object]]:
 def to_words(lyrics: str | Sequence, *,
              audio: str | os.PathLike | None = None,
              duration: float | None = None,
-             wpm: float = 150.0) -> list[Word]:
+             wpm: float = 150.0,
+             timing_source: str = "") -> list[Word]:
     """Normalize lyric input to a timed word list.
 
     Accepts: ``[(text, start, end), …]``, ``[(text, start), …]``,
     ``[{text, start, end}, …]``, or plain text (timings estimated, snapped
     to the audio's beat grid when ``audio`` is given).
+
+    Timing provenance (plan §2.4): every returned word carries a
+    :attr:`Word.timing_source`. Plain text is always ``"estimated"``.
+    Timed input is ``"authored"`` unless labelled otherwise — a word
+    dict's own ``timing_source`` key wins, then the ``timing_source``
+    argument (the caller's statement of where the track came from,
+    e.g. ``"measured"`` for the word dicts of
+    :func:`edit_engine.text.captions_from_audio`). Measured is a
+    claim only a measurement earns; unlabelled input never gets it
+    by default.
     """
     if isinstance(lyrics, str):
         tokens = [t for t in lyrics.replace("\n", " ").split() if t]
@@ -157,22 +175,39 @@ def to_words(lyrics: str | Sequence, *,
             except Exception as exc:  # noqa: BLE001 - estimates still work
                 _log.warning("beat snap failed: %s", exc)
         est = estimate_word_timings(" ".join(tokens), wpm=wpm, beats=beats)
-        return [Word(w.text, w.start, w.end) for w in est]
+        return [Word(w.text, w.start, w.end, timing_source="estimated")
+                for w in est]
 
     words: list[Word] = []
     for item in lyrics:
         if isinstance(item, Word):
+            if not item.timing_source and timing_source:
+                item = Word(item.text, item.start, item.end,
+                            timing_source=timing_source)
             words.append(item)
         elif isinstance(item, dict):
-            words.append(Word(str(item["text"]), float(item["start"]),
-                              float(item.get("end", item["start"] + 0.4))))
+            words.append(Word(
+                str(item["text"]), float(item["start"]),
+                float(item.get("end", item["start"] + 0.4)),
+                timing_source=str(item.get("timing_source")
+                                  or timing_source or "authored")))
         else:
             text, start = item[0], float(item[1])
             end = float(item[2]) if len(item) > 2 else start + 0.4
-            words.append(Word(str(text), start, end))
+            words.append(Word(str(text), start, end,
+                              timing_source=timing_source or "authored"))
     if not words:
         raise MotionStudioError("empty word list — nothing to render")
     return sorted(words, key=lambda w: w.start)
+
+
+def timing_sources(words: Sequence[Word]) -> dict[str, int]:
+    """Word counts by timing provenance (unlabelled → ``"unlabelled"``)."""
+    out: dict[str, int] = {}
+    for w in words:
+        key = w.timing_source or "unlabelled"
+        out[key] = out.get(key, 0) + 1
+    return out
 
 
 def _phrases(words: list[Word], per_line: int) -> list[list[Word]]:
@@ -516,6 +551,7 @@ def render_lyrics(lyrics: str | Sequence,
                     preset=str(defaults["preset"]))
     record_ledger({"kind": "lyric_video", "path": str(out_path),
                    "preset": preset, "words": len(words),
+                   "timing_sources": timing_sources(words),
                    "duration": duration})
     return str(out_path)
 
@@ -525,7 +561,7 @@ def render_quote_card(text: str, out: str | os.PathLike | None = None, *,
                       size: tuple[int, int] | None = None,
                       fps: float | None = None, seed: int = 21) -> str:
     """One big statement, word-by-word pop — quote cards / hooks."""
-    words = [Word(w, i * 0.45, i * 0.45 + 0.6)
+    words = [Word(w, i * 0.45, i * 0.45 + 0.6, timing_source="authored")
              for i, w in enumerate(text.split())]
     return render_lyrics(words, out, duration=duration, preset=preset,
                          size=size, fps=fps, seed=seed)

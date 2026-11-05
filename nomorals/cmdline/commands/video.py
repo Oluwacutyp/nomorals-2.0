@@ -184,6 +184,23 @@ def _motion_export(args) -> int:
     return _ok(f"📐 exported ({args.format}) → {path}")
 
 
+def _motion_project(args) -> int:
+    """Render a saved MotionProject document (Echelon Wave 4)."""
+    from ...media.motion_studio import MotionStudioError
+    from ...media.motion_studio.project import MotionProject
+    try:
+        proj = MotionProject.load(args.file)
+        res = proj.render(out=args.out or None)
+    except MotionStudioError as exc:
+        return _err(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _err(str(exc))
+    rec = res.get("motion_project", {})
+    return _ok(f"🎬 motion project {rec.get('project_hash', '')[:12]} "
+               f"({len(rec.get('segments', []))} segments) → "
+               f"{res['output']}")
+
+
 def _motion_moves(args) -> int:
     from ...media.motion_studio.kenburns import list_moves
     for m in list_moves():
@@ -214,6 +231,7 @@ _MOTION_DISPATCH = {
     "trailer": _motion_trailer,
     "grade": _motion_grade,
     "export": _motion_export,
+    "project": _motion_project,
     "moves": _motion_moves,
     "presets": _motion_presets,
 }
@@ -227,7 +245,7 @@ def cmd_video(args: argparse.Namespace, context) -> int:
         fn = _MOTION_DISPATCH.get(getattr(args, "motion_action", ""))
         if fn is None:
             return _err("usage: nm video motion "
-                        "lyric|visual|slideshow|trailer|grade|export|moves|presets")
+                        "lyric|visual|slideshow|trailer|grade|export|project|moves|presets")
         return fn(args)
     if action == "chain":
         return _cmd_chain(args, context)
