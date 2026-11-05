@@ -471,6 +471,22 @@ class Database:
     def in_transaction(self) -> bool:
         return getattr(self._depth, "value", 0) > 0
 
+    @property
+    def connection_in_transaction(self) -> bool:
+        """True while the SQLite connection itself holds an open transaction.
+
+        Unlike :attr:`in_transaction` — the logical nesting depth, which the
+        transaction manager resets as it unwinds — this reads SQLite's own
+        state, so a COMMIT that failed and was swallowed by :meth:`_safe`
+        (``SQLITE_FULL`` on a full disk is the case that matters) still shows
+        up here as a dangling transaction whose work never landed. The
+        migration runner checks it to prove a commit actually committed.
+        """
+        try:
+            return bool(self._connection().in_transaction)
+        except Exception:  # noqa: BLE001 - closed/unopened db has no open txn
+            return False
+
     # ── maintenance ──────────────────────────────────────────────────────────
     def pragma(self, name: str, value: Any | None = None) -> Any:
         """Read (or set) a PRAGMA. Read form returns the scalar value."""

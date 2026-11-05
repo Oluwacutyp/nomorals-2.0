@@ -11,6 +11,13 @@ Properties that matter for a long-lived personal database:
   edit is not a schema change and must not trip the guard.
 * **Atomic.** Each migration runs inside its own transaction. SQLite DDL is
   transactional, so a failed migration leaves the database exactly as it was.
+* **Verified.** ``apply_all`` proves its own post-conditions before it
+  returns: the objects each applied migration's SQL created are spot-checked
+  in ``sqlite_master``, every claimed migration is re-read from the
+  bookkeeping tables, the recorded version must equal the version the run
+  was supposed to reach, and a COMMIT swallowed by the storage layer's soft
+  path (``SQLITE_FULL`` on a full disk) is caught as a dangling transaction
+  and raised — migrate never reports success on a half-applied schema.
 * **Cross-process safe.** ``apply_all`` holds an ``flock`` file lock while it
   works, then re-checks pending migrations *inside* the lock, so two processes
   (bot + CLI, bot + cron) can never double-apply a data migration.
@@ -27,6 +34,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import inspect
+import re
 import textwrap
 import time
 from contextlib import contextmanager
@@ -142,6 +150,61 @@ class Migration:
         if self.repeatable:
             return f"R__{self.name}"
         return f"{self.version:04d}_{self.name}"
+
+
+_SQL_NAME = r"(?:\"[^\"]+\"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w$]*)"
+_CREATE_RE = re.compile(
+    r"CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX|VIEW|TRIGGER)\s+"
+    r"(?:IF\s+NOT\s+EXISTS\s+)?(" + _SQL_NAME + r")",
+    re.IGNORECASE,
+)
+_CREATE_VIRTUAL_RE = re.compile(
+    r"CREATE\s+VIRTUAL\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(" + _SQL_NAME + r")",
+    re.IGNORECASE,
+)
+_DROP_RE = re.compile(
+    r"DROP\s+(?:TABLE|INDEX|VIEW|TRIGGER)\s+(?:IF\s+EXISTS\s+)?(" + _SQL_NAME + r")",
+    re.IGNORECASE,
+)
+
+
+def _unquote_sql_name(raw: str) -> str:
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] in "\"`[" and raw[-1] in "\"`]":
+        return raw[1:-1]
+    return raw
+
+
+def _created_objects(sql: str) -> dict[str, str]:
+    """Schema objects a migration's SQL creates: ``{name: sqlite_master type}``.
+
+    Derived from the migration's own DDL — the metadata the codebase already
+    keeps — so post-migration spot-checks need no hand-maintained registry.
+    Line comments are stripped first so prose can't masquerade as DDL.
+    Virtual tables live in ``sqlite_master`` as plain ``table`` rows.
+    """
+    if not sql:
+        return {}
+    body = re.sub(r"--[^\n]*", "", sql)
+    objects: dict[str, str] = {}
+    for match in _CREATE_VIRTUAL_RE.finditer(body):
+        objects[_unquote_sql_name(match.group(1))] = "table"
+    for match in _CREATE_RE.finditer(body):
+        objects[_unquote_sql_name(match.group(2))] = match.group(1).lower()
+    return objects
+
+
+def _dropped_objects(sql: str) -> set[str]:
+    """Names a migration's SQL drops (lower-cased).
+
+    A name created *and* dropped inside one migration is a scratch/rebuild
+    artifact (e.g. a staging table), not a post-condition — callers exclude
+    these from the created-objects check for that same migration.
+    """
+    if not sql:
+        return set()
+    body = re.sub(r"--[^\n]*", "", sql)
+    return {_unquote_sql_name(m.group(1)).lower() for m in _DROP_RE.finditer(body)}
 
 
 class MigrationRunner:
@@ -316,9 +379,156 @@ class MigrationRunner:
                         round((time.perf_counter() - started) * 1000, 3),
                     ),
                 )
+        if self._commit_left_dangling():
+            # The transaction block exited without raising, but SQLite is
+            # still holding the transaction open: the COMMIT went through
+            # Database._safe, which swallows failures (SQLITE_FULL on a
+            # full disk is the case that matters), so this migration's
+            # changes — and its bookkeeping row — never landed. Roll the
+            # dangling transaction back so a later, unrelated commit can
+            # never claim this version by accident, then fail loudly:
+            # reporting success here is how a half-applied schema used to
+            # surface much later as misleading "no such table" errors.
+            self.db._safe("ROLLBACK")
+            raise MigrationError(
+                f"migration {migration.label} did not commit: the COMMIT "
+                "failed (the transaction was rolled back), so the migration "
+                "is NOT applied — check disk space and database health, "
+                "then migrate again"
+            )
         duration = (time.perf_counter() - started) * 1000
         _log.debug("applied migration %s in %.1fms", migration.label, duration)
         return duration
+
+    def _commit_left_dangling(self) -> bool:
+        """True when a finished transaction block left SQLite still holding
+        the transaction open — the signature of a COMMIT that
+        :meth:`Database._safe` swallowed instead of landing."""
+        if self.db.in_transaction:
+            # Nested inside a caller's transaction: that caller owns the
+            # commit, so an open SQLite transaction is expected, not a fault.
+            return False
+        return bool(getattr(self.db, "connection_in_transaction", False))
+
+    def _schema_objects(self) -> dict[str, str]:
+        """``{lower-cased name: sqlite_master type}`` for the whole schema."""
+        rows = self.db.query("SELECT name, type FROM sqlite_master")
+        return {str(row["name"]).lower(): str(row["type"]) for row in rows}
+
+    def _verify_migration_objects(self, migration: Migration) -> list[str]:
+        """Spot-check that the objects *migration*'s SQL creates now exist.
+
+        Checked immediately after the migration applies, so a later
+        migration legitimately dropping an object can't false-positive
+        against an earlier one. Names the same SQL also drops are scratch
+        artifacts and are excluded. ``fn`` migrations carry no DDL to
+        derive from; their post-conditions are the bookkeeping and commit
+        checks in :meth:`verify_applied`.
+        """
+        expected = _created_objects(migration.sql)
+        if not expected:
+            return []
+        dropped = _dropped_objects(migration.sql)
+        master = self._schema_objects()
+        problems: list[str] = []
+        for name, obj_type in expected.items():
+            if name.lower() in dropped:
+                continue
+            actual = master.get(name.lower())
+            if actual is None:
+                problems.append(
+                    f"migration {migration.label} should have created "
+                    f"{obj_type} {name}, but it is missing from the schema"
+                )
+            elif actual != obj_type:
+                problems.append(
+                    f"migration {migration.label} should have created "
+                    f"{obj_type} {name}, but the schema holds a {actual} "
+                    "under that name"
+                )
+        return problems
+
+    def verify_applied(
+        self,
+        migrations: Sequence[Migration],
+        applied_labels: Sequence[str],
+        *,
+        expected_version: int | None = None,
+    ) -> list[str]:
+        """Post-condition check for a finished :meth:`apply_all` run.
+
+        Returns a list of problems (empty = the run's claims are all true):
+
+        * every label the run claims has a matching bookkeeping row —
+          versioned migrations in ``schema_migrations``, repeatables in
+          ``schema_migrations_repeatable``, with the recorded name intact;
+        * when *expected_version* is given, the recorded schema version
+          equals it exactly;
+        * no transaction is left dangling (a swallowed COMMIT would mean
+          the "applied" work never reached disk).
+
+        Object-level spot-checks live in :meth:`_verify_migration_objects`,
+        which :meth:`apply_all` runs per migration as it applies.
+        """
+        problems: list[str] = []
+        by_label = {m.label: m for m in migrations}
+        done = self.applied()
+        done_repeatable = self.applied_repeatable()
+        for label in applied_labels:
+            migration = by_label.get(label)
+            if migration is None:
+                continue
+            if migration.repeatable:
+                if migration.name not in done_repeatable:
+                    problems.append(
+                        f"repeatable migration {label} is not recorded as applied"
+                    )
+                continue
+            record = done.get(migration.version)
+            if record is None:
+                problems.append(
+                    f"migration {label} is not recorded as applied "
+                    f"(no bookkeeping row for version {migration.version})"
+                )
+            elif str(record.get("name") or "") != migration.name:
+                problems.append(
+                    f"migration {label} is recorded under the wrong name "
+                    f"({record.get('name')!r}, expected {migration.name!r})"
+                )
+        if expected_version is not None:
+            current = self.current_version()
+            if current != expected_version:
+                problems.append(
+                    f"recorded schema version is {current}, "
+                    f"expected {expected_version}"
+                )
+        if self._commit_left_dangling():
+            problems.append(
+                "a transaction is still open after migration — a COMMIT "
+                "did not land, so the schema may be half-applied"
+            )
+        return problems
+
+    def verify_objects(
+        self,
+        migrations: Sequence[Migration],
+        labels: Sequence[str] | None = None,
+    ) -> list[str]:
+        """Object spot-checks for migrations believed to be applied.
+
+        The operator-facing counterpart to the per-migration check
+        :meth:`apply_all` runs as it applies: re-derives the objects each
+        migration's SQL created and names any that are now missing from
+        the schema (a doctored or half-applied database). Restricted to
+        *labels* when given, otherwise every migration in the set.
+        """
+        wanted = None if labels is None else set(labels)
+        problems: list[str] = []
+        for migration in migrations:
+            if wanted is not None and migration.label not in wanted:
+                continue
+            problems.extend(self._verify_migration_objects(migration))
+        return problems
 
     @contextmanager
     def _migration_lock(self, timeout_s: float = 60.0) -> Iterator[None]:
@@ -389,7 +599,10 @@ class MigrationRunner:
         re-applied whenever their checksum changed.
 
         Raises :class:`MigrationError` if an applied migration has been edited
-        (see :meth:`repair` for the explicit operator escape hatch).
+        (see :meth:`repair` for the explicit operator escape hatch), or if the
+        post-run verification fails — a migration whose COMMIT did not land,
+        whose bookkeeping row is missing, or whose objects are absent from
+        the schema is never reported as applied.
         """
         with self._migration_lock(timeout_s=lock_timeout_s):
             problems = self.validate(migrations)
@@ -401,6 +614,7 @@ class MigrationRunner:
             if problems:
                 _log.warning("migration checksum problems ignored: %s", problems)
 
+            start_version = self.current_version()
             applied: list[str] = []
             pending = self.pending(migrations)
             if target is not None:
@@ -423,6 +637,13 @@ class MigrationRunner:
                     raise MigrationError(
                         f"migration {migration.label} failed: {exc}"
                     ) from exc
+                obj_problems = self._verify_migration_objects(migration)
+                if obj_problems:
+                    raise MigrationError(
+                        "migration verification failed: "
+                        + "; ".join(obj_problems),
+                        details={"problems": obj_problems},
+                    )
                 applied.append(migration.label)
             for migration in self.pending_repeatable(migrations):
                 try:
@@ -433,7 +654,33 @@ class MigrationRunner:
                     raise MigrationError(
                         f"repeatable migration {migration.label} failed: {exc}"
                     ) from exc
+                obj_problems = self._verify_migration_objects(migration)
+                if obj_problems:
+                    raise MigrationError(
+                        "migration verification failed: "
+                        + "; ".join(obj_problems),
+                        details={"problems": obj_problems},
+                    )
                 applied.append(migration.label)
+            by_label = {m.label: m for m in migrations}
+            applied_versions = [
+                by_label[label].version
+                for label in applied
+                if label in by_label and not by_label[label].repeatable
+            ]
+            expected_version = (
+                max([start_version, *applied_versions])
+                if applied_versions
+                else start_version
+            )
+            problems = self.verify_applied(
+                migrations, applied, expected_version=expected_version
+            )
+            if problems:
+                raise MigrationError(
+                    "migration verification failed: " + "; ".join(problems),
+                    details={"problems": problems},
+                )
         return applied
 
     # ── operator tools (explicit only, never automatic) ──────────────────────
