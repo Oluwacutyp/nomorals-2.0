@@ -941,6 +941,12 @@ class ControlCommand:
     kind: str
     arg: str = ""    #: first argument ("" when there are none)
     tail: str = ""   #: everything after the command word (for multi-word commands)
+    #: the @BotName a group command was addressed to, lowercased
+    #: ("" when unaddressed). It names the ONE account the command
+    #: is for: the runtime's cross-surface claim reads it so every
+    #: other surface stands down (owner order 2026-11-05 — one
+    #: command, one handling, across all surfaces).
+    addressee: str = ""
 
     def to_dict(self) -> dict[str, str]:
         return {"kind": self.kind, "arg": self.arg, "tail": self.tail}
@@ -965,12 +971,19 @@ def parse_control(text: str) -> ControlCommand | None:
         return ControlCommand(kind="help")
     words = rest.split(None, 1)
     kind = words[0].lower()
+    addressee = ""
     if "@" in kind:
         # Telegram's group command menu inserts /cmd@BotName —
         # that IS the command, addressed to the bot (owner
         # live-test 2026-11-03: /work@Nomorals_bot fell into
-        # conversation while /work executed).  Strip the addressee.
-        kind = kind.split("@", 1)[0]
+        # conversation while /work executed).  Strip the addressee
+        # from the kind — but KEEP it on the command: it names the
+        # one surface that owns this command, and the runtime's
+        # cross-surface claim stands every other surface down
+        # (2026-11-05: the userbot executed /rmdeleted@Nomorals_bot
+        # alongside the bot and contradicted it in the room).
+        kind, _, addressee = kind.partition("@")
+        addressee = addressee.strip().lower()
     if kind not in CONTROL_COMMANDS:
         return None  # unknown slash: treat as a normal message, let her answer
     tail = words[1].strip() if len(words) > 1 else ""
@@ -978,10 +991,11 @@ def parse_control(text: str) -> ControlCommand | None:
     n = len(tail.split()) if tail else 0
     min_args, max_args = CONTROL_COMMANDS[kind]
     if n < min_args:
-        return ControlCommand(kind="error", arg=f"/{kind} needs {min_args} argument(s) — /help {kind} shows the usage")
+        return ControlCommand(kind="error", arg=f"/{kind} needs {min_args} argument(s) — /help {kind} shows the usage", addressee=addressee)
     if max_args is not None and n > max_args:
-        return ControlCommand(kind="error", arg=f"/{kind} takes at most {max_args} argument(s) — /help {kind} shows the usage")
-    return ControlCommand(kind=kind, arg=arg, tail=tail)
+        return ControlCommand(kind="error", arg=f"/{kind} takes at most {max_args} argument(s) — /help {kind} shows the usage", addressee=addressee)
+    return ControlCommand(kind=kind, arg=arg, tail=tail,
+                          addressee=addressee)
 
 
 # ── command stacking ───────────────────────────────────────────────────────

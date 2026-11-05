@@ -436,5 +436,231 @@ class ButtonHonestyTests(_RuntimeCase):
             buttons, [[("🌐 Proxy", "toolhub proxy")]])
 
 
+# ── (e) one command, one handling, across surfaces ─────────────────
+#
+# Owner screenshots, live, 2026-11-05: in his claimed Telegram group
+# the owner's /rmdeleted@Nomorals_bot got TWO answers — the bot ran
+# the scan while the as-him (userbot) surface posted the §33 gate
+# text claiming the room "isn't switched on" (false: the bot is
+# admin there and had just executed). /rminactive@Nomorals_bot did
+# the same while the bot removed members. In the bot's DM, one
+# /play minted TWO jobs (queue 10 and queue 11 — one per surface).
+# The composed law: a recognized command is claimed by exactly one
+# surface; every other surface that sees it stands down silently;
+# the §33 gate and the executor read the SAME claim record.
+
+GATE_MARKER = "isn't switched on for my group systems"
+
+
+class _BotSurfaceAdapter(RecordingAdapter):
+    """Bot API surface fake: carries the bot identity the real
+    adapter learns from getMe (username + id) and the admin seams
+    the cleanup roster reads. The bot is administrator in the
+    claimed room (-1001) and a plain member in the other (-1002);
+    the owner is an admin in both."""
+
+    _bot_username = "Nomorals_bot"
+    _bot_id = 777
+
+    def admin_member(self, chat, user_id):  # type: ignore[no-untyped-def]
+        uid = str(user_id)
+        if uid == "777":
+            status = ("administrator"
+                      if str(chat.chat_id) == "-1001" else "member")
+            return {"ok": True, "status": status}
+        return {"ok": True, "status": "administrator"}
+
+    def admin_administrators(self, chat):  # type: ignore[no-untyped-def]
+        return {"ok": True, "administrators": [
+            {"id": "4242", "status": "administrator"}]}
+
+    def admin_members_full(self, chat):  # type: ignore[no-untyped-def]
+        return {"ok": True, "members": [], "count": 0,
+                "truncated": False}
+
+
+class _PersonalSurfaceAdapter(RecordingAdapter):
+    """Userbot surface fake: the owner's own account identity."""
+
+    _me_username = "peacethefirst"
+    _me_id = 4242
+
+
+class OneCommandOneHandlingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        clear_failures()
+        self.context, self.tmp = _make_context()
+        self.adapters = {
+            "whatsapp": RecordingAdapter("whatsapp"),
+            "telegram": _PersonalSurfaceAdapter("telegram"),
+            "telegram-personal": RecordingAdapter("telegram-personal"),
+            "telegram-bot": _BotSurfaceAdapter("telegram-bot"),
+            "discord": RecordingAdapter("discord"),
+        }
+        self.gateway = ChatGateway(self.adapters, db=self.context.db)
+        self.runtime = PartnerRuntime(self.context, gateway=self.gateway)
+        self.runtime.brain.presence_rng = random.Random(34)
+        self.runtime._typing_enabled = lambda chat: False
+
+    def tearDown(self) -> None:
+        try:
+            self.runtime.stop()
+        except Exception as exc:  # noqa: BLE001 - teardown only
+            assert isinstance(exc, Exception)
+        self.context.close()
+        self.tmp.cleanup()
+
+    # -- faithful message shapes ------------------------------------
+    def _owner_msg(self, platform: str, *, kind: ChatKind,
+                   chat_id: str, text: str, incoming: bool,
+                   message_id: str,
+                   own: bool = False) -> ChatMessage:
+        chat = ChatRef(platform=platform, chat_id=chat_id, kind=kind,
+                       title="Builders" if kind == ChatKind.GROUP
+                       else "", peer=chat_id)
+        meta: dict = {"is_owner": True}
+        if own:
+            meta["own_message"] = True
+        msg = ChatMessage(chat=chat, incoming=incoming, text=text,
+                          sender="death", message_id=message_id,
+                          meta=meta)
+        msg.sender_id = "4242"
+        return msg
+
+    def _group_pair(self, text: str, message_id: str,
+                    chat_id: str = "-1001") -> tuple:
+        """The same group message as Telegram delivers it twice:
+        once to the bot (Bot API, incoming) and once to the
+        owner's userbot (MTProto own echo)."""
+        bot = self._owner_msg(
+            "telegram-bot", kind=ChatKind.GROUP, chat_id=chat_id,
+            text=text, incoming=True, message_id=message_id)
+        personal = self._owner_msg(
+            "telegram", kind=ChatKind.GROUP, chat_id=chat_id,
+            text=text, incoming=False, message_id=message_id,
+            own=True)
+        return bot, personal
+
+    def _claim_room_by_bot(self, chat_id: str = "-1001") -> None:
+        surface = self.runtime._group_surface()
+        surface.note_bot_admin(f"telegram-bot:{chat_id}", True)
+
+    def _sent(self, platform: str) -> list:
+        return [text for text, _b in self.adapters[platform].sent]
+
+    # -- the incidents ----------------------------------------------
+    def test_rmdeleted_bot_addressed_claimed_group_once(self) -> None:
+        self._claim_room_by_bot()
+        bot, personal = self._group_pair(
+            "/rmdeleted@Nomorals_bot", "900")
+        self.runtime._process_inner(bot)
+        self.runtime._process_inner(personal)
+        self.assertEqual(self._sent("telegram"), [],
+                         "as-him surface answered a bot command")
+        bot_sent = self._sent("telegram-bot")
+        self.assertEqual(len(bot_sent), 1, bot_sent)
+        self.assertNotIn(GATE_MARKER, bot_sent[0])
+
+    def test_rminactive_bot_addressed_claimed_group_once(self) -> None:
+        self._claim_room_by_bot()
+        bot, personal = self._group_pair(
+            "/rminactive@Nomorals_bot", "901")
+        self.runtime._process_inner(bot)
+        self.runtime._process_inner(personal)
+        self.assertEqual(self._sent("telegram"), [],
+                         "as-him surface answered a bot command")
+        bot_sent = self._sent("telegram-bot")
+        self.assertEqual(len(bot_sent), 1, bot_sent)
+        self.assertNotIn(GATE_MARKER, bot_sent[0])
+
+    def test_rmdeleted_personal_copy_first_still_bot_only(self) -> None:
+        self._claim_room_by_bot()
+        bot, personal = self._group_pair(
+            "/rmdeleted@Nomorals_bot", "902")
+        self.runtime._process_inner(personal)
+        self.runtime._process_inner(bot)
+        self.assertEqual(self._sent("telegram"), [])
+        bot_sent = self._sent("telegram-bot")
+        self.assertEqual(len(bot_sent), 1, bot_sent)
+        self.assertNotIn(GATE_MARKER, bot_sent[0])
+
+    def test_unaddressed_group_command_claimed_once(self) -> None:
+        self._claim_room_by_bot()
+        bot, personal = self._group_pair("/rmdeleted", "903")
+        self.runtime._process_inner(bot)
+        self.runtime._process_inner(personal)
+        total = (len(self._sent("telegram"))
+                 + len(self._sent("telegram-bot")))
+        self.assertEqual(total, 1,
+                         f"two handlings: {self._sent('telegram')} / "
+                         f"{self._sent('telegram-bot')}")
+        for text in (self._sent("telegram")
+                     + self._sent("telegram-bot")):
+            self.assertNotIn(GATE_MARKER, text)
+
+    def test_unclaimed_group_gate_text_exactly_once(self) -> None:
+        surface = self.runtime._group_surface()
+        surface.note_bot_admin("telegram-bot:-1002", False)
+        bot, personal = self._group_pair(
+            "/rmdeleted@Nomorals_bot", "904", chat_id="-1002")
+        self.runtime._process_inner(bot)
+        self.runtime._process_inner(personal)
+        all_sent = self._sent("telegram") + self._sent("telegram-bot")
+        self.assertEqual(len(all_sent), 1, all_sent)
+        self.assertIn(GATE_MARKER, all_sent[0])
+        self.assertEqual(self._sent("telegram"), [])
+
+    # -- the bot-DM double queue -------------------------------------
+    def _patch_play(self) -> list:
+        calls: list = []
+
+        def fake_play(tail, chat_key=""):  # type: ignore[no-untyped-def]
+            calls.append((tail, chat_key))
+            n = len(calls)
+            return (f"queued 1 (queue {n}):\n  - FEAR\n"
+                    f"⏳ downloading in the background — I'll send "
+                    f"it here when it's ready. [job job{n:04d}]")
+
+        self.runtime._control_play = fake_play  # type: ignore[method-assign]
+        return calls
+
+    def _dm_pair(self, text: str, message_id: str) -> tuple:
+        """The owner's message in the bot's DM, as both surfaces
+        see it: the bot (incoming, chat = the owner) and the
+        userbot (own echo, chat = the bot)."""
+        bot = self._owner_msg(
+            "telegram-bot", kind=ChatKind.DM, chat_id="4242",
+            text=text, incoming=True, message_id=message_id)
+        personal = self._owner_msg(
+            "telegram", kind=ChatKind.DM, chat_id="777",
+            text=text, incoming=False, message_id=message_id,
+            own=True)
+        return bot, personal
+
+    def test_bot_dm_play_queues_exactly_one_job(self) -> None:
+        calls = self._patch_play()
+        bot, personal = self._dm_pair("/play fear by nf", "55")
+        self.runtime._process_inner(bot)
+        self.runtime._process_inner(personal)
+        self.assertEqual(len(calls), 1,
+                         f"/play ran {len(calls)} times (two jobs)")
+        self.assertEqual(self._sent("telegram"), [])
+        bot_sent = self._sent("telegram-bot")
+        self.assertEqual(len(bot_sent), 1, bot_sent)
+        self.assertIn("[job job0001]", bot_sent[0])
+
+    def test_personal_self_chat_command_stays_personal(self) -> None:
+        calls = self._patch_play()
+        personal = self._owner_msg(
+            "telegram", kind=ChatKind.DM, chat_id="4242",
+            text="/play fear by nf", incoming=False, message_id="56",
+            own=True)
+        self.runtime._process_inner(personal)
+        self.assertEqual(len(calls), 1)
+        sent = self._sent("telegram")
+        self.assertEqual(len(sent), 1, sent)
+        self.assertIn("[job job0001]", sent[0])
+
+
 if __name__ == "__main__":
     unittest.main()

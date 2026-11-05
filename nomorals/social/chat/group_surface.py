@@ -531,14 +531,59 @@ class GroupSurface:
     # consults, evaluated from live settings at send time, so
     # a claim that lapses stops output on the very next send.
 
+    #: Telegram's surfaces name the SAME room three ways (the
+    #: userbot's ``telegram:``, the gated bot's ``telegram-bot:``,
+    #: the personal bot's ``telegram-personal:``). §33 facts are
+    #: facts about the ROOM, whichever surface recorded them:
+    #: claim_state reads them merged across the family, so the
+    #: gate and the executor can never again read different claim
+    #: records for one room and contradict each other in front of
+    #: the members (owner screenshots, 2026-11-05: the userbot
+    #: posted "this room isn't switched on" from its own key's
+    #: empty record while the bot — claimed under its key —
+    #: executed the same command).
+    TELEGRAM_FAMILY = ("telegram", "telegram-bot",
+                       "telegram-personal")
+
+    def _claim_facts(self, group_key: str) -> tuple[bool, Any]:
+        """(designated, bot_admin) for the room, merged across
+        its Telegram family keys: designation on ANY family key
+        designates the room; a verified bot standing recorded by
+        the runtime's probe (which stamps only bot-platform keys)
+        is the room's standing on every surface. bot_admin keeps
+        its tri-state: True if any record verifies it, else False
+        if any record verifies a demotion, else None."""
+        platform, _, rest = str(group_key).partition(":")
+        own = self.store.settings(group_key).get(
+            "system_claim") or {}
+        records = [own]
+        if platform in self.TELEGRAM_FAMILY and rest:
+            for prefix in self.TELEGRAM_FAMILY:
+                if prefix == platform:
+                    continue
+                sibling = self.store.settings(
+                    f"{prefix}:{rest}").get("system_claim") or {}
+                if sibling:
+                    records.append(sibling)
+        designated = any(bool(r.get("designated"))
+                         for r in records)
+        stamps = [r.get("bot_admin") for r in records]
+        if any(s is True for s in stamps):
+            bot_admin: Any = True
+        elif any(s is False for s in stamps):
+            bot_admin = False
+        else:
+            bot_admin = stamps[0] if stamps else None
+        return designated, bot_admin
+
     def claim_state(self, group_key: str) -> dict[str, Any]:
         """The room's §33 facts, exactly as recorded: owner
         designation, the runtime's last verified bot standing,
-        the derived claim and its source ("" when unclaimed)."""
-        claim = self.store.settings(group_key).get(
-            "system_claim") or {}
-        designated = bool(claim.get("designated"))
-        bot_admin = claim.get("bot_admin")
+        the derived claim and its source ("" when unclaimed).
+        On Telegram the facts are read merged across the room's
+        family keys (see TELEGRAM_FAMILY): ONE claim state per
+        room, whichever surface asks."""
+        designated, bot_admin = self._claim_facts(group_key)
         platform = str(group_key).split(":", 1)[0]
         bot_platform = platform in BOT_PLATFORMS
         bot = bot_admin is True or (

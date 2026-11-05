@@ -93,6 +93,65 @@ def test_verified_demotion_lapses_the_bot_claim(tmp_path):
     assert surface.system_output_allowed(BOT_KEY) is True
 
 
+# ── one claim state per ROOM, across the Telegram family ──────
+# The 2026-11-05 contradiction: the executor read the claim
+# under telegram-bot:-100123 (claimed) while the §33 gate on the
+# userbot read telegram:-100123 (empty record, "unclaimed") and
+# posted the gate text beside the execution. The family keys
+# name one room; the facts merge.
+
+ROOM_BOT = "telegram-bot:-100123"
+ROOM_USER = "telegram:-100123"
+ROOM_PERSONAL_BOT = "telegram-personal:-100123"
+
+
+def test_bot_standing_is_the_room_s_fact_on_every_surface(tmp_path):
+    surface = _surface(tmp_path)
+    # the runtime's probe stamps verified standing under the
+    # BOT key only — every family surface reads the same fact
+    surface.note_bot_admin(ROOM_BOT, True)
+    for key in (ROOM_BOT, ROOM_USER, ROOM_PERSONAL_BOT):
+        state = surface.claim_state(key)
+        assert state["bot_admin"] is True, key
+        assert state["claimed"] is True, key
+        assert surface.system_output_allowed(key) is True, key
+
+
+def test_designation_is_the_room_s_fact_on_every_surface(tmp_path):
+    surface = _surface(tmp_path)
+    # designated through the userbot's key (the DM console writes
+    # under whichever surface the owner was driving) — the bot
+    # surface reads the same room fact
+    surface.set_designated(ROOM_USER, True, by="owner")
+    for key in (ROOM_BOT, ROOM_USER, ROOM_PERSONAL_BOT):
+        state = surface.claim_state(key)
+        assert state["designated"] is True, key
+        assert state["claimed"] is True, key
+        assert state["source"] == "designated", key
+
+
+def test_verified_demotion_lapses_across_the_family(tmp_path):
+    surface = _surface(tmp_path)
+    surface.note_bot_admin(ROOM_BOT, True)
+    assert surface.claim_state(ROOM_USER)["claimed"] is True
+    surface.note_bot_admin(ROOM_BOT, False)
+    for key in (ROOM_BOT, ROOM_USER, ROOM_PERSONAL_BOT):
+        state = surface.claim_state(key)
+        assert state["bot_admin"] is False, key
+        assert state["claimed"] is False, key
+        assert surface.system_output_allowed(key) is False, key
+
+
+def test_family_merge_never_crosses_rooms(tmp_path):
+    surface = _surface(tmp_path)
+    surface.note_bot_admin(ROOM_BOT, True)
+    surface.set_designated(ROOM_USER, True, by="owner")
+    # a different room under any family key stays unclaimed
+    assert surface.claim_state("telegram:-100777")["claimed"] is False
+    assert surface.claim_state(
+        "telegram-bot:-100777")["bot_admin"] is None
+
+
 # ── surface: no foreign accrual ───────────────────────────────
 
 

@@ -1452,6 +1452,21 @@ class PartnerRuntime(
             command = parse_control(message.text)
             _log.debug("game command check: text=%r, command=%s",
                       message.text[:40], command)
+            # One command, one handling, across surfaces (owner
+            # order 2026-11-05): this message may be another
+            # surface's copy of the same command — addressed to
+            # it, in its DM, in a group where the bot's standing
+            # is verified, or already claimed by it. Then this
+            # copy stands down silently: observed and persisted
+            # above, never handled, never answered here.
+            if command is not None and self._command_stands_down(
+                    message, command):
+                self._bump("controls")
+                _log.info(
+                    "command /%s in %s stands down on %s — another "
+                    "surface owns it", command.kind, message.chat.key,
+                    message.chat.platform)
+                return
             # /math in an outsider DM is conversation only (social_gate:
             # games are public in groups, not in DMs). Skip the game
             # branch entirely so the message falls through to the brain
@@ -1719,7 +1734,21 @@ class PartnerRuntime(
         if message.text.strip().startswith("/") and self._is_operator(message):
             from ...social.chat.control import parse_control
 
-            if parse_control(message.text) is not None:
+            _parsed = parse_control(message.text)
+            # One command, one handling, across surfaces: an own
+            # echo can be another surface's command (the owner's
+            # /play in the BOT's DM arrives here through the
+            # userbot and used to mint a second job). Standing
+            # down is silent — the owning surface answers.
+            if _parsed is not None and self._command_stands_down(
+                    message, _parsed):
+                self._bump("controls")
+                _log.info(
+                    "command /%s in %s stands down on %s — another "
+                    "surface owns it", _parsed.kind, message.chat.key,
+                    message.chat.platform)
+                return
+            if _parsed is not None:
                 self._bump("controls")
                 # Feed the arena's interest profiler: what the owner runs
                 # most shapes future topic picks. Never raises.
@@ -3403,6 +3432,133 @@ class PartnerRuntime(
         if sender_id and sender_id in getattr(self, "_owner_sender_ids", set()):
             return True
         return is_owner_chat(message.chat, owner_chats=self._owner_chats)
+
+    # ── one command, one handling, across surfaces ─────────────
+    # (owner order 2026-11-05; see command_claims.py for the
+    # incident). A Telegram message reaches this runtime once per
+    # attached surface; without arbitration every surface that
+    # parses a command handles it. The checkpoints in
+    # _process_inner consult _command_stands_down before any
+    # command branch runs.
+
+    def _command_claims(self):  # type: ignore[no-untyped-def]
+        ledger = getattr(self, "_command_claims_obj", None)
+        if ledger is None:
+            from .command_claims import CommandClaimLedger
+
+            ledger = CommandClaimLedger()
+            self._command_claims_obj = ledger
+        return ledger
+
+    def _surface_usernames(self) -> dict[str, str]:
+        """{username (lowercase, no @): platform} for every
+        attached surface that knows its own handle — the bot
+        adapters learn theirs from getMe, the userbot from its
+        session. Plus the configured main-bot username as a
+        fallback for a bot that has not connected yet."""
+        out: dict[str, str] = {}
+        gateway = getattr(self, "gateway", None)
+        adapters = getattr(gateway, "adapters", {}) or {}
+        for name, adapter in adapters.items():
+            for attr in ("_bot_username", "_me_username"):
+                value = getattr(adapter, attr, None)
+                if value:
+                    out[str(value).strip().lower().lstrip("@")] = \
+                        str(name)
+        try:
+            web = getattr(self.context.settings, "web", None)
+            configured = str(
+                getattr(web, "bot_username", "") or ""
+            ).strip().lower().lstrip("@")
+            if configured:
+                out.setdefault(configured, "telegram-bot")
+        except Exception:  # noqa: BLE001 - a fallback, not a need
+            pass
+        return out
+
+    def _bot_account_ids(self) -> set[str]:
+        """The numeric account ids of Devon's own bots, from the
+        attached adapters: each bot adapter's own id, and the
+        userbot's companion-bot registry (it is configured with
+        BOTH bot ids so it never talks over them)."""
+        ids: set[str] = set()
+        gateway = getattr(self, "gateway", None)
+        adapters = getattr(gateway, "adapters", {}) or {}
+        for adapter in adapters.values():
+            bot_id = getattr(adapter, "_bot_id", None)
+            if bot_id:
+                ids.add(str(bot_id))
+            companions = getattr(adapter, "companion_bot_ids", None)
+            if companions:
+                for cand in companions:
+                    try:
+                        ids.add(str(int(cand)))
+                    except (TypeError, ValueError):
+                        continue
+        return ids
+
+    def _command_stands_down(self, message, command) -> bool:  # type: ignore[no-untyped-def]
+        """True when THIS surface must not handle ``command``:
+        another surface owns it. Silent by design — standing down
+        never replies; the owning surface's answer is the only
+        one the room sees. Never raises."""
+        try:
+            return self._command_stands_down_inner(message, command)
+        except Exception as exc:  # noqa: BLE001 - arbitration
+            record_failure(               # never eats a command
+                "runtime.PartnerRuntime._command_stands_down", exc)
+            return False
+
+    def _command_stands_down_inner(self, message, command) -> bool:  # type: ignore[no-untyped-def]
+        chat = message.chat
+        platform = str(chat.platform or "")
+        bot_surface = platform in ("telegram-bot", "telegram-personal")
+        # (1) Addressed commands belong to the addressed account's
+        # surface, everywhere: /cmd@Nomorals_bot is the bot's, on
+        # the userbot's copy too — and a command addressed to an
+        # account that is not one of ours is not ours at all.
+        addressee = str(getattr(command, "addressee", "")
+                        or "").strip().lower()
+        if addressee:
+            owners = self._surface_usernames()
+            if owners:
+                owner_surface = owners.get(addressee)
+                if owner_surface is None \
+                        or owner_surface != platform:
+                    return True
+        # (2) A bot's DM belongs to that bot: a non-bot surface
+        # never handles commands in a DM whose peer is one of
+        # Devon's bots (the userbot sees the owner's bot chats in
+        # his dialogs — the bot's copy is the handling).
+        if chat.kind == ChatKind.DM and not bot_surface \
+                and str(chat.chat_id or "") in self._bot_account_ids():
+            return True
+        # (3) In a group where the bot's standing is VERIFIED
+        # (the merged §33 claim says bot_admin), group systems
+        # speak through the bot: a non-bot surface leaves group
+        # commands to it. Designated rooms without a bot keep
+        # their personal-surface handling — designation is not
+        # bot standing, and those rooms have no bot copy coming.
+        if chat.kind == ChatKind.GROUP and not bot_surface:
+            try:
+                state = self._group_surface().claim_state(chat.key)
+            except Exception:  # noqa: BLE001 - unproven, no defer
+                state = None
+            if state and state.get("bot_admin") is True:
+                return True
+        # (4) One handling: claim this message identity. The same
+        # message carries the same platform message id on every
+        # surface; the family collapses Telegram's three platform
+        # names. A prior claim by another surface stands this one
+        # down; this surface's own claim re-checks as its own.
+        message_id = str(getattr(message, "message_id", "") or "")
+        if message_id:
+            family = ("telegram" if platform.startswith("telegram")
+                      else platform)
+            key = f"{family}:{chat.chat_id}:{message_id}"
+            if not self._command_claims().claim(key, platform):
+                return True
+        return False
 
     def _money_send_hook(self, message: ChatMessage) -> str | None:
         """Build-map #49: "send 5k to Mama" → staged transfer + guard.
