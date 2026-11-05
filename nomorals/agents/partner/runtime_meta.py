@@ -785,7 +785,14 @@ class RuntimeMetaMixin:
         sections|lists|markup (on|off). Overrides are deltas on top of
         the mined profile — they persist, carry provenance, and reset
         restores the mined numbers. No target sets the chat the command
-        was sent in; a target sets a remote chat by key.
+        was sent in. A target names a remote chat the way a human
+        would (register #35 — see nomorals/partner/chat_targets.py):
+        a full key (``platform:chat_id``), a phone number (that
+        person's WhatsApp DM), or the chat's NAME, resolved against
+        the title index and adapter chat listings. A name matching
+        several chats lists the candidates instead of guessing;
+        a name matching none reports what was tried. The override
+        always lands under the resolved chat's canonical key.
         """
         from ...partner.style import style_for_chat
         from ...partner.style_overrides import (
@@ -793,16 +800,48 @@ class RuntimeMetaMixin:
             list_scopes, set_override)
 
         usage = ("usage: /style  ·  /style <emoji_cap|target_chars|max_chars|"
-                 "sections|lists|markup> <value> [platform:chat_id]  ·  "
-                 "/style reset [platform:chat_id]  ·  /style list")
+                 "sections|lists|markup> <value> [target]  ·  "
+                 "/style reset [target]  ·  /style list  ·  a target is a "
+                 "chat name, a phone number, or a full key "
+                 "(platform:chat_id)")
         words = (command.tail or "").split()
         sub = (words[0].lower() if words else "")
 
-        def _valid_target(target: str) -> str | None:
-            platform, _, chat_id = target.partition(":")
-            if not platform or not chat_id:
-                return f"chat keys look like telegram:123456 — {usage}"
-            return None
+        def _resolve(raw: str) -> tuple[str, str, str | None]:
+            """Resolve a target reference → (key, title, error).
+
+            Exactly one of key / error is set. Resolution follows
+            chat_targets (register #35, the /chatmode pattern):
+            full key, phone number, chat name — with ambiguity
+            and exhaustion reported, never guessed. Raw keys keep
+            working verbatim; human forms resolve to the same
+            canonical key the override is stored under.
+            """
+            from ...partner.chat_targets import resolve_chat_target
+
+            chat = getattr(message, "chat", None)
+            adapters: list = []
+            gateway = getattr(self, "gateway", None)
+            if gateway is not None:
+                try:
+                    adapters = list(gateway.adapters.values())
+                except Exception:  # noqa: BLE001 - listing is a hint
+                    adapters = []
+            res = resolve_chat_target(
+                raw,
+                current_key=chat_key,
+                current_title=str(getattr(chat, "title", "") or ""),
+                current_platform=str(getattr(chat, "platform", "") or ""),
+                db=getattr(self.context, "db", None),
+                adapters=adapters)
+            if res.resolved:
+                return res.key, res.title, None
+            return "", "", res.describe(raw)
+
+        def _where(target: str, title: str = "") -> str:
+            if target == chat_key:
+                return "this chat"
+            return f"{title} ({target})" if title else target
 
         def _audience_for(target: str) -> str:
             if target == chat_key and message is not None:
@@ -869,15 +908,16 @@ class RuntimeMetaMixin:
                     f"{k}={v}" for k, v in sorted(ov.items())))
             return "\n".join(lines)
         if sub == "reset":
-            if len(words) > 2:
-                return f"too many arguments — {usage}"
-            target = words[1] if len(words) > 1 else chat_key
-            if len(words) > 1:
-                err = _valid_target(target)
+            # The target is the rest of the line — a chat NAME may
+            # be several words (the /chatmode rule, register #35).
+            target_raw = " ".join(words[1:])
+            target, target_title = chat_key, ""
+            if target_raw:
+                target, target_title, err = _resolve(target_raw)
                 if err:
                     return err
             cleared = clear_overrides(target)
-            where = "this chat" if target == chat_key else target
+            where = _where(target, target_title)
             return (f"overrides cleared for {where} — mined numbers back in "
                     f"effect." if cleared else
                     f"no overrides to clear for {where}.")
@@ -889,18 +929,19 @@ class RuntimeMetaMixin:
                     f"{', '.join(sorted(list(FIELDS) + list(field_aliases)))} — {usage}")
         if len(words) < 2:
             return f"/style {sub} needs a value — {usage}"
-        if len(words) > 3:
-            return f"too many arguments — {usage}"
-        target = words[2] if len(words) > 2 else chat_key
-        if len(words) > 2:
-            err = _valid_target(target)
+        # The target is the rest of the line — a chat NAME may
+        # be several words (the /chatmode rule, register #35).
+        target_raw = " ".join(words[2:])
+        target, target_title = chat_key, ""
+        if target_raw:
+            target, target_title, err = _resolve(target_raw)
             if err:
                 return err
         try:
             set_override(target, field, words[1])
         except ValueError as exc:
             return f"{exc} — {usage}"
-        where = "this chat" if target == chat_key else target
+        where = _where(target, target_title)
         return (f"style override for {where}: {field} = {words[1]} "
                 f"(delta on the mined profile; /style reset clears it).")
 

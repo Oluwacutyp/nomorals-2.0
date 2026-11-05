@@ -324,7 +324,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "mode": (1, 1),
     "agent": (0, None),  # /agent [adaptive|autonomous|planning|+x|-x|status|off|tick]
     "chatmode": (0, None),  # /chatmode [mode|status|list|feature <f> <on|off>] [target] — per-chat mode + feature toggles; the target is a chat NAME (any length), a phone number, or a full key, so the tail is unbounded
-    "style": (0, 3),  # /style | /style <field> <value> [target] | /style reset [target] | /style list — inspect + tune the mined style profile (owner-only)
+    "style": (0, None),  # /style | /style <field> <value> [target] | /style reset [target] | /style list — inspect + tune the mined style profile (owner-only); the target is a chat NAME (any length), a phone number, or a full key, so the tail is unbounded
     "doctor": (0, 0),  # /doctor — system health: registry + config + stores + adapters + providers (owner-only)
     "model": (0, 6),  # provider + up to 5 fallback providers
     "providers": (0, 0),  # /providers — probe the whole chain, live or why not
@@ -1750,7 +1750,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/doctor", "example": "/doctor",
              "related": "/status /chatmode"},
     "style": {"what": "inspect + tune the mined style profile for this chat — the numbers Devon replies with (emoji budget, length target, sections/lists/markup), measured from YOUR own messages, never other people's. /style shows the live profile + any overrides + where each override came from; /style <field> <value> sets an override delta (emoji_cap 0..3, target_chars, max_chars, sections/lists/markup on|off); /style reset clears this chat's overrides; /style list shows every chat with overrides. Owner-only.",
-             "usage": "/style  ·  /style <emoji_cap|target_chars|max_chars|sections|lists|markup> <value> [platform:chat_id]  ·  /style reset [platform:chat_id]  ·  /style list",
+             "usage": "/style  ·  /style <emoji_cap|target_chars|max_chars|sections|lists|markup> <value> [target]  ·  /style reset [target]  ·  /style list  ·  a target is a chat name, a phone number, or a full key (platform:chat_id)",
              "example": "/style   ·   /style emoji_cap 0   ·   /style target_chars 200   ·   /style reset",
              "related": "/chatmode /mood"},
     "model": {"what": "switch the active model live (up to 5 fallbacks); no argument shows the chain.",
