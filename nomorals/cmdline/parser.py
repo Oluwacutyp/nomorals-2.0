@@ -2552,6 +2552,9 @@ def _parser() -> argparse.ArgumentParser:
         "project", help="render a saved MotionProject document (JSON)")
     mo_pr.add_argument("file", help="project file (MotionProject.save)")
     mo_pr.add_argument("--out", default="")
+    mo_pr.add_argument("--format", default="",
+                       help="format registry name (§1.5b) — its canvas "
+                            "steers the render (see: nm video formats)")
     mo_sub.add_parser("moves", help="list Ken Burns camera moves")
     mo_sub.add_parser("presets", help="list lyric/visualizer/grade presets")
     v_ch = v_sub.add_parser("chain", help="multi-scene film from scenes.json")
@@ -2567,6 +2570,20 @@ def _parser() -> argparse.ArgumentParser:
     v_cap.add_argument("--backend", default="auto")
     v_ls = v_sub.add_parser("list", help="recent studio renders")
     v_ls.add_argument("--json", action="store_true")
+    v_fmt = v_sub.add_parser(
+        "formats", help="format registry (§1.5b): list/show/scaffold")
+    fmt_sub = v_fmt.add_subparsers(dest="formats_action")
+    f_ls = fmt_sub.add_parser("list", help="list registered formats")
+    f_ls.add_argument("--json", action="store_true")
+    f_show = fmt_sub.add_parser(
+        "show", help="resolved parameter set for one format")
+    f_show.add_argument("name")
+    f_show.add_argument("--json", action="store_true")
+    f_sc = fmt_sub.add_parser(
+        "scaffold", help="write a fill-in format data file (JSON)")
+    f_sc.add_argument("name")
+    f_sc.add_argument("--out", default="",
+                      help="where to write (default: ./<name>.format.json)")
 
     director = sub.add_parser("director",
         help="Devon directs: coverage → breakdown + design → shoot → QA",

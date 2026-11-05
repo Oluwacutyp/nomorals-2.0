@@ -330,6 +330,29 @@ def register(registry: Any) -> None:
                               f"{sorted(data['effects'])}"}
         return {"ok": True, **data}
 
+    @registry.register(
+        "studio_formats",
+        description=("The format registry as data (§1.5b): named video "
+                     "formats — canvas, safe areas, caption defaults, "
+                     "grade pack, loudness target, design pack — with "
+                     "per-parameter provenance. No argument lists the "
+                     "formats; pass a format name for its fully "
+                     "resolved parameter set. ('what formats are "
+                     "there', 'show me the TikTok format')."),
+        capability=Capability.FS_READ,
+    )
+    def studio_formats(format: str = "") -> dict[str, Any]:
+        """Format registry (§1.5b)."""
+        from ..media.edit_engine.formats import (
+            FormatError, formats_data, resolve_format)
+        if format:
+            try:
+                resolved = resolve_format(format)
+            except FormatError as exc:
+                return {"ok": False, "reason": str(exc)}
+            return {"ok": True, "format": resolved.to_dict()}
+        return {"ok": True, **formats_data()}
+
     # ── timeline ────────────────────────────────────────────────
 
     @registry.register(

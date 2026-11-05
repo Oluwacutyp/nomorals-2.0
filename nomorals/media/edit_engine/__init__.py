@@ -146,6 +146,21 @@ from .timeline import (
 )
 from .transcript import compile_transcript_edit, keeps_for
 from .transitions import list_transitions, validate_transition
+from .formats import (
+    FormatError,
+    FormatSpec,
+    ResolvedFormat,
+    apply_format,
+    formats_data,
+    get_format,
+    list_formats,
+    load_format_file,
+    pack_for_format,
+    register_format,
+    resolve_format,
+    scaffold_format,
+    validate_format,
+)
 
 __all__ = [
     # timeline model
@@ -213,6 +228,11 @@ __all__ = [
     # QC measurers + five-pass contact sheet (§1.5c tail)
     "CONTACT_SHEET_PASSES", "MEASURER_RUNGS", "measure_render",
     "build_contact_sheet", "qc_render",
+    # format registry (§1.5b — formats as parameterized data)
+    "FormatError", "FormatSpec", "ResolvedFormat", "validate_format",
+    "register_format", "get_format", "list_formats", "resolve_format",
+    "apply_format", "pack_for_format", "formats_data", "scaffold_format",
+    "load_format_file",
     # private-but-stable (tests + compat shims)
     "_effect_filter",
 ]

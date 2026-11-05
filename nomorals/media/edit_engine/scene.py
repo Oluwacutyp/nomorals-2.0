@@ -445,6 +445,12 @@ def scenes_to_edit_spec(scenes: list[Scene], **spec_kw: Any) -> EditSpec:
     boundary transition when they all agree; mixed transitions are the
     Timeline layer's business and raise here rather than being
     silently flattened to one.
+
+    ``format="<name>"`` (§1.5b) applies a format registry entry to the
+    built spec — the format's canvas and caption defaults steer the
+    render; the application record rides on the returned spec as
+    ``format_application``. Explicit ``spec_kw`` canvas values are
+    overridden by the format (naming a format is the decision).
     """
     clips: list[Clip] = []
     layers: list[TextLayer] = []
@@ -467,4 +473,10 @@ def scenes_to_edit_spec(scenes: list[Scene], **spec_kw: Any) -> EditSpec:
                 f"mixed scene transitions {sorted(kinds)} need the "
                 f"Timeline layer — one EditSpec carries one transition")
         spec_kw.setdefault("transition", transitions[0])
-    return EditSpec(clips=clips, text_layers=layers, **spec_kw)
+    fmt = spec_kw.pop("format", None)
+    spec = EditSpec(clips=clips, text_layers=layers, **spec_kw)
+    if fmt:
+        from .formats import apply_format
+        spec, record = apply_format(spec, str(fmt))
+        spec.format_application = record  # type: ignore[attr-defined]
+    return spec

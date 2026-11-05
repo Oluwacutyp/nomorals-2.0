@@ -8,6 +8,7 @@
     nm video motion grade --file clip.mp4 --preset cinematic
     nm video motion export --file clip.mp4 --format 9:16
     nm video chain scenes.json [--backend auto] [--style cinematic]
+    nm video formats [list|show <name>|scaffold <name>]
     nm video capability
     nm video list [--json]
 
@@ -188,8 +189,19 @@ def _motion_project(args) -> int:
     """Render a saved MotionProject document (Echelon Wave 4)."""
     from ...media.motion_studio import MotionStudioError
     from ...media.motion_studio.project import MotionProject
+    fmt_note = ""
     try:
         proj = MotionProject.load(args.file)
+        fmt_name = getattr(args, "format", "") or ""
+        if fmt_name:
+            from ...media.edit_engine.formats import resolve_format
+            resolved = resolve_format(fmt_name)
+            proj.output.update({"width": resolved.width,
+                                "height": resolved.height,
+                                "fps": resolved.fps})
+            fmt_note = (f" [format {resolved.name}: "
+                        f"{resolved.width}×{resolved.height}"
+                        f"@{resolved.fps}]")
         res = proj.render(out=args.out or None)
     except MotionStudioError as exc:
         return _err(str(exc))
@@ -198,7 +210,57 @@ def _motion_project(args) -> int:
     rec = res.get("motion_project", {})
     return _ok(f"🎬 motion project {rec.get('project_hash', '')[:12]} "
                f"({len(rec.get('segments', []))} segments) → "
-               f"{res['output']}")
+               f"{res['output']}{fmt_note}")
+
+
+def _cmd_formats(args: argparse.Namespace, context) -> int:
+    """``nm video formats`` — the §1.5b format registry on the CLI."""
+    from ...media.edit_engine.formats import (
+        FormatError, formats_data, resolve_format, scaffold_format)
+    action = getattr(args, "formats_action", None) or "list"
+    try:
+        if action == "list":
+            data = formats_data()
+            if getattr(args, "json", False):
+                print(json.dumps(data, indent=2))
+                return 0
+            print(f"📐 formats: {data['count']} registered")
+            for f in data["formats"]:
+                groups = ",".join(f["groups"]) or "—"
+                print(f"  {f['name']:18} {f['label']}  [{groups}]")
+            for issue in data["bootstrap_issues"]:
+                print(f"  ⚠ {issue}")
+            return 0
+        if action == "show":
+            resolved = resolve_format(args.name)
+            if getattr(args, "json", False):
+                print(json.dumps(resolved.to_dict(), indent=2))
+                return 0
+            d = resolved.to_dict()
+            print(f"📐 {d['name']} — {d['label']}")
+            print(f"  canvas:   {d['canvas']['width']}×"
+                  f"{d['canvas']['height']}@{d['canvas']['fps']}")
+            print(f"  safe:     {d['safe']}")
+            print(f"  captions: {d['captions']}")
+            print(f"  grade:    {d['grade_pack']}")
+            print(f"  loudness: {d['loudness']}")
+            print(f"  design:   {d['design_pack']}")
+            print(f"  renderer: {d['renderer']}")
+            print(f"  provenance: {d['provenance']}")
+            return 0
+        if action == "scaffold":
+            path = scaffold_format(args.name,
+                                   dest=args.out or None)
+            return _ok(
+                f"📐 scaffold → {path}\n"
+                f"fill in the TODOs, then load it in code with "
+                f"load_format_file() or point NM_FORMAT_DIRS at its "
+                f"directory")
+    except FormatError as exc:
+        return _err(str(exc))
+    except Exception as exc:  # noqa: BLE001 - CLI surfaces as text
+        return _err(str(exc))
+    return _err("usage: nm video formats list|show <name>|scaffold <name>")
 
 
 def _motion_moves(args) -> int:
@@ -249,6 +311,8 @@ def cmd_video(args: argparse.Namespace, context) -> int:
         return fn(args)
     if action == "chain":
         return _cmd_chain(args, context)
+    if action == "formats":
+        return _cmd_formats(args, context)
     if action == "capability":
         return _cmd_capability(args, context)
     if action == "list":

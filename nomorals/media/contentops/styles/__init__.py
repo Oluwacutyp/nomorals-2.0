@@ -42,8 +42,46 @@ def get_style(name: str) -> Any:
 
 
 def build_spec(style: str, **content: Any) -> Any:
-    """``get_style(style).build_spec(**content)`` → engine EditSpec."""
+    """``get_style(style).build_spec(**content)`` → engine EditSpec.
+
+    ``format="<name>"`` (§1.5b) steers the build from the format
+    registry: the format's declared canvas (width/height/fps) and
+    caption defaults (style/wpm — plus ``target_lufs`` where the
+    style's own signature accepts it) fill any key the caller did not
+    pass explicitly. Values a format only inherits from the registry
+    defaults are not injected — the format must actually speak.
+    """
+    fmt = content.pop("format", None)
+    if fmt:
+        import inspect
+
+        from ....media.edit_engine.formats import resolve_format
+        resolved = resolve_format(str(fmt))
+        prov = resolved.provenance
+        params = inspect.signature(get_style(style).build_spec).parameters
+        inject: dict[str, Any] = {}
+        for key in ("width", "height", "fps", "caption_style",
+                    "caption_wpm"):
+            if key not in content and key in params \
+                    and prov.get(key) != "default":
+                inject[key] = getattr(resolved, key)
+        if "target_lufs" in params and "target_lufs" not in content \
+                and (prov.get("target_lufs") != "default"
+                     or prov.get("audio_platform") != "default"):
+            inject["target_lufs"] = resolved.loudness["target_lufs"]
+        content = {**inject, **content}
     return get_style(style).build_spec(**content)
+
+
+def style_format(name: str) -> dict[str, Any]:
+    """The format registry entry for a style, as data (§1.5b).
+
+    Style entries are probed from the styles' own ``build_spec``
+    output at registry bootstrap — this is the same data the
+    registry resolves, never a second copy.
+    """
+    from ....media.edit_engine.formats import get_format
+    return get_format(name).to_dict()
 
 
 def register_style(name: str, module_path: str) -> None:

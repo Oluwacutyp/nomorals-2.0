@@ -164,11 +164,27 @@ def apply_pack(spec: EditSpec | dict[str, Any],
     style name is validated against the registered presets (a pack
     naming a style that does not exist is a bug, not a fallback), and
     overrides are limited to the look keys in ``_PACK_OVERRIDE_KEYS``.
+    A pack may instead name a format registry entry (``{"format":
+    "<name>"}``, §1.5b): its grade pack is the base, and the pack's
+    own style/overrides win over it.
     """
     base = canonical_spec_dict(spec)
     pack = pack or {}
     if not isinstance(pack, dict):
         raise MediaEditError("pack must be a dict")
+    if pack.get("format") is not None:
+        # §1.5b: a pack may name a registry format; the format's grade
+        # pack is the base, and the pack's own style/spec_overrides
+        # win over it. Canvas/fps are NOT pack business — a format
+        # steers those at spec level via formats.apply_format.
+        from .formats import pack_for_format
+        merged = pack_for_format(str(pack["format"]))
+        merged.update({k: v for k, v in pack.items() if k != "format"})
+        merged_overrides = dict(merged.get("spec_overrides") or {})
+        merged_overrides.update(pack.get("spec_overrides") or {})
+        if merged_overrides:
+            merged["spec_overrides"] = merged_overrides
+        pack = merged
     style = pack.get("style")
     if style is not None:
         from ..contentops.styles import list_styles  # lazy: styles import the engine

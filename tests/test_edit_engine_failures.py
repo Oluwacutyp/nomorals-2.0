@@ -68,9 +68,10 @@ def test_direct_import_surface_and_all_unchanged():
     # length moves only with deliberate surface waves: 94 at the
     # failures wave, 113 after Echelon Wave 3 (video port exports),
     # 122 after Echelon Wave 5 (effect property registry exports),
-    # 127 after the §1.5c QC tail (measurer + contact-sheet exports).
+    # 127 after the §1.5c QC tail (measurer + contact-sheet exports),
+    # 140 after the §1.5b format registry exports landed on top of it.
     assert "failures" not in edit_engine_all
-    assert len(edit_engine_all) == 127
+    assert len(edit_engine_all) == 140
 
 
 # --- document.duration / timeline.duration --------------------------------
