@@ -121,6 +121,9 @@ class RenderReport:
     filter_graph_path: str = ""
     checks: list[dict[str, Any]] = field(default_factory=list)
     passed: bool | None = None
+    #: five-pass frame-QC contact sheet record (§1.5c), attached by
+    #: :func:`~.qc.qc_render` — sampled frames + per-axis verdicts.
+    contact_sheet: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {"output": self.output, "bytes": self.bytes,
@@ -129,7 +132,8 @@ class RenderReport:
                 "fps": round(self.fps, 2), "crf": self.crf,
                 "quality": self.quality, "sha256": self.sha256,
                 "filter_graph_path": self.filter_graph_path,
-                "checks": self.checks, "passed": self.passed}
+                "checks": self.checks, "passed": self.passed,
+                "contact_sheet": self.contact_sheet}
 
     def self_review(self, *, expect_duration: float = 0.0,
                     tolerance_s: float = 0.5) -> "RenderReport":

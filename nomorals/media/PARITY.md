@@ -5,6 +5,15 @@ incumbent surface here; a row moves to *shipped* only with its
 acceptance evidence, and the rows that remain are the burn-down
 queue. Sections land with their waves.
 
+## QC measurers + contact sheet — deterministic studio pipeline (plan §1.5c tail)
+
+| Row | State | Evidence / note |
+|---|---|---|
+| Measurers compute every QualityGate input from a finished render: exposure + aesthetic features from five-pass frame samples (`studio_color.measure_frame`), black-frame fraction from a dense sampling scan, loudness from the loudnorm first pass, caption drift from §2.4 measured word timings vs the document's caption words | shipped (§1.5c tail) | `edit_engine/qc.py` (`measure_render`); each axis names its rung in `methods` (MEASURER_RUNGS), each failure is a named `unmeasured` reason; acceptance in `tests/test_qc_measurers.py` — real renders measured end-to-end, planted black/silence/short-duration defects fail their specific axes |
+| Five-pass frame-QC contact sheet: the five sampling passes as five rows of judged frames (black/clipped flags, defect frames red-bordered) + per-axis gate verdicts in the header, attached to `RenderReport.contact_sheet` | shipped (§1.5c tail) | `qc.build_contact_sheet` / `qc_render(report=…)`; sheet record carries pass spans, per-frame stats + cell rects and `failing_frames`; pixel-oracle + double-build determinism tests in `tests/test_qc_measurers.py`. Not the cull sheet (`media/upgrade`) and not `media_edit`'s grid composite — the three stay distinct, per the plan |
+| Identity drift over rendered frames | open remainder | no face-embedding rung exists over rendered frames (insightface lives in the faceswap pipeline, not QC): with locks but no supplied per-shot embeddings the axis reads *unmeasured* with the reason named, and per-shot palette distances via `videogen.consistency.check_identity` are recorded as evidence — never converted into a score. Supplied embeddings are measured through `check_identity` |
+| Frozen-frame detection | shipped as evidence | the black scan records frozen spans (consecutive near-identical non-black samples) in the black-frames evidence; the gate's `black_frames` axis consumes the black fraction — frozen spans are named evidence for the reviewer, not silently folded into the fraction |
+
 ## Effects — EffectCraft → `edit_engine/effects` (plan §1.2b/§1.2c/§1.1c(d)/§1.1d)
 
 | Row | State | Evidence / note |

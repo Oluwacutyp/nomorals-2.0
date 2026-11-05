@@ -118,6 +118,13 @@ from .video_four import (
     tighten_keeps,
 )
 from .quality_gate import QualityGate, auto_fix, quality_gate
+from .qc import (
+    CONTACT_SHEET_PASSES,
+    MEASURER_RUNGS,
+    build_contact_sheet,
+    measure_render,
+    qc_render,
+)
 from .pure_render import (
     PROXY_HEIGHT,
     apply_pack,
@@ -203,6 +210,9 @@ __all__ = [
     "auto_broll", "tighten", "tighten_keeps",
     # quality gate (2.10)
     "QualityGate", "quality_gate", "auto_fix",
+    # QC measurers + five-pass contact sheet (§1.5c tail)
+    "CONTACT_SHEET_PASSES", "MEASURER_RUNGS", "measure_render",
+    "build_contact_sheet", "qc_render",
     # private-but-stable (tests + compat shims)
     "_effect_filter",
 ]
