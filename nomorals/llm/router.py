@@ -909,12 +909,23 @@ class LLMRouter:
             return breaker is not None and breaker.state == CircuitBreaker.OPEN
 
     def cooldown_remaining(self, name: str) -> float:
-        """Seconds until ``name`` may be retried (0 when not cooling)."""
+        """Seconds until ``name`` may be retried (0 when not cooling).
+
+        The window honors BOTH skip surfaces: the health cooldown
+        (``cooldown_until``) and the provider's own circuit-breaker
+        reset deadline. The breaker's reset window is its own — it can
+        still be open after the health cooldown lapses — and reporting
+        only the cooldown would call the provider available while
+        every call is still rejected at the breaker gate.
+        """
         with self._lock:
             health = self._health.get(name)
             if health is None:
                 return 0.0
-            return max(0.0, health.cooldown_until - self._clock())
+            remaining = max(0.0, health.cooldown_until - self._clock())
+            if health.breaker is not None:
+                remaining = max(remaining, health.breaker.reset_remaining())
+            return remaining
 
     def all_cooling_down(self) -> bool:
         """True when every registered provider would currently be skipped.
@@ -938,6 +949,15 @@ class LLMRouter:
         registered).  The llm ladder's all-down circuit breaker uses
         this as its fast-fail window: callers stop paying full ladder
         walks until a provider could actually answer.
+
+        Each provider's remaining time is :meth:`cooldown_remaining`,
+        which honors the provider's own breaker reset deadline where
+        the provider exposes one. APPROXIMATION, named: a provider
+        whose health carries no breaker (``breaker is None`` — not
+        producible through :meth:`add`, but possible for duck-typed
+        health surfaces) contributes only its health cooldown; its
+        true reset is then unobservable and the window may
+        under-report for that provider.
         """
         with self._lock:
             if not self._providers:
@@ -1086,15 +1106,18 @@ class LLMRouter:
         if not chain:
             raise ModelError("no registered provider supports embeddings")
         failed: list[str] = []
+        skipped: list[str] = []
         last_error = ""
         for provider in chain:
             health = self._health.get(provider.name)
             if health and not health.available(self._clock()):
+                skipped.append(f"{provider.name} (cooling down)")
                 continue
             if health and health.breaker is not None:
                 try:
                     health.breaker.before_call()
                 except CircuitOpen:
+                    skipped.append(f"{provider.name} (circuit open)")
                     continue
             try:
                 vectors = provider.embed(texts, **kw)
@@ -1108,6 +1131,13 @@ class LLMRouter:
                 _log.warning("embedding failover: %s failed; served by %s",
                              ", ".join(failed), provider.name)
             return vectors
+        if not failed and skipped:
+            # Nothing was even attempted: name the capable providers
+            # that were skipped and why (mirrors _dispatch's honest
+            # all-cooling shape) instead of an empty "last error".
+            raise ProviderUnavailable(
+                f"no embedding provider available: {', '.join(skipped)}; "
+                f"all providers are cooling down")
         raise ProviderUnavailable(f"all embedding providers failed; last error: {last_error}")
 
     def describe_image(

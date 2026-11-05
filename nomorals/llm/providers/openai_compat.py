@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import base64
 import time
-from typing import Any, Collection, Sequence
+from typing import Any, Callable, Collection, Sequence
 
 from ...core.errors import (
     ModelError,
@@ -315,6 +315,75 @@ class OpenAICompatProvider(LLMProvider):
                 chain.append(model_id)
         return chain or [self.model]
 
+    def _post_with_model_walk(
+        self,
+        chain: list[str],
+        post: Callable[[str], Any],
+        *,
+        soft_failure: Callable[[Any], str | None] | None = None,
+    ) -> tuple[str, Any, list[tuple[str, str]]]:
+        """Run ``post(model_id)`` across ``chain`` under chat's failover policy.
+
+        This is the model walk :meth:`embed` and :meth:`describe_image`
+        share with :meth:`chat` (chat's loop is its own because of its
+        response shaping and dead-id heal, but the classification is
+        the same module-level policy): the transport leg (``post``)
+        retries only what :func:`_same_model_retryable` blesses; what
+        reaches this loop is the per-model outcome — a model-scoped
+        failure (this model's rate limit, dead id, parse rejection)
+        walks to the next id, a provider-scoped failure (auth,
+        unreachable endpoint) aborts immediately, because a different
+        id cannot fix it. A 429 whose Retry-After window is short earns
+        ONE brief in-leg retry of the same model before the walk moves
+        on, exactly as in :meth:`chat`.
+
+        ``soft_failure(raw)`` marks a 200 response that is really a
+        per-model failure (the embeddings form of chat's empty
+        choices): it walks like a model-scoped failure, and on the last
+        model the reason raises as a :class:`ModelError`.
+
+        Returns ``(model_id, raw, attempts)`` for the serving model.
+        When every model fails, raises the last transport exception —
+        the same terminal shape a single-model caller has always seen.
+        """
+        attempts: list[tuple[str, str]] = []
+        for attempt_no, model_id in enumerate(chain):
+            raw: Any = None
+            exc: Exception | None = None
+            try:
+                raw = post(model_id)
+            except Exception as first_exc:  # noqa: BLE001
+                exc = first_exc
+                attempts.append((model_id, short_error(first_exc)))
+                info = classify_failure(str(first_exc), first_exc)
+                hint = _retry_after_hint(first_exc, info)
+                if (info.failure_class is FailureClass.RATE_LIMITED
+                        and hint is not None
+                        and 0.0 < hint <= _IN_LEG_RETRY_AFTER_MAX_S):
+                    time.sleep(hint)
+                    try:
+                        raw = post(model_id)
+                        exc = None
+                    except Exception as second_exc:  # noqa: BLE001
+                        exc = second_exc
+                        attempts.append((model_id, short_error(second_exc)))
+            if exc is not None:
+                if _model_scoped_failure(exc) \
+                        and attempt_no < len(chain) - 1:
+                    continue
+                raise exc
+            if soft_failure is not None:
+                reason = soft_failure(raw)
+                if reason is not None:
+                    attempts.append((model_id, reason))
+                    if attempt_no < len(chain) - 1:
+                        continue
+                    raise ModelError(reason)
+            return model_id, raw, attempts
+        # Unreachable by construction: callers build the chain from
+        # _model_chain() (never empty) or a pinned single model.
+        raise ModelError("no model attempted")  # pragma: no cover
+
     def chat(
         self, messages: Sequence[Message], params: SamplingParams | None = None, **kw: Any
     ) -> LLMResponse:
@@ -455,17 +524,43 @@ class OpenAICompatProvider(LLMProvider):
         )
 
     def embed(self, texts: Sequence[str], *, model: str = "", **kw: Any) -> list[list[float]]:
-        payload = {"model": model or self.model, "input": list(texts)}
-        raw = retry_call(
-            lambda: self.http.post_json(f"{self.base_url}/embeddings", payload),
-            policy=self._policy,
-        )
+        inputs = list(texts)
+        # An explicit ``model`` is the caller's word for this call: a
+        # one-model chain. Otherwise embeddings walk the same roster
+        # chat walks (_model_chain) under the same failover policy —
+        # a 429 or dead id on one model must not fail the call while a
+        # sibling id is healthy (the pre-ladderfix shape retried the
+        # SAME model in place and then gave up). The walk is per-call
+        # only: unlike chat it never heals ``self.model``, because an
+        # embeddings 404 proves the id cannot embed, not that it
+        # cannot chat.
+        chain = [model] if model else self._model_chain()
+
+        def _post(model_id: str) -> Any:
+            payload = {"model": model_id, "input": inputs}
+            return retry_call(
+                lambda: self.http.post_json(
+                    f"{self.base_url}/embeddings", payload),
+                policy=self._policy,
+                retryable=_same_model_retryable,
+            )
+
+        def _empty_data(raw: Any) -> str | None:
+            # A 200 with no data items for real input is the embeddings
+            # form of chat's empty choices: a soft per-model failure.
+            if inputs and not (raw.json().get("data") or []):
+                return (f"embedding provider returned 0 vectors "
+                        f"for {len(inputs)} inputs")
+            return None
+
+        _served, raw, _attempts = self._post_with_model_walk(
+            chain, _post, soft_failure=_empty_data)
         data = raw.json()
         items = sorted(data.get("data") or [], key=lambda d: d.get("index", 0))
         vectors = [item.get("embedding") or [] for item in items]
-        if len(vectors) != len(texts):
+        if len(vectors) != len(inputs):
             raise ModelError(
-                f"embedding provider returned {len(vectors)} vectors for {len(texts)} inputs"
+                f"embedding provider returned {len(vectors)} vectors for {len(inputs)} inputs"
             )
         return vectors
 
@@ -505,21 +600,43 @@ class OpenAICompatProvider(LLMProvider):
             http = HttpClient(timeout=self.timeout, headers=vheaders)
         else:
             base, http = self.base_url, self.http
-        model = self.vision_model or self.model
-        payload = {"model": model, "messages": payload_messages, **sampling.to_openai()}
-        try:
-            raw = retry_call(
+        # Model chain, mirroring chat's roster policy: a dedicated
+        # vision model — or a dedicated vision endpoint, whose roster
+        # is not the main endpoint's — is operator-pinned, so the chain
+        # is that single target (the transport still retries only
+        # transport transients, never a 429 in place). With neither,
+        # vision rides the chat endpoint and walks the same roster
+        # chat walks (_model_chain). The walk never rewrites
+        # ``self.model`` and never heals: a vision-leg 404 is ambiguous
+        # (dead id, or a server that cannot take image payloads), so
+        # chat's dead-id heal stays chat's own decision.
+        if self.vision_model:
+            chain = [self.vision_model]
+        elif self.vision_base_url:
+            chain = [self.model]
+        else:
+            chain = self._model_chain()
+
+        def _post(model_id: str) -> Any:
+            payload = {"model": model_id, "messages": payload_messages,
+                       **sampling.to_openai()}
+            return retry_call(
                 lambda: http.post_json(
                     f"{base}/chat/completions", payload,
                     **({"timeout": req_timeout}
                        if req_timeout is not None else {})),
                 policy=self._policy,
+                retryable=_same_model_retryable,
             )
+
+        try:
+            served_model, raw, _attempts = self._post_with_model_walk(
+                chain, _post)
         except Exception as exc:  # noqa: BLE001
             error = classify(exc)
             raise ProviderError(f"vision request failed: {error.message}", retryable=error.retryable) from exc
         data = raw.json()
         text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
         return self._record(
-            LLMResponse(text=text, model=data.get("model", model), raw=data), started
+            LLMResponse(text=text, model=data.get("model", served_model), raw=data), started
         )

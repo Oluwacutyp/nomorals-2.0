@@ -743,6 +743,23 @@ class CircuitBreaker:
                     )
                 self._half_open_calls += 1
 
+    def reset_remaining(self) -> float:
+        """Seconds until an OPEN breaker admits its next probe.
+
+        0.0 when the breaker is not open, or when the reset deadline
+        (``_opened_at + reset_timeout`` on this breaker's own clock)
+        has already passed — the next :meth:`before_call` then admits
+        a half-open probe. Availability windows that also track a
+        separate health cooldown must honor THIS deadline too: the
+        breaker's reset window is its own, and a provider whose
+        cooldown surface has lapsed can still be rejecting every call
+        at the breaker gate.
+        """
+        with self._lock:
+            if self._state != self.OPEN:
+                return 0.0
+            return max(0.0, self.reset_timeout - (self._clock() - self._opened_at))
+
     def record_success(self) -> None:
         with self._lock:
             was_open = self._state in (self.OPEN, self.HALF_OPEN)
