@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 from .failures import record_failure
+from .frametime import FrameGrid
+from .keyframes import KeyframeTrack
 
 
 #: pipeline/scene effect spellings → canonical effect names.
@@ -52,6 +54,13 @@ class Effect:
                                  f"got {self.at!r}")
             self.at = (a, b)
 
+    def at_frames(self, fps: Any) -> tuple[int, int] | None:
+        """The effect window as frame counts on the ``fps`` grid."""
+        if self.at is None:
+            return None
+        grid = FrameGrid(fps)
+        return grid.frames(self.at[0]), grid.frames(self.at[1])
+
     def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "params": dict(self.params),
                 "at": list(self.at) if self.at else None}
@@ -82,6 +91,11 @@ class Clip:
     speed: float = 1.0
     effects: tuple[Effect, ...] = ()
     gain: float = 1.0
+    #: stable identity keyframe tracks bind to (see :mod:`keyframes`).
+    #: Empty = unaddressed; renderers also match by per-track index
+    #: and by source path, in that order. Serialised only when set,
+    #: so legacy clip dicts stay byte-identical.
+    id: str = ""
 
     def __post_init__(self) -> None:
         self.start = max(0.0, float(self.start))
@@ -116,11 +130,32 @@ class Clip:
             return self.duration
         return self.source_duration(probe_duration) / self.speed
 
+    # -- rational frame time (Wave 1.2a): integer views of the same --
+    # -- seconds the model stores; the grid is the timeline's fps.   --
+    def start_frame(self, fps: Any) -> int:
+        return FrameGrid(fps).frames(self.start)
+
+    def at_frame(self, fps: Any) -> int:
+        return FrameGrid(fps).frames(self.at)
+
+    def end_frame(self, fps: Any) -> int | None:
+        if self.end is None:
+            return None
+        return FrameGrid(fps).frames(self.end)
+
+    def duration_frames(self, fps: Any,
+                        probe_duration: float | None = None) -> int:
+        """Play duration as a whole frame count on the ``fps`` grid."""
+        return FrameGrid(fps).frames(self.play_duration(probe_duration))
+
     def to_dict(self) -> dict[str, Any]:
-        return {"path": self.path, "start": self.start, "end": self.end,
+        data = {"path": self.path, "start": self.start, "end": self.end,
                 "at": self.at, "duration": self.duration,
                 "speed": self.speed, "gain": self.gain,
                 "effects": [e.to_dict() for e in self.effects]}
+        if self.id:
+            data["id"] = self.id
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Clip":
@@ -133,6 +168,7 @@ class Clip:
                              if data.get("duration") is not None else None),
                    speed=float(data.get("speed", 1.0)),
                    gain=float(data.get("gain", 1.0)),
+                   id=str(data.get("id", "") or ""),
                    effects=tuple(Effect.from_dict(e)
                                  for e in data.get("effects", ())))
 
@@ -193,6 +229,67 @@ class Track:
                           for c in data.get("clips", [])])
 
 
+#: blend modes an overlay track may use — the Document track
+#: vocabulary (``DocTrack.blend``), shared by stills and video (1.2b).
+OVERLAY_BLENDS = ("normal", "screen", "multiply", "overlay", "add")
+
+
+@dataclass
+class OverlayTrack:
+    """One picture track composited OVER the base track (Wave 1.2b).
+
+    The timeline-level form of a :class:`~.document.DocTrack` beyond
+    the first: same blend/opacity/muted vocabulary, plus optional
+    placement. ``x``/``y``/``width``/``height`` place the composited
+    frame (picture-in-picture); all ``None`` = full-frame cover.
+    Placement applies to ``blend="normal"`` only — the blend modes
+    are full-frame by definition. Clips carry ``at`` (timeline
+    position) and play windows; gaps are transparent.
+    """
+    kind: str = "video"  # "video" | "image"
+    clips: list[Clip] = field(default_factory=list)
+    blend: str = "normal"
+    opacity: float = 1.0
+    muted: bool = False
+    label: str = ""
+    x: int | None = None
+    y: int | None = None
+    width: int | None = None
+    height: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("video", "image"):
+            raise ValueError(f"overlay track kind must be video|image, "
+                             f"got {self.kind!r}")
+        if self.blend not in OVERLAY_BLENDS:
+            raise ValueError(f"unknown overlay blend {self.blend!r}; "
+                             f"use {list(OVERLAY_BLENDS)}")
+        if not 0.0 <= float(self.opacity) <= 1.0:
+            raise ValueError("overlay opacity must be in [0, 1]")
+        self.opacity = float(self.opacity)
+        self.clips = [c if isinstance(c, Clip) else Clip.from_dict(dict(c))
+                      for c in self.clips]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"kind": self.kind,
+                "clips": [c.to_dict() for c in self.clips],
+                "blend": self.blend, "opacity": self.opacity,
+                "muted": self.muted, "label": self.label,
+                "x": self.x, "y": self.y,
+                "width": self.width, "height": self.height}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "OverlayTrack":
+        return cls(kind=str(data.get("kind", "video")),
+                   clips=[Clip.from_dict(c) for c in data.get("clips", [])],
+                   blend=str(data.get("blend", "normal")),
+                   opacity=float(data.get("opacity", 1.0)),
+                   muted=bool(data.get("muted", False)),
+                   label=str(data.get("label", "")),
+                   x=data.get("x"), y=data.get("y"),
+                   width=data.get("width"), height=data.get("height"))
+
+
 @dataclass
 class Timeline:
     """The full edit structure.
@@ -202,6 +299,12 @@ class Timeline:
     :class:`AudioMix` (see :mod:`audio`), text in ``text_layers``
     (see :mod:`text`) — both kept out of the track model because they
     mix/overlay rather than sequence.
+
+    Wave 1.2: ``overlays`` carries the Document's remaining picture
+    tracks (composited by :func:`render_timeline`), and ``keyframes``
+    carries :class:`KeyframeTrack` animation consumed by the render.
+    Both serialise only when non-empty, so legacy timeline dicts stay
+    byte-identical.
     """
     video: Track
     width: int = 1080
@@ -210,6 +313,8 @@ class Timeline:
     seed: int = 0
     text_layers: list = field(default_factory=list)
     audio_mix: Any = None
+    overlays: list[OverlayTrack] = field(default_factory=list)
+    keyframes: list[KeyframeTrack] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if isinstance(self.video, dict):
@@ -219,6 +324,12 @@ class Timeline:
         self.fps = int(self.fps)
         if self.width <= 0 or self.height <= 0 or self.fps <= 0:
             raise ValueError("timeline needs positive width/height/fps")
+        self.overlays = [
+            o if isinstance(o, OverlayTrack)
+            else OverlayTrack.from_dict(dict(o)) for o in self.overlays]
+        self.keyframes = [
+            k if isinstance(k, KeyframeTrack)
+            else KeyframeTrack.from_dict(dict(k)) for k in self.keyframes]
 
     @property
     def duration(self) -> float:
@@ -232,16 +343,70 @@ class Timeline:
                 pass
         return total
 
+    def frame_counts(self) -> list[int]:
+        """Base-track play durations as integer frame counts (1.2a).
+
+        The exact assembly arithmetic: the timeline's total frame
+        count is ``sum(frame_counts())`` with no float anywhere, so a
+        10,000-cut assembly's duration is the frame sum *exactly*.
+        Raises ValueError (from :meth:`Clip.play_duration`) when a
+        clip's duration cannot be known without probing.
+        """
+        grid = FrameGrid(self.fps)
+        return [grid.frames(c.play_duration()) for c in self.video.clips]
+
+    def total_frames(self) -> int:
+        """Total base-track duration in whole frames (exact)."""
+        return sum(self.frame_counts())
+
+    def quantized(self) -> "Timeline":
+        """A copy with every edit time snapped to the frame grid.
+
+        Clip windows/placements/durations, effect windows, overlay
+        clips and keyframe times all become exact frame multiples at
+        this timeline's fps (Wave 1.2a: assemble/disassemble at
+        24/25/30/60 fps round-trips exactly through the grid).
+        """
+        grid = FrameGrid(self.fps)
+        q = grid.quantize_float
+        out = Timeline.from_dict(self.to_dict())
+
+        def snap_clip(c: Clip) -> None:
+            c.start = q(c.start)
+            c.at = q(c.at)
+            if c.end is not None:
+                c.end = q(c.end)
+            if c.duration is not None:
+                c.duration = q(c.duration)
+            for fx in c.effects:
+                if fx.at is not None:
+                    fx.at = (q(fx.at[0]), q(fx.at[1]))
+
+        for c in out.video.clips:
+            snap_clip(c)
+        for ov in out.overlays:
+            for c in ov.clips:
+                snap_clip(c)
+        for track in out.keyframes:
+            for k in track.keys:
+                k.time = q(k.time)
+        return out
+
     def to_dict(self) -> dict[str, Any]:
         from .text import TextLayer  # lazy: no cycle
         layers = [l.to_dict() if isinstance(l, TextLayer) else dict(l)
                   for l in self.text_layers]
-        return {"video": self.video.to_dict(),
+        data = {"video": self.video.to_dict(),
                 "width": self.width, "height": self.height,
                 "fps": self.fps, "seed": self.seed,
                 "text_layers": layers,
                 "audio_mix": (self.audio_mix.to_dict()
                               if self.audio_mix is not None else None)}
+        if self.overlays:
+            data["overlays"] = [o.to_dict() for o in self.overlays]
+        if self.keyframes:
+            data["keyframes"] = [k.to_dict() for k in self.keyframes]
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Timeline":
@@ -256,4 +421,8 @@ class Timeline:
                    fps=int(data.get("fps", 30)),
                    seed=int(data.get("seed", 0)),
                    text_layers=layers,
-                   audio_mix=AudioMix.from_dict(am) if am else None)
+                   audio_mix=AudioMix.from_dict(am) if am else None,
+                   overlays=[OverlayTrack.from_dict(o)
+                             for o in data.get("overlays", [])],
+                   keyframes=[KeyframeTrack.from_dict(k)
+                              for k in data.get("keyframes", [])])

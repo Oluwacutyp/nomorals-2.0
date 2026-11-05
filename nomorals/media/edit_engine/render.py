@@ -9,11 +9,12 @@ assumptions.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-from ...core.logging_setup import get_logger
 from ...core.profile import detect_profile
 from ...media_edit.videos import (
     MediaEditError,
@@ -22,8 +23,25 @@ from ...media_edit.videos import (
 )
 from .audio import AudioLayer, AudioMix, mix_layers
 from .effects import _ctx, _effect_filter, EFFECTS
+from .frametime import FrameGrid
+from .keyframes import (
+    KeyframeTrack,
+    classify_track,
+    discretize,
+    ffmpeg_expr,
+    keyframe_filter,
+    shifted,
+)
 from .text import TextLayer, burn_text_layers
-from .timeline import Clip, Effect, Timeline, Track, Transition, canonical_effect
+from .timeline import (
+    Clip,
+    Effect,
+    OverlayTrack,
+    Timeline,
+    Track,
+    Transition,
+    canonical_effect,
+)
 from .transitions import (
     edge_fade_filters,
     glitch_burst_params,
@@ -32,7 +50,6 @@ from .transitions import (
     xfade_args,
 )
 
-_log = get_logger(__name__)
 from .failures import record_failure
 
 WIDTH = 1080
@@ -305,6 +322,32 @@ def _chain_rgb_animated(parts: list[str], cur: str, fx: Effect,
     return cur
 
 
+def _velocity_pieces(dur: float,
+                     ramps: list[tuple[float, float, float]]
+                     ) -> list[tuple[float, float, float]]:
+    """Full-coverage (start, end, speed) pieces for a ramp set.
+
+    Identity (speed 1.0) outside ramp windows. The one piece of ramp
+    math: the in-chain video builder and the timeline-level ramp
+    pass (video + audio) both consume it, so the two can never
+    disagree about where a ramp starts or how long it lasts.
+    """
+    bounds = sorted({0.0, dur} | {t for r in ramps for t in (r[0], r[1])})
+    pieces: list[tuple[float, float, float]] = []
+    for x0, x1 in zip(bounds, bounds[1:]):
+        if x1 - x0 < 0.001:
+            continue
+        speed = 1.0
+        for t0, t1, s in ramps:
+            if t0 <= x0 + 1e-6 and x1 <= t1 + 1e-6:
+                speed = s
+                break
+        if speed <= 0:
+            raise MediaEditError("velocity_ramp speed must be > 0")
+        pieces.append((x0, x1, speed))
+    return pieces
+
+
 def _chain_velocity(parts: list[str], cur: str, fx: Effect,
                     ctx: dict[str, Any], tag: str) -> str:
     """velocity_ramp: piecewise setpts — the one structural effect."""
@@ -319,20 +362,7 @@ def _chain_velocity(parts: list[str], cur: str, fx: Effect,
         ramps = [(float(at[0]), float(at[1]), speed)]
     if not ramps:
         raise MediaEditError("velocity_ramp needs speed= or ramps=")
-    # full-coverage timeline: identity outside ramp windows
-    bounds = sorted({0.0, dur} | {t for r in ramps for t in (r[0], r[1])})
-    pieces: list[tuple[float, float, float]] = []
-    for x0, x1 in zip(bounds, bounds[1:]):
-        if x1 - x0 < 0.001:
-            continue
-        speed = 1.0
-        for t0, t1, s in ramps:
-            if t0 <= x0 + 1e-6 and x1 <= t1 + 1e-6:
-                speed = s
-                break
-        if speed <= 0:
-            raise MediaEditError("velocity_ramp speed must be > 0")
-        pieces.append((x0, x1, speed))
+    pieces = _velocity_pieces(dur, ramps)
     if len(pieces) == 1 and pieces[0][2] == 1.0:
         parts.append(f"[{cur}]null[{tag}]")
         return tag
@@ -508,17 +538,22 @@ def plan_from_cut_points(n_clips: int, cut_points: list[float],
     Boundaries are quantized to the frame grid (frame-accurate cuts).
     ``cut_points`` is *any* time grid — beats, silence gaps, chapter
     marks. Needs ≥2 points.
+
+    Wave 1.2a: the grid math is integer frame counts (FrameGrid) —
+    segment durations are frame differences, so the plan's total is
+    the frame sum *exactly*, at any grid length.
     """
     if n_clips < 1:
         raise MediaEditError("need at least one clip to plan")
-    qb = sorted({round(float(b) * fps) / fps
-                 for b in cut_points if b >= 0})
-    if len(qb) < 2:
+    grid = FrameGrid(fps)
+    qf = sorted({grid.frames(b) for b in cut_points if b >= 0})
+    if len(qf) < 2:
         raise MediaEditError("need at least 2 cut points for a grid plan")
-    seg_durs = [b - a for a, b in zip(qb, qb[1:]) if b - a >= 1.0 / fps]
-    if not seg_durs:
+    seg_frames = [b - a for a, b in zip(qf, qf[1:]) if b - a >= 1]
+    if not seg_frames:
         raise MediaEditError("cut grid produced no usable segments")
-    return [(j % n_clips, d) for j, d in enumerate(seg_durs)]
+    return [(j % n_clips, float(grid.seconds(f)))
+            for j, f in enumerate(seg_frames)]
 
 
 def _materialize_stills(clips: list[Clip], *, fps: int, width: int,
@@ -528,15 +563,23 @@ def _materialize_stills(clips: list[Clip], *, fps: int, width: int,
     out: list[Clip] = []
     for i, clip in enumerate(clips):
         if _is_still(clip.path):
-            dur = ((clip.end or 0.0) - clip.start) if clip.end else 0.0
+            # the clip's authored duration wins; end-start next; the
+            # 3 s default applies only when neither is authored.
+            if clip.duration:
+                dur = float(clip.duration)
+            elif clip.end:
+                dur = float(clip.end) - float(clip.start)
+            else:
+                dur = 0.0
             still = render_vertical(
                 clip.path, out=tmp / f"still{i}.mp4", fps=fps,
                 width=width, height=height,
-                still_duration=max(dur, 3.0), crf=crf, preset=preset,
-                profile=profile)
+                still_duration=dur if dur > 0 else 3.0, crf=crf,
+                preset=preset, profile=profile)
             out.append(Clip(path=still["output"], start=0.0,
-                            end=max(dur, 3.0) if dur else None,
-                            effects=clip.effects, speed=clip.speed))
+                            end=dur if dur > 0 else None,
+                            effects=clip.effects, speed=clip.speed,
+                            at=clip.at, gain=clip.gain, id=clip.id))
         else:
             out.append(clip)
     return out
@@ -560,6 +603,44 @@ def _normalize_transitions(
     return out
 
 
+def _match_keyframes(clips: list[Clip],
+                     tracks: list[KeyframeTrack] | None
+                     ) -> dict[int, list[KeyframeTrack]]:
+    """Keyframe tracks → {clip index: [tracks]} by clip identity.
+
+    Resolution order per track: the clip's explicit ``id``, then the
+    per-track index spelling (``"0"``, ``"1"``, …), then the source
+    path. A track matching no clip raises — an animation aimed at
+    nothing is a build error, never a silent no-op.
+    """
+    out: dict[int, list[KeyframeTrack]] = {}
+    for track in tracks or []:
+        if not track.keys:
+            raise MediaEditError(
+                f"keyframe track {track.clip_id!r} "
+                f"({track.effect}.{track.param}) has no keyframes")
+        idx: int | None = None
+        for i, c in enumerate(clips):
+            if c.id and c.id == track.clip_id:
+                idx = i
+                break
+        if idx is None and str(track.clip_id).isdigit():
+            i = int(track.clip_id)
+            if 0 <= i < len(clips):
+                idx = i
+        if idx is None:
+            for i, c in enumerate(clips):
+                if c.path == track.clip_id:
+                    idx = i
+                    break
+        if idx is None:
+            raise MediaEditError(
+                f"keyframe track targets clip {track.clip_id!r}, which "
+                f"is not among {[c.id or c.path for c in clips]}")
+        out.setdefault(idx, []).append(track)
+    return out
+
+
 def assemble_segments(clips: list[Clip], *,
                       segments: list[tuple[int, float]] | None = None,
                       cut_points: list[float] | None = None,
@@ -572,6 +653,8 @@ def assemble_segments(clips: list[Clip], *,
                       preset: str | None = None,
                       profile: str | None = None,
                       keep_audio: bool = False,
+                      keyframes: list[KeyframeTrack] | None = None,
+                      host: Any = None,
                       suffix: str = "edit",
                       workdir: str | os.PathLike[str] | None = None,
                       progress_cb: Any = None) -> dict[str, Any]:
@@ -582,13 +665,48 @@ def assemble_segments(clips: list[Clip], *,
     chapter marks — any grid). ``transitions``: one kind/Transition for
     every boundary, or a per-boundary list.
 
+    ``keyframes`` (Wave 1.2c): expression-family tracks (zoom) and
+    opacity tracks are applied per segment, re-based to each
+    segment's window of the clip's play time; opacity renders as
+    alpha over a black composite at the fold. Position tracks belong
+    to the overlay composite — passing them here raises, directing
+    the caller to :func:`render_timeline`.
+
+    ``host`` (Wave 1.2d): a :class:`~.host.RenderHost` to take the
+    encode plan from, instead of re-probing the profile.
+
     One ffmpeg invocation. Returns the run report.
     """
     if not clips:
         raise MediaEditError("assemble_segments needs at least one clip")
     perf = _perf_for(profile)
+    host_plan: dict[str, Any] | None = None
+    if host is not None:
+        host_plan = host.plan(width=width, height=height, fps=fps,
+                              profile=profile)
+        perf = {"profile": host_plan["profile"],
+                "preset": host_plan["preset"], "crf": host_plan["crf"],
+                "threads": host_plan["threads"]}
     crf = perf["crf"] if crf is None else crf
     preset = perf["preset"] if preset is None else preset
+    kf_by_clip: dict[int, list[KeyframeTrack]] = {}
+    kf_applied: list[dict[str, Any]] = []
+    kf_families: dict[int, str] = {}
+    if keyframes:
+        for track in keyframes:
+            try:
+                family = classify_track(track)
+            except ValueError as exc:
+                raise MediaEditError(str(exc)) from exc
+            if family == "position":
+                raise MediaEditError(
+                    f"keyframe track {track.effect}.{track.param} is a "
+                    f"position animation — those are consumed by the "
+                    f"overlay composite in render_timeline, not by "
+                    f"assemble_segments")
+            kf_families[id(track)] = family
+        kf_by_clip = _match_keyframes(clips, keyframes)
+    has_opacity = any(f == "opacity" for f in kf_families.values())
     tmp = Path(workdir) if workdir else Path(
         tempfile.mkdtemp(prefix="asm-"))
     tmp.mkdir(parents=True, exist_ok=True)
@@ -631,6 +749,7 @@ def assemble_segments(clips: list[Clip], *,
     v_durs: list[float] = []
     a_labels: list[str] = []
     cursors = [w0 for w0, _ in windows]  # continuous walk per clip
+    playheads = [0.0] * len(clips)  # per-clip play time (keyframe axis)
     total_dur = 0.0
     pending_head_fade: list[str] | None = None  # blink head fade from the
     # previous boundary — applied to this segment after its effects, so
@@ -680,6 +799,30 @@ def assemble_segments(clips: list[Clip], *,
                    beats=[0.0, play_d])
         for k, fx in enumerate(clip.effects):
             vcur = _chain_effect(parts, vcur, fx, ctx, f"{tag}e{k}")
+        # keyframed animation for this segment's window of the clip's
+        # play time (Wave 1.2c): the track is re-based to segment-local
+        # time. Zoom becomes one expression filter; opacity is sampled
+        # into constant-alpha windows over an alpha-carrying stream.
+        for j, kt in enumerate(kf_by_clip.get(ci, [])):
+            window = shifted(kt, playheads[ci], play_d)
+            if kf_families[id(kt)] == "expression":
+                filt = keyframe_filter(window, width=width,
+                                       height=height)
+                parts.append(f"[{vcur}]{filt}[{tag}kf{j}]")
+                vcur = f"{tag}kf{j}"
+            else:  # opacity
+                parts.append(f"[{vcur}]format=yuva420p[{tag}alp{j}]")
+                vcur = f"{tag}alp{j}"
+                for w_i, (a, b, v) in enumerate(discretize(window)):
+                    sub = Effect(name="opacity",
+                                 params={"alpha": round(v, 4)}, at=(a, b))
+                    vcur = _chain_effect(parts, vcur, sub, ctx,
+                                         f"{tag}op{j}_{w_i}")
+            kf_applied.append({"clip_id": kt.clip_id,
+                               "effect": kt.effect, "param": kt.param,
+                               "family": kf_families[id(kt)],
+                               "segment": n})
+        playheads[ci] += play_d
         # blink-kind head fade carried from the previous boundary
         if pending_head_fade:
             parts.append(f"[{vcur}]{','.join(pending_head_fade)}[{tag}hd]")
@@ -705,8 +848,11 @@ def assemble_segments(clips: list[Clip], *,
                 gfx = Effect(name="rgb_split", params=gp,
                              at=(max(play_d - win, 0.0), play_d))
                 vcur = _chain_effect(parts, vcur, gfx, ctx, f"{tag}gl")
-        # settb=AVTB: xfade requires identical timebases on both inputs
-        parts.append(f"[{vcur}]format=yuv420p,settb=AVTB[{tag}v]")
+        # settb=AVTB: xfade requires identical timebases on both inputs.
+        # An opacity-carrying assembly keeps its alpha to the fold,
+        # where it composites over black (fade semantics).
+        seg_fmt = "yuva420p" if has_opacity else "yuv420p"
+        parts.append(f"[{vcur}]format={seg_fmt},settb=AVTB[{tag}v]")
         v_labels.append(f"[{tag}v]")
         v_durs.append(play_d)
         total_dur += play_d
@@ -748,15 +894,21 @@ def assemble_segments(clips: list[Clip], *,
 
     # --- boundary fold: xfade runs vs concat runs --------------------
     vfinal, vcat_dur = _fold_boundaries(parts, v_labels, v_durs, tlist)
+    if has_opacity:
+        # fade semantics: the alpha the opacity tracks produced reads
+        # against black. One in-graph color source + overlay, then
+        # back to plain yuv420p for the encoder.
+        parts.append(f"color=c=black:s={width}x{height}:r={fps}"
+                     f":d={vcat_dur:.4f}[blk]")
+        parts.append(f"[blk]{vfinal}overlay=0:0[compv]")
+        parts.append(f"[compv]format=yuv420p[vcomp]")
+        vfinal = "[vcomp]"
     if keep_audio:
-        acat = "".join(a_labels)
-        parts.append(f"{acat}concat=n={len(plan)}:v=0:a=1[acat]")
-        maps = ["-map", vfinal, "-map", "[acat]"]
-        # NOTE: xfade overlaps shrink video vs audio; keep_audio +
-        # overlap transitions is caller error territory — documented.
-        if any(is_overlap(t.kind) for t in tlist):
-            _log.warning("keep_audio with overlap transitions: audio not "
-                         "time-shifted to match xfades")
+        # audio folds on the same boundaries as video: acrossfade at
+        # overlap boundaries (same overlap seconds), concat elsewhere
+        # — picture and sound stay the same length.
+        afinal = _fold_audio_boundaries(parts, a_labels, v_durs, tlist)
+        maps = ["-map", vfinal, "-map", afinal]
     else:
         maps = ["-map", vfinal]
 
@@ -773,11 +925,72 @@ def assemble_segments(clips: list[Clip], *,
         cmd += ["-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2"]
     cmd.append(str(out_p))
     run = run_ffmpeg(cmd, progress_cb=progress_cb, duration=total_dur or None)
-    return {"input_clips": [c.path for c in clips], "output": str(out_p),
-            "bytes": out_p.stat().st_size, "seconds": run["seconds"],
-            "segments": len(plan), "duration": round(vcat_dur, 3),
-            "fps": fps, "width": width, "height": height,
-            "profile": perf["profile"]}
+    result = {"input_clips": [c.path for c in clips], "output": str(out_p),
+              "bytes": out_p.stat().st_size, "seconds": run["seconds"],
+              "segments": len(plan), "duration": round(vcat_dur, 3),
+              "fps": fps, "width": width, "height": height,
+              "profile": perf["profile"],
+              "backend": "edit_engine.ffmpeg",
+              "rungs": [{"stage": "assemble",
+                         "rung": "ffmpeg/libx264 (software) — "
+                                 "edit_engine.render.assemble_segments",
+                         "note": f"profile {perf['profile']}, "
+                                 f"preset {preset}, crf {crf}"}],
+              "keyframes_applied": kf_applied}
+    if host_plan is not None:
+        result["host"] = host_plan
+    return result
+
+
+def _fold_audio_boundaries(parts: list[str], labels: list[str],
+                           durs: list[float],
+                           transitions: list[Transition]) -> str:
+    """Fold segment audio on the video's boundaries → final label.
+
+    Overlap boundaries fold pairwise via acrossfade with the *same*
+    overlap seconds the video fold computes (Fraction-exact), so a
+    keep-audio assembly's sound and picture have identical duration;
+    other boundaries concatenate.
+    """
+    if not labels:
+        raise MediaEditError("no audio segments to fold")
+    if len(labels) == 1:
+        return labels[0]
+    pieces: list[str] = []
+    cur_lbl, cur_dur = labels[0], _exact(durs[0])
+    for i, tr in enumerate(transitions):
+        nxt_lbl, nxt_dur = labels[i + 1], _exact(durs[i + 1])
+        if is_overlap(tr.kind):
+            _name, td_f = xfade_args(tr.kind, tr.params, tr.duration)
+            td = min(_exact(td_f), cur_dur, nxt_dur)
+            if td < Fraction(1, 20):
+                raise MediaEditError(
+                    f"acrossfade needs ≥0.05 s overlap; segments "
+                    f"{i}/{i + 1} are {float(cur_dur):.2f}s / "
+                    f"{float(nxt_dur):.2f}s")
+            parts.append(
+                f"{cur_lbl}{nxt_lbl}acrossfade=d={float(td):.4f}"
+                f"[axf{i}]")
+            cur_lbl, cur_dur = f"[axf{i}]", cur_dur + nxt_dur - td
+        else:
+            pieces.append(cur_lbl)
+            cur_lbl, cur_dur = nxt_lbl, nxt_dur
+    pieces.append(cur_lbl)
+    if len(pieces) == 1:
+        return pieces[0]
+    cat = "".join(pieces)
+    parts.append(f"{cat}concat=n={len(pieces)}:v=0:a=1[afold]")
+    return "[afold]"
+
+
+def _exact(seconds: float) -> Fraction:
+    """A float duration as the rational it names (Wave 1.2a).
+
+    Floats enter as decimal intentions (0.1, 2.5, frame multiples);
+    ``limit_denominator`` recovers that intention so fold arithmetic
+    is exact instead of accumulating binary error.
+    """
+    return Fraction(seconds).limit_denominator(1_000_000)
 
 
 def _fold_boundaries(parts: list[str], labels: list[str],
@@ -787,6 +1000,10 @@ def _fold_boundaries(parts: list[str], labels: list[str],
 
     Overlap kinds (fade/dissolve/whip_pan) fold pairwise via xfade;
     everything else concatenates. Returns a single label.
+
+    Durations fold as exact Fractions (Wave 1.2a): an xfade offset
+    deep into a long assembly is the exact sum of the durations
+    before it, not a float that has drifted by accumulated rounding.
     """
     if not labels:
         raise MediaEditError("nothing to fold")
@@ -794,20 +1011,21 @@ def _fold_boundaries(parts: list[str], labels: list[str],
         return labels[0], durs[0]
     # group into runs: maximal runs of xfade boundaries fold together
     pieces: list[str] = []   # labels to concat at the end
-    piece_durs: list[float] = []
-    cur_lbl, cur_dur = labels[0], durs[0]
+    piece_durs: list[Fraction] = []
+    cur_lbl, cur_dur = labels[0], _exact(durs[0])
     for i, tr in enumerate(transitions):
-        nxt_lbl, nxt_dur = labels[i + 1], durs[i + 1]
+        nxt_lbl, nxt_dur = labels[i + 1], _exact(durs[i + 1])
         if is_overlap(tr.kind):
-            name, td = xfade_args(tr.kind, tr.params, tr.duration)
-            td = min(td, cur_dur, nxt_dur)
-            if td < 0.05:
+            name, td_f = xfade_args(tr.kind, tr.params, tr.duration)
+            td = min(_exact(td_f), cur_dur, nxt_dur)
+            if td < Fraction(1, 20):
                 raise MediaEditError(
                     f"xfade needs ≥0.05 s overlap; segments {i}/{i + 1} "
-                    f"are {cur_dur:.2f}s / {nxt_dur:.2f}s")
+                    f"are {float(cur_dur):.2f}s / {float(nxt_dur):.2f}s")
             parts.append(
                 f"{cur_lbl}{nxt_lbl}xfade=transition={name}:"
-                f"duration={td:.4f}:offset={cur_dur - td:.4f}[xf{i}]")
+                f"duration={float(td):.4f}:offset={float(cur_dur - td):.4f}"
+                f"[xf{i}]")
             cur_lbl, cur_dur = f"[xf{i}]", cur_dur + nxt_dur - td
         else:
             pieces.append(cur_lbl)
@@ -816,15 +1034,276 @@ def _fold_boundaries(parts: list[str], labels: list[str],
     pieces.append(cur_lbl)
     piece_durs.append(cur_dur)
     if len(pieces) == 1:
-        return pieces[0], piece_durs[0]
+        return pieces[0], float(piece_durs[0])
     cat = "".join(pieces)
     parts.append(f"{cat}concat=n={len(pieces)}:v=1:a=0[vfold]")
-    return "[vfold]", sum(piece_durs)
+    return "[vfold]", float(sum(piece_durs))
+
+
+# ---------------------------------------------------------------------------
+# timeline ramps — velocity over the assembled program (Wave 1.2)
+# ---------------------------------------------------------------------------
+
+def _apply_timeline_ramps(src: str | os.PathLike[str], *,
+                          ramps: list[tuple[float, float, float]],
+                          out: str | os.PathLike[str],
+                          crf: int | None = None,
+                          preset: str | None = None,
+                          profile: str | None = None,
+                          progress_cb: Any = None) -> dict[str, Any]:
+    """Retim the assembled program: piecewise speed over [start, end].
+
+    The session model's speed ops live on the *assembled* timeline
+    (they span clip boundaries), so they cannot be clip effects. One
+    ffmpeg run: video through the shared velocity-piece math
+    (:func:`_velocity_pieces`, the same pieces the in-chain builder
+    uses), audio through mirrored atempo pieces — picture and sound
+    shrink/stretch together.
+    """
+    p = Path(src)
+    if not p.exists():
+        raise MediaEditError(f"no such video: {src}")
+    if not ramps:
+        raise MediaEditError("timeline ramps need at least one ramp")
+    perf = _perf_for(profile)
+    crf = perf["crf"] if crf is None else crf
+    preset = perf["preset"] if preset is None else preset
+    info = video_probe(p)
+    dur = float(info.get("duration") or 0.0)
+    if dur <= 0:
+        raise MediaEditError(f"could not determine duration of {src}")
+    has_a = any(s.get("type") == "audio" for s in info.get("streams", []))
+    norm = [(max(0.0, float(a)), min(dur, float(b)), float(s))
+            for a, b, s in ramps if float(b) > float(a)]
+    if not norm:
+        raise MediaEditError("timeline ramps are all outside the program")
+    pieces = _velocity_pieces(dur, norm)
+    parts: list[str] = []
+    fx = Effect(name="velocity_ramp", params={"ramps": norm})
+    ctx = _ctx(int(info.get("width") or WIDTH),
+               int(info.get("height") or HEIGHT), 30, dur, 0)
+    final_v = _chain_velocity(parts, "0:v", fx, ctx, "ramp")
+    maps = ["-map", f"[{final_v}]"]
+    if has_a:
+        if len(pieces) == 1 and pieces[0][2] == 1.0:
+            parts.append("[0:a]anull[rampa]")
+        else:
+            outs = "".join(f"[ras{i}]" for i in range(len(pieces)))
+            parts.append(f"[0:a]asplit={len(pieces)}{outs}")
+            cat = ""
+            for i, ((x0, x1, s), _lbl) in enumerate(
+                    zip(pieces, [f"ras{i}" for i in range(len(pieces))])):
+                chain = (f"[{_lbl}]atrim=start={x0:.4f}:end={x1:.4f},"
+                         f"asetpts=PTS-STARTPTS")
+                if abs(s - 1.0) > 1e-6:
+                    chain += f",{_atempo_chain(s)}"
+                chain += f"[raw{i}]"
+                parts.append(chain)
+                cat += f"[raw{i}]"
+            parts.append(f"{cat}concat=n={len(pieces)}:v=0:a=1[rampa]")
+        maps += ["-map", "[rampa]"]
+    out_p = Path(out)
+    cmd = ["-i", str(p), "-filter_complex", ";".join(parts), *maps,
+           "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
+           "-pix_fmt", "yuv420p"]
+    if has_a:
+        cmd += ["-c:a", "aac", "-b:a", "160k"]
+    cmd.append(str(out_p))
+    new_dur = sum((x1 - x0) / s for x0, x1, s in pieces)
+    run = run_ffmpeg(cmd, progress_cb=progress_cb, duration=dur)
+    return {"input": str(p), "output": str(out_p),
+            "bytes": out_p.stat().st_size, "seconds": run["seconds"],
+            "duration": round(new_dur, 3), "ramps": len(norm)}
+
+
+# ---------------------------------------------------------------------------
+# overlay tracks — per-track graph + the composite (Wave 1.2b)
+# ---------------------------------------------------------------------------
+
+_BLEND_XFADE = {"screen": "screen", "multiply": "multiply",
+                "overlay": "overlay", "add": "addition"}
+
+
+def _render_overlay_track(track: OverlayTrack, *,
+                          duration: float, fps: int, width: int,
+                          height: int, seed: int = 0,
+                          keyframes: list[KeyframeTrack] | None = None,
+                          tmp: Path, index: int) -> Path:
+    """One overlay track → a full-duration alpha-carrying file.
+
+    One ffmpeg graph: a transparent canvas, each clip placed at its
+    ``at`` with its effects, expression keyframes (zoom) and opacity
+    keyframes applied in-graph, and position keyframes driving the
+    overlay() placement expressions. The intermediate is ffv1/mkv —
+    lossless with an alpha channel, an honest intermediate format.
+    Clip audio is not part of a picture track (audio rides the
+    document's audio tracks / mix).
+    """
+    pw = int(track.width or width)
+    ph = int(track.height or height)
+    pos_tracks = [t for t in (keyframes or [])
+                  if classify_track(t) == "position"]
+    op_tracks = [t for t in (keyframes or [])
+                 if classify_track(t) == "opacity"]
+    ex_tracks = [t for t in (keyframes or [])
+                 if classify_track(t) == "expression"]
+    pos_by_clip = _match_keyframes(track.clips, pos_tracks)
+    op_by_clip = _match_keyframes(track.clips, op_tracks)
+    ex_by_clip = _match_keyframes(track.clips, ex_tracks)
+
+    clips = _materialize_stills(list(track.clips), fps=fps, width=pw,
+                                height=ph, crf=21, preset="veryfast",
+                                profile="pc", tmp=tmp)
+    order = sorted(range(len(clips)), key=lambda i: clips[i].at)
+    cmd: list[str] = []
+    cmd += ["-f", "lavfi", "-i",
+            f"color=c=black@0.0:s={width}x{height}:r={fps}"]
+    for clip in clips:
+        if _is_still(clip.path):
+            span = ((clip.end or 0.0) - clip.start) if clip.end \
+                else (clip.duration or 3.0)
+            cmd += ["-loop", "1", "-framerate", str(fps),
+                    "-t", f"{max(span, 0.1):.4f}"]
+        cmd += ["-i", clip.path]
+    parts: list[str] = ["[0:v]format=yuva420p[ovbase]"]
+    cur = "ovbase"
+    for n, ci in enumerate(order):
+        clip = clips[ci]
+        if _is_still(clip.path):
+            s0, s1 = 0.0, (clip.duration or 3.0)
+        else:
+            s0, s1 = _clip_window(clip)
+        speed = max(float(clip.speed), 1e-6)
+        play_d = (s1 - s0) / speed
+        tag = f"ov{n}"
+        parts.append(f"[{ci + 1}:v]trim=start={s0:.4f}:end={s1:.4f},"
+                     f"setpts=PTS-STARTPTS[{tag}raw]")
+        vcur = f"{tag}raw"
+        if abs(speed - 1.0) > 1e-6:
+            parts.append(f"[{vcur}]setpts=PTS/{speed:.4f},settb=AVTB"
+                         f"[{tag}spd]")
+            vcur = f"{tag}spd"
+        parts.append(
+            f"[{vcur}]scale={pw}:{ph}:"
+            f"force_original_aspect_ratio=increase,crop={pw}:{ph},"
+            f"setsar=1,fps={fps}[{tag}norm]")
+        vcur = f"{tag}norm"
+        ctx = _ctx(pw, ph, fps, play_d, seed + ci * 131,
+                   beats=[0.0, play_d])
+        for k, fx in enumerate(clip.effects):
+            vcur = _chain_effect(parts, vcur, fx, ctx, f"{tag}e{k}")
+        for j, kt in enumerate(ex_by_clip.get(ci, [])):
+            window = shifted(kt, 0.0, play_d)
+            filt = keyframe_filter(window, width=pw, height=ph)
+            parts.append(f"[{vcur}]{filt}[{tag}kf{j}]")
+            vcur = f"{tag}kf{j}"
+        for j, kt in enumerate(op_by_clip.get(ci, [])):
+            parts.append(f"[{vcur}]format=yuva420p[{tag}alp{j}]")
+            vcur = f"{tag}alp{j}"
+            window = shifted(kt, 0.0, play_d)
+            for w_i, (a, b, v) in enumerate(discretize(window)):
+                sub = Effect(name="opacity",
+                             params={"alpha": round(v, 4)}, at=(a, b))
+                vcur = _chain_effect(parts, vcur, sub, ctx,
+                                     f"{tag}op{j}_{w_i}")
+        parts.append(f"[{vcur}]format=yuva420p,"
+                     f"setpts=PTS-STARTPTS+{clip.at:.4f}/TB[{tag}v]")
+        # placement: position keyframes (clip-time → canvas-time by
+        # substituting the expression's t), else the track's x/y.
+        xs: Any = track.x if track.x is not None else 0
+        ys: Any = track.y if track.y is not None else 0
+        for kt in pos_by_clip.get(ci, []):
+            expr = ffmpeg_expr(kt)
+            expr = re.sub(r"\bt\b", f"(t-{clip.at:.3f})", expr)
+            if kt.param == "x":
+                xs = f"'{expr}'"
+            else:
+                ys = f"'{expr}'"
+        parts.append(
+            f"[{cur}][{tag}v]overlay=x={xs}:y={ys}:"
+            f"enable='between(t,{clip.at:.4f},{clip.at + play_d:.4f})'"
+            f"[{tag}c]")
+        cur = f"{tag}c"
+    out_p = tmp / f"overlay{index}.mkv"
+    cmd += ["-filter_complex", ";".join(parts), "-map", f"[{cur}]",
+            "-t", f"{duration:.4f}", "-c:v", "ffv1", "-pix_fmt",
+            "yuva420p", str(out_p)]
+    run_ffmpeg(cmd, duration=duration)
+    return out_p
+
+
+def _composite_tracks(base: str | os.PathLike[str],
+                      layers: list[tuple[OverlayTrack, Path]], *,
+                      out: str | os.PathLike[str],
+                      crf: int | None = None,
+                      preset: str | None = None,
+                      profile: str | None = None,
+                      progress_cb: Any = None) -> dict[str, Any]:
+    """Base + overlay track files → one composited mp4 (one graph).
+
+    ``normal`` layers overlay with their alpha (track opacity folds
+    into the alpha first); blend modes go through ffmpeg's blend
+    with the track opacity as ``all_opacity``. Placement was already
+    resolved inside each track's own graph.
+    """
+    perf = _perf_for(profile)
+    crf = perf["crf"] if crf is None else crf
+    preset = perf["preset"] if preset is None else preset
+    cmd: list[str] = ["-i", str(base)]
+    for _t, p in layers:
+        cmd += ["-i", str(p)]
+    parts: list[str] = []
+    cur = "0:v"
+    applied: list[dict[str, Any]] = []
+    for i, (track, _p) in enumerate(layers):
+        src = f"{i + 1}:v"
+        tag = f"cp{i}"
+        if track.blend == "normal":
+            parts.append(f"[{cur}]format=yuva420p[{tag}m]")
+            prep = f"[{src}]format=yuva420p"
+            if track.opacity < 1.0:
+                prep += f",colorchannelmixer=aa={track.opacity:.4f}"
+            prep += f"[{tag}o]"
+            parts.append(prep)
+            parts.append(f"[{tag}m][{tag}o]overlay=0:0[{tag}c]")
+            cur = f"{tag}c"
+        else:
+            parts.append(f"[{cur}]format=yuva420p[{tag}m]")
+            parts.append(f"[{src}]format=yuva420p[{tag}o]")
+            parts.append(
+                f"[{tag}m][{tag}o]blend="
+                f"all_mode={_BLEND_XFADE[track.blend]}:"
+                f"all_opacity={track.opacity:.4f}[{tag}c]")
+            cur = f"{tag}c"
+        applied.append({"label": track.label, "blend": track.blend,
+                        "opacity": track.opacity,
+                        "clips": len(track.clips)})
+    parts.append(f"[{cur}]format=yuv420p[compout]")
+    info = video_probe(str(base))
+    has_a = any(s.get("type") == "audio" for s in info.get("streams", []))
+    cmd += ["-filter_complex", ";".join(parts), "-map", "[compout]"]
+    if has_a:
+        cmd += ["-map", "0:a", "-c:a", "copy"]
+    cmd += ["-c:v", "libx264", "-preset", preset, "-crf", str(crf),
+            "-pix_fmt", "yuv420p", str(out)]
+    run = run_ffmpeg(cmd, progress_cb=progress_cb)
+    return {"output": str(out), "bytes": Path(out).stat().st_size,
+            "seconds": run["seconds"], "tracks": applied}
 
 
 # ---------------------------------------------------------------------------
 # render_timeline — Timeline + text + audio → finished mp4
 # ---------------------------------------------------------------------------
+
+def _kf_targets(track: KeyframeTrack, clips: list[Clip]) -> bool:
+    """Does ``track`` name one of ``clips`` (id → index → path)?"""
+    for c in clips:
+        if c.id and c.id == track.clip_id:
+            return True
+    if str(track.clip_id).isdigit() and int(track.clip_id) < len(clips):
+        return True
+    return any(c.path == track.clip_id for c in clips)
+
 
 def render_timeline(timeline: Timeline, *,
                     segments: list[tuple[int, float]] | None = None,
@@ -832,26 +1311,41 @@ def render_timeline(timeline: Timeline, *,
                     transitions: Any = "cut",
                     text_layers: list[TextLayer] | None = None,
                     audio_mix: AudioMix | None = None,
+                    overlays: list[OverlayTrack] | None = None,
+                    keyframes: list[KeyframeTrack] | None = None,
                     out: str | os.PathLike[str] | None = None,
                     crf: int | None = None,
                     quality: str | None = None,
                     preset: str | None = None,
                     profile: str | None = None,
                     keep_clip_audio: bool = False,
+                    host: Any = None,
                     suffix: str = "timeline",
                     workdir: str | os.PathLike[str] | None = None,
                     progress_cb: Any = None) -> dict[str, Any]:
     """Render a :class:`Timeline` → finished mp4.
 
-    1. video track → assemble_segments (effects, transitions)
-    2. audio_mix → mix_layers (or clip audio when keep_clip_audio)
-    3. text_layers → burn_text_layers
+    1. base video track → assemble_segments (effects, transitions,
+       expression + opacity keyframes)
+    2. overlay tracks → per-track alpha renders → composite
+       (blend modes, track opacity, position keyframes)
+    3. audio_mix → mix_layers (or clip audio when keep_clip_audio)
+    4. text_layers → burn_text_layers
     Returns the run report.
+
+    ``overlays``/``keyframes`` default to the Timeline's own fields
+    (Wave 1.2b/c — the renderer composites the canonical model, it
+    does not detour through a second representation). Keyframe
+    identity resolves base track first, then overlay tracks in
+    order; a track aimed at nothing raises. ``host`` (1.2d) supplies
+    the encode plan for the base assembly.
 
     ``quality`` picks a CRF preset (archival/high/balanced/social/draft);
     explicit ``crf=`` always wins. The returned dict carries a
     ``render_report`` (:class:`RenderReport`) — call ``.self_review()``
-    on it for ffprobe assertions before presenting the file.
+    on it for ffprobe assertions before presenting the file — plus
+    the Wave-1.2 honesty record: ``backend``, per-stage ``rungs``,
+    ``keyframes_applied`` and the composited ``tracks``.
     """
     if not timeline.video.clips:
         raise MediaEditError("Timeline needs at least one video clip")
@@ -860,17 +1354,97 @@ def render_timeline(timeline: Timeline, *,
         tempfile.mkdtemp(prefix="tl-"))
     tmp.mkdir(parents=True, exist_ok=True)
 
+    overlays_l = [t if isinstance(t, OverlayTrack)
+                  else OverlayTrack.from_dict(dict(t))
+                  for t in (getattr(timeline, "overlays", None)
+                            if overlays is None else overlays) or []]
+    kf_all = [t if isinstance(t, KeyframeTrack)
+              else KeyframeTrack.from_dict(dict(t))
+              for t in (getattr(timeline, "keyframes", None)
+                        if keyframes is None else keyframes) or []]
+    fam: dict[int, str] = {}
+    for t in kf_all:
+        try:
+            fam[id(t)] = classify_track(t)
+        except ValueError as exc:
+            raise MediaEditError(str(exc)) from exc
+    base_clips = list(timeline.video.clips)
+    assemble_kf = [t for t in kf_all
+                   if fam[id(t)] in ("expression", "opacity")
+                   and _kf_targets(t, base_clips)]
+    consumed = {id(t) for t in assemble_kf}
+    overlay_kf: dict[int, list[KeyframeTrack]] = {}
+    for oi, ot in enumerate(overlays_l):
+        rel = [t for t in kf_all if id(t) not in consumed
+               and _kf_targets(t, ot.clips)]
+        if rel:
+            overlay_kf[oi] = rel
+            consumed.update(id(t) for t in rel)
+    for t in kf_all:
+        if id(t) in consumed:
+            continue
+        if fam[id(t)] == "position" and _kf_targets(t, base_clips):
+            raise MediaEditError(
+                f"position keyframes target base-track clip "
+                f"{t.clip_id!r} — position animates overlay placement; "
+                f"put that clip on an overlay track")
+        raise MediaEditError(
+            f"keyframe track targets clip {t.clip_id!r}, which is not "
+            f"in this timeline")
+
     video = assemble_segments(
-        timeline.video.clips, segments=segments, cut_points=cut_points,
+        base_clips, segments=segments, cut_points=cut_points,
         transitions=transitions,
         out=tmp / "video.mp4", fps=timeline.fps,
         width=timeline.width, height=timeline.height, seed=timeline.seed,
         crf=crf, preset=preset, profile=profile,
-        keep_audio=keep_clip_audio, workdir=tmp, progress_cb=progress_cb)
+        keep_audio=keep_clip_audio, keyframes=assemble_kf, host=host,
+        workdir=tmp, progress_cb=progress_cb)
     final = Path(video["output"])
     video_dur = video["duration"]
-    audio_out: dict[str, Any] | None = None
+    rungs: list[dict[str, Any]] = list(video.get("rungs", []))
+    kf_applied: list[dict[str, Any]] = list(
+        video.get("keyframes_applied", []))
+    track_report: list[dict[str, Any]] = []
+    comp_out: dict[str, Any] | None = None
 
+    live_layers: list[tuple[OverlayTrack, Path]] = []
+    for oi, ot in enumerate(overlays_l):
+        if ot.muted or not ot.clips:
+            track_report.append({"label": ot.label, "blend": ot.blend,
+                                 "rendered": False,
+                                 "reason": "muted" if ot.muted
+                                 else "no clips"})
+            continue
+        rendered = _render_overlay_track(
+            ot, duration=video_dur, fps=timeline.fps,
+            width=timeline.width, height=timeline.height,
+            seed=timeline.seed, keyframes=overlay_kf.get(oi),
+            tmp=tmp, index=oi)
+        live_layers.append((ot, rendered))
+        rungs.append({
+            "stage": f"overlay:{ot.label or oi}",
+            "rung": "ffmpeg/ffv1 (alpha intermediate) — "
+                    "edit_engine.render._render_overlay_track",
+            "note": f"{ot.blend} track over {len(ot.clips)} clip(s)"})
+        for t in overlay_kf.get(oi, []):
+            kf_applied.append({"clip_id": t.clip_id, "effect": t.effect,
+                               "param": t.param, "family": fam[id(t)],
+                               "track": ot.label or oi})
+    if live_layers:
+        comp_out = _composite_tracks(
+            final, live_layers, out=tmp / "composited.mp4",
+            crf=crf, preset=preset, profile=profile,
+            progress_cb=progress_cb)
+        final = Path(comp_out["output"])
+        track_report.extend(comp_out["tracks"])
+        rungs.append({
+            "stage": "composite",
+            "rung": "ffmpeg/libx264 (software) — "
+                    "edit_engine.render._composite_tracks",
+            "note": f"{len(live_layers)} overlay track(s)"})
+
+    audio_out: dict[str, Any] | None = None
     mix = (audio_mix if audio_mix is not None else timeline.audio_mix)
     if mix is not None and mix.layers:
         audio_out = mix_layers(mix, video_dur, tmp / "mix.m4a")
@@ -879,6 +1453,9 @@ def render_timeline(timeline: Timeline, *,
                     "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
                     "-shortest", str(muxed)], duration=video_dur)
         final = muxed
+        rungs.append({"stage": "audio",
+                      "rung": "ffmpeg — edit_engine.audio.mix_layers",
+                      "note": f"{len(mix.layers)} layer(s)"})
     elif keep_clip_audio:
         pass  # already in the video stream
 
@@ -886,12 +1463,21 @@ def render_timeline(timeline: Timeline, *,
               for l in (text_layers if text_layers is not None
                         else timeline.text_layers)]
     text_out: dict[str, Any] | None = None
+    caption_timing: dict[str, int] = {}
     if layers:
         text_out = burn_text_layers(final, layers, width=timeline.width,
                                     height=timeline.height,
                                     out=tmp / "captioned.mp4",
                                     workdir=tmp)
         final = Path(text_out["output"])
+        for l in layers:
+            src = l.timing_source or "authored"
+            caption_timing[src] = caption_timing.get(src, 0) + 1
+        rungs.append({
+            "stage": "text",
+            "rung": "ffmpeg drawtext — edit_engine.text.burn_text_layers",
+            "note": "timing sources: " + ", ".join(
+                f"{k}×{v}" for k, v in sorted(caption_timing.items()))})
 
     if out:
         out_p = Path(out)
@@ -916,8 +1502,475 @@ def render_timeline(timeline: Timeline, *,
     except Exception as e:  # hash is best-effort
         record_failure("render.render_timeline:sha256", e)
         pass
-    return {"output": str(out_p), "bytes": out_p.stat().st_size,
-            "duration": video_dur, "profile": video["profile"],
-            "video": video, "audio": audio_out, "text": text_out,
-            "workdir": str(tmp), "render_report": report,
-            "quality": quality or "", "crf": crf}
+    result = {"output": str(out_p), "bytes": out_p.stat().st_size,
+              "duration": video_dur, "profile": video["profile"],
+              "video": video, "audio": audio_out, "text": text_out,
+              "workdir": str(tmp), "render_report": report,
+              "quality": quality or "", "crf": crf,
+              "backend": "edit_engine.ffmpeg", "rungs": rungs,
+              "keyframes_applied": kf_applied, "tracks": track_report,
+              "caption_timing": caption_timing}
+    if video.get("host") is not None:
+        result["host"] = video["host"]
+    return result
+
+
+# ---------------------------------------------------------------------------
+# render_document — the canonical Document, composited (Wave 1.2)
+# ---------------------------------------------------------------------------
+
+#: Wave-1 session (D1) effect kinds the video session façade stamps
+#: onto clips. They are directives, not canonical effects: the
+#: interpreter below gives each a real engine rung or fails honestly.
+_SESSION_DIRECTIVES = frozenset({
+    "v_transition", "v_title", "v_lower_third", "v_speed", "v_trim",
+    "v_duck", "v_chapter", "v_export",
+})
+
+
+def _session_transition(params: dict[str, Any]) -> Transition:
+    """A session transition op → an engine Transition.
+
+    Session kinds come from media_edit's TRANSITIONS vocabulary;
+    the engine's kinds are cut/fade/dissolve/flash/dip/whip_pan/
+    glitch_cut. Direct names map directly; slide/smooth kinds ride
+    the engine's whip_pan xfade (named in the note the caller
+    records); fadeblack/fadewhite map to the dip/flash blink kinds.
+    Wipe and circle kinds have no engine rung — they raise, here,
+    rather than being silently approximated.
+    """
+    kind = str(params.get("type") or params.get("kind")
+               or "fade").strip().lower()
+    dur = float(params.get("duration", 0.5))
+    if kind in ("fade", "dissolve"):
+        return Transition(kind=kind, duration=dur)
+    if kind in ("cut", "hardcut", "hard"):
+        return Transition(kind="cut")
+    if kind == "fadeblack":
+        return Transition(kind="dip", duration=dur)
+    if kind == "fadewhite":
+        return Transition(kind="flash", duration=dur)
+    for prefix in ("slide", "smooth"):
+        if kind.startswith(prefix):
+            direction = kind[len(prefix):]
+            if direction in ("left", "right", "up", "down"):
+                return Transition(kind="whip_pan", duration=dur,
+                                  params={"direction": direction})
+    raise MediaEditError(
+        f"session transition kind {kind!r} has no engine rung "
+        f"(engine kinds: cut/fade/dissolve/flash/dip/whip_pan/"
+        f"glitch_cut; slide/smooth map to whip_pan)")
+
+
+def _title_card_png(out: Path, params: dict[str, Any], *,
+                    width: int, height: int) -> Path:
+    """A title card PNG at the document's canvas size.
+
+    The session compiler's recipe (media_edit.studio._render_title_card:
+    solid bg, optional accent bar, centered shadowed text, optional
+    subtitle) rendered at the document's own dimensions instead of
+    the compiler's fixed 1920×1080.
+    """
+    from PIL import Image, ImageDraw
+
+    from ...media_edit.studio import render_text_layer
+
+    bg = str(params.get("bg") or params.get("background")
+             or "#14161c")
+    canvas = Image.new("RGB", (width, height), bg)
+    accent = params.get("accent")
+    if accent:
+        d = ImageDraw.Draw(canvas)
+        d.rectangle([0, height // 2 - 140, width, height // 2 - 128],
+                    fill=accent)
+    text = str(params.get("text", ""))
+    sub = str(params.get("subtitle", "") or "")
+    if text:
+        layer = render_text_layer(
+            text, font=params.get("font"),
+            size=int(params.get("font_size",
+                                params.get("fontsize", 96))),
+            color=str(params.get("color", "white")), align="center",
+            box_width=width,
+            letter_spacing=int(params.get("letter_spacing", 2)),
+            shadow=True)
+        x = (width - layer.width) // 2
+        y = (height - layer.height) // 2 - (40 if sub else 0)
+        canvas.paste(layer, (x, y), layer)
+    if sub:
+        layer = render_text_layer(
+            sub, font=params.get("font"),
+            size=int(params.get("subtitle_size", 44)),
+            color=str(params.get("subtitle_color", "#9aa0aa")),
+            align="center", box_width=width)
+        x = (width - layer.width) // 2
+        y = height // 2 + 60
+        canvas.paste(layer, (x, y), layer)
+    canvas.save(out, "PNG")
+    return out
+
+
+def _doc_play_duration(clip: Any) -> float:
+    """A document clip's play duration (probe when not authored)."""
+    if clip.duration:
+        return float(clip.duration) / max(float(clip.speed), 1e-6)
+    info = video_probe(clip.path)
+    end = clip.end if clip.end is not None else float(
+        info.get("duration") or 0.0)
+    return max(0.0, (float(end) - float(clip.start))) / max(
+        float(clip.speed), 1e-6)
+
+
+def _session_directives(doc: Any, tmp: Path, *, width: int,
+                        height: int) -> tuple[Any, list[Any] | None,
+                                              dict[str, Any],
+                                              list[dict[str, Any]]]:
+    """Interpret the session (``v_*``) directives on the base track.
+
+    Returns (cleaned document, boundary transitions | None,
+    post-passes, notes). The cleaned document carries only canonical
+    effects; titles become still clips, lower-thirds become text
+    layers, and speed/trim/duck/chapter become named post-passes the
+    caller executes in order. A directive with no rung raises —
+    silently dropping an authored edit is the failure this wave
+    exists to kill.
+
+    Directive times are authored on the sequential (cut) timeline;
+    an overlap transition compresses everything after its boundary
+    by its own duration, the same reading the session compiler gave
+    them.
+    """
+    from .document import Document
+
+    doc2 = Document.from_dict(doc.to_dict())
+    notes: list[dict[str, Any]] = []
+    post: dict[str, Any] = {"ramps": [], "trims": [], "duck": None,
+                            "chapters": []}
+    base = doc2.picture_tracks()[0] if doc2.picture_tracks() else None
+    transitions: list[Any] | None = None
+    if base is not None:
+        spans: list[float] = []
+        acc = 0.0
+        for c in base.clips:
+            spans.append(acc)
+            acc += _doc_play_duration(c)
+        new_clips: list[Any] = []
+        declared: list[Transition] = []
+        title_n = 0
+        shift = 0.0            # title durations inserted so far
+
+        for ci, clip in enumerate(base.clips):
+            kept: list[Effect] = []
+            span_here = spans[ci] + shift
+            for fx in clip.effects:
+                name = fx.name
+                params = fx.params or {}
+                if name not in _SESSION_DIRECTIVES:
+                    kept.append(fx)
+                    continue
+                if name == "v_title":
+                    text = str(params.get("text", "")).strip()
+                    if not text:
+                        raise MediaEditError(
+                            "v_title directive carries no text")
+                    dur = float(params.get("duration", 2.0))
+                    png = _title_card_png(
+                        tmp / f"title{title_n}.png", params,
+                        width=width, height=height)
+                    title_n += 1
+                    new_clips.append(Clip(
+                        path=str(png), duration=dur,
+                        id=f"title{title_n}"))
+                    shift += dur
+                    span_here += dur
+                    notes.append({"directive": "v_title",
+                                  "detail": f"title card {dur:.1f}s "
+                                            f"before clip {ci}"})
+                elif name == "v_transition":
+                    tr = _session_transition(params)
+                    declared.append(tr)
+                    notes.append({
+                        "directive": "v_transition",
+                        "detail": f"{params.get('type') or params.get('kind')} "
+                                  f"→ engine {tr.kind} "
+                                  f"{tr.duration:.2f}s (boundary "
+                                  f"{len(declared) - 1})"})
+                elif name == "v_lower_third":
+                    text = str(params.get("text", "")).strip()
+                    if not text:
+                        raise MediaEditError(
+                            "v_lower_third directive carries no text")
+                    if params.get("start") is not None:
+                        at = float(params["start"])
+                    else:
+                        at = span_here + float(
+                            fx.at[0] if fx.at else 0.0)
+                    dur = float(params.get("duration", 3.5))
+                    doc2.text_layers.append(TextLayer(
+                        text=text, start=round(at, 3),
+                        end=round(at + dur, 3),
+                        position="bottom-left", size=40,
+                        color="#ffffff", box=True,
+                        box_color="#00000088"))
+                    notes.append({"directive": "v_lower_third",
+                                  "detail": f"{text[:24]!r} at {at:.1f}s"})
+                elif name == "v_speed":
+                    if ("factor" in params or "start" in params
+                            or "end" in params):
+                        # session shape: timeline-absolute window
+                        speed = float(params.get(
+                            "factor", params.get("speed", 2.0)))
+                        t0 = float(params.get("start") or 0.0)
+                        t1 = (float(params["end"])
+                              if params.get("end") is not None else None)
+                    else:
+                        # hand-authored shape: clip-relative window
+                        speed = float(params.get("speed", 2.0))
+                        a, b = fx.at if fx.at else (0.0, None)
+                        t0 = span_here + float(a)
+                        t1 = (span_here + float(b)
+                              if b is not None else None)
+                    post["ramps"].append((t0, t1, speed))
+                    notes.append({"directive": "v_speed",
+                                  "detail": f"{speed}× over "
+                                            f"[{t0:.1f}, "
+                                            f"{t1 if t1 is not None else 'end'}]"})
+                elif name == "v_trim":
+                    post["trims"].append({
+                        "start": float(params.get("start", 0.0)),
+                        "end": params.get("end")})
+                    notes.append({"directive": "v_trim",
+                                  "detail": "start "
+                                            f"{float(params.get('start', 0.0)):.1f}s"})
+                elif name == "v_duck":
+                    if post["duck"] is None:
+                        post["duck"] = {
+                            "amount_db": float(params.get(
+                                "amount_db", 12.0)),
+                            "bgm": params.get("bgm"),
+                            "bgm_gain": float(params.get(
+                                "bgm_gain", 1.0))}
+                        notes.append({"directive": "v_duck",
+                                      "detail": "music ducked "
+                                                f"{float(params.get('amount_db', 12.0)):.0f} dB "
+                                                "under program audio"})
+                elif name == "v_chapter":
+                    title = str(params.get("name")
+                                or params.get("title") or "")
+                    if params.get("at") is not None:
+                        at = float(params["at"])
+                    else:
+                        at = span_here + float(
+                            fx.at[0] if fx.at else 0.0)
+                    post["chapters"].append({
+                        "title": title, "at": round(at, 3),
+                        "end": params.get("end")})
+                    notes.append({"directive": "v_chapter",
+                                  "detail": f"{title!r} at {at:.1f}s"})
+                elif name == "v_export":
+                    notes.append({
+                        "directive": "v_export",
+                        "detail": f"preset {params.get('preset')!r} — "
+                                  f"honored by the session façade as "
+                                  f"output hints, not an engine edit"})
+            clip.effects = tuple(kept)
+            new_clips.append(clip)
+        base.clips = new_clips
+        n_bounds = len(new_clips) - 1
+        if declared and n_bounds > 0:
+            if len(declared) == 1:
+                boundaries: list[Any] = [declared[0]] * n_bounds
+            elif len(declared) <= n_bounds:
+                boundaries = list(declared) + ["cut"] * (
+                    n_bounds - len(declared))
+            else:
+                raise MediaEditError(
+                    f"{len(declared)} transitions declared for "
+                    f"{n_bounds} clip boundaries")
+            if any(b != "cut" for b in boundaries):
+                transitions = boundaries
+    return doc2, transitions, post, notes
+
+
+def render_document(doc: Any, *,
+                    out: str | os.PathLike[str] | None = None,
+                    host: Any = None,
+                    workdir: str | os.PathLike[str] | None = None,
+                    progress_cb: Any = None,
+                    suffix: str = "document") -> dict[str, Any]:
+    """Render the canonical :class:`~.document.Document` end-to-end.
+
+    The Wave-1.2 convergence point: the document → EditSpec →
+    Timeline → :func:`render_timeline` path composites multi-track
+    picture, keyframes, text and audio in the engine itself (the
+    compile-via-media_edit detour is retired for video renders).
+
+    Session (``v_*``) directives stamped by the EditStudio façade are
+    interpreted onto real rungs (titles, transitions, lower-thirds,
+    timeline speed ramps, trim, sidechain duck, chapters) — a
+    directive without a rung raises instead of being dropped.
+
+    Post-pass order: render → trims → speed ramps → duck → chapters.
+    The result is render_timeline's report enriched with
+    ``renderer``, the ``document`` derivative manifest,
+    ``session_directives`` and the post-pass records in ``rungs``.
+    """
+    from .document import Document
+
+    if not isinstance(doc, Document):
+        doc = Document.from_dict(doc)
+    if not doc.picture_tracks():
+        raise MediaEditError("Document has no picture track to render")
+    tmp = Path(workdir) if workdir else Path(
+        tempfile.mkdtemp(prefix="doc-"))
+    tmp.mkdir(parents=True, exist_ok=True)
+    spec = doc.output
+    doc2, transitions, post, notes = _session_directives(
+        doc, tmp, width=int(spec.get("width", 1080)),
+        height=int(spec.get("height", 1920)))
+    tl = doc2.to_edit_spec().to_timeline()
+    # a document's clips carry their own audio (the session model's
+    # reading — the old compiler kept it too); an authored audio mix
+    # still replaces it in render_timeline's mux step.
+    rt_kwargs: dict[str, Any] = {"keep_clip_audio": True}
+    if post["duck"] is not None:
+        # ducking mixes music under the program's own audio, so the
+        # document's audio mix must NOT be baked in first — the duck
+        # pass below does the mix, sidechained on the program audio.
+        rt_kwargs["audio_mix"] = AudioMix(layers=[])
+    res = render_timeline(
+        tl, transitions=transitions if transitions is not None else "cut",
+        out=tmp / "program.mp4", host=host, workdir=tmp,
+        crf=(int(spec["crf"]) if spec.get("crf") else None),
+        profile=str(spec.get("profile") or "") or None,
+        progress_cb=progress_cb, **rt_kwargs)
+    cur = Path(res["output"])
+    cur_dur = float(res["duration"])
+    rungs: list[dict[str, Any]] = list(res.get("rungs", []))
+    crf = int(spec.get("crf") or 20)
+
+    for i, tr in enumerate(post["trims"]):
+        start = float(tr["start"])
+        end = tr["end"]
+        dur = (float(end) - start) if end is not None else None
+        nxt = tmp / f"trim{i}.mp4"
+        cmd = ["-ss", f"{start:.3f}", "-i", str(cur)]
+        if dur is not None:
+            cmd += ["-t", f"{dur:.3f}"]
+        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf",
+                str(crf), "-pix_fmt", "yuv420p", "-c:a", "aac",
+                "-b:a", "160k", str(nxt)]
+        run_ffmpeg(cmd, duration=cur_dur)
+        cur = nxt
+        cur_dur = float(video_probe(cur).get("duration") or cur_dur)
+        rungs.append({"stage": "session:v_trim",
+                      "rung": "ffmpeg trim — edit_engine.render."
+                              "render_document",
+                      "note": f"start {start:.1f}s"})
+    if post["ramps"]:
+        nxt = tmp / "ramped.mp4"
+        resolved = [(max(0.0, min(a, cur_dur)),
+                     min(b if b is not None else cur_dur, cur_dur), s)
+                    for a, b, s in post["ramps"]]
+        ramped = _apply_timeline_ramps(
+            cur, ramps=resolved, out=nxt, crf=crf,
+            progress_cb=progress_cb)
+        cur = nxt
+        cur_dur = float(ramped["duration"])
+        rungs.append({"stage": "session:v_speed",
+                      "rung": "ffmpeg setpts/atempo pieces — "
+                              "edit_engine.render._apply_timeline_ramps",
+                      "note": f"{len(post['ramps'])} ramp(s), video and "
+                              f"audio retimed together"})
+    if post["duck"] is not None:
+        info = video_probe(cur)
+        has_a = any(s.get("type") == "audio"
+                    for s in info.get("streams", []))
+        if not has_a:
+            raise MediaEditError(
+                "v_duck declared but the rendered program has no "
+                "audio to duck under")
+        music = post["duck"].get("bgm")
+        if not music:
+            for t in doc2.tracks:
+                if t.kind == "audio" and t.clips:
+                    music = t.clips[0].path
+                    break
+        if not music:
+            raise MediaEditError(
+                "v_duck declared but no music source: the directive "
+                "carries no bgm and the document has no audio track")
+        prog_audio = tmp / "program_audio.m4a"
+        run_ffmpeg(["-i", str(cur), "-vn", "-c:a", "aac", "-b:a",
+                    "192k", str(prog_audio)], duration=cur_dur)
+        amount = float(post["duck"]["amount_db"])
+        level = min(1.0, max(0.05, 10 ** (-amount / 20.0)))
+        mix = AudioMix(
+            layers=[AudioLayer(path=str(prog_audio)),
+                    AudioLayer(path=music,
+                               volume=float(post["duck"].get(
+                                   "bgm_gain", 1.0)))],
+            ducking="sidechain", duck_key=0, duck_level=level)
+        duck_mix = mix_layers(mix, cur_dur, tmp / "duck_mix.m4a")
+        mix_src = duck_mix["output"]
+        nxt = tmp / "ducked.mp4"
+        run_ffmpeg(["-i", str(cur), "-i", mix_src, "-map", "0:v",
+                    "-map", "1:a", "-c:v", "copy", "-c:a", "aac",
+                    "-b:a", "192k", "-shortest", str(nxt)],
+                   duration=cur_dur)
+        cur = nxt
+        rungs.append({"stage": "session:v_duck",
+                      "rung": "ffmpeg sidechaincompress — "
+                              "edit_engine.audio.mix_layers",
+                      "note": f"music at {level:.2f} under program "
+                              f"audio"})
+    if post["chapters"]:
+        chapters = sorted(post["chapters"], key=lambda c: c["at"])
+        lines = [";FFMETADATA1"]
+        for i, ch in enumerate(chapters):
+            start_ms = int(ch["at"] * 1000)
+            end_at = ch.get("end")
+            if end_at is None:
+                end_at = (chapters[i + 1]["at"] if i + 1 < len(chapters)
+                          else cur_dur)
+            title = str(ch["title"]).replace("\n", " ")
+            lines += ["[CHAPTER]", "TIMEBASE=1/1000",
+                      f"START={start_ms}",
+                      f"END={max(start_ms + 1, int(end_at * 1000))}",
+                      f"title={title}"]
+        meta = tmp / "chapters.txt"
+        meta.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        nxt = tmp / "chaptered.mp4"
+        run_ffmpeg(["-i", str(cur), "-i", str(meta), "-map", "0",
+                    "-map_chapters", "1", "-c", "copy", str(nxt)],
+                   duration=cur_dur)
+        cur = nxt
+        rungs.append({"stage": "session:v_chapter",
+                      "rung": "ffmpeg ffmetadata remux — "
+                              "edit_engine.render.render_document",
+                      "note": f"{len(chapters)} chapter(s)"})
+
+    if out:
+        out_p = Path(out)
+    else:
+        first = doc2.picture_tracks()[0].clips[0]
+        out_p = Path(first.path).parent / (
+            f"{Path(first.path).stem}.{suffix}.mp4")
+    if cur.resolve() != out_p.resolve():
+        run_ffmpeg(["-i", str(cur), "-c", "copy", str(out_p)],
+                   duration=cur_dur)
+    res.update({
+        "output": str(out_p), "bytes": out_p.stat().st_size,
+        "duration": round(cur_dur, 3),
+        "renderer": "edit_engine.render.render_document",
+        "rungs": rungs,
+        "session_directives": notes,
+        "document": {
+            "tracks": [t.kind for t in doc.tracks],
+            "clips": sum(len(t.clips) for t in doc.tracks),
+            "keyframes": len(doc.keyframes),
+            "text_layers": len(doc.text_layers),
+            "output": dict(spec),
+        },
+    })
+    return res

@@ -592,6 +592,102 @@ class LayerStack:
 
     # -- rendering ----------------------------------------------------------
 
+    def to_document(self, *, workdir: Any = None) -> Any:
+        """Convert this stack → the canonical edit_engine Document.
+
+        Wave-1.2 convergence, image side: the stack's base becomes
+        the Document's first image track; each image layer becomes
+        its own image track (blend / opacity carried, a hidden layer
+        becomes a muted track); text layers become Document text
+        layers. The Document's renderer composites tracks with the
+        same reading flatten() gives the stack — bottom-to-top.
+
+        Named limits, all loud rather than silent: shape and solid
+        layers have no Document track form (they are raster ops —
+        flatten the stack instead) and raise; a blend mode outside
+        the Document's set raises; an in-memory base or image layer
+        is staged to ``workdir`` when one is given and raises
+        without one; per-layer positions are not carried (Document
+        picture tracks are full-frame).
+        """
+        from pathlib import Path as _Path
+
+        from ..media.edit_engine.document import Document, DocTrack
+        from ..media.edit_engine.text import TextLayer
+        from ..media.edit_engine.timeline import Clip
+
+        work = _Path(workdir) if workdir else None
+        staged = 0
+
+        def _stage(img: Any, what: str) -> str:
+            nonlocal staged
+            if work is None:
+                raise MediaEditError(
+                    f"{what} is in-memory and cannot enter a Document "
+                    f"without a file form; pass workdir= to stage it")
+            work.mkdir(parents=True, exist_ok=True)
+            staged += 1
+            p = work / f"layerstack_{what}_{staged}.png"
+            img.save(p, "PNG")
+            return str(p)
+
+        if self._base_kind == "path":
+            base_path = self._base_spec["path"]
+        elif self._base_kind == "blank":
+            base_path = _stage(self._base_image, "base")
+        else:  # in-memory base image
+            base_path = _stage(self._base_image, "base")
+        w, h = self.canvas_size
+        tracks: list[Any] = [DocTrack(
+            kind="image", label="base",
+            clips=[Clip(path=base_path)])]
+        text_layers: list[Any] = []
+        doc_blends = ("normal", "screen", "multiply", "overlay", "add")
+        for layer in self._layers:
+            if layer.type == "image":
+                if layer.blend not in doc_blends:
+                    raise MediaEditError(
+                        f"layer {layer.id!r} blend {layer.blend!r} has "
+                        f"no Document equivalent (Document blends: "
+                        f"{list(doc_blends)})")
+                src = layer.params.get("source_path")
+                if not src:
+                    src = _stage(layer.params["image"],
+                                 f"layer_{layer.id}")
+                tracks.append(DocTrack(
+                    kind="image", label=layer.name,
+                    blend=layer.blend, opacity=layer.opacity,
+                    muted=not layer.visible,
+                    clips=[Clip(path=str(src))]))
+            elif layer.type == "text":
+                p = layer.params
+                entry: dict[str, Any] = {
+                    "text": p["text"], "size": int(p["font_size"]),
+                    "color": str(p["color"])}
+                pos = layer.position
+                if isinstance(pos, str):
+                    if pos not in ("bottom", "top", "center", "middle",
+                                   "bottom-left", "bottom-right",
+                                   "top-left", "top-right"):
+                        raise MediaEditError(
+                            f"text layer {layer.id!r} position "
+                            f"{pos!r} has no TextLayer equivalent")
+                    entry["position"] = pos
+                elif isinstance(pos, (tuple, list)) and len(pos) == 2:
+                    entry["position"] = "bottom"
+                    entry["x"] = int(pos[0])
+                    entry["y"] = int(pos[1])
+                text_layers.append(TextLayer.from_dict(entry))
+            else:
+                raise MediaEditError(
+                    f"layer {layer.id!r} is a {layer.type} layer — "
+                    f"shapes and solids are raster ops with no "
+                    f"Document track form; flatten the stack or "
+                    f"remove the layer before converting")
+        return Document(tracks=tracks, text_layers=text_layers,
+                        output={"width": int(w), "height": int(h),
+                                "fps": 30})
+
     def flatten(self) -> Any:
         """Composite visible layers bottom-to-top → a single PIL image.
 

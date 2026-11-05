@@ -133,6 +133,19 @@ def _fx_blur(params: dict[str, Any], ctx: dict[str, Any]) -> str:
     return f"boxblur=luma_radius={radius:.1f}:luma_power=1"
 
 
+def _fx_opacity(params: dict[str, Any], ctx: dict[str, Any]) -> str:
+    """Constant alpha — the still point of an opacity keyframe curve.
+
+    The stream gains an alpha channel at ``alpha`` opacity. On an
+    overlay track the composite reads it directly; on the base track
+    the renderer composites over black, so it reads as a fade.
+    """
+    alpha = float(params.get("alpha", 1.0))
+    if not 0.0 <= alpha <= 1.0:
+        raise MediaEditError("opacity alpha must be in [0, 1]")
+    return f"format=yuva420p,colorchannelmixer=aa={alpha:.4f}"
+
+
 #: named color grades → ffmpeg filter chains. Grades are looks, not
 #: styles: a documentary and a vlog can both ask for "warm".
 _GRADES: dict[str, str] = {
@@ -206,7 +219,30 @@ EFFECTS: dict[str, Any] = {
     "beat_pulse": _fx_beat_pulse,
     "blur": _fx_blur,
     "color_grade": _fx_color_grade,
+    "opacity": _fx_opacity,
 }
+
+#: Keyframable params per effect (Wave 1.2c — EffectCraft's property
+#: paths, Devon-shaped): each effect declares which of its params a
+#: :class:`~.keyframes.KeyframeTrack` may animate. ``zoom`` is the
+#: keyframe layer's own zoom property (the ``zoom_ramp`` helper's
+#: effect name); ``position`` addresses an overlay clip's placement
+#: in the composite. A track naming anything outside this table is a
+#: render error — never a silent no-op. Expression templates for the
+#: zoom family live in :mod:`keyframes`; opacity/position are applied
+#: by the renderer's composite/finishing passes.
+KEYFRAMABLE_PARAMS: dict[str, tuple[str, ...]] = {
+    "zoom": ("z",),
+    "ken_burns": ("zoom",),
+    "punch_zoom": ("zmax",),
+    "opacity": ("alpha",),
+    "position": ("x", "y"),
+}
+
+
+def keyframable_params() -> dict[str, tuple[str, ...]]:
+    """Effect → keyframable params (the 1.2c property declarations)."""
+    return dict(KEYFRAMABLE_PARAMS)
 
 
 def _effect_filter(name: str, params: dict[str, Any],

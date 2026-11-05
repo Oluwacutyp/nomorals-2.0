@@ -13,22 +13,42 @@ from .audio import (
     mix_layers,
     normalize_loudness,
 )
-from .effects import EFFECTS, _effect_filter, list_effects
+from .effects import (
+    EFFECTS,
+    KEYFRAMABLE_PARAMS,
+    _effect_filter,
+    keyframable_params,
+    list_effects,
+)
+from .frametime import (
+    FrameGrid,
+    frame_grid,
+    quantize_seconds,
+    sum_frame_durations,
+)
+from .host import HostCapabilities, LocalHost, RenderHost, probe_host
+from .keyframes import Keyframe, KeyframeTrack
 from .render import (
     HEIGHT,
     WIDTH,
     apply_effect,
     assemble_segments,
     plan_from_cut_points,
+    render_document,
     render_timeline,
     render_vertical,
 )
 from .spec import EditSpec, render, render_report
 from .text import (
+    STTTranscriber,
     TextLayer,
+    Transcriber,
     build_captions,
     burn_text_layers,
+    captions_from_audio,
+    captions_sidecar,
     estimate_word_timings,
+    karaoke_layer,
     layer_to_ass,
     words_to_ass,
 )
@@ -99,7 +119,15 @@ from .pure_render import (
     render_pure,
     source_fingerprint,
 )
-from .timeline import Clip, Effect, Track, Timeline, Transition, canonical_effect
+from .timeline import (
+    Clip,
+    Effect,
+    OverlayTrack,
+    Track,
+    Timeline,
+    Transition,
+    canonical_effect,
+)
 from .transcript import compile_transcript_edit, keeps_for
 from .transitions import list_transitions, validate_transition
 
@@ -107,17 +135,29 @@ __all__ = [
     # timeline model
     "Clip", "Effect", "Track", "Timeline", "Transition",
     "canonical_effect",
+    # rational time (Wave 1.2a) + keyframes (1.2c)
+    "FrameGrid", "frame_grid", "quantize_seconds", "sum_frame_durations",
+    "Keyframe", "KeyframeTrack", "KEYFRAMABLE_PARAMS",
+    "keyframable_params",
+    # multi-track model (Wave 1.2b)
+    "OverlayTrack",
+    # render host seam (Wave 1.2d)
+    "HostCapabilities", "RenderHost", "LocalHost", "probe_host",
     # effects / transitions
     "EFFECTS", "list_effects", "list_transitions", "validate_transition",
     # text
     "TextLayer", "words_to_ass", "layer_to_ass", "estimate_word_timings",
     "build_captions", "burn_text_layers",
+    # caption timing provenance (§2.4)
+    "Transcriber", "STTTranscriber", "captions_from_audio",
+    "captions_sidecar", "karaoke_layer",
     # audio
     "AudioLayer", "AudioMix", "mix_layers", "normalize_loudness",
     "make_music_bed",
     # render
     "WIDTH", "HEIGHT", "apply_effect", "assemble_segments",
     "plan_from_cut_points", "render_timeline", "render_vertical",
+    "render_document",
     # spec
     "EditSpec", "render", "render_report",
     # transcript → spec compiler (the one transcript-edit path)

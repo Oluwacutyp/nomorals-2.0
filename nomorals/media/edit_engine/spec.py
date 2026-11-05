@@ -14,6 +14,7 @@ from typing import Any
 
 from ...media_edit.videos import MediaEditError
 from .audio import AudioLayer, AudioMix
+from .keyframes import KeyframeTrack
 from .render import (
     HEIGHT,
     WIDTH,
@@ -22,7 +23,14 @@ from .render import (
     render_timeline,
 )
 from .text import TextLayer
-from .timeline import Clip, Effect, Timeline, Track, Transition
+from .timeline import (
+    Clip,
+    Effect,
+    OverlayTrack,
+    Timeline,
+    Track,
+    Transition,
+)
 
 
 def _scene_to_clip(scene: Any) -> Clip:
@@ -108,6 +116,10 @@ class EditSpec:
     profile: str | None
     out: str | None
     keep_clip_audio: bool
+    #: Wave 1.2b: picture tracks composited over the base track.
+    overlays: list[OverlayTrack]
+    #: Wave 1.2c: keyframe tracks consumed by the render.
+    keyframes: list[KeyframeTrack]
 
     def __init__(self, *args: Any, clips: Any = (),
                  cut_points: list[float] | None = None,
@@ -123,6 +135,8 @@ class EditSpec:
                  profile: str | None = None,
                  out: str | None = None,
                  keep_clip_audio: bool = False,
+                 overlays: Any = None,
+                 keyframes: Any = None,
                  # tolerated aliases:
                  beats: list[float] | None = None,
                  scenes: Any = None,
@@ -149,6 +163,14 @@ class EditSpec:
         self.transition = transition
         self.text_layers = _coerce_text_layers(text_layers)
         self.audio = _coerce_audio_mix(audio)
+        self.overlays = [
+            o if isinstance(o, OverlayTrack)
+            else OverlayTrack.from_dict(dict(o))
+            for o in (overlays or [])]
+        self.keyframes = [
+            k if isinstance(k, KeyframeTrack)
+            else KeyframeTrack.from_dict(dict(k))
+            for k in (keyframes or [])]
         self.fps = int(fps)
         self.width = int(width)
         self.height = int(height)
@@ -165,7 +187,7 @@ class EditSpec:
         transition = ([_tr(t) for t in self.transition]
                       if isinstance(self.transition, (list, tuple))
                       else _tr(self.transition))
-        return {
+        data = {
             "clips": [c.to_dict() for c in self.clips],
             "cut_points": list(self.cut_points) if self.cut_points else None,
             "segments": ([[ci, d] for ci, d in self.segments]
@@ -178,6 +200,14 @@ class EditSpec:
             "profile": self.profile, "out": self.out,
             "keep_clip_audio": self.keep_clip_audio,
         }
+        # Wave 1.2 fields serialise only when non-empty: a legacy
+        # spec's dict (and therefore its render-cache identity in
+        # pure_render) stays byte-identical.
+        if self.overlays:
+            data["overlays"] = [o.to_dict() for o in self.overlays]
+        if self.keyframes:
+            data["keyframes"] = [k.to_dict() for k in self.keyframes]
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EditSpec":
@@ -199,6 +229,10 @@ class EditSpec:
             crf=data.get("crf"), preset=data.get("preset"),
             profile=data.get("profile"), out=data.get("out"),
             keep_clip_audio=bool(data.get("keep_clip_audio", False)),
+            overlays=[OverlayTrack.from_dict(o)
+                      for o in data.get("overlays", [])],
+            keyframes=[KeyframeTrack.from_dict(k)
+                       for k in data.get("keyframes", [])],
         )
 
     def to_timeline(self) -> Timeline:
@@ -207,7 +241,8 @@ class EditSpec:
             video=Track(kind="video", clips=list(self.clips)),
             width=self.width, height=self.height, fps=self.fps,
             seed=self.seed, text_layers=list(self.text_layers),
-            audio_mix=self.audio)
+            audio_mix=self.audio,
+            overlays=list(self.overlays), keyframes=list(self.keyframes))
 
 
 def render(spec: EditSpec, *,

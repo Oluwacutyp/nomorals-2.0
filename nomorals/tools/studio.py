@@ -258,8 +258,12 @@ def register(registry: Any) -> None:
                 return {"ok": False,
                         "reason": f"bad key {k!r}; use 'time:value'"}
         return {"ok": True, "track": track.to_dict(),
+                "timeline_keyframes": [track.to_dict()],
                 "sample_filter": track_to_filter(track, f"eq=brightness={{v}}"),
-                "note": "use sample_filter as a template; {v} is the value"}
+                "note": "timeline_keyframes rides a Timeline/Document "
+                        "into render_timeline/render_document, which "
+                        "apply the track in the render; sample_filter "
+                        "stays as a template ({v} is the value)"}
 
     @registry.register(
         "studio_fade",
@@ -274,7 +278,11 @@ def register(registry: Any) -> None:
         from ..media.edit_engine.keyframes import fade_in, fade_out
         track = fade_in(clip_id, duration) if direction == "in" \
             else fade_out(clip_id, start, duration)
-        return {"ok": True, "track": track.to_dict()}
+        return {"ok": True, "track": track.to_dict(),
+                "timeline_keyframes": [track.to_dict()],
+                "note": "timeline_keyframes rides a Timeline/Document "
+                        "into the renderer, which applies the fade "
+                        "as alpha over black in the assembly"}
 
     @registry.register(
         "studio_zoom_ramp",
@@ -287,7 +295,12 @@ def register(registry: Any) -> None:
         """Zoom ramp keyframe builder."""
         from ..media.edit_engine.keyframes import zoom_ramp
         track = zoom_ramp(clip_id, start, end, z0=z0, z1=z1)
-        return {"ok": True, "track": track.to_dict()}
+        return {"ok": True, "track": track.to_dict(),
+                "timeline_keyframes": [track.to_dict()],
+                "note": "timeline_keyframes rides a Timeline/Document "
+                        "into the renderer, which applies the ramp "
+                        "as a per-frame zoom expression in the "
+                        "assembly"}
 
     # ── timeline ────────────────────────────────────────────────
 

@@ -2227,11 +2227,87 @@ class EditStudio:
     def _render_video(self, *, out_dir: Any = None, suffix: str = "studio",
                       wait: bool = False,
                       timeout: float = 600.0) -> dict[str, Any]:
+        """Render the session through the canonical Document (Wave 1.2).
+
+        The renderer convergence: the session's Document — the same
+        object :attr:`document` exposes — is composited by
+        ``edit_engine.render.render_document`` (multi-track +
+        keyframes in the engine), replacing the compile-via-
+        media_edit detour. The export preset becomes Document output
+        hints (dimensions/fps/crf), never edit identity.
+
+        One preset has no engine rung: ``gif-preview`` (.gif is not
+        an engine output) — it keeps the legacy compile path, and
+        its result says so in ``renderer``.
+        """
         from .videos import ffmpeg_path
         from .jobs import get_manager
         import tempfile
         ffmpeg_path()  # fail fast with the clear hint
         parts = self._collect_video_ops()
+        preset_name = parts["export"]
+        if preset_name == "gif-preview":
+            result = self._render_video_legacy(
+                parts, out_dir=out_dir, suffix=suffix, wait=wait,
+                timeout=timeout)
+            result["renderer"] = (
+                "media_edit.compile_video (legacy — gif-preview has "
+                "no engine rung)")
+            return result
+
+        from ..media.edit_engine.document import Document
+        from ..media.edit_engine.render import render_document
+
+        preset = EXPORT_PRESETS[preset_name]
+        doc = Document.from_dict(self.document.to_dict())
+        if preset.get("width"):
+            doc.output["width"] = int(preset["width"])
+        if preset.get("height"):
+            doc.output["height"] = int(preset["height"])
+        if preset.get("fps"):
+            doc.output["fps"] = int(preset["fps"])
+        if preset.get("crf"):
+            doc.output["crf"] = int(preset["crf"])
+        doc.output["preset"] = preset_name
+        first = Path(parts["segments"][0]["path"])
+        if not preset.get("width"):
+            # "source" preset: the frame follows the first segment.
+            from .videos import video_probe
+            info = video_probe(first)
+            if info.get("width"):
+                doc.output["width"] = int(info["width"])
+            if info.get("height"):
+                doc.output["height"] = int(info["height"])
+        target = Path(out_dir) if out_dir else first.parent / "edited"
+        out = _unique_output(first, target, suffix, ".mp4")
+        work = Path(tempfile.mkdtemp(prefix="studio-doc-"))
+
+        def _run(progress_cb: Any) -> dict[str, Any]:
+            try:
+                return render_document(doc, out=out, workdir=work,
+                                       progress_cb=progress_cb)
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+
+        label = f"studio:{self.name} ({len(self.ops)} ops)"
+        if wait:
+            mgr = get_manager()
+            jid = mgr.submit("video", label, _run,
+                             input_ref=str(first))
+            return mgr.wait(jid, timeout=timeout)
+        mgr = get_manager()
+        jid = mgr.submit("video", label, _run, input_ref=str(first))
+        return {"job_id": jid, "status": "queued", "label": label,
+                "poll": "media_job_status",
+                "renderer": "edit_engine.render.render_document"}
+
+    def _render_video_legacy(self, parts: dict[str, Any], *,
+                             out_dir: Any = None, suffix: str = "studio",
+                             wait: bool = False,
+                             timeout: float = 600.0) -> dict[str, Any]:
+        """The pre-convergence compile path (gif-preview's rung)."""
+        from .jobs import get_manager
+        import tempfile
         work = Path(tempfile.mkdtemp(prefix="studio-"))
         compiled = compile_video(
             parts["segments"], transitions=parts["transitions"],

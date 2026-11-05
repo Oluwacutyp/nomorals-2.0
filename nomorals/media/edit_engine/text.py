@@ -75,6 +75,11 @@ class TextLayer:
     y: int | None = None
     style: str = "karaoke"
     margin_v: int = 120
+    #: where the word timings came from: "measured" (a transcriber
+    #: produced them), "estimated" (even-spacing approximation), or
+    #: "" for authored/static layers. Honesty metadata (§2.4): an
+    #: estimate never masquerades as a measurement downstream.
+    timing_source: str = ""
 
     def __post_init__(self) -> None:
         if not self.text and not self.words:
@@ -96,13 +101,16 @@ class TextLayer:
         return _POSITIONS.get(self.position, 2)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"text": self.text, "words": self.words,
-                "start": self.start, "end": self.end, "font": self.font,
-                "size": self.size, "color": self.color,
-                "stroke": self.stroke, "stroke_color": self.stroke_color,
-                "box": self.box, "box_color": self.box_color,
-                "position": self.position, "x": self.x, "y": self.y,
-                "style": self.style, "margin_v": self.margin_v}
+        out = {"text": self.text, "words": self.words,
+               "start": self.start, "end": self.end, "font": self.font,
+               "size": self.size, "color": self.color,
+               "stroke": self.stroke, "stroke_color": self.stroke_color,
+               "box": self.box, "box_color": self.box_color,
+               "position": self.position, "x": self.x, "y": self.y,
+               "style": self.style, "margin_v": self.margin_v}
+        if self.timing_source:
+            out["timing_source"] = self.timing_source
+        return out
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | str) -> "TextLayer":
@@ -111,7 +119,7 @@ class TextLayer:
         return cls(**{k: data[k] for k in (
             "text", "words", "start", "end", "font", "size", "color",
             "stroke", "stroke_color", "box", "box_color", "position",
-            "x", "y", "style", "margin_v") if k in data})
+            "x", "y", "style", "margin_v", "timing_source") if k in data})
 
 
 def as_words(words: list[Any]) -> list[_captions.Word]:
@@ -216,6 +224,181 @@ def estimate_word_timings(text: str, *, start: float = 0.0,
                                     text=tok))
         t += per
     return words
+
+
+# ---------------------------------------------------------------------------
+# caption timing provenance (§2.4) — measured vs estimated, never blurred
+# ---------------------------------------------------------------------------
+
+from typing import Protocol, runtime_checkable
+
+from ...core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
+
+@runtime_checkable
+class Transcriber(Protocol):
+    """Anything that can produce word timings for a media file.
+
+    Returns word dicts ``{"start", "end", "text"}``; a dict may also
+    carry ``"speaker"`` when the backend diarizes. An empty list
+    means "no timings" — the caller falls back honestly.
+    """
+
+    def transcribe_words(self, path: str) -> list[dict[str, Any]]:
+        ...
+
+
+class STTTranscriber:
+    """Measured word timings from Devon's speech-to-text ladder.
+
+    Rung 1: :class:`nomorals.voice.stt.UniversalSTT` with
+    ``word_timestamps=True`` (segment speaker labels carried onto
+    the words when the backend provides them). Rung 2: the caption
+    engine's own faster-whisper path
+    (:func:`media_edit.captions.transcribe_words`). Both rungs are
+    real transcription; if neither yields words the result is an
+    empty list and the caller labels its fallback *estimated* —
+    this class never fabricates timings.
+    """
+
+    def __init__(self, stt: Any = None, *, language: str = "en") -> None:
+        self._stt = stt
+        self.language = language
+
+    def transcribe_words(self, path: str) -> list[dict[str, Any]]:
+        words: list[dict[str, Any]] = []
+        try:
+            stt = self._stt
+            if stt is None:
+                from ...voice.stt import UniversalSTT
+                stt = UniversalSTT()
+            res = stt.transcribe(str(path), language=self.language,
+                                 word_timestamps=True)
+            for seg in (res.get("segments") or []):
+                seg_speaker = seg.get("speaker")
+                for w in seg.get("words") or []:
+                    text = str(w.get("word") or w.get("text")
+                               or "").strip()
+                    if not text:
+                        continue
+                    d: dict[str, Any] = {
+                        "start": float(w["start"]),
+                        "end": float(w["end"]), "text": text}
+                    speaker = w.get("speaker", seg_speaker)
+                    if speaker:
+                        d["speaker"] = str(speaker)
+                    words.append(d)
+        except Exception as exc:  # ladder rung unavailable — try next
+            _log.warning("STT ladder rung failed for %s: %s", path, exc)
+        if words:
+            return words
+        try:
+            ws = _captions.transcribe_words(path, language=self.language)
+            return [w.to_dict() for w in ws]
+        except Exception as exc:
+            _log.warning("caption-engine transcription failed for %s: "
+                         "%s", path, exc)
+            return []
+
+
+def captions_from_audio(path: str | Path, *,
+                        text: str | None = None,
+                        transcriber: Transcriber | None = None,
+                        wpm: float = 150.0,
+                        language: str = "en") -> dict[str, Any]:
+    """Word timings for a media file, with the source labelled.
+
+    Measured when a transcriber yields words (the default is
+    :class:`STTTranscriber`); otherwise, when ``text`` is known, an
+    even-spacing estimate — returned with ``timing_source``
+    ``"estimated"``, never dressed up as a measurement. Neither
+    available → :class:`MediaEditError`.
+
+    Returns ``{"words", "timing_source", "speakers",
+    "transcriber"}``. Speaker labels survive in the word dicts and
+    the ``speakers`` list (the ASS caption Words drop them at
+    coercion — the transcript data keeps them).
+    """
+    tr: Transcriber = transcriber if transcriber is not None \
+        else STTTranscriber(language=language)
+    words: list[dict[str, Any]] = []
+    try:
+        words = list(tr.transcribe_words(str(path)) or [])
+    except Exception as exc:
+        _log.warning("transcriber %s failed for %s: %s",
+                     type(tr).__name__, path, exc)
+        words = []
+    norm: list[dict[str, Any]] = []
+    for w in words:
+        text_v = str(w.get("text") or w.get("word") or "").strip()
+        if not text_v:
+            continue
+        d = {"start": float(w["start"]), "end": float(w["end"]),
+             "text": text_v}
+        if w.get("speaker"):
+            d["speaker"] = str(w["speaker"])
+        norm.append(d)
+    if norm:
+        return {"words": norm, "timing_source": "measured",
+                "speakers": sorted({w["speaker"] for w in norm
+                                    if "speaker" in w}),
+                "transcriber": type(tr).__name__}
+    if text:
+        est = estimate_word_timings(text, wpm=wpm)
+        return {"words": [w.to_dict() for w in est],
+                "timing_source": "estimated", "speakers": [],
+                "transcriber": None}
+    raise MediaEditError(
+        "no measured word timings and no text to estimate from — "
+        "captions need one or the other")
+
+
+def karaoke_layer(words: list[dict[str, Any]], *,
+                  timing_source: str = "measured",
+                  style: str = "karaoke",
+                  **layer_kwargs: Any) -> TextLayer:
+    """A karaoke :class:`TextLayer` from timed words (§2.4).
+
+    The layer's span is the words' span; ``timing_source`` is
+    carried onto the layer so every downstream surface (render
+    rungs included) can state whether the highlighting follows a
+    measurement or an estimate. Speaker keys are stripped — the
+    caption Word model has no speaker field.
+    """
+    ws = [{"start": float(w["start"]), "end": float(w["end"]),
+           "text": str(w.get("text") or w.get("word") or "")}
+          for w in words]
+    ws = [w for w in ws if w["text"]]
+    if not ws:
+        raise MediaEditError("no timed words — nothing to karaoke")
+    return TextLayer(words=ws, start=ws[0]["start"], end=ws[-1]["end"],
+                     style=style, timing_source=timing_source,
+                     **layer_kwargs)
+
+
+def captions_sidecar(path: str | Path, out_path: str | Path, *,
+                     text: str | None = None,
+                     transcriber: Transcriber | None = None,
+                     wpm: float = 150.0,
+                     language: str = "en") -> dict[str, Any]:
+    """§2.4's consumption point: timed words → an SRT sidecar.
+
+    Runs :func:`captions_from_audio` (measured when a transcriber
+    yields words, estimated-and-labelled otherwise) and writes the
+    words through :func:`build_captions`. The result carries the
+    timing source through, so the sidecar's provenance is stated
+    wherever the render reports it.
+    """
+    got = captions_from_audio(path, text=text, transcriber=transcriber,
+                              wpm=wpm, language=language)
+    phrases = [(w["text"], w["start"], w["end"]) for w in got["words"]]
+    srt = build_captions(phrases, out_path)
+    return {"output": srt, "words": len(phrases),
+            "timing_source": got["timing_source"],
+            "speakers": got["speakers"],
+            "transcriber": got["transcriber"]}
 
 
 def build_captions(phrases: list[tuple[str, float, float]],

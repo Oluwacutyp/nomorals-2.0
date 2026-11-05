@@ -264,16 +264,39 @@ class Document:
         return total
 
     # -- specialisations (views, not separate engines) -----------------
+    def picture_tracks(self) -> list[DocTrack]:
+        """Picture tracks in render order: video tracks, then image.
+
+        The first is the base track; the rest composite over it.
+        (Pre-1.2 the renderer saw only the first of these — V5's
+        stored-but-not-composited gap. Render order keeps the legacy
+        precedence — video before image — so existing documents base
+        on the same track they always did.)
+        """
+        return (self.tracks_of("video") + self.tracks_of("image"))
+
     def to_edit_spec(self) -> EditSpec:
-        """Document → :class:`EditSpec` for the video renderer."""
-        video = self.track("video")
-        clips = list(video.clips) if video else []
-        image = self.track("image")
-        if not clips and image is not None:
-            clips = list(image.clips)
+        """Document → :class:`EditSpec` for the video renderer.
+
+        Faithful since Wave 1.2: the base track becomes ``clips``,
+        every further picture track becomes an overlay (blend /
+        opacity / muted carried), and the document's keyframe tracks
+        ride along — nothing the document holds is dropped on the
+        way to the renderer.
+        """
+        from .timeline import OverlayTrack
+        picture = self.picture_tracks()
+        clips = list(picture[0].clips) if picture else []
+        overlays = [
+            OverlayTrack(kind=t.kind, clips=list(t.clips),
+                         blend=t.blend, opacity=t.opacity,
+                         muted=t.muted, label=t.label)
+            for t in picture[1:]]
         return EditSpec(
             clips=clips, text_layers=list(self.text_layers),
             audio=self.audio_mix,
+            overlays=overlays,
+            keyframes=[dict(k) for k in self.keyframes],
             fps=int(self.output.get("fps", 30)),
             width=int(self.output.get("width", 1080)),
             height=int(self.output.get("height", 1920)),
@@ -283,9 +306,15 @@ class Document:
 
     @classmethod
     def from_edit_spec(cls, spec: EditSpec, **kw: Any) -> "Document":
-        doc = cls(tracks=[DocTrack(kind="video", clips=list(spec.clips))],
+        tracks = [DocTrack(kind="video", clips=list(spec.clips))]
+        for o in spec.overlays:
+            tracks.append(DocTrack(
+                kind=o.kind, clips=list(o.clips), label=o.label,
+                muted=o.muted, blend=o.blend, opacity=o.opacity))
+        doc = cls(tracks=tracks,
                   text_layers=list(spec.text_layers),
                   audio_mix=spec.audio,
+                  keyframes=[k.to_dict() for k in spec.keyframes],
                   output={"width": spec.width, "height": spec.height,
                           "fps": spec.fps, "profile": spec.profile or
                           "workstation", "preset": spec.preset,

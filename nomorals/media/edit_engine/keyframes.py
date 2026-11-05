@@ -170,6 +170,136 @@ def track_to_filter(track: KeyframeTrack, filter_template: str) -> str:
     return filter_template.replace("{v}", _ffmpeg_expr(track))
 
 
+def ffmpeg_expr(track: KeyframeTrack) -> str:
+    """The track's ffmpeg expression (public name for the builder)."""
+    return _ffmpeg_expr(track)
+
+
+# ── Wave 1.2c: the renderer's keyframe wire ────────────────────────
+# KeyframeTrack declarations live in effects.KEYFRAMABLE_PARAMS (each
+# effect states which params are keyframable — the property-path
+# idea). Three application families:
+#
+# * ``expression`` — zoom-family tracks become ONE ffmpeg filter via
+#   :func:`track_to_filter` with :data:`ZOOM_TEMPLATE` (scale with
+#   eval=frame is a proven per-frame expression in this engine —
+#   the punch_zoom/ken_burns builders use the same primitive);
+# * ``opacity`` — alpha curves are applied by the renderer's
+#   finishing pass, discretized into constant-alpha windows (the
+#   _chain_rgb_animated doctrine: this ffmpeg rejects per-frame
+#   expressions in several filters, so curves are sampled);
+# * ``position`` — overlay placement: the composite's overlay()
+#   call takes the track's expression for x/y directly.
+
+#: scale-eval template for zoom-family tracks; ``{v}`` is the zoom
+#: factor expression, ``{w}``/``{h}`` the canvas. The static
+#: punch_zoom builder converges on the same shape with a linear {v}.
+ZOOM_TEMPLATE = (
+    "scale=eval=frame:w='iw*({v})':h='ih*({v})':flags=bilinear,"
+    "crop={w}:{h}:x='(iw-ow)/2':y='(ih-oh)/2',setsar=1"
+)
+
+_EXPRESSION_FAMILY = {("zoom", "z"), ("ken_burns", "zoom"),
+                      ("punch_zoom", "zmax")}
+
+
+def classify_track(track: KeyframeTrack) -> str:
+    """Which application family a track belongs to.
+
+    Raises ValueError when (effect, param) is not declared keyframable
+    in :data:`effects.KEYFRAMABLE_PARAMS` — an undeclared animation
+    target is a build error, never a silent no-op at render time.
+    """
+    from .effects import KEYFRAMABLE_PARAMS
+    allowed = KEYFRAMABLE_PARAMS.get(track.effect)
+    if allowed is None or track.param not in allowed:
+        declared = ", ".join(
+            f"{e}.{p}" for e, ps in sorted(KEYFRAMABLE_PARAMS.items())
+            for p in ps)
+        raise ValueError(
+            f"keyframe target {track.effect}.{track.param} is not "
+            f"keyframable; declared: {declared}")
+    if (track.effect, track.param) in _EXPRESSION_FAMILY:
+        return "expression"
+    if track.effect == "opacity":
+        return "opacity"
+    return "position"
+
+
+def keyframe_filter(track: KeyframeTrack, *, width: int,
+                    height: int) -> str:
+    """The ffmpeg filter for an expression-family track on a canvas.
+
+    This is the renderer's half of the two-paths-one-result contract:
+    it is exactly ``track_to_filter(track, ZOOM_TEMPLATE)`` with the
+    canvas substituted — a caller applying the same track standalone
+    through :func:`track_to_filter` gets the identical filter.
+    """
+    if classify_track(track) != "expression":
+        raise ValueError(
+            f"keyframe_filter only serves expression-family tracks, "
+            f"got {track.effect}.{track.param}")
+    return track_to_filter(
+        track, ZOOM_TEMPLATE.format(v="{v}", w=width, h=height))
+
+
+def shifted(track: KeyframeTrack, offset: float,
+            duration: float) -> KeyframeTrack:
+    """The track re-based to a play window [offset, offset+duration].
+
+    Segment chains see segment-local time (trim + setpts restarts the
+    clock), so a track bound to a clip that plays in several segments
+    is re-based per segment: keys inside the window shift by
+    ``-offset``; the curve's value at the window edges becomes
+    synthetic boundary keys (sampled, so the visible curve is the
+    same curve, windowed). A window covering the whole track returns
+    an equal track.
+    """
+    if duration <= 0:
+        raise ValueError("shift window duration must be > 0")
+    end = offset + duration
+    keys: list[Keyframe] = [Keyframe(0.0, track.sample(offset),
+                                     track.keys[0].easing
+                                     if track.keys else "smooth")]
+    for k in track.keys:
+        if offset < k.time < end:
+            keys.append(Keyframe(k.time - offset, k.value, k.easing))
+    keys.append(Keyframe(float(duration), track.sample(end), "smooth"))
+    # collapse duplicates at the same instant (window edges on keys)
+    out: list[Keyframe] = []
+    for k in keys:
+        if out and abs(k.time - out[-1].time) < 1e-9:
+            out[-1] = k
+        else:
+            out.append(k)
+    return KeyframeTrack(clip_id=track.clip_id, effect=track.effect,
+                         param=track.param, keys=out)
+
+
+def discretize(track: KeyframeTrack, *, step_s: float = 0.125,
+               max_steps: int = 64) -> list[tuple[float, float, float]]:
+    """Sample a curve into constant (start, end, value) windows.
+
+    For filters without per-frame expression support (the opacity
+    pass): each window takes the curve's value at its midpoint, the
+    same sampling doctrine as render.py's animated rgb_split.
+    """
+    if not track.keys:
+        raise ValueError("track has no keyframes")
+    start = track.keys[0].time
+    end = track.keys[-1].time
+    if end <= start:
+        return [(start, end, track.keys[0].value)]
+    steps = max(1, min(max_steps, int((end - start) / step_s) or 1))
+    span = (end - start) / steps
+    out: list[tuple[float, float, float]] = []
+    for i in range(steps):
+        a = start + span * i
+        b = start + span * (i + 1)
+        out.append((a, b, track.sample((a + b) / 2.0)))
+    return out
+
+
 # ── convenience builders ───────────────────────────────────────────
 
 def fade_in(track_id: str, duration: float = 1.0) -> KeyframeTrack:

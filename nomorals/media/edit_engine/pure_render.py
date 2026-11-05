@@ -34,6 +34,7 @@ import json
 import os
 import shutil
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -203,7 +204,11 @@ def render_pure(sources: Any, spec: EditSpec | dict[str, Any],
     ``renderer`` (default: :func:`edit_engine.spec.render`) renders
     into a temp file that is atomically moved into the cache, plus a
     ``<key>.json`` manifest recording the triple that produced it.
-    Returns ``{"output", "cache_key", "cached", "manifest"}``.
+    Returns ``{"output", "cache_key", "cached", "manifest"}`` plus
+    the 1.1b(b) honesty fields: on a miss, ``worked_out`` records
+    when and by which renderer the file was computed and
+    ``followed`` is null; on a hit, ``followed`` reads the stored
+    manifest's worked_out back and ``worked_out`` is null.
     """
     if isinstance(sources, (str, os.PathLike, dict)):
         sources = [sources]
@@ -213,11 +218,28 @@ def render_pure(sources: Any, spec: EditSpec | dict[str, Any],
     out_path, manifest_path = _cache_paths(cache_dir, key)
     if out_path.exists() and manifest_path.exists():
         manifest = json.loads(manifest_path.read_text("utf-8"))
+        # 1.1b(b) honesty, hit side: report what this hit *followed*
+        # — the stored manifest's worked_out record. A manifest from
+        # before the honesty fields existed says so instead of
+        # inventing a provenance.
+        stored_worked = manifest.get("worked_out") or {}
+        followed = {
+            "cache_key": key,
+            "worked_out_at": stored_worked.get("at"),
+            "renderer": stored_worked.get("renderer")
+            or "unknown (pre-honesty manifest)",
+        }
         return {"output": str(out_path), "cache_key": key,
-                "cached": True, "manifest": manifest}
+                "cached": True, "manifest": manifest,
+                "worked_out": None, "followed": followed}
     if renderer is None:
         from .spec import render as _render_spec  # lazy: avoid a cycle
         renderer = _render_spec
+        renderer_name = "edit_engine.spec.render"
+    else:
+        renderer_name = (
+            f"{getattr(renderer, '__module__', '?')}."
+            f"{getattr(renderer, '__qualname__', type(renderer).__name__)}")
     tmp = Path(tempfile.mkdtemp(prefix="pure-render-"))
     try:
         tmp_out = tmp / "render.mp4"
@@ -229,12 +251,19 @@ def render_pure(sources: Any, spec: EditSpec | dict[str, Any],
         shutil.move(str(produced_path), str(out_path))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    # 1.1b(b) honesty, miss side: the manifest records that this
+    # render was actually worked out, when, and by which renderer;
+    # `followed` is null — nothing was followed, it was computed.
+    worked_out = {"at": datetime.now(timezone.utc).isoformat(),
+                  "renderer": renderer_name, "via": "render_pure"}
     manifest = {"cache_key": key,
                 "sources": [source_fingerprint(s) for s in sources],
-                "spec": packed, "pack": _canonical(pack or {})}
+                "spec": packed, "pack": _canonical(pack or {}),
+                "worked_out": worked_out, "followed": None}
     manifest_path.write_text(json.dumps(manifest, indent=2), "utf-8")
     return {"output": str(out_path), "cache_key": key,
-            "cached": False, "manifest": manifest}
+            "cached": False, "manifest": manifest,
+            "worked_out": worked_out, "followed": None}
 
 
 def render_proxy_then_full(sources: Any, spec: EditSpec | dict[str, Any],
