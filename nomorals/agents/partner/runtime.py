@@ -45,6 +45,7 @@ from .runtime_intel import RuntimeIntelMixin
 from .runtime_search import RuntimeSearchMixin
 from .runtime_wisdom import RuntimeWisdomMixin
 from .runtime_reach import RuntimeReachMixin
+from .runtime_anime import RuntimeAnimeMixin
 from .failures import failure_count, recent_failures, record_failure
 from .reply_guard import guard_reply_parts, scrub_narration
 from .brain_gate import BrainGate, is_personal_platform
@@ -241,6 +242,7 @@ class PartnerRuntime(
     RuntimeSearchMixin,
     RuntimeWisdomMixin,
     RuntimeReachMixin,
+    RuntimeAnimeMixin,
 ):
     """Runs the partner across all configured platforms, at the same time."""
 
@@ -5493,6 +5495,19 @@ class PartnerRuntime(
                                            chat_key=chat_key)
         if kind == "play":
             return self._control_play(command.tail or arg, chat_key=chat_key)
+        if kind in {"anime", "manga", "anichar", "charpic", "staff",
+                    "studio", "episodes", "animechars", "trailer",
+                    "streaming", "animereview", "genres", "genre",
+                    "topanime", "topmanga", "popular", "trending",
+                    "airing", "upcoming", "season", "topchars",
+                    "anischedule", "nextep", "recommend", "randomanime",
+                    "randommanga", "randomchar", "animequote", "favorite",
+                    "whatanime", "waifu", "neko", "kitsune", "husbando"}:
+            # The anime organ (wave B): lookup/schedules/pictures/
+            # favorites, one mixin entry for the whole family.
+            return self._control_anime(
+                kind, command.tail or arg, chat_key=chat_key,
+                message=message)
         if kind == "download":
             return self._control_download(command.tail or arg, chat_key=chat_key)
         if kind in {"tiktok", "ttdl"}:
