@@ -1,0 +1,187 @@
+{
+ "construction": {
+  "fluent": "whole script in one synthesis; reference transcript known, per-word reference timings do not exist \u2014 timing recorded not_scored, WER scored",
+  "gap_s": 0.45,
+  "lead_s": 0.3,
+  "word_by_word": "each token synthesized alone and concatenated with fixed silence gaps; reference word timings computed from the sample counts of the clips actually concatenated \u2014 exact by construction"
+ },
+ "fixtures": [
+  {
+   "construction": "word_by_word",
+   "floors": {
+    "mae_end_s": 0.4,
+    "mae_start_s": 0.45,
+    "wer": 0.15
+   },
+   "measured": {
+    "exact_pairs": 9,
+    "hyp_words": 9,
+    "mae_end_s": 0.2009,
+    "mae_start_s": 0.3055,
+    "ref_words": 9,
+    "timed_pairs": 9,
+    "timing": "scored",
+    "transcriber": "STTTranscriber",
+    "tts_backend": "piper",
+    "wer": 0.0
+   },
+   "name": "fox_pangram",
+   "notes": "The classic pangram; short function words (the, over) are the timing stress \u2014 easy for a transcriber to merge or drop. All 9 words exact; the start MAE (~0.31 s) is the systematic DTW onset lag this corpus exists to record, not noise.",
+   "status": "measured",
+   "text": "the quick brown fox jumps over the lazy dog"
+  },
+  {
+   "construction": "word_by_word",
+   "floors": {
+    "mae_end_s": 0.4,
+    "mae_start_s": 0.45,
+    "wer": 0.45
+   },
+   "measured": {
+    "exact_pairs": 6,
+    "hyp_words": 9,
+    "mae_end_s": 0.1261,
+    "mae_start_s": 0.2807,
+    "ref_words": 9,
+    "timed_pairs": 9,
+    "timing": "scored",
+    "transcriber": "STTTranscriber",
+    "tts_backend": "piper",
+    "wer": 0.3333
+   },
+   "name": "market_morning",
+   "notes": "Sibilant-heavy opening \u2014 a real WER trap, and it springs: tiny.en heard 'Chi, cells, fresh, bread, bed, the, market, every morning' (she\u2192Chi, sells\u2192cells, at\u2192bed; 3 substitutions of 9). The floor sits one further error above the measured value; a bigger STT model should beat this number, never hide it.",
+   "status": "measured",
+   "text": "she sells fresh bread at the market every morning"
+  },
+  {
+   "construction": "word_by_word",
+   "floors": {
+    "mae_end_s": 0.4,
+    "mae_start_s": 0.45,
+    "wer": 0.15
+   },
+   "measured": {
+    "exact_pairs": 8,
+    "hyp_words": 8,
+    "mae_end_s": 0.1612,
+    "mae_start_s": 0.306,
+    "ref_words": 8,
+    "timed_pairs": 8,
+    "timing": "scored",
+    "transcriber": "STTTranscriber",
+    "tts_backend": "piper",
+    "wer": 0.0
+   },
+   "name": "small_tools",
+   "notes": "Plain declarative sentence, mid-length words. Perfect transcript; start MAE again ~0.31 s (the same systematic onset lag as fox_pangram).",
+   "status": "measured",
+   "text": "we build small tools that solve real problems"
+  },
+  {
+   "construction": "word_by_word",
+   "floors": {
+    "mae_end_s": 0.4,
+    "mae_start_s": 0.45,
+    "wer": 0.15
+   },
+   "measured": {
+    "exact_pairs": 10,
+    "hyp_words": 10,
+    "mae_end_s": 0.1742,
+    "mae_start_s": 0.2685,
+    "ref_words": 10,
+    "timed_pairs": 10,
+    "timing": "scored",
+    "transcriber": "STTTranscriber",
+    "tts_backend": "piper",
+    "wer": 0.0
+   },
+   "name": "tin_roof",
+   "notes": "Two 'the'-class function words plus a hard/rain consonant cluster. All 10 words exact.",
+   "status": "measured",
+   "text": "the rain fell hard on the tin roof last night"
+  },
+  {
+   "construction": "word_by_word",
+   "floors": {
+    "mae_end_s": 0.4,
+    "mae_start_s": 0.45,
+    "wer": 0.15
+   },
+   "measured": {
+    "exact_pairs": 9,
+    "hyp_words": 9,
+    "mae_end_s": 0.2438,
+    "mae_start_s": 0.2687,
+    "ref_words": 9,
+    "timed_pairs": 9,
+    "timing": "scored",
+    "transcriber": "STTTranscriber",
+    "tts_backend": "piper",
+    "wer": 0.0
+   },
+   "name": "water_plants",
+   "notes": "Polite-imperative phrasing; 'please' and 'before' are the words small models most often soften \u2014 tiny.en held both here.",
+   "status": "measured",
+   "text": "please remember to water the plants before you leave"
+  },
+  {
+   "construction": "fluent",
+   "floors": {
+    "wer": 0.15
+   },
+   "measured": {
+    "hyp_words": 10,
+    "ref_words": 10,
+    "timing": "not_scored",
+    "timing_note": "fluent construction: reference transcript known, per-word reference timings do not exist",
+    "transcriber": "STTTranscriber",
+    "tts_backend": "piper",
+    "wer": 0.0
+   },
+   "name": "fluent_caption_timing",
+   "notes": "Fluent synthesis: WER scored, per-word timing not scored (no fluent reference timings exist \u2014 no TTS rung on the measuring machine aligns fluent speech; piper's alignment fields come back unpopulated for the standard voice).",
+   "status": "measured",
+   "text": "caption timing matters because viewers read along with the speaker"
+  },
+  {
+   "construction": "fluent",
+   "floors": {
+    "wer": 0.15
+   },
+   "measured": {
+    "hyp_words": 11,
+    "ref_words": 11,
+    "timing": "not_scored",
+    "timing_note": "fluent construction: reference transcript known, per-word reference timings do not exist",
+    "transcriber": "STTTranscriber",
+    "tts_backend": "piper",
+    "wer": 0.0
+   },
+   "name": "fluent_good_edit",
+   "notes": "Fluent synthesis: WER scored, per-word timing not scored (same named gap as fluent_caption_timing).",
+   "status": "measured",
+   "text": "a good edit keeps the words and the pictures in step"
+  }
+ ],
+ "floor_rule": "WER floors sit one extra word error above the measured value on the shortest fixture (0.15 over a measured 0.0; 0.45 over market_morning's measured 0.3333). MAE floors sit ~1.5x the worst measured value (start 0.306 -> 0.45; end 0.2438 -> 0.40): the start-MAE cluster (~0.27-0.31 s on every word_by_word fixture) is a systematic onset lag of the measured STT rung on isolated words, so the floor guards regression of the rung, not the lag's existence. A machine whose STT rung is a larger whisper model should measure strictly better; floors are regression lines, not targets.",
+ "generator": "nomorals.media.edit_engine.caption_corpus",
+ "history": [
+  {
+   "date": "2026-11-05",
+   "note": "Corpus first runs caught a live defect in the TTS rung it measures through: PiperBackend.synthesize's fallback drove the pre-1.3 piper API (synthesize_stream_raw, then an unconfigured wave writer) \u2014 on current piper-tts every piper synthesis died with wave.Error '# channels not specified'. Fixed in tts.py: the current AudioChunk API is driven first, legacy APIs remain as fallbacks."
+  },
+  {
+   "date": "2026-11-05",
+   "note": "The corpus's second run (warm segment cache) caught a worse one: tts._to_int16 treated the SegmentCache's stdlib array('h') int16 samples as float amplitudes, clipping every nonzero sample to +/-32767 \u2014 every cache-hit speak() wrote a square wave (the run scored WER 2.0 against it). Fixed with dtype-aware scaling in _to_int16; post-fix runs are score-identical warm or cold. Note the disk cache entries themselves were always clean PCM (SegmentCache.put writes raw samples); only the write-out path was corrupt."
+  },
+  {
+   "date": "2026-11-05",
+   "note": "Piper alignment probe, recorded so nobody re-claims it from the API surface alone: piper-tts 1.3's synthesize/synthesize_wav accept include_alignments=True, but with the standard en_US-lessac-medium voice the chunks' phoneme_alignments and phoneme_id_samples come back unpopulated (None / empty list) \u2014 PiperBackend.synthesize_aligned therefore yields no words on that voice and speak_aligned reports the alignment unavailable. The mechanism is implemented and fake-pinned; a voice that populates the fields will flow measured timings through it unchanged."
+  }
+ ],
+ "kind": "caption_corpus",
+ "measured_env": "Python 3.12.3; TTS rung: piper via UniversalTTS (piper-tts 1.3.x, voice en_US-lessac-medium 22050 Hz, PIPER_VOICE-pinned); STT rung: STTTranscriber -> UniversalSTT -> faster-whisper 1.2.1, model tiny.en (FASTER_WHISPER_MODEL), CPU int8, word_timestamps on. Scratch venv pins: PyAV 12.3.0 (faster-whisper 1.2.1's decode_audio passes metadata_errors=, a kwarg PyAV removed in later versions \u2014 an unpinned av breaks the rung, recorded here so the next measurer does not rediscover it). Floors sit above the measured values by the floor_rule margin; a rung falling under its floor is a regression, not weather.",
+ "version": 1
+}

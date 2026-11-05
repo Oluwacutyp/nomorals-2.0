@@ -975,20 +975,21 @@ class KokoroBackend:
     supports_cloning = False
     supports_streaming = False  # whole-utterance only
     sample_rate = 24000
+    #: the pipeline's results carry per-token timestamps — the one
+    #: rung whose synthesis side can time its own words (§1.4).
+    word_alignment = "token_timestamps"
 
     def __init__(self) -> None:
         from kokoro import KPipeline
 
         self.pipeline = KPipeline(lang_code="a")
 
-    def synthesize(self, text: str, voice: Optional[VoiceProfile],
-                   *, instruct: str = "") -> Any:
-        voice_id = (voice.preset_id if voice and voice.preset_id
-                    else "af_heart")
-        generator = self.pipeline(text, voice=voice_id)
-        chunks = [audio for _idx, _len, audio in generator]
-        if not chunks:
-            raise ValueError("kokoro produced no audio")
+    def _voice_id(self, voice: Optional[VoiceProfile]) -> str:
+        return (voice.preset_id if voice and voice.preset_id
+                else "af_heart")
+
+    @staticmethod
+    def _join(chunks: list) -> Any:
         try:
             import numpy as np
 
@@ -1000,6 +1001,50 @@ class KokoroBackend:
                 flat.extend(chunk.tolist() if hasattr(chunk, "tolist")
                             else list(chunk))
             return flat
+
+    def synthesize(self, text: str, voice: Optional[VoiceProfile],
+                   *, instruct: str = "") -> Any:
+        generator = self.pipeline(text, voice=self._voice_id(voice))
+        chunks = [audio for _idx, _len, audio in generator]
+        if not chunks:
+            raise ValueError("kokoro produced no audio")
+        return self._join(chunks)
+
+    def synthesize_aligned(self, text: str,
+                           voice: Optional[VoiceProfile],
+                           *, instruct: str = "") -> tuple[Any, list]:
+        """Synthesize + the pipeline's own per-token timestamps.
+
+        Returns ``(audio, words)`` with words in the caption
+        shape ``{"text", "start", "end"}`` (seconds). The tokens
+        are read off each pipeline result; a kokoro build that
+        exposes no token timestamps yields ``words == []`` and
+        the caller (UniversalTTS.speak_aligned) reports the
+        alignment unavailable — the timestamps are never
+        reconstructed from the audio after the fact.
+        """
+        chunks: list = []
+        words: list[dict[str, Any]] = []
+        offset = 0.0
+        for result in self.pipeline(text, voice=self._voice_id(voice)):
+            audio = getattr(result, "audio", None)
+            if audio is None:
+                audio = result[2]
+            chunks.append(audio)
+            for tok in getattr(result, "tokens", None) or []:
+                start = getattr(tok, "start_ts", None)
+                end = getattr(tok, "end_ts", None)
+                tok_text = str(getattr(tok, "text", "") or "").strip()
+                if start is None or end is None or not tok_text:
+                    continue
+                words.append({
+                    "text": tok_text,
+                    "start": round(offset + float(start), 4),
+                    "end": round(offset + float(end), 4)})
+            offset += len(audio) / float(self.sample_rate)
+        if not chunks:
+            raise ValueError("kokoro produced no audio")
+        return self._join(chunks), words
 
 
 class CosyVoiceBackend:
@@ -1586,25 +1631,127 @@ class PiperBackend:
             "'python -m piper.download_voices en_US-lessac-medium' "
             "and set PIPER_VOICE or PIPER_VOICES_DIR")
 
+    #: piper's synthesis can carry phoneme alignments
+    #: (``include_alignments=True``) — where a voice/build
+    #: populates them they time the words exactly (§1.4); the
+    #: standard voices populate none, and synthesize_aligned
+    #: then returns no words rather than reconstructed ones.
+    word_alignment = "phoneme_alignments"
+
+    def _chunks(self, pv: Any, text: str, *,
+                include_alignments: bool = False) -> list | None:
+        """AudioChunks from the current piper-tts API, or None.
+
+        piper-tts ≥1.3 (piper1-gpl) replaced the old
+        ``synthesize_stream_raw`` / caller-configured-wav API
+        with ``synthesize()`` yielding AudioChunks; the old
+        calls raise or produce empty files there, so they are
+        only ever fallbacks for a legacy install.
+        """
+        synth = getattr(pv, "synthesize", None)
+        if synth is None:
+            return None
+        try:
+            chunks = list(synth(text, include_alignments=
+                                include_alignments))
+        except TypeError:
+            chunks = list(synth(text))
+        if chunks and hasattr(chunks[0], "audio_int16_bytes"):
+            return chunks
+        return None
+
     def synthesize(self, text: str, voice: Optional[VoiceProfile],
                    *, instruct: str = "") -> Any:
         pv = self._resolve(voice)
-        # preferred: raw int16 PCM chunks, no temp files
-        try:
+        chunks = self._chunks(pv, text)
+        if chunks is not None:
+            raw = b"".join(c.audio_int16_bytes for c in chunks)
+            rate = getattr(chunks[0], "sample_rate", 0)
+            if rate:
+                self.sample_rate = int(rate)
+        elif hasattr(pv, "synthesize_stream_raw"):
+            # legacy piper-tts: raw int16 PCM chunks, no temp files
             raw = b"".join(pv.synthesize_stream_raw(text))
-        except AttributeError:
+        elif hasattr(pv, "synthesize_wav"):
             import io
 
             buf = io.BytesIO()
             with wave.open(buf, "wb") as wav_file:
-                pv.synthesize(text, wav_file)
+                pv.synthesize_wav(text, wav_file)
             buf.seek(0)
             with wave.open(buf, "rb") as wav_file:
                 raw = wav_file.readframes(wav_file.getnframes())
+        else:
+            raise RuntimeError(
+                "piper voice object exposes no synthesis API this "
+                "backend can drive (looked for synthesize / "
+                "synthesize_stream_raw / synthesize_wav)")
         if not raw:
             raise ValueError("piper produced no audio")
         vals = struct.unpack("<%dh" % (len(raw) // 2), raw)
         return [v / 32768.0 for v in vals]
+
+    def synthesize_aligned(self, text: str,
+                           voice: Optional[VoiceProfile],
+                           *, instruct: str = "") -> tuple[Any, list]:
+        """Synthesize + word timings grouped from phoneme alignments.
+
+        Returns ``(audio, words)``. Two population routes, both
+        read off the synthesis itself: per-phoneme timestamp
+        entries on the chunks, or per-phoneme sample counts
+        (cumulative counts ÷ sample rate). Phonemes are grouped
+        into words on the phonemizer's own ``" "`` boundaries.
+        A voice/build that populates neither yields ``words ==
+        []`` — UniversalTTS.speak_aligned reports the alignment
+        unavailable; timings are never reconstructed.
+        """
+        pv = self._resolve(voice)
+        chunks = self._chunks(pv, text, include_alignments=True)
+        if chunks is None:
+            return self.synthesize(text, voice, instruct=instruct), []
+        raw = b"".join(c.audio_int16_bytes for c in chunks)
+        if not raw:
+            raise ValueError("piper produced no audio")
+        vals = struct.unpack("<%dh" % (len(raw) // 2), raw)
+        audio: Any = [v / 32768.0 for v in vals]
+        # phoneme sequence (with " " word boundaries), flattened
+        # across the voice's per-sentence phonemization
+        try:
+            phonemes = [p for sentence in pv.phonemize(text)
+                        for p in sentence]
+        except Exception:
+            return audio, []
+        # per-phoneme (start, end) spans across all chunks; any
+        # chunk that populates neither route voids the whole
+        # alignment (a partial timing track is worse than none)
+        spans: list[tuple[float, float]] = []
+        offset = 0.0
+        for chunk in chunks:
+            rate = float(getattr(chunk, "sample_rate", 0)
+                         or self.sample_rate)
+            got = _piper_chunk_spans(chunk, offset, rate)
+            if got is None:
+                return audio, []
+            spans.extend(got)
+            offset += len(chunk.audio_int16_array) / rate
+        if len(spans) != len(phonemes):
+            return audio, []
+        words: list[dict[str, Any]] = []
+        tokens = text.split()
+        groups: list[list[int]] = [[]]
+        for i, ph in enumerate(phonemes):
+            if ph == " ":
+                groups.append([])
+            else:
+                groups[-1].append(i)
+        groups = [g for g in groups if g]
+        if len(groups) != len(tokens):
+            return audio, []
+        for tok, group in zip(tokens, groups):
+            words.append({"text": tok,
+                          "start": round(spans[group[0]][0], 4),
+                          "end": round(spans[group[-1]][1], 4)})
+        return audio, words
 
 
 class F5TTSBackend:
@@ -2464,14 +2611,92 @@ _BACKEND_SPECS = {"bark": "bark", "xtts": "TTS", "kokoro": "kokoro",
 # ----------------------------------------------------
 
 
+def _piper_chunk_spans(chunk: Any, offset: float,
+                       rate: float) -> list[tuple[float, float]] | None:
+    """One piper AudioChunk → per-phoneme (start, end) spans.
+
+    Two population routes: explicit per-phoneme timestamp
+    entries, or per-phoneme sample counts (cumulative ÷ rate).
+    ``None`` when the chunk populates neither — the caller voids
+    the alignment rather than guessing the missing spans.
+    """
+    entries = getattr(chunk, "phoneme_alignments", None)
+    if entries:
+        spans: list[tuple[float, float]] = []
+        for e in entries:
+            start = next((getattr(e, k) for k in
+                          ("start_time", "start_seconds", "start")
+                          if isinstance(getattr(e, k, None),
+                                        (int, float))), None)
+            end = next((getattr(e, k) for k in
+                        ("end_time", "end_seconds", "end")
+                        if isinstance(getattr(e, k, None),
+                                      (int, float))), None)
+            if start is None or end is None:
+                return None
+            spans.append((offset + float(start), offset + float(end)))
+        return spans
+    counts = getattr(chunk, "phoneme_id_samples", None)
+    if counts:
+        spans = []
+        cursor = offset
+        for n in counts:
+            step = float(n) / rate
+            spans.append((cursor, cursor + step))
+            cursor += step
+        return spans
+    return None
+
+
+def _checked_alignment_words(words: Any) -> list[dict[str, Any]] | None:
+    """Validate synthesis-side word timings before anyone trusts them.
+
+    A backend claiming alignment must produce a non-empty list of
+    ``{"text", "start", "end"}`` dicts with numeric, positive-length,
+    non-decreasing spans. Anything else returns ``None`` and the
+    caller reports the alignment unavailable — malformed timings
+    are never passed downstream dressed as a measurement (§1.4).
+    """
+    if not isinstance(words, (list, tuple)) or not words:
+        return None
+    out: list[dict[str, Any]] = []
+    prev_start = 0.0
+    for w in words:
+        if not isinstance(w, dict):
+            return None
+        text = str(w.get("text") or w.get("word") or "").strip()
+        try:
+            start = float(w["start"])
+            end = float(w["end"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not text or end <= start or start < prev_start - 1e-9:
+            return None
+        prev_start = start
+        out.append({"text": text, "start": round(start, 4),
+                    "end": round(end, 4)})
+    return out
+
+
 def _to_int16(samples: Any, sample_rate: int) -> bytes:
     """Normalize samples (float list or numpy array, range ~[-1, 1]) to
-    16-bit little-endian PCM bytes."""
+    16-bit little-endian PCM bytes.
+
+    Integer-typed sample containers (a numpy int array, a stdlib
+    ``array('h')`` — the SegmentCache's shape) are already PCM:
+    they scale by 1/32768 like the numpy int branch. Treating
+    their values as float amplitudes clips every nonzero sample
+    to ±32767 — a square wave — which is what cache-hit speak()
+    calls used to write.
+    """
     has_astype = hasattr(samples, "astype")
     if has_astype:
         arr = samples.astype("float64") if samples.dtype.kind == "f" \
             else (samples / 32768.0).astype("float64")
         clipped = [max(-1.0, min(1.0, float(v))) for v in arr.tolist()]
+    elif getattr(samples, "typecode", "f") not in ("f", "d"):
+        # stdlib array of ints (array('h') from the segment cache)
+        clipped = [max(-1.0, min(1.0, v / 32768.0)) for v in samples]
     else:
         clipped = [max(-1.0, min(1.0, float(v))) for v in samples]
     return b"".join(struct.pack("<h", int(v * 32767)) for v in clipped)
@@ -2857,6 +3082,12 @@ class UniversalTTS:
             "native_opts": list(getattr(
                 _BACKENDS.get(name), "_supports_opts", ()))
             if name in _BACKENDS else [],
+            #: synthesis-side word timing (§1.4): "token_timestamps"
+            #: when the backend's own synthesis exposes per-word
+            #: times, else "none" — comparable data, not prose.
+            "word_alignment": str(getattr(
+                _BACKENDS.get(name), "word_alignment", "none"))
+            if name in _BACKENDS else "none",
         }
 
     def list_backend_info(self) -> list[dict[str, Any]]:
@@ -3100,6 +3331,115 @@ class UniversalTTS:
             "native_opts": sorted(synth_opts),
             "speed_dsp": abs(residual_speed - 1.0) > 0.02,
         }
+
+    def speak_aligned(self, tagged_text: str,
+                      voice_name: Optional[str] = None,
+                      out_path: str = "", mood: str = "",
+                      mood_level: int = 5,
+                      audience: str | None = None, *,
+                      speed: float = 1.0,
+                      language: str = "") -> dict:
+        """Synthesize + synthesis-side word timings (§1.4 TTS feed).
+
+        Like :meth:`speak`, but the result also carries the words
+        the synthesis itself timed::
+
+            {**speak-result, "words": [{"text", "start", "end"}],
+             "timing_source": "measured" | "unavailable",
+             "alignment": "token_timestamps" | "none",
+             "alignment_reason": str  # only when unavailable}
+
+        "measured" means the backend's own synthesis produced the
+        timestamps (today: kokoro's per-token times). A backend
+        that cannot align *says so* — its name and the missing
+        rung are in ``alignment_reason`` and ``words`` is empty;
+        callers fall back to estimation and label it estimated
+        themselves. Estimated timings are never manufactured here.
+
+        The aligned path is deliberately the plain render: no
+        segment cache and no emotion-DSP shaping (rate-shifting
+        post-processing would make synthesis-side timestamps
+        describe audio other than the file written). Two shapes
+        therefore report unavailable while still speaking via
+        :meth:`speak`: ``speed != 1.0`` (the DSP stretch re-times
+        the audio after synthesis) and pause tags (spliced silence
+        the backend never timed).
+        """
+        unavailable: str | None = None
+        if abs(speed - 1.0) > 0.02:
+            unavailable = ("speed adjustment re-times the audio "
+                           "after synthesis; synthesis-side timings "
+                           "would not describe the written file")
+        aud = audience or self.audience
+        text = mood_to_tagged_text(tagged_text, mood, mood_level) \
+            if mood else tagged_text
+        voice = self._resolve_voice(voice_name, aud)
+        backend = self._load_backend(audience=aud)
+        segments = self.tag_processor.parse(text)
+        final_text, instruct, pause_points = \
+            self._render_for_backend(backend, segments)
+        if pause_points and unavailable is None:
+            unavailable = ("pause tags splice silence at points "
+                           "the backend never timed; aligned "
+                           "synthesis covers untagged speech")
+        alignment = str(getattr(backend, "word_alignment", "none"))
+        aligned_fn = getattr(backend, "synthesize_aligned", None)
+        if unavailable is None and (alignment == "none"
+                                    or aligned_fn is None):
+            unavailable = (f"backend {backend.name!r} exposes no "
+                           "synthesis-side word alignment "
+                           "(word_alignment='none')")
+        if unavailable is not None:
+            res = self.speak(tagged_text, voice_name,
+                             out_path=out_path, mood=mood,
+                             mood_level=mood_level, audience=audience,
+                             speed=speed, language=language)
+            return {**res, "words": [], "timing_source": "unavailable",
+                    "alignment": "none",
+                    "alignment_reason": unavailable}
+        synth_opts, _residual = self._split_synth_opts(
+            backend, speed=1.0, language=language)
+        audio, words = aligned_fn(final_text, voice,
+                                  instruct=instruct, **synth_opts)
+        sample_rate = getattr(backend, "sample_rate",
+                              self.default_sample_rate)
+        words = _checked_alignment_words(words)
+        if words is None:
+            return self._aligned_unusable(
+                tagged_text, voice_name, out_path, mood, mood_level,
+                audience, speed, language, backend)
+        path = out_path or os.path.join(
+            self.voices.storage_dir, "..",
+            f"tts-{int(__import__('time').time() * 1000)}.wav")
+        os.makedirs(os.path.dirname(os.path.abspath(path)),
+                    exist_ok=True)
+        written = write_wav(path, audio, sample_rate)
+        return {"path": path, "bytes": written,
+                "sample_rate": sample_rate, "backend": backend.name,
+                "segments": len(segments),
+                "words": words, "timing_source": "measured",
+                "alignment": alignment}
+
+    def _aligned_unusable(self, tagged_text: str,
+                          voice_name: Optional[str], out_path: str,
+                          mood: str, mood_level: int,
+                          audience: str | None, speed: float,
+                          language: str, backend: Any) -> dict:
+        """A backend claimed alignment but produced unusable times.
+
+        Speak normally and report the claim's failure — never pass
+        malformed timings downstream dressed as a measurement.
+        """
+        res = self.speak(tagged_text, voice_name, out_path=out_path,
+                         mood=mood, mood_level=mood_level,
+                         audience=audience, speed=speed,
+                         language=language)
+        return {**res, "words": [], "timing_source": "unavailable",
+                "alignment": "none",
+                "alignment_reason":
+                    f"backend {backend.name!r} declared "
+                    f"word_alignment={getattr(backend, 'word_alignment', 'none')!r} "
+                    "but produced no usable word timestamps"}
 
     def _sentence_stream(self, backend: Any, text: str,
                          voice: Optional[VoiceProfile],

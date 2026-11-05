@@ -10,7 +10,9 @@ Content kwargs for :func:`build_spec`:
   ({image, duration, effect, zoom_direction})
 * ``beats`` — explicit cut grid; ``beat_audio`` — detect from this file
 * ``voiceover`` / ``music`` — audio paths
-* ``captions`` — text, word list, TextLayer, or list thereof
+* ``captions`` — text, word list, TextLayer, or list thereof; a
+  ``captions_from_audio`` result dict also rides in whole, its
+  §2.4 timing-source label intact on the layer
 * ``transition`` — boundary style (default ``"cut"``)
 * ``seed``, ``width``, ``height``, ``fps``, ``out``, ``keep_clip_audio``,
   ``crf``, ``preset``, ``profile``
@@ -93,11 +95,36 @@ def beat_sync_words(words: list[Any], beats: list[float] | None, *,
     return out
 
 
+def words_timing_source(words: Any) -> str:
+    """The §2.4 timing-source label a word list carries, if uniform.
+
+    Per-word stamps (a ``timing_source`` key on dict words, the
+    attribute on word objects) win; a list whose words agree on one
+    source reports it, a mixed or unlabelled list reports "" — the
+    label is never averaged into a claim the words don't support.
+    """
+    srcs: set[str] = set()
+    for w in words or []:
+        if isinstance(w, dict):
+            s = str(w.get("timing_source") or "")
+        else:
+            s = str(getattr(w, "timing_source", "") or "")
+        if s:
+            srcs.add(s)
+    return srcs.pop() if len(srcs) == 1 else ""
+
+
 def words_to_beat_ass(words: list[Any], beats: list[float] | None = None, *,
                       style: str = "karaoke",
                       width: int = 1080, height: int = 1920,
                       sync: bool = True) -> str:
-    """Word timings → word-highlight .ass, beat-grid or voiceover timed."""
+    """Word timings → word-highlight .ass, beat-grid or voiceover timed.
+
+    Beat-snapping is a style transform of the timings, not a new
+    measurement: the words' §2.4 ``timing_source`` label stays with
+    them at the layer/result level (see :func:`burn_beat_captions`
+    and :func:`_captions_to_layers`).
+    """
     ws = as_words(words)
     if sync and beats:
         ws = beat_sync_words(ws, beats)
@@ -120,6 +147,7 @@ def burn_beat_captions(video: str | Path,
     p = Path(video)
     if not p.exists():
         raise MediaEditError(f"no such video: {video}")
+    source = words_timing_source(words)
     ws = as_words(words)
     if not ws:
         raise MediaEditError("no words — nothing to caption")
@@ -133,6 +161,9 @@ def burn_beat_captions(video: str | Path,
     run["words"] = len(ws)
     run["style"] = style
     run["synced_to_beats"] = bool(sync and beats)
+    #: §2.4 provenance, in the render layer's own convention: the
+    #: words' source label, or "authored" when they carry none.
+    run["timing_source"] = source or "authored"
     return run
 
 
@@ -164,7 +195,15 @@ def _apply_effect_cycle(clips: list[Clip],
 def _captions_to_layers(captions: Any, beats: list[float] | None, *,
                         style: str, sync: str, wpm: float,
                         width: int, height: int) -> list[TextLayer]:
-    """captions (text | words | TextLayer | list) → TextLayers."""
+    """captions (text | words | TextLayer | list) → TextLayers.
+
+    The layer carries the §2.4 ``timing_source`` of its words:
+    plain text is timed by estimation and labelled ``estimated``
+    (never left to read as authored in the render rung notes);
+    a :func:`captions_from_audio` result dict keeps its blanket
+    label (``measured`` when a transcriber timed it); a word list
+    keeps its uniform per-word stamp when it has one.
+    """
     if captions is None:
         return []
     if isinstance(captions, TextLayer):
@@ -172,6 +211,12 @@ def _captions_to_layers(captions: Any, beats: list[float] | None, *,
     if isinstance(captions, (list, tuple)) and captions and all(
             isinstance(c, TextLayer) for c in captions):
         return list(captions)
+    # a §2.4 captions_from_audio result rides in whole: its words
+    # plus the label the transcription path put on them
+    blanket = ""
+    if isinstance(captions, dict) and "words" in captions:
+        blanket = str(captions.get("timing_source") or "")
+        captions = list(captions["words"])
     # word-list or plain text → one karaoke layer
     if isinstance(captions, str):
         if not captions.strip():
@@ -179,9 +224,11 @@ def _captions_to_layers(captions: Any, beats: list[float] | None, *,
         from ...edit_engine.text import estimate_word_timings
         words = estimate_word_timings(captions, wpm=wpm)
         estimated = True
+        source = "estimated"
     else:
         words = as_words(list(captions))
         estimated = False
+        source = blanket or words_timing_source(captions)
     snap = (sync == "beats" or (sync == "auto" and estimated and beats))
     if sync not in ("auto", "beats", "voiceover"):
         raise MediaEditError(
@@ -190,7 +237,7 @@ def _captions_to_layers(captions: Any, beats: list[float] | None, *,
         words = beat_sync_words(words, beats)
     return [TextLayer(words=[{"start": w.start, "end": w.end, "text": w.text}
                              for w in words],
-                      style=style)]
+                      style=style, timing_source=source)]
 
 
 def _audio_to_mix(voiceover: Any, music: Any, *,
