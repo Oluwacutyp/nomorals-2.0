@@ -13,13 +13,17 @@
    re-grades), and a mid-animation frame measures between its
    endpoints in the expected direction, against values predicted
    by the canonical CDL math.
-3. **Regional velocity_ramp** — stays refused, and the refusal is
-   now *proven*, not asserted: the velocity rung rewrites the
-   stream timeline (measured duration change), so after any ramp
-   the effected branch's frame at an output instant carries a
-   different source instant than the base it would composite over
-   (measured) — the mask composite pairs frames on one shared
-   timeline, and no rung resamples a retimed branch back onto it.
+3. **Regional velocity_ramp** — the refusal was *proven* first
+   (the velocity rung rewrites the stream timeline, measured, so
+   a retimed branch can never pair with the shared-timeline mask
+   composite), then the missing rung was built: the region
+   time-remap resampler (`_chain_velocity_resampled`) stamps
+   every source frame with the output instant that shows it, so
+   the composite framesync resamples the retimed branch back
+   onto the base timeline — the region follows the ramp integral
+   inside the window, absorbs the offset by hold (fast) or cut
+   (slow) at the window edge, and is back on the base clock
+   after it. The landing is measured below, not asserted.
 """
 from __future__ import annotations
 
@@ -370,7 +374,8 @@ class TestMaskTrackingRender:
 
 
 # ---------------------------------------------------------------------------
-# regional velocity_ramp — the refusal, proven
+# regional velocity_ramp — why the rung had to exist (the proof),
+# then the resampler landing, measured
 # ---------------------------------------------------------------------------
 
 def _banded_video(workdir: Path) -> str:
@@ -418,14 +423,220 @@ class TestRegionalVelocityBlocker:
         assert base[2] > 150 and base[0] < 90          # blue
         assert branch[0] > 150 and branch[2] < 90      # yellow
 
-    def test_masked_velocity_still_refuses_by_name(self, workdir):
+    def test_masked_velocity_bad_speed_refuses_by_name(self, workdir):
+        # the resampler shares the structural chain's ramp math,
+        # refusals included: a non-positive speed is still named
         src = _banded_video(workdir)
         clip = Clip(path=src, id="v0", effects=(Effect(
             name="velocity_ramp",
-            params={"speed": 2.0, "mask": dict(PATCH_BOX)}),))
+            params={"speed": 0.0, "mask": dict(PATCH_BOX)}),))
         tl = Timeline(video=Track(kind="video", clips=[clip]),
                       width=W, height=H, fps=FPS)
         with pytest.raises(MediaEditError) as ei:
             render_timeline(tl, out=workdir / "no.mp4",
                             workdir=workdir / "wd")
-        assert "regional velocity ramp" in str(ei.value)
+        assert "speed must be > 0" in str(ei.value)
+
+
+# ---------------------------------------------------------------------------
+# regional velocity_ramp — the resampler, measured
+# ---------------------------------------------------------------------------
+
+#: ten 0.2 s bands (6 frames each — frame-aligned at 30 fps),
+#: far apart in RGB so a decoded frame classifies by nearest
+#: centroid even after two lossy encodes.
+BANDS10 = [(220, 30, 30), (30, 200, 30), (30, 30, 220),
+           (220, 200, 30), (220, 30, 220), (30, 220, 220),
+           (240, 240, 240), (240, 140, 30), (140, 30, 240),
+           (240, 140, 160)]
+LEFT_HALF_MASK = {"kind": "box", "box": [0, 0, W // 2, H],
+                  "feather": 0}
+IN_RECT = (40, 100, 120, 140)     # inside the mask (left half)
+OUT_RECT = (220, 100, 300, 140)   # outside it
+
+
+def _band_index(rgb) -> int:
+    return min(range(len(BANDS10)),
+               key=lambda i: sum((a - b) ** 2 for a, b in
+                                  zip(rgb, BANDS10[i], strict=True)))
+
+
+def _banded10_video(workdir: Path, name: str = "bands10.mp4",
+                    *, audio: bool = False) -> str:
+    """The 10-band clock: source time is readable from any frame.
+
+    With ``audio``, band k also carries a sine tone at
+    300 + 100k Hz, so the audio timeline is readable the same
+    way — the (d) oracle: picture retimes regionally, sound must
+    stay on the base clock.
+    """
+    from PIL import Image
+    seq = workdir / f"seq_{name}"
+    seq.mkdir()
+    for i in range(60):
+        img = Image.new("RGB", (W, H), BANDS10[min(i // 6, 9)])
+        img.save(str(seq / f"f{i:03d}.png"))
+    out = workdir / name
+    args = ["-framerate", "30", "-i", str(seq / "f%03d.png")]
+    if audio:
+        for k in range(10):
+            args += ["-f", "lavfi", "-i",
+                     f"sine=frequency={300 + 100 * k}"
+                     f":sample_rate=48000:duration=0.2"]
+        tones = "".join(f"[{k + 1}:a]" for k in range(10))
+        args += ["-filter_complex",
+                 f"{tones}concat=n=10:v=0:a=1[tones]",
+                 "-map", "0:v", "-map", "[tones]",
+                 "-c:a", "aac", "-shortest"]
+    args += ["-c:v", "libx264", "-crf", "6", "-pix_fmt", "yuv420p",
+             "-y", str(out)]
+    run_ffmpeg(args)
+    return str(out)
+
+
+def _frame_count(video: str) -> int:
+    import subprocess
+
+    from nomorals.media_edit.videos import ffprobe_path
+    out = subprocess.run(
+        [ffprobe_path(), "-v", "error", "-count_frames",
+         "-select_streams", "v:0", "-show_entries",
+         "stream=nb_read_frames", "-of", "csv=p=0", str(video)],
+        capture_output=True, text=True, check=True).stdout
+    return int(out.strip())
+
+
+def _bands_at(video: str, t: float, workdir: Path) -> tuple[int, int]:
+    img = _frame(video, t, workdir)
+    return (_band_index(_region(img, IN_RECT)),
+            _band_index(_region(img, OUT_RECT)))
+
+
+def _render_banded(workdir: Path, fx: Effect, *, audio=False,
+                   name="out.mp4", src_name="bands10.mp4"):
+    src = _banded10_video(workdir, src_name, audio=audio)
+    clip = Clip(path=src, id="v0", effects=(fx,))
+    tl = Timeline(video=Track(kind="video", clips=[clip]),
+                  width=W, height=H, fps=FPS)
+    out = workdir / name
+    res = render_timeline(tl, out=out, workdir=workdir / f"wd_{name}",
+                          keep_clip_audio=audio)
+    return src, str(out), res
+
+
+@NEEDS_FFMPEG
+class TestRegionalVelocityResampled:
+    def test_fast_ramp_follows_integral_holds_and_rejoins(
+            self, workdir):
+        fx = Effect(name="velocity_ramp",
+                    params={"speed": 2.0, "mask": dict(LEFT_HALF_MASK)},
+                    at=(0.6, 1.4))
+        src, out, res = _render_banded(workdir, fx)
+        entry = [e for e in res["effects_applied"]
+                 if e["effect"] == "velocity_ramp"][0]
+        assert entry["kind"] == "structural-resampled"
+        assert entry["mask"]["rung"] == "box+feather"
+        # (a) before the window, output frame k pairs region and
+        # base at the same source instant — both read band 1
+        assert _bands_at(out, 0.3, workdir) == (1, 1)
+        # (b) inside the window the region shows σ(t) = 0.6+2(t−0.6):
+        # at t=0.8, σ=1.0 → band 5, while the base reads band 4
+        assert _bands_at(out, 0.8, workdir) == (5, 4)
+        # the hold: σ reached 1.4 at t*=1.0; at t=1.1 the region
+        # still shows the window's last frame (band 6) while the
+        # base has only reached band 5
+        assert _bands_at(out, 1.1, workdir) == (6, 5)
+        # (a) after the window the region is back on the base
+        # clock — the desync the blocker proved (the structural
+        # branch reads source 2.1 here, i.e. past the last band)
+        # is gone: both read band 8
+        assert _bands_at(out, 1.7, workdir) == (8, 8)
+        # (c) the composite is exactly the base's length
+        assert _frame_count(out) == _frame_count(src) == 60
+        assert abs(float(video_probe(out)["duration"])
+                   - float(video_probe(src)["duration"])) < 0.001
+
+    def test_slow_ramp_cuts_and_rejoins(self, workdir):
+        fx = Effect(name="velocity_ramp",
+                    params={"speed": 0.5, "mask": dict(LEFT_HALF_MASK)},
+                    at=(0.0, 1.0))
+        _src, out, _res = _render_banded(workdir, fx,
+                                         name="slow.mp4")
+        # inside: σ(t) = 0.5t — at t=0.7 the region reads band 1
+        # (source 0.35) while the base reads band 3
+        assert _bands_at(out, 0.7, workdir) == (1, 3)
+        # late in the window: σ=0.475 → band 2, base band 4
+        assert _bands_at(out, 0.95, workdir) == (2, 4)
+        # after the edge the unplayed tail (source 0.5–1.0) is
+        # cut, inside the region only: both read band 6
+        assert _bands_at(out, 1.3, workdir) == (6, 6)
+        assert _frame_count(out) == 60
+
+    def test_multiple_ramps_each_rejoin(self, workdir):
+        fx = Effect(name="velocity_ramp",
+                    params={"ramps": [(0.3, 0.9, 2.0),
+                                      (1.2, 1.8, 0.5)],
+                            "mask": dict(LEFT_HALF_MASK)})
+        _src, out, _res = _render_banded(workdir, fx,
+                                         name="multi.mp4")
+        # fast window: σ(0.5) = 0.3+2·0.2 = 0.7 → band 3, base 2
+        assert _bands_at(out, 0.5, workdir) == (3, 2)
+        # its hold (t* = 0.6): at t=0.7 the region sits on the
+        # window's last frame (band 4), the base is at band 3
+        assert _bands_at(out, 0.7, workdir) == (4, 3)
+        # between windows both clocks agree again (band 5)
+        assert _bands_at(out, 1.0, workdir) == (5, 5)
+        # slow window: σ(1.4) = 1.2+0.5·0.2 = 1.3 → band 6, base 7
+        assert _bands_at(out, 1.4, workdir) == (6, 7)
+        # and after its cut, rejoined (band 9 both)
+        assert _bands_at(out, 1.9, workdir) == (9, 9)
+        assert _frame_count(out) == 60
+
+    def test_apply_effect_surface_records_the_rung(self, workdir):
+        src = _banded10_video(workdir)
+        out = workdir / "single.mp4"
+        res = apply_effect(src, "velocity_ramp", out=str(out),
+                           speed=2.0, at=(0.6, 1.4),
+                           mask=dict(LEFT_HALF_MASK))
+        entry = res["effects_applied"][0]
+        assert entry["kind"] == "structural-resampled"
+        assert _bands_at(str(out), 0.8, workdir) == (5, 4)
+        assert _bands_at(str(out), 1.7, workdir) == (8, 8)
+        assert _frame_count(str(out)) == 60
+
+    def test_identity_speed_masked_is_a_plain_region(self, workdir):
+        fx = Effect(name="velocity_ramp",
+                    params={"speed": 1.0, "mask": dict(LEFT_HALF_MASK)},
+                    at=(0.6, 1.4))
+        _src, out, _res = _render_banded(workdir, fx,
+                                         name="ident.mp4")
+        assert _bands_at(out, 0.8, workdir) == (4, 4)
+        assert _frame_count(out) == 60
+
+    def test_audio_stays_on_the_base_timeline(self, workdir):
+        # (d) the clip's sound is never routed through the video
+        # resampler: every 0.2 s band of the output audio carries
+        # the tone the BASE clock assigns to it — including the
+        # bands inside the ramp window, where the picture region
+        # is hearing source time σ(t) instead.
+        fx = Effect(name="velocity_ramp",
+                    params={"speed": 2.0, "mask": dict(LEFT_HALF_MASK)},
+                    at=(0.6, 1.4))
+        _src, out, _res = _render_banded(workdir, fx, audio=True,
+                                         name="av.mp4",
+                                         src_name="bands_av.mp4")
+        assert _bands_at(out, 0.8, workdir) == (5, 4)  # video retimed
+        wav = workdir / "out.wav"
+        run_ffmpeg(["-i", out, "-vn", "-ac", "1", "-ar", "48000",
+                    "-c:a", "pcm_s16le", "-y", str(wav)])
+        import wave
+        with wave.open(str(wav)) as w:
+            raw = np.frombuffer(w.readframes(w.getnframes()),
+                                dtype=np.int16).astype(np.float64)
+        assert len(raw) >= 2 * 48000 - 4800  # ~the full 2 s
+        for k in range(10):
+            seg = raw[int((0.2 * k + 0.05) * 48000):
+                      int((0.2 * k + 0.15) * 48000)]
+            spec = np.abs(np.fft.rfft(seg * np.hanning(len(seg))))
+            freq = float(np.argmax(spec)) * 48000 / len(seg)
+            assert abs(freq - (300 + 100 * k)) <= 30, (k, freq)

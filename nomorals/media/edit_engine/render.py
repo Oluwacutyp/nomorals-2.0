@@ -285,9 +285,10 @@ def _fx_record(fx: Effect, *, kind: str = "builder") -> dict[str, Any]:
     return rec
 
 
-def _chain_masked(parts: list[str], cur: str, filt: str,
-                  mask_label: str, tag: str) -> str:
-    """Apply ``filt`` to ``cur`` through a mask stream; return label.
+def _composite_masked(parts: list[str], base_label: str,
+                      effected_label: str, mask_label: str,
+                      tag: str) -> str:
+    """Composite an effected branch over the base through a mask.
 
     The effected branch takes (its own alpha × the mask) as its
     alpha and composites over the untouched base — the overlay
@@ -295,9 +296,12 @@ def _chain_masked(parts: list[str], cur: str, filt: str,
     maskedmerge: on this ffmpeg maskedmerge blends per-plane against
     the mask's constant chroma planes, washing the unmasked region
     with the effected stream (proven on fixtures, see PARITY.md).
+    Branch and base pair by timestamp (overlay framesync), so the
+    branch must live on the base's timeline — the contract the
+    regional velocity resampler is built to (:func:`_chain_masked`
+    gets it for free, both sides being splits of one stream).
     """
-    parts.append(f"[{cur}]split=2[{tag}mb][{tag}mf]")
-    parts.append(f"[{tag}mf]{filt},format=yuva420p[{tag}md]")
+    parts.append(f"[{effected_label}]format=yuva420p[{tag}md]")
     parts.append(f"[{tag}md]split=2[{tag}mc][{tag}mx]")
     parts.append(f"[{tag}mx]alphaextract[{tag}ea]")
     parts.append(f"[{tag}ea][{mask_label}]blend=all_mode=multiply"
@@ -305,8 +309,17 @@ def _chain_masked(parts: list[str], cur: str, filt: str,
     parts.append(f"[{tag}mc][{tag}am]alphamerge[{tag}ma]")
     # the composite lands exactly on the requested tag — the chain
     # contract every caller (plain, windowed, segment) relies on.
-    parts.append(f"[{tag}mb][{tag}ma]overlay=0:0[{tag}]")
+    parts.append(f"[{base_label}][{tag}ma]overlay=0:0[{tag}]")
     return tag
+
+
+def _chain_masked(parts: list[str], cur: str, filt: str,
+                  mask_label: str, tag: str) -> str:
+    """Apply ``filt`` to ``cur`` through a mask stream; return label."""
+    parts.append(f"[{cur}]split=2[{tag}mb][{tag}mf]")
+    parts.append(f"[{tag}mf]{filt}[{tag}me]")
+    return _composite_masked(parts, f"{tag}mb", f"{tag}me",
+                             mask_label, tag)
 
 
 def _chain_effect(parts: list[str], cur: str, fx: Effect,
@@ -327,10 +340,20 @@ def _chain_effect(parts: list[str], cur: str, fx: Effect,
     masked = bool(params.get("_mask_png"))
     if fx.name == "velocity_ramp":
         if masked:
-            raise MediaEditError(
-                "velocity_ramp is structural (it rewrites the chain "
-                "as trim/setpts pieces) — a regional velocity ramp "
-                "has no rung; mask a picture effect instead")
+            mask_label = (ctx.get("mask_labels") or {}).get(
+                params["_mask_png"])
+            if mask_label is None:
+                raise MediaEditError(
+                    f"effect {fx.name!r} carries a resolved mask but "
+                    f"no mask stream is registered in this render — "
+                    f"masks are resolved by the renderer before "
+                    f"chaining")
+            out = _chain_velocity_resampled(parts, cur, fx, ctx, tag,
+                                            mask_label)
+            if rec is not None:
+                rec.append(_fx_record(fx,
+                                      kind="structural-resampled"))
+            return out
         out = _chain_velocity(parts, cur, fx, ctx, tag)
         if rec is not None:
             rec.append(_fx_record(fx, kind="structural"))
@@ -470,10 +493,15 @@ def _velocity_pieces(dur: float,
     return pieces
 
 
-def _chain_velocity(parts: list[str], cur: str, fx: Effect,
-                    ctx: dict[str, Any], tag: str) -> str:
-    """velocity_ramp: piecewise setpts — the one structural effect."""
-    dur = ctx["duration"]
+def _velocity_ramps(fx: Effect,
+                    dur: float) -> list[tuple[float, float, float]]:
+    """The authored ramp set of a velocity_ramp effect.
+
+    ``ramps=`` wins; otherwise one window from the effect's
+    ``at`` (or the whole stream) at ``speed=``. The one parse,
+    shared by the structural chain and the regional resampler,
+    so the two can never disagree about what was authored.
+    """
     params = fx.params or {}
     if "ramps" in params:
         ramps = [(float(t0), float(t1), float(s))
@@ -484,6 +512,14 @@ def _chain_velocity(parts: list[str], cur: str, fx: Effect,
         ramps = [(float(at[0]), float(at[1]), speed)]
     if not ramps:
         raise MediaEditError("velocity_ramp needs speed= or ramps=")
+    return ramps
+
+
+def _chain_velocity(parts: list[str], cur: str, fx: Effect,
+                    ctx: dict[str, Any], tag: str) -> str:
+    """velocity_ramp: piecewise setpts — the one structural effect."""
+    dur = ctx["duration"]
+    ramps = _velocity_ramps(fx, dur)
     pieces = _velocity_pieces(dur, ramps)
     if len(pieces) == 1 and pieces[0][2] == 1.0:
         parts.append(f"[{cur}]null[{tag}]")
@@ -501,6 +537,66 @@ def _chain_velocity(parts: list[str], cur: str, fx: Effect,
         concat_in += f"[{tag}w{i}]"
     parts.append(f"{concat_in}concat=n={len(pieces)}:v=1:a=0[{tag}]")
     return tag
+
+
+def _chain_velocity_resampled(parts: list[str], cur: str, fx: Effect,
+                              ctx: dict[str, Any], tag: str,
+                              mask_label: str) -> str:
+    """Regional velocity_ramp — the region time-remap resampler.
+
+    The unmasked chain rewrites the stream's timeline (trim/setpts
+    pieces + concat), which a masked composite can never pair with:
+    it framesyncs branch and base on ONE timeline. The resampler
+    instead builds the branch ON the base timeline. Every surviving
+    source frame τ is stamped with the output instant that shows
+    it — τ itself outside ramp windows, ``x0 + (τ − x0)/s`` inside
+    a window [x0, x1) at speed s — and the composite's framesync
+    does the resampling: at output time t the region shows the
+    source frame whose stamp interval covers t, i.e. the source
+    time σ(t) = x0 + s·(t − x0) inside the window. The window is
+    half-open, exactly the structural chain's trim semantics, so
+    the frame at x1 is the first rejoined frame, never a window
+    frame. The two edge absorptions live inside the region only:
+
+    * s > 1 (the region races): σ reaches x1 at t* = x0 + (x1−x0)/s
+      and the window's last frame then HOLDS — it stays the active
+      branch frame until the identity-stamped frame at x1 takes
+      over at the window edge.
+    * s < 1 (the region lags): frames whose stamp would land at or
+      after x1 are the unplayed tail of the window's material;
+      ``select`` cuts them, and at x1 the region snaps back to the
+      base clock.
+
+    Outside the windows the branch is the untouched stream, the
+    composite's total duration is the base's, and no other stream
+    (audio included) is ever routed here. The semantics above are
+    the effect's contract, recorded in PARITY.md and measured in
+    tests/test_effects_remainders.py.
+    """
+    dur = ctx["duration"]
+    pieces = _velocity_pieces(dur, _velocity_ramps(fx, dur))
+    active = [(x0, x1, s) for x0, x1, s in pieces
+              if abs(s - 1.0) > 1e-9]
+    parts.append(f"[{cur}]split=2[{tag}mb][{tag}mf]")
+    if not active:
+        parts.append(f"[{tag}mf]null[{tag}me]")
+        return _composite_masked(parts, f"{tag}mb", f"{tag}me",
+                                 mask_label, tag)
+    stamp = "PTS*TB"
+    for x0, x1, s in reversed(active):
+        stamp = (f"if(gte(PTS*TB,{x0:.6f})*lt(PTS*TB,{x1:.6f}),"
+                 f"{x0:.6f}+(PTS*TB-{x0:.6f})/{s:.6f},{stamp})")
+    chain: list[str] = []
+    drops = [f"gte(t,{x0:.6f})*lt(t,{x1:.6f})"
+             f"*gte(t,{x0 + s * (x1 - x0):.6f})"
+             for x0, x1, s in active if s < 1.0]
+    if drops:
+        chain.append("select='not(" +
+                     "+".join(f"({d})" for d in drops) + ")'")
+    chain.append(f"setpts='({stamp})/TB'")
+    parts.append(f"[{tag}mf]{','.join(chain)}[{tag}me]")
+    return _composite_masked(parts, f"{tag}mb", f"{tag}me",
+                             mask_label, tag)
 
 
 def _atempo_chain(speed: float) -> str:

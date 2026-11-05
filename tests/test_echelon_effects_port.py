@@ -51,7 +51,11 @@ from nomorals.media.edit_engine.render import (
     render_document,
     render_timeline,
 )
-from nomorals.media_edit.videos import MediaEditError, run_ffmpeg
+from nomorals.media_edit.videos import (
+    MediaEditError,
+    run_ffmpeg,
+    video_probe,
+)
 
 from tests.edit_engine_golden import (
     color_source,
@@ -495,13 +499,32 @@ class TestRegionalEffects:
                             workdir=self._wd / "wd_x")
         assert "mask did not resolve" in str(ei.value)
 
-    def test_masked_velocity_ramp_refuses(self):
+    def test_masked_velocity_ramp_renders_resampled(self):
+        # the regional resampler rung (effects burn-down): a masked
+        # ramp no longer refuses — the branch is retimed back onto
+        # the base timeline, the render keeps the clip's duration,
+        # and the record names the rung that made it true. (This
+        # test replaces the Wave-5 refusal pin; the measured
+        # landing suite is tests/test_effects_remainders.py.)
+        vid = self._wd / "twotone.mp4"
+        run_ffmpeg(["-loop", "1", "-framerate", str(FPS), "-t", "1",
+                    "-i", self._src, "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p", str(vid)])
         fx = (Effect(name="velocity_ramp",
                      params={"speed": 2.0, "mask": LEFT_BOX_MASK}),)
-        with pytest.raises(MediaEditError) as ei:
-            render_document(self._doc(fx), out=self._wd / "v.mp4",
-                            workdir=self._wd / "wd_vr")
-        assert "structural" in str(ei.value)
+        doc = Document(
+            tracks=[DocTrack(kind="video", clips=[Clip(
+                path=str(vid), duration=1.0, effects=fx)])],
+            output={"width": W, "height": H, "fps": FPS,
+                    "profile": "pc"})
+        out = self._wd / "v.mp4"
+        res = render_document(doc, out=out, workdir=self._wd / "wd_vr")
+        entry = [e for e in res["effects_applied"]
+                 if e["effect"] == "velocity_ramp"][0]
+        assert entry["kind"] == "structural-resampled"
+        assert entry["mask"]["rung"] == "box+feather"
+        assert abs(float(video_probe(str(out))["duration"]) - 1.0) \
+            < 0.05
 
     def test_mask_survives_document_round_trip(self):
         doc = self._doc((Effect(name="blur", params={

@@ -474,9 +474,13 @@ EFFECT_PROPERTIES: dict[str, dict[str, ParamSpec]] = {
     "velocity_ramp": {
         "speed": ParamSpec(
             "number", 2.0, 0.0, 16.0,
-            doc="constant speed factor — structural: render.py "
-                "rewrites the chain (trim/setpts/concat), so there "
-                "is no value curve to bind; not keyframable"),
+            doc="constant speed factor — structural: unmasked, "
+                "render.py rewrites the chain (trim/setpts/concat); "
+                "masked (regional), render.py's time-remap "
+                "resampler retimes the branch back onto the base "
+                "timeline (hold/cut absorbed at the window edge, "
+                "inside the region only). No value curve to bind "
+                "either way; not keyframable"),
         "ramps": ParamSpec(
             "list", None,
             doc="explicit (start, end, speed) pieces"),
