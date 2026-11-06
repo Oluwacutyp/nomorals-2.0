@@ -44,9 +44,31 @@ KV persistence (``finance.price_sources.v1``), a real-fetch health
 loop (:func:`verify_price_sources` — keyless providers probed with
 one bounded liquid-symbol fetch; keyed providers never probed, they
 are judged by real-fetch outcomes), and the extended
-:func:`source_status` surface.  Discovery verdict: no genuine
-discovery channel for new price APIs exists in code, so the class
-ships with NO candidate intake — named absence, not invention.
+:func:`source_status` surface.  Discovery verdict (Pass #91): no
+genuine discovery channel for new price APIs exists in code, so the
+class ships with NO candidate intake — named absence, not invention.
+
+AA-56 (assembly audit, owner's open-sources law): the named absence
+above is now closed for the shape it can honestly cover.  A provider
+CATALOG (:data:`PRICE_PROVIDER_CATALOG`) names well-known keyless
+public exchange APIs that are NOT in :data:`SOURCES`; every entry
+carries the declarative kline shape (endpoint, symbol style,
+interval map, row path/fields) a generic fetcher
+(:func:`_catalog_ohlc`) needs to serve real OHLCV from it.
+:func:`discover_price_providers` verifies each catalog candidate
+with one bounded REAL kline fetch (the same probe discipline as
+:func:`verify_price_sources` — a probe IS a real fetch, recorded
+through the same vocabulary); a verified candidate is promoted to a
+GROWN provider: registered in :data:`SOURCES`, given a fetcher,
+persisted in the price state, and appended to the crypto OHLCV
+chain, where the learned ordering governs it like any seed.  A
+candidate that keeps failing is shed (3 failed discovery rounds,
+the registry's ``CANDIDATE_SHED_AFTER`` vocabulary) and re-intake
+opens after the shed window.  Discovery runs on demand and once,
+throttled, from :func:`get_ohlcv` when the whole seed chain has
+failed — the class can now grow past its seed list on the real
+path.  Grown providers serve OHLCV only: ``quote()``'s per-market
+dispatch is hand-written per provider and does not extend to them.
 
 All OHLC fetchers return a pandas DataFrame with a DatetimeIndex and
 ``open/high/low/close/volume`` float columns — the exact shape Sentinel's
@@ -95,6 +117,9 @@ __all__ = [
     "verify_price_sources",
     "bind_price_source_store",
     "clear_price_source_state",
+    # AA-56: the provider-catalog discovery channel
+    "PRICE_PROVIDER_CATALOG",
+    "discover_price_providers",
 ]
 
 _log = get_logger(__name__)
@@ -519,7 +544,14 @@ def _persist_price_state() -> None:
         with _health_lock:
             payload = {"version": _PRICE_STATE_VERSION,
                        "sources": {src: dict(h) for src, h
-                                   in _source_health.items()}}
+                                   in _source_health.items()},
+                       # AA-56: grown providers + discovery state —
+                       # a promoted provider survives restarts by
+                       # re-registering from its catalog id.
+                       "grown": dict(_GROWN_PROVIDERS),
+                       "candidates": {pid: dict(c) for pid, c
+                                      in _PRICE_CANDIDATES.items()},
+                       "shed": [dict(r) for r in _PRICE_SHED]}
         raw = json.dumps(payload, ensure_ascii=False)
         if hasattr(_price_store, "set_raw"):
             _price_store.set_raw(PRICE_PERSIST_KEY, raw, "json")
@@ -552,6 +584,28 @@ def _load_price_state() -> None:
                     if k in raw:
                         h[k] = raw[k]
                 _source_health[str(src)] = h
+        # AA-56: re-register grown providers from their catalog ids
+        # (a catalog id the code no longer carries is skipped — the
+        # shape lives in code, the promotion lives in state) and
+        # restore the discovery candidate/shed state.
+        for pid, at in (data.get("grown") or {}).items():
+            entry = _CATALOG_BY_ID.get(str(pid))
+            if entry is not None:
+                _register_grown_provider(
+                    entry, at=float(at or 0.0) or time.time())
+        for pid, cand in (data.get("candidates") or {}).items():
+            if isinstance(cand, dict) and str(pid) not in SOURCES:
+                _PRICE_CANDIDATES.setdefault(str(pid), {
+                    "fails": int(cand.get("fails") or 0),
+                    "last_attempt": float(cand.get("last_attempt")
+                                          or 0.0),
+                    "last_error": str(cand.get("last_error") or "")})
+        for row in data.get("shed") or []:
+            if isinstance(row, dict) and row.get("id"):
+                _PRICE_SHED.append({"id": str(row["id"]),
+                                    "reason": str(row.get("reason")
+                                                  or ""),
+                                    "at": float(row.get("at") or 0.0)})
     except Exception:  # noqa: BLE001
         _log.debug("price source load failed", exc_info=True)
 
@@ -559,8 +613,22 @@ def _load_price_state() -> None:
 def clear_price_source_state() -> bool:
     """Drop the persisted learned price state (the seed chains are
     untouched).  Returns True when a store is bound and the delete
-    was issued.  Never raises."""
+    was issued.  Never raises.
+
+    AA-56: grown providers are state, not seeds — clearing also
+    unregisters them in memory, so a wipe returns exactly the seed
+    behaviour (the Pass #91 doctrine)."""
     try:
+        for pid in list(_GROWN_PROVIDERS):
+            SOURCES.pop(pid, None)
+            SOURCE_TIERS.pop(pid, None)
+            _FETCHERS.pop(pid, None)
+            _QUOTE_STALE_AFTER_S.pop(pid, None)
+            with _health_lock:
+                _source_health.pop(pid, None)
+        _GROWN_PROVIDERS.clear()
+        _PRICE_CANDIDATES.clear()
+        _PRICE_SHED.clear()
         if _price_store is None:
             return False
         delete = getattr(_price_store, "delete", None)
@@ -1343,6 +1411,344 @@ _FETCHERS: dict[str, Callable[..., Any]] = {
 }
 
 
+# ── provider-catalog discovery (AA-56) ─────────────────────────────
+# The catalog: well-known keyless public exchange APIs NOT in SOURCES,
+# each with the declarative kline shape the generic fetcher below
+# serves.  A catalog entry is a CANDIDATE, never a source: only a
+# verified real fetch in discover_price_providers() promotes one to a
+# grown provider.  Shapes are the exchanges' documented public kline
+# endpoints — the same class of endpoint the seed adapters call.
+#
+# Entry fields: ``url`` (may embed {symbol} / {interval} / {pair}),
+# ``params`` (values may embed {symbol} / {interval} / {limit}),
+# ``symbol_style`` (concat | dash | underscore | concat_lower |
+# t_prefix), ``usd_only`` (the exchange quotes USD pairs only — a
+# USDT request is served as its USD pair), ``intervals`` (canonical
+# timeframe → the exchange's spelling), ``rows_path`` (JSON keys to
+# the row list; () = the payload IS the list), ``row_kind``
+# ("list" = positional rows, "dict" = named fields), ``fields``
+# (canonical field → index or key), ``ts_unit`` ("ms" | "s").
+PRICE_PROVIDER_CATALOG: tuple[dict[str, Any], ...] = (
+    {
+        "id": "okx", "name": "OKX",
+        "covers": "crypto OHLCV, public candles (catalog-grown)",
+        "limits": "public tier, no key",
+        "url": "https://www.okx.com/api/v5/market/candles",
+        "params": {"instId": "{symbol}", "bar": "{interval}",
+                   "limit": "{limit}"},
+        "symbol_style": "dash", "usd_only": False,
+        "intervals": {"1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m",
+                      "30m": "30m", "1h": "1H", "2h": "2H", "4h": "4H",
+                      "6h": "6H", "12h": "12H", "1d": "1D", "1w": "1W"},
+        "rows_path": ("data",), "row_kind": "list",
+        "fields": {"ts": 0, "open": 1, "high": 2, "low": 3,
+                   "close": 4, "volume": 5},
+        "ts_unit": "ms",
+    },
+    {
+        "id": "gateio", "name": "Gate.io",
+        "covers": "crypto OHLCV, public spot candlesticks (catalog-grown)",
+        "limits": "public tier, no key",
+        "url": "https://api.gateio.ws/api/v4/spot/candlesticks",
+        "params": {"currency_pair": "{symbol}",
+                   "interval": "{interval}", "limit": "{limit}"},
+        "symbol_style": "underscore", "usd_only": False,
+        "intervals": {"1m": "1m", "5m": "5m", "15m": "15m",
+                      "30m": "30m", "1h": "1h", "4h": "4h", "1d": "1d",
+                      "1w": "7d"},
+        "rows_path": (), "row_kind": "list",
+        "fields": {"ts": 0, "open": 5, "high": 3, "low": 4,
+                   "close": 2, "volume": 6},
+        "ts_unit": "s",
+    },
+    {
+        "id": "kucoin", "name": "KuCoin",
+        "covers": "crypto OHLCV, public market candlesticks (catalog-grown)",
+        "limits": "public tier, no key",
+        "url": "https://api.kucoin.com/api/v1/market/candlesticks",
+        "params": {"type": "{interval}", "symbol": "{symbol}"},
+        "symbol_style": "dash", "usd_only": False,
+        "intervals": {"1m": "1min", "3m": "3min", "5m": "5min",
+                      "15m": "15min", "30m": "30min", "1h": "1hour",
+                      "2h": "2hour", "4h": "4hour", "6h": "6hour",
+                      "8h": "8hour", "12h": "12hour", "1d": "1day",
+                      "1w": "1week"},
+        "rows_path": ("data",), "row_kind": "list",
+        "fields": {"ts": 0, "open": 1, "high": 3, "low": 4,
+                   "close": 2, "volume": 5},
+        "ts_unit": "s",
+    },
+    {
+        "id": "bitstamp", "name": "Bitstamp",
+        "covers": "crypto OHLCV (USD pairs), public OHLC (catalog-grown)",
+        "limits": "public tier, no key",
+        "url": "https://www.bitstamp.net/api/v2/ohlc/{pair}/",
+        "params": {"step": "{interval}", "limit": "{limit}"},
+        "symbol_style": "concat_lower", "usd_only": True,
+        "intervals": {"1m": "60", "5m": "300", "15m": "900",
+                      "30m": "1800", "1h": "3600", "4h": "21600",
+                      "1d": "86400"},
+        "rows_path": ("data", "ohlc"), "row_kind": "dict",
+        "fields": {"ts": "timestamp", "open": "open", "high": "high",
+                   "low": "low", "close": "close", "volume": "volume"},
+        "ts_unit": "s",
+    },
+    {
+        "id": "bitfinex", "name": "Bitfinex",
+        "covers": "crypto OHLCV (USD pairs), public candles (catalog-grown)",
+        "limits": "public tier, no key",
+        "url": "https://api-pub.bitfinex.com/v2/candles/"
+               "trade:{interval}:{symbol}/hist",
+        "params": {"limit": "{limit}", "sort": "-1"},
+        "symbol_style": "t_prefix", "usd_only": True,
+        "intervals": {"1m": "1m", "5m": "5m", "15m": "15m",
+                      "30m": "30m", "1h": "1h", "3h": "3h", "6h": "6h",
+                      "12h": "12h", "1d": "1D", "1w": "1W"},
+        "rows_path": (), "row_kind": "list",
+        "fields": {"ts": 0, "open": 1, "high": 3, "low": 4,
+                   "close": 2, "volume": 5},
+        "ts_unit": "ms",
+    },
+)
+
+#: Failed discovery rounds before a candidate is shed — the media
+#: registry's CANDIDATE_SHED_AFTER vocabulary (source_registry.py).
+_PRICE_CANDIDATE_SHED_AFTER = 3
+#: A shed candidate may be re-intaken after this long (the registry's
+#: _SHED_REINTAKE_S vocabulary).
+_PRICE_SHED_REINTAKE_S = 7 * 86400.0
+#: The get_ohlcv auto-discovery retry runs at most this often.
+_DISCOVERY_MIN_INTERVAL_S = 3600.0
+
+#: catalog id → entry, for load-time re-registration of grown rows.
+_CATALOG_BY_ID = {e["id"]: e for e in PRICE_PROVIDER_CATALOG}
+#: Grown provider ids, in promotion order (the persisted set).
+_GROWN_PROVIDERS: dict[str, float] = {}
+#: candidate id → {"fails", "last_attempt", "last_error"} (persisted).
+_PRICE_CANDIDATES: dict[str, dict[str, Any]] = {}
+#: shed candidates: {"id", "reason", "at"} rows (persisted).
+_PRICE_SHED: list[dict[str, Any]] = []
+_last_discovery_at = 0.0
+
+
+def _catalog_symbol(entry: dict[str, Any], sym: dict[str, str]) -> str:
+    """The catalog exchange's spelling of a normalized symbol."""
+    base = sym.get("base") or ""
+    quote_c = sym.get("quote") or ""
+    if entry.get("usd_only") and quote_c != "USD":
+        quote_c = "USD"
+    style = entry.get("symbol_style") or "concat"
+    if style == "dash":
+        return f"{base}-{quote_c}"
+    if style == "underscore":
+        return f"{base}_{quote_c}"
+    if style == "concat_lower":
+        return f"{base}{quote_c}".lower()
+    if style == "t_prefix":
+        return f"t{base}{quote_c}"
+    return f"{base}{quote_c}"
+
+
+def _catalog_ohlc(entry: dict[str, Any], sym: dict[str, str],
+                  timeframe: str, bars: int) -> Any:
+    """OHLCV from one catalog exchange's public kline endpoint,
+    shaped by the entry's declarative row map.  Raises
+    :class:`MarketDataError` on any unusable answer — the chain
+    machinery classifies and moves on, exactly as for seed
+    adapters."""
+    pid = str(entry.get("id") or "catalog")
+    intervals = entry.get("intervals") or {}
+    if timeframe not in intervals:
+        raise MarketDataError(
+            f"{pid}: unsupported timeframe {timeframe!r}")
+    iv = str(intervals[timeframe])
+    pair = _catalog_symbol(entry, sym)
+    url = str(entry.get("url") or "").replace("{symbol}", pair) \
+        .replace("{pair}", pair).replace("{interval}", iv)
+    params: dict[str, Any] = {}
+    for key, raw in (entry.get("params") or {}).items():
+        value = raw
+        if isinstance(value, str):
+            value = value.replace("{symbol}", pair) \
+                .replace("{pair}", pair).replace("{interval}", iv) \
+                .replace("{limit}", str(max(1, int(bars))))
+        params[key] = value
+    data = _json(url, params or None)
+    node: Any = data
+    for key in entry.get("rows_path") or ():
+        if not isinstance(node, dict) or key not in node:
+            raise MarketDataError(f"{pid}: response missing {key!r}")
+        node = node[key]
+    if not isinstance(node, list) or not node:
+        raise MarketDataError(f"{pid}: no klines for {pair}")
+    fields = entry.get("fields") or {}
+    dict_rows = entry.get("row_kind") == "dict"
+    scale = 1000.0 if entry.get("ts_unit") == "s" else 1.0
+    rows: list[list] = []
+    for raw in node:
+        try:
+            if dict_rows:
+                ts = float(raw[fields["ts"]]) * scale
+                rows.append([ts,
+                             float(raw[fields["open"]]),
+                             float(raw[fields["high"]]),
+                             float(raw[fields["low"]]),
+                             float(raw[fields["close"]]),
+                             float(raw[fields["volume"]])])
+            else:
+                ts = float(raw[fields["ts"]]) * scale
+                rows.append([ts,
+                             float(raw[fields["open"]]),
+                             float(raw[fields["high"]]),
+                             float(raw[fields["low"]]),
+                             float(raw[fields["close"]]),
+                             float(raw[fields["volume"]])])
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue  # one malformed row never sinks the frame
+    if not rows:
+        raise MarketDataError(f"{pid}: no usable klines for {pair}")
+    rows.sort(key=lambda r: r[0])
+    rows = rows[-max(1, int(bars)):]
+    return _frame(rows, ["timestamp", "open", "high", "low", "close",
+                         "volume"])
+
+
+def _register_grown_provider(entry: dict[str, Any], *,
+                             at: float = 0.0) -> bool:
+    """Register one VERIFIED catalog entry as a grown provider:
+    :data:`SOURCES` row, tier, fetcher, freshness entry.  Returns
+    False when the id is already a source.  Never raises."""
+    pid = str(entry.get("id") or "")
+    try:
+        if not pid or pid in SOURCES:
+            return False
+        SOURCES[pid] = {
+            "covers": str(entry.get("covers") or
+                          "crypto OHLCV (catalog-grown)"),
+            "limits": str(entry.get("limits") or "public tier, no key"),
+            "key": "none",
+        }
+        SOURCE_TIERS[pid] = 3
+        _FETCHERS[pid] = (
+            lambda s, m, tf, b, _e=entry: _catalog_ohlc(_e, s, tf, b))
+        _QUOTE_STALE_AFTER_S.setdefault(pid, None)
+        _GROWN_PROVIDERS[pid] = float(at or time.time())
+        _PRICE_CANDIDATES.pop(pid, None)
+        return True
+    except Exception:  # noqa: BLE001 - registration never wedges
+        return False
+
+
+def _grown_chain(market: str) -> list[str]:
+    """Grown providers serving one market (the catalog is crypto
+    exchanges — grown providers join the crypto chain only)."""
+    if market != "crypto":
+        return []
+    return [pid for pid in _GROWN_PROVIDERS if pid in _FETCHERS]
+
+
+def _price_candidate_shed(pid: str, now: float) -> bool:
+    """True when a shed row for this candidate is still inside the
+    re-intake window."""
+    return any(
+        row.get("id") == pid
+        and now - float(row.get("at") or 0) < _PRICE_SHED_REINTAKE_S
+        for row in _PRICE_SHED)
+
+
+def discover_price_providers(now: float = 0.0) -> dict[str, Any]:
+    """The price class's discovery channel (AA-56): verify every
+    catalog candidate not yet a source with ONE bounded real kline
+    fetch (BTC, 1h, 5 bars — the :func:`verify_price_sources` probe
+    discipline: a probe IS a real fetch and is recorded through the
+    same outcome vocabulary).  A verified candidate is promoted to
+    a grown provider (registered, persisted, appended to the
+    crypto chain); a failing candidate's round is recorded, and
+    after :data:`_PRICE_CANDIDATE_SHED_AFTER` failed rounds it is
+    shed for the re-intake window.  Never raises."""
+    global _last_discovery_at
+    now = now or time.time()
+    _last_discovery_at = now
+    summary: dict[str, Any] = {
+        "checked": 0, "promoted": [], "already": [], "failed": [],
+        "shed": [], "skipped_shed": []}
+    try:
+        probe_sym = normalize_symbol("BTC/USDT", "crypto")
+        for entry in PRICE_PROVIDER_CATALOG:
+            pid = str(entry.get("id") or "")
+            if not pid:
+                continue
+            if pid in SOURCES:
+                summary["already"].append(pid)
+                continue
+            if _price_candidate_shed(pid, now):
+                summary["skipped_shed"].append(pid)
+                continue
+            summary["checked"] += 1
+            try:
+                df = _catalog_ohlc(entry, probe_sym, "1h", 5)
+                last_ts = _frame_last_ts(df)
+                close = float(df["close"].iloc[-1])
+                if close <= 0:
+                    raise MarketDataError(f"{pid}: probe close <= 0")
+            except Exception as exc:  # noqa: BLE001 - record, move on
+                cand = _PRICE_CANDIDATES.setdefault(
+                    pid, {"fails": 0, "last_attempt": 0.0,
+                          "last_error": ""})
+                cand["fails"] = int(cand.get("fails") or 0) + 1
+                cand["last_attempt"] = now
+                cand["last_error"] = str(exc)[:200]
+                summary["failed"].append(
+                    {"source": pid, "error": str(exc)[:200],
+                     "fails": cand["fails"]})
+                if cand["fails"] >= _PRICE_CANDIDATE_SHED_AFTER:
+                    _PRICE_CANDIDATES.pop(pid, None)
+                    _PRICE_SHED.append(
+                        {"id": pid, "reason": "discovery_failed",
+                         "at": now})
+                    summary["shed"].append(pid)
+                continue
+            if _register_grown_provider(entry, at=now):
+                freshness, age = ("unknown", None) if last_ts is None \
+                    else (("stale" if (now - last_ts)
+                           > _ohlcv_stale_after_s("1h") else "fresh"),
+                          max(0.0, now - last_ts))
+                record_quote_outcome(
+                    pid, {"fresh": "fresh", "stale": "stale"}.get(
+                        freshness, "served"),
+                    quote_ts=last_ts, age_s=age, now=now)
+                summary["promoted"].append(pid)
+                _log.info("market_data: catalog discovery promoted "
+                          "grown price provider %s", pid)
+        if len(_PRICE_SHED) > 50:
+            del _PRICE_SHED[:-50]
+        _persist_price_state()
+    except Exception:  # noqa: BLE001 - discovery reports, never raises
+        _log.debug("price provider discovery failed", exc_info=True)
+    return summary
+
+
+def _maybe_discover(now: float) -> list[str]:
+    """The throttled auto-discovery leg of :func:`get_ohlcv`: runs
+    the catalog discovery at most once per
+    :data:`_DISCOVERY_MIN_INTERVAL_S` and only while undiscovered,
+    unshed candidates remain.  Returns the newly promoted provider
+    ids.  Never raises."""
+    try:
+        if now - _last_discovery_at < _DISCOVERY_MIN_INTERVAL_S:
+            return []
+        pending = [e for e in PRICE_PROVIDER_CATALOG
+                   if str(e.get("id") or "") not in SOURCES
+                   and not _price_candidate_shed(
+                       str(e.get("id") or ""), now)]
+        if not pending:
+            return []
+        return list(discover_price_providers(now).get("promoted")
+                    or [])
+    except Exception:  # noqa: BLE001
+        return []
+
+
 #: symbols that are metals, not forex pairs — auto-routed to commodities.
 _METAL_SYMBOLS = {"XAUUSD", "XAU", "GOLD", "XAGUSD", "XAG", "SILVER",
                   "XPTUSD", "XPT", "XPDUSD", "XPD", "PLATINUM", "PALLADIUM"}
@@ -1380,9 +1786,12 @@ def get_ohlcv(symbol: str, market: str = "crypto",
         # the chain below byte-for-byte), then the circuit breaker;
         # when every source is cooling/demoted the learned order is
         # tried anyway — the demoted are the fallback of last
-        # resort, never silently dropped.
+        # resort, never silently dropped.  AA-56: grown providers
+        # (catalog discovery) append to the chain and are governed
+        # by the same learned ordering.
         full = _keyed_chain(market) + _DEFAULT_CHAINS.get(market,
-                                                          ["binance"])
+                                                          ["binance"]) \
+            + _grown_chain(market)
         chain = _healthy_chain(ordered_price_chain(market, full))
         if not chain:
             # all sources cooling — try anyway, don't hard-fail
@@ -1390,6 +1799,33 @@ def get_ohlcv(symbol: str, market: str = "crypto",
     else:
         chain = [source.strip().lower()]
     errors: list[str] = []
+    df = _attempt_chain(chain, sym, symbol, market, timeframe, bars,
+                        errors)
+    if df is not None:
+        return df
+    if source == "auto":
+        # AA-56: the whole chain failed — the class may GROW past
+        # its seed list.  One throttled catalog-discovery round;
+        # any provider it promotes is attempted before giving up.
+        promoted = _maybe_discover(time.time())
+        if promoted:
+            df = _attempt_chain(promoted, sym, symbol, market,
+                                timeframe, bars, errors)
+            if df is not None:
+                return df
+    raise MarketDataError(
+        f"all sources failed for {symbol} [{market}]: "
+        + "; ".join(errors))
+
+
+def _attempt_chain(chain: list[str], sym: dict[str, str], symbol: str,
+                   market: str, timeframe: str, bars: int,
+                   errors: list[str]) -> Any:
+    """Walk one OHLCV chain, returning the first served frame (or
+    None, with every failure appended to ``errors``).  The attempt
+    body is :func:`get_ohlcv`'s pre-AA-56 loop, verbatim: outcomes
+    are recorded through the Pass #91 vocabulary and the frame
+    surfaces its source + freshness via attrs."""
     for src in chain:
         fn = _FETCHERS.get(src)
         if fn is None:
@@ -1432,9 +1868,7 @@ def get_ohlcv(symbol: str, market: str = "crypto",
                                  error_class="unexpected")
             errors.append(f"{src}: unexpected {exc}")
             _log.warning("market_data adapter %s failed: %s", src, exc)
-    raise MarketDataError(
-        f"all sources failed for {symbol} [{market}]: "
-        + "; ".join(errors))
+    return None
 
 
 # ── quotes (stdlib-only, no pandas) ───────────────────────────────────
@@ -1745,21 +2179,32 @@ def price_source_status() -> dict[str, Any]:
                 "last_age_s": st["last_age_s"],
                 "cooling_down": cooling})
         chains = {market: ordered_price_chain(
-            market, _keyed_chain(market) + list(chain))
+            market, _keyed_chain(market) + list(chain)
+            + _grown_chain(market))
             for market, chain in _DEFAULT_CHAINS.items()}
         return {
             "sources": rows, "chains": chains,
             "persisted": _price_store is not None,
-            "candidates_pending": 0,
+            "grown": sorted(_GROWN_PROVIDERS),
+            # candidates the discovery channel has actually taken
+            # up and not yet promoted or shed (the registry
+            # classes' meaning of pending) — the unattempted
+            # catalog is the channel itself, described below
+            "candidates_pending": len(_PRICE_CANDIDATES),
             "discovery": (
-                "no candidate intake for the price class: new price "
-                "providers are APIs and no genuine discovery channel "
-                "exists in code (named absence, Pass #91) — outcomes, "
-                "health, ordering and persistence only"),
+                "provider-catalog discovery (AA-56): well-known "
+                "keyless exchange APIs in PRICE_PROVIDER_CATALOG "
+                "are verified by one bounded real kline fetch "
+                "(discover_price_providers, and once throttled from "
+                "get_ohlcv when the seed chain fails); verified "
+                "candidates promote to grown providers in SOURCES, "
+                "persist in the price state, and join the crypto "
+                "OHLCV chain — outcomes, health and ordering apply "
+                "to them exactly as to seeds"),
         }
     except Exception:  # noqa: BLE001
         return {"sources": [], "chains": {}, "persisted": False,
-                "candidates_pending": 0, "discovery": ""}
+                "grown": [], "candidates_pending": 0, "discovery": ""}
 
 
 def _price_probes() -> dict[str, Callable[[], tuple[float | None, str]]]:
@@ -1831,12 +2276,25 @@ def _price_probes() -> dict[str, Callable[[], tuple[float | None, str]]]:
         q = _ecb_direct_quote(normalize_symbol("EURUSD", "forex"))
         return q.get("quote_ts"), ""
 
-    return {"binance": _binance, "kraken": _kraken,
-            "coinbase": _coinbase, "coingecko": _coingecko,
-            "yahoo": _yahoo, "stooq": _stooq,
-            "frankfurter": _frankfurter, "gold_api": _gold_api,
-            "yahoo_metals": _yahoo_metals,
-            "open_er_api": _open_er_api, "ecb": _ecb}
+    probes = {"binance": _binance, "kraken": _kraken,
+              "coinbase": _coinbase, "coingecko": _coingecko,
+              "yahoo": _yahoo, "stooq": _stooq,
+              "frankfurter": _frankfurter, "gold_api": _gold_api,
+              "yahoo_metals": _yahoo_metals,
+              "open_er_api": _open_er_api, "ecb": _ecb}
+    # AA-56: grown providers join the health loop too — the same
+    # bounded real fetch (one BTC 1h bar) that probes the seed
+    # OHLC providers, through their generic catalog fetcher.
+    for pid in list(_GROWN_PROVIDERS):
+        entry = _CATALOG_BY_ID.get(pid)
+        if entry is None:
+            continue
+
+        def _grown(_e=entry) -> tuple[float | None, str]:
+            return _frame_last_ts(_catalog_ohlc(_e, btc, "1h", 1)), "1h"
+
+        probes[pid] = _grown
+    return probes
 
 
 def verify_price_sources(now: float = 0.0) -> dict[str, Any]:

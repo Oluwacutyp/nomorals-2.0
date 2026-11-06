@@ -508,8 +508,12 @@ class RuntimeMediaMixin:
                 query, _, source_id = query.partition("--source")
                 query = query.strip()
                 source_id = (source_id.strip().split() or [None])[0]
+            from ...music_sources import registry_bridge as _ms_bridge
             return _registry_play.registry_play_text(
-                _registry_play.play_via_registry(query, source_id=source_id))
+                _registry_play.play_via_registry(
+                    query, source_id=source_id,
+                    registry=_ms_bridge.music_registry_for_context(
+                        self.context)))
         actions = {"add", "pause", "resume", "stop", "seek", "volume",
                    "next", "prev", "queue", "remove", "clear", "status",
                    "pick"}

@@ -603,7 +603,38 @@ class SearXNGWebSource(WebSearchSource):
 
     def _instances(self) -> list[str]:
         raw = _env("NM_SEARXNG_URL", "SEARXNG_URL")
-        return [u.strip().rstrip("/") for u in raw.split(",") if u.strip()]
+        out = [u.strip().rstrip("/") for u in raw.split(",") if u.strip()]
+        # AA-54: instances the discovery channel grew (public
+        # SearXNG directory → registry candidates → health-loop
+        # promotion) join as failover instances AFTER the owner's
+        # configured ones — the promoted engines are usable engines,
+        # in this home too.  No registry in reach → configured
+        # instances only, exactly as before.
+        for url in self._grown_instances():
+            if url not in out:
+                out.append(url)
+        return out
+
+    def _grown_instances(self) -> list[str]:
+        """Base URLs of the grown SearXNG instances in the ONE
+        source registry (origin ``grown``, kind ``web-search``,
+        carrying the standard JSON search template).  Never
+        raises."""
+        try:
+            reg = self._registry()
+            if reg is None:
+                return []
+            out: list[str] = []
+            for desc in reg.by_kind("web-search"):
+                if reg.origin_for(desc) != "grown":
+                    continue
+                if "format=json" not in (
+                        getattr(desc, "search_url_template", "") or ""):
+                    continue
+                out.append(f"https://{desc.domain}")
+            return sorted(out)
+        except Exception:  # noqa: BLE001
+            return []
 
     def _category(self) -> str:
         cat = _env("NM_SEARXNG_CATEGORY", "SEARXNG_CATEGORY",

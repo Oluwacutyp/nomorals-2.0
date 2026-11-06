@@ -20,8 +20,21 @@ learned state the engine order is :data:`_SEARCH_ENGINES` byte-for-byte
 (the day-one pin); with evidence, :func:`ordered_search_engines` sorts
 active engines by registry score and demotes stood-down/disabled/dead
 engines to the end — demoted, never dropped from the record or the
-chain.  There is NO discovery intake on this path: search result hosts
-are content sources, not engines.
+chain.  Discovery verdict for this pass was a named absence: search
+result hosts are content sources, not engines.
+
+AA-54 (assembly audit, owner's open-sources law): the absence is now
+closed with a genuine ENGINE channel — the public SearXNG instance
+directory (searx.space).  :func:`discover_search_engines` fetches the
+directory, intakes each listed public instance as a registry
+candidate (kinds ``web-search``) carrying the standard SearXNG
+search template, and the shared health loop probes it through that
+real search endpoint (the #90 honest probe) — verified instances
+promote to grown engines, join :func:`ordered_search_engines` in
+learned order, and are actually run by the chain (their JSON API
+shape) and by the federated SearXNG backend in ``search/web.py``
+(as failover instances).  Result hosts are still content, never
+engines: only the directory's listed instances intake.
 
 Fetch detects the page charset (Content-Type header first, then ``<meta>``)
 instead of blindly assuming UTF-8. ``web_extract`` adds readability-style
@@ -34,6 +47,7 @@ between a tool and a nuisance.
 from __future__ import annotations
 
 import html
+import json
 import re
 import time
 import urllib.parse
@@ -48,7 +62,8 @@ from ..core.text import approx_token_count, normalize_text
 
 __all__ = ["html_to_text", "readability_extract", "web_extract", "register",
            "SEARCH_ENGINE_DOMAINS", "web_registry_for_context",
-           "ordered_search_engines"]
+           "ordered_search_engines", "grown_search_engines",
+           "discover_search_engines", "SEARX_DIRECTORY_URL"]
 
 _log = get_logger(__name__)
 
@@ -251,7 +266,10 @@ def register(registry: Any) -> None:
             "failed / blocked / rate-limited / no-result counts) | "
             "health (run the shared source health loop: keyless "
             "engines probed through their real search endpoints, "
-            "keyed APIs root-checked only — no quota spent)."
+            "keyed APIs root-checked only — no quota spent) | "
+            "discover (AA-54: intake new engines from the public "
+            "SearXNG instance directory as untrusted candidates, "
+            "then run the health loop that can promote them)."
         ),
         capability=Capability.NET_OUT,
     )
@@ -264,9 +282,14 @@ def register(registry: Any) -> None:
         act = (action or "status").strip().lower()
         if act == "health":
             return reg.verify_health()
+        if act == "discover":
+            summary = discover_search_engines(reg, client)
+            health = reg.verify_health()
+            return {"discovery": summary, "health": health,
+                    "status": reg.web_search_status()}
         if act == "status":
             return reg.web_search_status()
-        return {"error": f"unknown action {act!r} — status|health"}
+        return {"error": f"unknown action {act!r} — status|health|discover"}
 
     @registry.register(
         "web_download",
@@ -556,11 +579,178 @@ def _engine_desc(reg: Any, engine: str) -> Any:
     Never raises."""
     try:
         domain = SEARCH_ENGINE_DOMAINS.get(engine)
+        if not domain and engine.startswith(_GROWN_ENGINE_PREFIX) \
+                and reg is not None:
+            # a grown engine's name carries its host (AA-54)
+            domain = engine[len(_GROWN_ENGINE_PREFIX):]
         if not domain or reg is None:
             return None
         return reg.for_domain(domain)
     except Exception:  # noqa: BLE001
         return None
+
+
+#: Grown engines (AA-54) are SearXNG instances promoted by the
+#: registry health loop from the public instance directory.  Their
+#: chain name carries the host — ``searxng:<host>`` — so every
+#: name-keyed seam (descriptor lookup, outcome recording) resolves
+#: them statelessly, exactly like the seed engines.
+_GROWN_ENGINE_PREFIX = "searxng:"
+
+#: The public SearXNG instance directory — the engine catalog the
+#: discovery channel reads (a JSON map of instance URL → metadata,
+#: maintained by the SearXNG project at searx.space).
+SEARX_DIRECTORY_URL = "https://searx.space/data/instances.json"
+
+#: Discovery is bounded per run: the directory lists hundreds of
+#: instances; a run intakes at most this many NEW candidates (the
+#: health loop's promotion budget is the real gate).
+_DISCOVERY_MAX_CANDIDATES = 48
+
+
+def grown_search_engines(reg: Any) -> list[str]:
+    """Chain names of the grown web-search engines (AA-54):
+    registry sources the health loop promoted from discovery
+    candidates (origin ``grown``, kind ``web-search``) that carry a
+    usable search template.  Candidates serve nothing — only
+    promoted sources appear here.  Sorted by domain for a stable
+    pre-evidence order.  Never raises."""
+    try:
+        if reg is None:
+            return []
+        out: list[str] = []
+        for desc in reg.by_kind("web-search"):
+            if reg.origin_for(desc) != "grown":
+                continue
+            if not getattr(desc, "search_url_template", ""):
+                continue
+            out.append(_GROWN_ENGINE_PREFIX + desc.domain)
+        return sorted(set(out))
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _attach_engine_template(reg: Any, host: str) -> bool:
+    """Give one pending web-search candidate the standard SearXNG
+    search template, so the shared health loop probes the candidate
+    through its REAL search endpoint (the #90 honest probe) and a
+    promotion keeps the template the chain runs.  Idempotent;
+    returns True when a template was set/changed.  Never raises."""
+    try:
+        import dataclasses
+
+        template = f"https://{host}/search?q={{query}}&format=json"
+        for cand in reg.candidates():
+            if cand.domain == host \
+                    and cand.search_url_template != template:
+                # SourceDescriptor is frozen: the candidate is
+                # REPLACED in the pending map (its key — nation,
+                # language, domain — is template-independent).
+                reg._candidates[cand.key] = dataclasses.replace(
+                    cand, search_url_template=template)
+                return True
+        return False
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def discover_search_engines(reg: Any, client: Any = None) -> dict[str, Any]:
+    """The web-search class's discovery intake (AA-54).
+
+    Fetches the public SearXNG instance directory (searx.space) and
+    intakes every listed public (https, normal-network) instance as
+    an UNTRUSTED registry candidate (``note_candidate``, kinds
+    ``web-search``) carrying the standard SearXNG search template.
+    Candidates serve nothing: the shared health loop probes them
+    through their real search endpoints and only verified instances
+    promote to grown engines (see :func:`grown_search_engines`).
+    Bounded per run; already-known hosts are re-noted (their
+    templates re-attached) so a candidate persisted before its
+    template still gets probed honestly.  Never raises."""
+    summary: dict[str, Any] = {"listed": 0, "noted": 0, "attached": 0,
+                               "skipped": 0, "error": ""}
+    try:
+        if reg is None:
+            summary["error"] = "no source registry in reach"
+            return summary
+        http = client or HttpClient(timeout=20.0)
+        response = http.get(SEARX_DIRECTORY_URL)
+        text = getattr(response, "text", None)
+        if text is None:
+            body = getattr(response, "body", b"") or b""
+            text = body.decode("utf-8", "replace") \
+                if isinstance(body, bytes) else str(body)
+        payload = json.loads(text)
+        instances = payload.get("instances") or {}
+        if not isinstance(instances, dict):
+            summary["error"] = "directory payload has no instances map"
+            return summary
+        summary["listed"] = len(instances)
+        noted = 0
+        for url, meta in instances.items():
+            if noted >= _DISCOVERY_MAX_CANDIDATES:
+                break
+            try:
+                parsed = urllib.parse.urlparse(str(url or ""))
+                host = (parsed.hostname or "").lower()
+                if parsed.scheme != "https" or not host \
+                        or host.endswith(".onion") or "." not in host:
+                    summary["skipped"] += 1
+                    continue
+                if isinstance(meta, dict) \
+                        and meta.get("network_type") not in (None,
+                                                             "normal"):
+                    summary["skipped"] += 1
+                    continue
+                is_new = reg.note_candidate(
+                    host, via="searx.space instance directory",
+                    kinds=("web-search",))
+                if _attach_engine_template(reg, host):
+                    summary["attached"] += 1
+                if is_new:
+                    noted += 1
+                    summary["noted"] += 1
+            except Exception:  # noqa: BLE001 - one bad row never
+                # sinks the intake
+                summary["skipped"] += 1
+        try:
+            reg._persist()  # candidates + templates survive restarts
+        except Exception as exc:  # noqa: BLE001 - persistence is an
+            # enhancement; the intake itself already landed
+            summary["persist_error"] = (
+                f"{type(exc).__name__}: {exc}")[:120]
+        return summary
+    except Exception as exc:  # noqa: BLE001 - discovery reports,
+        # never raises into a search
+        summary["error"] = f"{type(exc).__name__}: {exc}"[:200]
+        return summary
+
+
+def _parse_searxng_json(markup: str) -> list[dict[str, str]]:
+    """Parse a SearXNG JSON API response (the grown engines' shape)
+    into the chain's result dicts.  Defensive by design: a non-JSON
+    or result-less payload yields [] for that engine, never a
+    crash."""
+    try:
+        payload = json.loads(markup or "")
+    except (ValueError, TypeError):
+        return []
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for hit in (payload.get("results") or [])[:20]:
+        if not isinstance(hit, dict):
+            continue
+        url = str(hit.get("url") or "").strip()
+        title = str(hit.get("title") or "").strip()
+        if not url or url in seen:
+            continue
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        seen.add(url)
+        out.append({"url": url, "title": title,
+                    "snippet": str(hit.get("content") or "")[:400]})
+    return out
 
 
 def ordered_search_engines(reg: Any,
@@ -578,7 +768,19 @@ def ordered_search_engines(reg: Any,
       the active ordering but are still tried last rather than
       pretending they do not exist.
     Never raises; a registry hiccup returns the chain as-is."""
-    pool = list(engines) if engines is not None else list(_SEARCH_ENGINES)
+    if engines is not None:
+        pool = list(engines)
+    else:
+        # AA-54: the default chain is the seed engines PLUS the
+        # grown engines the health loop promoted (learned order
+        # applies to them identically — they carry descriptors and
+        # outcome stats like any seed).  An explicit ``engines``
+        # argument stays exactly as passed: the caller's roster.
+        pool = list(_SEARCH_ENGINES)
+        if reg is not None:
+            for name in grown_search_engines(reg):
+                if name not in pool:
+                    pool.append(name)
     try:
         if reg is None:
             return pool
@@ -686,6 +888,21 @@ def _engine_parser(engine: str) -> Any:
     }[engine]
 
 
+def _grown_engine_url(reg: Any, engine: str, encoded: str) -> str:
+    """The search URL for one grown engine: its registry
+    descriptor's template (the standard SearXNG shape the discovery
+    intake attached), formatted with the encoded query.  Raises
+    ValueError when the engine has no usable template — the caller
+    records that as this engine's failure, like any dead engine."""
+    desc = _engine_desc(reg, engine)
+    template = getattr(desc, "search_url_template", "") \
+        if desc is not None else ""
+    if not template:
+        raise ValueError(
+            f"grown engine {engine} has no search template")
+    return template.format(query=encoded)
+
+
 def _run_engines(client: Any, needle: str, *,
                  registry: Any = None,
                  engines: Any = None) -> tuple[
@@ -711,7 +928,12 @@ def _run_engines(client: Any, needle: str, *,
     for engine in order:
         t0 = time.time()
         try:
-            response = client.get(_engine_url(engine, encoded))
+            # AA-54: a grown engine's URL comes from its registry
+            # descriptor's template; seed engines from the table.
+            url = _grown_engine_url(registry, engine, encoded) \
+                if engine.startswith(_GROWN_ENGINE_PREFIX) \
+                else _engine_url(engine, encoded)
+            response = client.get(url)
         except Exception as exc:  # noqa: BLE001 - try the next engine
             _log.debug("search engine %s failed: %s", engine,
                        classify(exc).message)
@@ -741,7 +963,10 @@ def _run_engines(client: Any, needle: str, *,
             failed.append(engine)
             continue
         try:
-            got = _engine_parser(engine)(response.text)
+            parser = _parse_searxng_json \
+                if engine.startswith(_GROWN_ENGINE_PREFIX) \
+                else _engine_parser(engine)
+            got = parser(response.text)
         except Exception as exc:  # noqa: BLE001 - a parser bug must not
             # kill the other engines
             _log.debug("search engine %s parser failed: %s", engine, exc)

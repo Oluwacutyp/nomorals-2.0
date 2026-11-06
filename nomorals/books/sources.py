@@ -1611,7 +1611,12 @@ def adapter_for_url(url: str,
     # this module, so a top-level import would be circular)
     try:
         from .descriptors import descriptor_adapters
-        for adapter in descriptor_adapters():
+        # AA-63: restore persisted owner descriptors from the same
+        # KV store the book registry binds, so owner-added sources
+        # serve after a restart.
+        _desc_store = getattr(source_registry, "_store", None) \
+            if source_registry is not None else None
+        for adapter in descriptor_adapters(store=_desc_store):
             if adapter.matches(url):
                 if source_registry is not None:
                     adapter.bind_book_registry(source_registry)

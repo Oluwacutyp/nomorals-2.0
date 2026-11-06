@@ -5,6 +5,20 @@ the exact DataFrame shape the indicators expect (open/high/low/close/
 volume with a DatetimeIndex). Uses public market-data endpoints where the
 exchange allows; fails fast with a plain-English message when the
 connector is not connected.
+
+Open-sources law (AA-53): the four exchanges in :data:`SOURCES` are
+SEEDS, not a closed dispatch.  :func:`fetch_ohlcv` walks them in the
+price class's health-ordered chain (``integrations/market_data``'s
+:func:`ordered_price_chain` over the TA seed set): a source-side
+failure (exchange down, connector unconnected, empty response,
+network error) records its outcome into the price class's shared
+health store (:func:`record_source_result` — the same store
+``verify_price_sources`` maintains) and the next healthy exchange is
+tried, so a dead named source falls over instead of raising.
+Request-side errors (unknown source, unsupported interval, bad
+symbol, no vault/connector configured) are facts about the REQUEST,
+not the source: they still fail fast, exactly as before, and are
+never recorded as source ill-health.
 """
 
 from __future__ import annotations
@@ -211,32 +225,123 @@ def fetch_coinbase(symbol: str, interval: str = "1h", limit: int = 200, *,
     return ensure_ohlcv(df.tail(limit))
 
 
-def fetch_ohlcv(source: str, symbol: str, interval: str = "1h",
-                limit: int = 200, *, vault=None, http=None,
-                connector=None, cache_ttl: int = 300) -> _pd.DataFrame:
-    """OHLCV from any supported source.
+def _note_ta_result(source: str, ok: bool) -> None:
+    """Note one TA fetch attempt into the price class's health store
+    (AA-53) — the same learned state ``market_data``'s chains order
+    by and its health loop maintains, so TA outcomes improve the
+    shared ordering and price outcomes improve TA's.  Lazy import
+    (this module already lazy-imports the connector registry to
+    respect layering); best-effort — bookkeeping never breaks a
+    fetch."""
+    try:
+        from importlib import import_module
 
-    ``source`` is one of ``SOURCES``. ``binance``/``coinbase`` go through
-    the connector layer; ``kraken``/``bybit`` use keyless public endpoints
-    (stdlib urllib — no credentials, no connector). Results are cached on
-    disk for ``cache_ttl`` seconds (0 disables).
-    """
-    src = (source or "").strip().lower()
-    if src == "binance":
+        md = import_module("nomorals.integrations.market_data")
+        md.record_source_result(source, ok)
+    except Exception:  # noqa: BLE001 - bookkeeping is never fatal
+        pass
+
+
+def _ta_attempt_order(requested: str) -> list[str]:
+    """The order :func:`fetch_ohlcv` attempts the TA seed exchanges:
+    the price class's health-ordered chain over the seed set with
+    the requested source heading the pool (AA-53).  Zero learned
+    state → the pool is returned untouched (requested first, then
+    :data:`SOURCES` order); with evidence, stood-down / disabled
+    exchanges demote to the end — demoted, never dropped, so a
+    demoted exchange is still the fallback of last resort.  Never
+    raises; a hiccup returns the plain pool."""
+    pool = [requested] + [s for s in SOURCES if s != requested]
+    try:
+        from importlib import import_module
+
+        md = import_module("nomorals.integrations.market_data")
+        ordered = md.ordered_price_chain("crypto", pool)
+        return list(ordered) or pool
+    except Exception:  # noqa: BLE001 - ordering is advisory
+        return pool
+
+
+def _fetch_one(source: str, symbol: str, interval: str, limit: int, *,
+               vault=None, http=None, connector=None,
+               cache_ttl: int = 300) -> _pd.DataFrame:
+    """One exchange's fetch, exactly the pre-AA-53 dispatch."""
+    if source == "binance":
         return fetch_binance(symbol, interval, limit, vault=vault,
                              http=http, connector=connector)
-    if src == "coinbase":
+    if source == "coinbase":
         return fetch_coinbase(symbol, interval, limit, vault=vault,
                               http=http, connector=connector)
-    if src == "kraken":
+    if source == "kraken":
         return _cached("kraken", symbol, interval, limit, cache_ttl,
                        fetch_kraken, symbol, interval, limit)
-    if src == "bybit":
+    if source == "bybit":
         return _cached("bybit", symbol, interval, limit, cache_ttl,
                        fetch_bybit, symbol, interval, limit)
     raise ValueError(
         f"unknown OHLCV source {source!r}; supported: "
         f"{', '.join(SOURCES)}")
+
+
+def fetch_ohlcv(source: str, symbol: str, interval: str = "1h",
+                limit: int = 200, *, vault=None, http=None,
+                connector=None, cache_ttl: int = 300) -> _pd.DataFrame:
+    """OHLCV from any supported source, with health-ordered fallback.
+
+    ``source`` is one of ``SOURCES`` and is attempted first unless
+    the price class's learned health has demoted it. ``binance`` /
+    ``coinbase`` go through the connector layer; ``kraken``/``bybit``
+    use keyless public endpoints (stdlib urllib — no credentials, no
+    connector). Results are cached on disk for ``cache_ttl`` seconds
+    (0 disables).
+
+    A source-side failure (unconnected connector, exchange error,
+    empty response, network failure) is noted into the price class's
+    health store and the next exchange in the health-ordered chain
+    is tried; when every exchange fails, the REQUESTED source's
+    error is raised.  A request-side ``ValueError`` (unsupported
+    interval, bad symbol, no vault/connector) fails fast with no
+    fallback and no health note — it is not the source's fault.  An
+    injected ``connector`` serves only its own source; fallback
+    connector sources without a vault are skipped as unconfigured.
+    """
+    src = (source or "").strip().lower()
+    if src not in SOURCES:
+        raise ValueError(
+            f"unknown OHLCV source {source!r}; supported: "
+            f"{', '.join(SOURCES)}")
+    first_error: Exception | None = None
+    failures: list[str] = []
+    for name in _ta_attempt_order(src):
+        try:
+            df = _fetch_one(
+                name, symbol, interval, limit, vault=vault, http=http,
+                connector=connector if name == src else None,
+                cache_ttl=cache_ttl)
+        except ValueError:
+            if name == src:
+                raise  # request-side error: fail fast, as before
+            continue  # fallback source can't serve this request shape
+        except Exception as exc:  # noqa: BLE001 - fall over to the next
+            _note_ta_result(name, False)
+            if name == src:
+                first_error = exc
+            failures.append(f"{name}: {exc}")
+            _log.info("ta feeds: %s failed for %s %s (%s); "
+                      "falling over", name, symbol, interval, exc)
+            continue
+        _note_ta_result(name, True)
+        try:
+            df.attrs["source"] = name
+            if name != src:
+                df.attrs["requested_source"] = src
+        except Exception:  # noqa: BLE001 - attrs are surface only
+            pass
+        return df
+    if first_error is not None:
+        raise first_error
+    raise RuntimeError(  # pragma: no cover - order always includes src
+        f"no TA feed could serve {symbol}: " + "; ".join(failures))
 
 
 # ── keyless public feeds + disk cache ────────────────────────────────────

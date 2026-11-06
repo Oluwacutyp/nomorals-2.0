@@ -78,11 +78,17 @@ def test_ledger_unprintable_exc_safe():
 def test_direct_import_surface_and_all_unchanged():
     import nomorals.tools.imagedb as m
 
+    # AA-58 (assembly audit) extended the surface with the
+    # reverse-image candidate channel — the four new names are the
+    # fix, appended in __all__ order.
     assert m.__all__ == ["register", "sniff_format", "image_dimensions", "dhash",
                          "hamming", "image_exif", "image_colors", "find_dupes",
                          "image_stats", "REVERSE_IMAGE_ENGINES",
                          "IMAGE_ENGINE_DOMAINS", "IMAGE_LINK_ONLY_DOMAINS",
-                         "image_registry_for_context", "ordered_image_engines"]
+                         "image_registry_for_context", "ordered_image_engines",
+                         "REVERSE_IMAGE_CATALOG", "grown_image_engines",
+                         "note_reverse_image_candidate",
+                         "discover_reverse_image_engines"]
 
 
 # ── helpers ─────────────────────────────────────────────────────────────

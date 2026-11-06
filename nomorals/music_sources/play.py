@@ -54,11 +54,25 @@ def play_via_registry(
     download_fn: Optional[Callable[[MusicSource, str], DownloadResult]] = None,
     enrich_chain: Optional[EnrichmentChain] = None,
     source_id: Optional[str] = None,
+    registry: Any = None,
 ) -> PlayResult:
-    """Resolve ``query`` through the registry to a playable/downloadable result."""
+    """Resolve ``query`` through the registry to a playable/downloadable result.
+
+    ``registry`` (AA-57) is the ONE media source registry: when one
+    is in reach, the legal rows' persisted health is CONSULTED in
+    selection — a source the registry has stood down / disabled /
+    marked dead is skipped in candidate and fallback selection, and
+    an explicit ``source_id`` naming one fails fast with the health
+    state named — and every real download outcome is recorded back
+    into it.  With no registry, behaviour is exactly the pre-AA-57
+    behaviour."""
     q = (query or "").strip()
     if not q:
         return PlayResult(query=query, status="error", detail="empty query")
+    bridge = None
+    if registry is not None:
+        from . import registry_bridge as bridge
+        bridge.ensure_music_sources(registry)
     # 1. Source selection: explicit id wins, else search, else metadata fallback.
     source: Optional[MusicSource] = None
     candidates: List[Dict[str, Any]] = []
@@ -67,6 +81,17 @@ def play_via_registry(
         if source is None:
             return PlayResult(query=q, status="no_source",
                               detail=f"unknown music source {source_id!r}")
+        if bridge is not None \
+                and not bridge.is_source_usable(registry, source.id):
+            health = bridge.source_health(registry, source.id) or {}
+            return PlayResult(
+                query=q, status="error", source_id=source.id,
+                source_name=source.name, licence=source.licence,
+                quality_ceiling=source.quality_ceiling,
+                detail=(
+                    f"music source {source.id!r} is not usable — the "
+                    f"source registry has it {health.get('health', '?')} "
+                    "on recorded play outcomes; pick another source"))
     elif search_fn is not None:
         try:
             found = search_fn(q)
@@ -80,13 +105,29 @@ def play_via_registry(
         for candidate in candidates:
             named = candidate.get("source_id") or candidate.get("source")
             if isinstance(named, str) and by_id(named) is not None:
-                source = by_id(named)
+                picked = by_id(named)
+                if bridge is not None and not bridge.is_source_usable(
+                        registry, picked.id):
+                    continue  # stood down on real outcomes — next
+                source = picked
                 break
         if source is None and candidates:
-            # Candidate names no registry source — fall back to the
-            # first metadata source so the licence ladder still applies.
+            # Candidate names no (usable) registry source — fall back
+            # to the first usable metadata source so the licence
+            # ladder still applies.
             metas = by_class("metadata")
-            source = metas[0] if metas else None
+            if bridge is not None:
+                usable = [m for m in metas if bridge.is_source_usable(
+                    registry, m.id)]
+                source = usable[0] if usable else None
+                if source is None and metas:
+                    return PlayResult(
+                        query=q, status="error",
+                        detail=("every metadata music source is stood "
+                                "down in the source registry on recorded "
+                                "play outcomes"))
+            else:
+                source = metas[0] if metas else None
     else:
         return PlayResult(
             query=q, status="no_search",
@@ -104,6 +145,10 @@ def play_via_registry(
         try:
             dl = download_fn(source, q)
         except Exception as exc:  # noqa: BLE001 — download failure is data
+            if bridge is not None:
+                bridge.record_play_outcome(
+                    registry, source.id, False,
+                    error_class="download_failed")
             return PlayResult(query=q, status="error", source_id=source.id,
                               source_name=source.name, licence=source.licence,
                               quality_ceiling=source.quality_ceiling,
@@ -111,6 +156,17 @@ def play_via_registry(
                               candidates=candidates)
     else:
         dl = _download(source, query=q)
+    # AA-57: a REAL download outcome lands in the registry — a
+    # fetched file is a serve; a wired attempt that produced
+    # nothing is a failure.  Plan-only / checkout results attempted
+    # nothing against the source and record nothing.
+    if bridge is not None and download_fn is not None:
+        if dl.downloaded:
+            bridge.record_play_outcome(registry, source.id, True)
+        elif dl.action != "checkout":
+            bridge.record_play_outcome(
+                registry, source.id, False,
+                error_class="download_empty")
     # 3. Enrichment (optional chain; missing chain = recorded, not fatal).
     enrichment: Optional[EnrichmentResult] = None
     if enrich_chain is not None:

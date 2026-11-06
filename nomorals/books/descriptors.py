@@ -30,6 +30,11 @@ Rules, no exceptions:
   already spaces requests per domain; descriptors declare their
   minimum delay and the adapter enforces ``max(declared, fetcher)``.
 * A descriptor with ``verified=False`` says so on every result.
+* Owner-added descriptors PERSIST (AA-63): ``register_descriptor``
+  with a context in reach writes the full descriptor rows to the
+  KV store the book source registry binds, and the read paths
+  restore them on first use — an added source survives restarts.
+  Db-less use keeps the in-memory behaviour exactly.
 """
 
 from __future__ import annotations
@@ -71,6 +76,8 @@ __all__ = [
     "descriptor_for_url",
     "descriptor_by_id",
     "list_sources",
+    "persist_owner_descriptors",
+    "load_owner_descriptors",
 ]
 
 # ── descriptor ───────────────────────────────────────────────────────────────
@@ -240,34 +247,168 @@ LEGAL_SOURCES: tuple[str, ...] = (
 )
 
 
-def register_descriptor(descriptor: SourceDescriptor) -> SourceDescriptor:
+# ── owner-descriptor persistence (AA-63) ─────────────────────────────────────
+#
+# register_descriptor used to mutate this module's in-memory table
+# only: an owner-added descriptor vanished on restart.  Owner
+# descriptors now persist as full descriptor rows in the SAME KV
+# store the book source registry binds (alongside the registry
+# state), and load back on first use.  Db-less callers (no context,
+# no store) keep the in-memory behaviour exactly.
+
+#: KV key the owner descriptor rows live under.
+_OWNER_KV_KEY = "books.owner_descriptors.v1"
+
+#: Ids added through register_descriptor in this process (the
+#: built-in table's rows are code, never persisted).
+_OWNER_IDS: set[str] = set()
+
+#: id(store) values whose owner rows have already been loaded —
+#: loading is a first-use act per store, not a per-call one.
+_LOADED_STORES: set[int] = set()
+
+_TUPLE_FIELDS = ("domains", "url_patterns", "novel_title_selectors",
+                 "chapter_list_selectors", "body_selectors")
+
+
+def _descriptor_to_row(d: SourceDescriptor) -> dict[str, Any]:
+    import dataclasses
+    row = dataclasses.asdict(d)
+    for name in _TUPLE_FIELDS:
+        row[name] = [list(x) if isinstance(x, tuple) else x
+                     for x in row.get(name) or ()]
+    return row
+
+
+def _descriptor_from_row(row: dict[str, Any]) -> SourceDescriptor:
+    data = dict(row)
+    for name in _TUPLE_FIELDS:
+        value = data.get(name) or ()
+        if name == "domains" or name == "url_patterns":
+            data[name] = tuple(str(x) for x in value)
+        else:
+            data[name] = tuple(tuple(x) for x in value)
+    known = {f for f in SourceDescriptor.__dataclass_fields__}
+    return SourceDescriptor(
+        **{k: v for k, v in data.items() if k in known})
+
+
+def _owner_store(context: Any = None, store: Any = None) -> Any:
+    """Resolve the KV store owner descriptors persist in: an
+    explicit store wins; a store-shaped context (get/set) is used
+    directly; a context carrying a database binds a KVStore over
+    it — the same store the book registry binds.  None when no
+    store is in reach.  Never raises."""
+    try:
+        if store is not None:
+            return store
+        if context is None:
+            return None
+        if hasattr(context, "get") and hasattr(context, "set"):
+            return context
+        db = getattr(context, "db", None)
+        if db is None:
+            return None
+        from ..storage.kv import KVStore
+        return KVStore(db)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def persist_owner_descriptors(context: Any = None,
+                              store: Any = None) -> int:
+    """Write every owner-registered descriptor to the KV store.
+    Returns how many rows were written (0 when no store is in
+    reach).  Never raises."""
+    try:
+        kv = _owner_store(context, store)
+        if kv is None:
+            return 0
+        rows = [_descriptor_to_row(d) for d in DESCRIPTORS
+                if d.id in _OWNER_IDS]
+        kv.set(_OWNER_KV_KEY, rows)
+        return len(rows)
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("owner descriptor persist failed: %s", exc)
+        return 0
+
+
+def load_owner_descriptors(context: Any = None,
+                           store: Any = None) -> int:
+    """Restore persisted owner descriptors into the table
+    (replace-by-id, the register semantics), once per store.
+    Returns how many rows were restored.  Never raises."""
+    global DESCRIPTORS
+    try:
+        kv = _owner_store(context, store)
+        if kv is None or id(kv) in _LOADED_STORES:
+            return 0
+        _LOADED_STORES.add(id(kv))
+        rows = kv.get(_OWNER_KV_KEY) or []
+        restored = 0
+        for row in rows:
+            if not isinstance(row, dict) or not row.get("id"):
+                continue
+            d = _descriptor_from_row(row)
+            DESCRIPTORS = [x for x in DESCRIPTORS if x.id != d.id]
+            DESCRIPTORS.append(d)
+            _OWNER_IDS.add(d.id)
+            restored += 1
+        if restored:
+            _log.info("restored %d owner story-source descriptor(s)",
+                      restored)
+        return restored
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("owner descriptor load failed: %s", exc)
+        return 0
+
+
+def _ensure_owner_loaded(context: Any = None, store: Any = None) -> None:
+    if context is not None or store is not None:
+        load_owner_descriptors(context, store)
+
+
+def register_descriptor(descriptor: SourceDescriptor,
+                        context: Any = None) -> SourceDescriptor:
     """Add an owner-supplied descriptor (any site). The descriptor is
     data: the system records its licence label and never claims rights.
-    Re-registering an id replaces it."""
+    Re-registering an id replaces it.
+
+    AA-63: the descriptor is also PERSISTED (when a context/store
+    is in reach) so it survives restarts — see
+    :func:`load_owner_descriptors`."""
     global DESCRIPTORS
     DESCRIPTORS = [d for d in DESCRIPTORS if d.id != descriptor.id]
     DESCRIPTORS.append(descriptor)
+    _OWNER_IDS.add(descriptor.id)
     _log.info("registered story-source descriptor %s (%s)",
               descriptor.id, descriptor.rights_class)
+    if context is not None:
+        persist_owner_descriptors(context)
     return descriptor
 
 
-def descriptor_by_id(source_id: str) -> SourceDescriptor | None:
+def descriptor_by_id(source_id: str,
+                     context: Any = None) -> SourceDescriptor | None:
+    _ensure_owner_loaded(context)
     for d in DESCRIPTORS:
         if d.id == (source_id or "").lower():
             return d
     return None
 
 
-def descriptor_for_url(url: str) -> SourceDescriptor | None:
+def descriptor_for_url(url: str,
+                       context: Any = None) -> SourceDescriptor | None:
+    _ensure_owner_loaded(context)
     for d in DESCRIPTORS:
         if d.matches(url or ""):
             return d
     return None
 
 
-def list_sources() -> list[dict[str, Any]]:
+def list_sources(context: Any = None) -> list[dict[str, Any]]:
     """Every known source with its rights label — legal first."""
+    _ensure_owner_loaded(context)
     out: list[dict[str, Any]] = []
     for d in DESCRIPTORS:
         out.append({
@@ -548,8 +689,14 @@ class GutenbergAdapter(SourceAdapter):
                        url=url, paragraphs=paras, source=self.name)
 
 
-def descriptor_adapters() -> list[SourceAdapter]:
-    """One adapter per descriptor (Gutenberg gets its API adapter)."""
+def descriptor_adapters(context: Any = None,
+                        store: Any = None) -> list[SourceAdapter]:
+    """One adapter per descriptor (Gutenberg gets its API adapter).
+
+    AA-63: persisted owner descriptors are restored first when a
+    context/store is in reach, so an owner-added source serves
+    after a restart exactly as it did when it was added."""
+    _ensure_owner_loaded(context, store)
     out: list[SourceAdapter] = [GutenbergAdapter()]
     for d in DESCRIPTORS:
         if d.id == "gutenberg":

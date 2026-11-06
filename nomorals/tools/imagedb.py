@@ -52,6 +52,22 @@ status).  Discovery verdict — named absence: reverse-search
 RESULT hosts are image content, not engines (a host holding a
 matching picture cannot be queried BY picture), so no candidate
 intake exists on this path.
+
+AA-58 (assembly audit, owner's open-sources law): the absence is
+now closed with the channel that DOES exist for engines — a
+catalog/manual candidate channel.  :data:`REVERSE_IMAGE_CATALOG`
+names additional reverse-search engines whose result pages are
+server-rendered and URL-addressable (IQDB, SauceNAO, ascii2d);
+:func:`note_reverse_image_candidate` intakes any engine with the
+URL-template shape (``{image_url}`` placeholder) as an untrusted
+registry candidate (kind ``image-search``).  The shared health
+loop probes the candidate's root (the #92 doctrine: a synthetic
+reverse probe is impossible, so the endpoint itself is judged by
+real reverse-search outcomes); promoted engines join
+:func:`ordered_image_engines` and are scraped through the generic
+result-page shape (image URLs harvested from the page, the
+engine's own host excluded).  Google Lens / TinEye stay link-only:
+they remain pages Devon hands the user, never scraped engines.
 """
 
 from __future__ import annotations
@@ -76,7 +92,9 @@ __all__ = ["register", "sniff_format", "image_dimensions", "dhash", "hamming",
            "image_exif", "image_colors", "find_dupes", "image_stats",
            "REVERSE_IMAGE_ENGINES", "IMAGE_ENGINE_DOMAINS",
            "IMAGE_LINK_ONLY_DOMAINS", "image_registry_for_context",
-           "ordered_image_engines"]
+           "ordered_image_engines", "REVERSE_IMAGE_CATALOG",
+           "grown_image_engines", "note_reverse_image_candidate",
+           "discover_reverse_image_engines"]
 
 
 def _pil_image():
@@ -576,6 +594,119 @@ IMAGE_LINK_ONLY_DOMAINS: dict[str, str] = {
     "tineye": "tineye.com",
 }
 
+#: The reverse-image engine CATALOG (AA-58): additional engines
+#: whose search-by-image pages are server-rendered and addressed
+#: by a URL template carrying the image URL — the one shape the
+#: generic result-page scraper can serve honestly.  A catalog row
+#: is a CANDIDATE, never an engine: it intakes through
+#: :func:`note_reverse_image_candidate` and only the registry
+#: health loop can promote it into the scrape roster.
+REVERSE_IMAGE_CATALOG: tuple[dict[str, str], ...] = (
+    {"id": "iqdb", "name": "IQDB", "domain": "iqdb.org",
+     "template": "https://iqdb.org/?url={image_url}"},
+    {"id": "saucenao", "name": "SauceNAO", "domain": "saucenao.com",
+     "template": "https://saucenao.com/search.php?url={image_url}"},
+    {"id": "ascii2d", "name": "ascii2d", "domain": "ascii2d.net",
+     "template": "https://ascii2d.net/search/url/{image_url}"},
+)
+
+#: Grown reverse engines (AA-58) carry chain names ``grown:<host>``
+#: — the host rides in the name so every name-keyed seam resolves
+#: the descriptor statelessly (the AA-54 SearXNG precedent).
+_GROWN_IMAGE_PREFIX = "grown:"
+
+#: The registry kind the image class's grown sources carry — the
+#: same label ``image_status`` renders its grown rows from.
+_IMAGE_KIND = "image-search"
+
+
+def note_reverse_image_candidate(reg: Any, url_or_domain: str,
+                                 template: str, *,
+                                 via: str = "manual") -> bool:
+    """Intake one reverse-image engine as an UNTRUSTED registry
+    candidate (AA-58): the manual/catalog candidate channel.
+
+    ``template`` is the engine's search-by-image URL with an
+    ``{image_url}`` placeholder — the shape the generic scraper
+    serves.  The candidate carries the template so a promotion
+    keeps it; the health loop probes the host root (the reverse
+    endpoint itself is judged by real outcomes, #92).  Returns
+    True when a NEW candidate was noted.  Never raises."""
+    try:
+        if reg is None or "{image_url}" not in (template or ""):
+            return False
+        host = reg._host_of(url_or_domain)
+        if not host or "." not in host:
+            return False
+        is_new = reg.note_candidate(
+            host, via=f"reverse-image {via}", kinds=(_IMAGE_KIND,))
+        for cand in reg.candidates():
+            if cand.domain == host \
+                    and cand.search_url_template != template:
+                # SourceDescriptor is frozen: replace the pending
+                # candidate (its key is template-independent).
+                import dataclasses
+
+                reg._candidates[cand.key] = dataclasses.replace(
+                    cand, search_url_template=template)
+                break
+        try:
+            reg._persist()
+        except Exception as exc:  # noqa: BLE001 - enhancement only,
+            # but never silent
+            record_failure("note_reverse_image_candidate.persist", exc)
+        return bool(is_new)
+    except Exception as e:  # noqa: BLE001
+        record_failure("note_reverse_image_candidate", e)
+        return False
+
+
+def discover_reverse_image_engines(reg: Any) -> dict[str, Any]:
+    """Intake the whole reverse-image catalog as candidates
+    (AA-58).  Promotion is the health loop's act, not this
+    function's.  Never raises."""
+    summary: dict[str, Any] = {"listed": len(REVERSE_IMAGE_CATALOG),
+                               "noted": 0, "already": 0}
+    try:
+        if reg is None:
+            summary["error"] = "no source registry in reach"
+            return summary
+        for row in REVERSE_IMAGE_CATALOG:
+            if note_reverse_image_candidate(
+                    reg, row["domain"], row["template"],
+                    via="catalog"):
+                summary["noted"] += 1
+            else:
+                summary["already"] += 1
+        return summary
+    except Exception as e:  # noqa: BLE001
+        record_failure("discover_reverse_image_engines", e)
+        summary["error"] = f"{type(e).__name__}: {e}"[:200]
+        return summary
+
+
+def grown_image_engines(reg: Any) -> dict[str, str]:
+    """Grown reverse-image engines (AA-58): chain name → URL
+    template, for registry sources the health loop promoted from
+    image candidates (origin ``grown``, kind ``image-search``)
+    carrying a usable ``{image_url}`` template.  Candidates serve
+    nothing.  Never raises."""
+    try:
+        if reg is None:
+            return {}
+        out: dict[str, str] = {}
+        for desc in reg.by_kind(_IMAGE_KIND):
+            if reg.origin_for(desc) != "grown":
+                continue
+            template = getattr(desc, "search_url_template", "") or ""
+            if "{image_url}" not in template:
+                continue
+            out[_GROWN_IMAGE_PREFIX + desc.domain] = template
+        return dict(sorted(out.items()))
+    except Exception as e:  # noqa: BLE001
+        record_failure("grown_image_engines", e)
+        return {}
+
 
 def image_registry_for_context(context: Any = None,
                                injected: Any = None) -> Any:
@@ -613,6 +744,10 @@ def _image_engine_desc(reg: Any, engine: str) -> Any:
     Never raises."""
     try:
         domain = IMAGE_ENGINE_DOMAINS.get(engine)
+        if not domain and engine.startswith(_GROWN_IMAGE_PREFIX) \
+                and reg is not None:
+            # a grown engine's name carries its host (AA-58)
+            domain = engine[len(_GROWN_IMAGE_PREFIX):]
         if not domain or reg is None:
             return None
         return reg.for_domain(domain)
@@ -636,8 +771,18 @@ def ordered_image_engines(reg: Any,
       the active ordering but are still tried last rather than
       pretending they do not exist.
     Never raises; a registry hiccup returns the roster as-is."""
-    pool = list(engines) if engines is not None \
-        else list(REVERSE_IMAGE_ENGINES)
+    if engines is not None:
+        pool = list(engines)
+    else:
+        # AA-58: the default roster is the seed engines PLUS the
+        # grown engines the health loop promoted (learned order
+        # applies identically).  An explicit ``engines`` argument
+        # stays exactly as passed.
+        pool = list(REVERSE_IMAGE_ENGINES)
+        if reg is not None:
+            for name in grown_image_engines(reg):
+                if name not in pool:
+                    pool.append(name)
     try:
         if reg is None:
             return pool
@@ -820,6 +965,63 @@ _ENGINE_SCRAPERS = {
     "yandex": (_yandex_reverse_url, _parse_yandex_body),
 }
 
+#: Absolute image URLs anywhere in a page body — the generic
+#: grown-engine harvester's widest net (AA-58).
+_GENERIC_IMG_URL = re.compile(
+    rb'https?://[^\s"\'<>\\]{10,300}?\.(?:jpe?g|png|webp|gif)'
+    rb'(?:\?[^\s"\'<>\\]{0,60})?', re.IGNORECASE)
+
+
+def _parse_generic_body(body: bytes, own_host: str = "") -> list[str]:
+    """Similar-image URLs from a GROWN engine's result page
+    (AA-58): the union of the seed engines' evidence patterns
+    (``mediaurl=`` attributes, ``originalImage`` JSON, <img>
+    sources) plus bare absolute image URLs, minus anything hosted
+    on the engine's own host (its chrome/thumbnails are not
+    matches).  Best-effort by design — the tool labels every
+    scraped match unverified."""
+    body = body or b""
+    raw: list[bytes] = []
+    raw += _MEDIA_URL.findall(body)
+    raw += _YANDEX_ORIGINAL.findall(body)
+    raw += _YANDEX_IMG_SRC.findall(body)
+    raw += _GENERIC_IMG_URL.findall(body)
+    cleaned: list[bytes] = []
+    for hit in raw:
+        hit = hit.replace(b"\\/", b"/")
+        if hit not in cleaned:
+            cleaned.append(hit)
+    urls = _dedupe_urls(cleaned, cap=24)
+    if own_host:
+        urls = [u for u in urls
+                if (urllib.parse.urlparse(u).hostname or "").lower()
+                not in (own_host, f"www.{own_host}")]
+    return urls[:8]
+
+
+def _grown_scraper(reg: Any, engine: str) -> Any:
+    """The (url builder, body parser) pair for one grown engine,
+    from its registry template — or None when the engine is not a
+    usable grown engine.  Never raises."""
+    try:
+        template = grown_image_engines(reg).get(engine)
+        if not template:
+            return None
+        domain = engine[len(_GROWN_IMAGE_PREFIX):]
+
+        def url_for(image_url: str, _t: str = template) -> str:
+            return _t.replace(
+                "{image_url}",
+                urllib.parse.quote(image_url, safe=""))
+
+        def parse(body: bytes, _d: str = domain) -> list[str]:
+            return _parse_generic_body(body, own_host=_d)
+
+        return url_for, parse
+    except Exception as e:  # noqa: BLE001
+        record_failure("_grown_scraper", e)
+        return None
+
 
 def _bot_signalled(body: bytes) -> bool:
     """True when a 200 page is a bot-wall/challenge, not results —
@@ -853,7 +1055,8 @@ def _status_outcome(status: int) -> tuple[str, str]:
 
 
 def _scrape_one(engine: str, client: HttpClient,
-                image_url: str) -> tuple[list[str], str, str]:
+                image_url: str, registry: Any = None) -> tuple[
+        list[str], str, str]:
     """One engine's scrape attempt, classified (Pass #92).
 
     Returns ``(urls, kind, error_class)`` where ``kind`` is the
@@ -868,7 +1071,15 @@ def _scrape_one(engine: str, client: HttpClient,
     is read from the exception (``http_status_of``) as well as
     from duck-typed responses that carry one.  Never raises:
     scraping is optional garnish, exactly as before."""
-    url_for, parse = _ENGINE_SCRAPERS[engine]
+    scraper = _ENGINE_SCRAPERS.get(engine)
+    if scraper is None:
+        # AA-58: a grown engine resolves its scraper from the
+        # registry template; an unresolvable name is this engine's
+        # failure, never the chain's.
+        scraper = _grown_scraper(registry, engine)
+        if scraper is None:
+            return [], "failure", "unknown_engine"
+    url_for, parse = scraper
     try:
         page = client.get(url_for(image_url))
     except Exception as exc:  # noqa: BLE001 - per-engine isolation
@@ -916,7 +1127,8 @@ def _scrape_engines(client: HttpClient, image_url: str, *,
     for name in ordered_image_engines(registry):
         t0 = time.time()
         try:
-            urls, kind, error_class = _scrape_one(name, client, image_url)
+            urls, kind, error_class = _scrape_one(
+                name, client, image_url, registry=registry)
         except Exception:  # noqa: BLE001 - per-engine isolation
             _log.debug("reverse image scrape failed for %s", name, exc_info=True)
             urls, kind, error_class = [], "failure", "network_failure"
@@ -997,7 +1209,10 @@ def register(registry: Any) -> None:
             "fetched, so no outcomes recorded for them) | health "
             "(run the shared source health loop: the shared hosts "
             "are probed through their real search endpoint; the "
-            "reverse endpoints are judged by real-search outcomes)."
+            "reverse endpoints are judged by real-search outcomes) "
+            "| discover (AA-58: intake the reverse-engine catalog "
+            "— IQDB / SauceNAO / ascii2d — as untrusted candidates, "
+            "then run the health loop that can promote them)."
         ),
         capability="net.out",
     )
@@ -1010,6 +1225,11 @@ def register(registry: Any) -> None:
         act = (action or "status").strip().lower()
         if act == "health":
             return reg.verify_health()
+        if act == "discover":
+            summary = discover_reverse_image_engines(reg)
+            health = reg.verify_health()
+            return {"discovery": summary, "health": health,
+                    "status": reg.image_status()}
         if act == "status":
             return reg.image_status()
-        return {"error": f"unknown action {act!r} — status|health"}
+        return {"error": f"unknown action {act!r} — status|health|discover"}

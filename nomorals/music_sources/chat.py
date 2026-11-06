@@ -45,12 +45,12 @@ def control_music_sources(tail: str, context: Any = None, chat: Any = None,
                           chat_key: str = "") -> str:
     """Registry surface. Never raises."""
     try:
-        return _control_music_sources(tail)
+        return _control_music_sources(tail, context)
     except Exception as exc:  # noqa: BLE001 — never raise from chat
         return f"Music sources hit an error ({exc})."
 
 
-def _control_music_sources(tail: str) -> str:
+def _control_music_sources(tail: str, context: Any = None) -> str:
     from . import play as play_mod
     from . import registry as reg
 
@@ -65,9 +65,9 @@ def _control_music_sources(tail: str) -> str:
     if verb == "enrich":
         return _enrich(rest)
     if verb == "health":
-        return _health(rest)
+        return _health(rest, context)
     if verb in ("registry-play", "play"):
-        return _registry_play(play_mod, rest)
+        return _registry_play(play_mod, rest, context)
     return MUSIC_SOURCES_USAGE()
 
 
@@ -142,7 +142,7 @@ def _enrich(query: str) -> str:
     )
 
 
-def _health(rest: str) -> str:
+def _health(rest: str, context: Any = None) -> str:
     from .health import HealthProber
     from .registry import by_id
 
@@ -152,11 +152,26 @@ def _health(rest: str) -> str:
         if source is None:
             return f"unknown source {rest.split()[0]!r}."
         status = prober.probe(source, force=True)
-        return (
-            f"🎵 health {source.id}: {status.status}\n"
-            f"  detail: {status.detail}\n"
-            f"  next check in ~{status.next_due_hours}h (volatility-driven)"
-        )
+        lines = [
+            f"🎵 health {source.id}: {status.status}",
+            f"  detail: {status.detail}",
+            f"  next check in ~{status.next_due_hours}h (volatility-driven)",
+        ]
+        # AA-57: the ONE registry's persisted health for this row,
+        # when a registry is in reach — the health playback obeys.
+        from . import registry_bridge
+        reg = registry_bridge.music_registry_for_context(context)
+        if reg is not None:
+            registry_bridge.ensure_music_sources(reg)
+            view = registry_bridge.source_health(reg, source.id)
+            if view is not None:
+                stats = view["stats"]
+                lines.append(
+                    f"  source registry: {view['health']} "
+                    f"(score {view['score']:.2f}, served "
+                    f"{stats.get('ok', 0)}, failed "
+                    f"{stats.get('fail', 0)}) — playback consults this")
+        return "\n".join(lines)
     results = prober.probe_all(force=True)
     ups = sum(1 for r in results if r.status == "up")
     downs = sum(1 for r in results if r.status == "down")
@@ -168,7 +183,7 @@ def _health(rest: str) -> str:
     )
 
 
-def _registry_play(play_mod: Any, rest: str) -> str:
+def _registry_play(play_mod: Any, rest: str, context: Any = None) -> str:
     if not rest:
         return "usage: /music registry-play <query> [--source <id>]"
     source_id = None
@@ -177,5 +192,10 @@ def _registry_play(play_mod: Any, rest: str) -> str:
         query, _, source_id = rest.partition("--source")
         query = query.strip()
         source_id = (source_id.strip().split() or [None])[0]
-    result = play_mod.play_via_registry(query, source_id=source_id)
+    # AA-57: play selection consults the ONE registry's persisted
+    # health when a registry is in reach (db-carrying context).
+    from . import registry_bridge
+    reg = registry_bridge.music_registry_for_context(context)
+    result = play_mod.play_via_registry(query, source_id=source_id,
+                                        registry=reg)
     return play_mod.registry_play_text(result)

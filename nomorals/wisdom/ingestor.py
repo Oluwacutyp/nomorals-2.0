@@ -43,10 +43,15 @@ shared ``DEFAULT_REGISTRY`` when the context carries a database):
   the same way.  Candidates serve nothing until the health loop
   promotes them; a promoted archive serves through the generic
   ingest fetch path itself (:meth:`fetch_bytes` is host-agnostic),
-  its outcomes credited like any seed's.  There is no generic
-  archive-*search* shape (nothing like the film chain's WordPress
-  shape exists for archives), so grown sources do not join
-  :meth:`search` — named absence, not invention;
+  its outcomes credited like any seed's.  Pass #94 found no
+  generic archive-*search* shape, so grown sources did not join
+  :meth:`search` — named absence, not invention.  AA-59
+  (assembly audit) closes it: the generic shapes DO exist — the
+  MediaWiki API search (Wikisource's own shape, generalized) and
+  the archive.org advancedsearch shape — and
+  :class:`DiscoveredArchiveSource` serves promoted archives
+  through them, appended after the seed backends in the default
+  hunt, mirroring how ``DiscoveredBlogSource`` serves music;
 * :meth:`fetch_bytes` credits the fetched host's descriptor
   (served, or the classified failure) when the registry knows the
   host — cache hits fetch nothing and earn nothing;
@@ -506,6 +511,37 @@ class ArchiveIngestor:
                     break
             if len(merged) >= max_results:
                 break
+        # AA-59: grown archives join the DEFAULT hunt, appended
+        # after the seed backends — an explicit ``sources`` order is
+        # the caller's instruction and stays seed-only, exactly as
+        # the learned reorder above respects it.
+        if sources is None and reg is not None \
+                and len(merged) < max_results:
+            for grown in _grown_wisdom_backends(reg):
+                if len(merged) >= max_results:
+                    break
+                t0 = time.perf_counter()
+                try:
+                    found = grown.search(
+                        self._http, query, tradition, max_results,
+                        robots=self._robots)
+                except IngestError as exc:
+                    failures.append(f"{grown.name}: {exc}")
+                    _log.debug("wisdom grown backend %s failed: %s",
+                               grown.name, exc)
+                    _record_wisdom_grown(reg, grown, [],
+                                         time.perf_counter() - t0, exc)
+                    continue
+                _record_wisdom_grown(reg, grown, found,
+                                     time.perf_counter() - t0, None)
+                for cand in found:
+                    url = str(cand.get("url") or "")
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        cand.setdefault("source", grown.name)
+                        merged.append(cand)
+                    if len(merged) >= max_results:
+                        break
         if not merged:
             raise IngestError(
                 query, "every search backend failed: "
@@ -854,6 +890,182 @@ def _record_wisdom_fetch(reg: Any, url: str, data: bytes | None,
         elif data:
             reg.note_candidate(url, via="wisdom-ingest-fetch",
                                kinds=(WISDOM_KIND,))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+class DiscoveredArchiveSource:
+    """A wisdom archive DISCOVERED on the hunt/fetch path, promoted
+    by the source registry's health loop (AA-59, open-sources law).
+
+    Mirrors ``media/sources.py``'s ``DiscoveredBlogSource`` (the
+    music class's generic grown shape): a promoted host becomes
+    searchable through the generic archive shapes public archives
+    actually speak — the MediaWiki API search (Wikisource's own
+    shape, generalized to any MediaWiki host) first, then the
+    archive.org advancedsearch shape.  A host speaking neither
+    simply returns the failure / no-result the hunt records, and
+    the registry's health machinery stands it down or sheds it —
+    honestly, on evidence.  Robots posture matches the seed
+    archive backend: a published denial is a wall, never bypassed.
+    """
+
+    def __init__(self, domain: str) -> None:
+        host = (domain or "").strip().lower()
+        if host.startswith("www."):
+            host = host[4:]
+        self.domain = host
+        self.name = f"grown:{host}"
+        self._base = f"https://{host}"
+
+    def search(self, http: Any, query: str, tradition: str,
+               max_results: int, *, robots: Any = None
+               ) -> list[dict[str, Any]]:
+        """Search this archive through the generic shapes.
+
+        Raises :class:`IngestError` when the host answers neither
+        shape (transport failure, non-JSON, robots denial) — the
+        hunt records it as this backend's failure, exactly like a
+        seed backend's.  A shape that ANSWERS with zero hits is a
+        genuine answer: its (empty) result stands, no second shape
+        is tried."""
+        terms = f"{query} {tradition}".strip()
+        # ── shape 1: MediaWiki API search ──
+        params = {
+            "action": "query", "list": "search", "srsearch": terms,
+            "srlimit": str(max_results), "srnamespace": "0",
+            "format": "json",
+        }
+        url = f"{self._base}/w/api.php?{urllib.parse.urlencode(params)}"
+        payload = self._fetch_json(http, url, robots, IngestError)
+        hits = ((payload or {}).get("query") or {}).get("search")
+        if isinstance(hits, list):
+            results: list[dict[str, Any]] = []
+            for hit in hits[:max_results]:
+                title = str(hit.get("title") or "").strip()
+                if not title:
+                    continue
+                page = urllib.parse.quote(title.replace(" ", "_"))
+                snippet = re.sub(r"(?s)<[^>]*>", " ",
+                                 str(hit.get("snippet") or "")).strip()
+                results.append({
+                    "identifier": f"{self.domain}:{title}",
+                    "title": title,
+                    "url": f"{self._base}/wiki/{page}",
+                    "description": snippet[:300],
+                    "edition": f"Discovered archive ({self.domain})",
+                })
+            return results
+        # ── shape 2: archive.org advancedsearch ──
+        terms_q = query.strip()
+        if " " in terms_q and not (
+                terms_q.startswith('"') and terms_q.endswith('"')):
+            terms_q = f'"{terms_q}"'
+        if tradition:
+            terms_q = f"{terms_q} AND {tradition}"
+        params2 = {
+            "q": f"({terms_q}) AND mediatype:texts",
+            "fl[]": list(_SEARCH_FIELDS),
+            "rows": str(max_results),
+            "output": "json",
+        }
+        url2 = (f"{self._base}/advancedsearch.php?"
+                f"{urllib.parse.urlencode(params2, doseq=True)}")
+        payload2 = self._fetch_json(http, url2, robots, IngestError)
+        docs = ((payload2 or {}).get("response") or {}).get("docs")
+        if isinstance(docs, list):
+            results = []
+            for doc in docs:
+                identifier = str(doc.get("identifier") or "").strip()
+                if not identifier:
+                    continue
+                results.append({
+                    "identifier": identifier,
+                    "title": str(doc.get("title") or identifier),
+                    "url": f"{self._base}/details/{identifier}",
+                    "description": str(doc.get("description") or ""),
+                    "edition": f"Discovered archive ({self.domain})",
+                })
+                if len(results) >= max_results:
+                    break
+            return results
+        raise IngestError(
+            url, f"{self.domain} answers neither the MediaWiki nor "
+                 "the advancedsearch shape")
+
+    @staticmethod
+    def _fetch_json(http: Any, url: str, robots: Any,
+                    error_cls: Any) -> Any:
+        """One robots-checked JSON fetch for a grown archive shape.
+        A non-JSON answer returns None (the caller tries the next
+        shape); transport failure and robots denial raise."""
+        if robots is not None \
+                and not robots.allowed(url, _USER_AGENT, http):
+            raise error_cls(url, "robots.txt disallows this search")
+        try:
+            response = http.get(url)
+            return json.loads(response.text)
+        except error_cls:
+            raise
+        except ValueError:
+            return None  # answered, but not as JSON — not this shape
+        except Exception as exc:  # noqa: BLE001 - transport is failure
+            raise error_cls(
+                url, f"discovered archive search failed: {exc}"
+            ) from exc
+
+
+def _grown_wisdom_backends(reg: Any) -> list[DiscoveredArchiveSource]:
+    """The grown wisdom archives (AA-59): registry sources the
+    health loop promoted from wisdom candidates (origin ``grown``,
+    kind :data:`WISDOM_KIND`), as generic-shape search backends.
+    Active archives first in learned-score order, stood-down /
+    disabled last (the #94 demote-never-drop discipline).  Never
+    raises."""
+    try:
+        if reg is None:
+            return []
+        descs = [d for d in reg.by_kind(WISDOM_KIND)
+                 if reg.origin_for(d) == "grown"]
+        active = [d for d in descs if reg.is_active(d)]
+        inactive = [d for d in descs if not reg.is_active(d)]
+        active.sort(key=lambda d: -reg.score(d))
+        return [DiscoveredArchiveSource(d.domain)
+                for d in active + inactive]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _record_wisdom_grown(reg: Any, grown: DiscoveredArchiveSource,
+                         results: list[dict[str, Any]],
+                         latency_s: float,
+                         exc: BaseException | None) -> None:
+    """Credit/blame one grown archive's hunt attempt (AA-59) —
+    :func:`_record_wisdom_search`'s contract, resolved by the
+    grown host's own descriptor.  On a serve, foreign hosts among
+    the results intake as candidates, exactly as on the seed path.
+    Best-effort; never raises."""
+    try:
+        if reg is None:
+            return
+        desc = reg.for_domain(grown.domain)
+        if desc is None:
+            return
+        if exc is not None:
+            kind, error_class = _wisdom_error_evidence(exc)
+            _apply_wisdom_evidence(reg, desc, kind, error_class,
+                                   latency_s)
+            return
+        if results:
+            _apply_wisdom_evidence(reg, desc, "served", "", latency_s)
+            for cand in results:
+                url = str(cand.get("url") or "")
+                if url:
+                    reg.note_candidate(
+                        url, via="wisdom-grown-result",
+                        kinds=(WISDOM_KIND,))
+            return
+        _apply_wisdom_evidence(reg, desc, "no_result", "", latency_s)
     except Exception:  # noqa: BLE001
         pass
 

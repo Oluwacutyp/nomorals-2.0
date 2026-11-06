@@ -305,16 +305,14 @@ class ResearchOrgan:
 
     def weak_sources(self, min_runs: int = 3,
                      threshold: float = 0.25) -> list[dict[str, Any]]:
-        rows = self.db.query(
-            "SELECT domain, runs, worth_runs FROM source_quality"
-            " WHERE runs >= ? ORDER BY runs DESC", (min_runs,))
-        out = []
-        for r in rows or []:
-            score = float(r["worth_runs"]) / float(r["runs"])
-            if score < threshold:
-                out.append({"domain": r["domain"], "runs": r["runs"],
-                            "worth_rate": round(score, 3)})
-        return out
+        """Domains the evidence has proven weak — the canonical
+        computation lives in :func:`pipeline.weak_domains` (AA-61),
+        which :func:`pipeline.run_job` also consumes for finding
+        ranking and depth-fetch selection, so this report and the
+        run path can never disagree."""
+        from .pipeline import weak_domains
+        return list(weak_domains(self.db, min_runs=min_runs,
+                                 threshold=threshold).values())
 
     # ── the autonomous tick ──────────────────────────────────────────
 
@@ -387,7 +385,8 @@ class ResearchOrgan:
         result = self._run_one_watch(watch, report, time.time())
         return {"watch_id": watch_id, "findings": result["findings"],
                 "delivered": result["delivered"],
-                "status": result["status"]}
+                "status": result["status"],
+                "weak_sources": result.get("weak_sources", [])}
 
     def _run_one_watch(self, watch: dict[str, Any],
                        report: OrganTickReport, now: float) -> dict[str, Any]:
@@ -437,7 +436,10 @@ class ResearchOrgan:
             " last_status = excluded.last_status",
             (watch["id"], now, status))
         return {"findings": len(findings), "delivered": delivered,
-                "status": status}
+                "status": status,
+                # AA-61: the weak-source set the run consumed,
+                # surfaced on the run's own output.
+                "weak_sources": self.weak_sources()}
 
     def _run_due_watches(self, report: OrganTickReport, now: float) -> None:
         for watch in self.list_watches():

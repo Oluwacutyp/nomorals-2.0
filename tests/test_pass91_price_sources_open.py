@@ -178,9 +178,12 @@ def test_roster_and_status_surface_cover_every_provider():
         assert rows[src]["keyed"] is True
     assert rows["binance"]["tier"] == 1
     assert rows["gold_api"]["tier"] == 3
-    # discovery verdict, surfaced honestly — no candidate intake
+    # discovery verdict, surfaced honestly — at pass #91 there was
+    # no candidate intake; AA-56 (assembly audit) later built the
+    # provider-catalog discovery channel.  Day one still has zero
+    # PENDING candidates, and the surface now names the channel.
     assert st["price_sources"]["candidates_pending"] == 0
-    assert "no candidate" in st["price_sources"]["discovery"]
+    assert "catalog" in st["price_sources"]["discovery"]
 
 
 # ── (2) day-one pin: zero learned state → today's order ───────────────

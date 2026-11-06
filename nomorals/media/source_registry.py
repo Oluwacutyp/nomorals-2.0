@@ -131,6 +131,14 @@ content is DATA, never instructions.  This module is that layer:
   this class: NO genuine discovery channel exists in code (search
   result hosts are content sources, not engines), so the class
   ships with no candidate intake — named absence, not invention.
+  (AA-54, assembly audit: a genuine ENGINE channel was later
+  found and built — the public SearXNG instance directory at
+  searx.space; ``tools/web.py``'s ``discover_search_engines``
+  intakes listed instances as candidates carrying the standard
+  SearXNG template, this loop probes them through it, and
+  promoted instances join both the scrape chain and the
+  federated backend's instance list.  Result hosts remain
+  content, never engines.)
   :meth:`SourceRegistry.status` carries the class under
   ``web_search``, and the ONE health loop / health job covers it.
 * Image class goes open (Pass #92) — the reverse image search
@@ -168,6 +176,11 @@ content is DATA, never instructions.  This module is that layer:
   CONTENT, not engines — a host holding a matching picture
   cannot be queried BY picture), so the class ships with no
   candidate intake — named absence, not invention.
+  (AA-58, assembly audit: the channel that DOES exist for
+  engines was later built — a catalog/manual candidate channel
+  in ``tools/imagedb.py`` for engines with a URL-template
+  shape; promoted engines join the scrape roster through the
+  generic result-page shape.)
   :meth:`SourceRegistry.status` carries the class under
   ``images``, and the ONE health loop / health job covers it.
 * Film class goes open (Pass #93) — the film/video search chain
@@ -242,6 +255,11 @@ content is DATA, never instructions.  This module is that layer:
   (``ArchiveIngestor.fetch_bytes`` is host-agnostic) — there
   is no generic archive-SEARCH shape, so grown sources do not
   join the hunt's backend list: named absence, not invention.
+  (AA-59, assembly audit: the generic shapes were later built
+  — the MediaWiki API search and the advancedsearch shape —
+  and ``wisdom/ingestor.py``'s ``DiscoveredArchiveSource``
+  now serves promoted archives through them, appended after
+  the seed backends in the default hunt.)
   :meth:`SourceRegistry.status` carries the class under
   ``wisdom``, and the ONE health loop / health job covers it.
 * Betting class joins the loop (Pass 8, directed) — the betting
@@ -1670,6 +1688,19 @@ class SourceRegistry:
             "status": "unknown", "consecutive_failures": 0,
             "fail_count": 0, "last_checked": 0.0, "last_ok": 0.0,
             "last_error": ""})
+        if ":" in (desc.domain or ""):
+            # A synthetic descriptor (AA-57: the legal-music rows
+            # register under "music-source:<id>" — a service, not a
+            # fetch host): there is NO URL to probe, so no probe
+            # verdict is honest.  The descriptor is unverifiable by
+            # probe; its truth is judged by real outcomes only —
+            # the keyed-API posture, generalized.
+            entry["last_checked"] = now
+            entry["status"] = "unverifiable"
+            entry["detail"] = (
+                "synthetic descriptor — no probe URL; judged by "
+                "real outcomes")
+            return "unverifiable"
         url = f"https://{desc.domain}/"
         # Honest probes for the web-search class (Pass #90): a
         # keyless engine is probed through its REAL search endpoint
@@ -2082,10 +2113,14 @@ class SourceRegistry:
                     "grown": grown,
                     "candidates_pending": image_candidates,
                     "discovery": (
-                        "no candidate channel exists for reverse "
-                        "image engines (result hosts are image "
-                        "content, not engines) — outcomes/health "
-                        "only, by design")}
+                        "catalog/manual candidate channel (AA-58): "
+                        "reverse engines with a URL-template shape "
+                        "intake via tools/imagedb.py "
+                        "note_reverse_image_candidate (catalog: "
+                        "IQDB / SauceNAO / ascii2d) and promote "
+                        "through this health loop into the scrape "
+                        "roster; result hosts are still image "
+                        "content, never engines")}
         except Exception as e:  # noqa: BLE001
             record_failure("SourceRegistry.image_status", e)
             return {"engines": [], "link_only": [], "grown": [],
@@ -2785,6 +2820,24 @@ def _seed(store: Any = None) -> SourceRegistry:
             licence=Licence.LICENSED, trust_tier=TrustTier.COMMUNITY,
             rate_limit_per_min=10, notes=notes,
             search_url_template=template))
+    # AA-62: the sources/health_plus.py descriptors are registry
+    # seeds — punchng.com and audiomack.com were already seeded
+    # above (identical keys; first-wins keeps one row per source);
+    # the three that existed ONLY as health_plus dicts join here,
+    # with the kinds health_plus declares for them.
+    for nation, language, domain, name, kinds, notes in (
+            ("US", "en", "techcrunch.com", "TechCrunch",
+             ("news", "tech"), "Global tech news."),
+            ("US", "en", "espn.com", "ESPN",
+             ("news", "sports"), "Global sports coverage."),
+            ("NG", "yo", "yorubaculture.example", "Yoruba Culture",
+             ("culture",),
+             "Yoruba-language culture pack — one language pack "
+             "among N.")):
+        reg.register(SourceDescriptor(
+            nation=nation, language=language, domain=domain, name=name,
+            kinds=kinds, licence=Licence.LICENSED,
+            trust_tier=TrustTier.COMMUNITY, notes=notes))
     # Everything the seed loop registered is a SEED (origin + floor
     # set); anything the store restored before seeding keeps the
     # origin it was persisted with.

@@ -34,6 +34,17 @@
   honestly: nothing is pushed, scores stay NULL, and ``status()``
   reports interest ``unavailable`` — scores are never fabricated.
 
+AA-55 (assembly audit, open-sources law): the feed list grows.
+Publisher hosts encountered in fetched items (an item's ``<source>``
+publisher URL, else the item's own host — aggregator pages surface
+their publishers exactly this way) intake as untrusted candidates
+in the ONE media source registry (kinds ``("news",)``); the shared
+health loop promotes live hosts, and promoted feeds join
+:meth:`NewsAgent._feeds` alongside the seeds through the generic
+``https://<host>/feed/`` shape, their poll outcomes recorded back
+into the registry so dead growth is stood down and shed by the
+same loop.
+
 Every feed URL was live-fetched and classified 2026-10-18 (see
 ``docs/source-verification-2026-10-18.md``): 9 dead feeds removed
 (404 / 200-but-HTML), 7 verified-live replacements added. Feeds that
@@ -517,6 +528,91 @@ def _ensure_delivery_columns(db: Any) -> None:
         pass
 
 
+def news_registry_for_context(context: Any = None,
+                              injected: Any = None) -> Any:
+    """The source registry news growth lands in, or None.
+
+    Mirrors the #88–#94 resolver exactly: an injected registry wins;
+    otherwise the shared ``DEFAULT_REGISTRY`` bound to the context's
+    KV store — and only when the context carries a database, so
+    db-less callers keep the pre-AA-55 behaviour exactly.  Never
+    raises."""
+    if injected is not None:
+        return injected
+    try:
+        db = getattr(context, "db", None) if context is not None else None
+        if db is None:
+            return None
+        from ..media.source_registry import DEFAULT_REGISTRY
+        reg = DEFAULT_REGISTRY
+        try:
+            from ..storage.kv import KVStore
+            reg.bind_store(KVStore(db))
+        except Exception:  # noqa: BLE001 - persistence is an
+            # enhancement; its absence never sinks a poll
+            pass
+        return reg
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _grown_news_feeds(reg: Any) -> list[tuple[str, str]]:
+    """Feeds the registry health loop grew into the news class
+    (AA-55): promoted candidates (origin ``grown``, kind ``news``)
+    served through the generic feed shape — ``https://<host>/feed/``,
+    the WordPress/RSS shape most publisher hosts answer (the
+    DiscoveredBlogSource bargain: a host that does not serve it
+    records failures on the real path and is stood down / shed by
+    the same machinery that promoted it).  Never raises."""
+    try:
+        if reg is None:
+            return []
+        out: list[tuple[str, str]] = []
+        for desc in reg.by_kind("news"):
+            if reg.origin_for(desc) != "grown":
+                continue
+            out.append((str(desc.name or desc.domain),
+                        f"https://{desc.domain}/feed/"))
+        return sorted(out, key=lambda t: t[1])
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _note_news_hosts(reg: Any, items: list[dict[str, Any]],
+                     seen: set[str]) -> int:
+    """Discovery intake for one poll (AA-55): publisher hosts from
+    fetched items (the item's ``<source>`` publisher URL first, the
+    item's own host second — aggregator pages surface their
+    publishers exactly this way) become UNTRUSTED registry
+    candidates, kinds ``("news",)``.  ``seen`` dedupes within the
+    poll so each host is noted at most once per run.  Returns the
+    number of NEW candidates noted.  Best-effort; never raises."""
+    noted = 0
+    try:
+        if reg is None:
+            return 0
+        for item in items:
+            # ONE intake per item: the publisher host (the item's
+            # <source> URL) wins; the item's own host is only the
+            # fallback when no publisher is named.  A host already
+            # seen this poll ends the item — its other URL is the
+            # aggregator's, not a new publisher.
+            host = ""
+            for raw in (item.get("source_url"), item.get("url")):
+                host = reg._host_of(str(raw or ""))
+                if host:
+                    break
+            if not host or "." not in host or host in seen:
+                continue
+            seen.add(host)
+            if reg.note_candidate(
+                    host, via="news-item", kinds=("news",)):
+                noted += 1
+        return noted
+    except Exception:  # noqa: BLE001
+        return noted
+
+
 def publisher_of(item: dict[str, Any]) -> str:
     """The truthful display attribution for a news item or stored row.
 
@@ -536,10 +632,15 @@ def publisher_of(item: dict[str, Any]) -> str:
 class NewsAgent:
     """Fetches feeds, dedupes, summarizes, and delivers a digest."""
 
-    def __init__(self, context: Any, notifier: Any = None) -> None:
+    def __init__(self, context: Any, notifier: Any = None, *,
+                 registry: Any = None) -> None:
         self.context = context
         self.settings = getattr(context, "settings", None)
         self.db = getattr(context, "db", None)
+        # AA-55: the ONE source registry — news discovery intake and
+        # grown feeds resolve through it (None = db-less context =
+        # seed behaviour exactly).
+        self._registry = news_registry_for_context(context, registry)
         _ensure_attribution_columns(self.db)
         _ensure_delivery_columns(self.db)
         self.notifier = notifier
@@ -564,8 +665,23 @@ class NewsAgent:
                 part = part.strip()
                 if part.startswith("http"):
                     out.append((part.split("/")[-2] or part, part))
-            return out or list(DEFAULT_FEEDS)
-        return list(DEFAULT_FEEDS)
+            base = out or list(DEFAULT_FEEDS)
+        else:
+            base = list(DEFAULT_FEEDS)
+        # AA-55: health-promoted grown feeds join alongside the
+        # seeds (and alongside an owner-configured list) — growth
+        # is additive, never a replacement.
+        have = {url for _name, url in base}
+        for name, url in _grown_news_feeds(self._registry):
+            if url not in have:
+                base.append((name, url))
+                have.add(url)
+        return base
+
+    def _grown_feed_urls(self) -> set[str]:
+        """URLs in the current feed list that came from registry
+        growth (their poll outcomes land back in the registry)."""
+        return {url for _name, url in _grown_news_feeds(self._registry)}
 
     def _model_summaries(self, items: list[dict[str, str]]) -> dict[str, str]:
         router = getattr(self.context, "router", None)
@@ -617,6 +733,12 @@ class NewsAgent:
         sources_ok: list[str] = []
         stood_down: list[str] = []
         feeds = self._feeds()
+        # AA-55: grown feeds' outcomes land back in the source
+        # registry (the loop that promoted them also sheds them),
+        # and publisher hosts in fetched items intake as candidates.
+        grown_urls = self._grown_feed_urls()
+        seen_hosts: set[str] = set()
+        candidates_noted = 0
         # Circuit breaker: a feed the health table has stood down (or
         # disabled) is skipped, not retried forever — the scheduled
         # SourceHealth re-verification re-activates it on recovery.
@@ -649,6 +771,8 @@ class NewsAgent:
                 if health is not None:
                     health.note_result(spec, ok=False,
                                        error=str(exc)[:200])
+                if url in grown_urls:
+                    self._record_grown_outcome(url, "failure")
                 continue
             if not items:
                 # HTTP 200 but zero usable items: unusable as a source —
@@ -657,14 +781,20 @@ class NewsAgent:
                 if health is not None:
                     health.note_result(spec, ok=False,
                                        error="zero usable items", http=200)
+                if url in grown_urls:
+                    self._record_grown_outcome(url, "no_result")
             elif health is not None:
                 health.note_result(spec, ok=True, items=len(items),
                                    http=200)
+            if items and url in grown_urls:
+                self._record_grown_outcome(url, "served")
             sources_ok.append(source)
             per_source[source] = len(items)
             for it in items:
                 it["source"] = source
                 fetched.append(it)
+            candidates_noted += _note_news_hosts(
+                self._registry, items, seen_hosts)
 
         # Dedupe by URL AND by normalized title — the same story carried
         # by 6 outlets must not flood the digest as 6 "different" items.
@@ -759,9 +889,34 @@ class NewsAgent:
             "sources_ok": sources_ok,
             "per_source": per_source,
             "stood_down": stood_down,
+            # AA-55: growth on the real path, reported not hidden.
+            "grown_feeds": len(grown_urls),
+            "candidates_noted": candidates_noted,
             **tiers,
             "held": held,
         }
+
+    def _record_grown_outcome(self, feed_url: str, kind: str) -> None:
+        """Land one grown feed's poll outcome in the source
+        registry (AA-55): served / no_result / failure, mirroring
+        the vocabulary the registry's health loop sheds by.
+        Best-effort; never raises."""
+        try:
+            reg = self._registry
+            if reg is None:
+                return
+            desc = reg.for_domain(reg._host_of(feed_url))
+            if desc is None:
+                return
+            if kind == "served":
+                reg.record_outcome(desc, True)
+            elif kind == "no_result":
+                reg.record_no_result(desc)
+            else:
+                reg.record_outcome(desc, False,
+                                   error_class="feed_failed")
+        except Exception as exc:  # noqa: BLE001
+            record_failure("news.grown_outcome", exc)
 
     def _store_fresh(self, fresh: list[dict[str, str]]) -> list[dict[str, Any]]:
         """Persist fresh items as UNDELIVERED; return their row dicts.
@@ -1336,7 +1491,7 @@ class NewsAgent:
         profile = self.interest_profile()
         interest = self._interest_state or (
             "ok" if self._brain_available() else "unavailable")
-        return {
+        out = {
             "stored": sum(counts.values()),
             "by_state": counts,
             "undelivered": counts.get(STATE_UNDELIVERED, 0),
@@ -1348,6 +1503,18 @@ class NewsAgent:
             "beats": [b["topic"] for b in profile["beats"]],
             "pins": profile["pins"],
         }
+        # AA-55: the growth surface — grown feeds in rotation and
+        # candidates awaiting the health loop's verdict.
+        if self._registry is not None:
+            try:
+                out["grown_feeds"] = len(
+                    _grown_news_feeds(self._registry))
+                out["news_candidates_pending"] = sum(
+                    1 for d in self._registry.candidates()
+                    if "news" in d.kinds)
+            except Exception:  # noqa: BLE001 - status never breaks
+                pass
+        return out
 
     # ── one digest cycle (compatibility composition) ─────────────────────
     def run(self, cap: int | None = None) -> dict[str, Any]:

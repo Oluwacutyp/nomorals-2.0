@@ -4,6 +4,18 @@ Skip-list correction: source-health is NOT a gate on adding sources —
 health ships as part of adding them. This module adds 5 new source
 descriptors and the health layer in one file.
 
+AA-62 (assembly audit): the 5 descriptors are media-registry SEEDS
+(``media/source_registry.py`` — punchng.com and audiomack.com were
+already seeded there under identical keys; techcrunch.com,
+espn.com and yorubaculture.example joined the seed list so all
+five resolve through the ONE registry), and :class:`SourceHealth`
+DELEGATES to that registry's persisted health whenever one is
+injected (``SourceHealth(registry=…)``): recorded probes land in
+the registry as outcomes, and ``success_rate`` / ``is_healthy`` /
+``fallback_chain`` prefer the registry's truth for sources it
+knows.  Unbound, the class keeps its in-memory behaviour exactly.
+This module stays L0: the registry is duck-typed, never imported.
+
 The 5 new sources (descriptors are data; fetching stays with the
 existing polite-fetch / registry machinery):
 
@@ -89,14 +101,63 @@ class SourceProbeResult:
 
 @dataclass
 class SourceHealth:
-    """Per-source health: probe outcomes, success rates, fallback chains."""
+    """Per-source health: probe outcomes, success rates, fallback chains.
+
+    AA-62: when ``registry`` (the ONE media source registry,
+    duck-typed) is injected, this class CONSOLIDATES onto it —
+    records mirror into the registry as outcomes and reads prefer
+    the registry's persisted health for sources it knows.  The
+    in-memory history is kept either way (it is this class's own
+    contract and its tests' surface)."""
     max_history: int = 200
     history: dict[str, list[SourceProbeResult]] = field(default_factory=dict)
+    registry: Any = field(default=None, repr=False, compare=False)
+
+    def _desc(self, source: str) -> Any:
+        """The registry descriptor for ``source`` (a domain), or
+        None — unbound, unknown, or the registry hiccuped."""
+        if self.registry is None:
+            return None
+        try:
+            return self.registry.for_domain(source)
+        except Exception:  # noqa: BLE001 - delegation never breaks
+            return None
+
+    def _registry_rate(self, source: str) -> float | None:
+        """The registry's success rate for ``source`` when it has
+        recorded attempts, else None."""
+        desc = self._desc(source)
+        if desc is None:
+            return None
+        try:
+            stats = self.registry.stats_for(desc)
+            total = int(stats.get("ok", 0)) + int(stats.get("fail", 0)) \
+                + int(stats.get("blocked", 0)) \
+                + int(stats.get("rate_limited", 0)) \
+                + int(stats.get("no_result", 0))
+            if total <= 0:
+                return None
+            return float(stats.get("success_rate", 0.0))
+        except Exception:  # noqa: BLE001
+            return None
 
     def record(self, result: SourceProbeResult) -> None:
         hist = self.history.setdefault(result.source, [])
         hist.append(result)
         self.history[result.source] = hist[-self.max_history:]
+        # AA-62: the same outcome lands in the ONE registry, judged
+        # by its persisted health machinery from then on.
+        desc = self._desc(result.source)
+        if desc is not None:
+            try:
+                self.registry.record_outcome(
+                    desc, bool(result.ok),
+                    latency_s=float(result.latency_s or 0.0),
+                    error_class="" if result.ok else "probe_failed")
+            except Exception:  # noqa: BLE001 - delegation never
+                # breaks the local record; the mirror is retried on
+                # the next probe
+                self._registry_mirror_failed = True
 
     def probe(self, source: str,
               probe_fn: Callable[[str], tuple[bool, float]]) -> SourceProbeResult:
@@ -119,6 +180,11 @@ class SourceHealth:
         return result
 
     def success_rate(self, source: str) -> float | None:
+        # AA-62: the registry's persisted rate wins when it has
+        # evidence for this source — one health truth, not two.
+        rate = self._registry_rate(source)
+        if rate is not None:
+            return rate
         hist = self.history.get(source) or []
         if not hist:
             return None
@@ -145,6 +211,17 @@ class SourceHealth:
         return last is None or (now - last) > max_age_s
 
     def is_healthy(self, source: str, *, min_rate: float = 0.5) -> bool:
+        # AA-62: a registry-known source is healthy when the
+        # registry still ACTIVELY serves it and its persisted rate
+        # clears the bar — the registry's stand-down/dead states
+        # are verdicts this class no longer keeps a second copy of.
+        desc = self._desc(source)
+        if desc is not None and self._registry_rate(source) is not None:
+            try:
+                return bool(self.registry.is_active(desc)) \
+                    and (self.success_rate(source) or 0.0) >= min_rate
+            except Exception:  # noqa: BLE001 - fall through to local
+                pass
         rate = self.success_rate(source)
         return rate is not None and rate >= min_rate and not self.is_stale(source)
 
@@ -153,8 +230,19 @@ class SourceHealth:
 
         Unknown sources (never probed) sort after known-healthy ones
         but before known-dead ones — worth trying once before giving up.
+        With a registry bound (AA-62), a candidate the registry
+        knows is ordered by the registry's own standing (active
+        first, learned score as the rate) — one ordering truth.
         """
         def key(source: str) -> tuple[int, float, float]:
+            desc = self._desc(source)
+            if desc is not None:
+                try:
+                    active = bool(self.registry.is_active(desc))
+                    score = float(self.registry.score(desc))
+                    return (0 if active else 2, -score, 0.0)
+                except Exception:  # noqa: BLE001 - fall through
+                    pass
             rate = self.success_rate(source)
             latency = self.avg_latency(source)
             if rate is None:
@@ -166,9 +254,16 @@ class SourceHealth:
         rows = []
         for source in sorted(self.history):
             hist = self.history[source]
-            rows.append({"source": source, "probes": len(hist),
-                         "success_rate": self.success_rate(source),
-                         "avg_latency_s": self.avg_latency(source),
-                         "stale": self.is_stale(source),
-                         "healthy": self.is_healthy(source)})
+            row = {"source": source, "probes": len(hist),
+                   "success_rate": self.success_rate(source),
+                   "avg_latency_s": self.avg_latency(source),
+                   "stale": self.is_stale(source),
+                   "healthy": self.is_healthy(source)}
+            desc = self._desc(source)
+            if desc is not None:
+                try:
+                    row["registry_health"] = self.registry.health_for(desc)
+                except Exception:  # noqa: BLE001 - reported, not hidden
+                    row["registry_health"] = "unknown"
+            rows.append(row)
         return rows

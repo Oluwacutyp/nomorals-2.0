@@ -1740,6 +1740,10 @@ class ProxyLab:
         for p in fresh:
             by_scheme[p.scheme] = by_scheme.get(p.scheme, 0) + 1
             by_anon[p.anonymity or "?"] = by_anon.get(p.anonymity or "?", 0) + 1
+        # AA-60: every refresh flows the freshly proven pool into
+        # the proxypool connector — the pool the rest of Devon
+        # rotates through — instead of leaving it lab-side.
+        pool_import = self.bridge_to_pool()
         return {
             "scraped": scraped,
             "candidates": len(candidates),
@@ -1750,10 +1754,55 @@ class ProxyLab:
             "errors": errors,
             "best": [p.to_dict() for p in fresh[:10]],
             "store": str(self.store.dir),
+            "pool_imported": pool_import.get("imported", 0),
+            "pool_import": pool_import,
             "yield_quarantined": [n for n, e in
                                   self.yield_tracker.snapshot().items()
                                   if e["quarantined"]],
         }
+
+    def _pool_connector(self) -> Any:
+        """The proxypool connector for this lab's context, or None
+        when the context carries no vault (the bridge's only genuine
+        wall — the pool's storage IS the vault).  Never raises."""
+        try:
+            vault = getattr(self.context, "vault", None)
+            if vault is None:
+                return None
+            # Dynamic reach, this module's own convention (cf. its
+            # scheduler import): tools (L4) never STATICALLY import
+            # connectors (L5) — the bridge resolves at call time.
+            import importlib
+
+            registry_mod = importlib.import_module(
+                "nomorals.connectors.registry")
+            return registry_mod.create_connector("proxypool", vault)
+        except Exception as exc:  # noqa: BLE001
+            record_failure("proxylab.pool_connector", exc)
+            return None
+
+    def bridge_to_pool(self, connector: Any = None) -> dict[str, Any]:
+        """Flow this lab's VERIFIED working pool into the proxypool
+        connector (AA-60): every alive, lab-proven proxy is imported
+        as a tier=free entry and health-tracked by the pool's own
+        machinery from then on.  Best-effort — a bridge failure is
+        reported in the summary, never raised into the lab."""
+        try:
+            conn = connector if connector is not None \
+                else self._pool_connector()
+            if conn is None:
+                return {"imported": 0, "skipped_dead": 0, "failed": 0,
+                        "ids": [],
+                        "note": "no vault in reach — pool bridge "
+                                "skipped"}
+            import importlib
+
+            pool_mod = importlib.import_module("nomorals.connectors.proxypool")
+            return pool_mod.import_lab_proxies(conn, self.store.load_working())
+        except Exception as exc:  # noqa: BLE001
+            record_failure("proxylab.bridge_to_pool", exc)
+            return {"imported": 0, "skipped_dead": 0, "failed": 0,
+                    "ids": [], "error": f"{type(exc).__name__}: {exc}"}
 
     def pool(self, **filters: Any) -> list[dict[str, Any]]:
         return [p.to_dict() for p in self.store.pool(**filters)]
@@ -2357,9 +2406,13 @@ class ProxyRotationManager:
         if needs_auth:
             return {"proxy": "",
                     "note": "the free-proxy pool holds no authenticated "
-                            "proxies — add your own via the proxypool "
-                            "connector (vault-held credentials) or "
-                            "/proxy set socks5://user:pass@host:port"}
+                            "proxies — the lab's verified pool also "
+                            "flows into the proxypool connector "
+                            "automatically on refresh (AA-60, "
+                            "tier=free); add your own via the "
+                            "proxypool connector (vault-held "
+                            "credentials) or /proxy set "
+                            "socks5://user:pass@host:port"}
         schemes: tuple[str, ...] = ()
         if needs_udp:
             schemes = ("socks5",)

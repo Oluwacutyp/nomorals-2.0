@@ -427,6 +427,66 @@ def _learned_domain_score(db: Any, url: str) -> float | None:
         return None
 
 
+def _domain_of(url: str) -> str:
+    """The source-quality domain a URL's evidence lands under —
+    the exact normalization the per-URL lookups have always used
+    (strip the leading run of 'w'/'.' characters)."""
+    try:
+        from urllib.parse import urlparse
+        return re.sub(r"^[w.]+", "", urlparse(url).netloc.lower())
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def weak_domains(db: Any, min_runs: int = 3,
+                 threshold: float = 0.25) -> dict[str, dict[str, Any]]:
+    """The CANONICAL weak-source computation (AA-61): domains whose
+    learned worth-rate sits below ``threshold`` over at least
+    ``min_runs`` assessed runs, from the ``source_quality`` table.
+
+    One implementation, every consumer: the research organ's
+    ``weak_sources()`` report delegates here, and :func:`run_job`
+    consumes the same set for finding ranking and depth-fetch
+    selection — the audit found the report had no consumer in the
+    run path; now the report and the run read the same truth.
+    Returns ``{domain: {"domain", "runs", "worth_rate"}}`` ordered
+    by runs descending.  Never raises; a missing table reads as no
+    weak domains (unseen is never penalized)."""
+    try:
+        rows = db.query(
+            "SELECT domain, runs, worth_runs FROM source_quality"
+            " WHERE runs >= ? ORDER BY runs DESC", (min_runs,))
+        out: dict[str, dict[str, Any]] = {}
+        for r in rows or []:
+            runs = int(r["runs"] or 0)
+            if not runs:
+                continue
+            score = float(r["worth_runs"] or 0) / float(runs)
+            if score < threshold:
+                out[str(r["domain"])] = {
+                    "domain": str(r["domain"]), "runs": runs,
+                    "worth_rate": round(score, 3)}
+        return out
+    except Exception:  # noqa: BLE001 - learned ranking is advisory
+        return {}
+
+
+def _domain_scores(db: Any) -> dict[str, float]:
+    """Every learned worth-rate by domain, in one query (the
+    rerank's score map).  Never raises."""
+    try:
+        rows = db.query(
+            "SELECT domain, runs, worth_runs FROM source_quality")
+        out: dict[str, float] = {}
+        for r in rows or []:
+            runs = int(r["runs"] or 0)
+            if runs:
+                out[str(r["domain"])] = float(r["worth_runs"] or 0) / runs
+        return out
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _rerank_by_learned_quality(findings: list[ResearchFinding],
                                db: Any) -> list[ResearchFinding]:
     """Demote findings from evidence-demonstrated weak domains.
@@ -435,12 +495,15 @@ def _rerank_by_learned_quality(findings: list[ResearchFinding],
     everything else keeps its relative order. Never filters — a weak
     domain can still deliver a worthy finding, it just doesn't get the
     depth-fetch slots first. Stable sort, so equal scores keep position.
+    The weak test is the canonical :func:`weak_domains` set (AA-61).
     """
+    weak = weak_domains(db)
+    scores = _domain_scores(db)
+
     def sort_key(f: ResearchFinding) -> tuple[int, float]:
-        score = _learned_domain_score(db, f.url)
-        weak = (score is not None and score < 0.25
-                and _domain_runs(db, f.url) >= 3)
-        return (1 if weak else 0, -(score or 0.0))
+        domain = _domain_of(f.url)
+        score = scores.get(domain)
+        return (1 if domain in weak else 0, -(score or 0.0))
 
     return sorted(findings, key=sort_key)
 
@@ -563,7 +626,24 @@ def run_job(job: ResearchJob, rctx: ResearchContext,
     # Depth pass: fetch full text for the top N so assessment sees more than a snippet.
     from ..core.profiles import profile_value
     _detail_chars = int(profile_value("detail_chars", 2000))
-    targets = findings[: max(0, job.fetch_top)]
+    # AA-61: the canonical weak set also governs FETCH SELECTION —
+    # weak-domain findings are depth-fetched only with slots left
+    # over after every stronger finding is served (they are never
+    # filtered from the findings themselves: a weak domain can
+    # still deliver, it just doesn't spend fetch budget first).
+    weak = weak_domains(rctx.db)
+    fetch_cap = max(0, job.fetch_top)
+    if weak and fetch_cap:
+        strong = [f for f in findings if _domain_of(f.url) not in weak]
+        demoted = [f for f in findings if _domain_of(f.url) in weak]
+        targets = (strong + demoted)[:fetch_cap]
+        if demoted:
+            _log.info("research job %s: %d finding(s) from weak "
+                      "domains (%s) fetch only with leftover slots",
+                      job.id, len(demoted),
+                      ", ".join(sorted(weak))[:200])
+    else:
+        targets = findings[:fetch_cap]
     if budget is not None:
         affordable: list[ResearchFinding] = []
         for f in targets:

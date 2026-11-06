@@ -27,6 +27,17 @@ through each proxy (stdlib urllib + ProxyHandler for HTTP(S) proxies,
 auth via the proxy URL's userinfo; manual SOCKS tunnel for SOCKS
 proxies) and records latency, outcome, and timestamp. :meth:`rotate`
 round-robins over proxies whose last recorded check was healthy.
+
+Discovery (AA-60, assembly audit — owner's open-sources law):
+the pool used to grow ONLY by hand (``add_proxy`` calls).  It now
+also receives the proxy LAB's verified working pool: ``tools/
+proxylab.py`` scrapes public proxy lists and PROVES each candidate
+with a real test; :func:`import_lab_proxies` bridges every proven
+proxy in as a ``tier="free"`` entry (the tier gate still refuses
+free proxies for credential-carrying traffic) and records the
+lab's measured success through the pool's own health machinery,
+so imported proxies live and die by the same health loop as
+hand-added ones.
 """
 
 from __future__ import annotations
@@ -58,7 +69,7 @@ from .base import (
 )
 from .registry import register_connector
 
-__all__ = ["ProxyPoolConnector", "ProxyPoolError"]
+__all__ = ["ProxyPoolConnector", "ProxyPoolError", "import_lab_proxies"]
 
 _log = get_logger(__name__)
 
@@ -1433,3 +1444,60 @@ class ProxyPoolConnector(Connector):
             view["url_with_auth"] = self._proxy_url(cred, with_auth=True)
             view["proxy_url"] = view["url_with_auth"]  # alias: hand to HttpClient etc.
         return view
+
+
+def import_lab_proxies(connector: Any, proxies: Any) -> dict[str, Any]:
+    """Bridge the proxy lab's VERIFIED working pool into this pool
+    (AA-60).
+
+    ``proxies`` are duck-typed lab rows (``tools/proxylab.py``'s
+    ``Proxy`` objects or their ``to_dict()`` form): each carries
+    host, port, scheme, country, alive and the latency the lab
+    MEASURED.  Only alive rows cross — the lab's test is the
+    evidence; a row the lab has not proven (or has proven dead)
+    stays out.  Each imported proxy lands as a ``tier="free"``
+    entry tagged ``proxylab`` and its measured success is recorded
+    through the pool's own health machinery (:meth:`record_success`),
+    so from import on, the pool's health loop owns it.  Re-imports
+    are idempotent (``add_proxy`` updates in place and preserves
+    health).  One bad row never sinks the batch.  Returns a summary
+    dict; never raises."""
+    summary: dict[str, Any] = {"imported": 0, "skipped_dead": 0,
+                               "failed": 0, "ids": []}
+    if connector is None:
+        summary["error"] = "no proxypool connector in reach"
+        return summary
+
+    def _field(row: Any, name: str, default: Any = "") -> Any:
+        if isinstance(row, dict):
+            return row.get(name, default)
+        return getattr(row, name, default)
+
+    for row in proxies or []:
+        try:
+            if not _field(row, "alive", False):
+                summary["skipped_dead"] += 1
+                continue
+            host = str(_field(row, "host") or "").strip()
+            port = _field(row, "port", 0)
+            scheme = str(_field(row, "scheme", "http") or "http")
+            if not host or not port:
+                summary["failed"] += 1
+                continue
+            stored = connector.add_proxy(
+                host, port, protocol=scheme,
+                tags=["proxylab"],
+                country=str(_field(row, "country") or ""),
+                tier="free")
+            pid = str(stored.get("id") or
+                      f"{scheme}://{host}:{int(port)}")
+            latency = _field(row, "latency_ms", 0) or None
+            connector.record_success(
+                pid, latency_ms=float(latency) if latency else None)
+            summary["imported"] += 1
+            summary["ids"].append(pid)
+        except Exception as exc:  # noqa: BLE001 - one bad row is
+            # the row's failure, never the batch's
+            _log.debug("proxypool: lab import skipped a row: %s", exc)
+            summary["failed"] += 1
+    return summary
