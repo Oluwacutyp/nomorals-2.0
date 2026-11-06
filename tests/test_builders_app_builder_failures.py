@@ -5,11 +5,19 @@ control: every rung that fails hands over to the next rung, and the
 final rung reports failure honestly (False / None) instead of
 claiming success. All four sites are held as exclusions:
 
-2252 — ``AppBuilder.remove``: stop()/stop_deploy() raising ToolError
--> pass, then the delete proceeds. ToolError from the stop paths is
-their "not running / nothing to stop" vocabulary; the result dict's
-claim is ``removed: True``, earned by the shutil.rmtree that
-actually runs. PARENT: flagged-accepted remainder (no noqa in code).
+2252 — ``AppBuilder.remove``: CONVERTED by the Pass 3 targeted
+fix. remove() now attempts a stop only for an app actually
+registered as running (the served/deployed registries are the
+"is it running" truth, so the stops' "not running" ToolError
+vocabulary is never even invoked for a stopped app), and the
+result dict carries the stop outcome: ``stopped`` plus
+``stop_errors`` naming any genuine failure (a ToolError from a
+stop that had something to stop, or a process still alive after
+the kill). ``removed: True`` remains earned by the shutil.rmtree
+that actually runs, and the delete still proceeds when a stop
+fails — but it no longer claims a clean teardown. The pin below
+now asserts the nothing-running outcome values; the genuine-
+failure halves are pinned in test_plumbing_pass3.py.
 
 2456 — ``_signal_tree``: process-group signal fails (Windows has no
 killpg, the group is gone, permissions) -> pass and fall back to
@@ -63,6 +71,10 @@ class TestRemoveStopToolError(unittest.TestCase):
             self.assertTrue(result["removed"])
             self.assertEqual(result["app"], "demo-app")
             self.assertFalse(app_dir.exists())
+            # Pass 3: the app was never registered as running, so no
+            # stop was attempted and the outcome is honestly clean.
+            self.assertTrue(result["stopped"])
+            self.assertEqual(result["stop_errors"], [])
 
     def test_remove_missing_app_raises(self):
         # Control: the swallow is scoped to the stop calls — a missing

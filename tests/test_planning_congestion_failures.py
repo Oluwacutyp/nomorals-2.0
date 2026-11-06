@@ -313,7 +313,25 @@ def _mon_res():
 
 
 def test_pin_profile_kind(monkeypatch):
+    # Converted (Pass 3): the import was ``from ...core.profiles``
+    # (three dots — escapes the package), so it raised ImportError on
+    # every call, the except path recorded congestion.profile_kind
+    # every time, and the answer fell back to the NM_PROFILE env /
+    # "workstation" — on termux without NM_PROFILE set, _full_model()
+    # therefore wrongly returned True. With the two-dot import the
+    # real consult answers (detection says "laptop" on this box) and
+    # records nothing.
+    from nomorals.core import profiles as _profiles
+
     monkeypatch.delenv("NM_PROFILE", raising=False)
+    assert cg._profile_kind() == _profiles.get_profile_kind()
+    assert _sites() == []
+    # Control: when the consult itself fails, the env fallback and
+    # the recording are still the behaviour.
+    def _boom(pinned=""):
+        raise RuntimeError("profiles down")
+
+    monkeypatch.setattr(_profiles, "get_profile_kind", _boom)
     assert cg._profile_kind() == "workstation"
     assert _sites() == ["congestion.profile_kind"]
 

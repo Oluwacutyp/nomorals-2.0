@@ -2241,18 +2241,39 @@ class AppBuilder:
                 "from": slug}
 
     def remove(self, name: str) -> dict[str, Any]:
-        """Delete a generated app (stops its server/proxy first)."""
+        """Delete a generated app (stops its server/proxy first).
+
+        The result carries the stop outcome: ``stopped`` is True only
+        when nothing was left running.  A stop that genuinely fails —
+        a ToolError from a stop that had something to stop, or a
+        process still alive after the kill — is named in
+        ``stop_errors`` instead of being swallowed while
+        ``removed: True`` claims a clean teardown (a live process
+        would otherwise keep serving from the deleted directory,
+        invisibly).  "Not running" is not an error: when the served /
+        deployed registries hold no entry for the app there is nothing
+        to stop, so the stop is not even attempted.
+        """
         slug = _slug(name)
         app_dir = self._apps_dir / slug
         if not app_dir.is_dir():
             raise ToolError(f"no app named {name!r}")
-        for fn in (self.stop, self.stop_deploy):
+        stop_errors: list[str] = []
+        for label, fn, registry in (
+                ("server", self.stop, self._served()),
+                ("deploy proxy", self.stop_deploy, self._deployed())):
+            if slug not in registry:
+                continue  # nothing running — nothing that can fail
             try:
-                fn(name)
-            except ToolError:
-                pass
+                res = fn(name)
+                if not res.get("stopped", False):
+                    stop_errors.append(
+                        f"{label} process still alive after stop")
+            except ToolError as exc:
+                stop_errors.append(f"{label} stop failed: {exc}")
         shutil.rmtree(app_dir)
-        return {"app": slug, "removed": True, "dir": str(app_dir)}
+        return {"app": slug, "removed": True, "dir": str(app_dir),
+                "stopped": not stop_errors, "stop_errors": stop_errors}
 
 
 def _dockerfile_for(stack: str, man: dict[str, Any]) -> str | None:

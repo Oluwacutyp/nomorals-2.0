@@ -764,6 +764,7 @@ class RoutePlanner:
             self._db_path = db_path or self.cost._default_path(profile)
             if self._db_path != ":memory:":
                 db = sqlite3.connect(self._db_path)
+                db.row_factory = sqlite3.Row
                 db.execute(
                     """CREATE TABLE IF NOT EXISTS route_stops (
                            stop_id TEXT PRIMARY KEY, label TEXT, lat REAL,
@@ -819,7 +820,9 @@ class RoutePlanner:
                 if self._db_path != ":memory:":
                     db = sqlite3.connect(self._db_path)
                     db.execute(
-                        "INSERT OR REPLACE INTO route_stops VALUES (?, ?, ?, ?, ?)",
+                        "INSERT OR REPLACE INTO route_stops "
+                        "(stop_id, label, lat, lng, dwell_minutes) "
+                        "VALUES (?, ?, ?, ?, ?)",
                         (sid, label, lat, lng, stop.dwell_minutes))
                     db.commit()
                     db.close()

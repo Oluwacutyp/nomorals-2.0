@@ -69,7 +69,7 @@ def _default_db() -> str:
 def _profile_kind() -> str:
     """termux | laptop | workstation (cheap, never raises)."""
     try:
-        from ...core.profiles import get_profile_kind
+        from ..core.profiles import get_profile_kind
         return get_profile_kind() or "workstation"
     except Exception as exc:  # noqa: BLE001
         record_failure("congestion.profile_kind", exc)

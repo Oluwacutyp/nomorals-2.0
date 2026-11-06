@@ -448,7 +448,11 @@ class BookForge:
         planned = None
         if not clean and not organic:
             try:
-                from .outline import plan_book
+                # plan_book lives in this module (forge.py) — the old
+                # ``from .outline import plan_book`` raised ImportError
+                # on every call (outline has no such function), so the
+                # unified-plan branch was dead and every explicit-
+                # chapters create silently took the fallback path.
                 plan = plan_book(topic, book_notes, self.context, genre=genre)
                 if plan:
                     clean = plan["title"]

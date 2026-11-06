@@ -1,21 +1,24 @@
 """Tail-108 pins: nomorals/search/osint_browser.py census sites.
 
-All four sites are exclusions — every failure degrades to absence
-(no tool, not-ready, results already collected), never to a
-fabricated hit:
+Every failure degrades to absence (no tool, not-ready, results
+already collected), never to a fabricated hit:
 
-* 36 — ``_browser()``: any registry failure -> None, the module's
-  "unwired" value; both adapters then return []. TARGETED-FIX
-  CANDIDATE (top of this batch): the pin below proves the guard is
-  not hypothetical — ``nomorals.tools.registry`` exposes only the
-  ``ToolRegistry`` class and has NO module-level ``get``, so
-  ``_browser()`` returns None unconditionally today and both
-  browser OSINT adapters (registered in search/sources.py) are
-  dead organs. The real spine pattern is a registry INSTANCE
-  called via ``registry.call("browser", ...)`` (see
-  research/pipeline.py ``_browser_fetch_fallback``). The batch
-  pins the behaviour; rewiring is a targeted pass, not a convert —
-  the failure shape is absence, not a fabricated success.
+* 36 — ``_browser()``: CONVERTED by the Pass 3 targeted wiring.
+  The original pin proved the guard was not hypothetical —
+  ``nomorals.tools.registry`` exposes only the ``ToolRegistry``
+  class and has NO module-level ``get``, so the old lookup raised
+  AttributeError on every call, ``_browser()`` returned None
+  unconditionally, and both browser OSINT adapters (registered in
+  search/sources.py) were dead organs. ``_browser()`` now resolves
+  the tool on a real registry INSTANCE — the search context's own
+  in production (threaded via sources.build_osint_adapter /
+  federated_search), a lazily built standalone registry otherwise —
+  and drives it via ``registry.call("browser", ...)``, the
+  research/pipeline.py ``_browser_fetch_fallback`` pattern. The
+  pins below pin the wired contract: no browser tool on the
+  registry -> None; a failed standalone build -> None; calls
+  unwrap the Outcome to the tool's result dict, with an Err
+  outcome becoming an ``ok: False`` dict.
 * 44 — ``_rendered_ok()``: import/probe crash -> (False,
   "browser tool not importable") — fail-closed with the reason
   carried in-band.
@@ -38,33 +41,53 @@ from nomorals.tools import registry as reg
 
 # ── 36: _browser() ───────────────────────────────────────────────
 
-def test_browser_is_none_with_the_real_registry_module():
-    # Standing-state pin: the tools registry module has no
-    # module-level ``get`` (only ToolRegistry instances do), so the
-    # lookup raises AttributeError inside the guard and _browser()
-    # reports "unwired". A future wiring fix SHOULD break this pin.
-    assert not hasattr(reg, "get")
-    assert ob._browser() is None
+def test_browser_is_none_when_registry_has_no_browser_tool():
+    # Converted standing-state pin: the unwired case is now a real
+    # registry instance with no "browser" tool registered on it.
+    assert not hasattr(reg, "get")  # the old lookup target: still absent
+    assert ob._browser(reg.ToolRegistry()) is None
 
 
-def test_browser_registry_crash_returns_none(monkeypatch):
-    def _get(name):
+def test_browser_registry_build_crash_returns_none(monkeypatch):
+    # A failed standalone-registry build degrades to "unwired".
+    def _boom(self):
         raise RuntimeError("registry boom")
 
-    monkeypatch.setattr(reg, "get", _get, raising=False)
+    monkeypatch.setattr(reg.ToolRegistry, "register_builtins", _boom)
+    monkeypatch.setattr(ob, "_registry_cache", None, raising=False)
     assert ob._browser() is None
 
 
-def test_browser_unwraps_registered_tool(monkeypatch):
-    sentinel = lambda *a, **k: {}  # noqa: E731
-    monkeypatch.setattr(
-        reg, "get", lambda name: types.SimpleNamespace(func=sentinel),
-        raising=False)
-    assert ob._browser() is sentinel
-    monkeypatch.setattr(reg, "get", lambda name: sentinel, raising=False)
-    assert ob._browser() is sentinel
-    monkeypatch.setattr(reg, "get", lambda name: None, raising=False)
-    assert ob._browser() is None
+def test_browser_calls_through_registry_instance():
+    # The returned callable drives registry.call("browser", ...) and
+    # unwraps the Outcome to the tool's result dict.
+    calls = []
+
+    class _Reg:
+        def get(self, name):
+            return object() if name == "browser" else None
+
+        def call(self, name, actor="system", **kw):
+            calls.append((name, actor, kw))
+            return types.SimpleNamespace(
+                ok=True, value={"text": "hi"}, error=None)
+
+    browse = ob._browser(_Reg())
+    assert browse is not None
+    assert browse("text", engine="rendered", session="osint") == {"text": "hi"}
+    assert calls == [("browser", "system",
+                      {"action": "text", "engine": "rendered",
+                       "session": "osint"})]
+
+    class _ErrReg(_Reg):
+        def call(self, name, actor="system", **kw):
+            return types.SimpleNamespace(
+                ok=False, value=None,
+                error=types.SimpleNamespace(message="nope"))
+
+    # an Err outcome becomes an ok:False dict, never an exception
+    assert ob._browser(_ErrReg())("open", url="https://x") == {
+        "ok": False, "error": "nope"}
 
 
 # ── 44: _rendered_ok() ───────────────────────────────────────────
@@ -109,7 +132,11 @@ def _make_browse(close_raises):
 
 def _wire(monkeypatch, close_raises):
     monkeypatch.setattr(ob, "_rendered_ok", lambda: (True, ""))
-    monkeypatch.setattr(ob, "_browser", lambda: _make_browse(close_raises))
+    # _browser gained the registry parameter in the Pass 3 wiring;
+    # the seam's shape (module function the adapters consult) is
+    # unchanged.
+    monkeypatch.setattr(
+        ob, "_browser", lambda registry=None: _make_browse(close_raises))
 
 
 def test_people_adapter_close_crash_keeps_collected_hits(monkeypatch):

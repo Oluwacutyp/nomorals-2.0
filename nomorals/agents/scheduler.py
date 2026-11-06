@@ -258,6 +258,17 @@ def _parse_depends(raw: Any) -> list[str]:
     Accepts a single id, a comma-separated string, a JSON list string, or
     a real list.  Never raises — garbage becomes an empty list (and the
     gate then treats "no dependencies" as open, matching history).
+
+    Adjudication (Pass 3, the #174 inversion): a *bracketed* value that
+    is not a parseable JSON list is garbage, not a lone id — ``add()``
+    validates bare ids at creation and stores canonical JSON, so a
+    stored value starting with "[" was meant as a list.  The old
+    fallthrough returned the whole string as one dependency id, and
+    ``_dependency_ok`` then kept the gate shut forever on an id that
+    can never exist — exactly backwards from the contract above.  A
+    bare (non-bracketed) string stays a single id: that form is
+    documented, and creation-time validation is where a bad one is
+    rejected.
     """
     if not raw:
         return []
@@ -273,6 +284,7 @@ def _parse_depends(raw: Any) -> list[str]:
                 return [str(x).strip() for x in parsed if str(x).strip()]
         except (ValueError, TypeError) as exc:
             record_failure("scheduler.parse_depends_json", exc)
+        return []
     if "," in text:
         return [p.strip() for p in text.split(",") if p.strip()]
     return [text]
@@ -978,6 +990,24 @@ class Scheduler:
             spec_str = f"{detail} {timezone}"
         else:
             spec_str = str(detail)
+        # Idempotency guard: an exact replay — same name, kind, spec,
+        # payload and timezone as an enabled job already in the table —
+        # returns that job instead of inserting a duplicate.  The
+        # ensure_* registrars promise "idempotent by name", but their
+        # existence check is a separate query: when it fails (or two
+        # contexts share one db) an unconditional insert used to mint a
+        # second copy of the very same job.  Distinct jobs that merely
+        # share a name (different spec or payload) are untouched.
+        job_name = (name or "").strip() or "job"
+        existing = self.db.query_one(
+            "SELECT * FROM schedule_jobs WHERE name = ? AND kind = ? "
+            "AND spec = ? AND payload_kind = ? AND payload = ? "
+            "AND timezone = ? AND enabled = 1",
+            (job_name, kind, spec_str, payload_kind, json.dumps(payload),
+             timezone))
+        if existing:
+            return {"id": existing["id"], "name": job_name, "kind": kind,
+                    "next_run": existing["next_run"], "deduped": True}
         with self.db.transaction():
             self.db.execute(
                 "INSERT INTO schedule_jobs (id, name, kind, spec, payload_kind, payload, "

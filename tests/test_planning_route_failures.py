@@ -469,12 +469,13 @@ def test_converted_window_violations_records_and_returns_partial():
 
 
 def test_converted_planner_init_migration_records(tmp_path, monkeypatch):
-    # NOTE: planner __init__ row loading is itself broken upstream (its
-    # ad-hoc connection sets no row_factory, so row["stop_id"] raises
-    # TypeError and the outer debug-logged handler swallows it — stops
-    # never restore from disk). That pre-existing bug is OUT of scope
-    # here; the pin supplies the row_factory the code assumes so the
-    # migration handler itself can be probed. Reported to parent.
+    # NOTE (superseded by the Pass 3 targeted fix): planner __init__
+    # row loading was broken upstream (its ad-hoc connection set no
+    # row_factory, so row["stop_id"] raised TypeError and the outer
+    # debug-logged handler swallowed it — stops never restored from
+    # disk). RoutePlanner.__init__ now sets row_factory itself; the
+    # pin still supplies it via the connect double (idempotent) so
+    # the migration handler itself can be probed in isolation.
     db_file = tmp_path / "stops.db"
     conn = sqlite3.connect(str(db_file))
     conn.execute(
@@ -497,9 +498,10 @@ def test_converted_planner_init_migration_records(tmp_path, monkeypatch):
 
 
 def test_converted_planner_row_window_records_and_drops_window(tmp_path, monkeypatch):
-    # Same row_factory caveat as the migration pin above: the pin
-    # supplies the row_factory the loader assumes, so the window-parse
-    # handler itself can be probed.
+    # Same row_factory history as the migration pin above: the pin
+    # supplies the row_factory the loader assumes (the loader sets it
+    # itself since the Pass 3 fix), so the window-parse handler
+    # itself can be probed.
     db_file = tmp_path / "stops2.db"
     conn = sqlite3.connect(str(db_file))
     conn.execute(
@@ -525,12 +527,13 @@ def test_converted_planner_row_window_records_and_drops_window(tmp_path, monkeyp
 
 
 def test_converted_add_stop_persist_records_and_still_returns_stop(tmp_path):
-    # The DROP TABLE trigger below is the pin's probe — but note the
-    # sharper live finding: add_stop's INSERT supplies 5 values for the
-    # 7-column table (window_start/window_end added by migration), so
-    # persist ALSO fails on every live table (verified: OperationalError
-    # "7 columns but 5 values"). Pre-existing, out of scope; the ledger
-    # now surfaces it instead of the silent pass.
+    # The DROP TABLE trigger below is the pin's probe. (The sharper
+    # live finding once noted here — add_stop's INSERT supplied 5
+    # values for the 7-column table, so persist failed on every live
+    # table with OperationalError "7 columns but 5 values" — was
+    # fixed in Pass 3: the INSERT now names its five columns. On an
+    # intact table persist succeeds and records nothing; the dropped
+    # table below is what still forces the failure this pin probes.)
     db_file = tmp_path / "p.db"
     planner = route.RoutePlanner(db_path=str(db_file))
     conn = sqlite3.connect(str(db_file))
@@ -548,11 +551,11 @@ def test_converted_add_stop_records_and_returns_none():
 
 
 def test_converted_set_window_records_and_returns_false(tmp_path):
-    # NOTE: the stop is placed directly in _stops, not via add_stop —
-    # add_stop's own persist is arity-broken upstream (5-value INSERT
-    # into the 7-column table, see the add_stop_persist pin), so routing
-    # through it would co-fire that site. The UPDATE failure below is
-    # the set_window site's own trigger.
+    # NOTE: the stop is placed directly in _stops, not via add_stop,
+    # to isolate this site (add_stop's persist was arity-broken when
+    # this pin was written; Pass 3 fixed the INSERT — see the
+    # add_stop_persist pin). The UPDATE failure below is the
+    # set_window site's own trigger.
     db_file = tmp_path / "w.db"
     planner = route.RoutePlanner(db_path=str(db_file))
     planner._stops["bank"] = route.Stop("bank", "bank", 6.5, 3.3)

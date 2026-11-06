@@ -348,9 +348,14 @@ def _fake_notifier(**kw):
 
 
 def test_site_parse_depends_json():
-    # Malformed JSON list falls through to single-text (fallback kept),
-    # and the anomaly is now recorded.
-    assert _parse_depends("[not json") == ["[not json"]
+    # Converted (Pass 3, the #174 adjudication): a bracketed value
+    # that is not a parseable JSON list is garbage -> empty list (the
+    # docstring contract), NOT a lone dependency id — the old
+    # fallthrough returned ["[not json"], and _dependency_ok then
+    # kept the gate shut forever on an id that can never exist. The
+    # anomaly is still recorded. Bare ids still parse as single ids
+    # (pinned in test_scheduler_deep).
+    assert _parse_depends("[not json") == []
     assert _sites() == ["scheduler.parse_depends_json"]
 
 

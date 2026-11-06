@@ -289,8 +289,11 @@ def federated_search(
             # OSINT adapters are context-free (no constructor arguments),
             # so they build on demand instead of living in the
             # context-bound adapter set — this is what makes osint_*
-            # sources reachable through the standard query path.
-            lazy = build_osint_adapter(name)
+            # sources reachable through the standard query path.  The
+            # browser-driven ones get the context's tool registry, so
+            # their browser calls run on the production registry.
+            lazy = build_osint_adapter(
+                name, registry=getattr(context, "tools", None))
             if lazy is None:
                 raise SearchError(f"no adapter built for source {name!r}")
             adapters[name] = lazy

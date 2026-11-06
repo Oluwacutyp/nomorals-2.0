@@ -635,17 +635,39 @@ class Matchmaker:
         except Exception:  # noqa: BLE001
             return 0
         now = time.time()
+        busy: dict[str, bool] = {}
+
+        def _chat_busy(chat_key: str) -> bool:
+            # The sweep-side half of enqueue's live-game guard: a chat
+            # with a live game must not have a relay duel started in
+            # it (enqueue refuses to queue from such a chat; the sweep
+            # used to pair queued players into one regardless).  Busy
+            # entries stay queued for a later sweep — skipped, never
+            # dropped.  A live() crash counts as busy: don't start a
+            # duel in a chat whose state can't be verified.
+            if chat_key not in busy:
+                try:
+                    busy[chat_key] = self.engine.live(chat_key) is not None
+                except Exception:  # noqa: BLE001
+                    _log.debug("sweep live check failed for %s",
+                               chat_key, exc_info=True)
+                    busy[chat_key] = True
+            return busy[chat_key]
+
         by_game: dict[str, list[QueuedPlayer]] = {}
         for r in rows:
             try:
-                by_game.setdefault(r["game"], []).append(QueuedPlayer(
+                entry = QueuedPlayer(
                     player_key=r["player_key"], chat_key=r["chat_key"],
                     player_name=r.get("player_name") or "",
                     platform=r.get("platform") or "",
                     game=r["game"], elo=int(r.get("elo") or START_ELO),
-                    enqueued_at=float(r.get("enqueued_at") or now)))
+                    enqueued_at=float(r.get("enqueued_at") or now))
             except Exception:  # noqa: BLE001
                 continue
+            if _chat_busy(entry.chat_key):
+                continue
+            by_game.setdefault(entry.game, []).append(entry)
         made = 0
         for game, entries in by_game.items():
             made += self._pair_game(game, entries, now)

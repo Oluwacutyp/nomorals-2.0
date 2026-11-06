@@ -47,6 +47,12 @@ Verdict notes (full grounds in the tail-59 SURVEY.md):
   out-of-batch defect documented in the SURVEY; the pin
   installs the attribute double to exercise the handler as
   written.)
+  CONVERTED by the Pass 3 targeted fix: create() now calls
+  forge's own plan_book (where the function lives) directly, so
+  the unified-plan branch is live in production. The pin now
+  patches F.plan_book — the real call target — and asserts
+  outline still has no plan_book, which is why the old patch
+  target could only ever exercise the handler via a double.
 """
 
 import json
@@ -336,6 +342,10 @@ def test_395_book_list_tool_includes_unreadable_count():
 def test_443_create_plan_failure_falls_back_to_outline():
     before = _snap()
     plan_calls = []
+    # plan_book lives in forge itself; outline never had it — the
+    # pre-fix create() imported it from outline and the ImportError
+    # made this handler fire on every explicit-chapters create.
+    assert not hasattr(outline_mod, "plan_book")
 
     def bad_plan(topic, notes, context, genre=""):
         plan_calls.append(1)
@@ -343,7 +353,7 @@ def test_443_create_plan_failure_falls_back_to_outline():
 
     tmp = tempfile.mkdtemp()
     ctx = SimpleNamespace(settings=SimpleNamespace(workspace_dir=tmp))
-    with mock.patch.object(outline_mod, "plan_book", bad_plan, create=True):
+    with mock.patch.object(F, "plan_book", bad_plan):
         book = F.BookForge(ctx).create("the history of paper clips",
                                        chapters=5, research=False)
     assert len(plan_calls) == 1
@@ -356,7 +366,7 @@ def test_443_create_plan_failure_falls_back_to_outline():
 
     tmp2 = tempfile.mkdtemp()
     ctx2 = SimpleNamespace(settings=SimpleNamespace(workspace_dir=tmp2))
-    with mock.patch.object(outline_mod, "plan_book", good_plan, create=True):
+    with mock.patch.object(F, "plan_book", good_plan):
         book2 = F.BookForge(ctx2).create("the history of paper clips",
                                          chapters=5, research=False)
     assert book2.title == "Planned Title"

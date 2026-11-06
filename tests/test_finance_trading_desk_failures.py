@@ -2,20 +2,16 @@
 
 All three are held as exclusions:
 
-433 — ``daily_pnl`` live-snapshot guard: ``account()`` raising in live
-     mode -> the journal-only total is returned (open-position profits
-     silently excluded). WEAKEST EXCLUSION of the batch and a
-     TARGETED-FIX CANDIDATE: daily_pnl feeds the daily-loss kill
-     switch in ``_check_risk``, so an understated day P&L is a safety
-     input, and the module's own doctrine two screens up is "snapshot
-     failure != free pass" (the position-count gate refuses outright).
-     Held in-batch because the only decision path is fenced — the
-     count gate calls ``account()`` FIRST and raises before daily_pnl
-     is read, so the guard's residue is the display paths (tools/
-     trading stats, CLI) plus a mid-call transient race — and a
-     fail-closed repair must change the risk gate, not just this
-     function (returning None, which the signature allows, makes
-     ``_check_risk`` SKIP the daily check entirely: same fail-open).
+433 — ``daily_pnl`` live-snapshot guard: CONVERTED by the Pass 3
+     targeted fix, along exactly the lines this note prescribed.
+     ``daily_pnl`` now returns None when the live snapshot fails
+     (the unrealized component is unknowable; a journal-only total
+     understated the day's loss), and ``_check_risk`` treats None as
+     "cannot verify" and refuses — the same fail-closed shape as the
+     position-count gate ("snapshot failure != free pass"). The
+     display paths render None as "unknown" instead of a number.
+     The pin below now asserts the None + the non-recording half;
+     the working-snapshot controls are unchanged.
 525 — ``paper_open``: ``_contract_value`` raising ``DeskError`` ->
      contract_value stays 0.0 and risk_amount falls back to unit 1.0
      ("paper can still track in price terms", in-code comment).
@@ -66,11 +62,14 @@ def _desk(tmp_path: Path, connector, mode: str, name: str) -> TradingDesk:
 
 # ── 433: daily_pnl live snapshot swallow ─────────────────────────────
 
-def test_433_account_crash_returns_journal_only_total(tmp_path):
+def test_433_account_crash_returns_none_not_journal_only_total(tmp_path):
+    # Converted (Pass 3): a crashed live snapshot makes the day P&L
+    # unknown (None) — never the journal-only total, which understated
+    # the loss feeding the daily-loss kill switch.
     desk = _desk(tmp_path, _RaisingConnector(), "live", "a")
     desk._journal("paper_close", pnl=5.0)
     before = desk.journal(limit=100)
-    assert desk.daily_pnl() == 5.0
+    assert desk.daily_pnl() is None
     # non-recording: the read wrote nothing back to the journal
     assert desk.journal(limit=100) == before
 

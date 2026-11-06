@@ -12,6 +12,7 @@ Public pages only. Paywalled/login-gated results are reported as
 from __future__ import annotations
 
 import re
+import threading
 import urllib.parse
 from typing import Any
 
@@ -22,19 +23,70 @@ from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
 
+_registry_cache: Any = None
+_registry_lock = threading.Lock()
 
-def _browser() -> Any:
-    """The spine browser tool's function, or None when unwired."""
+
+def _standalone_registry() -> Any:
+    """A process-wide ToolRegistry with the builtins registered.
+
+    Built lazily, once, for callers that have no context of their own
+    (the same construction ``nm doctor`` probes with).  The production
+    path passes the context's own registry instead — see
+    ``sources.build_osint_adapter`` / ``federated_search``.  None when
+    the build fails: the adapters' "unwired" value.
+    """
+    global _registry_cache
+    if _registry_cache is not None:
+        return _registry_cache
+    with _registry_lock:
+        if _registry_cache is None:
+            try:
+                from ..tools.registry import ToolRegistry
+                _registry_cache = ToolRegistry().register_builtins()
+            except Exception:  # noqa: BLE001
+                return None
+    return _registry_cache
+
+
+def _browser(registry: Any = None) -> Any:
+    """The spine browser tool as a ``browse(action, **kwargs)`` callable.
+
+    Resolves the ``browser`` tool on a real ToolRegistry instance —
+    the caller's own when given, else the standalone registry — and
+    drives it the way research/pipeline.py's browser fallback does:
+    ``registry.call("browser", ...)`` with the Outcome unwrapped back
+    to the tool's result dict (an Err outcome becomes an
+    ``{"ok": False, ...}`` dict, never an exception).  None when no
+    registry is available or the tool isn't registered on it: the
+    adapters then return [] — absence, never a fabricated hit.
+
+    (Before the Pass 3 wiring this called ``registry.get`` on the
+    tools.registry *module*, which has no module-level ``get`` — the
+    lookup raised AttributeError on every call and both adapters were
+    dead organs returning [] unconditionally.)
+    """
+    reg = registry if registry is not None else _standalone_registry()
+    if reg is None:
+        return None
     try:
-        from ..tools import registry as _reg
-        tool = _reg.get("browser")
-        if tool is None:
+        if reg.get("browser") is None:
             return None
-        # registry.get returns the tool callable or a wrapper; unwrap
-        fn = getattr(tool, "func", None) or getattr(tool, "fn", None) or tool
-        return fn if callable(fn) else None
     except Exception:  # noqa: BLE001
         return None
+
+    def browse(action: str, **kwargs: Any) -> dict[str, Any]:
+        outcome = reg.call("browser", actor="system", action=action,
+                           **kwargs)
+        if not getattr(outcome, "ok", False):
+            err = getattr(outcome, "error", None)
+            return {"ok": False,
+                    "error": str(getattr(err, "message", "") or err
+                                 or "browser call failed")}
+        value = getattr(outcome, "value", None)
+        return value if isinstance(value, dict) else {"ok": True}
+
+    return browse
 
 
 def _rendered_ok() -> tuple[bool, str]:
@@ -66,11 +118,16 @@ class BrowserPeopleSearchAdapter(SourceAdapter):
         ("peekyou", "https://www.peekyou.com/{q}"),
     )
 
+    def __init__(self, registry: Any = None) -> None:
+        # A ToolRegistry the browser calls run on (production: the
+        # search context's own).  None → the standalone registry.
+        self._registry = registry
+
     def search(self, query: str, *, limit: int, since=None, before=None):
         name = (query or "").strip()
         if not name or len(name.split()) < 2:
             return []  # needs at least a first+last name
-        browse = _browser()
+        browse = _browser(self._registry)
         if browse is None:
             _log.debug("osint_people_browser: spine browser tool unwired")
             return []
@@ -139,11 +196,16 @@ class BrowserSiteSearchAdapter(SourceAdapter):
         ("archive", "https://web.archive.org/web/*/{q}*"),
     )
 
+    def __init__(self, registry: Any = None) -> None:
+        # A ToolRegistry the browser calls run on (production: the
+        # search context's own).  None → the standalone registry.
+        self._registry = registry
+
     def search(self, query: str, *, limit: int, since=None, before=None):
         q = (query or "").strip()
         if not q:
             return []
-        browse = _browser()
+        browse = _browser(self._registry)
         if browse is None:
             return []
         ok, _ = _rendered_ok()

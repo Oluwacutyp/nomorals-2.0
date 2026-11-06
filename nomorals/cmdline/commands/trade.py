@@ -140,6 +140,13 @@ def _cmd_trade_exness(args: argparse.Namespace, context: Any) -> int:
     return 0
 
 
+def _fmt_day_pnl(out: dict[str, Any]) -> str:
+    """daily_pnl renders as a signed number, or "unknown" when the
+    desk could not verify it (None — a failed live snapshot)."""
+    day = out.get("daily_pnl")
+    return f"{day:+.2f}" if isinstance(day, (int, float)) else "unknown"
+
+
 def _render_exness(action: str, out: dict[str, Any]) -> str:
     """One-line-ish human rendering per exness action."""
     if action == "snapshot":
@@ -176,7 +183,7 @@ def _render_exness(action: str, out: dict[str, Any]) -> str:
         return (f"trades={out.get('total_trades')} "
                 f"win_rate={out.get('win_rate', 0):.0%} "
                 f"realized_pnl={out.get('realized_pnl', 0):+.2f} "
-                f"daily_pnl={out.get('daily_pnl', 0):+.2f}")
+                f"daily_pnl={_fmt_day_pnl(out)}")
     if action == "journal":
         entries = out.get("entries") or []
         if not entries:
@@ -195,5 +202,5 @@ def _render_exness(action: str, out: dict[str, Any]) -> str:
                 f"daily loss kill at {pol.get('max_daily_loss_pct')}%, "
                 f"SL required={pol.get('require_stop_loss')}, "
                 f"live_unlocked={pol.get('live_unlocked')} · "
-                f"daily pnl={out.get('daily_pnl', 0):+.2f}")
+                f"daily pnl={_fmt_day_pnl(out)}")
     return str(out)

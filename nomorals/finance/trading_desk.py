@@ -377,19 +377,26 @@ class TradingDesk:
         if open_count >= p.max_open_positions:
             raise DeskError(
                 f"already at max open positions ({p.max_open_positions})")
-        # Daily loss kill switch.
+        # Daily loss kill switch.  An unknown day P&L (live snapshot
+        # failed inside daily_pnl) refuses, exactly like the position-
+        # count gate above: snapshot failure ≠ free pass.  (Before the
+        # Pass 3 fix, daily_pnl swallowed the failure and returned the
+        # journal-only total, so this gate ran on understated losses.)
         day_pnl = self.daily_pnl()
-        if day_pnl is not None:
-            try:
-                eq = self.equity()
-            except DeskError:
-                eq = 0.0
-            if eq > 0 and day_pnl <= -eq * p.max_daily_loss_pct / 100:
-                self._journal("kill", reason="daily loss limit",
-                              day_pnl=day_pnl)
-                raise DeskError(
-                    f"daily loss limit hit ({day_pnl:+.2f}) — desk is "
-                    "killed for today")
+        if day_pnl is None:
+            raise DeskError(
+                "cannot verify daily P&L (account snapshot failed) — "
+                "refusing to open")
+        try:
+            eq = self.equity()
+        except DeskError:
+            eq = 0.0
+        if eq > 0 and day_pnl <= -eq * p.max_daily_loss_pct / 100:
+            self._journal("kill", reason="daily loss limit",
+                          day_pnl=day_pnl)
+            raise DeskError(
+                f"daily loss limit hit ({day_pnl:+.2f}) — desk is "
+                "killed for today")
         # Weekly loss kill switch.
         week_pnl = self.weekly_pnl()
         try:
@@ -408,7 +415,11 @@ class TradingDesk:
         """Realized P&L today (account currency) + open unrealized.
 
         Journal-backed for paper; for live, the snapshot's position
-        profits are added when the API exposes them.
+        profits are added when the API exposes them.  Returns None
+        when the live snapshot fails: the unrealized component is
+        then unknowable, and a journal-only total would understate
+        the day's loss — the risk gate treats None as "cannot
+        verify" and refuses (snapshot failure ≠ free pass).
         """
         day_start = self._now() - (self._now() % 86400)
         total = 0.0
@@ -424,14 +435,17 @@ class TradingDesk:
                     continue
         if self.mode == "live":
             try:
-                for pos in self.account().get("positions") or []:
-                    try:
-                        total += float(pos.get("profit") or 0)
-                        seen = True
-                    except (TypeError, ValueError):
-                        continue
-            except Exception:  # noqa: BLE001
-                pass
+                positions = self.account().get("positions") or []
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("daily_pnl: account snapshot failed, day "
+                             "P&L unknown: %s", exc)
+                return None
+            for pos in positions:
+                try:
+                    total += float(pos.get("profit") or 0)
+                    seen = True
+                except (TypeError, ValueError):
+                    continue
         return total if seen else 0.0
 
     def weekly_pnl(self) -> float:

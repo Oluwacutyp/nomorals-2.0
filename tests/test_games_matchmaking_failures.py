@@ -34,10 +34,14 @@ notified before it — so the match count stays honest (a match
 WAS made), but the stale rows remain queued and the next
 sweep can pair the same two players into a second duel
 (probe-proven: both still show as queued after their match).
-Held: no surface claims the rows were deleted, the failure
+Held: no surface claims the rows were deleted, and the failure
 needs a db that accepted the pairing reads/writes yet fails
-this one delete, and a sweep-side live-game guard is a design
-change for a deliberate pass, not an error-handling fix.
+this one delete. UPDATE (Pass 3, the deliberate pass this note
+called for): the sweep now applies enqueue's live-game guard —
+a queued entry whose chat has a live game is skipped (left
+queued) — so the second-duel path is fenced whenever the engine
+can see the live relay room. The delete-crash exclusion itself
+is unchanged.
 """
 from __future__ import annotations
 
