@@ -269,10 +269,19 @@ class Analyst:
 def executor_check(idea: TradeIdea) -> dict:
     """The executor's pre-flight: refuse unsigned or malformed ideas.
 
-    Called by ``trading_desk`` before any order reaches the broker.
-    Returns ``{"ok": bool, "reason": str}``. This is the enforcement
-    point of the boundary law — analysis stays in ta/, execution stays
-    in finance/connectors.
+    Called by ``trading_desk`` before any order that carries an
+    idea reaches the broker: the desk's ``paper_open``/``live_open``
+    run it first when an ``idea`` is passed, and the trading
+    system's execution path (``nomorals/agents/execution.py``)
+    builds a TradeIdea from every setup plan + judgment verdict it
+    executes, so every system order passes here. (Before Pass 4 of
+    the trading system this claimed a desk call that did not exist
+    — zero callers; the wiring is real now, and the desk-side test
+    proves a refusal blocks the order.) Orders placed manually
+    through the desk surfaces without an idea are outside this
+    check's contract. Returns ``{"ok": bool, "reason": str}``.
+    This is the enforcement point of the boundary law — analysis
+    stays in ta/, execution stays in finance/connectors.
 
     Also consults the backtest lessons (``ta.lessons``): configs with
     a "DO NOT TRADE" verdict from real backtest evidence are refused

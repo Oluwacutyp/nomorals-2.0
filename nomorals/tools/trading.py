@@ -1,9 +1,20 @@
 """Trading tool: the `trading` action surface over the FinancialExpert.
 
 Actions: analyze | backtest | signal | compare | strategies | paper_start |
-paper_status | paper_stop | doctor | live_unlock | live_order | kill
+paper_status | paper_stop | doctor | live_unlock | live_order | kill |
+read | scan | setups | forecast | judge | judgments (the trading
+system's shadow passes) | execute | positions | manage (Pass 4:
+demo execution + management) | exness_* (the desk, manual surfaces)
 
-Paper trading is simulated (Sentinel's PaperBroker) and always available.
+Paper trading here is simulated (Sentinel's PaperBroker) and always
+available. CONSOLIDATION (trading system Pass 4): the Sentinel paper
+sessions below are a MANUAL research sandbox — strategy-driven
+sessions over CCXT data, with their own DB journal. They are not,
+and never feed, the trading system's execution: the system executes
+only through the TradingDesk (agents/execution.py), whose paper
+mode is the simulator rung and whose live mode is the Exness demo
+rung. Three paper paths existed; the desk is the system's engine
+and the sessions are a surface, not a path.
 Live trading is INERT unless every gate passes:
 
 1. ``settings.trading.live_enabled`` is true, AND
@@ -28,6 +39,7 @@ from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
 from ..storage.kv import KVStore
+
 import nomorals.integrations.sentinel_bridge as bridge
 
 __all__ = ["register", "LiveTradingDisabled",
@@ -653,6 +665,65 @@ def exness_action(context: Any, action: str, **kw: Any) -> dict[str, Any]:
     raise bridge.SentinelError(f"unknown exness action {action!r}")
 
 
+# ── the trading system: demo execution + management (Pass 4) ─────────
+def _system_engine(context: Any, mode: str) -> Any:
+    """The execution engine over the system desk (see module docstring).
+
+    mode: paper (simulator rung) | demo (Exness live-mode desk on a
+    verified demo account) | mt5 (the bridge rung — reports
+    unavailable where no terminal exists).
+    """
+    from ..agents.execution import ExecutionEngine, build_system_desk
+
+    settings = getattr(context, "settings", None)
+    if mode == "mt5":
+        from ..connectors.mt5_bridge import MT5BridgeConnector
+        return ExecutionEngine(None, settings=settings,
+                               mt5_adapter=MT5BridgeConnector())
+    from ..connectors.exness import ExnessConnector
+    vault = _desk_vault(context)
+    connector = ExnessConnector(vault=vault)
+    desk = build_system_desk(connector, "live" if mode == "demo"
+                             else "paper", settings=settings)
+    return ExecutionEngine(desk, settings=settings)
+
+
+def system_action(context: Any, action: str, **kw: Any) -> dict[str, Any]:
+    """execute | positions | manage — the Pass 4 system surfaces."""
+    from ..agents.execution import render_execution_pass, render_manage_pass, render_positions
+
+    if not getattr(_trading_settings(context), "enabled", True):
+        return {"ok": False,
+                "error": "trading is disabled (NM_TRADING_ENABLED=0 / settings.trading.enabled=false)"}
+    mode = str(kw.get("mode") or "paper").lower()
+    if mode not in ("paper", "demo", "mt5"):
+        raise bridge.SentinelError("mode must be paper|demo|mt5")
+    symbol = str(kw.get("symbol") or "")
+    market = str(kw.get("market") or "crypto")
+    try:
+        engine = _system_engine(context, mode)
+    except Exception as exc:
+        return _fmt_desk_error(exc)
+    if action == "execute":
+        if not symbol:
+            raise bridge.SentinelError("execute needs a symbol")
+        rep = engine.execution_pass(symbol, market=market)
+        return {"ok": True, "mode": mode, **rep,
+                "rendered": render_execution_pass(rep)}
+    if action == "positions":
+        found = engine.load_positions()
+        if symbol:
+            found = [p for p in found
+                     if p["symbol"] == symbol.strip().upper()]
+        return {"ok": True, "mode": mode, "positions": found,
+                "rendered": render_positions(found, symbol=symbol)}
+    if action == "manage":
+        rep = engine.manage_pass(symbol=symbol or None)
+        return {"ok": True, "mode": mode, **rep,
+                "rendered": render_manage_pass(rep)}
+    raise bridge.SentinelError(f"unknown system action {action!r}")
+
+
 # ── registry ────────────────────────────────────────────────────────────
 def register(registry: Any) -> None:
     context = registry.context
@@ -672,6 +743,17 @@ def register(registry: Any) -> None:
             "shadow judgment pass over armed/triggered setups (five "
             "competing scenarios, act/abstain with reasons — never "
             "executes); judgments lists the latest judgment decisions; "
+            "execute runs ONE demo-execution pass over triggered "
+            "setups (judgment act + hard invariants above it — "
+            "friction gate, 15% drawdown halt, position/loss caps, "
+            "kill switch — doctrine sizing, orders on the demo rung "
+            "only: mode=paper simulator, mode=demo the Exness demo "
+            "account, mode=mt5 the bridge rung which reports "
+            "unavailable without a terminal); positions lists the "
+            "trading system's own open/closed positions; manage runs "
+            "ONE position-management sweep (per-playbook profiles: "
+            "QM fixed bracket only, hot-scalp earned lock + staged "
+            "targets, generic profit-lock + partial tiers); "
             "analyze/backtest/signal/compare/strategies are research tools; "
             "paper_* run simulated sessions; live_order is inert unless "
             "every live gate passes (settings + 24h unlock + loss limit); "
@@ -680,11 +762,13 @@ def register(registry: Any) -> None:
             "exness_snapshot, exness_positions, exness_size (real-contract "
             "position sizing), exness_open, exness_close, exness_mark "
             "(paper SL/TP), exness_stats, exness_journal, exness_unlock, "
-            "exness_risk. mode=paper|live (default paper); live orders need "
-            "confirmed=true or a human checkpoint. action=..."),
+            "exness_risk. mode=paper|live (exness_*, default paper); "
+            "paper|demo|mt5 (execute|positions|manage, default paper); "
+            "live orders need confirmed=true or a human checkpoint. "
+            "action=..."),
         capability=Capability.NET_OUT,
         parameters={
-            "action": "str — read|scan|setups|forecast|judge|judgments|analyze|backtest|signal|compare|strategies|"
+            "action": "str — read|scan|setups|forecast|judge|judgments|execute|positions|manage|analyze|backtest|signal|compare|strategies|"
                       "paper_start|paper_status|paper_stop|doctor|"
                       "live_unlock|live_order|kill|"
                       "exness_snapshot|exness_positions|exness_size|"
@@ -771,6 +855,10 @@ def register(registry: Any) -> None:
                 symbol, settings=getattr(context, "settings", None))
             return {"symbol": symbol, "judgments": found,
                     "rendered": render_judgments(found, symbol=symbol)}
+        if action in ("execute", "positions", "manage"):
+            return system_action(context, action, symbol=symbol,
+                                 market=market,
+                                 mode=str(kwargs.get("mode") or "paper"))
         expert = FinancialExpert(context)
         if action == "analyze":
             return expert.analyze(

@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.logging_setup import get_logger
+from ..ta.analyst import executor_check
 from .budgets import finance_paths
 
 _log = get_logger("nomorals.finance.trading")
@@ -517,13 +518,34 @@ class TradingDesk:
 
     # ── paper trading ─────────────────────────────────────────────
 
+    def _idea_gate(self, idea: Any) -> None:
+        """The analyst boundary law's pre-order check, for real.
+
+        When an order carries a :class:`~nomorals.ta.analyst.TradeIdea`,
+        :func:`executor_check` runs before anything else — a refusal
+        (unsigned/malformed idea, or a backtest lesson's DO NOT TRADE
+        verdict for the symbol/timeframe) raises DeskError and no
+        order is placed. Orders without an idea (the manual desk
+        surfaces) are unchanged; the trading system's execution path
+        (agents/execution) always carries one.
+        """
+        if idea is None:
+            return
+        verdict = executor_check(idea)
+        if not verdict.get("ok"):
+            raise DeskError(
+                f"pre-order check refused the order: "
+                f"{verdict.get('reason')}")
+
     def paper_open(self, instrument: str, side: str, volume: float, *,
                    entry: float | None = None,
                    stop_loss: float | None = None,
-                   take_profit: float | None = None) -> PaperPosition:
+                   take_profit: float | None = None,
+                   idea: Any = None) -> PaperPosition:
         """Simulated fill at the latest candle close (or given entry)."""
         if self.mode != "paper":
             raise DeskError("desk is in live mode — paper_open is disabled")
+        self._idea_gate(idea)
         if entry is None:
             bars = self.candles(instrument, count=2)
             if not bars:
@@ -626,6 +648,96 @@ class TradingDesk:
         return self._paper_close(position_id, float(exit_price),
                                  reason="manual")
 
+    def paper_modify(self, position_id: str, *,
+                     stop_loss: float | None = None,
+                     take_profit: float | None = None,
+                     price: float | None = None) -> dict[str, Any]:
+        """Move a paper position's stop and/or target in place.
+
+        The management engine's stop moves (profit-locks) land here:
+        the desk owns the position state, so the move is journaled
+        and persisted with the position — never edited behind the
+        desk's back. A profit-lock stop legitimately sits BEYOND the
+        entry (that is what makes it a lock), so there is no
+        entry-relative validation; when the caller supplies its
+        freshest mark (``price``), both legs are validated against
+        it — neither may already be crossed.
+        """
+        pos = self._paper_positions.get(position_id)
+        if pos is None:
+            raise DeskError(f"unknown paper position {position_id}")
+        if price is not None:
+            if stop_loss is not None:
+                if pos.side == "buy" and stop_loss >= price:
+                    raise DeskError(
+                        "buy stop-loss is beyond the current price")
+                if pos.side == "sell" and stop_loss <= price:
+                    raise DeskError(
+                        "sell stop-loss is beyond the current price")
+            if take_profit is not None:
+                if pos.side == "buy" and take_profit <= price:
+                    raise DeskError(
+                        "buy take-profit is beyond the current price")
+                if pos.side == "sell" and take_profit >= price:
+                    raise DeskError(
+                        "sell take-profit is beyond the current price")
+        if stop_loss is not None:
+            pos.stop_loss = float(stop_loss)
+        if take_profit is not None:
+            pos.take_profit = float(take_profit)
+        self._save_state()
+        self._journal("paper_modify", position_id=position_id,
+                      instrument=pos.instrument,
+                      stop_loss=pos.stop_loss,
+                      take_profit=pos.take_profit)
+        return {"position_id": position_id, "instrument": pos.instrument,
+                "side": pos.side, "volume": pos.volume,
+                "entry": pos.entry, "stop_loss": pos.stop_loss,
+                "take_profit": pos.take_profit}
+
+    def paper_close_partial(self, position_id: str, volume: float, *,
+                            price: float,
+                            reason: str = "partial") -> dict[str, Any]:
+        """Close part of a paper position at ``price``.
+
+        The realized P&L of the closed fraction is journaled as
+        ``paper_partial_close`` (deliberately NOT ``paper_close`` —
+        the position lives on, and the desk's streak/statistics
+        readers count only full closes). Closing at or beyond the
+        full volume delegates to the full close. Returns the partial
+        facts plus the remaining volume.
+        """
+        pos = self._paper_positions.get(position_id)
+        if pos is None:
+            raise DeskError(f"unknown paper position {position_id}")
+        volume = float(volume)
+        if volume <= 0:
+            raise DeskError("partial close volume must be positive")
+        if volume >= pos.volume - 1e-9:
+            return {**self._paper_close(position_id, float(price),
+                                         reason=reason),
+                    "remaining_volume": 0.0}
+        pnl = self._paper_pnl(pos, float(price)) * (volume / pos.volume)
+        r_mult = _r_multiple(
+            pnl, pos.risk_amount * (volume / pos.volume)
+            if pos.risk_amount else 0.0)
+        pos.volume = round(pos.volume - volume, 8)
+        if pos.risk_amount:
+            pos.risk_amount = round(
+                pos.risk_amount * (pos.volume / (pos.volume + volume)), 2)
+        self._save_state()
+        self._journal("paper_partial_close", position_id=position_id,
+                      instrument=pos.instrument, side=pos.side,
+                      volume=volume, entry=pos.entry,
+                      exit_price=float(price), pnl=round(pnl, 2),
+                      reason=reason, r_multiple=r_mult,
+                      remaining_volume=pos.volume)
+        return {"position_id": position_id, "instrument": pos.instrument,
+                "side": pos.side, "volume": volume, "entry": pos.entry,
+                "exit": float(price), "pnl": round(pnl, 2),
+                "reason": reason, "r_multiple": r_mult,
+                "remaining_volume": pos.volume}
+
     # ── live trading (demo-first, confirmation-gated) ──────────────
 
     def _is_demo_account(self) -> bool:
@@ -662,7 +774,8 @@ class TradingDesk:
                   comment: str = "",
                   confirmed: bool = False,
                   db: Any = None,
-                  context: Any = None) -> dict[str, Any]:
+                  context: Any = None,
+                  idea: Any = None) -> dict[str, Any]:
         """Open a REAL position. Risk gates + live unlock + the connector's
         own confirmation/checkpoint gate. Demo accounts skip the unlock
         but never the confirmation."""
@@ -670,6 +783,7 @@ class TradingDesk:
             raise DeskError(
                 "desk is in paper mode — switch to mode='live' to trade "
                 "real money")
+        self._idea_gate(idea)
         if not self.policy.live_unlocked and not self._is_demo_account():
             raise DeskError(
                 "live trading is locked — run unlock_live("
@@ -707,6 +821,26 @@ class TradingDesk:
         result = self.connector.close_position(
             position_id, confirmed=confirmed, db=db, context=context)
         self._journal("live_close", position_id=position_id,
+                      response=str(result)[:500])
+        return {"ok": True, "response": result}
+
+    def live_close_partial(self, position_id: str, volume: float, *,
+                           confirmed: bool = False,
+                           db: Any = None,
+                           context: Any = None) -> dict[str, Any]:
+        """Partially close a REAL position (the connector's close
+        carries a volume). Confirmation-gated like live_close. Note:
+        the Exness connector exposes no modify for an OPEN position
+        (modify_order covers pending orders), so stop moves on the
+        live rung are the management engine's documented gap — it
+        journals them as unapplied rather than pretending."""
+        if self.mode != "live":
+            raise DeskError("desk is in paper mode")
+        result = self.connector.close_position(
+            position_id, volume=float(volume), confirmed=confirmed,
+            db=db, context=context)
+        self._journal("live_partial_close", position_id=position_id,
+                      volume=float(volume),
                       response=str(result)[:500])
         return {"ok": True, "response": result}
 

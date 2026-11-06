@@ -66,6 +66,17 @@ def _cmd_trade(args: argparse.Namespace, context: Any) -> int:
             _emit(args, {"symbol": args.symbol, "judgments": found},
                   render_judgments(found, symbol=args.symbol))
             return 0
+        if action in ("execute", "positions", "manage"):
+            out = trading_tool.system_action(
+                context, action, symbol=args.symbol or "",
+                market=getattr(args, "market", "crypto"),
+                mode=getattr(args, "mode", "paper") or "paper")
+            if not out.get("ok"):
+                _emit(args, out, f"trade {action} failed: "
+                                 f"{out.get('error')}")
+                return 1
+            _emit(args, out, out.get("rendered") or str(out))
+            return 0
         if action == "analyze":
             rep = FinancialExpert(context).analyze(
                 args.symbol, market=args.market,
