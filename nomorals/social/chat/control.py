@@ -761,8 +761,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "think": (1, None),      # /think <question> [strategy] — show the work
     "benchmark": (0, 2),     # /benchmark [dimension] — how sharp is the system right now
     # wave 68: command discovery
-    "list": (0, 1),          # /list [group] — every executable command, categorized
-    "commands": (0, 1),      # alias of /list
+    "list": (0, 2),          # /list [group] [page] — every executable command, categorized
+    "commands": (0, 2),      # alias of /list
     # redteam: defensive self-attack suite
     "redteam": (0, 1),       # /redteam [scenario_id] — attack our own loop, report holes
     "balances": (0, None),   # /balances [rail…] — unified money view
@@ -770,7 +770,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "goal": (0, None),        # /goal add|list|done|snooze|remove
     "insights": (0, None),    # /insights [days] — native money analytics
     "predict": (0, 3),       # /predict <stake> <over|under> <1-99> — prediction pit (progression-unlocked)
-    "menu": (0, 1),          # alias of /list
+    "menu": (0, 2),          # alias of /list ([group] [page] ride the same grammar)
     # wave 72 systems: media, execution, archives, builders
     "music": (0, None),      # /music <topic> [style] | styles | song [slug] | bed | full | voices
     "distribute": (0, 1),   # /distribute [song.wav] | legal
@@ -1564,6 +1564,185 @@ def menu_sections(
              for kind in missing],
         ))
     return sections
+
+
+# ── the live bot-DM menu session (2026-11-06 menufix) ─────────────
+#
+# The bot-DM menu is ONE live message: the home index, category
+# pages and page turns all render from the canonical
+# :func:`menu_sections` structure and ride the live-session
+# machinery (declared ``session="menu"``), so a tap EDITS the menu
+# message instead of posting the catalog as a new raw text wall.
+# Callbacks stay inside the list grammar — ``list <section>
+# [page]`` — which the control parser and the gated surface's
+# callback allowlist already speak.
+
+#: Rendered-page budget for one menu page, with headroom under
+#: Telegram's 4096-char message cap for the funnel's stamp/framing.
+MENU_SESSION_PAGE_MAX = 3200
+
+
+def _menu_section_key(title: str) -> str:
+    """The one-word callback token naming a menu section (the
+    title's first word — ``voice`` for "voice & vision")."""
+    words = (title or "").strip().lower().split()
+    return words[0] if words else ""
+
+
+def _menu_session_sections(
+        platform: str, public_only: bool,
+) -> list[tuple[str, str, list[tuple[str, str]]]]:
+    """The canonical sections for a session render, public-filtered
+    on the gated surface exactly as :func:`list_catalog` filters."""
+    out = []
+    for emoji, title, items in menu_sections(platform):
+        if public_only:
+            items = [it for it in items
+                     if it[0].lstrip("/") in PUBLIC_COMMANDS]
+        if items:
+            out.append((emoji, title, list(items)))
+    return out
+
+
+def _menu_session_index(topic: str, sections) -> int | None:
+    """Which section ``topic`` names — the same topic matching
+    :func:`list_catalog` applies (aliases, group-name substrings,
+    member commands), then section-title / callback-token matches.
+    ``None`` when it names nothing (the caller falls back to the
+    catalog text path, whose "no group" reply stays the answer)."""
+    t = (topic or "").strip().lstrip("/").lower()
+    if not t:
+        return 0
+    want = _LIST_GROUP_ALIASES.get(t, t)
+    title_of = dict(_MENU_SECTION_ORDER)
+    # Priority matters: a token can be a member command of one group
+    # AND the name of another ("memory" is a game kind and a whole
+    # section). Exact beats loose — alias-target groups first, then
+    # section title / callback token, then list_catalog's loose
+    # matching (group-name substring or member command).
+    exact = {title_of.get(group, group)
+             for group, _kinds in LIST_GROUPS if group.lower() == want}
+    for i, (_emoji, title, _items) in enumerate(sections):
+        if title in exact:
+            return i
+    for i, (_emoji, title, _items) in enumerate(sections):
+        if t == title.lower() or t == _menu_section_key(title):
+            return i
+    titles = {
+        title_of.get(group, group)
+        for group, kinds in LIST_GROUPS
+        if t in group.lower().replace(" — ", " ") or group.lower() == want
+        or any(t == k for k in kinds)
+    }
+    for i, (_emoji, title, _items) in enumerate(sections):
+        if title in titles:
+            return i
+    return None
+
+
+def _menu_session_pages(items) -> list[list[tuple[str, str]]]:
+    """Split one section's items into pages under the rendered-size
+    budget (lines are ``/cmd — desc`` exactly as the menu renders)."""
+    pages: list = []
+    current: list = []
+    size = 0
+    for item in items:
+        line_len = len(item[0]) + (len(item[1]) + 3 if item[1] else 0) + 1
+        if current and size + line_len > MENU_SESSION_PAGE_MAX:
+            pages.append(current)
+            current, size = [], 0
+        current.append(item)
+        size += line_len
+    if current or not pages:
+        pages.append(current)
+    return pages
+
+
+def menu_session_render(topic: str = "", page: int = 1, *,
+                        platform: str = "",
+                        public_only: bool = False,
+                        home: bool = False,
+                        continuation: bool = False):
+    """Render one page of the live bot-DM menu — an ActionableMessage
+    declaring ``session="menu"`` — or ``None`` when ``topic`` names
+    no section (the caller then answers with the catalog text path).
+
+    ``home=True`` renders the section index (every section + its
+    command count). Otherwise the render is one page of one section;
+    pages walk the WHOLE catalog linearly (Next on a section's last
+    page opens the next section), so the old "All commands" dump is
+    a page walk inside this one message — never a second message,
+    never a raw slash-list wall. Content comes only from
+    :func:`menu_sections`; buttons only from the list grammar.
+    ``continuation`` marks tap/topic renders, which edit the live
+    menu message in place; the home opener posts it.
+    """
+    from .tgbot_buttons import actionable
+    from .typography import Card, render_card
+
+    sections = _menu_session_sections(platform, public_only)
+    if not sections:
+        return None
+    nav = [[(f"{emoji} {title}", f"list {_menu_section_key(title)}")]
+           for emoji, title, _items in sections]
+    if home:
+        card = Card("menu", title="Devon — command menu", icon="✨")
+        card.line("you don't need to memorize these — just say "
+                  "what you want in plain words.")
+        card.block_lines(
+            [f"{emoji} {title} — {len(items)} commands"
+             for emoji, title, items in sections],
+            title="categories")
+        card.note("tap a category — every page lives in this one "
+                  "message · /help <command> for the full page on "
+                  "one command")
+        buttons = [list(row) for row in nav]
+        if not public_only:
+            # Parity with the personal category menu's Power row (an
+            # owner-surface affordance; never on the gated bot).
+            for i, (_e, title, _i) in enumerate(sections):
+                if _menu_section_key(title) == "games":
+                    buttons.insert(i + 1, [("⚡ Power", "power status")])
+                    break
+        buttons.append([("📋 All commands",
+                         f"list {_menu_section_key(sections[0][1])}")])
+        return actionable(render_card(card, platform=platform).text,
+                          buttons, session="menu",
+                          session_edit=continuation)
+    idx = _menu_session_index(topic, sections)
+    if idx is None:
+        return None
+    per_section = [_menu_session_pages(items)
+                   for _e, _t, items in sections]
+    flat = [(si, pi) for si, pages in enumerate(per_section)
+            for pi in range(len(pages))]
+    page = min(max(1, int(page or 1)), len(per_section[idx]))
+    pos = flat.index((idx, page - 1))
+    emoji, title, _items = sections[idx]
+    card = Card("menu", title=title, icon=emoji)
+    card.block_lines(
+        [f"{cmd} — {desc}" if desc else cmd
+         for cmd, desc in per_section[idx][page - 1]])
+    card.note(f"page {pos + 1} of {len(flat)} · "
+              "/help <command> for the full page on one command")
+    buttons: list = []
+    turn: list = []
+    if pos > 0:
+        psi, ppi = flat[pos - 1]
+        turn.append(("◀ Prev",
+                     f"list {_menu_section_key(sections[psi][1])} "
+                     f"{ppi + 1}"))
+    if pos < len(flat) - 1:
+        nsi, npi = flat[pos + 1]
+        turn.append(("Next ▶",
+                     f"list {_menu_section_key(sections[nsi][1])} "
+                     f"{npi + 1}"))
+    if turn:
+        buttons.append(turn)
+    buttons.append([("⌂ Menu home", "list home")])
+    buttons.extend(list(row) for row in nav)
+    return actionable(render_card(card, platform=platform).text,
+                      buttons, session="menu", session_edit=True)
 
 
 def _whatsapp_sections() -> list[tuple[str, str, list[tuple[str, str]]]]:

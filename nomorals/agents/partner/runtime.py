@@ -1625,7 +1625,6 @@ class PartnerRuntime(
             # text, as before.
             if message.chat.platform == "telegram-bot" and command is not None:
                 from ...social.chat.control import PUBLIC_COMMANDS
-                from ...social.chat.tgbot_buttons import public_menu_keyboard
 
                 # Bare /start and bare /menu are menu triggers (the menu
                 # text is public); /menu <group> and /start <platform>
@@ -1645,10 +1644,14 @@ class PartnerRuntime(
                         reply = "that broke something on my end — try again."
                     if reply:
                         try:
-                            self._send_control_reply(
-                                message, reply,
-                                reply_keyboard=public_menu_keyboard()
-                                if bare_menu else None)
+                            # The persistent catalog reply-keyboard
+                            # grid is retired (2026-11-06 menufix):
+                            # the inline menu is the action surface.
+                            # Bare-menu replies clear any grid a
+                            # client still holds — once per chat.
+                            if bare_menu:
+                                self._clear_menu_grid_once(message)
+                            self._send_control_reply(message, reply)
                         except Exception:  # noqa: BLE001
                             _log.warning("public-bot reply send failed")
                     return
@@ -1803,13 +1806,13 @@ class PartnerRuntime(
                     try:
                         # Bare /start and /menu carry the bottom menu
                         # keyboard on operator chats too (any platform).
-                        _kb = None
+                        # Retired 2026-11-06 (menufix): the grid is
+                        # abolished — the inline menu is the action
+                        # surface; bare-menu replies clear any grid a
+                        # client still holds, once per chat.
                         if message.text.strip() in ("/start", "/menu"):
-                            from ...social.chat.tgbot_buttons import (
-                                public_menu_keyboard)
-                            _kb = public_menu_keyboard()
-                        self._send_control_reply(
-                            message, reply, reply_keyboard=_kb)
+                            self._clear_menu_grid_once(message)
+                        self._send_control_reply(message, reply)
                     except Exception as exc:  # noqa: BLE001
                         _log.warning("control reply send failed: %s", exc)
                 return
@@ -4155,6 +4158,93 @@ class PartnerRuntime(
                 f"{reply if reply else '(no output)'}")
         return "\n".join(parts)
 
+    def _menu_session_reply(self, message, chat_key, command):  # type: ignore[no-untyped-def]
+        """The live bot-DM menu render for /menu, /list, /commands —
+        or None when this surface keeps the catalog text path.
+
+        The session render applies only where the one-live-message
+        law can hold (2026-11-06 menufix): a real inbound message, a
+        DM, a platform whose limits support buttons AND text edit,
+        and never WhatsApp (its menu bytes are its own law). Groups,
+        buttonless surfaces and internal (message=None) calls keep
+        the text path, byte for byte. An unknown topic also falls
+        back — the catalog's "no group" reply stays the answer.
+        """
+        if message is None:
+            return None
+        platform = (chat_key or "").partition(":")[0].strip().lower()
+        if platform in ("whatsapp", "wa"):
+            return None
+        chat = getattr(message, "chat", None)
+        if chat is None or getattr(chat, "kind", None) is not ChatKind.DM:
+            return None
+        from ...social.chat.control import menu_session_render
+        from ...social.chat.platform_limits import for_platform
+        limits = for_platform(platform)
+        if limits is None or not (limits.supports_buttons
+                                  and limits.supports_text_edit):
+            return None
+        tail = str(command.tail or "").split()
+        topic = (command.arg or "").strip()
+        page = 1
+        if len(tail) > 1 and tail[1].isdigit():
+            page = max(1, int(tail[1]))
+        meta = getattr(message, "meta", None) or {}
+        tapped = bool(meta.get("tapped_message_id"))
+        public_only = is_gated_surface(platform)
+        if topic.lower() in ("home", "index"):
+            return menu_session_render(
+                platform=platform, public_only=public_only,
+                home=True, continuation=True)
+        if not topic:
+            if tapped and command.kind in ("list", "commands"):
+                # The category menu's "All commands" tap: start the
+                # linear page walk at the first section, editing the
+                # menu message — never a fresh catalog wall.
+                return menu_session_render(
+                    platform=platform, public_only=public_only)
+            return menu_session_render(
+                platform=platform, public_only=public_only,
+                home=True, continuation=tapped)
+        return menu_session_render(
+            topic, page, platform=platform, public_only=public_only,
+            continuation=True)
+
+    def _clear_menu_grid_once(self, message) -> None:
+        """Retire the persistent catalog reply keyboard in this chat.
+
+        The grid attached on every bare /start|/menu reply until the
+        2026-11-06 menufix; a persistent keyboard survives in the
+        client until a remove lands, so the first bare-menu reply in
+        each Telegram chat carries one short carrier message with
+        the remove verb (an empty reply_keyboard), KV-flagged so it
+        happens exactly once per chat, ever. Best-effort: a failed
+        send leaves the flag unset and the next menu retries; a
+        failure here never breaks the menu reply itself.
+        """
+        try:
+            chat = getattr(message, "chat", None)
+            if chat is None:
+                return
+            platform = str(getattr(chat, "platform", "") or "")
+            if platform not in ("telegram", "telegram-bot",
+                                "telegram-personal"):
+                return
+            kv = KVStore(self.context.db)
+            flag = f"menu.grid_cleared:{chat.key}"
+            if kv.get(flag, default=False):
+                return
+            result = self.gateway.send(
+                platform, chat,
+                "⌨️ the bottom command grid is retired — "
+                "the menu carries the buttons now.",
+                reply_keyboard=[])
+            if result is not None and getattr(result, "ok", False):
+                kv.set(flag, True)
+        except Exception as exc:  # noqa: BLE001 - cosmetic cleanup
+            record_failure(
+                "runtime.PartnerRuntime._clear_menu_grid_once", exc)
+
     def _send_control_reply(self, message, reply, *,  # type: ignore[no-untyped-def]
                             reply_keyboard=None):
         """The ONE send channel for control-command replies, on
@@ -4502,6 +4592,12 @@ class PartnerRuntime(
                     in ("whatsapp", "wa"):
                 from ...social.chat.control import help_menu
                 return help_menu("whatsapp")
+            # Bot-DM button surfaces get the live menu session's home
+            # (one message; categories page inside it) — the text menu
+            # stays for groups and buttonless surfaces.
+            home = self._menu_session_reply(message, chat_key, command)
+            if home is not None:
+                return home
             return public_menu_text()
 
         # The originating surface, from the chat key — one computation,
@@ -4618,6 +4714,16 @@ class PartnerRuntime(
             # list only — the full catalog names owner-only commands
             # (platform control, money, trial tooling) that must never
             # be advertised there.
+            #
+            # Bot-DM surfaces with buttons + text edit get the LIVE
+            # menu instead (2026-11-06 menufix): one message, paged
+            # in place via the menu session — the catalog text below
+            # stays the path for groups, WhatsApp and buttonless
+            # surfaces, byte for byte.
+            session_reply = self._menu_session_reply(
+                message, chat_key, command)
+            if session_reply is not None:
+                return session_reply
             from ...social.chat.control import list_catalog
             return list_catalog(arg, public_only=is_gated_surface(platform))
         if kind == "help":

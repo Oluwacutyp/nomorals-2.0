@@ -470,7 +470,11 @@ class ChatAdapter(ABC):
         message). Only the Telegram adapters render it; every other
         adapter ignores it. When both ``buttons`` and ``reply_keyboard``
         are passed, ``reply_keyboard`` wins (a message carries one
-        keyboard).
+        keyboard). An EMPTY ``reply_keyboard`` (``[]``) is the remove
+        verb: the Telegram adapters hide the persistent keyboard
+        (Bot API ``remove_keyboard`` / MTProto ``ReplyKeyboardHide``);
+        every other adapter ignores it, like a keyboard it cannot
+        render.
 
         ``parse_mode`` (e.g. "HTML") enables rich formatting — opt-in per
         message so plain-text messages are never accidentally parsed.

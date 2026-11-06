@@ -517,7 +517,13 @@ def confirm_keyboard(action: str,
 # ── public bottom menu (BotFather list) ─────────────────────────────────
 
 def public_menu_keyboard() -> list[list[str]]:
-    """Persistent bottom reply keyboard: the PUBLIC command list only.
+    """The PUBLIC command list as a bottom reply-keyboard grid.
+
+    Retained as the BotFather-list mirror builder (its shape is
+    pinned by tests), but the runtime no longer attaches it: the
+    persistent catalog grid was retired by the 2026-11-06 menufix —
+    the inline menu is the action surface, and clients still holding
+    the grid get a one-time ReplyKeyboardRemove from the menu flow.
 
     Button text is the command itself (``"/help"``) — tapping one sends
     it as a message. 13 rows: 5 rows of named commands + 8 rows of the

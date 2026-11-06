@@ -2193,6 +2193,15 @@ class TelegramAdapter(ChatAdapter):
             except Exception:  # noqa: BLE001 - keyboard is cosmetic
                 _log.debug("telegram: could not build reply keyboard",
                            exc_info=True)
+        elif reply_keyboard is not None:
+            # Empty keyboard = the remove verb: hide the persistent
+            # reply keyboard (the Bot API side sends remove_keyboard).
+            try:
+                from telethon.tl.types import ReplyKeyboardHide
+                markup = ReplyKeyboardHide()
+            except Exception:  # noqa: BLE001 - keyboard is cosmetic
+                _log.debug("telegram: could not build keyboard hide",
+                           exc_info=True)
         # Inline action buttons (AA-77): a real Telethon inline
         # matrix, attached to the last chunk like the reply keyboard.
         # A message carries ONE reply_markup: the authored inline
@@ -5396,7 +5405,17 @@ class TelegramBotAdapter(ChatAdapter):
             # carries one keyboard. The reply keyboard is the persistent
             # bottom menu (tapping a button sends its text as a message).
             keyboard = None
-            if reply_keyboard:
+            if reply_keyboard is not None and not any(
+                    cell for row in reply_keyboard for cell in row):
+                # The remove verb: an EMPTY reply_keyboard hides the
+                # persistent bottom keyboard (ReplyKeyboardRemove).
+                # The 2026-11-06 menufix retired the catalog grid,
+                # and a persistent keyboard lives in the client until
+                # a remove lands. Removal wins over inline buttons
+                # for this message — a removal carrier carries no
+                # actions of its own.
+                keyboard = {"remove_keyboard": True}
+            elif reply_keyboard:
                 keyboard = {
                     "keyboard": [[{"text": t} for t in row]
                                  for row in reply_keyboard if row],
@@ -5460,7 +5479,13 @@ class TelegramBotAdapter(ChatAdapter):
                 # The keyboard goes on the last chunk only — every chunk
                 # carrying it would repeat the buttons N times.
                 if keyboard and i == len(chunks) - 1:
-                    if reply_keyboard:
+                    if reply_keyboard is not None:
+                        # The reply-keyboard family (a grid, or the
+                        # remove verb for an empty one) IS the markup;
+                        # inline buttons wrap as inline_keyboard. The
+                        # discriminator is None-ness, not truthiness —
+                        # an empty keyboard is falsy but is a remove,
+                        # never an inline keyboard.
                         params["reply_markup"] = keyboard
                     else:
                         params["reply_markup"] = {"inline_keyboard": keyboard}
