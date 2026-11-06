@@ -27,6 +27,21 @@ def _cmd_trade(args: argparse.Namespace, context: Any) -> int:
             # Honest exit: a read with every timeframe missing failed.
             return 0 if any(b["status"] != "missing"
                             for b in rep["timeframes"].values()) else 1
+        if action == "scan":
+            from ...agents.setups import render_pass, shadow_pass
+            rep = shadow_pass(
+                args.symbol, market=args.market,
+                settings=getattr(context, "settings", None))
+            _emit(args, rep, render_pass(rep))
+            return 0
+        if action == "setups":
+            from ...agents.setups import recent_setups, render_setups
+            found = recent_setups(
+                args.symbol,
+                settings=getattr(context, "settings", None))
+            _emit(args, {"symbol": args.symbol, "setups": found},
+                  render_setups(found, symbol=args.symbol))
+            return 0
         if action == "analyze":
             rep = FinancialExpert(context).analyze(
                 args.symbol, market=args.market,

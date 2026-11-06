@@ -2865,6 +2865,8 @@ def _parser() -> argparse.ArgumentParser:
     trade = sub.add_parser("trade", aliases=CLI_ALIASES["trade"],
         help="FinancialExpert trading brain (Sentinel.py engine)",
         description=("nm trade read XAUUSD [--market forex]\n"
+                     "nm trade scan XAUUSD [--market forex]\n"
+                     "nm trade setups XAUUSD [--market forex]\n"
                      "nm trade analyze BTC/USDT [--market crypto] [--timeframe 1h]\n"
                      "nm trade backtest XAUUSD --market forex [--profile aggressive]\n"
                      "nm trade signal ETH/USDT\n"
@@ -2884,6 +2886,14 @@ def _parser() -> argparse.ArgumentParser:
     t_read.add_argument("symbol", help="e.g. XAUUSD, BTC/USDT")
     t_read.add_argument("--market", default="crypto", help="crypto|forex|stocks")
     t_read.add_argument("--json", action="store_true", help="Output as JSON")
+    t_scan = trade_sub.add_parser("scan", help="one shadow pass: detect + arm playbook setups from a fresh read (never executes)")
+    t_scan.add_argument("symbol", help="e.g. XAUUSD, BTC/USDT")
+    t_scan.add_argument("--market", default="crypto", help="crypto|forex|stocks")
+    t_scan.add_argument("--json", action="store_true", help="Output as JSON")
+    t_setups = trade_sub.add_parser("setups", help="live + recent shadow setups from the trading journal")
+    t_setups.add_argument("symbol", help="e.g. XAUUSD, BTC/USDT")
+    t_setups.add_argument("--market", default="crypto", help="crypto|forex|stocks")
+    t_setups.add_argument("--json", action="store_true", help="Output as JSON")
     t_analyze = trade_sub.add_parser("analyze", help="plain-language regime + strategy brief")
     t_analyze.add_argument("symbol", help="e.g. BTC/USDT, XAUUSD")
     t_analyze.add_argument("--market", default="crypto", help="crypto|forex|stocks")

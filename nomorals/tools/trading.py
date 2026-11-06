@@ -663,6 +663,9 @@ def register(registry: Any) -> None:
             "FinancialExpert trading brain (Sentinel.py engine). "
             "read is the standing whole-market read (D1·H4·H1·M30·M15·M5 "
             "structure bias + zones, per-timeframe provenance, journaled); "
+            "scan runs ONE shadow pass of the playbook system (detect + "
+            "arm setups from a fresh read, journal every transition — "
+            "never executes); setups lists live + recent shadow setups; "
             "analyze/backtest/signal/compare/strategies are research tools; "
             "paper_* run simulated sessions; live_order is inert unless "
             "every live gate passes (settings + 24h unlock + loss limit); "
@@ -675,7 +678,7 @@ def register(registry: Any) -> None:
             "confirmed=true or a human checkpoint. action=..."),
         capability=Capability.NET_OUT,
         parameters={
-            "action": "str — read|analyze|backtest|signal|compare|strategies|"
+            "action": "str — read|scan|setups|analyze|backtest|signal|compare|strategies|"
                       "paper_start|paper_status|paper_stop|doctor|"
                       "live_unlock|live_order|kill|"
                       "exness_snapshot|exness_positions|exness_size|"
@@ -729,6 +732,19 @@ def register(registry: Any) -> None:
                 settings=getattr(context, "settings", None))
             rep["rendered"] = render_read(rep)
             return rep
+        if action == "scan":
+            from ..agents.setups import render_pass, shadow_pass
+            rep = shadow_pass(
+                symbol, market=market,
+                settings=getattr(context, "settings", None))
+            rep["rendered"] = render_pass(rep)
+            return rep
+        if action == "setups":
+            from ..agents.setups import recent_setups, render_setups
+            found = recent_setups(
+                symbol, settings=getattr(context, "settings", None))
+            return {"symbol": symbol, "setups": found,
+                    "rendered": render_setups(found, symbol=symbol)}
         expert = FinancialExpert(context)
         if action == "analyze":
             return expert.analyze(
