@@ -59,6 +59,7 @@ from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
 from ..storage.kv import KVStore
+from .extra_content import RIDDLES, TRIVIA_PACKS
 from .failures import record_failure
 
 _log = get_logger(__name__)
@@ -827,6 +828,63 @@ class TriviaForge:
                     record_failure("trivia_forge.blocked_themes", exc)
         return blocked
 
+    def _draw_static(self, count: int, difficulty: str,
+                     used: set[str]) -> list[dict[str, Any]]:
+        """Draw up to ``count`` fresh records from the hand-written
+        static content: the culture trivia packs (:data:`TRIVIA_PACKS`)
+        and the riddle-hunt riddles (:data:`RIDDLES`) in
+        :mod:`nomorals.games.extra_content`.
+
+        These are verified-by-authorship questions with real
+        distractors — the same trust class as the bank — so they are
+        served by the engine's trivia path here instead of sitting
+        unserved in their own module (AA-10). Freshness is filtered
+        here against the anti-repeat window + this deal's ``used``
+        set, exactly as :meth:`_draw_bank` filters its draw. Pack
+        and question order is shuffled per draw so successive deals
+        rotate through the packs.
+        """
+        if count <= 0:
+            return []
+        records: list[dict[str, Any]] = []
+        pack_ids = list(TRIVIA_PACKS)
+        self.rng.shuffle(pack_ids)
+        for pid in pack_ids:
+            pack = TRIVIA_PACKS[pid]
+            questions = list(pack["questions"])
+            self.rng.shuffle(questions)
+            for q in questions:
+                options = list(q["options"])
+                answer = options[q["answer"]]
+                records.append({
+                    "q": q["q"], "answer": answer,
+                    "distractors": [o for i, o in enumerate(options)
+                                    if i != q["answer"]],
+                    "kind": "pack", "source": pid, "tag": "",
+                    "solution": "", "theme": pack["title"],
+                    "difficulty": difficulty})
+        riddles = list(RIDDLES)
+        self.rng.shuffle(riddles)
+        for r in riddles:
+            answers = [str(a) for a in r["a"]]
+            if not answers:
+                continue
+            records.append({
+                "q": r["q"], "answer": answers[0],
+                "distractors": answers[1:],
+                "kind": "riddle", "source": "riddle-hunt", "tag": "",
+                "solution": str(r.get("hint", "")), "theme": "riddles",
+                "difficulty": difficulty})
+        self.rng.shuffle(records)
+        out: list[dict[str, Any]] = []
+        for r in records:
+            if _hash_q(r["q"]) in used or not self._is_fresh(r["q"]):
+                continue
+            out.append(r)
+            if len(out) >= count:
+                break
+        return out
+
     def _draw_bank(self, count: int, difficulty: str,
                    used: set[str]) -> list[dict[str, Any]]:
         """Draw up to ``count`` detailed records from the bank.
@@ -879,9 +937,9 @@ class TriviaForge:
         """Deal ``count`` fresh questions as (question, answer) pairs.
 
         The M3 mix: the verified bank takes at least half the set
-        when it has fresh stock, the generative forge serves the
-        rest, the template forge fills last.  With no bank stock this
-        is exactly the pre-M3 deal.
+        when it has fresh stock, the generative forge serves next,
+        the hand-written static packs/riddles (AA-10) fill after
+        that, more bank follows, and the template forge fills last.
         """
         return [(r["q"], r["answer"]) for r in
                 self.deal_detailed(count, difficulty, profile)]
@@ -922,10 +980,15 @@ class TriviaForge:
                         "kind": "generative", "source": None, "tag": "",
                         "solution": "", "theme": topic,
                         "difficulty": difficulty} for q, a in got])
-        # 3) more bank before the template forge (design order)
+        # 3) the hand-written static content (AA-10): culture
+        # trivia packs + riddle-hunt riddles — verified-by-authorship
+        # questions that used to sit unserved in extra_content.
+        if len(out) < count:
+            _take(self._draw_static(count - len(out), difficulty, used))
+        # 4) more bank before the template forge (design order)
         if len(out) < count:
             _take(self._draw_bank(count - len(out), difficulty, used))
-        # 4) template forge — the never-stall filler, as before
+        # 5) template forge — the never-stall filler, as before
         if len(out) < count:
             got = self._forge(count - len(out), difficulty)
             _take([{"q": q, "answer": a, "distractors": [],

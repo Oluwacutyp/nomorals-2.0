@@ -15,11 +15,24 @@
   *injected* group messages (``guess who said this`` / wisdom / book),
   never from owner data. Deterministic given ``(messages, seed)``.
 
+Production wiring (AA-16): the engine folds every finished group
+game's results into the group's season board
+(:func:`record_season_results`, persisted by :class:`SeasonStore`),
+a durable hourly scheduler job (:func:`ensure_season_tick_job` →
+``__season_tick__`` tool → :func:`run_season_tick_once`) rolls each
+group into the current quarter and pays closed seasons' prizes
+through the group economy — the one purse — and ``/game season``
+renders the live board. Before this wiring the season system had
+no production caller at all: no game ever scored, no season ever
+closed, no prize ever moved.
+
 Only stdlib + ``nomorals.core``. No owner-data imports.
 """
 
 from __future__ import annotations
 
+import calendar
+import contextlib
 import json
 import random
 import time
@@ -38,6 +51,9 @@ __all__ = [
     "season_id_for", "AsyncGameStore", "MurderMysteryGame",
     "ScavengerHuntGame", "ElectionGame", "TriviaQuestion",
     "build_trivia", "ASYNC_GAMES",
+    "SeasonStore", "seasons_root", "record_season_results",
+    "current_season", "run_season_tick_once", "ensure_season_tick_job",
+    "SEASON_JOB", "SEASON_SPEC", "SEASON_TOOL",
 ]
 
 ASYNC_GAMES = ("murder_mystery", "scavenger_hunt", "election")
@@ -157,6 +173,317 @@ class SeasonPrize:
                             "amount": amount, "paid": paid,
                             "dry_run": ledger is None})
         return payouts
+
+
+# ─────────────────── production wiring (AA-16) ─────────────────────────────
+# The classes above are the organ; everything below is its production
+# life: persistence, the engine's result feed, the quarterly rollover
+# + prize tick, and the durable scheduler job.
+
+#: Durable season job: name, tool payload, cadence. Hourly is plenty
+#: for a quarterly boundary — the tick is a cheap directory scan, and
+#: the rollover also happens lazily on the next recorded result or
+#: board read, so a boundary is never missed by more than the tick.
+SEASON_JOB = "season tick"
+SEASON_TOOL = "__season_tick__"
+SEASON_SPEC = "every 1h"
+
+
+def _seasons_default_root() -> Path:
+    return Path.home() / ".devon" / "community" / "seasons"
+
+
+def seasons_root(context: Any = None) -> Path:
+    """The season store root: the community dir's ``seasons`` folder
+    when the runtime context carries one (the same resolution the
+    community orchestration uses), else the default community root
+    the async-game store also lives under."""
+    settings = getattr(context, "settings", None)
+    root = getattr(settings, "community_dir", None)
+    if root:
+        return Path(root) / "seasons"
+    return _seasons_default_root()
+
+
+def _quarter_bounds(ts: float) -> tuple[float, float]:
+    """(starts_at, ends_at) unix bounds of the quarter holding ``ts``
+    (UTC, computed with calendar arithmetic — no tz objects)."""
+    tm = time.gmtime(ts)
+    start_month = 3 * ((tm.tm_mon - 1) // 3) + 1  # 1, 4, 7, 10
+    start = calendar.timegm((tm.tm_year, start_month, 1, 0, 0, 0, 0, 0, 0))
+    if start_month == 10:
+        end = calendar.timegm((tm.tm_year + 1, 1, 1, 0, 0, 0, 0, 0, 0))
+    else:
+        end = calendar.timegm(
+            (tm.tm_year, start_month + 3, 1, 0, 0, 0, 0, 0, 0))
+    return float(start), float(end)
+
+
+class SeasonStore:
+    """JSON persistence for group seasons, one file per group.
+
+    The file holds the active ``season`` + ``board``, a
+    display-name → member-id map (prize payouts credit through it —
+    member ids are routing data and never reach member-facing text),
+    and the ``archive`` of closed seasons with their payout records
+    (``payouts`` is None until the tick has attempted them;
+    ``settled`` flips only when every prize actually landed).
+    """
+
+    def __init__(self, root: Path | str | None = None) -> None:
+        self.root = Path(root) if root is not None else _seasons_default_root()
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, group_id: str) -> Path:
+        safe = group_id.replace("/", "_").replace("\\", "_").strip() or "group"
+        return self.root / f"{safe}.json"
+
+    def load(self, group_id: str) -> dict[str, Any]:
+        path = self._path(group_id)
+        if not path.exists():
+            return {"group_id": group_id, "season": None, "board": None,
+                    "members": {}, "archive": []}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {"group_id": group_id, "season": None, "board": None,
+                    "members": {}, "archive": []}
+        data.setdefault("group_id", group_id)
+        data.setdefault("season", None)
+        data.setdefault("board", None)
+        data.setdefault("members", {})
+        data.setdefault("archive", [])
+        return data
+
+    def save(self, group_id: str, data: dict[str, Any]) -> None:
+        path = self._path(group_id)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                       encoding="utf-8")
+        tmp.replace(path)
+
+    def group_ids(self) -> list[str]:
+        """Groups with a season file, by the id stored inside each
+        file (the filename is only a sanitized routing key)."""
+        out: list[str] = []
+        for path in sorted(self.root.glob("*.json")):
+            try:
+                gid = json.loads(path.read_text(encoding="utf-8")).get("group_id")
+            except (json.JSONDecodeError, OSError):
+                continue
+            if gid:
+                out.append(str(gid))
+        return out
+
+
+def _rollover(data: dict[str, Any], group_id: str, now: float) -> bool:
+    """Close a stale active season into the archive and open the
+    current quarter's. A stale season with points is archived for
+    prize payout; an empty one simply lapses. Returns True when a
+    season with results was closed."""
+    cur_id = season_id_for(now)
+    season = data.get("season")
+    if season and season.get("id") == cur_id \
+            and season.get("status") == "active":
+        return False
+    closed = False
+    if season:
+        board = data.get("board") or {}
+        if board.get("points"):
+            archived = dict(season)
+            archived["status"] = "closed"
+            data.setdefault("archive", []).append({
+                "season": archived, "board": board,
+                "members": dict(data.get("members") or {}),
+                "payouts": None, "settled": False})
+            closed = True
+    starts, ends = _quarter_bounds(now)
+    data["season"] = Season(id=cur_id, group_id=group_id,
+                            name=f"Season {cur_id}", starts_at=starts,
+                            ends_at=ends, status="active").to_dict()
+    data["board"] = SeasonLeaderboard(
+        season_id=cur_id, group_id=group_id).to_dict()
+    data["members"] = {}
+    return closed
+
+
+def record_season_results(group_id: str, game: str,
+                          results: list[tuple[str, str, int, bool]], *,
+                          context: Any = None, root: Path | str | None = None,
+                          now: float | None = None) -> dict[str, Any]:
+    """Fold one finished group game's results into the season board.
+
+    ``results`` are ``(player_name, member_id, points, won)`` tuples —
+    the engine's settle produces them per human at the table. Points
+    only: no money moves here. Prizes are the tick's job, paid
+    through the group economy when the season closes.
+    """
+    now = now if now is not None else time.time()
+    store = SeasonStore(root if root is not None else seasons_root(context))
+    data = store.load(group_id)
+    _rollover(data, group_id, now)
+    board = SeasonLeaderboard.from_dict(data["board"])
+    members = dict(data.get("members") or {})
+    recorded = 0
+    for name, member_id, points, won in results:
+        if not name:
+            continue
+        board.add_result(str(name), int(points), game=game, won=bool(won))
+        if member_id and str(name) not in members:
+            members[str(name)] = str(member_id)
+        recorded += 1
+    data["board"] = board.to_dict()
+    data["members"] = members
+    store.save(group_id, data)
+    return {"season": board.season_id, "recorded": recorded,
+            "players": len(board.standings())}
+
+
+def current_season(group_id: str, *, context: Any = None,
+                   root: Path | str | None = None,
+                   now: float | None = None) -> tuple[dict[str, Any], SeasonLeaderboard]:
+    """The group's (season, board) for the current quarter — the
+    store rolls over first, so a surface never renders a stale
+    season as the live one."""
+    now = now if now is not None else time.time()
+    store = SeasonStore(root if root is not None else seasons_root(context))
+    data = store.load(group_id)
+    before = (data.get("season") or {}).get("id")
+    _rollover(data, group_id, now)
+    if (data.get("season") or {}).get("id") != before:
+        store.save(group_id, data)
+    return data["season"], SeasonLeaderboard.from_dict(data["board"])
+
+
+def _prize_economy(context: Any = None) -> Any:
+    """The group economy at the surface's root (workspace
+    ``data/social/group_economy`` — the root GroupSurface uses), or
+    the economy's own default root when no workspace is known."""
+    from ..community.group_economy import GroupEconomy
+
+    settings = getattr(context, "settings", None)
+    ws = getattr(settings, "workspace_dir", None)
+    if ws:
+        return GroupEconomy(Path(ws) / "data" / "social" / "group_economy")
+    return GroupEconomy()
+
+
+def _ledger_for(econ: Any, group_id: str, members: dict[str, str],
+                ) -> Callable[[str, int, str], bool]:
+    """A SeasonPrize ledger over the group economy — the one purse.
+
+    A season prize is a competition *payout*, not an earn, so it
+    settles the way the token-economy facade (AA-21) settles its
+    non-earn movements: appended straight to the group's ledger as
+    kind ``prize``. Routing it through ``award()`` would make the
+    top prizes unpayable forever — award()'s daily earn cap (200)
+    sits below the rank-1 prize (500), and a blocked earn never
+    lands no matter how often it is retried. The winner is verified
+    on first credit, exactly as ``GroupSurface.game_award`` verifies
+    a member before crediting game winnings."""
+
+    def ledger(player: str, amount: int, reason: str) -> bool:
+        member = members.get(player)
+        if not member or int(amount) <= 0:
+            return False
+        try:
+            if not econ.is_verified(group_id, member):
+                econ.verify_member(group_id, member)
+            econ._append(group_id, econ._new_entry(
+                group_id, member, "prize", int(amount), reason,
+                ref="season-prize"))
+            return True
+        except Exception as exc:  # noqa: BLE001 — one prize never kills the tick
+            _log.warning("season prize payout failed for %s in %s: %s",
+                         player, group_id, exc)
+            return False
+
+    return ledger
+
+
+def run_season_tick_once(context: Any = None, *,
+                         root: Path | str | None = None,
+                         ledger_for: Callable[[str, dict[str, str]],
+                                                Callable[[str, int, str], bool]] | None = None,
+                         now: float | None = None) -> dict[str, Any]:
+    """One production season tick: roll every known group into the
+    current quarter, then pay every closed season's outstanding
+    prizes through the group economy.
+
+    Returns a summary for the scheduler journal — the tick posts
+    nothing anywhere (a routine job with nothing to report stays
+    silent). ``ledger_for`` is injectable for tests; production
+    builds the group-economy ledger per closed season.
+    """
+    now = now if now is not None else time.time()
+    store = SeasonStore(root if root is not None else seasons_root(context))
+    summary: dict[str, Any] = {"ok": True, "groups": 0, "closed": [],
+                               "paid": [], "unpaid": []}
+    econ: Any = None
+    for group_id in store.group_ids():
+        data = store.load(group_id)
+        if _rollover(data, group_id, now):
+            summary["closed"].append(
+                {"group": group_id, "season": data["archive"][-1]["season"]["id"]})
+        for entry in data.get("archive", []):
+            if entry.get("settled"):
+                continue
+            board = SeasonLeaderboard.from_dict(entry["board"])
+            members = dict(entry.get("members") or {})
+            if ledger_for is not None:
+                ledger = ledger_for(group_id, members)
+            else:
+                if econ is None:
+                    econ = _prize_economy(context)
+                ledger = _ledger_for(econ, group_id, members)
+            payouts = SeasonPrize(
+                season_id=entry["season"]["id"]).distribute(board, ledger)
+            entry["payouts"] = payouts
+            entry["settled"] = all(p.get("paid") for p in payouts)
+            for p in payouts:
+                row = {"group": group_id, "season": entry["season"]["id"],
+                       "player": p["player"], "rank": p["rank"],
+                       "amount": p["amount"]}
+                summary["paid" if p.get("paid") else "unpaid"].append(row)
+        store.save(group_id, data)
+        summary["groups"] += 1
+    return summary
+
+
+def _job_field(job: Any, name: str) -> Any:
+    if isinstance(job, dict):
+        return job.get(name, "")
+    return getattr(job, name, "")
+
+
+def _spec_matches(stored: Any, spec: str) -> bool:
+    return str(stored or "") == spec
+
+
+def ensure_season_tick_job(scheduler: Any, *,
+                           spec: str = SEASON_SPEC) -> Any:
+    """Register the durable season tick job. Idempotent — mirrors
+    ``ensure_failure_loop_job``: an existing job at the requested
+    cadence is returned as-is, a stale one is replaced. Best-effort:
+    never raises (a missing scheduler just means no scheduled tick
+    runs; rollover still happens lazily on recorded results). The
+    job is ``routine=True`` — runs journal with AA-67 honesty
+    (skipped/missed runs record ok=False) and never page."""
+    if scheduler is None:
+        return None
+    try:
+        for job in (scheduler.list_jobs() or []):
+            if _job_field(job, "name") == SEASON_JOB:
+                if _spec_matches(_job_field(job, "spec"), spec):
+                    return job
+                with contextlib.suppress(Exception):
+                    scheduler.remove(_job_field(job, "id"))
+                break
+        return scheduler.add(SEASON_JOB, spec, "tool",
+                             {"tool": SEASON_TOOL, "args": {}},
+                             routine=True)
+    except Exception:  # noqa: BLE001 - scheduling is best-effort
+        return None
 
 
 # ───────────────────────── async multiplayer ────────────────────────────────

@@ -1433,6 +1433,7 @@ class GameEngine:
         room.status = "finished"
         msgs: list[str] = []
         card_scores: dict[str, int] = {}
+        season_results: list[tuple[str, str, int, bool]] = []
         winner_label = ""
         fair_mem: tuple[str, dict[str, Any]] | None = None
         if extra:
@@ -1518,6 +1519,14 @@ class GameEngine:
                     if (room.state or {}).get("forfeit_loser") == p.key:
                         won = False  # a forfeit is a loss, full stop
                     points = GameEconomy.reward_points(won, game.score(room, p))
+                    # quarterly season (AA-16): this result folds
+                    # into the group's season board after the settle
+                    # (points only — prizes are the season tick's
+                    # job, paid through the group economy).
+                    season_results.append(
+                        (p.name,
+                         p.key.split(":", 1)[1] if ":" in p.key else "",
+                         int(points), bool(won)))
                     score = game.score(room, p)
                     card_scores[p.key] = score
                     try:
@@ -1760,6 +1769,17 @@ class GameEngine:
                     )
             except Exception:  # noqa: BLE001
                 _log.debug("game ledger credit failed", exc_info=True)
+        # quarterly season board (AA-16): group-room results only —
+        # a season is a group's standing table, DM tables don't feed
+        # it. Fail-soft like every other settle bridge: a season
+        # write must never sink a finished game.
+        if season_results and room.kind == "group":
+            try:
+                from .tournaments_seasons import record_season_results
+                record_season_results(room.chat_key, room.game,
+                                      season_results, context=self.context)
+            except Exception:  # noqa: BLE001
+                _log.debug("season record failed", exc_info=True)
         try:
             self._reconcile_items(room)
         except Exception:  # noqa: BLE001

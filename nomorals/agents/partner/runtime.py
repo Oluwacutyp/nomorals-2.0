@@ -2855,6 +2855,20 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "failure loop job not registered: %s", exc)
+                # Games seasons (AA-16): one durable "season tick"
+                # job (every 1h) rolling each group's quarterly
+                # season over at the boundary and paying closed
+                # seasons' prizes through the group economy — the
+                # engine folds finished group games into the season
+                # boards, but before this wiring nothing ever closed
+                # a season or moved a prize.  Idempotent; best-effort.
+                try:
+                    from ...games.tournaments_seasons import ensure_season_tick_job
+
+                    ensure_season_tick_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "season tick job not registered: %s", exc)
                 # Community orchestration (AA-18): one durable
                 # "community orchestration tick" job (every 1m)
                 # heartbeating this device into the fleet session

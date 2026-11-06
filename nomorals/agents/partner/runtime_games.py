@@ -166,6 +166,7 @@ class RuntimeGamesMixin:
             lines.append("  /game fair — provable-fairness status · "
                          "/game seed <word> — your entropy for fair tables")
             lines.append("  /game events — this week's season & bonuses")
+            lines.append("  /game season — this quarter's group season board & prizes")
             lines.append("  /game queue <game> — matchmaking: get paired for a duel")
             lines.append("  /game ratings [game] — the ELO boards")
             lines.append("  /game delete — delete your profile (48h to undo)")
@@ -325,6 +326,27 @@ class RuntimeGamesMixin:
         if verb == "events":
             from ...games.seasons import describe_seasons
             return describe_seasons(engine.db)
+        if verb == "season":
+            # the quarterly group season (AA-16): every finished
+            # group game folds its points into this board; at the
+            # quarter boundary the season closes and ranks 1-3 are
+            # paid through the group economy purse.
+            from ...games.tournaments_seasons import current_season
+            season, board = current_season(chat_key, context=self.context)
+            lines = [f"🏆 **Season {season['id']}** — quarterly group "
+                     "season (ranks 1–3 win coins from the group purse "
+                     "when the quarter closes)"]
+            rows = board.standings()
+            if rows:
+                for row in rows:
+                    lines.append(
+                        f"  {row['rank']}. {row['player']} — "
+                        f"{row['points']} pts · {row['wins']}W / "
+                        f"{row['games']}G")
+            else:
+                lines.append("no results yet — finish any group game "
+                             "to open the board.")
+            return "\n".join(lines)
         if verb == "queue":
             if player is None:
                 return "queue needs a chat sender — run it where you play."

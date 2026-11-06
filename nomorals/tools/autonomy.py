@@ -55,6 +55,11 @@ nervous system through plain language:
   registry, route via the device Router, dispatch due scheduled
   group posts through the social gateway. Same closure pattern.
   Routine job (silent at the scheduler).
+* ``__season_tick__`` — scheduler-internal games season tick
+  (AA-16): roll every group with a season board into the current
+  quarter and pay closed seasons' prizes through the group economy.
+  Same closure pattern. Routine job (silent at the scheduler);
+  the summary lands in the scheduler journal only.
 """
 
 from __future__ import annotations
@@ -493,6 +498,23 @@ def register(registry: Any) -> None:
         except Exception as exc:  # noqa: BLE001 - one bad pass never kills the job
             return {"ok": False,
                     "error": f"failure loop pass failed: {exc}"}
+
+    @registry.register(
+        "__season_tick__",
+        description="Run one games season tick (AA-16): roll every "
+        "group with a season board into the current quarter and pay "
+        "closed seasons' prizes (ranks 1-3) through the group "
+        "economy. Scheduler-internal; runs every ~1h.",
+        capability="owner",
+    )
+    def _season_tick_tool() -> dict[str, Any]:
+        from ..games.tournaments_seasons import run_season_tick_once
+
+        try:
+            return run_season_tick_once(context=_context)
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"season tick failed: {exc}"}
 
     @registry.register(
         "__orchestration__",
