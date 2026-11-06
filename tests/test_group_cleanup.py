@@ -386,7 +386,13 @@ def test_removals_off_blocks_removal_but_not_scan(tmp_path):
     assert "removals off" in mixin._control_gsettings(
         "cleanup off", _msg())
     out = mixin._control_rmdeleted("", _msg())
-    assert "removals are off" in out
+    # Presentation as architecture (2026-11-06): the refusal
+    # DECLARES its recovery actions as buttons — turn removals
+    # back on, or run the scan — instead of printing the hint.
+    assert "removals are off" in out.text
+    assert [data for row in out.buttons
+            for _label, data in row] == [
+                "gsettings cleanup on", "cleanup"]
     assert adapter.calls == []
     scan = mixin._control_cleanup("", _msg())
     assert "deleted accounts: 1" in scan

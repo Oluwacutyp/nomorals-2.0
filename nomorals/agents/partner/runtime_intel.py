@@ -91,6 +91,17 @@ def parse_monitor_nl(tail: str) -> dict[str, Any] | None:
     return {"target": target, "duration_s": duration_s,
             "interval_s": interval_s}
 
+def _no_monitor_reply(ref: str):  # type: ignore[no-untyped-def]
+    """The no-such-monitor reply: the live list rides as a
+    DECLARED button (presentation architecture), never a printed
+    "/monitor list …" hint."""
+    from ...social.chat.tgbot_buttons import actionable
+
+    return actionable(
+        f"no monitor {ref!r}.",
+        [[("📡 Live monitors", "monitor list")]])
+
+
 class RuntimeIntelMixin:
     """RuntimeIntelMixin for :class:`PartnerRuntime`."""
 
@@ -296,8 +307,16 @@ class RuntimeIntelMixin:
             lines.append(f"  knowledge graph: +{kg.get('added_nodes', 0)} "
                          f"nodes, +{kg.get('added_links', 0)} links")
         if rep.get("report_id"):
-            lines.append(f"  report: {rep['report_id']}  "
-                         "(/decode show <id>)")
+            # The decode action rides as a DECLARED button
+            # carrying the very id printed here (presentation
+            # architecture) — no "(/decode show <id>)" hint text.
+            from ...social.chat.tgbot_buttons import actionable
+
+            lines.append(f"  report: {rep['report_id']}")
+            return actionable(
+                "\n".join(lines),
+                [[("🔍 Decode the report",
+                   f"decode show {rep['report_id']}")]])
         return "\n".join(lines)
 
     def _control_monitor(self, tail: str) -> str:
@@ -361,8 +380,7 @@ class RuntimeIntelMixin:
                     return "usage: /monitor webhook-test <ref>"
                 res = agent.webhook_test(body)
                 if res is None:
-                    return (f"no monitor {body!r} — "
-                    "/monitor list to see the live ones")
+                    return _no_monitor_reply(body)
                 if not res.get("ok"):
                     err = res.get("error") or (res.get("result") or {}).get(
                         "error", "")
@@ -403,8 +421,7 @@ class RuntimeIntelMixin:
                 min_gap=min_gap if min_gap >= 0 else None,
                 auto_decode=False if no_decode else None)
             if row is None:
-                return (f"no monitor {body!r} — "
-                    "/monitor list to see the live ones")
+                return _no_monitor_reply(body)
             return (f"alerting for {row['target']}:"
                     f" webhook={'on → ' + row['webhook_url'] if row['webhook_url'] else 'off'}"
                     f" · gap={row['min_alert_gap_s']:.0f}s"
@@ -420,7 +437,7 @@ class RuntimeIntelMixin:
         if tail.startswith("rm "):
             ref = tail[3:].strip()
             return ("removed" if agent.remove(ref)
-                else f"no monitor {ref!r} — /monitor list to see the live ones")
+                    else _no_monitor_reply(ref))
         if tail == "status":
             st = agent.status()
             return f"{st['enabled']}/{st['total']} monitors active"

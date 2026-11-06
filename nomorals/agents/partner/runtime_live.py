@@ -198,7 +198,11 @@ class RuntimeLiveMixin:
         if verb == "status":
             rows = agent.recent(8)
             if not rows:
-                return "no news stored yet — /news run to fetch the feeds."
+                from ...social.chat.tgbot_buttons import actionable
+
+                return actionable(
+                    "no news stored yet.",
+                    [[("🗞️ Fetch the feeds", "news run")]])
             lines = ["recent news:"]
             for row in rows:
                 # credit the publisher when the row carries attribution
@@ -420,8 +424,12 @@ class RuntimeLiveMixin:
         if verb in {"ideas", "queue", "pending"}:
             n = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 5
             rows = agent.list_proposals(limit=n)
+            from ...social.chat.tgbot_buttons import actionable
+
             if not rows:
-                return "no proposals yet — /research run"
+                return actionable(
+                    "no proposals yet.",
+                    [[("🔬 Run research", "research run")]])
             lines = [f"top proposals ({len(rows)}):"]
             for row in rows:
                 lines.append(
@@ -429,8 +437,14 @@ class RuntimeLiveMixin:
                     f"{row['domain']} — {str(row['topic'])[:52]}\n"
                     f"  {str(row['suggestion'])[:120]}"
                 )
-            lines.append("approve: /research approve <id|latest>   deny: /research deny <id|latest>")
-            return "\n".join(lines)
+            # Approve/deny ride as DECLARED buttons (presentation
+            # architecture) — the latest proposal is the buttons'
+            # target; a specific one still takes its printed id
+            # typed, exactly as the rows show it.
+            return actionable(
+                "\n".join(lines),
+                [[("✅ Approve latest", "research approve latest"),
+                  ("❌ Deny latest", "research deny latest")]])
         if verb == "approve" and len(parts) > 1:
             return agent.approve(parts[1])
         if verb == "deny" and len(parts) > 1:

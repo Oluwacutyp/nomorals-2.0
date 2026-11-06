@@ -1980,6 +1980,11 @@ class TelegramAdapter(ChatAdapter):
                 ts=time.time(),
                 message_id=f"cb_{getattr(event, 'message_id', '') or ''}",
                 meta={"callback_query": True,
+                      # A CallbackQuery event's message_id IS the
+                      # message the tapped button rides on — the
+                      # live-session path edits it in place.
+                      "tapped_message_id": str(
+                          getattr(event, "message_id", "") or ""),
                       "partner_context": getattr(
                           self, "partner_context", False)},
             )
@@ -2580,19 +2585,23 @@ class TelegramAdapter(ChatAdapter):
     async def _edit_coro(self, chat: ChatRef, message_id: str,
                          text: str,
                          buttons: list[list[tuple[str, str]]]
-                         | None = None) -> None:
+                         | None = None,
+                         parse_mode: str = "") -> None:
         entity = await self._resolve(chat)
         kwargs: dict[str, Any] = {}
         if buttons:
             markup = self._inline_markup(buttons)
             if markup is not None:
                 kwargs["buttons"] = markup
+        if parse_mode in ("html", "HTML", "md", "markdown"):
+            kwargs["parse_mode"] = parse_mode
         await self._client.edit_message(entity, int(message_id),
                                         str(text or ""), **kwargs)
 
     def edit_message(self, chat: ChatRef, message_id: str,
                      text: str, *,
                      buttons: list[list[tuple[str, str]]] | None = None,
+                     parse_mode: str = "",
                      ) -> dict[str, Any]:
         """Edit one message — MTProto edits the account's OWN
         messages; Telethon raises on anyone else's and that
@@ -2601,13 +2610,16 @@ class TelegramAdapter(ChatAdapter):
         the message's inline keyboard for the authored one;
         omitted/empty leaves any existing keyboard untouched —
         the ack-edit path edits text-only messages, which never
-        carried one."""
+        carried one.  ``parse_mode`` renders the edit exactly
+        like the send it replaces (the live-session path passes
+        the same mode its send would have used)."""
         if not str(message_id).strip().lstrip("-").isdigit():
             return {"ok": False,
                     "error": "message_id must be the numeric "
                              "Telegram message id"}
         return self._admin(
-            self._edit_coro(chat, message_id, text, buttons),
+            self._edit_coro(chat, message_id, text, buttons,
+                            parse_mode=parse_mode),
             "edit_message")
 
     async def _revoke_coro(self, chat: ChatRef,
@@ -4908,6 +4920,10 @@ class TelegramBotAdapter(ChatAdapter):
             ts=time.time(),
             message_id=f"cb_{query_id}",
             meta={"callback_query": True,
+                  # The message the tap landed on: the live-session
+                  # presentation path edits THAT message in place
+                  # (see live_session.edit_target).
+                  "tapped_message_id": str(_tapped or ""),
                   "partner_context": self.partner_context,
                   "bot_role": "personal" if self.owner_only else "gated"},
         )
@@ -5205,6 +5221,7 @@ class TelegramBotAdapter(ChatAdapter):
     def edit_message(self, chat: ChatRef, message_id: str, text: str,
                      *, origin_command: str = "",
                      buttons: list[list[tuple[str, str]]] | None = None,
+                     parse_mode: str = "",
                      ) -> dict[str, Any] | None:
         """Replace a message's text + inline keyboard in place.
 
@@ -5216,6 +5233,11 @@ class TelegramBotAdapter(ChatAdapter):
         the API result, or None on ANY failure — including "message
         is not modified" — so the caller falls back to a normal send.
         Never raises.
+
+        ``parse_mode`` renders the edit exactly like the send it
+        replaces (the live-session path passes the same mode its
+        send would have used, so styled text — the stamp's italics,
+        bold, code — survives the edit instead of showing raw tags).
         """
         from .adaptive_buttons import adaptive_buttons_for
         from .tgbot_buttons import personal_buttons_for
@@ -5234,6 +5256,8 @@ class TelegramBotAdapter(ChatAdapter):
             "message_id": int(message_id),
             "text": (text or "")[:for_platform("telegram-bot").max_text],
         }
+        if parse_mode in ("HTML", "Markdown", "MarkdownV2"):
+            params["parse_mode"] = parse_mode
         if resolved:
             keyboard = []
             for row in resolved:

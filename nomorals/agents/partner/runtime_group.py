@@ -542,7 +542,7 @@ class RuntimeGroupMixin:
             return "HTML"
         return ""
 
-    def _card(self, message, card, buttons=None, *, xmd_frame: bool = False):  # type: ignore[no-untyped-def]
+    def _card(self, message, card, buttons=None, *, xmd_frame: bool = False, session: str = "", session_edit: bool = False):  # type: ignore[no-untyped-def]
         """Render a typography Card (§27) for this message's
         platform under the group's presentation settings, and
         bundle the buttons the handler authored from the same
@@ -554,7 +554,13 @@ class RuntimeGroupMixin:
         frame, 2026-11-05): on WhatsApp the same Card renders in
         the XMD box grammar instead of the flat dialect render —
         same content, same buttons, same stamp resolution; every
-        other platform ignores the flag."""
+        other platform ignores the flag.
+
+        ``session`` / ``session_edit`` declare the card as one
+        render of a live session (presentation architecture —
+        see social/chat/live_session): the DM console's screens
+        ride it, so navigating the console edits ONE message
+        instead of stacking a new card per tap."""
         from ...social.chat.tgbot_buttons import actionable
         from ...social.chat.typography import render_card, render_card_framed
 
@@ -569,7 +575,9 @@ class RuntimeGroupMixin:
                 card, platform=platform,
                 settings=surface.store.settings(key))
         if buttons is not None:
-            return actionable(rendered.text, buttons)
+            return actionable(rendered.text, buttons,
+                              session=session,
+                              session_edit=session_edit)
         return rendered.text
 
     def _welcome_buttons(self, surface: Any, key: str) -> list:
@@ -5218,7 +5226,8 @@ class RuntimeGroupMixin:
                   + (" · channels open with their c-handle: "
                      "queue, post, analytics, settings"
                      if channel_rows else ""))
-        return self._card(message, card, buttons)
+        return self._card(message, card, buttons,
+                              session="console", session_edit=True)
 
     def _console_group_menu(self, surface, key, message, token):  # type: ignore[no-untyped-def]
         from ...social.chat.typography import Card
@@ -5300,7 +5309,8 @@ class RuntimeGroupMixin:
         card.note("tap a section, or type its grammar — every "
                   "change lands in the group's /glog with your "
                   "name on it")
-        return self._card(message, card, buttons)
+        return self._card(message, card, buttons,
+                              session="console", session_edit=True)
 
     def _console_section(self, surface, key, message, token,  # type: ignore[no-untyped-def]
                          section, lead: str = ""):
@@ -5820,7 +5830,8 @@ class RuntimeGroupMixin:
         buttons += buttons_from_spec(
             [[("back", "Sections", f"console {token}"),
               ("home", "Console home", "console")]], settings=s)
-        return self._card(message, card, buttons)
+        return self._card(message, card, buttons,
+                              session="console", session_edit=True)
 
     def _console_apply(self, surface, key, message, sender,  # type: ignore[no-untyped-def]
                        section, words):
@@ -6366,7 +6377,8 @@ class RuntimeGroupMixin:
               f"console {token} settings")],
             [("home", "Console home", "console")],
         ], settings=surface.store.settings(key))
-        return self._card(message, card, buttons)
+        return self._card(message, card, buttons,
+                              session="console", session_edit=True)
 
     def _console_channel_section(self, surface, key, message,  # type: ignore[no-untyped-def]
                                  token, section, lead=""):
@@ -6563,7 +6575,8 @@ class RuntimeGroupMixin:
             [[("back", "Channel", f"console {token}"),
               ("home", "Console home", "console")]],
             settings=s)
-        return self._card(message, card, buttons)
+        return self._card(message, card, buttons,
+                              session="console", session_edit=True)
 
     def _channel_analytics_lines(self, surface, key):  # type: ignore[no-untyped-def]
         """The analytics truth for the console card: what was
@@ -8868,9 +8881,14 @@ class RuntimeGroupMixin:
         surface = self._group_surface()
         cfg = surface.cleanup_cfg(key)
         if not cfg.get("enabled", True):
-            return ("member cleanup removals are off in this "
-                    "group — /gsettings cleanup on turns them "
-                    "back on. The scan (/cleanup) still runs.")
+            from ...social.chat.tgbot_buttons import actionable
+
+            return actionable(
+                "member cleanup removals are off in this group. "
+                "The scan still runs.",
+                [[("🧹 Turn removals back on",
+                   "gsettings cleanup on")],
+                 [("🔍 Run the scan", "cleanup")]])
         days = days_override or int(
             cfg.get("inactive_days") or DEFAULT_INACTIVE_DAYS)
         findings, _roster = self._cleanup_scan(
@@ -10082,7 +10100,12 @@ class RuntimeGroupMixin:
 
         if not self._mod_run(surface, key, message, "purge",
                              target_id, call):
-            return "the delete didn't go through — the platform refused it (it's in /glog)."
+            from ...social.chat.tgbot_buttons import actionable
+
+            return actionable(
+                "the delete didn't go through — the platform "
+                "refused it; the attempt is in the group log.",
+                [[("📜 Group log", "glog")]])
         return "🧹 gone."
 
     # ---- economy commands (P2) --------------------------------------
@@ -10554,11 +10577,13 @@ class RuntimeGroupMixin:
                 f"{sparks(policy.get('earned', 0))} issued vs "
                 f"{sparks(policy.get('sunk', 0))} sunk this week.")
         proposals = surface.open_proposals(key)
+        treasury_buttons = None
         if proposals:
             card.line(f"🗳️ {len(proposals)} treasury proposal(s) "
-                      "waiting for a second admin (/approve).")
+                      "waiting for a second admin.")
+            treasury_buttons = [[("🗳️ Second it", "approve")]]
         card.note("triple 7️⃣ on /slots takes the jackpot pot")
-        return self._card(message, card)
+        return self._card(message, card, treasury_buttons)
 
     def _control_drop(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key = self._group_key_or_none(message)
@@ -11148,13 +11173,16 @@ class RuntimeGroupMixin:
         if reason == "hospital":
             ward = result.get("hospital") or {}
             bill = int(ward.get("bill") or 0)
-            return (f"🏥 you're in hospital"
-                    + (f" — the bill is {bill} sparks (/bail "
-                       "pays it, a medkit discharges you free)"
-                       if bill else
-                       " — a medkit discharges you, or wait "
-                       "it out")
-                    + ".")
+            if bill:
+                from ...social.chat.tgbot_buttons import actionable
+
+                return actionable(
+                    f"🏥 you're in hospital — the bill is "
+                    f"{bill} sparks (a medkit discharges you "
+                    f"free).",
+                    [[("🔓 Pay the bill", "bail")]])
+            return ("🏥 you're in hospital — a medkit "
+                    "discharges you, or wait it out.")
         if reason == "cooldown":
             return (f"🥷 too soon — the heat dies down in "
                     f"~{max(1, int(result.get('wait_s') or 0) // 60)}"
@@ -11473,9 +11501,9 @@ class RuntimeGroupMixin:
                 return self._conflict_refusal(surface, key, out)
             lobby = out["heist"]
             return self._heist_card(surface, key, message, lobby,
-                                    lead="crew forming — /heist "
-                                         "join to ride, /heist go "
-                                         "when ready (2–5).")
+                                    lead="crew forming — crews "
+                                         "of 2–5; join below, "
+                                         "then run it.")
         if head == "join":
             out = surface.heist_join(key, user_id)
             if not out.get("ok"):
@@ -12404,6 +12432,7 @@ class RuntimeGroupMixin:
         card = Card("economy", title="War", icon="⚔️")
         war = view.get("war")
         inter = view.get("inter")
+        war_buttons = None
         if war:
             gangs = surface.conflict._load_state(key).get(
                 "gangs") or {}
@@ -12419,11 +12448,12 @@ class RuntimeGroupMixin:
                         ("Pot", f"{int(war.get('pot') or 0)} "
                                 "sparks")])
             if war.get("status") == "declared":
-                card.line("waiting on the defenders' answer "
-                          "(/war accept · /war decline).")
+                card.line("waiting on the defenders' answer.")
+                war_buttons = [[("⚔️ Accept war", "war accept"),
+                                ("🏳️ Decline", "war decline")]]
             elif war.get("status") == "active":
-                card.line("rounds fight on the cycle — /war "
-                          "join adds your power.")
+                card.line("rounds fight on the cycle.")
+                war_buttons = [[("⚔️ Join the fight", "war join")]]
         elif inter:
             a = (inter.get("a") or {}).get("gang_name", "?")
             b = (inter.get("b") or {}).get("gang_name", "?")
@@ -12438,7 +12468,7 @@ class RuntimeGroupMixin:
                       "gang treasury, best of rounds, the "
                       "winner takes the pot (and, at home, a "
                       "district).")
-        return self._card(message, card)
+        return self._card(message, card, war_buttons)
 
     def _control_police(self, tail, message):  # type: ignore[no-untyped-def]
         """``/police`` — the precinct board (§24): who's
@@ -13368,9 +13398,14 @@ class RuntimeGroupMixin:
         result = surface.estate_collect_rent(key, user_id)
         if not result["ok"]:
             if result["reason"] == "jailed":
-                return ("🔒 no rent collection from jail — /bail "
-                        "first, or hire a manager (/property "
-                        "manager) and it collects for you.")
+                from ...social.chat.tgbot_buttons import actionable
+
+                return actionable(
+                    "🔒 no rent collection from jail — bail "
+                    "out, or hire a manager and it collects "
+                    "for you.",
+                    [[("🔓 Bail", "bail")],
+                     [("🏠 Hire a manager", "property manager")]])
             return "the property market is off here."
         import time as _time
 

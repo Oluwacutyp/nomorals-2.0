@@ -380,6 +380,14 @@ function contextInfoOf(m) {
     || msg.audioMessage?.contextInfo
     || msg.documentMessage?.contextInfo
     || msg.stickerMessage?.contextInfo
+    // Button/list taps: the response's context stanza names the
+    // message that carried the buttons — the live-session
+    // presentation path edits THAT message in place, so a tap
+    // reports it as reply_to like a quote does (Go bridge parity).
+    || msg.buttonsResponseMessage?.contextInfo
+    || msg.templateButtonReplyMessage?.contextInfo
+    || msg.listResponseMessage?.contextInfo
+    || msg.interactiveResponseMessage?.contextInfo
     || null;
 }
 

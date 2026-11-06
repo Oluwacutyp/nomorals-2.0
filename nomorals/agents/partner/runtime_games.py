@@ -503,8 +503,12 @@ class RuntimeGamesMixin:
             if rest == "confirm":
                 exp = self._delete_pending.pop(player.key, 0)
                 if exp < time.time():
-                    return ("nothing to confirm — /game delete to start over "
-                            "(confirmations expire after 5 minutes).")
+                    from ...social.chat.tgbot_buttons import actionable
+
+                    return actionable(
+                        "nothing to confirm (confirmations expire "
+                        "after 5 minutes).",
+                        [[("🗑️ Start the delete", "game delete")]])
                 prof = store.get_for(player)
                 if store.soft_delete(player.key):
                     return (
@@ -526,15 +530,21 @@ class RuntimeGamesMixin:
             except Exception as e:
                 record_failure("runtime_games.RuntimeGamesMixin._control_game:421", e)
                 lvl = 1
-            return (
+            from ...social.chat.tgbot_buttons import actionable
+
+            return actionable(
                 f"⚠️ delete your game profile?\n"
                 f"level {lvl} · {prof.coins} coins · "
                 f"{prof.games_played} games · {prof.wins}W-{prof.losses}L\n"
                 f"this wipes XP, coins, gear, skills and stats.\n"
-                f"you have 48 hours to undo it — just play any game.\n"
-                f"/game delete confirm — do it\n"
-                f"/game delete cancel — keep everything")
-        return (f"unknown game {verb!r} — /game list to see the table.")
+                f"you have 48 hours to undo it — just play any game.",
+                [[("🗑️ Delete everything", "game delete confirm")],
+                 [("✅ Keep everything", "game delete cancel")]])
+        from ...social.chat.tgbot_buttons import actionable
+
+        return actionable(
+            f"unknown game {verb!r}.",
+            [[("🎮 Game list", "game list")]])
 
     def _slots_quickstart(self, engine: Any, chat_key: str,
                           player: Any, *, kind: str,
@@ -2537,7 +2547,11 @@ class RuntimeGamesMixin:
             n = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
             rows = arena.digests(n)
             if not rows:
-                return "no digests yet — run a cycle first (/arena run)"
+                from ...social.chat.tgbot_buttons import actionable
+
+                return actionable(
+                    "no digests yet — run a cycle first.",
+                    [[("🏟️ Run a cycle", "arena run")]])
             lines = []
             for r in rows:
                 when = time.strftime("%m-%d %H:%M", time.localtime(r.get("created_at", 0)))
@@ -2609,8 +2623,8 @@ class RuntimeGamesMixin:
             loop_running = arena.loop_running()
             loop = "loop: running" if loop_running else "loop: idle"
             lines = [f"arena — {loop}"]
-            lines.append(f"feature: {'on' if feature_enabled(self.context, 'arena') else 'off'} "
-                         f"(/features arena on|off)")
+            _arena_on = feature_enabled(self.context, "arena")
+            lines.append(f"feature: {'on' if _arena_on else 'off'}")
             lines.append(f"knowledge rows: {self._arena_knowledge_count()}")
             # Idle ≠ dead: when the background loop isn't running, kick off
             # one research cycle on the laid-out path (topic bank first),
@@ -2630,10 +2644,20 @@ class RuntimeGamesMixin:
             if stream:
                 last = stream[0]
                 lines.append(f"last event: {last['kind']} {str(last.get('payload', {}).get('topic', ''))[:50]}")
-            return "\n".join(lines)
+            from ...social.chat.tgbot_buttons import actionable
+
+            return actionable(
+                "\n".join(lines),
+                [[("⏸️ Turn arena off", "features arena off")]
+                 if _arena_on else
+                 [("▶️ Turn arena on", "features arena on")]])
         if verb == "run":
             if not feature_enabled(self.context, "arena"):
-                return "arena is off. /features arena on"
+                from ...social.chat.tgbot_buttons import actionable
+
+                return actionable(
+                    "arena is off.",
+                    [[("▶️ Turn arena on", "features arena on")]])
             topic = " ".join(parts[1:]).strip() or None
             chat = self._ref_from_key(chat_key)
 
@@ -2694,7 +2718,11 @@ class RuntimeGamesMixin:
             if kind_filter:
                 events = [e for e in events if e.get("kind") == kind_filter][:limit]
             if not events:
-                return "arena stream is empty — run a cycle first (/arena run)."
+                from ...social.chat.tgbot_buttons import actionable
+
+                return actionable(
+                    "arena stream is empty — run a cycle first.",
+                    [[("🏟️ Run a cycle", "arena run")]])
             lines = [f"arena stream (last {len(events)}):"]
             for ev in events:
                 payload = ev.get("payload") or {}

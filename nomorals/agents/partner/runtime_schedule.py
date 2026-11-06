@@ -118,8 +118,13 @@ class RuntimeScheduleMixin:
             if not ref:
                 return "usage: /schedule rm <name or id>"
             try:
-                return ("removed." if scheduler.remove(ref)
-        else f"no job named {ref!r} — /schedule list to see the jobs")
+                if scheduler.remove(ref):
+                    return "removed."
+                from ...social.chat.tgbot_buttons import actionable
+
+                return actionable(
+                    f"no job named {ref!r}.",
+                    [[("🗓️ Scheduled jobs", "schedule list")]])
             except AmbiguousRef as exc:
                 return str(exc)
         if verb in {"enable", "disable"}:
@@ -530,8 +535,11 @@ class RuntimeScheduleMixin:
             result = agent.add(queued)
             if not result.get("ok"):
                 return f"could not add: {result.get('error')}"
-            return (f"queued {result['id'][:8]}: “{text[:70]}”{brief_note} — "
-                    f"/task run to execute now")
+            from ...social.chat.tgbot_buttons import actionable
+
+            return actionable(
+                f"queued {result['id'][:8]}: “{text[:70]}”{brief_note}",
+                [[("▶️ Run it now", f"task run {result['id']}")]])
         if verb == "run":
             did = parts[1] if len(parts) > 1 else ""
             chat = self._ref_from_key(chat_key)

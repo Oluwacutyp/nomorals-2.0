@@ -88,9 +88,13 @@ class RuntimeMediaMixin:
         lines = nb.splitlines()
         preview = "\n".join(lines[:40])
         if len(lines) > 40:
-            preview += f"\n… ({len(lines) - 40} more lines — /music perform to hear it)"
-        return (f"📝 draft: “{draft.title}”\n\n{preview}\n\n"
-                f"revise: /music revise <note>  |  perform: /music perform")
+            preview += f"\n… ({len(lines) - 40} more lines)"
+        from ...social.chat.tgbot_buttons import actionable
+
+        return actionable(
+            f"📝 draft: “{draft.title}”\n\n{preview}\n\n"
+            f"revise: /music revise <note>",
+            [[("🎤 Perform it", "music perform")]])
 
     def _control_music_revise(self, tail: str, chat_key: str = "") -> str:
         """ /music revise <note> — revise the active draft in plain words. """
@@ -923,8 +927,12 @@ class RuntimeMediaMixin:
         # re-search every source) just to try another number.
         entry = PickCache.get(token)
         if entry is None:
-            return ("that pick-list expired (5 min) — run /play again and "
-                    "pick fast 😄")
+            from ...social.chat.tgbot_buttons import actionable
+
+            return actionable(
+                "that pick-list expired (5 min) — pick fast "
+                "next time 😄",
+                [[("🎵 Search again", "play")]])
         cands = entry.candidates or []
         if n < 1 or n > len(cands):
             return (f"pick a number 1–{len(cands)} — “{num_s}” is out of range.")

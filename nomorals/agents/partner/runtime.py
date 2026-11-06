@@ -3959,7 +3959,7 @@ class PartnerRuntime(
         return build_adapter(self.settings, name)
 
     def _confirm_gate(self, kind: str, tail: str, chat_key: str,
-                      ) -> tuple[str | None, bool, str]:
+                      ) -> tuple[Any, bool, str]:
         """Confirm-flow gate for CONFIRMABLE commands.
 
         Returns ``(reply, proceed, effective_tail)``: ``proceed`` False
@@ -3968,9 +3968,11 @@ class PartnerRuntime(
         with ``effective_tail`` (the ORIGINAL tail stored when the
         request was first made — so ``/forget abc`` + ``/forget confirm``
         forgets ``abc``). Pending confirmations are keyed by chat_key,
-        expire after CONFIRM_TTL_S, and are single-use. The Bot API
-        adapter turns the ``⚠️ confirm: /<kind>`` line into Confirm /
-        Cancel inline buttons (see ``buttons_for_text``).
+        expire after CONFIRM_TTL_S, and are single-use. The prompt
+        DECLARES its Confirm / Cancel buttons (presentation
+        architecture — an ActionableMessage, no longer derived from
+        the ``⚠️ confirm: /<kind>`` text by the adapter); typed
+        ``/<kind> confirm`` / ``/<kind> cancel`` resolve identically.
         """
         from ...social.chat.control import CONFIRM_TTL_S
         import time as _time
@@ -4013,9 +4015,13 @@ class PartnerRuntime(
             what = "shut Devon down"
         else:
             what = f"forget {tail.strip()!r}"
+        from ...social.chat.tgbot_buttons import actionable
+
         return (
-            f"⚠️ confirm: /{kind} — this will {what}.\n"
-            f"Send /{kind} confirm to go ahead, or /{kind} cancel to drop it.",
+            actionable(
+                f"⚠️ confirm: /{kind} — this will {what}.",
+                [[("❌ Cancel", f"{kind} cancel"),
+                  ("✅ Confirm", f"{kind} confirm")]]),
             False, "")
 
     def _run_command_stack(self, segments: list[str], chat_key: str,
@@ -4143,6 +4149,11 @@ class PartnerRuntime(
         text, buttons = reply, None
         if hasattr(reply, "text") and hasattr(reply, "buttons"):
             text, buttons = str(reply.text), reply.buttons
+        # Live-session declaration (presentation architecture):
+        # an interactive flow's renders belong to ONE live message
+        # per chat, edited in place — see social/chat/live_session.
+        session = str(getattr(reply, "session", "") or "")
+        session_edit = bool(getattr(reply, "session_edit", False))
         text = str(text or "")
         if not text and not buttons:
             return None
@@ -4243,15 +4254,81 @@ class PartnerRuntime(
         self._typing_for(message.chat, text)
         parse_mode = "HTML" if ("<b>" in text or "<code>" in text
                                 or "<i>" in text) else ""
-        return self.gateway.send(message.chat.platform, message.chat,
-                                 text, buttons=buttons,
-                                 parse_mode=parse_mode,
-                                 reply_keyboard=reply_keyboard,
-                                 # Solicited control reply to a live
-                                 # turn: its first dispatch attempt is
-                                 # fresh — a send-once guard may hold
-                                 # retries, never the answer itself.
-                                 fresh=True)
+        if session:
+            edited = self._try_session_edit(
+                message, session, session_edit=session_edit,
+                text=text, buttons=btn_rows or [],
+                parse_mode=parse_mode)
+            if edited is not None:
+                return edited
+        result = self.gateway.send(message.chat.platform, message.chat,
+                                   text, buttons=buttons,
+                                   parse_mode=parse_mode,
+                                   reply_keyboard=reply_keyboard,
+                                   # Solicited control reply to a live
+                                   # turn: its first dispatch attempt is
+                                   # fresh — a send-once guard may hold
+                                   # retries, never the answer itself.
+                                   fresh=True)
+        if session and result is not None \
+                and getattr(result, "ok", False):
+            _mid = str(getattr(result, "message_id", "") or "")
+            if _mid:
+                self._live_session_registry().record(
+                    str(message.chat.key or ""), session, _mid)
+        return result
+
+    def _live_session_registry(self):  # type: ignore[no-untyped-def]
+        """The runtime's one live-session map (presentation
+        architecture): (chat, session) → the platform id of the
+        session's ONE live message. Lazily built like the other
+        runtime registries; in-memory — a restart forgets it and
+        the next render posts fresh (see live_session)."""
+        registry = getattr(self, "_live_sessions_obj", None)
+        if registry is None:
+            from ...social.chat.live_session import LiveSessionRegistry
+
+            registry = self._live_sessions_obj = LiveSessionRegistry()
+        return registry
+
+    def _try_session_edit(self, message, session, *,  # type: ignore[no-untyped-def]
+                          session_edit, text, buttons, parse_mode):
+        """Render a live-session state change by EDITING the
+        session's live message instead of posting a follow-up.
+        Returns a SendResult when the edit landed; None falls
+        through to the fresh send — a refused edit is never
+        reported as an edit (the fallback send re-records the
+        live message). Never raises."""
+        try:
+            from ...social.chat.base import SendResult
+            from ...social.chat.live_session import edit_session_message, edit_target
+            from ...social.chat.platform_limits import for_platform
+
+            limits = for_platform(message.chat.platform)
+            if limits is None or not limits.supports_text_edit:
+                return None
+            registry = self._live_session_registry()
+            target = edit_target(registry, message, session,
+                                 session_edit=session_edit)
+            if not target:
+                return None
+            adapter = (getattr(self.gateway, "adapters", {})
+                       or {}).get(message.chat.platform)
+            if adapter is None:
+                return None
+            if not edit_session_message(
+                    adapter, message.chat, target, text,
+                    buttons=buttons, parse_mode=parse_mode):
+                return None
+            registry.record(str(message.chat.key or ""), session,
+                            target)
+            return SendResult(ok=True,
+                              platform=message.chat.platform,
+                              message_id=target)
+        except Exception as exc:  # noqa: BLE001 - degrade to the send
+            record_failure(
+                "runtime.PartnerRuntime._try_session_edit", exc)
+            return None
 
     def handle_control(self, text: str, chat_key: str,
                        message: Any = None, _no_stack: bool = False) -> str:

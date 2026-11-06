@@ -387,7 +387,11 @@ class RuntimeMemoryMixin:
             cid = rest.strip().split()[0] if rest.strip() else ""
             course = Course.load(cid) if cid else None
             if course is None:
-                return "unknown course id — /course list to see them."
+                from ...social.chat.tgbot_buttons import actionable
+
+                return actionable(
+                    "unknown course id.",
+                    [[("📚 Courses", "course list")]])
             try:
                 from ...learn.curriculum import course_tutor
                 from ...learn.tutor import set_session

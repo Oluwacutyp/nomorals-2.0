@@ -8,6 +8,18 @@ from ...core.logging_setup import get_logger
 _log = get_logger(__name__)
 
 
+def _no_mission_reply(name: str):  # type: ignore[no-untyped-def]
+    """The no-such-mission reply, shared by every mission verb:
+    the next action (the active list) rides as a DECLARED button
+    (presentation architecture), never a printed
+    "/mission list …" hint."""
+    from ...social.chat.tgbot_buttons import actionable
+
+    return actionable(
+        f"no mission matching {name!r}.",
+        [[("📋 Active missions", "mission list")]])
+
+
 class RuntimeMissionMixin:
     """RuntimeMissionMixin for :class:`PartnerRuntime`."""
 
@@ -41,6 +53,7 @@ class RuntimeMissionMixin:
             render_status_text,
             wired_runner,
         )
+        from ...social.chat.tgbot_buttons import actionable
 
         store = MissionStore(self.context.db)
 
@@ -97,8 +110,7 @@ class RuntimeMissionMixin:
             if _amb:
                 return _amb
             if mission is None:
-                return (f"no mission matching {rest!r} — "
-                        "/mission list to see the active ones.")
+                return _no_mission_reply(rest)
             # reconcile on read: a dead runner must not report "running"
             rec = store.reconcile(mission.id)
             text = render_status_text(store.detail(mission.id))
@@ -112,8 +124,7 @@ class RuntimeMissionMixin:
             if _amb:
                 return _amb
             if mission is None:
-                return (f"no mission matching {rest!r} — "
-                        "/mission list to see the active ones.")
+                return _no_mission_reply(rest)
             # reconcile on read, same as status: a dead runner must not
             # label a finished mission's stored outputs "partial".
             store.reconcile(mission.id)
@@ -130,8 +141,7 @@ class RuntimeMissionMixin:
             if _amb:
                 return _amb
             if mission is None:
-                return (f"no mission matching {ref!r} — "
-                        "/mission list to see the active ones.")
+                return _no_mission_reply(ref)
             if code not in StallCode.ALL:
                 return (f"unknown stall code {code!r} — one of: "
                         f"{', '.join(sorted(StallCode.ALL))}")
@@ -155,8 +165,7 @@ class RuntimeMissionMixin:
             if _amb:
                 return _amb
             if mission is None:
-                return (f"no mission matching {rest!r} — "
-                        "/mission list to see the active ones.")
+                return _no_mission_reply(rest)
             cleared = wired_runner(self.context, store=store).clear_stalled(mission.id)
             return (f"{mission.name}: stall cleared — back in play."
                     if cleared else f"{mission.name}: no stall recorded.")
@@ -166,14 +175,15 @@ class RuntimeMissionMixin:
             if _amb:
                 return _amb
             if mission is None:
-                return (f"no mission matching {rest!r} — "
-                        "/mission list to see the active ones.")
+                return _no_mission_reply(rest)
             # idempotent: double-pause is a no-op success, and a finished
             # mission is already past pausing — never an error, never a
             # state rewrite.
             if mission.status == MissionStatus.PAUSED:
-                return (f"⏸ {mission.name}: already paused — no change "
-                        f"(/mission resume {mission.id} to continue).")
+                return actionable(
+                    f"⏸ {mission.name}: already paused — no change.",
+                    [[("▶️ Resume it",
+                       f"mission resume {mission.id}")]])
             if mission.terminal:
                 return (f"{mission.name} is already {mission.status} — "
                         "nothing to pause.")
@@ -181,16 +191,16 @@ class RuntimeMissionMixin:
                 store.set_status(mission.id, MissionStatus.PAUSED)
             except (NoMoralsError, ValueError) as exc:
                 return f"couldn't pause: {exc}"
-            return (f"⏸ {mission.name}: paused — "
-                    f"/mission resume {mission.id} to continue.")
+            return actionable(
+                f"⏸ {mission.name}: paused.",
+                [[("▶️ Resume it", f"mission resume {mission.id}")]])
 
         if verb == "resume":
             mission, _amb = _resolve(rest)
             if _amb:
                 return _amb
             if mission is None:
-                return (f"no mission matching {rest!r} — "
-                        "/mission list to see the active ones.")
+                return _no_mission_reply(rest)
             # a "running" mission whose runner died is not running —
             # reconcile first so resume restarts it instead of no-op'ing
             rec = store.reconcile(mission.id)
@@ -228,8 +238,7 @@ class RuntimeMissionMixin:
             if _amb:
                 return _amb
             if mission is None:
-                return (f"no mission matching {rest!r} — "
-                        "/mission list to see the active ones.")
+                return _no_mission_reply(rest)
             if mission.status not in (MissionStatus.PAUSED,
                                       MissionStatus.FAILED):
                 return (f"{mission.name} is {mission.status} — replan is "
@@ -273,8 +282,7 @@ class RuntimeMissionMixin:
             if _amb:
                 return _amb
             if mission is None:
-                return (f"no mission matching {ref!r} — "
-                        "/mission list to see the active ones.")
+                return _no_mission_reply(ref)
             # idempotent: a finished mission stays finished — cancelling
             # must never rewrite done/failed into cancelled, and a second
             # cancel is a no-op success, not an error.
@@ -306,11 +314,15 @@ class RuntimeMissionMixin:
             if _amb:
                 return _amb
             if mission is None:
-                return (f"no mission matching {rest!r} — "
-                        "/mission list to see the active ones.")
+                return _no_mission_reply(rest)
             if mission.status == MissionStatus.RUNNING:
-                return (f"{mission.name} is still running — /mission cancel "
-                        "it first if you want to start over.")
+                from ...social.chat.tgbot_buttons import actionable
+
+                return actionable(
+                    f"{mission.name} is still running — cancel it "
+                    "first if you want to start over.",
+                    [[("✖️ Cancel it",
+                       f"mission cancel {mission.id}")]])
             # cancel + requeue: a fresh mission row keeps the goal, the plan
             # skeleton, the name and the budgets; spend, errors, stalls and
             # the milestone log start clean. The original row is kept
@@ -360,8 +372,7 @@ class RuntimeMissionMixin:
             if _amb:
                 return _amb
             if mission is None:
-                return (f"no mission matching {rest!r} — "
-                        "/mission list to see the active ones.")
+                return _no_mission_reply(rest)
             if not chat_key:
                 return "watch needs a chat context — run this from a chat."
             # reconcile on read: report the true state, not stale "running"
@@ -380,8 +391,7 @@ class RuntimeMissionMixin:
             if _amb:
                 return _amb
             if mission is None:
-                return (f"no mission matching {rest!r} — "
-                        "/mission list to see the active ones.")
+                return _no_mission_reply(rest)
             if not chat_key:
                 return "unwatch needs a chat context — run this from a chat."
             removed = MissionWatchers(self.context.db).unsubscribe(

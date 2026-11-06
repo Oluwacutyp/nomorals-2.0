@@ -874,14 +874,28 @@ def test_handler_riddle_flow(tmp_path):
         "answer": "A bottle"})
     rt, _adapter, chat = _rig(tmp_path, {"riddle": [fake]})
     none = rt._control_fun("riddle", "answer", _Msg(chat))
-    assert "no riddle is open" in none
+    assert "no riddle is open" in none.text
+    # Presentation as architecture (2026-11-06): the riddle is a
+    # declared live session — buttons carry the actions, the hint
+    # text is gone, and the reveal renders INTO the same message
+    # (the funnel edits it in place; pinned end-to-end in
+    # test_presentation_architecture).
     posted = rt._control_fun("riddle", "", _Msg(chat))
-    assert posted.startswith("🧩 What has a neck")
-    assert "riddle answer reveals" in posted
+    assert posted.text.startswith("🧩 What has a neck")
+    assert "riddle answer reveals" not in posted.text
+    assert posted.session == "riddle"
+    assert not posted.session_edit
+    assert [data for row in posted.buttons
+            for _label, data in row] == ["riddle answer", "riddle"]
     revealed = rt._control_fun("riddle", "answer", _Msg(chat))
-    assert revealed == "the answer was: A bottle"
+    assert revealed.text == ("🧩 What has a neck but no head?\n"
+                             "💡 the answer: A bottle")
+    assert revealed.session == "riddle"
+    assert revealed.session_edit
+    assert [data for row in revealed.buttons
+            for _label, data in row] == ["riddle"]
     again = rt._control_fun("riddle", "answer", _Msg(chat))
-    assert "no riddle is open" in again
+    assert "no riddle is open" in again.text
 
 
 def test_handler_choose_and_8ball_and_numfact_guard(tmp_path):

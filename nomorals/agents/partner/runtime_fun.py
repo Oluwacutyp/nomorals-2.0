@@ -114,11 +114,20 @@ class RuntimeFunMixin:
         return str(out.get("reason") or f"no /{kind} right now")
 
     # ---- /riddle --------------------------------------------------
-    def _fun_riddle(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
-        """The held-answer game: bare /riddle posts a question
-        and holds its answer for THIS room; /riddle answer
-        reveals (and clears) it; a fresh /riddle replaces the
-        held one."""
+    def _fun_riddle(self, tail: str, message=None):  # type: ignore[no-untyped-def]
+        """The held-answer game, rendered as ONE live session
+        message (presentation architecture): bare /riddle posts
+        the question WITH its Reveal/Another buttons declared —
+        no printed "(/riddle answer …)" hint — and the reveal
+        render EDITS that same message in place (session
+        "riddle", session_edit) instead of posting a second
+        "the answer was:" message. A fresh typed /riddle posts
+        a new live message; a tapped Another edits the tapped
+        one. The service still holds the answer per room;
+        /riddle answer typed or tapped reveals (and clears)
+        it exactly as before."""
+        from ...social.chat.tgbot_buttons import actionable
+
         if message is None:
             return ("usage: /riddle in a chat — the answer is "
                     "held per room.")
@@ -127,9 +136,14 @@ class RuntimeFunMixin:
         if tail.lower() in ("answer", "reveal", "solve"):
             out = service.riddle_answer(room)
             if not out.get("ok"):
-                return ("no riddle is open in this chat — "
-                        "/riddle starts one.")
-            return f"the answer was: {out['answer']}"
+                return actionable(
+                    "no riddle is open in this chat.",
+                    [[("🧩 New riddle", "riddle")]])
+            return actionable(
+                f"🧩 {out['question']}\n"
+                f"💡 the answer: {out['answer']}",
+                [[("🔀 Another riddle", "riddle")]],
+                session="riddle", session_edit=True)
         try:
             out = service.new_riddle(room)
         except Exception as exc:  # noqa: BLE001 - the game never breaks the pipeline
@@ -137,8 +151,11 @@ class RuntimeFunMixin:
             return "my riddle sources stumbled — try again in a bit."
         if not out.get("ok"):
             return str(out.get("reason") or "no riddle right now")
-        return (f"🧩 {out['question']}\n"
-                f"(/riddle answer reveals it)")
+        return actionable(
+            f"🧩 {out['question']}",
+            [[("💡 Reveal answer", "riddle answer")],
+             [("🔀 Another riddle", "riddle")]],
+            session="riddle")
 
     # ---- /calc ------------------------------------------------------
     def _fun_calc(self, tail: str) -> str:  # type: ignore[no-untyped-def]

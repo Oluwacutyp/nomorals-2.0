@@ -1011,13 +1011,22 @@ class RuntimeReachMixin:
             except ValueError as exc:
                 return str(exc)
             label = f" ({s.label})" if s.label else ""
-            return f"focus started{label} — /focus stop when done, /focus pause to pause."
+            from ...social.chat.tgbot_buttons import actionable
+
+            return actionable(
+                f"focus started{label}.",
+                [[("⏸️ Pause", "focus pause")],
+                 [("⏹️ Stop", "focus stop")]])
         if verb == "pause":
             try:
                 s = timer.pause()
             except (KeyError, ValueError) as exc:
                 return str(exc)
-            return f"paused ({s.label or 'untitled'}) — /focus resume to continue."
+            from ...social.chat.tgbot_buttons import actionable
+
+            return actionable(
+                f"paused ({s.label or 'untitled'}).",
+                [[("▶️ Resume", "focus resume")]])
         if verb == "resume":
             try:
                 s = timer.resume()

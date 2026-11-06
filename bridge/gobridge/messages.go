@@ -215,6 +215,14 @@ func contextInfoOf(m *waE2E.Message) *waE2E.ContextInfo {
 		m.GetAudioMessage().GetContextInfo(),
 		m.GetDocumentMessage().GetContextInfo(),
 		m.GetStickerMessage().GetContextInfo(),
+		// Button/list taps: the response's context stanza names
+		// the message that carried the buttons — the live-session
+		// presentation path edits THAT message in place, so a tap
+		// must report it as reply_to like a quote does.
+		m.GetButtonsResponseMessage().GetContextInfo(),
+		m.GetTemplateButtonReplyMessage().GetContextInfo(),
+		m.GetListResponseMessage().GetContextInfo(),
+		m.GetInteractiveResponseMessage().GetContextInfo(),
 	}
 	for _, ci := range candidates {
 		if ci != nil {

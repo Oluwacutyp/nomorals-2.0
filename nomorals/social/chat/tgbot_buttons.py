@@ -49,19 +49,31 @@ class ActionableMessage:
     ``buttons=msg.buttons`` to ``gateway.send(...)``. Platforms without
     a button concept (WhatsApp, SMS, …) ignore the keyboard — the raw
     command text stays in the message body, tappable as plain text.
+
+    ``session`` / ``session_edit`` declare the reply as one render of
+    a LIVE session (see :mod:`.live_session`): the presentation
+    layer keeps the session's one live message per chat and renders
+    state changes by EDITING it instead of posting follow-ups.
+    ``session`` names the session (``"riddle"``); ``session_edit``
+    marks a continuation render — one that belongs in the existing
+    live message even when the turn was typed rather than tapped.
     """
 
-    __slots__ = ("text", "buttons")
+    __slots__ = ("text", "buttons", "session", "session_edit")
 
-    def __init__(self, text: str, buttons: Keyboard) -> None:
+    def __init__(self, text: str, buttons: Keyboard,
+                 session: str = "", session_edit: bool = False) -> None:
         self.text = text
         self.buttons = buttons
+        self.session = str(session or "")
+        self.session_edit = bool(session_edit)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"ActionableMessage(text={self.text[:40]!r}, buttons={self.buttons!r})"
 
 
-def actionable(text: str, buttons: list) -> ActionableMessage:
+def actionable(text: str, buttons: list, *, session: str = "",
+               session_edit: bool = False) -> ActionableMessage:
     """Build a message with tappable inline buttons.
 
     ``buttons`` is ``[(label, command), …]`` — ``command`` is the chat
@@ -70,6 +82,11 @@ def actionable(text: str, buttons: list) -> ActionableMessage:
     it). A flat list lands on a single row; a list of ROWS (each a
     list of pairs) keeps its layout — handlers author whichever
     matches their display.
+
+    ``session`` / ``session_edit`` declare a live-session render
+    (see :class:`ActionableMessage`): an interactive flow's states
+    render into ONE message, edited in place, never a chain of
+    follow-up posts.
 
     Raises :class:`ValueError` if any callback payload exceeds Telegram's
     47-byte budget (after the adapter's HMAC signature is added).
@@ -94,7 +111,8 @@ def actionable(text: str, buttons: list) -> ActionableMessage:
     rows = items if nested else ([items] if items else [])
     keyboard: Keyboard = [[_pair(pair) for pair in row]
                           for row in rows if row]
-    return ActionableMessage(text, keyboard)
+    return ActionableMessage(text, keyboard, session=session,
+                             session_edit=session_edit)
 
 
 def wide_layout(keyboard: Keyboard | None) -> Keyboard | None:

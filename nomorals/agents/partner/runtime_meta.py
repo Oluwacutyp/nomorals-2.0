@@ -1600,9 +1600,11 @@ class RuntimeMetaMixin:
             if still:
                 lines.append(f"  still broken (no safe fix): "
                              f"{', '.join('/' + r['kind'] for r in still[:10])}")
-            lines.append("")
-            lines.append("run /heal to apply.")
-            return "\n".join(lines)
+            from ...social.chat.tgbot_buttons import actionable
+
+            return actionable(
+                "\n".join(lines),
+                [[("🩹 Apply the fixes", "heal")]])
 
         lines = [f"🩹 heal — {total} commands probed"]
         if healed:

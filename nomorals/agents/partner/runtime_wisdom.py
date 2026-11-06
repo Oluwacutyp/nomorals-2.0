@@ -165,7 +165,11 @@ class RuntimeWisdomMixin:
         except Exception as exc:  # noqa: BLE001
             return f"⚠️ traditions failed: {type(exc).__name__}: {exc}"
         if not detail:
-            return "no traditions registered yet — run /wisdom seed"
+            from ...social.chat.tgbot_buttons import actionable
+
+            return actionable(
+                "no traditions registered yet.",
+                [[("🌱 Seed the library", "wisdom seed")]])
         lines = ["A \"tradition\" = a family of texts + teachings that grew "
                  "together around shared scriptures, teachers, and practices."]
         for trad in detail:
@@ -227,9 +231,12 @@ class RuntimeWisdomMixin:
 
         threading.Thread(target=_bg, daemon=True,
                          name="wisdom-seed").start()
-        return (f"📚 seeded {n} new texts ({total} total). Ingesting the "
-                f"library in the background — /wisdom status to watch it "
-                f"fill up, then ask away.")
+        from ...social.chat.tgbot_buttons import actionable
+
+        return actionable(
+            f"📚 seeded {n} new texts ({total} total). Ingesting "
+            f"the library in the background — ask away as it fills.",
+            [[("📊 Ingest status", "wisdom status")]])
 
     def _control_wisdom_ask(self, keeper, query: str, chat) -> str:
         if not query:

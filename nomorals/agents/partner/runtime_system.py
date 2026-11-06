@@ -428,7 +428,11 @@ class RuntimeSystemMixin:
                 return f"pool failed: {getattr(outcome.error, 'message', outcome.error)}"
             urls = outcome.value["urls"]
             if not urls:
-                return "pool empty — /proxy refresh to scrape+test"
+                from ...social.chat.tgbot_buttons import actionable
+
+                return actionable(
+                    "pool empty.",
+                    [[("🔄 Refresh pool", "proxy refresh")]])
             lines = [f"🧱 working proxies ({outcome.value['count']}):"]
             lines += [f"  {u}" for u in urls]
             lines.append("use: /proxy set <url>  (routes all outbound traffic)")
@@ -535,8 +539,12 @@ class RuntimeSystemMixin:
                     chat_key, proxy_intro_text(), "proxy")
             if rest == "run":
                 return self._hub_proxy_flow(chat_key)
-            return ("unknown proxy action — /toolhub proxy for the tool "
-                    "screen, /toolhub proxy run to refresh")
+            from ...social.chat.tgbot_buttons import actionable
+
+            return actionable(
+                "unknown proxy action.",
+                [[("🧰 Proxy screen", "toolhub proxy")],
+                 [("🔄 Refresh the pool", "toolhub proxy run")]])
         if verb:
             return ("usage: /toolhub | /toolhub proxy [run] | /toolhub bin <digits> "
                     "| /toolhub help")
@@ -573,7 +581,14 @@ class RuntimeSystemMixin:
             return text
         from ...social.chat.hub import keyboard_for_screen
         from ...social.chat.tgbot_buttons import actionable
-        return actionable(text, keyboard or keyboard_for_screen(screen))
+        # Hub screens are a live session (presentation
+        # architecture): on the surfaces that take the authored
+        # keyboard here, navigation renders edit the ONE screen
+        # message in place — the same live-edit the Bot API
+        # surface's nav-edit seam gives its hub. Continuation
+        # renders belong in the recorded screen message.
+        return actionable(text, keyboard or keyboard_for_screen(screen),
+                          session="hub", session_edit=True)
 
     def _hub_home(self) -> Any:
         """Devon's home dir (cooldown store lives under it)."""

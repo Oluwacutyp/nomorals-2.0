@@ -210,7 +210,16 @@ class ResultsVerbTests(unittest.TestCase):
 
     def test_unknown_ref_matches_sibling_style(self):
         out = self.call("results nope-nothing")
-        self.assertIn("no mission matching 'nope-nothing'", out)
+        # Presentation as architecture (2026-11-06): the
+        # not-found reply DECLARES its recovery action (a
+        # "mission list" button) instead of printing the hint;
+        # the text keeps the sibling style shared with the
+        # monitor/task not-found replies.
+        self.assertIn("no mission matching 'nope-nothing'",
+                      out.text)
+        self.assertEqual(
+            [data for row in out.buttons
+             for _label, data in row], ["mission list"])
 
     def test_long_output_truncated_with_total(self):
         big = "x" * 5000
