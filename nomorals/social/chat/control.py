@@ -454,7 +454,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "sticker": (0, None),     # /sticker [text] — the maker: text/emoji, or replied image/video
     "convert": (0, None),     # /convert <name> — sticker/gif/mp4/mp3 conversions (§21); in a group, an amount tail is the §25 currency exchange (context kind)
     "gif": (0, None),         # /gif <what> — a GIF from her library / providers
-    "emoji": (0, None),       # /emoji <words|emoji> — the full Unicode table, searched (§22)
+    "emoji": (0, None),       # /emoji <words|emoji> — the full Unicode table, searched; /emoji make <words> creates one it lacks (§22)
     "customemoji": (0, None), # /customemoji list|add|ref|show|remove — her own set (§22)
     "react": (0, None),       # /react [emoji] — react to the replied message (§22)
     # per-emotion reaction GIFs (wave C): /<emotion> [@someone] | as a reply —
@@ -2227,9 +2227,9 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/gif <what you're feeling>",
             "example": "/gif celebration dance",
             "related": "/steal · /sticker · /emoji"},
-    "emoji": {"what": "the FULL Unicode emoji table — every emoji that exists, named and keyworded, including rare ones some phones can't render. Search by meaning, or hand her an emoji and she'll name it (ZWJ sequences included).",
-              "usage": "/emoji <words> · /emoji <an emoji>",
-              "example": "/emoji melting face",
+    "emoji": {"what": "the FULL Unicode emoji table — every emoji that exists, named and keyworded, including rare ones some phones can't render. Search by meaning, or hand her an emoji and she'll name it (ZWJ sequences included). And what the table DOESN'T have, she creates: /emoji make <words> generates it and sends it as a sticker — a search no single emoji covers creates one too.",
+              "usage": "/emoji <words> · /emoji <an emoji> · /emoji make <words>",
+              "example": "/emoji make a cat riding a rocket",
               "related": "/customemoji · /react · /sticker"},
     "customemoji": {"what": "Devon's own custom emoji set: named entries with a unicode face everywhere, platform custom refs where a platform carries them, and sticker art. Curated by the owner (or group admins).",
                     "usage": "/customemoji list · add <name> <emoji> · ref <name> <platform> <ref> · show <name> · remove <name>",

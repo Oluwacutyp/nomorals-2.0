@@ -71,7 +71,9 @@ __all__ = [
     "BUTTON_EMOJI", "button_label", "buttons_from_spec",
     "EXPRESSION_DEFAULTS",
     "EmojiEntry", "emoji_table", "search_emoji", "emoji_info",
-    "describe_sequence",
+    "confident_emoji_match", "describe_sequence",
+    "emoji_prompt_for", "EmojiCreateUnavailable",
+    "create_emoji_sticker",
     "CustomEmojiRegistry",
     "ExpressionLibrary",
     "CaptureError", "capture_library_sticker",
@@ -501,27 +503,41 @@ def emoji_info(char: str) -> dict[str, Any] | None:
     }
 
 
+def _word_scores(entry: EmojiEntry,
+                 words: list[str]) -> list[int]:
+    """Per-word scores of one entry against a query: exact name
+    token 4 > keyword 3 > name prefix 2 > name substring 1."""
+    name_words = set(_name_tokens(entry.name))
+    scores: list[int] = []
+    for word in words:
+        if word in name_words:
+            scores.append(4)
+        elif word in entry.keywords:
+            scores.append(3)
+        elif any(nw.startswith(word) for nw in name_words):
+            scores.append(2)
+        elif word in entry.name:
+            scores.append(1)
+        else:
+            scores.append(0)
+    return scores
+
+
+def _query_words(query: str) -> list[str]:
+    return [w for w in re.split(r"[^a-z0-9]+",
+                                str(query or "").lower()) if w]
+
+
 def search_emoji(query: str, *, limit: int = 8) -> list[EmojiEntry]:
     """Find emoji by meaning: query words score against names
     and keywords (exact token > keyword > prefix > substring),
     so 'melting' finds 🫠 and 'family' finds the ZWJ chains."""
-    words = [w for w in re.split(r"[^a-z0-9]+",
-                                 str(query or "").lower()) if w]
+    words = _query_words(query)
     if not words:
         return []
     scored: list[tuple[int, EmojiEntry]] = []
     for entry in emoji_table():
-        score = 0
-        name_words = set(_name_tokens(entry.name))
-        for word in words:
-            if word in name_words:
-                score += 4
-            elif word in entry.keywords:
-                score += 3
-            elif any(nw.startswith(word) for nw in name_words):
-                score += 2
-            elif word in entry.name:
-                score += 1
+        score = sum(_word_scores(entry, words))
         if score:
             scored.append((score, entry))
     # Ties break toward the SHORTER name: "thumbs up: medium
@@ -529,6 +545,109 @@ def search_emoji(query: str, *, limit: int = 8) -> list[EmojiEntry]:
     # than the medium-light variant that merely contains it.
     scored.sort(key=lambda pair: (-pair[0], len(pair[1].name)))
     return [entry for _score, entry in scored[:max(1, limit)]]
+
+
+def confident_emoji_match(query: str) -> EmojiEntry | None:
+    """The one entry that covers EVERY query word with a real
+    hit (name token or keyword, score ≥ 3 per word) — the
+    lookup is sure it means this.  'melting face' → 🫠;
+    'thumbs up medium' → the tone entry.  'family rocket'
+    covers nothing: the table holds the parts, never the
+    whole — that is a creation request, not a lookup."""
+    words = _query_words(query)
+    if not words:
+        return None
+    best: tuple[int, EmojiEntry] | None = None
+    for entry in emoji_table():
+        scores = _word_scores(entry, words)
+        if scores and all(s >= 3 for s in scores):
+            total = sum(scores)
+            if best is None or total > best[0] or (
+                    total == best[0]
+                    and len(entry.name) < len(best[1].name)):
+                best = (total, entry)
+    return best[1] if best is not None else None
+
+
+# ── creating what the table doesn't have ─────────────────────
+
+#: The emoji-art direction every creation prompt carries:
+#: one glyph-like subject a phone keyboard would ship —
+#: bold silhouette, thick outline, flat color, nothing else.
+_EMOJI_STYLE = (
+    "a single emoji icon of {subject}: one bold glyph-like "
+    "subject, thick dark outline, flat vibrant colors, simple "
+    "shapes, centered, plain transparent background, no text, "
+    "no letters, no watermark, no shadow, digital emoji art "
+    "style like a phone keyboard emoji")
+
+
+def emoji_prompt_for(description: str) -> str:
+    """The generation prompt for one created emoji: the ask
+    wrapped in the house emoji-art direction."""
+    subject = " ".join(str(description or "").split()).strip()
+    return _EMOJI_STYLE.format(subject=subject)
+
+
+class EmojiCreateUnavailable(Exception):
+    """Emoji creation cannot run on this install — the message
+    says, in plain words, exactly what is missing.  Never a
+    fabricated emoji, never a near-match passed off as made."""
+
+
+def create_emoji_sticker(description: str, out_dir: Any, *,
+                         backend: Any = None) -> Path:
+    """Create a NEW emoji: generate the art through the image
+    pipeline's best configured rung, then post-process it
+    through the house sticker seam (512×512 transparent
+    canvas, WebP) and return the sticker path.
+
+    Raises :class:`EmojiCreateUnavailable` when no image
+    rung is configured or generation fails — the caller
+    answers with that plain reason, journaled."""
+    subject = " ".join(str(description or "").split()).strip()
+    if not subject:
+        raise EmojiCreateUnavailable(
+            "an emoji creation needs a description")
+    if backend is None:
+        from ...media_edit.generate import (
+            GenerativeEditError,
+            get_backend,
+        )
+
+        try:
+            backend = get_backend()
+        except GenerativeEditError as exc:
+            raise EmojiCreateUnavailable(str(exc)) from exc
+    try:
+        images = backend.generate(emoji_prompt_for(subject))
+    except Exception as exc:  # noqa: BLE001 - any rung failure is one honest line
+        raise EmojiCreateUnavailable(
+            f"the image rung failed: {exc}") from exc
+    if not images:
+        raise EmojiCreateUnavailable(
+            "the image rung returned no image")
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    raw = out / f"emoji_{time.time_ns()}.png"
+    image = images[0]
+    try:
+        if hasattr(image, "save"):
+            image.save(str(raw))
+        else:
+            from PIL import Image
+
+            Image.fromarray(image).save(str(raw))
+    except Exception as exc:  # noqa: BLE001 - unsavable art is unavailable art
+        raise EmojiCreateUnavailable(
+            f"the generated art could not be saved: {exc}"
+        ) from exc
+    from .media_convert import ConversionError, image_to_sticker
+
+    try:
+        return image_to_sticker(raw, out_dir=out)
+    except ConversionError as exc:
+        raise EmojiCreateUnavailable(str(exc)) from exc
 
 
 # ── her own custom emoji set (§22) ───────────────────────────────
@@ -1332,6 +1451,10 @@ REACTION_GIF_COMMANDS: frozenset[str] = frozenset(REACTION_GIFS)
 #: delivery, never the /sudo defect.
 MEDIA_DELIVERED_KINDS: frozenset[str] = frozenset(
     {"steal", "sticker", "convert", "gif", "react",
+     # /emoji answers in text when the table has the emoji;
+     # when it CREATES one, the made sticker is the reply and
+     # the handler's "" is a delivery, same contract.
+     "emoji",
      # the wave-D image one-shots: /dog /cat /fox /meme /nasa
      # /pokemon answer by attaching the picture, caption riding
      # it — the same delivery contract as the kinds above.

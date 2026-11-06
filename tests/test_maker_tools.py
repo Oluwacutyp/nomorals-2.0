@@ -118,14 +118,19 @@ def test_media_kinds_ride_the_delivered_set():
     # the FULL set, pinned here (the hand-off wave D took
     # from wave C and wave E takes from wave D): the base
     # expression kinds + wave D's image one-shots + wave E's
-    # media makers — nothing more, nothing less.
+    # media makers + the download family (joined 2026-11-05,
+    # unpinned until now) + "emoji" (creation rung, 2026-11-06:
+    # a created emoji answers by sending its sticker) —
+    # nothing more, nothing less.
     assert frozenset({
-        "steal", "sticker", "convert", "gif", "react",
+        "steal", "sticker", "convert", "gif", "react", "emoji",
         "dog", "cat", "fox", "meme", "nasa", "pokemon",
         "qcard", "canvasquote", "iqc", "wndwqute", "meme2",
         "fakemsg", "fakettc", "nokiamsg", "fakeff",
         "fakeffduo", "ffgirl", "removebg", "qr", "couplepp",
-        "pp"}) == MEDIA_DELIVERED_KINDS
+        "pp",
+        "play", "download", "tiktok", "ttdl", "instagram",
+        "spotify", "aio"}) == MEDIA_DELIVERED_KINDS
 
 
 def test_dispatch_literal_set_equals_maker_commands():

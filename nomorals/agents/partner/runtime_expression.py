@@ -664,17 +664,36 @@ class RuntimeExpressionMixin:
 
     # ---- /emoji ---------------------------------------------------------
     def _control_emoji(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
-        """The full Unicode table, searchable by meaning — any
-        emoji that exists, including the ones some phones can't
-        render.  Given an emoji itself, it reports what it is."""
-        from ...social.chat.expression import emoji_info, search_emoji
+        """Two powers.  FIND: the full Unicode table, searchable
+        by meaning — any emoji that exists, including the ones
+        some phones can't render; given an emoji itself, it
+        reports what it is.  CREATE: ``/emoji make <words>``
+        generates one the table doesn't have and sends it as a
+        sticker — and a search no single emoji confidently
+        covers ('family rocket') is a creation too, never a
+        dump of near-miss parts."""
+        from ...social.chat.expression import (
+            confident_emoji_match,
+            emoji_info,
+            search_emoji,
+        )
 
         query = str(tail or "").strip()
         if not query:
-            return ("usage: /emoji <words> — melting face, thumbs "
-                    "up medium, family, rocket… the whole Unicode "
-                    "table is mine to search. Or give me an emoji "
-                    "and I'll tell you what it is.")
+            return ("usage: /emoji <words> finds one in the "
+                    "whole Unicode table — melting face, thumbs "
+                    "up medium, rocket… /emoji make <words> "
+                    "creates one the table doesn't have, as a "
+                    "sticker. Or give me an emoji and I'll tell "
+                    "you what it is.")
+        words = query.split(None, 1)
+        if words[0].lower() in ("make", "create"):
+            description = words[1].strip() if len(words) > 1 else ""
+            if not description:
+                return ("usage: /emoji make <what it should "
+                        "be> — a cat in a party hat, a rocket "
+                        "with a face…")
+            return self._emoji_create_and_send(description, message)
         info = emoji_info(query)
         if info is not None and info["char"] == query:
             kws = ", ".join(info["keywords"][:8])
@@ -682,13 +701,50 @@ class RuntimeExpressionMixin:
                     f"({info['codepoints']})"
                     + (f" · also: {kws}" if kws else ""))
         hits = search_emoji(query, limit=6)
-        if not hits:
-            return ("nothing in the whole Unicode table matches "
-                    "that — try different words.")
-        faces = " ".join(entry.char for entry in hits)
-        names = " · ".join(f"{entry.char} {entry.name}"
-                            for entry in hits[:3])
-        return f"{faces}\n{names}"
+        if hits and confident_emoji_match(query) is not None:
+            faces = " ".join(entry.char for entry in hits)
+            names = " · ".join(f"{entry.char} {entry.name}"
+                                for entry in hits[:3])
+            return f"{faces}\n{names}"
+        return self._emoji_create_and_send(query, message)
+
+    def _emoji_create_and_send(self, description: str, message) -> str:  # type: ignore[no-untyped-def]
+        """Create one emoji and send it as a sticker through
+        the maker's own seam.  Honest at every step: no chat
+        surface, no §33 claim, or no image rung configured
+        each earns its plain line — the unavailable case is
+        journaled, and nothing is ever fabricated."""
+        from ...social.chat.expression import (
+            EmojiCreateUnavailable,
+            create_emoji_sticker,
+        )
+
+        if message is None:
+            return ("no single emoji in the Unicode table "
+                    "covers that — in a chat I'd create it as "
+                    "a sticker; here I can only search.")
+        if not self._group_gate(message, "emoji"):
+            return ("I can create that — but this room isn't "
+                    "claimed for my bot-system posts (§33), so "
+                    "I'm not dropping it here.")
+        out_dir = self._expression_root() / "expression_media"
+        try:
+            produced = create_emoji_sticker(description, out_dir)
+        except EmojiCreateUnavailable as exc:
+            record_failure("expression.emoji_create.unavailable",
+                           exc)
+            return (f"no emoji in the table covers that, and "
+                    f"I can't create one on this install yet: "
+                    f"{exc}")
+        from ...social.chat.base import MediaRef
+
+        ref = MediaRef(path=str(produced), kind="sticker",
+                       name=Path(str(produced)).name)
+        result = self._expression_send(message, ref)
+        if getattr(result, "ok", False):
+            return ""
+        return (f"created it, but the send failed here: "
+                f"{getattr(result, 'error', '')}")
 
     # ---- /customemoji -------------------------------------------------
     def _control_customemoji(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]

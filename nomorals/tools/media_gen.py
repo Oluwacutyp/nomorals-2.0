@@ -17,6 +17,12 @@ carries the owner's yes/no on that download.
 Native-first: the local pipelines run when the hardware allows;
 honest errors (never fake images) when it doesn't. APIs stay as
 fallback, never the priority.
+
+Also ``emoji_create``: the creation rung of /emoji — a brand-new
+emoji for what the Unicode table doesn't have, generated through
+the shared media_edit backend and post-processed into a sticker
+by the expression organ's own core (one implementation, two
+surfaces: the chat command and this tool).
 """
 
 from __future__ import annotations
@@ -278,6 +284,30 @@ def register(registry: Any) -> None:
             return {"ok": True, "sam_provision": flow.reopen()}
         raise ValueError(
             f"unknown decision {decision!r}; use accept|refuse|reopen")
+
+    @registry.register(
+        "emoji_create",
+        description=("Create a BRAND-NEW emoji of something the "
+                     "Unicode table doesn't have ('make an emoji of "
+                     "a cat riding a rocket', 'create an emoji for "
+                     "deadline panic'). Generates emoji art through "
+                     "the image pipeline and post-processes it into "
+                     "a sticker file (512×512 WebP). Returns the "
+                     "saved sticker path — send it to the chat with "
+                     "send_file. For emoji that DO exist in Unicode, "
+                     "answer with the character itself instead; this "
+                     "tool is for the ones that don't exist."),
+        capability=Capability.FS_WRITE,
+    )
+    def emoji_create(description: str) -> dict[str, Any]:
+        """Create one emoji that doesn't exist, as a sticker."""
+        from ..social.chat.expression import create_emoji_sticker
+
+        out = _out_dir(context, "emojis")
+        path = create_emoji_sticker(description, out)
+        return {"path": str(path), "format": "webp",
+                "kind": "sticker",
+                "description": (description or "").strip()}
 
 
 # ── style presets (tool surface; engines stay style-agnostic) ─────────────
