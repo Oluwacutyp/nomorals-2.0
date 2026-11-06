@@ -693,6 +693,10 @@ class Scheduler:
 
             # Per-execution history: one row per firing, pruned to
             # run_history_limit per task (observability + "what ran when").
+            # ``status`` (AA-67) is the run's true state — ran / failed /
+            # skipped / missed / suppressed; ``ok`` alone cannot say
+            # "never ran", and skipped/missed firings were journaled
+            # ok=True before this column existed.
             self.db.execute("""
                 CREATE TABLE IF NOT EXISTS task_runs (
                     id TEXT PRIMARY KEY,
@@ -701,10 +705,19 @@ class Scheduler:
                     finished_at REAL NOT NULL,
                     seconds REAL NOT NULL DEFAULT 0,
                     ok INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT '',
                     result TEXT NOT NULL DEFAULT '',
                     trigger_source TEXT NOT NULL DEFAULT ''
                 )
             """)
+            try:
+                self.db.execute(
+                    "ALTER TABLE task_runs ADD COLUMN status "
+                    "TEXT NOT NULL DEFAULT ''")
+            except Exception as exc:  # noqa: BLE001 — pre-existing DBs
+                if "duplicate column" not in str(exc).lower():
+                    _log.debug("task_runs status column ensure failed: "
+                               "%s", exc)
 
             self.db.execute("""
                 CREATE INDEX IF NOT EXISTS idx_task_runs_task
@@ -1455,9 +1468,9 @@ class Scheduler:
             if cooldown > 0 and last_ts and now - last_ts < cooldown:
                 wait = int(cooldown - (now - last_ts))
                 self._record_run(
-                    task_id, now, 0.0, True,
+                    task_id, now, 0.0, False,
                     f"throttled: cooldown {cooldown:g}s "
-                    f"({wait}s remaining)", "event")
+                    f"({wait}s remaining)", "event", status="throttled")
                 self._emit("throttled", {"task_id": task_id,
                                          "action": row["action"],
                                          "event_type": event_type,
@@ -2331,9 +2344,10 @@ class Scheduler:
         decision = self._overlap_decision(task_id, meta)
         if decision == "skip":
             self._advance_cron(row, meta, now)
-            self._record_run(task_id, now, 0.0, True,
+            self._record_run(task_id, now, 0.0, False,
                              "skipped: previous run still in flight "
-                             "(overlap_policy=skip)", "tick")
+                             "(overlap_policy=skip)", "tick",
+                             status="skipped")
             _log.info("cron %s skipped (overlap)", task_id)
             return False
         if decision == "queue":
@@ -2344,9 +2358,10 @@ class Scheduler:
         stale_after = float(meta.get("stale_after_s") or 24 * 3600)
         if lateness > stale_after:
             self._advance_cron(row, meta, now)
-            self._record_run(task_id, now, 0.0, True,
+            self._record_run(task_id, now, 0.0, False,
                              f"missed: firing {int(lateness)}s stale "
-                             f"(>{int(stale_after)}s)", "tick")
+                             f"(>{int(stale_after)}s)", "tick",
+                             status="missed")
             self._emit("missed", {"task_id": task_id, "action": action,
                                   "lateness_s": int(lateness)})
             _log.warning("cron %s missed (stale %ds) — advanced",
@@ -2354,9 +2369,10 @@ class Scheduler:
             return False
         if lateness > 0 and meta.get("missed_fire_policy") == "skip":
             self._advance_cron(row, meta, now)
-            self._record_run(task_id, now, 0.0, True,
+            self._record_run(task_id, now, 0.0, False,
                              f"skipped: missed by {int(lateness)}s "
-                             "(missed_fire_policy=skip)", "tick")
+                             "(missed_fire_policy=skip)", "tick",
+                             status="skipped")
             self._emit("missed", {"task_id": task_id, "action": action,
                                   "lateness_s": int(lateness)})
             return False
@@ -2488,9 +2504,10 @@ class Scheduler:
 
         decision = self._overlap_decision(task_id, meta)
         if decision == "skip":
-            self._record_run(task_id, now, 0.0, True,
+            self._record_run(task_id, now, 0.0, False,
                              "skipped: previous run still in flight "
-                             "(overlap_policy=skip)", "tick")
+                             "(overlap_policy=skip)", "tick",
+                             status="skipped")
             return False
         if decision == "queue":
             return False
@@ -2510,9 +2527,10 @@ class Scheduler:
                     "updated_at = ? WHERE task_id = ?",
                     (time.time(), task_id))
             self._record_run(
-                task_id, now, 0.0, True,
+                task_id, now, 0.0, False,
                 f"suppressed: quiet hours → shifted to "
-                f"{_fmt_next(shifted, meta.get('tz') or None)}", "tick")
+                f"{_fmt_next(shifted, meta.get('tz') or None)}", "tick",
+                status="suppressed")
             self._emit("deferred", {"task_id": task_id, "action": action,
                                     "reason": "quiet_hours",
                                     "shifted_to": shifted})
@@ -2530,9 +2548,9 @@ class Scheduler:
                     "UPDATE scheduled_tasks SET status = 'missed', "
                     "updated_at = ? WHERE task_id = ?",
                     (time.time(), task_id))
-            self._record_run(task_id, now, 0.0, True,
+            self._record_run(task_id, now, 0.0, False,
                              f"missed: reminder {int(lateness)}s overdue",
-                             "tick")
+                             "tick", status="missed")
             self._emit("missed", {"task_id": task_id, "action": action,
                                   "lateness_s": int(lateness)})
             _log.warning("reminder %s missed (%ds overdue)", task_id,
@@ -2640,9 +2658,10 @@ class Scheduler:
         if decision != "run":
             # skip or queue: leave it; the next tick retries
             if decision == "skip":
-                self._record_run(task_id, now, 0.0, True,
+                self._record_run(task_id, now, 0.0, False,
                                  "skipped: previous run still in flight "
-                                 "(overlap_policy=skip)", "tick")
+                                 "(overlap_policy=skip)", "tick",
+                                 status="skipped")
             return False
 
         # quiet hours: shift the firing to the window end (DND), don't drop it
@@ -2653,9 +2672,10 @@ class Scheduler:
         if shifted is not None:
             self._write_meta(task_id, {"run_at": shifted})
             self._record_run(
-                task_id, now, 0.0, True,
+                task_id, now, 0.0, False,
                 f"suppressed: quiet hours → shifted to "
-                f"{_fmt_next(shifted, meta.get('tz') or None)}", "tick")
+                f"{_fmt_next(shifted, meta.get('tz') or None)}", "tick",
+                status="suppressed")
             self._emit("deferred", {"task_id": task_id, "action": action,
                                     "reason": "quiet_hours",
                                     "shifted_to": shifted})
@@ -2672,9 +2692,9 @@ class Scheduler:
                     "UPDATE scheduled_tasks SET status = 'missed', "
                     "updated_at = ? WHERE task_id = ?",
                     (time.time(), task_id))
-            self._record_run(task_id, now, 0.0, True,
+            self._record_run(task_id, now, 0.0, False,
                              f"missed: one-time task {int(lateness)}s overdue",
-                             "tick")
+                             "tick", status="missed")
             self._emit("missed", {"task_id": task_id, "action": action,
                                   "lateness_s": int(lateness)})
             return False
@@ -2885,19 +2905,36 @@ class Scheduler:
 
     # ── execution history ────────────────────────────────────────────────
 
+    #: Run states that mean the firing never executed (AA-67).
+    _NON_RUN_STATUSES = ("skipped", "missed", "suppressed", "throttled")
+
     def _record_run(self, task_id: str, started: float, seconds: float,
-                    ok: bool, result: str, trigger_source: str) -> None:
-        """Land one row in ``task_runs``.  Never raises."""
+                    ok: bool, result: str, trigger_source: str,
+                    status: str = "") -> None:
+        """Land one row in ``task_runs``.  Never raises.
+
+        ``status`` is the firing's true state: derived as ran/failed
+        from ``ok`` for real executions; callers whose firing never
+        executed pass skipped/missed/suppressed explicitly.  A
+        non-run status can never be journaled as ok — the guard
+        below forces ok off, so the ledger's success bit only ever
+        describes a run that happened (AA-67).
+        """
+        status = (status or "").strip().lower()
+        if status in self._NON_RUN_STATUSES:
+            ok = False
+        elif not status:
+            status = "ran" if ok else "failed"
         try:
             with self.db.transaction():
                 self.db.execute(
                     """INSERT INTO task_runs
                        (id, task_id, started_at, finished_at, seconds, ok,
-                        result, trigger_source)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        status, result, trigger_source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (new_id("run"), task_id, started, started + seconds,
-                     seconds, 1 if ok else 0, (result or "")[:2000],
-                     trigger_source),
+                     seconds, 1 if ok else 0, status,
+                     (result or "")[:2000], trigger_source),
                 )
             self._prune_runs(task_id)
         except Exception:  # noqa: BLE001
@@ -2925,17 +2962,24 @@ class Scheduler:
         except Exception as exc:  # noqa: BLE001
             record_failure("scheduler.recent_runs", exc)
             return []
-        return [
-            {
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            # Legacy rows (pre-AA-67) carry no status: derive it from
+            # the ok bit.  New rows always carry their true state,
+            # and ``ok`` reads True only for a run that executed and
+            # succeeded — never for a skip/miss/suppression.
+            status = (r.get("status") or "").strip().lower() or (
+                "ran" if r.get("ok") else "failed")
+            out.append({
                 "task_id": r["task_id"],
                 "started_at": r["started_at"],
                 "seconds": round(float(r.get("seconds") or 0.0), 2),
-                "ok": bool(r.get("ok")),
+                "ok": status == "ran" and bool(r.get("ok")),
+                "status": status,
                 "result": (r.get("result") or "")[:300],
                 "trigger_source": r.get("trigger_source") or "",
-            }
-            for r in rows
-        ]
+            })
+        return out
 
     @staticmethod
     def _is_heavy(metadata: dict[str, Any]) -> bool:

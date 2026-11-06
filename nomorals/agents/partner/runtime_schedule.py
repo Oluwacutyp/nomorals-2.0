@@ -57,7 +57,10 @@ class RuntimeScheduleMixin:
                 return f"no runs recorded for {ref!r}"
             lines = [f"recent runs for {ref}:"]
             for r in runs:
-                mark = "✅" if r["ok"] else "❌"
+                # AA-67: a run that never executed (skipped/missed)
+                # gets its own mark — neither success nor failure.
+                mark = {"skipped": "⏭", "missed": "🕐"}.get(
+                    r.get("status") or "", "✅" if r["ok"] else "❌")
                 ts = time.strftime("%m-%d %H:%M",
                                    time.localtime(r["started_at"]))
                 from ..job_reports import summarize_last_result

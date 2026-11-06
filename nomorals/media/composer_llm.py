@@ -116,15 +116,39 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 
 
 def _taste_summary(context: Any) -> str:
-    """One-line taste profile for the prompt, best-effort."""
+    """One-line taste profile for the prompt, from the real taste store.
+
+    Reads ``media.taste.load_taste(context).profile`` — the learned
+    genre/energy weights.  An empty profile honestly reads as the
+    neutral line.  A taste store that fails to LOAD is different
+    from an empty one: it is logged at error level (the journal must
+    show personalisation is down) before the neutral line is used —
+    never a silent swallow.
+    """
     try:
-        from .taste import get_taste
-        t = get_taste(context)
-        likes = (t.get("liked_styles") or [])[:5]
-        if likes:
-            return "likes: " + ", ".join(str(x) for x in likes)
-    except Exception:  # noqa: BLE001
-        pass
+        from .taste import load_taste
+        profile = load_taste(context).profile
+    except Exception as exc:  # noqa: BLE001 — degraded, but LOUD
+        _log.error(
+            "taste profile failed to load — composing without the "
+            "owner's taste personalisation: %s", exc)
+        return "unknown — write to the request"
+    parts: list[str] = []
+    genres = [g for g, _w in sorted(
+        (profile.genre_weights or {}).items(),
+        key=lambda kv: kv[1], reverse=True)][:5]
+    if not genres:
+        genres = [t.genre for t in (profile.tracks or [])
+                  if getattr(t, "liked", False) and t.genre][:5]
+    if genres:
+        parts.append("likes: " + ", ".join(str(g) for g in genres))
+    energy = [w for w, _w in sorted(
+        (profile.energy_weights or {}).items(),
+        key=lambda kv: kv[1], reverse=True)][:5]
+    if energy:
+        parts.append("energy: " + ", ".join(str(w) for w in energy))
+    if parts:
+        return "; ".join(parts)
     return "unknown — write to the request"
 
 

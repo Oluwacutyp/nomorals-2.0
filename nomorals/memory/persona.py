@@ -707,6 +707,7 @@ class MemoryCurator:
             by_kind[r.kind].append(r)
 
         merged = 0
+        failures: list[dict[str, Any]] = []
         kept: list[str] = []
         for kind_records in by_kind.values():
             # highest confidence first → winner survives
@@ -735,14 +736,29 @@ class MemoryCurator:
                 meta["merged_ids"] = merged_ids
                 try:
                     self.manager.update(dup_of.id, metadata=meta)
-                    self._archive(record.id, reason="dedup",
-                                  superseded_by=dup_of.id)
-                    self.manager.forget(record.id)
+                    # Archive integrity (AA-64's rule, applied here
+                    # too): where an archive store exists, a record
+                    # is only forgotten once its archive copy landed.
+                    if self.db is not None and not self._archive(
+                            record.id, reason="dedup",
+                            superseded_by=dup_of.id):
+                        raise RuntimeError(
+                            f"archive failed for {record.id} — "
+                            "merge not applied")
+                    removed = self.manager.forget(record.id)
+                    if isinstance(removed, int) and removed <= 0:
+                        raise RuntimeError(
+                            f"forget removed 0 records for {record.id}")
                     merged += 1
                 except Exception as exc:  # noqa: BLE001
                     _log.warning("dedup merge failed: %s", exc)
+                    failures.append({"id": record.id, "error": str(exc)})
             kept.extend(s.id for s in survivors)
-        return {"ok": True, "merged": merged, "kept": len(kept)}
+        report: dict[str, Any] = {"ok": not failures, "merged": merged,
+                                  "kept": len(kept)}
+        if failures:
+            report["failures"] = failures
+        return report
 
     # ── contradictions ───────────────────────────────────────────────
     # crude opposition markers — a contradiction is "X" vs "not X" /
@@ -805,14 +821,36 @@ class MemoryCurator:
         report["dedup"] = self.deduplicate()
         try:
             # archive before forgetting so nothing vanishes surprisingly
-            report["forgotten"] = self._forget_with_archive(
-                self.FORGET_THRESHOLD)
+            detail = self._forget_with_archive_detail(self.FORGET_THRESHOLD)
+            report["forgotten"] = detail["forgotten"]
+            if detail["failed"]:
+                report["forget_failed"] = detail["failed"]
+            if detail["archive_failed"]:
+                report["forget_archive_failed"] = detail["archive_failed"]
         except Exception as exc:  # noqa: BLE001
             report["error"] = str(exc)
         return report
 
     def _forget_with_archive(self, threshold: float) -> int:
-        """forget_below() but every deletion lands in the archive first."""
+        """The count of records ACTUALLY forgotten (AA-64).
+
+        Only records whose archive copy landed AND whose forget
+        succeeded are counted; per-record failures are available
+        from :meth:`_forget_with_archive_detail` and surface in the
+        scheduled_pass report — never folded into this number.
+        """
+        return self._forget_with_archive_detail(threshold)["forgotten"]
+
+    def _forget_with_archive_detail(self, threshold: float) -> dict[str, Any]:
+        """forget_below() but every deletion lands in the archive first.
+
+        Returns ``{"forgotten": n, "failed": [...], "archive_failed":
+        [...]}`` — the truth per record (AA-64): a record whose
+        archive write failed is NOT forgotten (no deletion without
+        its 30-day undo copy) and is named under ``archive_failed``;
+        a record whose forget raised (or removed 0 rows) is named
+        under ``failed`` with its error.
+        """
         from .base import MemoryKind as MK
         now = time.time()
         rows = self.db.query(
@@ -827,13 +865,30 @@ class MemoryCurator:
             if record.recency(self.manager.half_life, now) * \
                     record.importance < threshold:
                 doomed.append(row["id"])
+        forgotten = 0
+        failed: list[dict[str, Any]] = []
+        archive_failed: list[str] = []
         for record_id in doomed:
-            self._archive(record_id, reason="forget_below")
+            if not self._archive(record_id, reason="forget_below"):
+                # No undo copy → the record is NOT deleted; the
+                # deletion-with-no-archive shape is exactly what
+                # this method exists to prevent.
+                archive_failed.append(record_id)
+                _log.warning(
+                    "forget skipped for %s: archive copy failed — "
+                    "record kept", record_id)
+                continue
             try:
-                self.manager.forget(record_id)
+                removed = self.manager.forget(record_id)
+                if isinstance(removed, int) and removed <= 0:
+                    raise RuntimeError(
+                        f"forget removed 0 records for {record_id}")
+                forgotten += 1
             except Exception as exc:  # noqa: BLE001
                 _log.warning("archived forget failed: %s", exc)
-        return len(doomed)
+                failed.append({"id": record_id, "error": str(exc)})
+        return {"forgotten": forgotten, "failed": failed,
+                "archive_failed": archive_failed}
 
     def _archive(self, record_id: str, reason: str,
                  superseded_by: str = "") -> bool:

@@ -4562,7 +4562,7 @@ class PartnerRuntime(
         # in DM they meet the economy gate's group text like
         # every other group kind.
         if kind == "gear":
-            return self._control_gear(command.tail, message)
+            return self._control_conflict_gear(command.tail, message)
 
         if kind == "heist":
             return self._control_heist(command.tail, message)

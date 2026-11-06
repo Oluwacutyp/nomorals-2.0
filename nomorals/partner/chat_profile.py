@@ -21,7 +21,12 @@ import json
 import math
 import re
 import time
+from contextlib import suppress
 from typing import Any
+
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
 
 # Tiny closed-class stoplist for topic mining. This is linguistic
 # plumbing (the / it / and class), not a topic dictionary — the topics
@@ -86,16 +91,86 @@ def _mine_topics(texts: list[str]) -> list[str]:
     return [w for _, w in scored[:_MAX_TOPICS]]
 
 
+# ── refresh-failure record (AA-68) ──────────────────────────────
+# A failed refresh used to be invisible: refresh_profile returned
+# the stored profile as though it were current, and the brain built
+# prompt context from it as fresh.  Failures are now recorded
+# against the db handle (attribute first, module map as fallback)
+# so both the refresh return value AND get_profile can mark the
+# stored copy as what it is: stale, with its age and the error.
+_FAILURE_ATTR = "_chat_profile_refresh_failures"
+_FALLBACK_FAILURES: dict[int, dict[str, dict[str, Any]]] = {}
+
+#: Marker keys a stale profile carries; never persisted — a
+#: successful refresh strips them from the rebuilt profile.
+STALE_KEYS = ("stale", "refresh_error", "profile_age_s", "updated_at")
+
+
+def _failure_store(db: Any) -> dict[str, dict[str, Any]]:
+    try:
+        store = getattr(db, _FAILURE_ATTR, None)
+        if store is None:
+            store = {}
+            setattr(db, _FAILURE_ATTR, store)
+        return store
+    except Exception:  # noqa: BLE001 - exotic db handles
+        return _FALLBACK_FAILURES.setdefault(id(db), {})
+
+
+def _note_refresh_failure(db: Any, chat_key: str, exc: Exception) -> None:
+    # best-effort: the log + failure ledger are the durable trail
+    with suppress(Exception):
+        _failure_store(db)[chat_key] = {
+            "failed_at": time.time(), "error": str(exc)}
+
+
+def _clear_refresh_failure(db: Any, chat_key: str) -> None:
+    with suppress(Exception):
+        _failure_store(db).pop(chat_key, None)
+
+
+def _stale_markers(db: Any, chat_key: str,
+                   updated_at: float) -> dict[str, Any] | None:
+    """The stale markers for a stored profile, when a refresh has
+    failed since that copy was written (AA-68); else None."""
+    try:
+        failure = _failure_store(db).get(chat_key)
+    except Exception:  # noqa: BLE001
+        failure = None
+    if not failure:
+        return None
+    if updated_at and failure["failed_at"] < updated_at:
+        return None  # a later refresh already succeeded past it
+    markers: dict[str, Any] = {"stale": True,
+                               "refresh_error": failure["error"]}
+    if updated_at:
+        markers["updated_at"] = updated_at
+        markers["profile_age_s"] = round(time.time() - updated_at, 1)
+    return markers
+
+
 def get_profile(db: Any, chat_key: str) -> dict[str, Any]:
-    """Load the profile; returns {} when none exists yet."""
+    """Load the profile; returns {} when none exists yet.
+
+    When the last refresh for this chat failed after the stored
+    copy was written, the copy is returned WITH stale markers
+    (AA-68) — consumers can tell a fallback from a fresh profile.
+    """
     try:
         _ensure_table(db)
         row = db.query_one(
-            "SELECT profile_json FROM chat_profiles WHERE chat_key = ?",
+            "SELECT profile_json, updated_at FROM chat_profiles "
+            "WHERE chat_key = ?",
             (chat_key,),
         )
         if row and row.get("profile_json"):
-            return json.loads(row["profile_json"])
+            profile = json.loads(row["profile_json"])
+            if profile:
+                markers = _stale_markers(
+                    db, chat_key, float(row.get("updated_at") or 0.0))
+                if markers:
+                    profile.update(markers)
+            return profile
     except Exception:  # noqa: BLE001 - no profile beats a broken chat
         pass
     return {}
@@ -150,6 +225,17 @@ def build_context_lines(profile: dict[str, Any]) -> list[str]:
         parts.append(owner_note)
     if parts:
         lines.append("chat context — " + " · ".join(parts))
+    if profile.get("stale"):
+        # AA-68: honest degradation — the brain is told the context
+        # it just read is a fallback copy, never presented as fresh.
+        age = profile.get("profile_age_s")
+        age_txt = (f" (last good copy {int(age)}s old)"
+                   if isinstance(age, (int, float)) and age >= 0
+                   else "")
+        lines.append(
+            "chat profile note: this chat's saved profile is STALE"
+            f"{age_txt} — its last refresh failed, so the context "
+            "above may be out of date.")
     return lines
 
 
@@ -192,6 +278,11 @@ def refresh_profile(db: Any, chat_key: str, *, force: bool = False) -> dict[str,
 
         new_messages = total - old_count
         profile = dict(old)
+        # AA-68: a rebuilt profile is fresh by construction — stale
+        # markers (if a marked copy was ever persisted) never ride
+        # into the new stored profile.
+        for _key in STALE_KEYS:
+            profile.pop(_key, None)
         profile["participants"] = participants
         profile["purpose"] = _chat_purpose(chat_key, participants, total)
         if "first_seen" not in profile:
@@ -252,6 +343,20 @@ def refresh_profile(db: Any, chat_key: str, *, force: bool = False) -> dict[str,
             "message_count = excluded.message_count, updated_at = excluded.updated_at",
             (chat_key, json.dumps(profile), total, time.time()),
         )
+        _clear_refresh_failure(db, chat_key)
         return profile
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # AA-68: the fallback is still the stored profile (a missing
+        # profile degrades to no context, never a broken reply) —
+        # but the failure is now LOGGED, recorded in the failure
+        # ledger, and the returned copy carries stale markers so no
+        # consumer mistakes it for a fresh refresh.
+        _log.warning("chat profile refresh failed for %s: %s",
+                     chat_key, exc)
+        try:
+            from ..storage.failures import record_failure
+            record_failure("partner.chat_profile.refresh", exc)
+        except Exception:  # noqa: BLE001 - ledger must not break it
+            pass
+        _note_refresh_failure(db, chat_key, exc)
         return get_profile(db, chat_key)

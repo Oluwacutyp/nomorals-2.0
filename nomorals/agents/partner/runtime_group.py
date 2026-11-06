@@ -11174,7 +11174,7 @@ class RuntimeGroupMixin:
         return target, self._estate_member_label(surface, key,
                                                  target)
 
-    def _control_gear(self, tail, message):  # type: ignore[no-untyped-def]
+    def _control_conflict_gear(self, tail, message):  # type: ignore[no-untyped-def]
         """``/gear`` — your loadout; ``/gear buy <item>``,
         ``/gear install <item> treasury|bank <district>|vault``,
         ``/gear use <item>``.  The shelf itself lives in

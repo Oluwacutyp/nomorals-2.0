@@ -72,9 +72,11 @@ def test_direct_import_surface_and_all_unchanged():
     # 140 after the §1.5b format registry exports landed on top of it,
     # 174 after the §1.5e Scene3D spine exports, 177 after the §1.5e
     # Rust rung exports (RustSceneRenderer, register_rust_renderer,
-    # RENDERER_BOOTSTRAP_ISSUES).
+    # RENDERER_BOOTSTRAP_ISSUES), 179 after the assembly truth-fix
+    # AA-01 (BlenderRenderer, register_blender_renderer — the Blender
+    # rung's exports, registered in the same bootstrap).
     assert "failures" not in edit_engine_all
-    assert len(edit_engine_all) == 177
+    assert len(edit_engine_all) == 179
 
 
 # --- document.duration / timeline.duration --------------------------------

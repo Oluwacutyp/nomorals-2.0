@@ -679,6 +679,7 @@ class Scheduler:
         self.run_history_limit = max(1, int(run_history_limit or 200))
         self._ensure_blackout_column()
         self._ensure_routine_column()
+        self._ensure_run_status_column()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._running_jobs = 0
@@ -712,6 +713,30 @@ class Scheduler:
         except Exception as exc:  # noqa: BLE001
             if "duplicate column" not in str(exc).lower():
                 _log.debug("scheduler blackout column ensure failed: %s", exc)
+
+    def _ensure_run_status_column(self) -> None:
+        """Lazily add ``schedule_runs.status`` on older databases (AA-67).
+
+        The run journal's ``ok`` bit alone cannot say "never ran":
+        skipped and missed firings were recorded ok=True, so every
+        history view read them as successes.  ``status`` carries the
+        firing's true state (ran / failed / skipped — written by
+        :meth:`_record_run` from now on; legacy rows keep '' and
+        readers derive ran/failed from the ok bit).  Same discipline
+        as the blackout column: the shared migrations module is not
+        touched; the scheduler ensures its own column, idempotently
+        and best-effort.
+        """
+        if self.db is None:
+            return
+        try:
+            self.db.execute(
+                "ALTER TABLE schedule_runs ADD COLUMN status "
+                "TEXT NOT NULL DEFAULT ''")
+        except Exception as exc:  # noqa: BLE001
+            if "duplicate column" not in str(exc).lower():
+                _log.debug("scheduler run-status column ensure failed: "
+                           "%s", exc)
 
     def _ensure_routine_column(self) -> None:
         """Lazily add ``schedule_jobs.routine`` and backfill it ONCE.
@@ -1234,7 +1259,8 @@ class Scheduler:
         reason = (f"skipped: firing missed by {int(lateness)}s "
                   f"(missed_fire_policy={policy}"
                   f"{', too stale to fire' if too_stale else ''})")
-        self._record_run(job_id, now, 0.0, True, reason, 0, trigger_source)
+        self._record_run(job_id, now, 0.0, False, reason, 0,
+                         trigger_source, status="skipped")
         self._ledger("skipped", job_id,
                      f"{row.get('name')}: {reason}",
                      metadata={"policy": policy, "lateness_s": int(lateness)})
@@ -1324,7 +1350,8 @@ class Scheduler:
                 (next_run, 1 if still_enabled else 0, time.time(), job_id),
             )
         reason = "skipped: blackout date (exclusion calendar)"
-        self._record_run(job_id, now, 0.0, True, reason, 0, "tick")
+        self._record_run(job_id, now, 0.0, False, reason, 0, "tick",
+                         status="skipped")
         self._ledger("skipped", job_id, f"{row.get('name')}: {reason}")
         _log.info("scheduler: job %s (%s) %s", job_id, row.get("name"), reason)
 
@@ -1519,25 +1546,49 @@ class Scheduler:
                 (next_run, 1 if still_enabled else 0, time.time(), job_id),
             )
         reason = "skipped: previous run still active (overlap_policy=skip)"
-        self._record_run(job_id, now, 0.0, True, reason, 0, "tick")
+        self._record_run(job_id, now, 0.0, False, reason, 0, "tick",
+                         status="skipped")
         self._ledger("skipped", job_id, f"{row.get('name')}: {reason}")
         _log.info("scheduler: job %s (%s) %s", job_id, row.get("name"), reason)
 
+    #: Run states that mean the firing never executed (AA-67).
+    _NON_RUN_STATUSES = ("skipped", "missed", "suppressed", "throttled")
+
+    @staticmethod
+    def _run_status(row: dict[str, Any]) -> str:
+        """A run row's true state (AA-67): its stored status, or —
+        for legacy rows written before the status column — ran /
+        failed derived from the ok bit."""
+        return (row.get("status") or "").strip().lower() or (
+            "ran" if row.get("ok") else "failed")
+
     def _record_run(self, job_id: str, started: float, seconds: float,
                     ok: bool, result: str, retry_attempt: int,
-                    trigger_source: str) -> None:
+                    trigger_source: str, status: str = "") -> None:
         """Land one row in ``schedule_runs`` — the durable per-execution
         history.  Best-effort: a broken history table must never break a
-        job's bookkeeping."""
+        job's bookkeeping.
+
+        ``status`` is the firing's true state (AA-67): derived as
+        ran/failed from ``ok`` for real executions; non-executions
+        pass skipped/missed explicitly, and a non-run status can
+        never be journaled as ok — the guard forces ok off, so the
+        success bit only ever describes a run that happened."""
+        status = (status or "").strip().lower()
+        if status in self._NON_RUN_STATUSES:
+            ok = False
+        elif not status:
+            status = "ran" if ok else "failed"
         try:
             with self.db.transaction():
                 self.db.execute(
                     """INSERT INTO schedule_runs
                        (id, job_id, started_at, finished_at, seconds, ok,
-                        result, retry_attempt, trigger_source)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        status, result, retry_attempt, trigger_source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (new_id("run"), job_id, started, started + seconds,
-                     seconds, 1 if ok else 0, (result or "")[:2000],
+                     seconds, 1 if ok else 0, status,
+                     (result or "")[:2000],
                      int(retry_attempt or 0), trigger_source),
                 )
         except Exception:  # noqa: BLE001
@@ -1613,18 +1664,23 @@ class Scheduler:
         except Exception as exc:  # noqa: BLE001
             record_failure("scheduler.recent_runs", exc)
             return []
-        return [
-            {
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            # AA-67: ``ok`` reads True only for a run that executed
+            # and succeeded; a skipped/missed firing carries its
+            # true state in ``status`` (legacy rows derive it).
+            status = self._run_status(r)
+            out.append({
                 "job_id": r["job_id"],
                 "started_at": r["started_at"],
                 "seconds": round(float(r.get("seconds") or 0.0), 2),
-                "ok": bool(r.get("ok")),
+                "ok": status == "ran" and bool(r.get("ok")),
+                "status": status,
                 "result": (r.get("result") or "")[:300],
                 "retry_attempt": int(r.get("retry_attempt") or 0),
                 "trigger_source": r.get("trigger_source") or "",
-            }
-            for r in rows
-        ]
+            })
+        return out
 
     def _maybe_redeliver(self) -> int:
         """Throttled sweep of the notification redelivery queue.
@@ -2157,7 +2213,11 @@ class Scheduler:
                 out["recent_runs"] = [
                     {
                         "job": r.get("job_name") or r["job_id"],
-                        "ok": bool(r.get("ok")),
+                        # AA-67: ok means ran-and-succeeded; a
+                        # skipped firing shows its state, not success.
+                        "ok": (self._run_status(r) == "ran"
+                               and bool(r.get("ok"))),
+                        "status": self._run_status(r),
                         "seconds": round(float(r.get("seconds") or 0.0), 2),
                         "result": (r.get("result") or "")[:100],
                         "trigger_source": r.get("trigger_source") or "",

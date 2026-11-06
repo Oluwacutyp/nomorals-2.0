@@ -1035,7 +1035,9 @@ def test_runtime_conflict_commands_render(tmp_path):
     assert "Night Owls" in _text(out)
     out = rt._control_gshop("", _msg())
     assert "Arsenal" in _text(out), out
-    out = rt._control_gear("", _msg())
+    # AA-50: the conflict gear handler carries its own name
+    # (_control_conflict_gear); _control_gear is the games handler.
+    out = rt._control_conflict_gear("", _msg())
     assert "Street power" in _text(out)
     out = rt._control_police("", _msg())
     assert "precinct" in _text(out)
@@ -1131,9 +1133,13 @@ def test_runtime_capture_lets_the_power_gang_grant(tmp_path):
 
 
 # ── house law: the guardrail file never moves ──────────────────
+# (one sanctioned move: the assembly truth-fix AA-64 rewrote
+# persona.py's forget accounting so failed forgets stop reporting
+# as forgotten — digest re-pinned to the fixed file; the guard
+# stands against any FURTHER unsanctioned move.)
 
 def test_persona_guardrail_untouched():
     path = Path(__file__).resolve().parents[1] \
         / "nomorals" / "memory" / "persona.py"
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    assert digest.startswith("70e48096"), digest
+    assert digest.startswith("aa4a31fd"), digest

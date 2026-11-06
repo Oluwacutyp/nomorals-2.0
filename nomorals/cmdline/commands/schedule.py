@@ -348,7 +348,10 @@ def _schedule_runs(args: Any, context: Any, rest: list[str]) -> int:
     print(f"recent runs for {ref}:")
     for r in runs:
         ts = time.strftime("%m-%d %H:%M", time.localtime(r["started_at"]))
-        mark = "✅" if r["ok"] else "❌"
+        # AA-67: a run that never executed (skipped/missed) gets its
+        # own mark — neither success nor failure.
+        mark = {"skipped": "⏭", "missed": "🕐"}.get(
+            r.get("status") or "", "✅" if r["ok"] else "❌")
         print(f"  {mark} {ts} {r['seconds']}s [{r['trigger_source']}] "
               f"{r['result'][:90]}")
     return 0
