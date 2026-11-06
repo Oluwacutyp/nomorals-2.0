@@ -1291,6 +1291,22 @@ class WhatsAppAdapter(ChatAdapter):
                     ts=ts,
                 )
             wa_msg.meta["envelope"] = _wa_envelope(obj, wa_msg.text)
+            # Media the bridge reported WITHOUT a local path (its
+            # download failed) was filtered out of wa_msg.media
+            # above — silently, until 2026-11-06: the brain then
+            # could not tell "no photo was sent" from "a photo was
+            # sent and we dropped it", and in the owner's voice
+            # claimed the photo never arrived. Stamp the arrival
+            # so the brain records it honestly (the brain reads
+            # meta["media_unavailable"]).
+            _wa_missed = [
+                {"kind": str(m.get("kind") or "file"),
+                 "reason": "download_failed"}
+                for m in (obj.get("media") or [])
+                if isinstance(m, dict) and not m.get("path")
+            ]
+            if _wa_missed:
+                wa_msg.meta["media_unavailable"] = _wa_missed
             _alt = str((obj.get("from") or {}).get("alt") or "").strip()
             if _alt:
                 # The sender's other addressing form (LID ↔ phone

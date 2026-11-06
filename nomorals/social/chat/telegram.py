@@ -1529,6 +1529,26 @@ class TelegramAdapter(ChatAdapter):
             _log.debug("telegram: cached input entity for chat_id=%s", chat_id)
         text = getattr(message, "raw_text", None) or ""
         media: list[MediaRef] = []
+        # Media that ARRIVED but was not fetched (gate skip, failed
+        # or empty download). Until 2026-11-06 that fact died here:
+        # the message proceeded with media=[] and the brain — and
+        # the model speaking as the owner — could not tell "no
+        # photo was sent" from "a photo was sent and we dropped
+        # it". Stamped on the ChatMessage meta instead, so the
+        # brain records the arrival honestly.
+        media_unavailable: list[dict] = []
+
+        def _note_media_missed() -> None:
+            if getattr(message, "photo", None) is not None:
+                _mkind = "image"
+            elif getattr(message, "voice", None) is not None:
+                _mkind = "voice"
+            else:
+                _mkind = _kind_for_mime(
+                    str(getattr(doc, "mime_type", "") or ""))
+            media_unavailable.append(
+                {"kind": _mkind, "reason": "download_failed"})
+
         if getattr(message, "media", None):
             # Download gates: groups flood media (spam groups post a photo
             # every few seconds) — by default we only pull media in DMs, and
@@ -1539,6 +1559,7 @@ class TelegramAdapter(ChatAdapter):
                 doc_size = int(getattr(doc, "size", 0) or 0)
             if not media_download_allowed(kind, doc_size, self.media_in_groups, self.media_max_mb):
                 _log.debug("telegram: skipping media download (group/size gate)")
+                _note_media_missed()
             else:
                 try:
                     fname = f"tg-{int(time.time() * 1000)}-{len(media)}"
@@ -1589,8 +1610,11 @@ class TelegramAdapter(ChatAdapter):
                                 is_voice=_is_voice,
                             )
                         )
+                    else:
+                        _note_media_missed()
                 except Exception as exc:  # noqa: BLE001 - media is best-effort
                     _log.debug("telegram media download failed: %s", exc)
+                    _note_media_missed()
         # Self-destruct TTL, read early: a view-once DM whose media
         # could not be downloaded (expired file reference, a gated
         # download) must NOT die at the drop below — the §15
@@ -1798,6 +1822,8 @@ class TelegramAdapter(ChatAdapter):
                     service_meta["view_once_media_missing"] = True
         except Exception:  # noqa: BLE001 - a stamp, never a failure
             pass
+        if media_unavailable:
+            service_meta["media_unavailable"] = media_unavailable
         handler_msg = ChatMessage(
             chat=ChatRef(
                 platform=self.name,

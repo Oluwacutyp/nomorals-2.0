@@ -1940,6 +1940,27 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001
                     _log.warning("play-pick reply send failed: %s", exc)
                 return
+        # Conversational exactly-once (reply claims, 2026-11-06):
+        # everything above this seam has OBSERVED the message
+        # (housekeeping, personal-surface hooks, persistence,
+        # command arbitration); everything below GENERATES a
+        # conversational reply (Core Mind, the brain, the delayed
+        # path). One platform message identity gets one turn at
+        # that generation: a redelivery — bridge replay inside the
+        # stale window, adapter seen-set lost to a restart — is
+        # held here instead of answering twice. (The owner's
+        # Telegram, 2026-11-06: the same photo processed twice
+        # sent the same line twice in one minute.) The delayed
+        # reply is part of the same claimed turn and never
+        # re-enters this seam.
+        if self._reply_already_claimed(message):
+            self._bump("reply_claim_held")
+            _log.info(
+                "reply claim: redelivered message held in %s "
+                "(id=%s) — already answered",
+                message.chat.key,
+                str(getattr(message, "message_id", "") or ""))
+            return
         # wave 87: the Core Mind. A natural-language goal in the owner's DM
         # routes to the right organ (research, builder, browser, downloader,
         # missions, games). Structurally owner-DM-only: in every other chat
@@ -3544,6 +3565,35 @@ class PartnerRuntime(
             ledger = CommandClaimLedger()
             self._command_claims_obj = ledger
         return ledger
+
+    def _reply_claims(self):  # type: ignore[no-untyped-def]
+        ledger = getattr(self, "_reply_claims_obj", None)
+        if ledger is None:
+            from .reply_claims import ReplyClaimLedger
+
+            ledger = ReplyClaimLedger()
+            self._reply_claims_obj = ledger
+        return ledger
+
+    def _reply_already_claimed(self, message) -> bool:  # type: ignore[no-untyped-def]
+        """True when this message identity already had its
+        conversational turn claimed — a redelivery stands down.
+
+        The conversational counterpart of the command claims
+        (see :mod:`reply_claims` for the incident and the law).
+        Never raises: a ledger fault must not silence chat, so a
+        failure here lets the turn proceed unclaimed."""
+        try:
+            from .reply_claims import reply_claim_key
+
+            key = reply_claim_key(message)
+            if not key:
+                return False
+            return not self._reply_claims().claim(key)
+        except Exception as exc:  # noqa: BLE001 - arbitration
+            record_failure(               # never eats a turn
+                "runtime.PartnerRuntime._reply_already_claimed", exc)
+            return False
 
     def _surface_usernames(self) -> dict[str, str]:
         """{username (lowercase, no @): platform} for every

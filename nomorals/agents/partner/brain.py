@@ -134,15 +134,34 @@ class PartnerBrain:
             (getattr(message, "meta", None) or {}).get("voice_transcript"))
         for media in message.media[:3]:
             if media.kind == "image" or media.mime.startswith("image/"):
-                if tools is not None:
+                described = False
+                if tools is not None and media.path:
                     result = tools.call("vision_describe", path=media.path,
                                         prompt="Describe this photo in one or two plain sentences: what's in it, and the mood of it.")
                     if result.ok:
                         payload = result.value
                         description = payload.get("description") if isinstance(payload, dict) else str(payload)
                         notes.append(f"photo — {description}")
-                        continue
-                notes.append("photo (could not see it)")
+                        described = True
+                if described:
+                    continue
+                # The photo ARRIVED — it sits in the chat the reply
+                # lands in. The old note ("photo (could not see
+                # it)") let the model paraphrase a vision failure
+                # into a receipt claim: "photo didn't come through"
+                # (owner's Telegram, 2026-11-06, sent as him about
+                # a photo plainly in the chat). The note now states
+                # receipt as fact and constrains the claim, and the
+                # turn is marked vision-degraded so the competence
+                # gate holds the reply on personal surfaces (see
+                # _generate_and_persist).
+                self._mark_photo_unseen(message)
+                notes.append(
+                    "photo (it DID arrive — never say it didn't "
+                    "come through or that it wasn't received; I "
+                    "couldn't view it just now, so if I mention it "
+                    "at all, I say I can't view images right now)")
+                continue
             elif media.kind == "video":
                 notes.append(f"video: {media.name or media.path}")
             elif media.kind == "audio" or media.kind == "voice" or media.mime.startswith("audio/"):
@@ -225,6 +244,28 @@ class PartnerBrain:
                     notes.append(f"audio: {media.name or media.path}")
             else:
                 notes.append(f"file: {media.name or media.path}")
+        # Media the adapter KNOWS arrived but could not fetch
+        # (download failed on Telegram; the bridge reported the
+        # item without a local path on WhatsApp) is stamped on
+        # meta["media_unavailable"] by the adapters. It never
+        # entered message.media — without this, the photo's very
+        # existence was erased before the brain saw the turn, and
+        # the model could claim it never arrived. A photo known
+        # to have arrived gets the same truthful note + mark as
+        # an attached-but-unviewable one.
+        _meta0 = getattr(message, "meta", None) or {}
+        for _missed in (_meta0.get("media_unavailable") or [])[:3]:
+            if not isinstance(_missed, dict):
+                continue
+            _mkind = str(_missed.get("kind") or "")
+            if _mkind in ("image", "photo"):
+                self._mark_photo_unseen(message)
+                notes.append(
+                    "photo (it DID arrive — never say it didn't "
+                    "come through or that it wasn't received; the "
+                    "file couldn't be fetched just now, so if I "
+                    "mention it at all, I say I can't view images "
+                    "right now)")
         try:
             meta = getattr(message, "meta", None)
             if isinstance(meta, dict):
@@ -235,6 +276,22 @@ class PartnerBrain:
         except Exception as e:
             record_failure("brain.PartnerBrain._media_notes:233", e)
         return notes
+
+    def _mark_photo_unseen(self, message: ChatMessage) -> None:
+        """Stamp the turn as vision-degraded: a photo is part of
+        this message and no vision rung viewed it.
+
+        ``_generate_and_persist`` folds the stamp into the turn's
+        degraded fact, so the competence gate holds the composed
+        reply on personal surfaces — a reply written blind about
+        a photo she holds is a degraded-brain reply in the
+        owner's voice, whatever the text rung's health."""
+        try:
+            meta = getattr(message, "meta", None)
+            if isinstance(meta, dict):
+                meta["photo_unseen"] = True
+        except Exception as e:
+            record_failure("brain.PartnerBrain._mark_photo_unseen", e)
 
     def _spoken_command(self, message: ChatMessage) -> str:
         """Raw transcript if an audio attachment transcribes to a /command.
@@ -955,6 +1012,22 @@ class PartnerBrain:
             degraded_note = str(
                 getattr(bundle, "degraded_note", "") or "") \
                 or "template fallback served (no model rung)"
+        if _meta.get("photo_unseen"):
+            # Vision-degraded turn (2026-11-06): a photo arrived
+            # but no vision rung viewed it. Until now this fact
+            # existed nowhere downstream — the outcome read as a
+            # healthy model reply, the competence gate passed it,
+            # and the model's paraphrase of "could not see it"
+            # went out in the owner's voice as "photo didn't come
+            # through". A reply composed blind is degraded
+            # however healthy the text rung is: on personal
+            # surfaces the gate holds it (silence over a false
+            # performance); on bot surfaces it still sends, with
+            # the media note constraining what it may claim.
+            degraded = True
+            if not degraded_note:
+                degraded_note = ("vision unavailable — a photo "
+                                 "arrived but could not be viewed")
         return parts, degraded, degraded_note
 
     def note_fast_turn(self, message: "ChatMessage", reply_text: str) -> None:
