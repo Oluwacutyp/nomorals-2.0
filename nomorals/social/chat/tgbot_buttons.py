@@ -194,7 +194,13 @@ def buttons_for_text(text: str) -> Keyboard | None:
         return [[("🚪 Leave", "game quit"), ("📊 Stats", "game stats")]]
 
     # ── game results ──
-    if "The House wins" in t or "points and coins credited" in t:
+    # The game-over card's head ("🏁 **<game>** — final") is a
+    # results shape too (markup integrity, 2026-11-06): the card
+    # no longer prints "/game rematch" as text, so a settle whose
+    # only results text is the card must still earn the Rematch
+    # action here.
+    if ("The House wins" in t or "points and coins credited" in t
+            or ("🏁 **" in t and "** — final" in t)):
         # Rematch runs it back; Next opens the game list; Arena goes to
         # the self-improvement arena (public bot: the public-bot gate
         # redirects it with a friendly message; owner chat: it runs);

@@ -223,6 +223,16 @@ class RuntimeGamesMixin:
                  if w in ("easy", "normal", "hard", "expert")),
                 "normal")
             room, msgs = engine.rematch(chat_key, difficulty=difficulty)
+            if room is not None and room.game == "slots":
+                # The rematch render belongs to the slots session:
+                # declared as one, a tap on the settled result EDITS
+                # that message into the new table (the funnel's tap
+                # rule), and a typed rematch edits it too when the
+                # session is on record.
+                from ...social.chat.tgbot_buttons import actionable
+
+                return actionable("\n".join(msgs), [], session="slots",
+                                  session_edit=True)
             return "\n".join(msgs)
         if verb in {"leaderboard", "board", "ranks"}:
             game = parts[1].lower() if len(parts) > 1 else ""
@@ -548,7 +558,7 @@ class RuntimeGamesMixin:
 
     def _slots_quickstart(self, engine: Any, chat_key: str,
                           player: Any, *, kind: str,
-                          amount: int) -> str:
+                          amount: int) -> Any:
         """``/slots <amount>`` — the whole bet-and-spin dance in one
         command (owner ask, live 2026-11-04).
 
@@ -564,6 +574,17 @@ class RuntimeGamesMixin:
         closed again and only the refusal is posted; a table that was
         already open keeps its exact prior state and is never spun at
         a different amount than the one asked for.
+
+        Presentation (2026-11-06): slots is a live SESSION — the
+        settled result declares its actions (Rematch / Fairness /
+        Leaderboard as buttons, never text hints) and rides the
+        LiveSessionRegistry, so a replay EDITS the session message
+        instead of posting a fresh wall per play. The fairness
+        note rides this merged reply exactly ONCE: the start
+        render's copy leads (the commitment precedes the draw,
+        visibly) and the settle render's duplicate is dropped —
+        printing both was the twice-told fairness block in the
+        owner's screenshot.
         """
         live = engine.live(chat_key)
         if live is not None and live.game != "slots":
@@ -576,13 +597,17 @@ class RuntimeGamesMixin:
             return "slots is live."  # pragma: no cover - start raises
         lines: list[str] = []
         fresh = False
+        note = ""
         if live is None:
             room, msgs = engine.start(chat_key, "slots", player,
                                       kind=kind)
             fresh = True
-            # the fairness commitment must be public BEFORE the draw;
-            # the how-to card is the dance this command exists to skip.
-            lines.extend(m for m in msgs if m.startswith("🔒"))
+            # The start render is dropped whole — the how-to card
+            # is the dance this command exists to skip — except its
+            # fairness note, which leads this reply (see docstring).
+            note = next((m for m in msgs if m.startswith("🔒")), "")
+            if note:
+                lines.append(note)
         else:
             room = live
             if room.player(player.key) is None:
@@ -599,8 +624,41 @@ class RuntimeGamesMixin:
                 engine.quit(chat_key)
             return "\n".join(bet_out) or "bet refused."
         lines.extend(bet_out)
-        lines.extend(engine.move(chat_key, "spin", player, kind=kind))
-        return "\n".join(lines)
+        spin_out = engine.move(chat_key, "spin", player, kind=kind)
+        if note:
+            # The settle render carries the same note (identical
+            # hash-free text, riding as one line of the joined
+            # settle); in this one merged reply it appears once —
+            # the leading copy above.
+            deduped: list[str] = []
+            for m in spin_out:
+                if note in m:
+                    parts = m.split("\n")
+                    if note in parts:
+                        parts.remove(note)
+                        m = "\n".join(parts)
+                deduped.append(m)
+            spin_out = deduped
+        lines.extend(spin_out)
+        text = "\n".join(lines)
+        if engine.live(chat_key) is not None:
+            # The spin did not settle the table — a plain mid-table
+            # render, no result actions to declare.
+            return text
+        # Settled: declare the result's actions and the session.
+        # The funnel posts the first result and records it under
+        # "slots"; a replay (registry hit) edits that message.
+        from ...games.fairness import FAIR_GAMES
+        from ...social.chat.tgbot_buttons import actionable
+
+        buttons = [[("🔁 Rematch", "game rematch"),
+                    ("🏆 Leaderboard", "game leaderboard")]]
+        if "slots" in FAIR_GAMES:
+            buttons[0].append(("🔒 Fairness", "game fair"))
+        return actionable(
+            text, buttons, session="slots",
+            session_edit=bool(self._live_session_registry().lookup(
+                chat_key, "slots")))
 
     def _challenge_player(self, game_name: str, to_label: str,
                           chat_key: str, player: Any) -> str:

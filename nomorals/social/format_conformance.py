@@ -19,6 +19,9 @@ the check + safe splitter at the send boundary:
 * :func:`convert` / :func:`sanitize` — transcode markup between
   platforms (HTML <-> WhatsApp/Discord markdown <-> plain) and verify
   the result.
+* :func:`repair_telegram_html` — make authored HTML valid for a
+  Telegram HTML-mode send (unsupported tag-like sequences escaped,
+  balance restored) without touching already-valid markup.
 
 Unlike :mod:`nomorals.social.chat.chunking` (lossless, content chunks
 concatenate exactly), :func:`chunk` may re-wrap an oversized markup
@@ -38,6 +41,7 @@ __all__ = [
     "check_message",
     "chunk",
     "convert",
+    "repair_telegram_html",
     "sanitize",
     "max_text_for",
     "KNOWN_PLATFORMS",
@@ -132,6 +136,103 @@ def _telegram_tag_violations(text: str) -> list[str]:
     for name in reversed(stack):
         violations.append(f"unclosed-html-tag <{name}>: missing </{name}>")
     return violations
+
+
+#: Entities Telegram HTML mode accepts as-is; a ``&`` starting one of
+#: these is content, any other ``&`` is a literal ampersand.
+_VALID_ENTITY_RE = re.compile(
+    r"&(?:lt|gt|amp|quot|#[0-9]+|#x[0-9A-Fa-f]+);")
+
+
+def _escape_gap(run: str) -> str:
+    """Escape a non-tag run for Telegram HTML: a stray ``<`` (one
+    that did not form a tag) and a bare ``&`` become entities; valid
+    entities pass through byte-identical."""
+    if "<" not in run and "&" not in run:
+        return run
+    out: list[str] = []
+    i = 0
+    while i < len(run):
+        ch = run[i]
+        if ch == "&":
+            m = _VALID_ENTITY_RE.match(run, i)
+            if m:
+                out.append(m.group(0))
+                i = m.end()
+            else:
+                out.append("&amp;")
+                i += 1
+        elif ch == "<":
+            out.append("&lt;")
+            i += 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def repair_telegram_html(text: str) -> str:
+    """Make authored HTML valid for a Telegram HTML-mode send.
+
+    The markup-integrity repair (2026-11-06): producers compose
+    HTML by hand in places — help prose carries literal placeholder
+    sequences like ``<command>`` that Telegram does not accept.
+    One such tag makes the API reject the whole message's entity
+    parse, and the fallback then shipped the layer's own tags as
+    literal text (the stamp printed raw on help page 2). Repair is
+    the layer's answer at the send boundary, BEFORE chunking, so a
+    paged presentation keeps one parse-mode discipline on every
+    part:
+
+    * a tag Telegram accepts (``TELEGRAM_TAGS``, balanced, ``<a>``
+      with href) passes through byte-identical — repair is a no-op
+      on already-valid HTML;
+    * a tag-like sequence Telegram does NOT accept is escaped, so
+      it displays as the literal text the author meant;
+    * misnested closers close the intervening tags first; stray
+      closers are escaped; tags left open are closed at the end;
+    * stray ``<`` / bare ``&`` in prose become entities.
+
+    Never raises; idempotent (repairing repaired text changes
+    nothing).
+    """
+    if not text:
+        return text or ""
+    try:
+        out: list[str] = []
+        stack: list[str] = []
+        pos = 0
+        for m in _TAG_RE.finditer(text):
+            out.append(_escape_gap(text[pos:m.start()]))
+            closing, name, attrs = (m.group(1), m.group(2).lower(),
+                                    m.group(3))
+            raw = m.group(0)
+            supported = name in TELEGRAM_TAGS and not (
+                attrs.rstrip().endswith("/"))
+            if name == "a" and not closing and not re.search(
+                    r"href\s*=\s*\"[^\"]+\"|href\s*=\s*'[^']+'",
+                    attrs):
+                supported = False
+            if not supported:
+                out.append(html.escape(raw, quote=False))
+            elif closing:
+                if name in stack:
+                    while stack and stack[-1] != name:
+                        out.append(f"</{stack.pop()}>")
+                    stack.pop()
+                    out.append(raw)
+                else:
+                    out.append(html.escape(raw, quote=False))
+            else:
+                stack.append(name)
+                out.append(raw)
+            pos = m.end()
+        out.append(_escape_gap(text[pos:]))
+        while stack:
+            out.append(f"</{stack.pop()}>")
+        return "".join(out)
+    except Exception:  # noqa: BLE001 - repair never breaks a send
+        return text
 
 
 def _leftover_markers(text: str, patterns: list[re.Pattern[str]],

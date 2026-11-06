@@ -5448,7 +5448,15 @@ class TelegramBotAdapter(ChatAdapter):
             for i, chunk in enumerate(chunks):
                 params = dict(params_base)
                 if plain_fallback:
+                    # The rest of the message goes plain AND
+                    # converted: the tags are stripped, never
+                    # shipped literally (the personal adapter's
+                    # fallback has always converted; raw tags on
+                    # screen were the 2026-11-06 help-page leak).
+                    from .platforms import strip_html
+
                     params.pop("parse_mode", None)
+                    chunk = strip_html(chunk)
                 # The keyboard goes on the last chunk only — every chunk
                 # carrying it would repeat the buttons N times.
                 if keyboard and i == len(chunks) - 1:
@@ -5463,17 +5471,22 @@ class TelegramBotAdapter(ChatAdapter):
                             and _is_entity_parse_error(exc)):
                         raise
                     # The API rejected the markup itself: retry this
-                    # chunk as PLAIN text (and keep the rest of the
-                    # message plain — half-formatted reads worse than
-                    # plain). A formatting failure must never eat the
-                    # message.
+                    # chunk as PLAIN text — tags stripped, not just
+                    # the parse mode dropped (and keep the rest of
+                    # the message plain the same way — half-formatted
+                    # reads worse than plain). A formatting failure
+                    # must never eat the message, and it must never
+                    # print the markup either.
+                    from .platforms import strip_html
+
                     _log.warning(
                         "telegram-bot: entity parse rejected (%s) — "
                         "retrying chunk %d/%d as plain text",
                         exc, i + 1, len(chunks))
                     plain_fallback = True
                     params.pop("parse_mode", None)
-                    result = self._api("sendMessage", text=chunk, **params)
+                    result = self._api("sendMessage",
+                                       text=strip_html(chunk), **params)
                 last_id = str(result.get("message_id", ""))
                 # Only the first chunk carries the reply reference.
                 params_base.pop("reply_parameters", None)

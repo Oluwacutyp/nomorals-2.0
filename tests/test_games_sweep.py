@@ -622,7 +622,15 @@ class GameOverCardTests(unittest.TestCase):
             winner_label="Ada")
         self.assertIn("Ada", card)
         self.assertIn("30 score", card)
-        self.assertIn("rematch", card)
+        # Markup integrity (2026-11-06): rematch is a DECLARED
+        # ACTION, never text in the card — the funnel's action
+        # inference turns the card's shape into the Rematch button.
+        self.assertNotIn("/game rematch", card)
+        self.assertNotIn("rematch", card)
+        from nomorals.social.chat.tgbot_buttons import buttons_for_text
+        rows = buttons_for_text(card)
+        callbacks = [cb for row in rows for _label, cb in row]
+        self.assertIn("game rematch", callbacks)
         # sorted: winner first
         self.assertLess(card.index("Ada"), card.index("Bob"))
 

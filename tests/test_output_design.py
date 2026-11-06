@@ -250,7 +250,13 @@ class HelpMenuTests(unittest.TestCase):
     def test_help_menu_telegram(self):
         from nomorals.social.chat.control import help_menu
         out = help_menu("telegram")
-        self.assertIn("<b>SEARCH</b>", out)
+        # Menu unification (2026-11-06): the Telegram catalog menu
+        # renders the SAME declared sections as WhatsApp through
+        # the typography layer — registry section titles in the
+        # layer's bold heads (previously a hand-parsed _HELP_TEXT
+        # render through a separate style path: "<b>SEARCH</b>").
+        self.assertIn("<b>🔍 search</b>", out)
+        self.assertIn("<i>Powered by peacethefirst</i>", out)
 
     def test_help_menu_coverage_matches_help_text(self):
         from nomorals.social.chat.control import (

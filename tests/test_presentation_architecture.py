@@ -892,5 +892,620 @@ class TapPlumbingTests(unittest.TestCase):
             self.assertIn(needle, mjs)
 
 
+# ── (e) markup integrity: the paged-presentation leak ────────────
+#
+# Owner screenshot, 2026-11-06: Telegram bot DM, help page 2 of 2
+# printed ``<i>Powered by peacethefirst</i> (2/2)`` as literal
+# text. The chain: help prose carries literal ``<command>`` /
+# ``<topic>`` placeholders Telegram HTML rejects → the API refuses
+# the entity parse → the bot adapter's plain fallback dropped the
+# parse mode but shipped the chunk's text UNCHANGED, tags and all.
+# The layer's answers, pinned here: repair at the gateway (markup
+# valid before chunking, one discipline for every page) and a
+# fallback that CONVERTS (strips) instead of merely un-moding.
+
+
+def _tag_violations(text: str) -> list[str]:
+    """format_conformance violations from the HTML-tag family."""
+    from nomorals.social.format_conformance import check_message
+
+    return [v for v in check_message("telegram-bot", text)
+            if "html-tag" in v or "href" in v]
+
+
+class RepairTelegramHtmlTests(unittest.TestCase):
+    def test_unsupported_placeholders_become_literal_text(self):
+        from nomorals.social.format_conformance import repair_telegram_html
+
+        out = repair_telegram_html(
+            "run `nm <command>` — `nm help <topic>` shows the pages, "
+            "<b>bold</b> stays bold")
+        self.assertIn("&lt;command&gt;", out)
+        self.assertIn("&lt;topic&gt;", out)
+        self.assertIn("<b>bold</b>", out)
+        self.assertEqual(_tag_violations(out), [])
+
+    def test_noop_on_valid_html(self):
+        from nomorals.social.format_conformance import repair_telegram_html
+
+        for text in (
+                "<i>Powered by peacethefirst</i>",
+                "<b>already</b> formatted &amp; ready",
+                "**raw** stays raw",
+                '<a href="https://x.test/?a=1">link</a>',
+                "<pre>code &lt; sample</pre>",
+                "plain prose, no markup at all"):
+            self.assertEqual(repair_telegram_html(text), text, text)
+
+    def test_balance_restored_and_strays_escaped(self):
+        from nomorals.social.format_conformance import repair_telegram_html
+
+        self.assertEqual(repair_telegram_html("<b>bold"),
+                         "<b>bold</b>")
+        self.assertEqual(repair_telegram_html("<b><i>x</b>"),
+                         "<b><i>x</i></b>")
+        self.assertEqual(repair_telegram_html("a </i> b"),
+                         "a &lt;/i&gt; b")
+        self.assertEqual(repair_telegram_html("1 < 2 & 3"),
+                         "1 &lt; 2 &amp; 3")
+        self.assertEqual(
+            repair_telegram_html("<a>nohref</a>"),
+            "&lt;a&gt;nohref&lt;/a&gt;")
+
+    def test_repair_is_idempotent(self):
+        from nomorals.social.format_conformance import repair_telegram_html
+
+        text = ("nm <command> & <b>bold <i>both</b> tail "
+                "<i>Powered by peacethefirst</i>")
+        once = repair_telegram_html(text)
+        self.assertEqual(repair_telegram_html(once), once)
+        self.assertEqual(_tag_violations(once), [])
+
+
+class _RecordingAdapter(ChatAdapter):
+    """Gateway-level fake capturing (text, parse_mode) per send."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(media_dir="/tmp/nm-test-media")
+        self.name = name
+        self.calls: list[tuple[str, str]] = []
+
+    def run(self, handler) -> None:  # pragma: no cover - unused
+        pass
+
+    def send(self, chat: ChatRef, text: str, *, reply_to: str = "",
+             buttons: Any = None, reply_keyboard: Any = None,
+             parse_mode: str = "") -> SendResult:
+        self.calls.append((text, parse_mode))
+        return SendResult(ok=True, platform=self.name,
+                          message_id=f"m{len(self.calls)}")
+
+
+class PagedHelpMarkupTests(unittest.TestCase):
+    """The evidence, end to end at the gateway: the REAL detailed
+    help overview + the layer's stamp, sent as ONE paged HTML
+    presentation — every page carries the mode, every page is
+    valid for the surface, the placeholders display as text and
+    the stamp renders as markup exactly once."""
+
+    def setUp(self) -> None:
+        clear_failures()
+        self.context, self.tmp = _make_context()
+        self.adapter = _RecordingAdapter("telegram-bot")
+        self.gateway = ChatGateway(
+            {"telegram-bot": self.adapter}, db=self.context.db)
+
+    def tearDown(self) -> None:
+        self.context.close()
+        self.tmp.cleanup()
+
+    def test_paged_help_every_page_one_discipline(self):
+        from nomorals.social.chat.control import _detailed_overview
+        from nomorals.social.chat.typography import apply_stamp
+
+        text = apply_stamp(_detailed_overview())
+        self.assertIn("<command>", text)   # the offending prose
+        self.assertIn("<i>Powered by peacethefirst</i>", text)
+        chat = ChatRef(platform="telegram-bot", chat_id="42",
+                       kind=ChatKind.DM)
+        result = self.gateway.send("telegram-bot", chat, text,
+                                   parse_mode="HTML", fresh=True)
+        self.assertTrue(result.ok)
+        calls = self.adapter.calls
+        self.assertGreaterEqual(len(calls), 2,
+                                "the overview must actually page")
+        for chunk, mode in calls:
+            self.assertEqual(mode, "HTML",
+                             "every page carries the parse mode")
+            self.assertEqual(_tag_violations(chunk), [],
+                             f"page invalid for the surface: {chunk[:80]}")
+            self.assertNotIn("<command>", chunk)
+            self.assertNotIn("<topic>", chunk)
+        joined = "".join(chunk for chunk, _mode in calls)
+        self.assertIn("&lt;command&gt;", joined,
+                      "the placeholder displays as literal text")
+        self.assertEqual(
+            joined.count("<i>Powered by peacethefirst</i>"), 1,
+            "the stamp renders as markup, once")
+
+
+class BotAdapterPlainFallbackTests(unittest.TestCase):
+    """When the API still rejects a chunk's entities, the bot
+    adapter's fallback CONVERTS the text (tags stripped) — for
+    the rejected chunk and every chunk after it. Shipping the
+    raw chunk with only the mode dropped is the leak."""
+
+    def _adapter(self):
+        from nomorals.social.chat.telegram import TelegramBotAdapter
+
+        ad = TelegramBotAdapter(token="<redacted>", session=object())
+        calls: list[dict] = []
+
+        def fake_api(method, **params):
+            calls.append(dict(params))
+            if params.get("parse_mode"):
+                raise Exception(
+                    "Bad Request: can't parse entities: Unsupported "
+                    "start tag \"command\" at byte offset 5")
+            return {"message_id": 100 + len(calls)}
+
+        ad._api = fake_api  # type: ignore[method-assign]
+        return ad, calls
+
+    def test_entity_rejection_converts_every_chunk(self):
+        ad, calls = self._adapter()
+        chat = ChatRef(platform="telegram-bot", chat_id="111")
+        text = ("run `nm <command>` for <b>bold</b> detail. "
+                + "filler words go here. " * 260
+                + "the end. <i>Powered by peacethefirst</i>")
+        result = ad.send(chat, text, parse_mode="HTML")
+        self.assertTrue(result.ok)
+        self.assertGreaterEqual(len(calls), 3,
+                                "reject + converted retry + chunk 2")
+        # The first call is the formatted attempt; every call after
+        # it is plain AND tag-free.
+        self.assertEqual(calls[0].get("parse_mode"), "HTML")
+        for params in calls[1:]:
+            self.assertNotIn("parse_mode", params)
+            body = params.get("text", "")
+            for tag in ("<b>", "</b>", "<i>", "</i>", "<command>"):
+                self.assertNotIn(tag, body)
+        self.assertIn("Powered by peacethefirst", calls[-1]["text"],
+                      "the stamp survives as readable plain text")
+
+
+class PresentedFamilyModeGuardTests(unittest.TestCase):
+    """The presented-output family in both modes: a stamped Card
+    renders as HTML with the mode ON for the Telegram family and
+    as tag-free plain text (mode off) for a plain surface."""
+
+    def test_card_renders_both_modes(self):
+        from nomorals.social.chat.typography import Card, render_card
+
+        card = Card("menu", title="Games")
+        card.line("pick a table to play")
+        tg = render_card(card, platform="telegram-bot")
+        self.assertEqual(tg.parse_mode, "HTML")
+        self.assertIn("<i>Powered by peacethefirst</i>", tg.text)
+        self.assertEqual(_tag_violations(tg.text), [])
+        plain = render_card(card, platform="local")
+        self.assertEqual(plain.parse_mode, "")
+        self.assertIn("Powered by peacethefirst", plain.text)
+        self.assertNotIn("<i>", plain.text)
+        self.assertNotIn("<b>", plain.text)
+
+
+# ── (e2) the menu family: one structure, every platform ─────────
+#
+# Owner, 2026-11-06: "The formatting for the menus across all
+# platforms even." The catalog menu existed as three systems:
+# WhatsApp's XMD frame over the registry, Telegram's hand-parsed
+# _HELP_TEXT render through a separate style path, and the paged
+# /help prose that leaked. Now: ONE declared structure
+# (control.menu_sections — the registry, ordered/titled once),
+# rendered through the shared typography layer per platform.
+# WhatsApp's rendered menu is byte-identical to before (its
+# structure became the canonical one); Telegram converged.
+
+
+class MenuFamilyGuardTests(unittest.TestCase):
+    def test_sections_parity_across_platforms(self):
+        from nomorals.social.chat.control import WHATSAPP_UNSUPPORTED_KINDS, menu_sections
+
+        tg = menu_sections("telegram")
+        wa = menu_sections("whatsapp")
+        # WhatsApp's one platform-truth extra leads: the
+        # plain-words group capabilities exist only on its bridge.
+        self.assertEqual(wa[0][1], "groups — in plain words")
+        # Same sections, same order, same titles after that.
+        self.assertEqual([t for _e, t, _i in tg],
+                         [t for _e, t, _i in wa[1:]])
+        # Item parity modulo exactly the platform-impossible kinds.
+        tg_cmds = {c for _e, _t, items in tg for c, _d in items}
+        wa_cmds = {c for _e, _t, items in wa[1:] for c, _d in items}
+        self.assertEqual(
+            tg_cmds - wa_cmds,
+            {f"/{k}" for k in WHATSAPP_UNSUPPORTED_KINDS})
+        self.assertEqual(wa_cmds - tg_cmds, set())
+
+    def test_telegram_menu_is_a_layer_render(self):
+        from nomorals.social.chat.control import help_menu
+
+        out = help_menu("telegram")
+        # The layer's stamp, styled — not a literal, not missing.
+        self.assertIn("<i>Powered by peacethefirst</i>", out)
+        self.assertEqual(_tag_violations(out), [])
+        # Every declared section renders, emoji-headed, in order.
+        from nomorals.social.chat.control import menu_sections
+
+        pos = -1
+        for emoji, title, _items in menu_sections("telegram"):
+            head = f"<b>{emoji} {title}</b>".replace(
+                "&", "&amp;")
+            nxt = out.find(head)
+            self.assertGreater(nxt, pos,
+                               f"section head missing/out of order: {head}")
+            pos = nxt
+
+    def test_whatsapp_menu_plain_stamped_framed(self):
+        from nomorals.social.chat.control import menu_sections, whatsapp_menu
+        from nomorals.social.chat.style import small_caps
+
+        out = whatsapp_menu()
+        for tag in ("<b>", "</b>", "<i>", "</i>", "<code>",
+                    "</code>", "<pre>", "</pre>"):
+            self.assertNotIn(tag, out,
+                             "no HTML survives into the WhatsApp render")
+        self.assertTrue(
+            out.rstrip().endswith("_Powered by peacethefirst_"),
+            "the stamp rides the WhatsApp render, styled")
+        self.assertEqual(out.count("╭━━〔"),
+                         out.count("╰━━━━━━━━━━━━┈⊷"),
+                         "frames balanced")
+        for _emoji, title, _items in menu_sections("whatsapp"):
+            self.assertIn(small_caps(title), out,
+                          f"section missing from WA render: {title}")
+
+    def test_public_menu_is_markup_free(self):
+        from nomorals.social.chat.control import public_menu_text
+
+        out = public_menu_text()
+        for tag in ("<b>", "</b>", "<i>", "</i>", "<code>"):
+            self.assertNotIn(tag, out)
+
+
+class PagedTelegramMenuTests(unittest.TestCase):
+    """The unified Telegram catalog menu, paged through the real
+    gateway: at 55K it spans many pages — every page carries the
+    HTML discipline and stays valid for the surface."""
+
+    def setUp(self) -> None:
+        clear_failures()
+        self.context, self.tmp = _make_context()
+        self.adapter = _RecordingAdapter("telegram-bot")
+        self.gateway = ChatGateway(
+            {"telegram-bot": self.adapter}, db=self.context.db)
+
+    def tearDown(self) -> None:
+        self.context.close()
+        self.tmp.cleanup()
+
+    def test_menu_pages_carry_the_mode(self):
+        from nomorals.social.chat.control import help_menu
+
+        text = help_menu("telegram")
+        chat = ChatRef(platform="telegram-bot", chat_id="42",
+                       kind=ChatKind.DM)
+        result = self.gateway.send("telegram-bot", chat, text,
+                                   parse_mode="HTML", fresh=True)
+        self.assertTrue(result.ok)
+        calls = self.adapter.calls
+        self.assertGreaterEqual(len(calls), 4,
+                                "the catalog menu must actually page")
+        for chunk, mode in calls:
+            self.assertEqual(mode, "HTML")
+            self.assertEqual(_tag_violations(chunk), [],
+                             f"page invalid for the surface: {chunk[:80]}")
+        joined = "".join(chunk for chunk, _mode in calls)
+        self.assertEqual(
+            joined.count("<i>Powered by peacethefirst</i>"), 1,
+            "the stamp renders once across all pages")
+
+
+# ── (f) games output: the settle composition, fixed as a class ───
+#
+# Owner screenshot, 2026-11-06: two /slots 20 plays in a group,
+# each a fresh wall printing the provably-fair commitment hash
+# TWICE, a dotted-glyph XP bar, and "/game rematch" as text.
+# The five corrections, pinned: no hash in any chat render ·
+# the fairness note at most once per result · rematch/fairness
+# are declared buttons · the bar is the typography layer's bar ·
+# slots rides the live-session registry (post once, edits after).
+
+
+def _engine_rig():
+    from nomorals.games.engine import GameEngine
+    from nomorals.storage.db import Database
+
+    class Ctx:
+        def __init__(self, db):
+            self.db = db
+
+    db = Database(":memory:")
+    db.migrate()
+    sent: list[str] = []
+    engine = GameEngine(Ctx(db), send=lambda chat, text: sent.append(text))
+    return engine, db, sent
+
+
+class SettleCompositionClassTests(unittest.TestCase):
+    """The shared builder (engine start + _finish_inner + the
+    final card) carries the corrections for EVERY game in the
+    fairness class — slots, blackjack and roulette played through,
+    poker and craps through the same settle path (quit)."""
+
+    def setUp(self) -> None:
+        from nomorals.games.players import Player
+
+        self.engine, self.db, self.sent = _engine_rig()
+        self.ada = Player.from_sender("telegram", "111", "Ada")
+        self.engine.store.add_coins(self.ada, 500,
+                                    reason="test funding")
+
+    def tearDown(self) -> None:
+        self.engine.shutdown()
+
+    def _assert_clean_composition(self, start_msgs, settle_msgs,
+                                  commit: str) -> None:
+        start = "\n".join(start_msgs)
+        settle = "\n".join(settle_msgs)
+        for body in (start, settle):
+            self.assertNotIn(commit, body, "the hash never prints")
+            self.assertNotIn(commit[:12], body,
+                             "not even a hash prefix prints")
+            self.assertNotIn("commitment `", body)
+            self.assertNotIn("/game rematch", body)
+            self.assertNotIn("run it back", body)
+        self.assertEqual(start.count("provably fair"), 1,
+                         "the note rides the table open, once")
+        self.assertEqual(settle.count("provably fair"), 1,
+                         "the note rides the settle, once")
+
+    def test_slots_played_through(self):
+        engine, ada = self.engine, self.ada
+        room, msgs = engine.start("test:sl", "slots", ada, kind="dm")
+        commit = room.state["fair"]["commit"]
+        engine.move("test:sl", "bet 20", ada, kind="dm")
+        out = engine.move("test:sl", "spin", ada, kind="dm")
+        self._assert_clean_composition(msgs, out, commit)
+        bar = re.search(r"`[█░]{10}` \d+% \d+/\d+ \(lvl \d+\)",
+                        "\n".join(out))
+        self.assertIsNotNone(bar,
+                             "the settle's XP bar is the typography bar")
+
+    def test_blackjack_played_through(self):
+        engine, ada = self.engine, self.ada
+        room, msgs = engine.start("test:bj", "blackjack", ada,
+                                  kind="dm")
+        commit = room.state["fair"]["commit"]
+        out = engine.move("test:bj", "stand", ada, kind="dm")
+        self.assertIsNone(engine.live("test:bj"))
+        self._assert_clean_composition(msgs, out, commit)
+
+    def test_roulette_played_through(self):
+        engine, ada = self.engine, self.ada
+        room, msgs = engine.start("test:rl", "roulette", ada,
+                                  kind="dm")
+        commit = room.state["fair"]["commit"]
+        engine.move("test:rl", "bet red", ada, kind="dm")
+        out = engine.move("test:rl", "spin", ada, kind="dm")
+        self.assertIsNone(engine.live("test:rl"))
+        self._assert_clean_composition(msgs, out, commit)
+
+    def test_poker_and_craps_share_the_settle(self):
+        engine, ada = self.engine, self.ada
+        for game in ("poker", "craps"):
+            room, msgs = engine.start(f"test:{game}", game, ada,
+                                      kind="dm")
+            commit = room.state["fair"]["commit"]
+            out = engine.quit(f"test:{game}")
+            self._assert_clean_composition(msgs, out, commit)
+
+    def test_nonfair_card_has_no_text_rematch(self):
+        from nomorals.games.players import Player
+
+        engine = self.engine
+        p = Player(key="local:tt", platform="local", name="Tt")
+        room, _ = engine.start("test:ttt", "ttt", p)
+        room.state["done"] = True
+        out = engine._finish(room)
+        joined = "\n".join(out)
+        self.assertIn("🏁", joined)
+        self.assertNotIn("/game rematch", joined)
+        self.assertNotIn("run it back", joined)
+
+
+class SlotsLiveSessionTests(_ArchCase):
+    """Slots end to end on Telegram group shapes through the real
+    intake (_process_inner -> the any-chat game dispatch -> the
+    funnel): the first play posts the session message with
+    declared actions; a replay EDITS it; a rematch tap edits it
+    again into the new table; typed /game rematch still works;
+    WhatsApp's reply_to-shaped edit grammar falls back honestly.
+    """
+
+    def _gmsg(self, platform: str, *, chat_id: str, text: str,
+              meta: dict | None = None) -> ChatMessage:
+        """A group message with a REAL sender shape: group players
+        resolve from the numeric sender_id (a name-only group
+        sender is refused a profile by design)."""
+        msg = self._msg(platform, kind=ChatKind.GROUP,
+                        chat_id=chat_id, text=text, meta=meta)
+        msg.sender_id = "111"
+        return msg
+
+    def _fund(self, msg: ChatMessage, coins: int = 1000):
+        """Fund BOTH purses a slots table can stake: the games
+        wallet (DM rooms) and the group estate (group rooms stake
+        the estate — member id is the sender id)."""
+        engine = self.runtime._game_engine()
+        player = self.runtime._game_player(msg)
+        engine.store.add_coins(player, coins, reason="test funding")
+        try:
+            self.runtime._group_surface().game_wager_credit(
+                msg.chat.key, "111", coins, "test funding")
+        except Exception as exc:  # noqa: BLE001 - DM keys have no estate
+            assert isinstance(exc, Exception)
+        return engine
+
+    def _play(self, msg: ChatMessage) -> None:
+        self.runtime._process_inner(msg)
+
+    def _commit_for(self, engine, chat_key: str) -> str:
+        reveal = engine.last_fair_reveal(chat_key)
+        self.assertIsNotNone(reveal)
+        m = re.search(r"[0-9a-f]{64}", reveal or "")
+        self.assertIsNotNone(m, "the reveal keeps the commitment")
+        return m.group(0)  # type: ignore[union-attr]
+
+    def _assert_result_text(self, text: str, commit: str) -> None:
+        self.assertIn("🏁", text)
+        self.assertNotIn(commit, text)
+        self.assertNotIn(commit[:12], text)
+        self.assertNotIn("commitment `", text)
+        self.assertEqual(text.count("provably fair"), 1,
+                         "one fairness note per result")
+        self.assertNotIn("/game rematch", text)
+        self.assertNotIn("run it back", text)
+        self.assertIsNotNone(
+            re.search(r"`[█░]{10}` \d+% \d+/\d+ \(lvl \d+\)", text),
+            "the XP bar is the typography layer's bar")
+
+    def test_first_play_posts_session_with_declared_actions(self):
+        msg = self._gmsg("telegram-bot", chat_id="777",
+                         text="/game slots 20")
+        engine = self._fund(msg)
+        self._play(msg)
+        adapter = self.adapters["telegram-bot"]
+        self.assertEqual(len(adapter.sent), 1)
+        self.assertEqual(adapter.edits, [])
+        text, buttons = adapter.sent[0]
+        commit = self._commit_for(engine, msg.chat.key)
+        self._assert_result_text(text, commit)
+        flat = [data for row in (buttons or [])
+                for _label, data in row]
+        self.assertIn("game rematch", flat)
+        self.assertIn("game fair", flat)
+        self.assertIn("game leaderboard", flat)
+        registry = self.runtime._live_session_registry()
+        self.assertEqual(registry.lookup(msg.chat.key, "slots"),
+                         "m1")
+
+    def test_replay_edits_the_session_message(self):
+        msg = self._gmsg("telegram-bot", chat_id="777",
+                         text="/game slots 20")
+        engine = self._fund(msg)
+        self._play(msg)
+        adapter = self.adapters["telegram-bot"]
+        self.assertEqual(len(adapter.sent), 1)
+        self._play(self._gmsg("telegram-bot", chat_id="777",
+                              text="/game slots 20"))
+        self.assertEqual(len(adapter.sent), 1,
+                         "a replay must not post a second wall")
+        self.assertEqual(len(adapter.edits), 1)
+        edit_mid, edit_text, _kw = adapter.edits[0]
+        self.assertEqual(edit_mid, "m1")
+        commit = self._commit_for(engine, msg.chat.key)
+        self._assert_result_text(edit_text, commit)
+
+    def test_rematch_tap_edits_into_the_new_table(self):
+        msg = self._gmsg("telegram-bot", chat_id="777",
+                         text="/game slots 20")
+        engine = self._fund(msg)
+        self._play(msg)
+        adapter = self.adapters["telegram-bot"]
+        self.assertEqual(len(adapter.sent), 1)
+        tap = self._gmsg(
+            "telegram-bot", chat_id="777", text="/game rematch",
+            meta={"callback_query": True, "tapped_message_id": "m1"})
+        result, _reply = self._drive(tap)
+        self.assertIsNotNone(result)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.message_id, "m1")
+        self.assertEqual(len(adapter.sent), 1,
+                         "the rematch tap must not post fresh")
+        self.assertEqual(len(adapter.edits), 1)
+        edit_mid, edit_text, _kw = adapter.edits[0]
+        self.assertEqual(edit_mid, "m1")
+        self.assertIn("provably fair", edit_text)
+        self.assertNotIn("commitment `", edit_text)
+        room = engine.live(msg.chat.key)
+        self.assertIsNotNone(room)
+        self.assertEqual(room.game, "slots")
+
+    def test_typed_rematch_still_works(self):
+        msg = self._gmsg("telegram-bot", chat_id="888",
+                         text="/game slots 20")
+        engine = self._fund(msg)
+        self._play(msg)
+        self.assertIsNone(engine.live(msg.chat.key))
+        typed = self._gmsg("telegram-bot", chat_id="888",
+                           text="/game rematch")
+        result, _reply = self._drive(typed)
+        self.assertIsNotNone(result)
+        self.assertTrue(result.ok)
+        room = engine.live(msg.chat.key)
+        self.assertIsNotNone(room,
+                             "typed /game rematch opens the table")
+        self.assertEqual(room.game, "slots")
+
+    def test_dm_bare_slots_command_is_the_same_session(self):
+        # The canonical entry: "/slots 20" in a DM (no group key,
+        # so no group-economy intercept) reaches the same
+        # quickstart and declares the same session + actions.
+        msg = self._msg("telegram-bot", chat_id="42",
+                        text="/slots 20")
+        msg.sender_id = "111"
+        engine = self._fund(msg)
+        self._play(msg)
+        adapter = self.adapters["telegram-bot"]
+        self.assertEqual(len(adapter.sent), 1)
+        text, buttons = adapter.sent[0]
+        commit = self._commit_for(engine, msg.chat.key)
+        self._assert_result_text(text, commit)
+        flat = [data for row in (buttons or [])
+                for _label, data in row]
+        self.assertIn("game rematch", flat)
+        self.assertIn("game fair", flat)
+        registry = self.runtime._live_session_registry()
+        self.assertEqual(registry.lookup(msg.chat.key, "slots"),
+                         "m1")
+
+    def test_whatsapp_replay_edits_text_only(self):
+        msg = self._msg("whatsapp", chat_id="15551234567",
+                        text="/slots 20")
+        msg.sender_id = "15551234567"
+        engine = self._fund(msg)
+        self._play(msg)
+        adapter = self.adapters["whatsapp"]
+        self.assertEqual(len(adapter.sent), 1)
+        text = adapter.sent[0][0]
+        self.assertIn("🏁", text)
+        msg2 = self._msg("whatsapp", chat_id="15551234567",
+                         text="/slots 20")
+        msg2.sender_id = "15551234567"
+        self._play(msg2)
+        # The session law holds on WhatsApp too, in its own
+        # grammar: the bridge edit verb is text-only, so the
+        # replay EDITS the live message's text (the original
+        # keyboard — Rematch / Fairness / Leaderboard — stays).
+        self.assertEqual(len(adapter.sent), 1)
+        self.assertEqual(len(adapter.edits), 1)
+        edit_mid, edit_text = adapter.edits[0]
+        self.assertEqual(edit_mid, "m1")
+        commit = self._commit_for(engine, msg.chat.key)
+        self._assert_result_text(edit_text, commit)
+
+
 if __name__ == "__main__":
     unittest.main()

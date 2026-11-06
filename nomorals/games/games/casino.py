@@ -59,7 +59,8 @@ class BlackjackGame(MultiGame):
              "Stand (keep your hand), Double (double bet, one more card), "
              "Split (two hands if you have a pair). Dealer hits on 16, "
              "stands on 17. Blackjack pays 3:2, wins pay 1:1. "
-             "🔒 the deck is provably fair — commitment shown at deal.")
+             "🔒 the deck is provably fair — every draw locked in "
+             "before the deal; the proof stays in my records.")
 
     def new_state(self, rng: random.Random,
                   bet: int = 0) -> dict[str, Any]:

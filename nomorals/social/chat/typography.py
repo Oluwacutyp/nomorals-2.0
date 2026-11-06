@@ -54,7 +54,8 @@ __all__ = [
     "WATERMARK_MODES", "DEFAULT_WATERMARK_MODE",
     "MediaMark", "resolve_media_mark",
     "Card", "render_card", "render_card_framed", "card_text",
-    "fmt_amount", "sparks", "moderation_warning", "notice_line",
+    "fmt_amount", "sparks", "progress_bar",
+    "moderation_warning", "notice_line",
 ]
 
 #: The surface classes a handler may declare.  The class — not
@@ -294,6 +295,25 @@ def fmt_amount(value: Any) -> str:
 def sparks(value: Any) -> str:
     """An amount in the group purse's unit, grouped."""
     return f"{fmt_amount(value)} sparks"
+
+
+def progress_bar(frac: float, width: int = 10) -> str:
+    """The one progress bar (board preset): a mono span of block
+    glyphs plus the percent — `` `██████░░░░` 60% `` in the house
+    dialect, so every surface renders the same bar (Telegram
+    converts the span to ``<code>``, WhatsApp shows it mono, plain
+    surfaces show the glyphs themselves). Settle compositions,
+    progression, profiles — every bar is THIS bar; the private
+    per-module copies are how a bare dotted-glyph bar shipped in
+    the games settle wall (owner screenshot, 2026-11-06)."""
+    try:
+        f = float(frac)
+    except (TypeError, ValueError):
+        f = 0.0
+    f = min(1.0, max(0.0, f))
+    filled = int(f * width + 0.5)
+    return (f"`{'█' * filled}{'░' * (width - filled)}` "
+            f"{int(f * 100 + 0.5)}%")
 
 
 # ── the Card ─────────────────────────────────────────────────────

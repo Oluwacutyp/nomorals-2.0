@@ -50,10 +50,10 @@ from .chunking import (
     split_caption,
     utf16_len,
 )
+from .failures import record_failure
 from .outbox import Outbox
 from .platform_limits import for_platform
 from .send_retry import send_with_retry
-from .failures import record_failure
 
 __all__ = ["ChatGateway", "OwnerTarget", "PLATFORM_CATALOGUE",
            "parse_chat_keys", "resolve_owner_targets"]
@@ -95,13 +95,33 @@ def _present_outbound(platform: str, text: str,
     for the personal adapter too, whose implicit markdown default was
     the other half of the split.
 
-    An explicit caller ``parse_mode`` always wins untouched. Platforms
-    without HTML (WhatsApp self-converts in its adapter; Discord
-    renders the markdown dialect natively; local/SMS are plain) and
-    texts with no dialect signal pass through byte-identical, so
-    unformatted callers are unaffected. Never raises.
+    An explicit caller ``parse_mode`` always wins — the mode itself
+    is never second-guessed. But explicit-HTML text still crosses
+    the markup-integrity repair before it is chunked: authored HTML
+    carrying a tag Telegram does not accept (help prose's literal
+    ``<command>`` placeholders) used to sail through untouched, the
+    API rejected the entity parse, and the adapter's plain fallback
+    shipped the layer's own tags as literal text (owner screenshot
+    2026-11-06: the stamp printed raw on help page 2). Repair makes
+    the markup valid for the surface up front, so a paged
+    presentation keeps ONE parse-mode discipline on every part;
+    it is a no-op on already-valid HTML. Platforms without HTML
+    (WhatsApp self-converts in its adapter; Discord renders the
+    markdown dialect natively; local/SMS are plain) and texts with
+    no dialect signal pass through byte-identical, so unformatted
+    callers are unaffected. Never raises.
     """
-    if parse_mode or not text:
+    if parse_mode:
+        if text and str(parse_mode).strip().upper() == "HTML":
+            try:
+                if for_platform(platform).supports_html:
+                    from ..format_conformance import repair_telegram_html
+                    return repair_telegram_html(text), parse_mode
+            except Exception as exc:  # noqa: BLE001 - never break a send
+                record_failure(
+                    'gateway._present_outbound#repair', exc)
+        return text, parse_mode
+    if not text:
         return text, parse_mode
     try:
         if not for_platform(platform).supports_html:

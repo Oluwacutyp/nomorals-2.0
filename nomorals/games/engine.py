@@ -133,7 +133,10 @@ def render_game_over_card(game_name: str, players: list[Player],
                 except Exception as e:  # noqa: BLE001
                     record_failure("render_game_over_card:glicko", e)
             lines.append(" · ".join(bits))
-        lines.append("↩️ /game rematch — run it back")
+        # No "↩️ /game rematch — run it back" TEXT line (2026-11-06):
+        # rematch is a declared action on the funnel renders that
+        # carry a finish (the ActionableMessage buttons), never an
+        # affordance printed into the card every surface shares.
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
         record_failure("render_game_over_card:outer", e)
@@ -720,12 +723,14 @@ class GameEngine:
             intro = game.setup(room, self._mind)
             if intro:
                 msgs.append(intro)
-            # the fairness commitment is published before any draw —
-            # the player sees it before play starts.
+            # the fairness commitment is MADE before any draw —
+            # the player sees the note before play starts. The hash
+            # itself stays in the engine's records (no ids in chat,
+            # 2026-11-06); the note is the in-chat face of it.
             if room.state.get("fair") is not None:
                 try:
-                    from .fairness import commit_line
-                    msgs.append(commit_line(room.state["fair"]))
+                    from .fairness import commit_note
+                    msgs.append(commit_note(room.state["fair"]))
                 except Exception:  # noqa: BLE001
                     _log.debug("fair commit line failed", exc_info=True)
             # the season touches this table — say so up front.
@@ -1444,16 +1449,17 @@ class GameEngine:
             except Exception as e:  # noqa: BLE001
                 record_failure("_finish_inner:final_message", e)
                 msgs.append("game over.")
-            # provably fair: the settle card carries the one-line
-            # commitment only. The full reveal (server seed + recipe)
-            # is served ON DEMAND from the retained fragment —
-            # /game fair via last_fair_reveal() — never blasted into
-            # the chat after every game.
+            # provably fair: the settle carries the hash-free note
+            # (2026-11-06: the commitment hash never prints — it is
+            # an internal id). The full reveal (server seed +
+            # recipe) is served ON DEMAND from the retained
+            # fragment — /game fair via last_fair_reveal() — never
+            # blasted into the chat after every game.
             if room.state.get("fair") is not None:
                 try:
-                    from .fairness import commit_line
+                    from .fairness import commit_note
                     fair_mem = (room.game, dict(room.state["fair"]))
-                    msgs.append(commit_line(room.state["fair"]))
+                    msgs.append(commit_note(room.state["fair"]))
                 except Exception:  # noqa: BLE001
                     _log.debug("fair commit line failed", exc_info=True)
             # the DM gets the last word: drain any remaining feed, then
@@ -1759,9 +1765,12 @@ class GameEngine:
                     except Exception:  # noqa: BLE001
                         _log.debug("xp award failed", exc_info=True)
                 if getattr(game, "takes_wagers", False):
+                    # No "— /game leaderboard" text tail (2026-11-06):
+                    # a result's next actions are declared buttons
+                    # at the funnel, not hints printed in the wall.
                     msgs.append(
                         "📈 points credited · wagers settled in the "
-                        "purse — /game leaderboard"
+                        "purse"
                     )
                 else:
                     msgs.append(

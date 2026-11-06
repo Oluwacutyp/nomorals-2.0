@@ -45,6 +45,7 @@ _log = logging.getLogger("nomorals.games.fairness")
 __all__ = [
     "FAIR_GAMES",
     "commit_line",
+    "commit_note",
     "draw_choice",
     "draw_int",
     "draw_weighted",
@@ -217,11 +218,26 @@ def shuffle(fair: dict[str, Any], tag: str, items: list[Any]) -> list[Any]:
 # ── player-facing text ─────────────────────────────────────────────────────
 
 def commit_line(fair: dict[str, Any]) -> str:
+    """The full-disclosure commitment line, for explicit inspection
+    tooling only. Chat renders (table opens, settle results) use
+    :func:`commit_note` instead — the 2026-11-06 law keeps hashes
+    out of chat entirely."""
     commit = str(fair.get("commit") or "")
     return (
         f"🔒 provably fair — commitment `{commit[:12]}…`\n"
         f"   every draw is locked in. the seed is revealed at the end — "
         f"/game fair to inspect.")
+
+
+def commit_note(fair: dict[str, Any]) -> str:
+    """The in-chat fairness line. It states that the proof EXISTS —
+    the commitment hash, the seed and every other fairness
+    identifier stay in Devon's records, never in chat (INTERNAL
+    IDS NEVER PRINT, owner ruling 2026-11-06). Inspection rides
+    the declared Fairness action into :func:`reveal_block` via
+    ``/game fair``; the reveal itself is unchanged."""
+    return ("🔒 provably fair — every draw is locked in before it "
+            "happens; the proof stays in my records, never in chat.")
 
 
 def reveal_block(fair: dict[str, Any]) -> str:

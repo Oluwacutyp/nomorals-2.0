@@ -74,11 +74,15 @@ def xp_progress(xp: int) -> tuple[int, int, int]:
 
 
 def xp_bar(xp: int, width: int = 10) -> str:
-    """``██████░░░░ 145/240`` style progress bar to the next level."""
+    """Progress bar to the next level: the typography layer's one
+    board-preset bar (:func:`...social.chat.typography.progress_bar`)
+    plus the ``145/240 (lvl 3)`` counts. The bar itself is not
+    composed here — the private glyph copy this replaces is what
+    read as broken in the settle wall (2026-11-06)."""
     level, into, span = xp_progress(xp)
-    filled = int(round(width * into / span)) if span else width
-    return ("█" * filled + "░" * (width - filled)
-            + f" {into}/{span} (lvl {level})")
+    frac = (into / span) if span else 1.0
+    from ..social.chat.typography import progress_bar
+    return f"{progress_bar(frac, width)} {into}/{span} (lvl {level})"
 
 
 # ── stat growth ──────────────────────────────────────────────────────────────

@@ -270,7 +270,12 @@ class BotAdapterFormatTests(unittest.TestCase):
         self.assertEqual(len(sends), 2)
         self.assertEqual(sends[0].get("parse_mode"), "HTML")
         self.assertNotIn("parse_mode", sends[1])
-        self.assertEqual(sends[1].get("text"), "<b>hi</b>")
+        # Markup integrity (2026-11-06): the plain retry CONVERTS —
+        # tags stripped, exactly like the personal adapter's pin
+        # below ("tags stripped"). This pin previously froze the
+        # text unchanged, which is how a rejected page shipped its
+        # raw tags as literal text (the literal <i> stamp leak).
+        self.assertEqual(sends[1].get("text"), "hi")
 
     def test_other_failures_not_masked_by_fallback(self):
         sess = _FakeBotSession(reject="chat")

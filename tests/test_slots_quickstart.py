@@ -90,9 +90,18 @@ def call_game(engine, text, chat_key, player, kind, blocked=False):
     rt.context = SimpleNamespace()
     rt._game_engine = lambda: engine
     rt._group_system_blocked = lambda key: blocked
-    return rt._control_game(
+    from nomorals.social.chat.live_session import LiveSessionRegistry
+
+    _registry = LiveSessionRegistry()
+    rt._live_session_registry = lambda: _registry
+    reply = rt._control_game(
         dispatch_verb(text), chat_key=chat_key, player=player,
         kind=kind)
+    # A settled quickstart declares its actions (ActionableMessage,
+    # 2026-11-06): the chat receives its text — unwrap to it, the
+    # same way the funnel does, so the pins below read the reply
+    # exactly as a member does.
+    return getattr(reply, "text", reply)
 
 
 # ── DM rooms: the games wallet is the purse ─────────────────────

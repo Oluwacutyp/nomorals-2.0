@@ -55,6 +55,7 @@ from .failures import record_failure
 
 __all__ = ["CONTROL_COMMANDS", "COMMAND_DETAILS", "ControlCommand",
            "parse_control", "PLATFORMS", "help_text", "help_menu", "whatsapp_menu",
+           "menu_sections",
            "detailed_help", "capability_brief",
            "list_catalog", "LIST_GROUPS", "LIST_ONELINERS", "GAME_COMMANDS",
            "GAME_START_COMMANDS",
@@ -1428,68 +1429,57 @@ def _help_section_emoji(title: str) -> str:
 def help_menu(platform: str = "telegram") -> str:
     """The help catalog rendered as a styled, scannable menu.
 
-    Parses :data:`_HELP_TEXT` (the same source ``help_text()`` uses, so
-    command coverage can never drift) into emoji-headed sections and
-    renders them for the target platform — HTML on Telegram,
-    ``*bold*``/`` `code` `` on WhatsApp. Never raises.
+    ONE declared structure (:func:`menu_sections` — the registry
+    itself, so command coverage can never drift) rendered through
+    the shared typography layer for every platform (2026-11-06
+    menu unification): WhatsApp gets its XMD frame
+    (:func:`whatsapp_menu`), every other platform the layer's
+    ``menu``-class Card render — the same sections, order and
+    titles, adapted by the layer to the surface's markup
+    discipline (HTML on Telegram, plain where the surface is
+    plain), stamp included. Before this, the Telegram menu was
+    parsed by hand out of a hand-kept text and rendered by a
+    separate style path — two structures, two systems. Never
+    raises.
     """
     try:
         if str(platform or "").strip().lower() in ("whatsapp", "wa"):
-            # workstream 3: WhatsApp gets its OWN menu — text-first,
-            # numbered, no inline-button assumptions. The Telegram
-            # rendering below is untouched.
+            # WhatsApp gets its OWN frame (owner rule) over the
+            # SAME declared sections — text-first, no
+            # inline-button assumptions.
             return whatsapp_menu()
-        from .style import render_menu
-        sections: list[tuple[str, str, list[tuple[str, str]]]] = []
-        cur_emoji, cur_title = "🎛️", "control commands"
-        cur_items: list[tuple[str, str]] = []
-        notes: list[str] = []
+        from .typography import Card, render_card
 
-        def flush() -> None:
-            if cur_items or notes:
-                items = list(cur_items)
-                for n in notes:
-                    items.append(("", n))
-                sections.append((cur_emoji, cur_title, items))
-
-        for raw in help_text().split("\n"):
-            line = raw.strip()
-            if not line:
+        card = Card("menu", title="Devon — command menu", icon="✨")
+        card.line("you don't need to memorize these — just say "
+                  "what you want in plain words.")
+        for emoji, title, items in menu_sections(platform):
+            if not items:
                 continue
-            if line.startswith("—") and line.endswith("—"):
-                flush()
-                cur_title = line.strip("— ").strip()
-                cur_emoji = _help_section_emoji(cur_title)
-                cur_items, notes = [], []
-            elif line.startswith("/"):
-                parts = re.split(r"\s{2,}", line, maxsplit=1)
-                cmd = parts[0].strip()
-                desc = parts[1].strip() if len(parts) > 1 else ""
-                cur_items.append((cmd, desc))
-            elif line.startswith("“") or "→" in line:
-                notes.append(line)
-            else:
-                notes.append(line)
-        flush()
-        # drop empty-command note rows from the styled render's item list
-        clean = [(e, t, [(c, d) for c, d in items if c]) for e, t, items in sections]
-        return render_menu(
-            clean, platform,
-            header="Devon — command menu",
-            footer="say it in plain words, or tap a command — /help <command> for detail",
-        )
+            card.block_lines(
+                [f"{cmd} — {desc}" if desc else cmd
+                 for cmd, desc in items],
+                title=f"{emoji} {title}")
+        card.note("say it in plain words, or tap a command — "
+                  "/help <command> for detail")
+        return render_card(card, platform=platform).text
     except Exception as exc:  # noqa: BLE001
         record_failure('control.help_menu', exc)
         return help_text()
 
 
-#: WhatsApp-native section curation: (LIST_GROUPS name, display title).
-#: Commands still come from LIST_GROUPS at render time — this table only
-#: sets the WhatsApp-first order and the short titles. An entry naming a
-#: group that no longer exists is skipped; LIST_GROUPS entries missing
-#: here are appended at the end in registry order, so the menu can never
+#: THE menu's declared section order + short titles: (LIST_GROUPS
+#: name, display title). Commands still come from LIST_GROUPS at
+#: render time — this table only sets the order and the short
+#: titles, and it is canonical for EVERY platform's catalog menu
+#: (2026-11-06 menu unification: it began as the WhatsApp menu's
+#: curation; the Telegram menu rendered a different structure from
+#: a hand-kept text, which is how the two menus drifted into
+#: different systems). An entry naming a group that no longer
+#: exists is skipped; LIST_GROUPS entries missing here are
+#: appended at the end in registry order, so the menu can never
 #: drift from the registry.
-_WHATSAPP_SECTION_ORDER: list[tuple[str, str]] = [
+_MENU_SECTION_ORDER: list[tuple[str, str]] = [
     ("voice & vision", "voice & vision"),
     ("media system — music · playback · video · podcast", "media"),
     ("search & research", "search"),
@@ -1503,25 +1493,44 @@ _WHATSAPP_SECTION_ORDER: list[tuple[str, str]] = [
 ]
 
 
-def _whatsapp_sections() -> list[tuple[str, str, list[tuple[str, str]]]]:
-    """Menu sections for WhatsApp, assembled from the registry at call time.
+def menu_sections(
+        platform: str = "",
+) -> list[tuple[str, str, list[tuple[str, str]]]]:
+    """THE declared catalog-menu structure — one section list for
+    every platform (2026-11-06 menu unification).
 
-    The first section comes from the WhatsApp adapter's GROUP_CAPABILITIES
-    table (group/community depth over the Baileys bridge); the rest come
-    from LIST_GROUPS with one-liners from LIST_ONELINERS/COMMAND_DETAILS
-    (the same sources /list renders from). A trailing "more" section
-    catches any registered command missing from every section, so
-    coverage can never drift. Returns ``[(emoji, title, [(cmd, desc)])]``.
+    Sections come from the registry at call time (LIST_GROUPS,
+    one-liners from LIST_ONELINERS / COMMAND_DETAILS), ordered and
+    titled by :data:`_MENU_SECTION_ORDER`, so coverage can never
+    drift from what the system actually runs. Platform differences
+    are declared HERE, once, and are platform-truth only:
+
+    * WhatsApp leads with its plain-words group section (those
+      capabilities exist only on the WhatsApp bridge) and omits
+      :data:`WHATSAPP_UNSUPPORTED_KINDS` — kinds that surface
+      cannot execute at all.
+    * Every other platform renders the full registry set.
+
+    A trailing "more" section catches any command ``help_text()``
+    knows that no section claimed. Returns
+    ``[(emoji, title, [(command, description), ...]), ...]``.
+    Renderers (the Telegram Card render, the WhatsApp XMD frame)
+    consume this one structure — a menu's sections, order and
+    titles are the same on every platform by construction.
     """
-    from . import whatsapp as _wa  # local import: never at module load
-    sections: list[tuple[str, str, list[tuple[str, str]]]] = [(
-        "💬", "groups — in plain words",
-        [(f'"{say}"', what) for _, say, what in _wa.GROUP_CAPABILITIES],
-    )]
+    on_wa = str(platform or "").strip().lower() in ("whatsapp", "wa")
+    sections: list[tuple[str, str, list[tuple[str, str]]]] = []
+    if on_wa:
+        from . import whatsapp as _wa  # local: never at module load
+        sections.append((
+            "💬", "groups — in plain words",
+            [(f'"{say}"', what)
+             for _, say, what in _wa.GROUP_CAPABILITIES],
+        ))
     by_name = dict(LIST_GROUPS)
-    ordered = [g for g, _ in _WHATSAPP_SECTION_ORDER if g in by_name]
+    ordered = [g for g, _ in _MENU_SECTION_ORDER if g in by_name]
     ordered += [g for g, _ in LIST_GROUPS if g not in ordered]
-    titles = dict(_WHATSAPP_SECTION_ORDER)
+    titles = dict(_MENU_SECTION_ORDER)
     for group in ordered:
         title = titles.get(group, group)
         emoji = _GROUP_EMOJI.get(group, "📌")
@@ -1529,11 +1538,11 @@ def _whatsapp_sections() -> list[tuple[str, str, list[tuple[str, str]]]]:
         for kind in by_name[group]:
             if kind not in CONTROL_COMMANDS:
                 continue
-            if kind in WHATSAPP_UNSUPPORTED_KINDS:
+            if on_wa and kind in WHATSAPP_UNSUPPORTED_KINDS:
                 # Not on this surface at all: WhatsApp cannot
                 # execute it (no per-person mute — see the
-                # constant).  Absent from the menu, and from
-                # the coverage sweep below.
+                # constant). Absent from the menu, and from the
+                # coverage sweep below.
                 continue
             one = LIST_ONELINERS.get(
                 kind, COMMAND_DETAILS.get(kind, {}).get("what", ""))
@@ -1543,17 +1552,24 @@ def _whatsapp_sections() -> list[tuple[str, str, list[tuple[str, str]]]]:
     shown = {cmd for _, _, items in sections for cmd, _ in items}
     missing = sorted(
         kind for kind in CONTROL_COMMANDS
-        if kind not in WHATSAPP_UNSUPPORTED_KINDS
+        if not (on_wa and kind in WHATSAPP_UNSUPPORTED_KINDS)
         and f"/{kind}" not in shown and f"/{kind}" in help_text())
     if missing:
         sections.append((
             "📌", "more",
             [("/" + kind,
-              LIST_ONELINERS.get(kind,
-                                 COMMAND_DETAILS.get(kind, {}).get("what", "")))
+              LIST_ONELINERS.get(
+                  kind,
+                  COMMAND_DETAILS.get(kind, {}).get("what", "")))
              for kind in missing],
         ))
     return sections
+
+
+def _whatsapp_sections() -> list[tuple[str, str, list[tuple[str, str]]]]:
+    """The WhatsApp menu's sections — :func:`menu_sections` for
+    the WhatsApp surface (kept as the menu builder's own name)."""
+    return menu_sections("whatsapp")
 
 
 def _whatsapp_find_section(sections: list, page: str) -> int | None:
@@ -1570,7 +1586,7 @@ def _whatsapp_find_section(sections: list, page: str) -> int | None:
             return i
     registry_name = _LIST_GROUP_ALIASES.get(key)
     if registry_name:
-        want = dict(_WHATSAPP_SECTION_ORDER).get(registry_name, registry_name)
+        want = dict(_MENU_SECTION_ORDER).get(registry_name, registry_name)
         for i, (_, title, _) in enumerate(sections):
             if title == want:
                 return i
