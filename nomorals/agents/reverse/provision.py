@@ -19,6 +19,14 @@ Pinned here:
   published ones, read from the Adoptium release API.
 * **Ghidra 12.2** (NSA, ``ghidra_12.2_PUBLIC_20261016.zip``) — the
   sha256 is the one published in the official release notes.
+* **unblob 26.6.4** (Pass 3, the firmware rung) — a Python engine,
+  so its pin channel is PyPI itself: the install set lives in
+  ``pins/unblob_26.6.4.txt`` with every wheel hash read from the
+  PyPI JSON API (the publisher's own published digests), and the
+  install runs ``pip install --require-hashes`` into a dedicated
+  venv — a wheel that matches no published digest installs
+  nothing. Linux profiles only: unblob's native dependencies
+  publish no Windows wheels.
 
 Installs live under the managed tools root (``~/workspace/tools``
 by house convention, ``NM_RE_TOOLS_DIR`` overrides) in ``re/`` —
@@ -35,6 +43,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import time
 import urllib.request
@@ -47,8 +56,9 @@ from .failures import record_failure
 
 __all__ = [
     "ProvisionError", "DESCRIPTORS", "tools_root", "re_root",
-    "platform_key", "jdk_state", "ghidra_state", "engine_states",
-    "provision_engine", "provision_all",
+    "platform_key", "jdk_state", "ghidra_state", "unblob_state",
+    "engine_states", "provision_engine", "provision_all",
+    "unblob_pins_path",
 ]
 
 #: Download budget for one engine archive (the Ghidra zip is
@@ -126,6 +136,13 @@ DESCRIPTORS: dict[str, dict[str, Any]] = {
                 "kind": "zip",
             },
         },
+    },
+    "unblob": {
+        "version": "26.6.4",
+        "kind": "pip-venv",
+        "package": "unblob",
+        "pins_file": "unblob_26.6.4.txt",
+        "platforms": ("linux-x64", "linux-aarch64"),
     },
 }
 
@@ -449,10 +466,213 @@ def ghidra_state(root: Path | None = None, *,
                       f"(JDK: {jdk['detail']})"}
 
 
+# ── unblob: the pip-venv engine (Pass 3) ────────────────────────────
+
+def unblob_pins_path() -> Path:
+    """The pinned install set for the pip-venv engine."""
+    return (Path(__file__).parent / "pins"
+            / DESCRIPTORS["unblob"]["pins_file"])
+
+
+def _pins_sha() -> str:
+    """The pin identity of a pip-venv engine: the sha256 of its
+    pinned requirements file — the hash set IS the pin."""
+    try:
+        return _sha256(unblob_pins_path())
+    except OSError:
+        return ""
+
+
+def _venv_bin(base: Path) -> Path:
+    return base / "venv" / ("Scripts" if os.name == "nt" else "bin")
+
+
+def _unblob_probe(exe: Path, bindir: Path,
+                  runner: Runner | None) -> str:
+    """Probe one unblob executable → its version line, or ""."""
+    run = runner or _run
+    env = dict(os.environ)
+    env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", "")
+    try:
+        _rc, out = run([str(exe), "--version"], timeout=PROBE_TIMEOUT_S,
+                       env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if line and line[0].isdigit():
+            return line
+    return ""
+
+
+def unblob_state(root: Path | None = None, *,
+                 runner: Runner | None = None) -> dict[str, Any]:
+    """Probe the firmware rung's engine: pinned venv → system → none.
+
+    Ready requires the install marker to match the pinned
+    requirements file's own sha256 AND the executable to answer
+    its version probe — an install whose pin set changed under it
+    is reported provisionable, never trusted.
+    """
+    version = DESCRIPTORS["unblob"]["version"]
+    base = re_root(root) / "unblob"
+    bindir = _venv_bin(base)
+    exe = bindir / ("unblob.exe" if os.name == "nt" else "unblob")
+    attempts: list[str] = []
+    if exe.is_file():
+        if _installed_sha(base) != _pins_sha():
+            attempts.append(
+                "pinned unblob venv present but its install marker "
+                "does not match the pinned requirements — "
+                "re-provision replaces it")
+        else:
+            probed = _unblob_probe(exe, bindir, runner)
+            if probed:
+                return {"engine": "unblob", "state": "ready",
+                        "available": True, "source": "provisioned",
+                        "version": probed, "path": str(exe),
+                        "attempts": attempts,
+                        "detail": f"pinned unblob {probed} at {exe} "
+                                  "(pip --require-hashes venv)"}
+            attempts.append(
+                f"pinned unblob at {exe} did not answer its "
+                "version probe — the install is not trusted")
+            return {"engine": "unblob", "state": "unavailable",
+                    "available": False, "source": "provisioned",
+                    "version": version, "path": str(exe),
+                    "attempts": attempts
+                    + recorded_attempts(root, "unblob"),
+                    "detail": attempts[0]}
+    system = shutil.which("unblob")
+    if system:
+        probed = _unblob_probe(Path(system), Path(system).parent,
+                               runner)
+        if probed:
+            return {"engine": "unblob", "state": "ready",
+                    "available": True, "source": "system",
+                    "version": probed, "path": system,
+                    "attempts": attempts,
+                    "detail": f"system unblob probed at {system} "
+                              f"({probed})"}
+        attempts.append(f"system unblob at {system} did not "
+                        "answer its version probe")
+    key = platform_key()
+    provisionable = key in DESCRIPTORS["unblob"]["platforms"]
+    return {"engine": "unblob",
+            "state": "provisionable" if provisionable
+                     else "unavailable",
+            "available": False, "source": "", "version": version,
+            "path": "",
+            "attempts": attempts + recorded_attempts(root, "unblob"),
+            "detail": ("unblob is not provisioned on this machine "
+                       "yet — the pinned unblob " + version
+                       + " (pip --require-hashes, PyPI digests) "
+                         "provisions on demand"
+                       if provisionable else
+                       "unblob's native dependencies publish no "
+                       f"wheels for {key} — the firmware extraction "
+                       "rung is Linux-profile")}
+
+
+def _provision_pip_venv(engine: str, *, root: Path | None,
+                        force: bool,
+                        runner: Runner | None) -> dict[str, Any]:
+    """The provisioning drive for a ``pip-venv`` descriptor.
+
+    Create the venv → ``pip install --require-hashes`` the pinned
+    requirements (pip itself refuses any wheel whose digest is not
+    in the pinned set) → mark the install with the pin set's sha256
+    → probe-execute. Every failure is a named attempt; nothing is
+    installed by a step whose verification failed.
+    """
+    descriptor = DESCRIPTORS[engine]
+    attempts: list[str] = []
+    if not force:
+        current = unblob_state(root, runner=runner)
+        if current["available"]:
+            attempts.append(f"{engine} already provisioned "
+                            f"({current['detail']})")
+            _record_attempts(root, engine, attempts,
+                             version=current["version"],
+                             source=current["source"])
+            return {**current, "attempts":
+                    attempts + list(current.get("attempts") or [])}
+    key = platform_key()
+    if key not in descriptor["platforms"]:
+        attempts.append(f"no pinned {engine} install set for "
+                        f"platform {key} (Linux-profile engine)")
+        _record_attempts(root, engine, attempts)
+        raise ProvisionError(engine, attempts)
+    pins = unblob_pins_path()
+    if not pins.is_file():
+        attempts.append(f"pinned requirements file missing: {pins}")
+        _record_attempts(root, engine, attempts)
+        raise ProvisionError(engine, attempts)
+    base = re_root(root) / engine
+    venv = base / "venv"
+    run = runner or _run
+    try:
+        if venv.exists():
+            shutil.rmtree(venv)
+        base.mkdir(parents=True, exist_ok=True)
+        rc, out = run([sys.executable, "-m", "venv", str(venv)],
+                      timeout=300.0)
+        if rc != 0 or not _venv_bin(base).is_dir():
+            tail = " · ".join((out or "").strip().splitlines()[-3:])
+            attempts.append(f"venv creation failed (exit {rc}): "
+                            f"{tail}")
+            _record_attempts(root, engine, attempts)
+            raise ProvisionError(engine, attempts)
+    except ProvisionError:
+        raise
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        attempts.append(f"venv creation failed: {exc}")
+        _record_attempts(root, engine, attempts)
+        raise ProvisionError(engine, attempts) from exc
+    attempts.append(f"created the engine venv at {venv}")
+    bindir = _venv_bin(base)
+    py = bindir / ("python.exe" if os.name == "nt" else "python")
+    try:
+        rc, out = run([str(py), "-m", "pip", "install",
+                       "--require-hashes", "-r", str(pins)],
+                      timeout=DOWNLOAD_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        attempts.append(f"pip install of the pinned set failed: "
+                        f"{exc}")
+        _record_attempts(root, engine, attempts)
+        raise ProvisionError(engine, attempts) from exc
+    if rc != 0:
+        tail = " · ".join((out or "").strip().splitlines()[-3:])
+        attempts.append(
+            f"pip install --require-hashes failed (exit {rc}) — "
+            f"nothing is trusted from a failed pinned install: "
+            f"{tail}")
+        _record_attempts(root, engine, attempts)
+        raise ProvisionError(engine, attempts)
+    attempts.append(
+        "pip installed the pinned set under --require-hashes "
+        "(every wheel matched a PyPI-published digest)")
+    _mark_installed(base, _pins_sha())
+    attempts.append(f"installed {engine} {descriptor['version']} "
+                    f"under {base}")
+    state = unblob_state(root, runner=runner)
+    if not state["available"]:
+        attempts.append("post-install probe failed: "
+                        + state["detail"])
+        _record_attempts(root, engine, attempts)
+        raise ProvisionError(engine, attempts)
+    attempts.append("post-install probe passed")
+    _record_attempts(root, engine, attempts,
+                     version=descriptor["version"],
+                     sha256=_pins_sha(), source="provisioned")
+    return {**state, "attempts": attempts}
+
+
 def engine_states(root: Path | None = None, *,
                   runner: Runner | None = None) -> dict[str, Any]:
     return {"jdk": jdk_state(root, runner=runner),
-            "ghidra": ghidra_state(root, runner=runner)}
+            "ghidra": ghidra_state(root, runner=runner),
+            "unblob": unblob_state(root, runner=runner)}
 
 
 # ── the provisioning drive ──────────────────────────────────────────
@@ -513,6 +733,12 @@ def provision_engine(engine: str, *, root: Path | None = None,
         raise ProvisionError(engine, [f"no pinned descriptor for "
                                       f"{engine!r}"])
     descriptor = DESCRIPTORS[engine]
+    if descriptor.get("kind") == "pip-venv":
+        # a Python engine: pip does the downloading, under the
+        # --require-hashes discipline of the pinned set (the
+        # ``downloader`` seam does not apply)
+        return _provision_pip_venv(engine, root=root, force=force,
+                                   runner=runner)
     state_fn = jdk_state if engine == "jdk" else ghidra_state
     attempts: list[str] = []
     if not force:

@@ -1,0 +1,364 @@
+[
+  {
+    "task": {
+      "path": "/verify/fixtures/rootfs.cpio",
+      "depth": 0,
+      "blob_id": "",
+      "is_multi_file": false
+    },
+    "reports": [
+      {
+        "path": "/verify/fixtures/rootfs.cpio",
+        "size": 17436,
+        "is_dir": false,
+        "is_file": true,
+        "is_link": false,
+        "link_target": null,
+        "__typename__": "StatReport"
+      },
+      {
+        "magic": "ASCII cpio archive (SVR4 with no CRC)\\012- data",
+        "mime_type": "application/x-cpio",
+        "__typename__": "FileMagicReport"
+      },
+      {
+        "md5": "52431162ea5acbb6158ae4415bf2a4bf",
+        "sha1": "94519aad9d385ae5cff20cc907791e0b46dd115c",
+        "sha256": "0043ef76d5c7c293320de3be1ee2adf1815f310c2feb5aebf4434f2f1ae2059e",
+        "__typename__": "HashReport"
+      },
+      {
+        "id": "60237:1",
+        "handler_name": "cpio_portable_ascii",
+        "start_offset": 0,
+        "end_offset": 17436,
+        "size": 17436,
+        "is_encrypted": false,
+        "extraction_reports": [],
+        "__typename__": "ChunkReport"
+      }
+    ],
+    "subtasks": [
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract",
+        "depth": 1,
+        "blob_id": "60237:1",
+        "is_multi_file": false
+      }
+    ]
+  },
+  {
+    "task": {
+      "path": "/verify/unblob-out/cpio/rootfs.cpio_extract",
+      "depth": 1,
+      "blob_id": "60237:1",
+      "is_multi_file": false
+    },
+    "reports": [
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract",
+        "size": 18,
+        "is_dir": true,
+        "is_file": false,
+        "is_link": false,
+        "link_target": null,
+        "__typename__": "StatReport"
+      }
+    ],
+    "subtasks": [
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/etc",
+        "depth": 1,
+        "blob_id": "60237:1",
+        "is_multi_file": false
+      },
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/usr",
+        "depth": 1,
+        "blob_id": "60237:1",
+        "is_multi_file": false
+      },
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/www",
+        "depth": 1,
+        "blob_id": "60237:1",
+        "is_multi_file": false
+      }
+    ]
+  },
+  {
+    "task": {
+      "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/www",
+      "depth": 1,
+      "blob_id": "60237:1",
+      "is_multi_file": false
+    },
+    "reports": [
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/www",
+        "size": 20,
+        "is_dir": true,
+        "is_file": false,
+        "is_link": false,
+        "link_target": null,
+        "__typename__": "StatReport"
+      }
+    ],
+    "subtasks": [
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/www/index.html",
+        "depth": 1,
+        "blob_id": "60237:1",
+        "is_multi_file": false
+      }
+    ]
+  },
+  {
+    "task": {
+      "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/usr",
+      "depth": 1,
+      "blob_id": "60237:1",
+      "is_multi_file": false
+    },
+    "reports": [
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/usr",
+        "size": 6,
+        "is_dir": true,
+        "is_file": false,
+        "is_link": false,
+        "link_target": null,
+        "__typename__": "StatReport"
+      }
+    ],
+    "subtasks": [
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/usr/bin",
+        "depth": 1,
+        "blob_id": "60237:1",
+        "is_multi_file": false
+      }
+    ]
+  },
+  {
+    "task": {
+      "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/etc",
+      "depth": 1,
+      "blob_id": "60237:1",
+      "is_multi_file": false
+    },
+    "reports": [
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/etc",
+        "size": 24,
+        "is_dir": true,
+        "is_file": false,
+        "is_link": false,
+        "link_target": null,
+        "__typename__": "StatReport"
+      }
+    ],
+    "subtasks": [
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/etc/config",
+        "depth": 1,
+        "blob_id": "60237:1",
+        "is_multi_file": false
+      },
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/etc/passwd",
+        "depth": 1,
+        "blob_id": "60237:1",
+        "is_multi_file": false
+      }
+    ]
+  },
+  {
+    "task": {
+      "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/usr/bin",
+      "depth": 1,
+      "blob_id": "60237:1",
+      "is_multi_file": false
+    },
+    "reports": [
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/usr/bin",
+        "size": 10,
+        "is_dir": true,
+        "is_file": false,
+        "is_link": false,
+        "link_target": null,
+        "__typename__": "StatReport"
+      }
+    ],
+    "subtasks": [
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/usr/bin/hello",
+        "depth": 1,
+        "blob_id": "60237:1",
+        "is_multi_file": false
+      }
+    ]
+  },
+  {
+    "task": {
+      "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/etc/config",
+      "depth": 1,
+      "blob_id": "60237:1",
+      "is_multi_file": false
+    },
+    "reports": [
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/etc/config",
+        "size": 12,
+        "is_dir": true,
+        "is_file": false,
+        "is_link": false,
+        "link_target": null,
+        "__typename__": "StatReport"
+      }
+    ],
+    "subtasks": [
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/etc/config/system",
+        "depth": 1,
+        "blob_id": "60237:1",
+        "is_multi_file": false
+      }
+    ]
+  },
+  {
+    "task": {
+      "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/usr/bin/hello",
+      "depth": 1,
+      "blob_id": "60237:1",
+      "is_multi_file": false
+    },
+    "reports": [
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/usr/bin/hello",
+        "size": 15960,
+        "is_dir": false,
+        "is_file": true,
+        "is_link": false,
+        "link_target": null,
+        "__typename__": "StatReport"
+      },
+      {
+        "magic": "ELF 64-bit LSB pie executable, x86-64, version 1\\012-  (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=da83ef4a2b9faf89ff7bcd2bb009fed18a4eb748, for GNU/Linux 3.2.0, not stripped\\012- data",
+        "mime_type": "application/x-pie-executable",
+        "__typename__": "FileMagicReport"
+      },
+      {
+        "md5": "0ffb4161b77b7fee1a85b1435fec5326",
+        "sha1": "a55569f5cbfcffca296fc9eb6beb03d2a71eada0",
+        "sha256": "ad456227c87a0e56faa1ac05812a94d7a0f73973d6ed2cd4a0bde0c15f21d90f",
+        "__typename__": "HashReport"
+      },
+      {
+        "id": "60237:2",
+        "handler_name": "elf64",
+        "start_offset": 0,
+        "end_offset": 15960,
+        "size": 15960,
+        "is_encrypted": false,
+        "extraction_reports": [],
+        "__typename__": "ChunkReport"
+      }
+    ],
+    "subtasks": []
+  },
+  {
+    "task": {
+      "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/www/index.html",
+      "depth": 1,
+      "blob_id": "60237:1",
+      "is_multi_file": false
+    },
+    "reports": [
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/www/index.html",
+        "size": 45,
+        "is_dir": false,
+        "is_file": true,
+        "is_link": false,
+        "link_target": null,
+        "__typename__": "StatReport"
+      },
+      {
+        "magic": "HTML document text\\012- HTML document text\\012- HTML document, ASCII text",
+        "mime_type": "text/html",
+        "__typename__": "FileMagicReport"
+      },
+      {
+        "md5": "e347cf324c0813a6ee8c2caa699bbb8d",
+        "sha1": "c7dd545dd85a310cb6d7e37477e49450d3922f15",
+        "sha256": "ef83c9acbac6eaad09ce9a6d2b8d277ba035fc6d4e3e1f68cea3e79a67af3f8a",
+        "__typename__": "HashReport"
+      }
+    ],
+    "subtasks": []
+  },
+  {
+    "task": {
+      "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/etc/config/system",
+      "depth": 1,
+      "blob_id": "60237:1",
+      "is_multi_file": false
+    },
+    "reports": [
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/etc/config/system",
+        "size": 131,
+        "is_dir": false,
+        "is_file": true,
+        "is_link": false,
+        "link_target": null,
+        "__typename__": "StatReport"
+      },
+      {
+        "magic": "ASCII text",
+        "mime_type": "text/plain",
+        "__typename__": "FileMagicReport"
+      },
+      {
+        "md5": "104a08c289b961a6248b9f7db4879185",
+        "sha1": "556da8373fca79f94cd066db9b4db08f4e6bc7c6",
+        "sha256": "6d5bd22c7761f78c82bf4d0985dc534b773771e4d93c2b8ee82e3b13aeff7399",
+        "__typename__": "HashReport"
+      }
+    ],
+    "subtasks": []
+  },
+  {
+    "task": {
+      "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/etc/passwd",
+      "depth": 1,
+      "blob_id": "60237:1",
+      "is_multi_file": false
+    },
+    "reports": [
+      {
+        "path": "/verify/unblob-out/cpio/rootfs.cpio_extract/etc/passwd",
+        "size": 74,
+        "is_dir": false,
+        "is_file": true,
+        "is_link": false,
+        "link_target": null,
+        "__typename__": "StatReport"
+      },
+      {
+        "magic": "ASCII text",
+        "mime_type": "text/plain",
+        "__typename__": "FileMagicReport"
+      },
+      {
+        "md5": "60a63b20bff314d0a9653712c039859d",
+        "sha1": "d6c7cb2c9f72c79c058d92185c3a229f09e2ab51",
+        "sha256": "5d61031710dfa3aa6c94396cc3198ec7a0606e8e9325ec275e73a06c9d0ed48a",
+        "__typename__": "HashReport"
+      }
+    ],
+    "subtasks": []
+  }
+]

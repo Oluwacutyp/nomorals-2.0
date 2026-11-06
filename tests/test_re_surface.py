@@ -250,9 +250,26 @@ class DoctorRowsTest(unittest.TestCase):
         self.assertEqual(light["available"],
                          lightbin.probe()["available"])
         self.assertTrue(rows["android-graph"]["available"])
-        for name in ("binwalk-unblob", "tshark", "frida-gdb"):
-            self.assertFalse(rows[name]["available"], name)
+        # Pass 3 supersedes the Pass 1 placeholder rows: the
+        # "binwalk-unblob" and "tshark" not-built rows are replaced
+        # by the real firmware/traffic rows with probe-true states
+        # (frida-gdb stays an unbuilt gated row — Pass 4).
+        self.assertNotIn("binwalk-unblob", rows)
+        for name in ("firmware-census", "traffic-native",
+                     "mitm-addon"):
+            self.assertTrue(rows[name]["available"], name)
             self.assertTrue(rows[name]["note"], name)
+        for name in ("unblob", "binwalk", "tshark", "frida-gdb"):
+            self.assertIn(name, rows)
+            self.assertTrue(rows[name]["note"], name)
+            if name in ("binwalk", "frida-gdb"):
+                self.assertFalse(rows[name]["available"], name)
+            else:
+                # probe-true: available exactly when the engine
+                # state says ready on THIS machine
+                self.assertEqual(rows[name]["available"],
+                                 rows[name].get("state") == "ready",
+                                 name)
 
 
 if __name__ == "__main__":

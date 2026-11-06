@@ -3676,11 +3676,14 @@ class RuntimeGamesMixin:
         """/re — the reverse-engineering organ (Pass 1).
 
         /re status               — engine matrix + store counts
-        /re inspect <path>       — static-inspect one binary file:
-                                   Evidence chain + residual unknowns,
+        /re inspect <path>       — static-inspect one file (binary,
+                                   firmware image or capture —
+                                   routed by content): Evidence
+                                   chain + residual unknowns,
                                    journaled to decisions + memory,
                                    routed to the deepest rung that
-                                   can answer (Ghidra / light / spine)
+                                   can answer (Ghidra / light / spine
+                                   / unblob / traffic readers)
         /re provision            — self-provision the deep rungs
                                    (pinned JDK + Ghidra) and report
         /re graph <path> [q t]   — Android reference graph over an

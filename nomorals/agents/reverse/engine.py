@@ -22,16 +22,27 @@ over ApkForge's jadx output (:mod:`.android_graph`). An inspection
 now routes the target to the deepest rung that can answer and
 says which rung answered; where no deep rung can, the gap is a
 residual unknown naming the rung that closes it.
+
+Pass 3 adds the firmware and traffic families behind the same
+routing (:mod:`.firmware`, :mod:`.traffic`): an inspection whose
+bytes sniff as a firmware image goes to the firmware rung
+(built-in signature census + the self-provisioned unblob
+extraction engine + a bounded native extractor), and one that
+sniffs as a capture (pcap / pcapng / HAR / mitmproxy flows /
+Devon-addon JSONL) goes to the traffic rung (built-in readers +
+a probed TShark second voice). Sniffing is by content, never by
+file name.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import struct
 from pathlib import Path
 from typing import Any
 
-from . import android_graph, ghidra, lightbin, provision
+from . import android_graph, firmware, ghidra, lightbin, provision, traffic
 from .evidence import EvidenceStore, UnknownCloseError
 from .failures import failure_count, record_failure
 from .inspectors import PROVIDER_ID, PROVIDER_NAME, PROVIDER_VERSION, elf_info, inspect_bytes
@@ -40,7 +51,8 @@ __all__ = [
     "ReEngine", "capability_matrix",
     "render_status", "render_inspect_card", "render_evidence_card",
     "render_unknowns", "render_audit", "render_provision",
-    "render_graph_answer",
+    "render_graph_answer", "render_firmware_card",
+    "render_traffic_card",
 ]
 
 #: Refuse to slurp an unbounded file into memory for a static parse.
@@ -125,18 +137,69 @@ def capability_matrix(root: Any = None) -> list[dict[str, Any]]:
                 "(who calls X, what Y touches) — consumes ApkForge "
                 "jadx sources trees; an APK is decompiled into one "
                 "through ApkForge's own provisioned jadx"})
-    for engine, note in (
-            ("binwalk-unblob",
-             "Pass 3 — firmware extraction + region analysis; "
-             "not built yet"),
-            ("tshark",
-             "Pass 3 — packet-capture summaries + field "
-             "inspection; not built yet"),
-            ("frida-gdb",
-             "dynamic rung — gated on the owner's sandbox/consent "
-             "posture for executing targets; not built")):
-        rows.append({"engine": engine, "kind": "external",
-                     "available": False, "note": note})
+    # ── Pass 3: firmware + traffic, probe-true ────────────────
+    fw_probe = (
+        b"\x27\x05\x19\x56" + b"\x00" * 60)
+    rows.append({
+        "engine": "firmware-census", "kind": "built-in",
+        "available": firmware.census(fw_probe)["is_firmware"],
+        "state": "ready",
+        "note": "signature census over firmware images (uImage "
+                "with CRC checks, SquashFS superblock, cpio entry "
+                "census, gzip-wrapper peeks) + native cpio/tar "
+                "extraction — no engine needed"})
+    ub = provision.unblob_state(root)
+    rows.append({
+        "engine": "unblob", "kind": "provisioned",
+        "available": ub["available"], "state": ub["state"],
+        "note": "self-provisioned firmware extraction engine "
+                "(pinned via PyPI's published digests, "
+                "--require-hashes venv) — " + ub["detail"]})
+    bw = firmware.probe_binwalk()
+    rows.append({
+        "engine": "binwalk", "kind": "probe-only",
+        "available": bw["available"],
+        "state": "system" if bw["available"] else "probe-only",
+        "note": bw["detail"]})
+    pcap_probe = (
+        struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 262144, 1)
+        + struct.pack("<IIII", 0, 0, 42, 42)
+        + bytes.fromhex("ffffffffffff123456789abc0806")
+        + b"\x00" * 28)
+    try:
+        _probe_pkts, _ = traffic.read_packets(pcap_probe, "pcap")
+        traffic_ok = len(_probe_pkts) == 1
+    except traffic.TrafficError:
+        traffic_ok = False
+    rows.append({
+        "engine": "traffic-native", "kind": "built-in",
+        "available": traffic_ok, "state": "ready",
+        "note": "built-in capture readers: pcap/pcapng dissect "
+                "(DNS, TLS handshake facts, cleartext HTTP, "
+                "conversations), HAR, mitmproxy flow files, "
+                "Devon-addon JSONL"})
+    ts = traffic.probe_tshark()
+    rows.append({
+        "engine": "tshark", "kind": "one-shot",
+        "available": ts["available"],
+        "state": "ready" if ts["available"] else "unavailable",
+        "note": "second engine voice over captures (protocol "
+                "hierarchy, conversations, field extraction) — "
+                + ts["detail"]})
+    addon_path = (Path(__file__).parent / "mitm_scripts"
+                  / "devon_capture_addon.py")
+    rows.append({
+        "engine": "mitm-addon", "kind": "built-in",
+        "available": addon_path.is_file(), "state": "ready",
+        "note": "Devon's mitmproxy capture addon — a file the "
+                "owner runs where mitmproxy lives (owner-invoked, "
+                "local); its JSONL folds into evidence here"})
+    rows.append({
+        "engine": "frida-gdb", "kind": "external",
+        "available": False,
+        "note": "dynamic rung — gated on the owner's "
+                "sandbox/consent posture for executing targets; "
+                "not built"})
     return rows
 
 
@@ -244,6 +307,18 @@ class ReEngine:
         except OSError as exc:
             return {"error": f"could not read {target}: {exc}"}
         sha = hashlib.sha256(data).hexdigest()
+        # Pass 3 families first, by content: a capture or a
+        # firmware image is not an "unknown binary" to the spine
+        capture_kind = traffic.sniff(data)
+        if capture_kind is None and traffic.sniff_addon(data):
+            capture_kind = "mitm-addon-jsonl"
+        if capture_kind is not None:
+            return self._inspect_capture(
+                target, data, sha, size, capture_kind, deep)
+        fw_census = firmware.census(data)
+        if fw_census["is_firmware"]:
+            return self._inspect_firmware(
+                target, data, sha, size, fw_census, deep)
         insp = inspect_bytes(data)
         store = self.store
         common = {
@@ -428,13 +503,242 @@ class ReEngine:
             required_confidence="derived")]
         return out
 
+    # ── Pass 3: capture routing ──────────────────────────────────────
+    def _inspect_capture(self, target: Path, data: bytes, sha: str,
+                         size: int, kind: str, deep: str
+                         ) -> dict[str, Any]:
+        """Route one capture file to the traffic rung: built-in
+        readers first, TShark as the second voice when it probes
+        present, everything folded as Evidence. An unreadable
+        capture is an error result, never a dressed-up empty."""
+        store = self.store
+        common = {
+            "subject_sha256": sha, "subject_name": target.name,
+            "subject_size": size,
+            "provider_id": traffic.PROVIDER_ID,
+            "provider_name": traffic.PROVIDER_NAME,
+            "provider_version": traffic.PROVIDER_VERSION,
+        }
+        tshark_facts: dict[str, Any] | None = None
+        rung = "built-in traffic readers"
+        try:
+            if kind in ("pcap", "pcapng"):
+                packets, fmt = traffic.read_packets(data, kind)
+                facts = traffic.dissect(packets, fmt)
+                if deep != "off" and traffic.probe_tshark()[
+                        "available"]:
+                    try:
+                        tshark_facts = traffic.run_tshark(target)
+                        rung = ("built-in traffic readers + tshark "
+                                "second voice")
+                    except traffic.TrafficError as exc:
+                        record_failure(
+                            "reverse.engine.tshark_route", exc)
+            elif kind == "har":
+                doc = json.loads(data.decode("utf-8"))
+                facts = traffic.parse_har(doc)
+            elif kind == "mitm-flows":
+                facts = traffic.flows_facts(traffic.parse_flows(data))
+            elif kind == "mitm-addon-jsonl":
+                facts = traffic.parse_addon_jsonl(
+                    data.decode("utf-8", "replace"))
+            else:  # pragma: no cover - sniff() is a closed set
+                return {"error": f"unroutable capture kind {kind!r}"}
+        except (ValueError, struct.error, traffic.TrafficError) \
+                as exc:
+            record_failure("reverse.engine.capture_parse", exc)
+            return {"error": f"{target.name} sniffs as {kind} but "
+                             f"the reader refused it: {exc}"}
+        identify = store.record(
+            predicate_type="format.identify",
+            operation="detect_format",
+            parameters={"format": kind},
+            result={"format": kind, "size": size,
+                    "magic_hex": data[:16].hex()},
+            locations=[{"type": "artifact-path",
+                        "value": str(target)}],
+            **common)
+        if kind == "mitm-addon-jsonl":
+            folded = traffic.fold_addon(
+                store, subject_sha256=sha,
+                subject_name=target.name, subject_size=size,
+                subject_path=str(target), facts=facts,
+                link_to=identify.evidence_id)
+        else:
+            folded = traffic.fold_evidence(
+                store, subject_sha256=sha,
+                subject_name=target.name, subject_size=size,
+                subject_path=str(target), kind=kind, facts=facts,
+                tshark_facts=tshark_facts,
+                link_to=identify.evidence_id)
+        evidence = [identify]
+        for eid in folded["evidence_ids"]:
+            rec = store.get(eid)
+            if rec is not None:
+                evidence.append(rec)
+        unknowns = [store.get_unknown(u["unknown_id"])
+                    for u in folded["unknowns"]]
+        unknowns = [u for u in unknowns if u is not None]
+        journaled = self._journal_finding(
+            target.name, kind, sha, evidence, unknowns)
+        remembered = self._remember_finding(
+            target.name, kind, sha, identify, evidence, unknowns)
+        result: dict[str, Any] = {
+            "subject": {"name": target.name, "path": str(target),
+                        "sha256": sha, "size": size},
+            "format": kind,
+            "facts": facts,
+            "rung": rung,
+            "evidence_ids": [e.evidence_id for e in evidence],
+            "evidence": [e.to_dict() for e in evidence],
+            "unknowns": [u.to_dict() for u in unknowns],
+            "journaled": journaled,
+            "remembered": remembered,
+        }
+        result["card_text"] = render_traffic_card(result)
+        return result
+
+    # ── Pass 3: firmware routing ─────────────────────────────────────
+    def _inspect_firmware(self, target: Path, data: bytes, sha: str,
+                          size: int, census_facts: dict[str, Any],
+                          deep: str) -> dict[str, Any]:
+        """Route one firmware image to the firmware rung: the
+        built-in census always answers; extraction is unblob when
+        it is ready (provisioned first under deep=provision), else
+        the bounded native extractor for cpio/tar shapes, else a
+        residual unknown naming the rung that closes the gap."""
+        store = self.store
+        common = {
+            "subject_sha256": sha, "subject_name": target.name,
+            "subject_size": size, "provider_id": PROVIDER_ID,
+            "provider_name": PROVIDER_NAME,
+            "provider_version": PROVIDER_VERSION,
+        }
+        identify = store.record(
+            predicate_type="format.identify",
+            operation="detect_format",
+            parameters={"format": "firmware"},
+            result={"format": "firmware",
+                    "primary": census_facts.get("primary"),
+                    "size": size, "magic_hex": data[:16].hex()},
+            locations=[{"type": "artifact-path",
+                        "value": str(target)}],
+            **common)
+        work = (provision.re_root(self._tools_root) / "extract"
+                / sha[:16])
+        provision_report: dict[str, Any] | None = None
+        ub_state = provision.unblob_state(self._tools_root)
+        if deep == "provision" and not ub_state["available"]:
+            try:
+                row = provision.provision_engine(
+                    "unblob", root=self._tools_root)
+                provision_report = {"engines": {"unblob": row},
+                                    "ok": bool(row.get("available"))}
+            except provision.ProvisionError as exc:
+                provision_report = {
+                    "engines": {"unblob": {
+                        "engine": "unblob", "state": "unavailable",
+                        "available": False,
+                        "attempts": exc.attempts,
+                        "detail": str(exc)}},
+                    "ok": False}
+                record_failure("reverse.engine.unblob_provision",
+                               exc)
+            ub_state = provision.unblob_state(self._tools_root)
+        unblob_facts: dict[str, Any] | None = None
+        inventory: dict[str, Any] | None = None
+        extraction_source = ""
+        rung = "built-in firmware census"
+        if ub_state["available"]:
+            try:
+                unblob_facts = firmware.run_unblob(
+                    target, work, root=self._tools_root)
+                inventory = firmware.build_inventory(
+                    unblob_facts["extract_root"])
+                extraction_source = "unblob"
+                rung = "unblob (self-provisioned)"
+            except firmware.FirmwareError as exc:
+                record_failure("reverse.engine.unblob_route", exc)
+                unblob_facts = None
+        if inventory is None:
+            native = firmware.extract_native(data, work / "native")
+            if native.get("extracted"):
+                inventory = firmware.build_inventory(work / "native")
+                extraction_source = "native"
+                rung = ("built-in firmware census + native "
+                        "extraction")
+        folded = firmware.fold_evidence(
+            store, subject_sha256=sha, subject_name=target.name,
+            subject_size=size, subject_path=str(target),
+            census_facts=census_facts, unblob_facts=unblob_facts,
+            inventory=inventory,
+            extraction_source=extraction_source,
+            link_to=identify.evidence_id)
+        evidence = [identify]
+        for eid in folded["evidence_ids"]:
+            rec = store.get(eid)
+            if rec is not None:
+                evidence.append(rec)
+        unknowns = [store.get_unknown(u["unknown_id"])
+                    for u in folded["unknowns"]]
+        unknowns = [u for u in unknowns if u is not None]
+        if inventory is None:
+            gap = store.open_unknown(
+                f"the contents of {target.name} beyond the "
+                "signature census are unestablished — no "
+                "extraction rung answered on this device; the "
+                "self-provisioned unblob rung closes this",
+                subject_sha256=sha, raised_by=identify.evidence_id,
+                supporting=[identify.evidence_id],
+                required_authority="shipped-artifact",
+                required_confidence="derived")
+            unknowns.append(gap)
+        journaled = self._journal_finding(
+            target.name, "firmware", sha, evidence, unknowns)
+        remembered = self._remember_finding(
+            target.name, "firmware", sha, identify, evidence,
+            unknowns)
+        result: dict[str, Any] = {
+            "subject": {"name": target.name, "path": str(target),
+                        "sha256": sha, "size": size},
+            "format": "firmware",
+            "facts": census_facts,
+            "rung": rung,
+            "extraction": extraction_source or "none",
+            "evidence_ids": [e.evidence_id for e in evidence],
+            "evidence": [e.to_dict() for e in evidence],
+            "unknowns": [u.to_dict() for u in unknowns],
+            "journaled": journaled,
+            "remembered": remembered,
+        }
+        if provision_report is not None:
+            result["provision"] = provision_report
+        result["card_text"] = render_firmware_card(result)
+        return result
+
     # ── Pass 2: provisioning drive ───────────────────────────────────
     def provision_engines(self) -> dict[str, Any]:
-        """Run the self-provisioning drive for the deep rungs
-        (JDK → Ghidra) and report each engine's landing state with
-        its attempts. REA makes the human fetch engines; Devon
-        fetches her own."""
-        return provision.provision_all(root=self._tools_root)
+        """Run the self-provisioning drive for the provisioned
+        rungs (JDK → Ghidra, then the firmware rung's unblob) and
+        report each engine's landing state with its attempts.
+        REA makes the human fetch engines; Devon fetches her own.
+        """
+        report = provision.provision_all(root=self._tools_root)
+        try:
+            row = provision.provision_engine(
+                "unblob", root=self._tools_root)
+        except provision.ProvisionError as exc:
+            row = {"engine": "unblob", "state": "unavailable",
+                   "available": False, "source": "",
+                   "version":
+                       provision.DESCRIPTORS["unblob"]["version"],
+                   "path": "", "attempts": exc.attempts,
+                   "detail": str(exc)}
+            record_failure("reverse.provision.unblob", exc)
+        report["engines"]["unblob"] = row
+        if not row.get("available"):
+            report["ok"] = False
+        return report
 
     # ── Pass 2: Android reference graph ──────────────────────────────
     def android_sources(self, path: str) -> dict[str, Any]:
@@ -631,7 +935,8 @@ class ReEngine:
 
 def render_status(status: dict[str, Any]) -> str:
     lines = ["reverse engineering — evidence core + static spine "
-             "+ self-provisioned deep rungs (Passes 1–2)"]
+             "+ self-provisioned deep rungs + firmware/traffic "
+             "(Passes 1–3)"]
     for row in status["engines"]:
         mark = "yes" if row["available"] else "no"
         state = f" [{row['state']}]" if row.get("state") else ""
@@ -695,6 +1000,140 @@ def render_inspect_card(result: dict[str, Any]) -> str:
             lines.append(f"  ? {unk['question']} [{unk['unknown_id']}]")
     else:
         lines.append("residual unknowns: none raised by this parse")
+    lines.append("journaled to decisions: "
+                 + ("yes" if result["journaled"] else "no")
+                 + " · remembered: "
+                 + ("yes" if result["remembered"] else "no"))
+    return "\n".join(lines)
+
+
+def render_firmware_card(result: dict[str, Any]) -> str:
+    if result.get("error"):
+        return f"⚠️ {result['error']}"
+    subj = result["subject"]
+    facts = result.get("facts") or {}
+    parsed = facts.get("parsed") or {}
+    lines = [
+        f"🔍 {subj['name']} — firmware image "
+        f"({facts.get('primary') or 'unknown container'})",
+        f"sha256 {subj['sha256'][:16]}… · {subj['size']} bytes",
+        f"rung: {result.get('rung')} · extraction: "
+        f"{result.get('extraction')}",
+    ]
+    if parsed.get("uimage"):
+        u = parsed["uimage"]
+        lines.append(
+            f"uImage: {u.get('name')} · {u.get('os')}/"
+            f"{u.get('arch')} · {u.get('image_type')} · "
+            f"compression {u.get('compression')} · header CRC "
+            f"{'ok' if u.get('header_crc_ok') else 'BAD'} · data "
+            f"CRC {'ok' if u.get('data_crc_ok') else 'BAD'}")
+    if parsed.get("squashfs"):
+        s = parsed["squashfs"]
+        lines.append(
+            f"squashfs {s.get('version')}: {s.get('inodes')} "
+            f"inode(s), compression {s.get('compression')}, "
+            f"{s.get('bytes_used')} bytes used")
+    if parsed.get("cpio"):
+        c = parsed["cpio"]
+        lines.append(f"cpio: {c.get('entries')} entr(ies) censused")
+    kinds = [e["predicate_type"] for e in result["evidence"]]
+    if "firmware.inventory" in kinds:
+        inv = next(e["result"] for e in result["evidence"]
+                   if e["predicate_type"] == "firmware.inventory")
+        lines.append(
+            f"inventory: {inv.get('files_total')} file(s), "
+            f"{inv.get('bytes_total')} bytes extracted")
+        if inv.get("notable_paths"):
+            lines.append("notable: "
+                         + ", ".join(inv["notable_paths"][:6]))
+        if inv.get("carved_binaries"):
+            lines.append(
+                f"carved binaries: {len(inv['carved_binaries'])} "
+                "(inspect one by path for the native rungs)")
+    if "firmware.credential_flags" in kinds:
+        flags = next(e["result"] for e in result["evidence"]
+                     if e["predicate_type"]
+                     == "firmware.credential_flags")
+        lines.append(
+            f"credential-shaped strings: {flags.get('flag_count')} "
+            "flagged (observations, not proven secrets — see the "
+            "evidence record)")
+    lines.append(f"evidence: {len(result['evidence_ids'])} record(s) "
+                 f"— root {result['evidence_ids'][0]}")
+    if result["unknowns"]:
+        lines.append(f"residual unknowns: {len(result['unknowns'])} "
+                     "registered")
+        for unk in result["unknowns"]:
+            lines.append(f"  ? {unk['question']} [{unk['unknown_id']}]")
+    lines.append("journaled to decisions: "
+                 + ("yes" if result["journaled"] else "no")
+                 + " · remembered: "
+                 + ("yes" if result["remembered"] else "no"))
+    return "\n".join(lines)
+
+
+def render_traffic_card(result: dict[str, Any]) -> str:
+    if result.get("error"):
+        return f"⚠️ {result['error']}"
+    subj = result["subject"]
+    facts = result.get("facts") or {}
+    lines = [
+        f"🔍 {subj['name']} — capture ({result['format']})",
+        f"sha256 {subj['sha256'][:16]}… · {subj['size']} bytes",
+        f"rung: {result.get('rung')}",
+    ]
+    if facts.get("packets") is not None:
+        lines.append(f"packets: {facts['packets']} · bytes: "
+                     f"{facts.get('bytes')}")
+        protos = facts.get("protocols") or {}
+        if protos:
+            census = ", ".join(
+                f"{name} {row['frames']}" for name, row in
+                sorted(protos.items(),
+                       key=lambda kv: -kv[1]["frames"]))
+            lines.append(f"protocols: {census}")
+    if facts.get("entries") is not None:
+        lines.append(f"HAR entries: {facts['entries']}")
+    if facts.get("flows") is not None:
+        lines.append(f"flows: {facts['flows']}")
+    if facts.get("records") is not None:
+        lines.append(f"addon records: {facts['records']}")
+    dns = facts.get("dns") or {}
+    names = [q["name"] for resp in dns.get("responses", [])
+             for q in resp.get("questions", [])]
+    asked = [q["name"] for query in dns.get("queries", [])
+             for q in query.get("questions", [])]
+    if asked or names:
+        lines.append("DNS: " + ", ".join(
+            dict.fromkeys(asked + names))[:160])
+    tls = facts.get("tls") or {}
+    for session in (tls.get("sessions") or [])[:4]:
+        bits = []
+        if session.get("sni"):
+            bits.append(f"SNI {session['sni']}")
+        if session.get("version"):
+            bits.append(session["version"])
+        for cert in (session.get("certificates") or [])[:1]:
+            subject = (cert.get("subject") or {}).get("CN")
+            if subject:
+                bits.append(f"cert CN={subject}")
+        if bits:
+            lines.append("TLS: " + " · ".join(bits))
+    exchanges = facts.get("exchanges") or (
+        facts.get("http") or {}).get("exchanges") or []
+    for ex in exchanges[:4]:
+        lines.append(
+            f"HTTP: {ex.get('method')} {ex.get('host') or ''}"
+            f"{ex.get('path') or ex.get('uri') or ''} → "
+            f"{ex.get('status')}")
+    lines.append(f"evidence: {len(result['evidence_ids'])} record(s) "
+                 f"— root {result['evidence_ids'][0]}")
+    if result["unknowns"]:
+        lines.append(f"residual unknowns: {len(result['unknowns'])} "
+                     "registered")
+        for unk in result["unknowns"]:
+            lines.append(f"  ? {unk['question']} [{unk['unknown_id']}]")
     lines.append("journaled to decisions: "
                  + ("yes" if result["journaled"] else "no")
                  + " · remembered: "

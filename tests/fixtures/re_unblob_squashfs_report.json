@@ -1,0 +1,51 @@
+[
+  {
+    "task": {
+      "path": "/verify/fixtures/rootfs.squashfs",
+      "depth": 0,
+      "blob_id": "",
+      "is_multi_file": false
+    },
+    "reports": [
+      {
+        "path": "/verify/fixtures/rootfs.squashfs",
+        "size": 4096,
+        "is_dir": false,
+        "is_file": true,
+        "is_link": false,
+        "link_target": null,
+        "__typename__": "StatReport"
+      },
+      {
+        "magic": "Squashfs filesystem, little endian, version 4.0, zlib compressed, 2773 bytes, 10 inodes, blocksize: 131072 bytes, created: Fri Nov  6 16:22:35 2026\\012- data",
+        "mime_type": "application/octet-stream",
+        "__typename__": "FileMagicReport"
+      },
+      {
+        "md5": "33d98420af2a385edeb92c2ff3c3bd3e",
+        "sha1": "800f5d1bc836e02df839cb9b53f4e2af5db8a148",
+        "sha256": "73e05dec64cd1172bcf30ea3791706cb7a27e1aefb653cdfada13c70132528bc",
+        "__typename__": "HashReport"
+      },
+      {
+        "id": "61392:1",
+        "handler_name": "squashfs_v4_le",
+        "start_offset": 0,
+        "end_offset": 4096,
+        "size": 4096,
+        "is_encrypted": false,
+        "extraction_reports": [
+          {
+            "severity": "ERROR",
+            "dependencies": [
+              "sasquatch"
+            ],
+            "__typename__": "ExtractorDependencyNotFoundReport"
+          }
+        ],
+        "__typename__": "ChunkReport"
+      }
+    ],
+    "subtasks": []
+  }
+]

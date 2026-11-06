@@ -1,5 +1,5 @@
 """``nm re`` — the reverse-engineering organ: evidence-led static
-inspection of binaries.
+inspection of binaries, firmware images and captures.
 
 status | inspect <path> [--deep] | provision | graph <path>
 [query target] | evidence [id] | unknowns | audit |
@@ -10,6 +10,11 @@ answer (the self-provisioned Ghidra headless rung, the binutils
 light rung, the built-in spine), ``provision`` runs the
 self-provisioning drive for those rungs, and ``graph`` answers
 Android reference questions over ApkForge's jadx output.
+Pass 3: inspections also route by content to the firmware rung
+(census + self-provisioned unblob extraction + native extractor)
+and the traffic rung (pcap/pcapng/HAR/mitmproxy-flow readers +
+a probed TShark second voice), and ``provision`` drives the
+unblob pin alongside the deep rungs.
 """
 
 from __future__ import annotations

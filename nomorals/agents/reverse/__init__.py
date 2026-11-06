@@ -26,22 +26,35 @@ triage (:mod:`.lightbin`); and a class/method/reference graph
 over ApkForge's jadx output answers who-calls-what as Evidence
 (:mod:`.android_graph`). Inspections route to the deepest rung
 that can answer and say which one did.
+
+Pass 3: firmware + traffic. Firmware images route (by content)
+to a built-in signature census plus the self-provisioned unblob
+extraction engine — pinned through PyPI's published digests —
+with a bounded native cpio/tar extractor behind it and
+extraction-bomb caps enforced (:mod:`.firmware`). Captures —
+pcap/pcapng, HAR, mitmproxy flow files, and the JSONL of Devon's
+own mitmproxy capture addon — route to built-in readers with a
+probed TShark second voice (:mod:`.traffic`). Nothing extracted
+or captured is ever executed; encrypted content is recorded as
+an unknown, never guessed.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from . import android_graph, ghidra, lightbin, provision
+from . import android_graph, firmware, ghidra, lightbin, provision, traffic
 from .engine import (
     ReEngine,
     capability_matrix,
     render_audit,
     render_evidence_card,
+    render_firmware_card,
     render_graph_answer,
     render_inspect_card,
     render_provision,
     render_status,
+    render_traffic_card,
     render_unknowns,
 )
 from .evidence import AUTHORITIES, CONFIDENCES, Evidence, EvidenceStore, Unknown, UnknownCloseError
@@ -51,9 +64,11 @@ __all__ = [
     "Evidence", "EvidenceStore", "Unknown", "UnknownCloseError",
     "AUTHORITIES", "CONFIDENCES",
     "provision", "ghidra", "lightbin", "android_graph",
+    "firmware", "traffic",
     "render_status", "render_inspect_card", "render_evidence_card",
     "render_unknowns", "render_audit", "render_provision",
-    "render_graph_answer",
+    "render_graph_answer", "render_firmware_card",
+    "render_traffic_card",
     "register",
 ]
 
@@ -142,23 +157,34 @@ def register(registry: Any) -> None:
         description=(
             "Reverse-engineering inspections + provisioning + "
             "unknown closes, write side. action=inspect (path = a "
-            "local binary or artifact file: the built-in static "
-            "spine parses ELF, PE and Mach-O — headers, sections, "
-            "symbols, imports, dylibs, hardening — and records the "
-            "findings as a linked chain of Evidence records, "
-            "registers the residual unknowns the parse raises, and "
-            "journals the finding to the decision journal and "
-            "memory when bound; the target is then routed to the "
-            "deepest Pass 2 rung that can answer — the "
-            "self-provisioned Ghidra headless rung (functions, "
-            "call graph, decompiled pseudocode) or the binutils "
-            "light rung — and the result names the rung; deep = "
-            "auto (deepest available now) | provision (provision "
-            "missing engines first, then route) | off (spine "
-            "only); static only, nothing is executed) | provision "
-            "(run the self-provisioning drive for the deep rungs — "
-            "pinned Temurin JDK then pinned Ghidra, sha256-verified "
-            "— and report each engine's state with its attempts) | "
+            "local binary, firmware image or capture file — "
+            "routing is by content, never by name: the built-in "
+            "static spine parses ELF, PE and Mach-O natively; a "
+            "firmware image goes to the firmware rung (signature "
+            "census + the self-provisioned unblob extraction "
+            "engine + bounded native cpio/tar extraction, "
+            "extraction-bomb caps enforced, nothing extracted is "
+            "executed, credential-shaped strings flagged as "
+            "observations with redacted values); a capture "
+            "(pcap/pcapng, HAR, mitmproxy flow file, Devon-addon "
+            "JSONL) goes to the traffic rung (built-in dissect: "
+            "protocol census, conversations, DNS, TLS handshake "
+            "facts incl. SNI and certificate subjects, cleartext "
+            "HTTP; TShark as a probed second voice when present; "
+            "encrypted payloads are recorded as unknowns, never "
+            "guessed); binaries route on to the deepest Pass 2 "
+            "rung that can answer — the self-provisioned Ghidra "
+            "headless rung or the binutils light rung — and every "
+            "route records a linked chain of Evidence, registers "
+            "its residual unknowns, and names the rung that "
+            "answered; deep = auto (deepest available now) | "
+            "provision (provision missing engines first, then "
+            "route) | off (built-in rungs only); static only, "
+            "nothing is executed) | provision (run the "
+            "self-provisioning drive — pinned Temurin JDK, "
+            "pinned Ghidra, pinned unblob (PyPI digests, "
+            "--require-hashes) — and report each engine's state "
+            "with its attempts) | "
             "graph (path = an APK or jadx output dir: build the "
             "Android class/method/reference graph and record its "
             "census as Evidence) | close (unknown_id + status="

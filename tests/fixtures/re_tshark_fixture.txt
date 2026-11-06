@@ -1,0 +1,59 @@
+=== io,phs + conversations ===
+================================================================================
+UDP Conversations
+Filter:<No Filter>
+                                                           |       <-      | |       ->      | |     Total     |    Relative    |   Duration   |
+                                                           | Frames  Bytes | | Frames  Bytes | | Frames  Bytes |      Start     |              |
+192.168.7.10:53111         <-> 192.0.2.53:53                    1 88 bytes        1 72 bytes        2 160 bytes     0.010000000         0.0100
+================================================================================
+================================================================================
+TCP Conversations
+Filter:<No Filter>
+                                                           |       <-      | |       ->      | |     Total     |    Relative    |   Duration   |
+                                                           | Frames  Bytes | | Frames  Bytes | | Frames  Bytes |      Start     |              |
+192.168.7.10:41000         <-> 93.184.216.34:80                 2 192 bytes       4 291 bytes       6 483 bytes     0.030000000         0.0500
+192.168.7.10:41001         <-> 203.0.113.7:443                  2 1056 bytes       4 351 bytes       6 1407 bytes     0.090000000         0.0500
+================================================================================
+================================================================================
+IPv4 Conversations
+Filter:<No Filter>
+                                               |       <-      | |       ->      | |     Total     |    Relative    |   Duration   |
+                                               | Frames  Bytes | | Frames  Bytes | | Frames  Bytes |      Start     |              |
+192.168.7.10         <-> 93.184.216.34              2 192 bytes       4 291 bytes       6 483 bytes     0.030000000         0.0500
+192.168.7.10         <-> 203.0.113.7                2 1056 bytes       4 351 bytes       6 1407 bytes     0.090000000         0.0500
+192.168.7.10         <-> 192.0.2.53                 2 138 bytes       2 122 bytes       4 260 bytes     0.010000000         0.1500
+================================================================================
+
+===================================================================
+Protocol Hierarchy Statistics
+Filter: 
+
+eth                                      frames:17 bytes:2192
+  arp                                    frames:1 bytes:42
+  ip                                     frames:16 bytes:2150
+    udp                                  frames:2 bytes:160
+      dns                                frames:2 bytes:160
+    tcp                                  frames:12 bytes:1890
+      http                               frames:2 bytes:267
+        data-text-lines                  frames:1 bytes:138
+      tls                                frames:3 bytes:1245
+    icmp                                 frames:2 bytes:100
+===================================================================
+=== fields ===
+1										
+2	17	example.test	False							
+3	17	example.test	True	93.184.216.34						
+4	6									
+5	6									
+6	6									
+7	6						GET	/index.html	example.test	
+8	6									200
+9	6									
+10	6									
+11	6									
+12	6									
+13	6				secret.example.test	0x0303				
+14	6					0x0303				
+15	6									
+16	1									
+17	1									
