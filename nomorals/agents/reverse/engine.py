@@ -13,8 +13,15 @@ entropy) with each record linked to the one it rests on, registers
 the residual unknowns the parse itself raises, and journals the
 finding into the decision journal + memory when those are bound —
 findings live in Devon's systems from day one, not in a side file.
-Deep engines (the Ghidra rung and friends) are Pass 2; the
-capability matrix says so, with the reason, instead of pretending.
+
+Pass 2 adds the self-provisioned deep providers behind the same
+facade: the Ghidra headless rung (Devon provisions Ghidra + its
+JDK herself — :mod:`.provision`, :mod:`.ghidra`), the binutils
+light rung (:mod:`.lightbin`), and the Android reference graph
+over ApkForge's jadx output (:mod:`.android_graph`). An inspection
+now routes the target to the deepest rung that can answer and
+says which rung answered; where no deep rung can, the gap is a
+residual unknown naming the rung that closes it.
 """
 
 from __future__ import annotations
@@ -24,6 +31,7 @@ import struct
 from pathlib import Path
 from typing import Any
 
+from . import android_graph, ghidra, lightbin, provision
 from .evidence import EvidenceStore, UnknownCloseError
 from .failures import failure_count, record_failure
 from .inspectors import PROVIDER_ID, PROVIDER_NAME, PROVIDER_VERSION, elf_info, inspect_bytes
@@ -31,21 +39,26 @@ from .inspectors import PROVIDER_ID, PROVIDER_NAME, PROVIDER_VERSION, elf_info, 
 __all__ = [
     "ReEngine", "capability_matrix",
     "render_status", "render_inspect_card", "render_evidence_card",
-    "render_unknowns", "render_audit",
+    "render_unknowns", "render_audit", "render_provision",
+    "render_graph_answer",
 ]
 
 #: Refuse to slurp an unbounded file into memory for a static parse.
 _MAX_INSPECT_BYTES = 256 * 1024 * 1024
 
 
-def capability_matrix() -> list[dict[str, Any]]:
+def capability_matrix(root: Any = None) -> list[dict[str, Any]]:
     """Per-engine availability, probe-executed where built-in.
 
     Built-in rows are proven by running the real parser over a
     minimal real header built here — an engine that cannot parse its
     own probe is reported unavailable, never assumed (the ApkForge
-    toolchain ethos). External rows are Pass 2+ rungs: unavailable
-    today, with the pass that lands them named on the row.
+    toolchain ethos). Pass 2 rows carry REAL probe state from the
+    provisioning ledger: ``state`` is ready (probed, usable now),
+    provisionable (pinned, lands on demand — Devon's outdo over
+    REA's bring-your-own), or unavailable with the reason on the
+    row. ``available`` means ready *now*. ``root`` overrides the
+    tools root (tests, alternate profiles).
     """
     rows: list[dict[str, Any]] = []
 
@@ -85,16 +98,34 @@ def capability_matrix() -> list[dict[str, Any]]:
         "note": "printable-string census (ASCII + UTF-16LE) and "
                 "Shannon entropy, recorded as evidence on every "
                 "inspection"})
+    # ── Pass 2: the self-provisioned deep rungs, probe-true ────
+    jdk = provision.jdk_state(root)
+    rows.append({
+        "engine": "temurin-jdk", "kind": "provisioned",
+        "available": jdk["available"], "state": jdk["state"],
+        "note": "the JDK the Ghidra rung stands on — " + jdk["detail"]})
+    gh = provision.ghidra_state(root)
+    rows.append({
+        "engine": "ghidra-headless", "kind": "provisioned",
+        "available": gh["available"], "state": gh["state"],
+        "note": "self-provisioned deep decompile rung (functions, "
+                "call graph, imports, pseudocode) — " + gh["detail"]})
+    light = lightbin.probe()
+    rows.append({
+        "engine": "rizin-objdump", "kind": "one-shot",
+        "available": light["available"],
+        "state": "ready" if light["available"] else "unavailable",
+        "note": "light one-shot triage rung (readelf-class: "
+                "header, dynamic deps, dynamic symbols) — "
+                + light["detail"]})
+    rows.append({
+        "engine": "android-graph", "kind": "built-in",
+        "available": True, "state": "ready",
+        "note": "class/method/reference graph over jadx output "
+                "(who calls X, what Y touches) — consumes ApkForge "
+                "jadx sources trees; an APK is decompiled into one "
+                "through ApkForge's own provisioned jadx"})
     for engine, note in (
-            ("ghidra-headless",
-             "Pass 2 — self-provisioned deep decompile rung "
-             "(pseudocode, call graph, xrefs); not built yet"),
-            ("android-graph",
-             "Pass 2 — class/method search + reference tracing over "
-             "ApkForge dossiers; not built yet"),
-            ("rizin-objdump",
-             "Pass 2 — one-shot disassembly rung for light "
-             "profiles; not built yet"),
             ("binwalk-unblob",
              "Pass 3 — firmware extraction + region analysis; "
              "not built yet"),
@@ -121,8 +152,11 @@ class ReEngine:
     """
 
     def __init__(self, context: Any = None, *, db: Any = None,
-                 journal: Any = None, memory: Any = None) -> None:
+                 journal: Any = None, memory: Any = None,
+                 tools_root: Any = None) -> None:
         self.context = context
+        self._tools_root = (Path(tools_root) if tools_root
+                            else None)
         self._db = db if db is not None else getattr(context, "db", None)
         self._ephemeral = False
         if self._db is None:
@@ -170,7 +204,7 @@ class ReEngine:
     def status(self) -> dict[str, Any]:
         audit = self.store.audit()
         return {
-            "engines": capability_matrix(),
+            "engines": capability_matrix(self._tools_root),
             "evidence_records": audit["evidence_records"],
             "unknowns_open": audit["unknowns_open"],
             "unknowns_resolved": audit["unknowns_resolved"],
@@ -181,11 +215,21 @@ class ReEngine:
         }
 
     # ── inspection ───────────────────────────────────────────────────
-    def inspect_path(self, path: str) -> dict[str, Any]:
+    def inspect_path(self, path: str, deep: str = "auto"
+                     ) -> dict[str, Any]:
         """Static-inspect one file → Evidence chain + unknowns.
 
-        Returns a structured dict; ``error`` is set (and nothing is
-        recorded) when the target cannot be read at all.
+        ``deep`` governs the Pass 2 rungs: ``auto`` routes the
+        target to the deepest rung that can answer *now* (the
+        provisioned Ghidra rung, else the binutils light rung for
+        ELF, else the built-in spine alone); ``provision`` first
+        runs the self-provisioning drive for any missing engine,
+        then routes; ``off`` keeps the Pass 1 spine only. The
+        result names the rung that answered (``rung``) — and when
+        no deep rung could, a residual unknown names the rung that
+        closes the gap. Returns a structured dict; ``error`` is set
+        (and nothing is recorded) when the target cannot be read
+        at all.
         """
         target = Path(path or "").expanduser()
         if not target.is_file():
@@ -268,6 +312,13 @@ class ReEngine:
                 required_confidence=seed["required_confidence"])
             for seed in insp.unknowns
         ]
+        routed = self._deep_route(
+            target, insp.format, sha, size, identify, deep)
+        for eid in routed["evidence_ids"]:
+            rec = store.get(eid)
+            if rec is not None:
+                evidence.append(rec)
+        unknowns.extend(routed["unknowns"])
         journaled = self._journal_finding(
             target.name, insp.format, sha, evidence, unknowns)
         remembered = self._remember_finding(
@@ -277,14 +328,228 @@ class ReEngine:
                         "sha256": sha, "size": size},
             "format": insp.format,
             "facts": insp.facts,
+            "rung": routed["rung"],
+            "deep": routed["summary"],
             "evidence_ids": [e.evidence_id for e in evidence],
             "evidence": [e.to_dict() for e in evidence],
             "unknowns": [u.to_dict() for u in unknowns],
             "journaled": journaled,
             "remembered": remembered,
         }
+        if routed.get("provision"):
+            result["provision"] = routed["provision"]
         result["card_text"] = render_inspect_card(result)
         return result
+
+    # ── Pass 2: deep-rung routing ────────────────────────────────────
+    def _deep_route(self, target: Path, fmt: str, sha: str,
+                    size: int, identify: Any, deep: str
+                    ) -> dict[str, Any]:
+        """Route one inspected binary to the deepest rung that can
+        answer. Returns {rung, summary, evidence_ids, unknowns,
+        provision?}. A rung that fails mid-run is recorded in the
+        failure ledger and named in the summary — the route then
+        degrades honestly to the next rung rather than swallowing
+        the failure."""
+        out: dict[str, Any] = {
+            "rung": "built-in static spine", "summary": {},
+            "evidence_ids": [], "unknowns": []}
+        if deep == "off" or fmt not in ("elf", "pe", "macho",
+                                        "macho-fat"):
+            return out
+        store = self.store
+        common = {"subject_sha256": sha, "subject_name": target.name,
+                  "subject_size": size, "subject_path": str(target),
+                  "link_to": identify.evidence_id}
+        gh_state = provision.ghidra_state(self._tools_root)
+        if deep == "provision" and not gh_state["available"]:
+            out["provision"] = self.provision_engines()
+            gh_state = provision.ghidra_state(self._tools_root)
+        if gh_state["available"]:
+            try:
+                export = ghidra.analyze(target,
+                                        root=self._tools_root)
+                folded = ghidra.fold_evidence(store, export=export,
+                                              **common)
+                out["rung"] = "ghidra-headless"
+                out["summary"] = {
+                    "engine": "ghidra-headless",
+                    "version": gh_state["version"],
+                    "functions": export.get("functions_total"),
+                    "decompiled": export.get("decompiled_count"),
+                }
+                out["evidence_ids"] = folded["evidence_ids"]
+                fetched = [store.get_unknown(u["unknown_id"])
+                           for u in folded["unknowns"]]
+                out["unknowns"] = [u for u in fetched
+                                   if u is not None]
+                return out
+            except ghidra.GhidraError as exc:
+                record_failure("reverse.engine.ghidra_route", exc)
+                out["summary"] = {"engine": "ghidra-headless",
+                                  "error": str(exc)}
+        if fmt == "elf":
+            light = lightbin.probe()
+            if light["available"]:
+                try:
+                    facts = lightbin.triage(target)
+                    folded = lightbin.fold_evidence(store, **common,
+                                                    facts=facts)
+                    summary = {
+                        "engine": "binutils-triage",
+                        "needed_libraries":
+                            facts.get("needed_libraries"),
+                        "defined_function_count":
+                            facts.get("defined_function_count"),
+                        "imported_symbol_count":
+                            facts.get("imported_symbol_count"),
+                    }
+                    if out["summary"]:
+                        summary["ghidra"] = out["summary"]
+                    out["summary"] = summary
+                    out["rung"] = "binutils-triage"
+                    out["evidence_ids"] = folded["evidence_ids"]
+                    return out
+                except RuntimeError as exc:
+                    record_failure("reverse.engine.light_route", exc)
+                    out["summary"] = {
+                        **out["summary"],
+                        "light_error": str(exc)}
+        # no deep rung could answer: the gap is a residual unknown
+        # naming the rung that closes it (the audit's whole point)
+        out["unknowns"] = [store.open_unknown(
+            f"the deep behavior of {target.name} (function-level "
+            "semantics, decompiled pseudocode) is unestablished — "
+            "no deep rung answered on this device; the "
+            "self-provisioned Ghidra rung closes this",
+            subject_sha256=sha, raised_by=identify.evidence_id,
+            supporting=[identify.evidence_id],
+            required_authority="shipped-artifact",
+            required_confidence="derived")]
+        return out
+
+    # ── Pass 2: provisioning drive ───────────────────────────────────
+    def provision_engines(self) -> dict[str, Any]:
+        """Run the self-provisioning drive for the deep rungs
+        (JDK → Ghidra) and report each engine's landing state with
+        its attempts. REA makes the human fetch engines; Devon
+        fetches her own."""
+        return provision.provision_all(root=self._tools_root)
+
+    # ── Pass 2: Android reference graph ──────────────────────────────
+    def android_sources(self, path: str) -> dict[str, Any]:
+        """Resolve a path to a jadx sources root: a directory is
+        taken as jadx output directly; an APK goes through
+        ApkForge (add + jadx) on its own provisioned toolchain."""
+        target = Path(path or "").expanduser()
+        if target.is_dir():
+            try:
+                return {"sources": str(
+                    android_graph.sources_root_of(target)),
+                    "via": "jadx output tree"}
+            except android_graph.GraphError as exc:
+                return {"error": str(exc)}
+        if target.is_file() and target.suffix.lower() in (
+                ".apk", ".xapk", ".apks"):
+            from ..apkforge import ApkForge
+
+            forge = ApkForge(self.context)
+            added = forge.add(str(target))
+            if added.get("error"):
+                return {"error": f"ApkForge intake failed: "
+                                 f"{added['error']}"}
+            ref = (added.get("project") or {}).get("id", "")
+            jres = forge.jadx(ref)
+            if jres.get("error"):
+                return {"error": f"jadx decompile failed: "
+                                 f"{jres['error']}"}
+            try:
+                sources = str(android_graph.sources_root_of(
+                    jres["jadx"]))
+            except android_graph.GraphError as exc:
+                return {"error": str(exc)}
+            return {"sources": sources,
+                    "via": f"ApkForge jadx (project {ref})",
+                    "project": ref}
+        return {"error": f"{path!r} is neither a jadx output "
+                         "directory nor an APK file"}
+
+    def android_graph_build(self, path: str) -> dict[str, Any]:
+        """Build the reference graph over an APK / jadx tree and
+        record its census as Evidence."""
+        resolved = self.android_sources(path)
+        if resolved.get("error"):
+            return resolved
+        try:
+            graph = android_graph.build_graph(resolved["sources"])
+        except android_graph.GraphError as exc:
+            return {"error": str(exc)}
+        subject = Path(path).expanduser()
+        name = subject.name
+        if subject.is_file():
+            data = subject.read_bytes()
+            sha = hashlib.sha256(data).hexdigest()
+            size = len(data)
+        else:
+            sha = hashlib.sha256(
+                resolved["sources"].encode("utf-8")).hexdigest()
+            size = 0
+        folded = android_graph.fold_evidence(
+            self.store, subject_sha256=sha, subject_name=name,
+            graph=graph)
+        return {"sources": resolved["sources"],
+                "via": resolved["via"], "stats": graph["stats"],
+                "collisions": graph["collisions"],
+                "evidence_ids": folded["evidence_ids"],
+                "graph_evidence_id": folded["graph_evidence_id"],
+                "_sha": sha, "_name": name, "_size": size}
+
+    def android_query(self, path: str, query: str,
+                      target: str) -> dict[str, Any]:
+        """Answer one graph question as a recorded Evidence record:
+        callers | callees | class | search over the graph of an
+        APK / jadx tree."""
+        built = self.android_graph_build(path)
+        if built.get("error"):
+            return built
+        try:
+            graph = android_graph.build_graph(built["sources"])
+            if query == "callers":
+                answer = android_graph.callers(graph, target)
+                operation = "graph.callers_of"
+            elif query == "callees":
+                answer = android_graph.callees(graph, target)
+                operation = "graph.callees_of"
+            elif query == "class":
+                answer = android_graph.class_profile(graph, target)
+                operation = "graph.class_profile"
+            elif query == "search":
+                answer = android_graph.search(graph, target)
+                operation = "graph.search"
+            else:
+                return {"error": f"unknown graph query {query!r} — "
+                                 "callers|callees|class|search"}
+        except android_graph.GraphError as exc:
+            return {"error": str(exc)}
+        rec = self.store.record(
+            predicate_type="android.references", operation=operation,
+            provider_id=android_graph.PROVIDER_ID,
+            provider_name=android_graph.PROVIDER_NAME,
+            provider_version=android_graph.PROVIDER_VERSION,
+            parameters={"query": query, "target": target,
+                        "source": built["sources"]},
+            result=answer,
+            subject_sha256=built["_sha"],
+            subject_name=built["_name"],
+            subject_size=built["_size"],
+            limitations=list(android_graph.LIMITATIONS),
+            locations=[{"type": "artifact-path",
+                        "value": built["sources"]}],
+            links=[built["graph_evidence_id"]])
+        return {"query": query, "target": target, "answer": answer,
+                "evidence_id": rec.evidence_id,
+                "graph_evidence_id": built["graph_evidence_id"],
+                "sources": built["sources"]}
 
     def _journal_finding(self, name: str, fmt: str, sha: str,
                          evidence: list, unknowns: list) -> bool:
@@ -365,12 +630,13 @@ class ReEngine:
 # ── renders (plain text; surfaces own the presentation layer) ────────
 
 def render_status(status: dict[str, Any]) -> str:
-    lines = ["reverse engineering — evidence core + built-in static "
-             "spine (Pass 1)"]
+    lines = ["reverse engineering — evidence core + static spine "
+             "+ self-provisioned deep rungs (Passes 1–2)"]
     for row in status["engines"]:
         mark = "yes" if row["available"] else "no"
-        lines.append(f"  [{mark}] {row['engine']} ({row['kind']}) — "
-                     f"{row['note']}")
+        state = f" [{row['state']}]" if row.get("state") else ""
+        lines.append(f"  [{mark}] {row['engine']} ({row['kind']})"
+                     f"{state} — {row['note']}")
     lines.append(
         f"evidence: {status['evidence_records']} record(s) · "
         f"unknowns: {status['unknowns_open']} open, "
@@ -393,6 +659,19 @@ def render_inspect_card(result: dict[str, Any]) -> str:
         f"🔍 {subj['name']} — {result['format']}",
         f"sha256 {subj['sha256'][:16]}… · {subj['size']} bytes",
     ]
+    if result.get("rung"):
+        lines.append(f"deepest rung: {result['rung']}")
+    deep = result.get("deep") or {}
+    if deep.get("engine") == "ghidra-headless" and not deep.get("error"):
+        lines.append(f"ghidra: {deep.get('functions')} function(s), "
+                     f"{deep.get('decompiled')} decompiled")
+    if deep.get("error"):
+        lines.append(f"ghidra rung failed: {deep['error']}")
+    if deep.get("engine") == "binutils-triage":
+        lines.append(
+            f"triage: {deep.get('defined_function_count')} defined "
+            f"function(s), {deep.get('imported_symbol_count')} "
+            "imported symbol(s)")
     for key in ("machine", "cpu", "object_type", "pe_format",
                 "filetype", "entry_point", "interpreter", "soname",
                 "uuid"):
@@ -487,4 +766,80 @@ def render_audit(audit: dict[str, Any]) -> str:
             or audit["open_without_supporting_evidence"]):
         lines.append("every open unknown is closable on current "
                      "evidence and carries support")
+    return "\n".join(lines)
+
+
+def render_provision(report: dict[str, Any]) -> str:
+    lines = ["engine provisioning — Devon fetches her own:"]
+    for name, row in (report.get("engines") or {}).items():
+        mark = "ready" if row.get("available") else row.get(
+            "state", "unavailable")
+        lines.append(f"  {name}: {mark} — {row.get('detail', '')}")
+        for attempt in row.get("attempts") or []:
+            lines.append(f"    · {attempt}")
+    lines.append("all engines provisioned"
+                 if report.get("ok") else
+                 "some engines did not land — the attempts above "
+                 "say why, and the matrix reports the same truth")
+    return "\n".join(lines)
+
+
+def render_graph_answer(payload: dict[str, Any]) -> str:
+    if payload.get("error"):
+        return f"⚠️ {payload['error']}"
+    if "stats" in payload:  # a build result, not a query
+        stats = payload["stats"]
+        lines = [
+            f"android reference graph — {payload['sources']}",
+            f"via {payload['via']}",
+            f"classes {stats['classes']} · methods "
+            f"{stats['methods']} · edges {stats['edges']} "
+            f"({stats['references']} references) over "
+            f"{stats['files_scanned']} file(s)",
+            f"graph evidence: {payload['graph_evidence_id']}",
+        ]
+        if payload.get("collisions"):
+            lines.append("ambiguous simple names: "
+                         + ", ".join(payload["collisions"][:8]))
+        return "\n".join(lines)
+    answer = payload["answer"]
+    query, target = payload["query"], payload["target"]
+    lines = [f"android graph · {query} · {target}",
+             f"evidence: {payload['evidence_id']}"]
+    if query == "callers":
+        lines.append(f"{answer['caller_count']} caller edge(s), "
+                     f"{answer['references']} reference(s)")
+        for row in answer["callers"][:20]:
+            lines.append(f"  ← {row['from_class']}."
+                         f"{row['from_method']} ({row['kind']}"
+                         f" ×{row['count']})")
+    elif query == "callees":
+        lines.append(f"{answer['callee_count']} callee edge(s), "
+                     f"{answer['references']} reference(s)")
+        for row in answer["callees"][:20]:
+            lines.append(f"  → {row['to_class']}."
+                         f"{row['to_method']} ({row['kind']}"
+                         f" ×{row['count']})")
+    elif query == "class":
+        rec = answer["class"]
+        lines.append(f"{rec['fqcn']} ({rec['kind']}) — "
+                     f"{len(rec['methods'])} method(s), "
+                     f"inbound {answer['inbound_count']}, "
+                     f"outbound {answer['outbound_count']}")
+        if rec.get("extends"):
+            lines.append(f"extends {rec['extends']}")
+        if rec.get("implements"):
+            lines.append("implements "
+                         + ", ".join(rec["implements"]))
+        lines.extend(f"  · {name}" for name in
+                     sorted(rec["methods"])[:20])
+    elif query == "search":
+        lines.append(f"{answer['class_count']} class hit(s), "
+                     f"{answer['method_count']} method hit(s)")
+        lines.extend(f"  {fq}" for fq in answer["classes"][:20])
+        lines.extend(f"  {hit['class']}.{hit['method']}"
+                     for hit in answer["methods"][:20])
+    if answer.get("truncated"):
+        lines.append("(sample truncated — the evidence record "
+                     "carries the same bound)")
     return "\n".join(lines)

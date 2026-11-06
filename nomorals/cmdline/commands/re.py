@@ -1,10 +1,15 @@
-"""``nm re`` — the reverse-engineering organ (Pass 1): evidence-led
-static inspection of binaries.
+"""``nm re`` — the reverse-engineering organ: evidence-led static
+inspection of binaries.
 
-status | inspect <path> | evidence [id] | unknowns | audit |
+status | inspect <path> [--deep] | provision | graph <path>
+[query target] | evidence [id] | unknowns | audit |
 close <unknown-id> <resolution…> — thin shell over ReEngine, the
 same facade the ``re`` registry tools and the ``/re`` chat command
-call.
+call. Pass 2: inspections route to the deepest rung that can
+answer (the self-provisioned Ghidra headless rung, the binutils
+light rung, the built-in spine), ``provision`` runs the
+self-provisioning drive for those rungs, and ``graph`` answers
+Android reference questions over ApkForge's jadx output.
 """
 
 from __future__ import annotations
@@ -18,6 +23,8 @@ def _cmd_re(args: Any, context: Any) -> int:
         ReEngine,
         render_audit,
         render_evidence_card,
+        render_graph_answer,
+        render_provision,
         render_status,
         render_unknowns,
     )
@@ -30,11 +37,31 @@ def _cmd_re(args: Any, context: Any) -> int:
         return 0
 
     if action == "inspect":
-        res = engine.inspect_path(args.path)
+        res = engine.inspect_path(
+            args.path,
+            deep="provision" if getattr(args, "deep", False)
+            else "auto")
         if res.get("error"):
             print(res["error"])
             return 2
         print(res["card_text"])
+        return 0
+
+    if action == "provision":
+        print(render_provision(engine.provision_engines()))
+        return 0
+
+    if action == "graph":
+        query = getattr(args, "query", "") or ""
+        if query:
+            payload = engine.android_query(
+                args.path, query, getattr(args, "target", "") or "")
+        else:
+            payload = engine.android_graph_build(args.path)
+        if payload.get("error"):
+            print(payload["error"])
+            return 2
+        print(render_graph_answer(payload))
         return 0
 
     if action == "evidence":

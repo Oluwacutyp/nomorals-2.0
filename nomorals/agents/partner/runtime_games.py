@@ -3678,7 +3678,14 @@ class RuntimeGamesMixin:
         /re status               — engine matrix + store counts
         /re inspect <path>       — static-inspect one binary file:
                                    Evidence chain + residual unknowns,
-                                   journaled to decisions + memory
+                                   journaled to decisions + memory,
+                                   routed to the deepest rung that
+                                   can answer (Ghidra / light / spine)
+        /re provision            — self-provision the deep rungs
+                                   (pinned JDK + Ghidra) and report
+        /re graph <path> [q t]   — Android reference graph over an
+                                   APK or jadx tree: census, or
+                                   callers|callees|class|search
         /re evidence [id]        — recent evidence, or one record
                                    with its provenance chain
         /re unknowns             — the open residual unknowns
@@ -3695,6 +3702,8 @@ class RuntimeGamesMixin:
             ReEngine,
             render_audit,
             render_evidence_card,
+            render_graph_answer,
+            render_provision,
             render_status,
             render_unknowns,
         )
@@ -3711,6 +3720,10 @@ class RuntimeGamesMixin:
                 "/re evidence [id] — recent evidence, or one record "
                 "with its provenance chain",
                 "/re unknowns — open residual unknowns",
+                "/re provision — self-provision the deep rungs "
+                "(pinned JDK + Ghidra) and report the attempts",
+                "/re graph <apk-or-jadx-dir> [callers|callees|class|"
+                "search <target>] — the Android reference graph",
                 "/re close <id> [observed|derived|inferred] "
                 "<resolution> — close an unknown",
                 "/re audit — unknowns audit",
@@ -3746,6 +3759,25 @@ class RuntimeGamesMixin:
                                    title="open residual unknowns")
         if verb == "audit":
             return render_audit(engine.audit())
+        if verb == "provision":
+            return render_provision(engine.provision_engines())
+        if verb == "graph":
+            # /re graph <path> [callers|callees|class|search <target>]
+            rest = (tail or "").strip().split(None, 1)
+            body = rest[1] if len(rest) > 1 else ""
+            bits = body.rsplit(None, 2)
+            queries = ("callers", "callees", "class", "search")
+            if len(bits) == 3 and bits[1].lower() in queries:
+                path, query, target = bits[0], bits[1].lower(), bits[2]
+                payload = engine.android_query(path, query, target)
+            elif body:
+                payload = engine.android_graph_build(body)
+            else:
+                return ("usage: /re graph <apk-or-jadx-dir> "
+                        "[callers|callees|class|search <target>]")
+            if payload.get("error"):
+                return f"⚠️ {payload['error']}"
+            return render_graph_answer(payload)
         if verb == "close":
             if len(parts) < 3:
                 return ("usage: /re close <unknown-id> "

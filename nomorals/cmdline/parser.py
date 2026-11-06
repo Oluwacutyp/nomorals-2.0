@@ -1993,7 +1993,7 @@ def _parser() -> argparse.ArgumentParser:
     a_rd.add_argument("target")
 
     re_p = sub.add_parser("re", aliases=CLI_ALIASES["re"],
-        help="Reverse engineering: evidence-led static inspection of binaries (Pass 1: built-in ELF/PE/Mach-O spine)",
+        help="Reverse engineering: evidence-led static inspection of binaries (built-in spine + self-provisioned Ghidra rung)",
         description=("nm re status\n"
                      "nm re inspect <path>\n"
                      "nm re evidence [id]\n"
@@ -2003,8 +2003,18 @@ def _parser() -> argparse.ArgumentParser:
     )
     re_sub = re_p.add_subparsers(dest="re_action", required=True)
     re_sub.add_parser("status", help="engine capability matrix + store counts")
-    r_ins = re_sub.add_parser("inspect", help="static-inspect one binary file → Evidence chain + residual unknowns")
+    r_ins = re_sub.add_parser("inspect", help="static-inspect one binary file → Evidence chain + residual unknowns, routed to the deepest rung that can answer")
     r_ins.add_argument("path")
+    r_ins.add_argument("--deep", action="store_true",
+                       help="provision any missing deep engine first, then route (the self-provisioning drive)")
+    re_sub.add_parser("provision", help="self-provision the deep rungs: pinned Temurin JDK + pinned Ghidra, sha256-verified, attempts reported")
+    r_gr = re_sub.add_parser("graph", help="Android reference graph over an APK / jadx output tree: build the census, or answer callers|callees|class|search as Evidence")
+    r_gr.add_argument("path")
+    r_gr.add_argument("query", nargs="?", default="",
+                      choices=["", "callers", "callees", "class", "search"],
+                      help="omit to just build the graph census")
+    r_gr.add_argument("target", nargs="?", default="",
+                      help="a class (com.x.Foo or Foo) or a method (Foo.bar)")
     r_ev = re_sub.add_parser("evidence", help="one Evidence record with its provenance chain (or the recent list)")
     r_ev.add_argument("evidence_id", nargs="?", default="",
                       help="evidence id or unique prefix")

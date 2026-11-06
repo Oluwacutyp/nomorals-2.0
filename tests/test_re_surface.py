@@ -233,12 +233,24 @@ class CliTest(unittest.TestCase):
 
 class DoctorRowsTest(unittest.TestCase):
     def test_capability_matrix_probes(self):
-        from nomorals.agents.reverse import capability_matrix
+        from nomorals.agents.reverse import capability_matrix, lightbin
         rows = {row["engine"]: row for row in capability_matrix()}
         for name in ("elf", "pe", "mach-o"):
             self.assertTrue(rows[name]["available"], name)
-        for name in ("ghidra-headless", "binwalk-unblob", "tshark",
-                     "frida-gdb", "rizin-objdump", "android-graph"):
+        # Pass 2: the deep rows carry REAL probe state instead of a
+        # blanket "not built yet" — available means ready NOW, and
+        # the state names the rest (provisionable / unavailable).
+        gh = rows["ghidra-headless"]
+        self.assertIn(gh["state"],
+                      ("ready", "provisionable", "unavailable"))
+        self.assertEqual(gh["available"], gh["state"] == "ready")
+        self.assertTrue(gh["note"])
+        self.assertIn("temurin-jdk", rows)
+        light = rows["rizin-objdump"]
+        self.assertEqual(light["available"],
+                         lightbin.probe()["available"])
+        self.assertTrue(rows["android-graph"]["available"])
+        for name in ("binwalk-unblob", "tshark", "frida-gdb"):
             self.assertFalse(rows[name]["available"], name)
             self.assertTrue(rows[name]["note"], name)
 

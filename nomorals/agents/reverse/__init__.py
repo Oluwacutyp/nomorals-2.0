@@ -14,20 +14,33 @@ confidence × authority + limitations on the record, and the
 residual-unknowns registry with a store-enforced close lifecycle)
 plus the native static spine — built-in ELF / PE / Mach-O inspectors
 emitting Evidence, never bare text. The ELF census generalizes
-ApkForge's proven ELF parser; no external engines run in this pass
-(the self-provisioned Ghidra rung is Pass 2).
+ApkForge's proven ELF parser.
+
+Pass 2: the self-provisioned deep providers. Where REA makes the
+human fetch every engine, Devon provisions her own — pinned
+Ghidra 12.2 + Temurin JDK 25, sha256-verified, probe-executed
+(:mod:`.provision`) — and drives Ghidra headless for functions,
+call graphs and decompiled pseudocode folded into Evidence
+(:mod:`.ghidra`); a binutils one-shot light rung covers fast
+triage (:mod:`.lightbin`); and a class/method/reference graph
+over ApkForge's jadx output answers who-calls-what as Evidence
+(:mod:`.android_graph`). Inspections route to the deepest rung
+that can answer and say which one did.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from . import android_graph, ghidra, lightbin, provision
 from .engine import (
     ReEngine,
     capability_matrix,
     render_audit,
     render_evidence_card,
+    render_graph_answer,
     render_inspect_card,
+    render_provision,
     render_status,
     render_unknowns,
 )
@@ -37,8 +50,10 @@ __all__ = [
     "ReEngine", "capability_matrix",
     "Evidence", "EvidenceStore", "Unknown", "UnknownCloseError",
     "AUTHORITIES", "CONFIDENCES",
+    "provision", "ghidra", "lightbin", "android_graph",
     "render_status", "render_inspect_card", "render_evidence_card",
-    "render_unknowns", "render_audit",
+    "render_unknowns", "render_audit", "render_provision",
+    "render_graph_answer",
     "register",
 ]
 
@@ -48,9 +63,12 @@ def register(registry: Any) -> None:
 
     ``re`` reads the evidence store (status, evidence records with
     their provenance chains, the unknowns registry, the unknowns
-    audit). ``re_inspect`` performs inspections — each one records a
-    chain of Evidence and registers the residual unknowns the parse
-    raises — and closes unknowns under the store's lifecycle rules.
+    audit) and answers Android graph queries as Evidence.
+    ``re_inspect`` performs inspections — each one records a chain
+    of Evidence and registers the residual unknowns the parse
+    raises — runs the self-provisioning drive for the deep rungs,
+    builds Android reference graphs, and closes unknowns under
+    the store's lifecycle rules.
     """
     from ...core.policy import Capability
 
@@ -60,30 +78,42 @@ def register(registry: Any) -> None:
         "re",
         description=(
             "Reverse-engineering evidence store, read side. "
-            "action=status (engine capability matrix, probe-executed "
-            "for the built-ins, plus store counts) | evidence (one "
-            "Evidence record by id or unique prefix, with its "
-            "provenance chain; empty id lists the most recent "
-            "records) | unknowns (the residual-unknown registry: "
-            "status=open|resolved|contradicted, empty status lists "
-            "all) | audit (unknowns audit: counts, the strongest "
-            "evidence on record, and which open unknowns no recorded "
-            "evidence could close yet). Evidence records are "
+            "action=status (engine capability matrix — built-ins "
+            "probe-executed, Pass 2 engines carry real provisioning "
+            "state: ready | provisionable | unavailable-with-reason "
+            "— plus store counts) | evidence (one Evidence record "
+            "by id or unique prefix, with its provenance chain; "
+            "empty id lists the most recent records) | unknowns "
+            "(the residual-unknown registry: status=open|resolved|"
+            "contradicted, empty status lists all) | audit "
+            "(unknowns audit: counts, the strongest evidence on "
+            "record, and which open unknowns no recorded evidence "
+            "could close yet) | graph (one Android reference-graph "
+            "answer as a recorded Evidence record: path = an APK "
+            "or a jadx output directory, query = callers|callees|"
+            "class|search, target = a class ('com.x.Foo' or 'Foo') "
+            "or a method ('Foo.bar')). Evidence records are "
             "content-addressed (ev:<sha256>) and carry confidence, "
             "authority and limitations on the record itself."
         ),
         capability=Capability.DB_READ,
         parameters={
-            "action": "str — status|evidence|unknowns|audit",
+            "action": "str — status|evidence|unknowns|audit|graph",
             "evidence_id": "str — evidence id or unique prefix "
                            "(action=evidence)",
             "status": "str — unknowns filter: open|resolved|"
                       "contradicted (action=unknowns)",
             "limit": "str — max rows for lists (default 20)",
+            "path": "str — APK or jadx output dir (action=graph)",
+            "query": "str — callers|callees|class|search "
+                     "(action=graph)",
+            "target": "str — class or Class.method (action=graph)",
         },
     )
     def re_tool(*, action: str = "status", evidence_id: str = "",
-                status: str = "", limit: str = "20") -> dict[str, Any]:
+                status: str = "", limit: str = "20",
+                path: str = "", query: str = "",
+                target: str = "") -> dict[str, Any]:
         act = (action or "status").strip().lower()
         engine = ReEngine(context)
         try:
@@ -100,21 +130,38 @@ def register(registry: Any) -> None:
             return engine.unknowns(status=(status or "open"), limit=n)
         if act == "audit":
             return engine.audit()
+        if act == "graph":
+            return engine.android_query(
+                path, (query or "callers").strip().lower(),
+                target)
         return {"error": f"unknown re action {act!r} — "
-                         "status|evidence|unknowns|audit"}
+                         "status|evidence|unknowns|audit|graph"}
 
     @registry.register(
         "re_inspect",
         description=(
-            "Reverse-engineering inspections + unknown closes, write "
-            "side. action=inspect (path = a local binary or artifact "
-            "file: the built-in static spine parses ELF, PE and "
-            "Mach-O — headers, sections, symbols, imports, dylibs, "
-            "hardening — and records the findings as a linked chain "
-            "of Evidence records, registers the residual unknowns "
-            "the parse raises, and journals the finding to the "
-            "decision journal and memory when bound; static only, "
-            "nothing is executed) | close (unknown_id + status="
+            "Reverse-engineering inspections + provisioning + "
+            "unknown closes, write side. action=inspect (path = a "
+            "local binary or artifact file: the built-in static "
+            "spine parses ELF, PE and Mach-O — headers, sections, "
+            "symbols, imports, dylibs, hardening — and records the "
+            "findings as a linked chain of Evidence records, "
+            "registers the residual unknowns the parse raises, and "
+            "journals the finding to the decision journal and "
+            "memory when bound; the target is then routed to the "
+            "deepest Pass 2 rung that can answer — the "
+            "self-provisioned Ghidra headless rung (functions, "
+            "call graph, decompiled pseudocode) or the binutils "
+            "light rung — and the result names the rung; deep = "
+            "auto (deepest available now) | provision (provision "
+            "missing engines first, then route) | off (spine "
+            "only); static only, nothing is executed) | provision "
+            "(run the self-provisioning drive for the deep rungs — "
+            "pinned Temurin JDK then pinned Ghidra, sha256-verified "
+            "— and report each engine's state with its attempts) | "
+            "graph (path = an APK or jadx output dir: build the "
+            "Android class/method/reference graph and record its "
+            "census as Evidence) | close (unknown_id + status="
             "resolved|contradicted: resolved takes a resolution "
             "text, contradicted takes at least one contradicting "
             "evidence id in evidence_ids, and the stated "
@@ -124,8 +171,11 @@ def register(registry: Any) -> None:
         ),
         capability=Capability.DB_WRITE,
         parameters={
-            "action": "str — inspect|close",
-            "path": "str — file to inspect (action=inspect)",
+            "action": "str — inspect|provision|graph|close",
+            "path": "str — file to inspect (action=inspect), or "
+                    "APK / jadx output dir (action=graph)",
+            "deep": "str — auto|provision|off (action=inspect, "
+                    "default auto)",
             "unknown_id": "str — unknown id or unique prefix "
                           "(action=close)",
             "status": "str — resolved|contradicted (action=close)",
@@ -141,6 +191,7 @@ def register(registry: Any) -> None:
         },
     )
     def re_inspect_tool(*, action: str = "inspect", path: str = "",
+                        deep: str = "auto",
                         unknown_id: str = "", status: str = "",
                         resolution: str = "", evidence_ids: str = "",
                         resolution_authority: str = "",
@@ -149,7 +200,14 @@ def register(registry: Any) -> None:
         act = (action or "inspect").strip().lower()
         engine = ReEngine(context)
         if act == "inspect":
-            return engine.inspect_path(path)
+            mode = (deep or "auto").strip().lower()
+            if mode not in ("auto", "provision", "off"):
+                mode = "auto"
+            return engine.inspect_path(path, deep=mode)
+        if act == "provision":
+            return engine.provision_engines()
+        if act == "graph":
+            return engine.android_graph_build(path)
         if act == "close":
             ids = tuple(x.strip() for x in (evidence_ids or "").split(",")
                         if x.strip())
@@ -162,4 +220,4 @@ def register(registry: Any) -> None:
                                        or "inferred"),
                 evidence_ids=ids)
         return {"error": f"unknown re_inspect action {act!r} — "
-                         "inspect|close"}
+                         "inspect|provision|graph|close"}
