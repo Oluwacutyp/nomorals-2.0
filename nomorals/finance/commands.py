@@ -103,8 +103,17 @@ def control_spending(tail: str, context: Any) -> str:
 # ── /mandate ───────────────────────────────────────────────────────────
 
 def control_mandate(tail: str, context: Any) -> str:
-    """/mandate issue <scope> <per-txn> <per-day> [ttl-days] [per-week] [per-month]
-    /mandate list | /mandate describe <id> | /mandate revoke <id> | /mandate revoke-all"""
+    """/mandate issue <scope> <per-txn> [per-day] [ttl-days] [per-week] [per-month]
+    /mandate list | /mandate describe <id> | /mandate revoke <id> | /mandate revoke-all
+
+    The one mandate handler (AA-51, 2026-11-05): the partner
+    runtime's second dispatch branch and its mixin handler
+    (``_control_mandate``) were unreachable and are consolidated
+    here.  That handler's documented grammar survives the merge:
+    per-day is optional (default 4× the per-transaction cap) and
+    ``stop all`` is accepted as a synonym for ``revoke-all`` — both
+    spellings are what the command catalogue has always promised.
+    """
     from .mandate import (MandateStore, SCOPE_ALL, SCOPE_TRANSFER,
                           SCOPE_TRAVEL, mandate_remaining)
 
@@ -131,6 +140,8 @@ def control_mandate(tail: str, context: Any) -> str:
             lines.append(f"  • {m.id} [{state}] scope={m.scope} {caps}")
         return "\n".join(lines)
     verb = parts[0].lower()
+    if verb == "stop" and len(parts) >= 2 and parts[1].lower() == "all":
+        verb = "revoke-all"  # documented synonym, see docstring
     if verb == "describe" and len(parts) >= 2:
         m = store.get(parts[1])
         if m is None:
@@ -141,13 +152,16 @@ def control_mandate(tail: str, context: Any) -> str:
         rem_txt = ", ".join(f"{k}: {format_naira(v)}"
                             for k, v in rem.items())
         return m.describe() + f"\nremaining → {rem_txt}"
-    if verb == "issue" and len(parts) >= 4:
+    if verb == "issue" and len(parts) >= 3:
         scope = parts[1].lower()
         if scope not in (SCOPE_TRANSFER, SCOPE_TRAVEL, SCOPE_ALL):
             return (f"unknown scope {scope!r} — use transfer, travel, or all")
         txn_kobo = parse_amount(parts[2])
-        day_kobo = parse_amount(parts[3])
-        if txn_kobo is None or day_kobo is None:
+        # Per-day is optional (the documented grammar): default 4×
+        # the per-transaction cap, the retired handler's rule.
+        day_kobo = (parse_amount(parts[3]) if len(parts) >= 4
+                    else (txn_kobo * 4 if txn_kobo is not None else None))
+        if txn_kobo is None or txn_kobo <= 0 or day_kobo is None:
             return ("couldn't parse caps — "
                     "e.g. /mandate issue transfer 50k 200k")
         ttl = 30.0
@@ -186,10 +200,10 @@ def control_mandate(tail: str, context: Any) -> str:
         n = store.revoke_all("owner")
         return f"revoked {n} mandate(s) — all agent spending is now blocked."
     return ("usage:\n"
-            "  /mandate issue <transfer|travel|all> <per-txn> <per-day> "
+            "  /mandate issue <transfer|travel|all> <per-txn> [per-day] "
             "[days] [per-week] [per-month]\n"
             "  /mandate list | /mandate describe <id>\n"
-            "  /mandate revoke <id> | /mandate revoke-all\n"
+            "  /mandate revoke <id> | /mandate revoke-all (or stop all)\n"
             "e.g. /mandate issue transfer 50k 200k 30 1m 3m")
 
 

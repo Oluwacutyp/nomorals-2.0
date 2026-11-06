@@ -167,6 +167,29 @@ def _parser() -> argparse.ArgumentParser:
                          help="grant expiry in hours (default: no expiry)")
     consent.add_argument("--json", action="store_true",
                          help="Output as JSON")
+    bench = sub.add_parser("bench",
+                           help="run the system benchmark (native vs "
+                                "pure-Python kernels) — not `nm "
+                                "benchmark` (the K3 scoreboard)")
+    bench.add_argument("--quick", action="store_true",
+                       help="smaller workloads")
+    bench.add_argument("--save", action="store_true",
+                       help="save this run as the baseline")
+    bench.add_argument("--json", action="store_true",
+                       help="Output as JSON")
+
+    organs = sub.add_parser("organs",
+                            help="the dormant-organ catalogue and "
+                                 "source-tree inventory (AA-48/49)")
+    organs.add_argument("action", nargs="?", default="list",
+                        choices=["list", "scan", "find"],
+                        help="list the catalogue (default), scan the "
+                             "source tree for dormant modules, or find "
+                             "catalogue entries by keyword")
+    organs.add_argument("keyword", nargs="?", default="",
+                        help="keyword for `find`")
+    organs.add_argument("--json", action="store_true",
+                        help="Output as JSON")
     sub.add_parser("config", aliases=CLI_ALIASES["config"],
                    help="print the effective configuration")
     sub.add_parser("setup", aliases=CLI_ALIASES["setup"], help="guided model setup wizard")

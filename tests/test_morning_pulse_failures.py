@@ -542,17 +542,30 @@ def test_converted_day_wrap_records_and_returns_empty(tmp_path, monkeypatch):
 
 
 def test_converted_tomorrow_spec_records_and_skips_job(tmp_path, monkeypatch):
+    # AA-44 conversion (2026-11-05): _tomorrow_preview now also appends
+    # tomorrow's weather (the retired evening_pulse remainder).  The
+    # weather stage is stubbed off here so this pin keeps measuring
+    # exactly what it always measured — the jobs stage records the bad
+    # spec and contributes no line.  The weather append itself is
+    # pinned in tests/test_final_audit_pass.py.
     monkeypatch.setattr(
         "nomorals.agents.scheduler.Scheduler",
         lambda ctx: _SchedStub(jobs=[{"name": "backup", "spec": "daily "}]))
+    monkeypatch.setattr("nomorals.agents.weather.geocode",
+                        lambda place: None)
     assert mp._tomorrow_preview(_ctx(tmp_path)) == ""
     assert "morning_pulse._tomorrow_preview.spec" in _sites()
 
 
 def test_converted_tomorrow_outer_records_and_returns_empty(tmp_path, monkeypatch):
+    # AA-44 conversion: same weather-stage stub as the spec pin above;
+    # the jobs stage's outer failure still records and yields no jobs
+    # lines.
     monkeypatch.setattr(
         "nomorals.agents.scheduler.Scheduler",
         lambda ctx: _SchedStub(list_raises=True))
+    monkeypatch.setattr("nomorals.agents.weather.geocode",
+                        lambda place: None)
     assert mp._tomorrow_preview(_ctx(tmp_path)) == ""
     assert "morning_pulse._tomorrow_preview.outer" in _sites()
 

@@ -407,6 +407,14 @@ class GroupStore:
             return None
         if announcement and group.role_of(author) not in (ROLE_OWNER, ROLE_ADMIN):
             return None  # announcements are role-gated
+        if announcement:
+            # Announcements carry the group's semantic marker + lead
+            # emoji (group_extras, AA-40): the stored post renders
+            # marked in every feed.  Lazy import, same pattern as the
+            # events linkage below — no module-level cycle.
+            from .group_extras import mark_semantics
+
+            text = mark_semantics(text, "announcement")
         p = GroupPost(
             id="post_" + new_short_id(),
             group_id=group_id,

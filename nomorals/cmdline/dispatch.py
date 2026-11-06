@@ -89,7 +89,9 @@ from .commands.status import _cmd_status
 from .commands.session import _cmd_session
 from .commands.chat import _cmd_chat
 from .commands.completion import _cmd_completion
+from .commands.bench import _cmd_bench
 from .commands.consent import _cmd_consent
+from .commands.organs import _cmd_organs
 from .commands.swarm import _cmd_swarm
 from .commands.timeline import _cmd_timeline
 from .commands.tools import _cmd_tools
@@ -295,6 +297,8 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "config": _CommandSpec(_cmd_config, needs_context=False),
     "completion": _CommandSpec(_cmd_completion, needs_context=False),
     "consent": _CommandSpec(_cmd_consent, needs_context=False),
+    "bench": _CommandSpec(_cmd_bench, needs_context=False),
+    "organs": _CommandSpec(_cmd_organs, needs_context=False),
     # everything else runs inside build_context()
     "setup": _CommandSpec(_cmd_setup),
     "models": _CommandSpec(_dispatch_models),

@@ -669,7 +669,12 @@ def format_recap(recap: PartyRecap) -> str:
                                for a in recap.achievements))
     if recap.attendees:
         lines.append(f"\n👥 {len(recap.attendees)} in the room.")
-    return "\n".join(lines)
+    # The recap is the party's loudest group surface: it renders in
+    # the hype_man register (group_extras, AA-40) — greeting, emoji
+    # frame, sign-off — while the recap body itself is untouched.
+    from .group_extras import render_in_register
+
+    return render_in_register("\n".join(lines), "hype_man")
 
 
 def format_last_night_card(recap: PartyRecap) -> str:

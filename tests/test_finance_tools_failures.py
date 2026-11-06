@@ -25,10 +25,10 @@ from unittest import mock
 import nomorals.accounts.vault as vault_mod
 import nomorals.agents.notifier as notifier_mod
 import nomorals.finance.alerts as alerts_mod
-import nomorals.finance.budgets as budgets_mod
 import nomorals.finance.goals as goals_mod
 import nomorals.finance.insights as insights_mod
 import nomorals.finance.overview as overview_mod
+from nomorals.finance import digest as digest_mod
 from nomorals.finance import tools as tools_mod
 
 
@@ -149,12 +149,23 @@ def test_alert_notify_publish_control_delivers() -> None:
 # ── 564 ─────────────────────────────────────────────────────────────
 
 def _digest_patches(notifier):
+    # AA-45 conversion (2026-11-05): the digest composition moved
+    # from tools.finance_digest to finance.digest.compose_weekly_
+    # digest (the tool delegates).  The seams patched below are the
+    # composition's new home module; the pinned behavior (site 564:
+    # a publish crash reports delivered: False) is unchanged.
     return (
-        mock.patch.object(tools_mod, "_ledger_budgets",
-                          return_value=(object(), object())),
-        mock.patch.object(tools_mod, "weekly_digest", return_value="WEEK"),
-        mock.patch.object(budgets_mod, "budget_status", return_value=[]),
-        mock.patch.object(budgets_mod, "overspend_alerts", return_value=[]),
+        mock.patch.object(digest_mod, "finance_paths",
+                          return_value=(None, None)),
+        mock.patch.object(digest_mod, "Ledger",
+                          lambda path: object()),
+        mock.patch.object(digest_mod, "BudgetStore",
+                          lambda path: object()),
+        mock.patch.object(digest_mod, "weekly_digest",
+                          return_value="WEEK"),
+        mock.patch.object(digest_mod, "budget_status", return_value=[]),
+        mock.patch.object(digest_mod, "overspend_alerts",
+                          return_value=[]),
         mock.patch.object(
             insights_mod, "safe_to_spend",
             return_value={"safe_kobo": 0, "expected_income_kobo": 0,

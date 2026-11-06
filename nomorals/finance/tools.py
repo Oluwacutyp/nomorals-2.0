@@ -515,55 +515,11 @@ def register(registry: Any) -> None:
         parameters={},
     )
     def finance_digest(context: Any) -> dict[str, Any]:
-        from .budgets import budget_status, month_key, overspend_alerts
-        from .goals import GoalStore, goal_progress
-        from .insights import safe_to_spend, upcoming_bills
-        ledger, budgets = _ledger_budgets(context)
-        text = weekly_digest(ledger, budgets)
-        statuses = budget_status(ledger, budgets, month_key())
-        over = [a for a in overspend_alerts(statuses)
-                if a["level"] == "over"]
-        if over:
-            worst = over[0]
-            text += (
-                f"\n\n🚨 overspend alert: you've spent "
-                f"{format_naira(worst['spent_kobo'])} on "
-                f"{worst['category']} against a "
-                f"{format_naira(worst['budgeted_kobo'])} budget "
-                f"({worst['pct_used']:.0%} used)")
-        # Safe-to-spend (Simplifi's number) rides along.
-        safe = safe_to_spend(ledger)
-        text += (f"\n\n💸 safe to spend: {format_naira(safe['safe_kobo'])} "
-                 f"(expected {format_naira(safe['expected_income_kobo'])}/mo "
-                 f"− {format_naira(safe['committed_recurring_kobo'])} "
-                 f"recurring − {format_naira(safe['spent_this_month_kobo'])} "
-                 f"spent)")
-        # Upcoming bills (Rocket Money's core view) ride along.
-        bills = upcoming_bills(ledger, days=14)
-        if bills:
-            text += "\n\n🧾 upcoming bills:"
-            for b in bills:
-                text += (f"\n  • {b.note_pattern} — "
-                         f"{format_naira(b.amount_kobo)}")
-        # Savings-goal pace flags ride along with the digest.
-        off_pace = []
-        for g in GoalStore().list():
-            if g.snoozed:
-                continue
-            p = goal_progress(g, ledger)
-            if p.get("on_track") is False:
-                off_pace.append(g.name)
-        if off_pace:
-            text += ("\n\n🎯 off pace on savings goals: "
-                     + ", ".join(off_pace))
-        try:
-            from ..agents.notifier import Notifier
-            Notifier(context).publish(
-                "finance_digest", "weekly money digest", text)
-            delivered = True
-        except Exception:
-            delivered = False
-        return {"ok": True, "delivered": delivered, "text": text}
+        # The composition lives in finance/digest.py (AA-45): one
+        # canonical weekly digest for the tool and the cron surfaces.
+        from .digest import compose_weekly_digest
+
+        return compose_weekly_digest(context)
 
     @registry.register(
         "finance_mandate",

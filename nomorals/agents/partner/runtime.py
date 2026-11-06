@@ -5186,7 +5186,19 @@ class PartnerRuntime(
 
             return control_spending(command.tail or arg, context=self.context)
         if kind == "mandate":
-            # Payment mandates: /mandate issue|list|revoke|revoke-all
+            # Payment mandates: /mandate issue|list|revoke|revoke-all.
+            # AA-51 (2026-11-05): this is the ONE dispatch branch.  A
+            # second branch further down this chain (to the mixin's
+            # _control_mandate) could never execute — this branch
+            # returns first — so the dead branch and its duplicate
+            # handler are gone.  The operator gate is repeated here
+            # in the same idiom as the gated neighbours below:
+            # caller_may_run already refuses non-owners for this kind
+            # at the top of this function, and the branch keeps the
+            # invariant locally rather than depending on the
+            # capability table never changing.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
             from ...finance.commands import control_mandate
 
             return control_mandate(command.tail or arg, context=self.context)
@@ -5963,11 +5975,6 @@ class PartnerRuntime(
                 return "that one's just for the owner."
             return self._control_health(command.tail or arg,
                                         chat_key=chat_key)
-        if kind == "mandate":
-            if message is not None and not self._is_operator(message):
-                return "that one's just for the owner."
-            return self._control_mandate(command.tail or arg,
-                                         chat_key=chat_key)
         if kind == "train":
             if message is not None and not self._is_operator(message):
                 return "that one's just for the owner."

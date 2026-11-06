@@ -1437,10 +1437,44 @@ def _tomorrow_preview(context: Any) -> str:
                 except Exception as exc:  # noqa: BLE001
                     record_failure("morning_pulse._tomorrow_preview.spec", exc)
                     continue
-        return "\n".join(lines[:8])
+        out = "\n".join(lines[:8])
     except Exception as exc:  # noqa: BLE001
         record_failure("morning_pulse._tomorrow_preview.outer", exc)
-        return ""
+        out = ""
+    # Tomorrow's Lagos weather — carried over from the retired
+    # evening_pulse module (AA-44 consolidation, 2026-11-05): its
+    # Tomorrow outlook always included the next-day forecast.  The
+    # live engine's preview was jobs-only; the line rides here so the
+    # evening wrap keeps it.  Best-effort: any failure omits the line.
+    try:
+        from .weather import fetch_forecast, geocode
+
+        place = geocode("Lagos")
+        if place is not None:
+            fc = fetch_forecast(place.latitude, place.longitude, days=2,
+                                units="metric")
+            daily = (fc or {}).get("daily") or []
+            if len(daily) > 1:
+                # Provider fallbacks disagree on the element type:
+                # Open-Meteo yields DayForecast objects, wttr.in /
+                # met.no yield plain dicts.  Read both shapes.
+                tom = daily[1]
+                if isinstance(tom, dict):
+                    from .weather import WMO
+
+                    desc = WMO.get(int(tom.get("weather_code", -1)),
+                                   ("—", ""))[0]
+                    tmin = float(tom.get("temp_min", 0))
+                    tmax = float(tom.get("temp_max", 0))
+                else:
+                    desc, tmin, tmax = (tom.description, tom.temp_min,
+                                        tom.temp_max)
+                wline = (f"• Weather tomorrow ({place.label}): "
+                         f"{desc}, {tmin:.0f}–{tmax:.0f}°C")
+                out = (out + "\n" + wline) if out else wline
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse._tomorrow_preview.weather", exc)
+    return out
 
 
 def _pending_items(context: Any) -> str:
@@ -1549,6 +1583,50 @@ def _deliver_slot_text(context: Any, slot: str, text: str) -> bool:
         return False
 
 
+def _fold_evening_digest(context: Any, text: str) -> tuple[str, list[str]]:
+    """Fold the DIGEST-tier alert backlog into the evening wrap text.
+
+    Carried over from the retired evening_pulse module (AA-44
+    consolidation, 2026-11-05): the evening briefing was the second
+    daily fold of the alert digest — the morning briefing folds once
+    via ``AlertDigestProvider`` — but the multi-slot engine never
+    folded outside the morning pipeline, so digest items raised
+    after the morning briefing waited a full day.  The fold renders
+    through the shared :func:`alert_digest_lines`, exactly as the
+    legacy module did.  Collecting marks NOTHING: the returned ids
+    are marked folded by :func:`_mark_evening_digest_folded` only
+    after the slot text is confirmed delivered, so a failed delivery
+    leaves the digest intact for the next briefing.  Never raises.
+    """
+    try:
+        from ..social.chat.present import SIGNPOSTS
+        from .morning_briefing import alert_digest_lines
+        from .notifier import Notifier
+
+        rows = Notifier(context).digest_unfolded(limit=20)
+        lines = alert_digest_lines(rows)
+        if not lines:
+            return text, []
+        ids = [str(r.get("id") or "") for r in rows if r.get("id")]
+        section = (f"{SIGNPOSTS['alert_digest']} Alert digest\n"
+                   + "\n".join(lines))
+        return (text.rstrip() + "\n\n" + section).strip(), ids
+    except Exception as exc:  # noqa: BLE001 — the fold never sinks the slot
+        record_failure("morning_pulse._fold_evening_digest", exc)
+        return text, []
+
+
+def _mark_evening_digest_folded(context: Any, ids: list[str]) -> int:
+    """Mark evening-folded digest rows folded (post-delivery only)."""
+    try:
+        from .notifier import Notifier
+
+        return Notifier(context).mark_digest_folded(ids)
+    except Exception as exc:  # noqa: BLE001 — bookkeeping only
+        record_failure("morning_pulse._mark_evening_digest_folded", exc)
+        return 0
+
+
 def run_slot(context: Any, slot: str = "morning") -> dict[str, Any]:
     """Run one briefing slot end-to-end.  Never raises.
 
@@ -1575,6 +1653,12 @@ def run_slot(context: Any, slot: str = "morning") -> dict[str, Any]:
         text, story_items = _compose_evening(context)
     stages.append("compose")
 
+    # Evening only: fold the alert digest into the wrap (AA-44 — the
+    # retired evening_pulse module's F7 fold, now on the live slot).
+    digest_ids: list[str] = []
+    if slot == "evening":
+        text, digest_ids = _fold_evening_digest(context, text)
+
     # voice only when explicitly enabled for the slot
     audio_path = ""
     if slot_voice(context, slot):
@@ -1591,6 +1675,11 @@ def run_slot(context: Any, slot: str = "morning") -> dict[str, Any]:
     text_ok = _deliver_slot_text(context, slot, text)
     audio_ok = _deliver_audio(context, audio_path) if audio_path else False
     stages.append("deliver")
+
+    # The digest fold is consumed only by a confirmed text delivery.
+    if digest_ids and text_ok:
+        _mark_evening_digest_folded(context, digest_ids)
+        stages.append("digest")
 
     # The full story list, in confirmed segments (F6): marking rides
     # each segment's own delivery confirmation — never the head

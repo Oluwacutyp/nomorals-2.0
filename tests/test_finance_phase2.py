@@ -463,7 +463,13 @@ def test_control_mandate(tmp_path, monkeypatch):
     mid = [l for l in out.splitlines() if "mand_" in l][0].split()[1]
     out = cmds.control_mandate(f"revoke {mid}", ctx)
     assert "revoked" in out
+    # AA-51 grammar merge: per-day is optional per the documented
+    # catalogue grammar (default 4× per-txn), so this now issues —
+    # the pre-merge assertion expected "usage" from the stricter
+    # positional grammar that the catalogue never promised.
     out = cmds.control_mandate("issue transfer 5k", ctx)
+    assert "mandate issued" in out
+    out = cmds.control_mandate("issue", ctx)
     assert "usage" in out
 
 
