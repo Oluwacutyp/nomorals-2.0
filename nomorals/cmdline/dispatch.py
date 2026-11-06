@@ -16,6 +16,7 @@ from .commands.backup import _cmd_backup
 from .commands.benchmark import _cmd_benchmark
 from .commands.bet import _cmd_bet
 from .commands.apk import _cmd_apk
+from .commands.re import _cmd_re
 from .commands.desk import _cmd_desk
 from .commands.pump import _cmd_pump
 from .commands.book import _cmd_book
@@ -385,6 +386,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "account": _CommandSpec(_cmd_account),
     "bet": _CommandSpec(_cmd_bet),
     "apk": _CommandSpec(_cmd_apk),
+    "re": _CommandSpec(_cmd_re),
     "desk": _CommandSpec(_cmd_desk),
     "pump": _CommandSpec(_cmd_pump),
     "build": _CommandSpec(_cmd_build),

@@ -3672,6 +3672,104 @@ class RuntimeGamesMixin:
         return f"unknown /apk verb {verb!r}\n{_usage()}"
 
     # ── pump desk: /pump (pump.fun intelligence, signals only) ────────
+    def _control_re(self, tail: str, chat_key: str = "") -> str:
+        """/re — the reverse-engineering organ (Pass 1).
+
+        /re status               — engine matrix + store counts
+        /re inspect <path>       — static-inspect one binary file:
+                                   Evidence chain + residual unknowns,
+                                   journaled to decisions + memory
+        /re evidence [id]        — recent evidence, or one record
+                                   with its provenance chain
+        /re unknowns             — the open residual unknowns
+        /re close <id> [observed|derived|inferred] <resolution>
+                                 — close an unknown; the stated
+                                   confidence pairs with authority
+                                   shipped-artifact (observed/derived)
+                                   or analyst-inference (inferred),
+                                   and the store refuses a close
+                                   weaker than the unknown requires
+        /re audit                — the unknowns audit
+        """
+        from ..reverse import (
+            ReEngine,
+            render_audit,
+            render_evidence_card,
+            render_status,
+            render_unknowns,
+        )
+
+        engine = ReEngine(getattr(self, "context", None))
+        parts = (tail or "").strip().split()
+        verb = parts[0].lower() if parts else ""
+
+        def _usage() -> str:
+            return "\n".join([
+                "/re status — engine matrix + store counts",
+                "/re inspect <path> — static-inspect a binary "
+                "(evidence + unknowns, journaled)",
+                "/re evidence [id] — recent evidence, or one record "
+                "with its provenance chain",
+                "/re unknowns — open residual unknowns",
+                "/re close <id> [observed|derived|inferred] "
+                "<resolution> — close an unknown",
+                "/re audit — unknowns audit",
+            ])
+
+        if verb in ("", "status"):
+            return render_status(engine.status())
+        if verb == "inspect":
+            if len(parts) < 2:
+                return "usage: /re inspect <path>"
+            res = engine.inspect_path(" ".join(parts[1:]))
+            if res.get("error"):
+                return f"⚠️ {res['error']}"
+            return str(res["card_text"])
+        if verb == "evidence":
+            if len(parts) < 2:
+                payload = engine.evidence_list(limit=10)
+                rows = payload["evidence"]
+                if not rows:
+                    return ("no evidence recorded yet — "
+                            "/re inspect <path> makes the first record")
+                lines = ["recent evidence:"]
+                for row in rows:
+                    lines.append(
+                        f"  {row['evidence_id']} · "
+                        f"{row['predicate_type']} · "
+                        f"{row['subject_name']}")
+                return "\n".join(lines)
+            return render_evidence_card(engine.evidence(parts[1]))
+        if verb == "unknowns":
+            payload = engine.unknowns(status="open")
+            return render_unknowns(payload["unknowns"],
+                                   title="open residual unknowns")
+        if verb == "audit":
+            return render_audit(engine.audit())
+        if verb == "close":
+            if len(parts) < 3:
+                return ("usage: /re close <unknown-id> "
+                        "[observed|derived|inferred] <resolution>")
+            rest = parts[2:]
+            confidence = "inferred"
+            if rest and rest[0].lower() in (
+                    "observed", "derived", "inferred"):
+                confidence = rest[0].lower()
+                rest = rest[1:]
+            authority = ("analyst-inference" if confidence == "inferred"
+                         else "shipped-artifact")
+            out = engine.close_unknown(
+                parts[1], status="resolved",
+                resolution=" ".join(rest),
+                resolution_authority=authority,
+                resolution_confidence=confidence)
+            if out.get("error"):
+                return f"⚠️ {out['error']}"
+            unk = out["unknown"]
+            return (f"closed {unk['unknown_id']} as resolved "
+                    f"({authority} / {confidence}): {unk['resolution']}")
+        return _usage()
+
     def _control_pump(self, tail: str, chat_key: str) -> str:
         """/pump — the pump.fun intelligence desk (signals only).
 

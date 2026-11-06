@@ -130,6 +130,20 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
                "tool_modules": {"failed": _failed},
                "config_keys": _status if _status is not None
                else {"error": _status_error}}
+    # RE organ engine availability: the capability matrix is
+    # probe-executed for the built-in inspectors — a parser that
+    # cannot parse its own probe reports unavailable, never assumed.
+    # Observational only, never part of the exit code: Pass-2 rungs
+    # not yet built are roadmap, not defects.
+    _re_section = None
+    _re_error = ""
+    try:
+        from ...agents.reverse import capability_matrix
+        _re_section = capability_matrix()
+    except Exception as exc:  # noqa: BLE001 — doctor must always report
+        _re_error = f"{type(exc).__name__}: {exc}"
+    payload["re_engines"] = (_re_section if _re_section is not None
+                             else {"error": _re_error})
     if getattr(args, "live", False):
         payload["live"] = (_live.to_dict() if _live is not None
                            else {"error": _live_error})
@@ -176,6 +190,13 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
                   f"({_rung.get('language')}): {_rung.get('detail')}")
     else:
         print("  ✗ rung probe failed — no rung state to report")
+    print("\nreverse engineering engines:")
+    if _re_section is not None:
+        for row in _re_section:
+            mark = "✓" if row["available"] else "✗"
+            print(f"  {mark} {row['engine']}: {row['note']}")
+    else:
+        print(f"  ✗ capability matrix failed — {_re_error}")
     if getattr(args, "live", False):
         print("\nlive verification:")
         if _live is not None:

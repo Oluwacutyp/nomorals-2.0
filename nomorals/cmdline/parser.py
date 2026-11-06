@@ -43,6 +43,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "autonomy": ["auto"],
     "bet": ["bt"],
     "apk": [],
+    "re": [],
     "desk": [],
     "pump": [],
     "book": ["bk"],
@@ -1990,6 +1991,42 @@ def _parser() -> argparse.ArgumentParser:
     a_rd = apk_sub.add_parser("read", help="read one text file (smali above all) from a project's decoded tree")
     a_rd.add_argument("project")
     a_rd.add_argument("target")
+
+    re_p = sub.add_parser("re", aliases=CLI_ALIASES["re"],
+        help="Reverse engineering: evidence-led static inspection of binaries (Pass 1: built-in ELF/PE/Mach-O spine)",
+        description=("nm re status\n"
+                     "nm re inspect <path>\n"
+                     "nm re evidence [id]\n"
+                     "nm re unknowns [--status open|resolved|contradicted]\n"
+                     "nm re audit\n"
+                     "nm re close <unknown-id> <resolution...>"),
+    )
+    re_sub = re_p.add_subparsers(dest="re_action", required=True)
+    re_sub.add_parser("status", help="engine capability matrix + store counts")
+    r_ins = re_sub.add_parser("inspect", help="static-inspect one binary file → Evidence chain + residual unknowns")
+    r_ins.add_argument("path")
+    r_ev = re_sub.add_parser("evidence", help="one Evidence record with its provenance chain (or the recent list)")
+    r_ev.add_argument("evidence_id", nargs="?", default="",
+                      help="evidence id or unique prefix")
+    r_un = re_sub.add_parser("unknowns", help="the residual-unknown registry")
+    r_un.add_argument("--status", default="open",
+                      choices=["open", "resolved", "contradicted"],
+                      help="filter by lifecycle status (default open)")
+    re_sub.add_parser("audit", help="unknowns audit: counts + what current evidence cannot close")
+    r_cl = re_sub.add_parser("close", help="close a residual unknown under the lifecycle rules")
+    r_cl.add_argument("unknown_id")
+    r_cl.add_argument("resolution", nargs="*",
+                      help="the answer, in words (required for resolved)")
+    r_cl.add_argument("--status", dest="status_kind", default="resolved",
+                      choices=["resolved", "contradicted"])
+    r_cl.add_argument("--authority", default="analyst-inference",
+                      choices=["shipped-artifact", "controlled-replay",
+                               "historical-reference", "external-service",
+                               "analyst-inference"],
+                      help="authority the close rests on")
+    r_cl.add_argument("--confidence", default="inferred",
+                      choices=["observed", "derived", "inferred"],
+                      help="confidence the close states")
     a_bi = apk_sub.add_parser("bisect", help="find the version where a dossier property flipped (git-bisect contract over the version series)")
     a_bi.add_argument("series", nargs="+",
                       help="project refs of ONE app (sorted by versionCode)")

@@ -67,6 +67,7 @@ AGENT_TOOL_MODULES = (
     "research_lexicon",
     "research_loop",
     "research_swarm",
+    "reverse",
     "router_select",
     "search.engine",
     "simulation",

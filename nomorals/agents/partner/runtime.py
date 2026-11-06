@@ -6428,6 +6428,8 @@ class PartnerRuntime(
             return self._control_desk(command.tail or arg, chat_key=chat_key)
         if kind == "apk":
             return self._control_apk(command.tail or arg, chat_key=chat_key)
+        if kind == "re":
+            return self._control_re(command.tail or arg, chat_key=chat_key)
         if kind == "pump":
             return self._control_pump(command.tail or arg, chat_key=chat_key)
         if kind == "money":

@@ -738,6 +738,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "bet": (0, None),        # /bet analyze <home> vs <away> [odds…] | bankroll | backtest
     "desk": (0, None),       # /desk status|study|signals|library|collect|sources|provision — the betting desk (crash lab + signal calls)
     "apk": (0, None),        # /apk add|list|status|show|dissect|teach|diff|bisect|signatures|hexpatch|artifacts|send — ApkForge: APK intake, dissection, editing/building (A2), version bisect + signature growth + native patching (A3)
+    "re": (0, None),         # /re status|inspect <path>|evidence [id]|unknowns|close <id> [observed|derived] <resolution>|audit — the RE organ: evidence-led static inspection of binaries (Evidence records + residual unknowns; Pass 1 built-in ELF/PE/Mach-O spine)
     "pump": (0, None),       # /pump status|watch|study|dossier <mint>|calls|wallet <addr>|graph|attention <mint>|learn|shelf <q>|sources|watch|provision — the pump.fun intelligence desk (signals only)
     "finance": (0, None),    # /finance quote|analyze|signal|idea|backtest|strategies|compare|watch|doctor
     "weather": (0, None),    # /weather [place] — live conditions + forecast + alerts
@@ -3525,6 +3526,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/apk add <path-or-url> | /apk list | /apk status | /apk show <project> | /apk dissect <project> | /apk teach <project> [topic] | /apk diff <project> <other> | /apk bisect <p1,p2,…> <predicate> | /apk signatures | /apk hexpatch <project> <json> | /apk artifacts | /apk send <artifact> <platform> <chat>",
             "example": "/apk add https://example.com/app.apk",
             "related": "/museum /filesend"},
+    "re": {"what": "the reverse-engineering organ: static inspection of binary files under an evidence discipline mined from REA and exceeded — every finding lands as a content-addressed Evidence record (confidence × authority, limitations carried on the record, provenance links to the evidence it rests on), what a parse cannot establish registers as a residual unknown with the authority/confidence closing it would take, and findings journal into the decision journal and memory. Pass 1 is the built-in static spine: ELF (generalizing ApkForge's census parser, plus program headers, needed libraries, static symbols, hardening), PE (imports/exports, certificate table, hardening flags) and Mach-O including fat binaries (load commands, dylibs, symbols, code-signature presence) — parsed by Devon's own parsers, nothing executed. Deep engines (the self-provisioned Ghidra rung) are Pass 2 and the status matrix says so.",
+           "usage": "/re status | /re inspect <path> | /re evidence [id] | /re unknowns | /re close <unknown-id> [observed|derived|inferred] <resolution> | /re audit",
+           "example": "/re inspect /usr/bin/ls",
+           "related": "/apk /audit"},
     "pump": {"what": "the pump.fun intelligence desk: a launch firehose (PumpPortal + public Solana RPC + frontend backfill, health-graded on the shared source registry) feeds per-token dossiers built from chain evidence — curve state in SOL (including virtual/real reserve divergence), dev launch/rug history, block-0 bundle absorption, authority flags, holder concentration, wash scores. A computed de-rug gate (INSUFFICIENT_DATA / NO_CALL / CALL_CANDIDATE) decides what is callable; calls publish like signals with entry/target/invalidation/expiry in SOL terms and grade themselves against outcomes in an append-only ledger, hit rate reported against the ~1% graduation base rate. P2 adds a smart-money graph (wallets graded by FIFO realized PnL from observed trades, cohort clustering on co-entry evidence), an attention verifier (organic vs manufactured hype, cross-checked against the real buyer base), a learning loop that recalibrates the score weights from the graded journal in journaled bounded steps, and Library shelving of dossiers/wallets as retrievable knowledge. Signals only — it never buys or sells, holds no wallet keys, signs nothing.",
             "usage": "/pump status | /pump watch | /pump study | /pump dossier <mint> | /pump calls | /pump wallet <addr> | /pump graph | /pump attention <mint> | /pump learn | /pump shelf <query> | /pump sources | /pump watch dev|smart <wallet> | /pump provision",
             "example": "/pump status",
@@ -4017,7 +4022,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "desk", "apk", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
+                            "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
                            "exness", "stripe", "content",
                            "tempmail", "checkmail", "vnumber", "checksms",
                            "browser", "paper", "backup"]),
@@ -4326,7 +4331,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "artifact", "api", "proxy", "toolhub", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
-      "monitor", "investigate", "bet", "desk", "apk", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
+      "monitor", "investigate", "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion", "gcal", "trello", "exness", "stripe",
       "guardrails", "content",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
@@ -4647,6 +4652,7 @@ LIST_ONELINERS: dict[str, str] = {
     "bet": "sports bet analyst: ensemble ML odds analysis + Kelly stakes",
     "desk": "betting desk: crash pattern lab, verdicts library, timed signal calls",
     "apk": "ApkForge: land, dissect, learn from and diff APKs",
+    "re": "Reverse engineering: evidence-led static inspection of binaries",
     "pump": "pump.fun intelligence desk: dossiers, de-rug gate, self-graded signal calls",
     "weather": "live weather, alerts, USA situations overview",
     "tz": "timezone conversion + your labeled local time",
