@@ -2864,7 +2864,8 @@ def _parser() -> argparse.ArgumentParser:
 
     trade = sub.add_parser("trade", aliases=CLI_ALIASES["trade"],
         help="FinancialExpert trading brain (Sentinel.py engine)",
-        description=("nm trade analyze BTC/USDT [--market crypto] [--timeframe 1h]\n"
+        description=("nm trade read XAUUSD [--market forex]\n"
+                     "nm trade analyze BTC/USDT [--market crypto] [--timeframe 1h]\n"
                      "nm trade backtest XAUUSD --market forex [--profile aggressive]\n"
                      "nm trade signal ETH/USDT\n"
                      "nm trade compare BTC/USDT,ETH/USDT,SOL/USDT\n"
@@ -2879,6 +2880,10 @@ def _parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     trade_sub = trade.add_subparsers(dest="trade_action", required=True)
+    t_read = trade_sub.add_parser("read", help="standing whole-market read (D1·H4·H1·M30·M15·M5 structure + zones)")
+    t_read.add_argument("symbol", help="e.g. XAUUSD, BTC/USDT")
+    t_read.add_argument("--market", default="crypto", help="crypto|forex|stocks")
+    t_read.add_argument("--json", action="store_true", help="Output as JSON")
     t_analyze = trade_sub.add_parser("analyze", help="plain-language regime + strategy brief")
     t_analyze.add_argument("symbol", help="e.g. BTC/USDT, XAUUSD")
     t_analyze.add_argument("--market", default="crypto", help="crypto|forex|stocks")

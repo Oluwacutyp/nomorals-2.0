@@ -18,6 +18,15 @@ def _cmd_trade(args: argparse.Namespace, context: Any) -> int:
     as_json = getattr(args, "json", False)
     action = args.trade_action
     try:
+        if action == "read":
+            from ...agents.market_read import render_read, whole_market_read
+            rep = whole_market_read(
+                args.symbol, market=args.market, journal=True,
+                settings=getattr(context, "settings", None))
+            _emit(args, rep, render_read(rep))
+            # Honest exit: a read with every timeframe missing failed.
+            return 0 if any(b["status"] != "missing"
+                            for b in rep["timeframes"].values()) else 1
         if action == "analyze":
             rep = FinancialExpert(context).analyze(
                 args.symbol, market=args.market,

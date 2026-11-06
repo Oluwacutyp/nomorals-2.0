@@ -661,6 +661,8 @@ def register(registry: Any) -> None:
         "trading",
         description=(
             "FinancialExpert trading brain (Sentinel.py engine). "
+            "read is the standing whole-market read (D1·H4·H1·M30·M15·M5 "
+            "structure bias + zones, per-timeframe provenance, journaled); "
             "analyze/backtest/signal/compare/strategies are research tools; "
             "paper_* run simulated sessions; live_order is inert unless "
             "every live gate passes (settings + 24h unlock + loss limit); "
@@ -673,7 +675,7 @@ def register(registry: Any) -> None:
             "confirmed=true or a human checkpoint. action=..."),
         capability=Capability.NET_OUT,
         parameters={
-            "action": "str — analyze|backtest|signal|compare|strategies|"
+            "action": "str — read|analyze|backtest|signal|compare|strategies|"
                       "paper_start|paper_status|paper_stop|doctor|"
                       "live_unlock|live_order|kill|"
                       "exness_snapshot|exness_positions|exness_size|"
@@ -717,10 +719,17 @@ def register(registry: Any) -> None:
                         "error": "trading is disabled (NM_TRADING_ENABLED=0 / settings.trading.enabled=false)"}
         if action.startswith("exness_"):
             return exness_action(context, action, **kwargs)
-        expert = FinancialExpert(context)
         symbol = str(kwargs.get("symbol") or "")
         market = str(kwargs.get("market") or "crypto")
 
+        if action == "read":
+            from ..agents.market_read import render_read, whole_market_read
+            rep = whole_market_read(
+                symbol, market=market, journal=True,
+                settings=getattr(context, "settings", None))
+            rep["rendered"] = render_read(rep)
+            return rep
+        expert = FinancialExpert(context)
         if action == "analyze":
             return expert.analyze(
                 symbol, market,
