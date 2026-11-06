@@ -25,5 +25,17 @@ def _cmd_immune(args: Any, context: Any) -> int:
               file=sys.stderr)
         return 2
     from ...immune.chat import control_immune
-    print(control_immune(" ".join(words), context=context, chat_key="cli"))
+
+    # Same organ-bus event sink the chat surface injects (AA-42):
+    # immune events from CLI scans persist alongside chat ones.
+    sink = None
+    db = getattr(context, "db", None)
+    if db is not None:
+        from ... import organs
+
+        def sink(kind: str, payload: dict) -> None:
+            organs.emit(db, "immune", "brain", kind, payload)
+
+    print(control_immune(" ".join(words), context=context, chat_key="cli",
+                         event_sink=sink))
     return 0

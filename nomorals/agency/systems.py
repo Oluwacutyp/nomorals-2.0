@@ -38,9 +38,12 @@ from typing import Any, Callable
 from .initiatives import Initiative, InitiativeStore
 from .knowledge import KnowledgeStore
 from .checker import Checker
+from .digestion import Claim, digest, record_outcome
+from .followthrough import STOP_REASONS, PlanTracker, WaitRecord
 from .rotation import RotationScheduler, SystemSlot, WorkResult
 from .deliberation import DeliberationLoop
 from .domains import LEAD_TRANSITIONS, social_next_action
+from .views import now_view, reconciled_agenda, since_view, why_view
 from .proactive import (
     detect_triggers, fire_triggers, load_proactive_state,
     save_proactive_state,
@@ -109,6 +112,24 @@ class ActiveSystems:
         #: handlers re-derive from live adapter state when missing
         #: (payloads don't survive a restart).
         self._trigger_payloads: dict[str, dict[str, Any]] = {}
+        #: Follow-through tracker (AA-43): blocked initiatives become
+        #: waits with review schedules; the authority the tracker asks
+        #: before resuming a wait delegates to the standing
+        #: AgencyAuthority (its check returns a decision object) and
+        #: default-denies when none is injected or the check raises.
+        self.plan_tracker = PlanTracker(authority=self._plan_authority)
+
+    def _plan_authority(self, action: str,
+                        context: dict[str, Any] | None = None) -> bool:
+        """PlanTracker authority adapter: AgencyAuthority → bool."""
+        auth = self.authority
+        if auth is None:
+            return False
+        try:
+            decision = auth.check(action, context=context)
+        except Exception:  # noqa: BLE001 - authority failure = deny
+            return False
+        return bool(getattr(decision, "allowed", False))
 
     def _persist_state(self) -> None:
         save_proactive_state(self.db, self._proactive_state)
@@ -488,11 +509,48 @@ class ActiveSystems:
         active = self.store.list_active()
         if not active:
             return WorkResult(useful=False)
-        # Digest the oldest active initiative's evidence into knowledge.
+        # Digest the oldest active initiative's evidence (AA-43):
+        # run the digestion engine's three-delta analysis — the claim
+        # is compared against the claims already in the knowledge
+        # store, and only what the deltas actually say is deposited:
+        # NEW knowledge as a fact deposit, contradictions / decision
+        # changes as decision deposits. A duplicate deposits nothing
+        # (no manufactured work); the action delta is reported in the
+        # evidence chain, never auto-executed (NONE is valid).
         it = sorted(active, key=lambda i: i.created_at)[0]
-        deposited = self.knowledge.deposit(
-            "digestion", f"digested evidence for '{it.outcome}': "
-            f"{it.evidence[:400]}", source="agency:digestion")
+        text = (it.evidence or it.outcome or "").strip()
+        if not text:
+            return WorkResult(useful=False, work_key=f"digestion:{it.id}")
+        known: list[Claim] = []
+        try:
+            rows = self.knowledge.db.query(
+                "SELECT text, source, ts FROM agency_knowledge "
+                "ORDER BY ts DESC LIMIT 200") or []
+            known = [Claim(text=str(r.get("text") or ""),
+                           source=str(r.get("source") or ""),
+                           observed_at=float(r.get("ts") or 0.0))
+                     for r in rows if r.get("text")]
+        except Exception:  # noqa: BLE001 - unknown store = empty known set
+            known = []
+        deltas = digest(
+            f"agency:{it.objective}",
+            [Claim(text=text[:1000], source=f"agency:{it.objective}",
+                   observed_at=now)],
+            known_claims=known)
+        deposited = False
+        for claim in deltas.knowledge_delta:
+            deposited = self.knowledge.deposit(
+                "digestion", claim.text,
+                source=claim.source or "agency:digestion") or deposited
+        for note_text in deltas.decision_delta:
+            deposited = self.knowledge.deposit(
+                "digestion", note_text, source="agency:digestion",
+                kind="decision") or deposited
+        if deltas.action_delta:
+            self.store.advance(
+                it.id, next_review_at=now + 3600,
+                evidence="digestion action delta: "
+                         + "; ".join(deltas.action_delta))
         return WorkResult(useful=deposited, work_key=f"digestion:{it.id}")
 
     # ── working one trigger initiative ─────────────────────────────
@@ -703,6 +761,31 @@ class ActiveSystems:
             f"(landed {observed.get('landed_price')}, "
             f"historical low {observed.get('historical_low')})",
             source="agency:deals")
+        # Outcome adjustment (AA-43): the observed landed price vs
+        # the historical low IS an expectation check with real
+        # numbers — record it through the outcome-adjustment loop and
+        # land any adjustment in knowledge so the next deal evaluation
+        # sees calibrated expectations, not raw ones.
+        landed = observed.get("landed_price")
+        historical_low = observed.get("historical_low")
+        if landed and historical_low:
+            try:
+                outcome = record_outcome({
+                    "kind": "deal",
+                    "expected": float(historical_low),
+                    "actual": float(landed),
+                    "source": "agency:deals",
+                })
+            except (TypeError, ValueError):
+                outcome = {}
+            adjustment = str(outcome.get("adjustment") or "none")
+            if adjustment != "none":
+                self.knowledge.deposit(
+                    "deals",
+                    f"deal outcome adjustment for {product}: {adjustment} "
+                    f"(landed {landed} vs historical low {historical_low}, "
+                    f"ratio {outcome.get('ratio')})",
+                    source="agency:deals", kind="decision")
         if evaluation.get("is_saving"):
             amount = float(observed.get("landed_price", 0) or 0)
             # Purchase path (adapter with an executor): COMPLETE the
@@ -1043,17 +1126,82 @@ class ActiveSystems:
                 "knowledge_items": self.knowledge.count(),
                 "preemptions": self.scheduler.preemptions}
 
+    def _reconcile_followthrough(self, now: float, *,
+                                 since_ts: float) -> dict[str, Any]:
+        """Follow-through reconciliation (AA-43).
+
+        The PlanTracker is a projection of the durable store (an
+        ActiveSystems is constructed fresh per shift), rebuilt every
+        shift: every blocked active initiative becomes a wait with a
+        review schedule (its own next_review_at, or +1h), and every
+        initiative completed during this shift whose stop_reason is a
+        canonical tracker reason is recorded as stopped. Initiative
+        stop_reasons are usually free text ("deal purchased: order
+        X") — those are NOT forced into the tracker's vocabulary; the
+        skip is the honest part of the projection.
+        """
+        tracker = self.plan_tracker
+        waits = 0
+        for it in self.store.list_active():
+            if it.blocker:
+                tracker.wait_for(WaitRecord(
+                    correlation_id=it.id, trigger="blocker_cleared",
+                    next_review_at=float(it.next_review_at or now + 3600),
+                    expires_at=now + 7 * 86400, initiative_id=it.id),
+                    now=now)
+                waits += 1
+        stops = 0
+        for event in self.store.events():
+            if event.get("kind") != "completed":
+                continue
+            if float(event.get("ts") or 0) < since_ts:
+                continue
+            iid = str(event.get("initiative_id") or "")
+            it = self.store.get(iid) if iid else None
+            reason = str(getattr(it, "stop_reason", "") or "")
+            if it is not None and reason in STOP_REASONS:
+                tracker.stop(iid, reason=reason,
+                             detail=str(event.get("detail") or ""))
+                stops += 1
+        return {"waits_tracked": waits,
+                "waits_due": len(tracker.due_waits(now)),
+                "waits_expired": len(tracker.expired_waits(now)),
+                "stops_recorded": stops}
+
     def work_shift(self) -> dict[str, Any]:
         """One human-worker shift: observe → do → verify → next thing.
 
         No prompt, no owner poke: scan for triggers, run a rotation
-        cycle that works them, report what happened.
+        cycle that works them, report what happened. The report also
+        carries the shift's views (AA-43): now / since-shift /
+        reconciled agenda + why-views for blocked initiatives, and
+        the follow-through reconciliation — the shift's consumers
+        (shift digest, owner surfaces) read these, they are not
+        decoration.
         """
         now = time.time()
         triggers = self.scan_proactive(now=now)
         cycle = self.run_cycle(now=now, scan_first=False)
         self._persist_state()
+        followthrough = self._reconcile_followthrough(now, since_ts=now)
+        views: dict[str, Any] = {
+            "now": now_view(self.store, now=now),
+            "since": since_view(self.store, since_ts=now),
+            "agenda": reconciled_agenda(self.store, now=now),
+        }
+        blocked_why: list[dict[str, Any]] = []
+        for it in self.store.list_active():
+            if not it.blocker or len(blocked_why) >= 5:
+                continue
+            try:
+                blocked_why.append({"initiative_id": it.id,
+                                    "why": why_view(self.store, it.id)})
+            except KeyError:
+                continue
+        views["blocked_why"] = blocked_why
         return {"triggers_fired": len(triggers),
                 "triggers": [f"{t.system}:{t.kind}" for t in triggers],
                 "cycle": cycle,
-                "knowledge_items": self.knowledge.count()}
+                "knowledge_items": self.knowledge.count(),
+                "followthrough": followthrough,
+                "views": views}

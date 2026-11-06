@@ -27,10 +27,13 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..core.ids import new_short_id
 from ..storage.db import Database
+
+if TYPE_CHECKING:  # annotation only — the runtime import stays lazy
+    from .ledger_ext import ExtendedRepresentationLedger  # (cycle)
 
 _log = logging.getLogger(__name__)
 
@@ -665,13 +668,27 @@ class RepresentationLedger:
         return "\n".join(lines)
 
 
-def _ledger_for(settings: Any = None) -> RepresentationLedger:
-    """Ledger bound to the agent data dir (same home pattern as finance)."""
+def _ledger_for(settings: Any = None) -> ExtendedRepresentationLedger:
+    """Ledger bound to the agent data dir (same home pattern as finance).
+
+    Returns the EXTENDED ledger (AA-26): the base
+    :class:`RepresentationLedger` wrapped by
+    :class:`~nomorals.cognition.ledger_ext.ExtendedRepresentationLedger`,
+    so every production call site that resolves its ledger here — the
+    ``log_representation_action`` hooks and the ``/review`` surface —
+    gets stakes weighting, counterparty memory and advisory prediction
+    on the SAME stored records. Base-ledger behaviour is unchanged:
+    the wrapper forwards ``log_action`` / ``recent`` / ``get`` /
+    ``quality_score`` / … to the wrapped ledger, and its ``summary``
+    is the base summary plus the stakes/counterparty owner feed.
+    """
+    from .ledger_ext import ExtendedRepresentationLedger
+
     home = getattr(settings, "home_path", None) if settings else None
     base = Path(home) if home else Path.home()
     path = base / ".nomorals" / "representation.db"
     path.parent.mkdir(parents=True, exist_ok=True)
-    return RepresentationLedger(path)
+    return ExtendedRepresentationLedger(RepresentationLedger(path))
 
 
 def log_representation_action(

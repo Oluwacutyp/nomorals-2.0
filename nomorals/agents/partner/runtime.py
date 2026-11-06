@@ -2842,6 +2842,19 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "immune sampler job not registered: %s", exc)
+                # Cognition failure loop: one durable "failure loop
+                # tick" job (every 1h) clustering the recorded
+                # failures into sandbox-checked, owner-gated fix
+                # proposals filed on the FailureKB — before this
+                # wiring the loop had no production caller and no
+                # proposal was ever built.  Idempotent; best-effort.
+                try:
+                    from ...cognition.failure_loop import ensure_failure_loop_job
+
+                    ensure_failure_loop_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "failure loop job not registered: %s", exc)
             except Exception as exc:  # noqa: BLE001 - scheduler is optional
                 _log.warning("scheduler failed to start: %s", exc)
                 self._scheduler = None
@@ -3406,6 +3419,26 @@ class PartnerRuntime(
             record_failure("runtime.PartnerRuntime._apply_persisted_mode", e)
 
     # ── control commands (live steering) ─────────────────────────────────────
+    def _immune_event_sink(self):
+        """Organ-bus sink for immune events (AA-42).
+
+        Immune events (threat detected / contained, antibody created,
+        false positive retired) persist into the cross-organ event bus
+        (``organ_events``, dst ``brain`` — the same dst research and
+        wisdom emit decision-relevant events to). Returns None when
+        the context carries no db; the immune surface then keeps its
+        events on its own state record instead.
+        """
+        db = getattr(self.context, "db", None)
+        if db is None:
+            return None
+        from ... import organs
+
+        def _sink(kind: str, payload: dict) -> None:
+            organs.emit(db, "immune", "brain", kind, payload)
+
+        return _sink
+
     def _is_operator(self, message: ChatMessage) -> bool:
         # Surface rule (owner's model, 2026-10-20): operator power is a
         # property of the surface, not just the person. On the gated
@@ -5230,6 +5263,7 @@ class PartnerRuntime(
                 sender_id=getattr(message, "sender_id", "") if message else "",
                 sender=getattr(message, "sender", "") if message else "",
                 chat_key=chat_key,
+                event_sink=self._immune_event_sink(),
             )
         if kind == "research":
             # Web research — swarm -> digest -> brief. Owner-only.
@@ -5637,6 +5671,8 @@ class PartnerRuntime(
             return self._control_people(command.tail or arg, chat_key=chat_key)
         if kind == "commitments":
             return self._control_commitments(command.tail or arg, chat_key=chat_key)
+        if kind == "decisions":
+            return self._control_decisions(command.tail or arg, chat_key=chat_key)
         if kind == "focus":
             return self._control_focus(command.tail or arg, chat_key=chat_key)
         if kind == "backup":

@@ -148,6 +148,36 @@ def grade_generation(case: GoldenCase, text: str) -> tuple[bool, list[str]]:
     return (not reasons), reasons
 
 
+def native_generator(output_dir: Any) -> Callable[[str], str]:
+    """The golden-case generator for one trained native artifact.
+
+    Loads the run's ``TrainedModel`` + its ``tokenizer.json`` from
+    ``output_dir`` and returns a deterministic (temperature 0) text
+    generator whose outputs are the model's completions (the prompt
+    prefix the native decoder echoes is stripped). This is the
+    adapter the training gate (``self_improvement``) grades against
+    the standing golden battery — its failure modes are plain
+    exceptions (missing/corrupt artifact), which the caller records.
+    """
+    from pathlib import Path
+
+    from .tokenize import BPETokenizer
+    from .trainer import TrainedModel
+
+    out = Path(output_dir)
+    model = TrainedModel.load(out)
+    tokenizer = BPETokenizer.load(out / "tokenizer.json")
+
+    def generate(prompt: str) -> str:
+        text = model.generate(tokenizer, prompt, max_new_tokens=48,
+                              temperature=0.0)
+        if isinstance(text, str) and text.startswith(prompt):
+            text = text[len(prompt):]
+        return text
+
+    return generate
+
+
 def default_golden_cases(persona_name: str = "") -> list[GoldenCase]:
     """The standing battery: persona coherence, straight answers, no refusal
     language, no parrot echoes. Deliberately small — it is a REGRESSION

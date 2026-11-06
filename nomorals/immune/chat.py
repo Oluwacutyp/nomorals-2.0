@@ -70,6 +70,97 @@ def IMMUNE_USAGE() -> str:
     )
 
 
+def _default_scan_patterns() -> list[dict[str, Any]]:
+    """The live-scan catalog: the immune package's own pathogen data.
+
+    Materializes :data:`immune.pathogens.PATHOGEN_CLASSES` (each class
+    carries a content-regex hint) and the immune-evasion
+    :data:`immune.pathogens.ATTACK_SCENARIOS` into the
+    ``{id, class_id, pattern, severity}`` dicts
+    :func:`immune.innate.evaluate_live` consumes. The red-team
+    catalog in ``agents/`` holds scenario payloads, not content
+    regexes; this in-package data is the catalog's immune class
+    source (pathogens.py is written for the catalog to consume).
+    A caller may inject a richer pattern set per state instead.
+    """
+    from .pathogens import ATTACK_SCENARIOS, PATHOGEN_CLASSES
+
+    severities = {
+        "virus": "high", "worm": "high", "trojan": "high",
+        "cancer": "medium", "parasite": "medium", "prion": "medium",
+        "opportunistic": "medium", "autoimmune": "medium",
+        "allergy": "low",
+    }
+    patterns: list[dict[str, Any]] = []
+    for cls in PATHOGEN_CLASSES:
+        hint = cls.get("innate_pattern_hint") or ""
+        if hint:
+            patterns.append({
+                "id": f"pathogen:{cls['id']}",
+                "class_id": cls["id"],
+                "pattern": hint,
+                "severity": severities.get(cls["id"], "medium"),
+            })
+    for scenario in ATTACK_SCENARIOS:
+        patterns.append({
+            "id": scenario["id"],
+            "class_id": scenario["class_id"],
+            "pattern": scenario["pattern"],
+            "severity": "high",
+        })
+    return patterns
+
+
+def _severity_label_fn(hit: Any):
+    """The deterministic default labeller for one innate hit.
+
+    The adaptive layer never calls an LLM itself — it takes an
+    INJECTED ``label_fn``. This is the chat surface's deterministic
+    classifier (the contract allows "an LLM, a human, or a
+    deterministic classifier"): verdict from the catalog hit's own
+    severity — critical/high is a real threat, medium a variant, low
+    (the allergy class: urgency bait) is noise, and noise never
+    creates an antibody. A caller-injected ``label_fn`` on the state
+    replaces this wholesale.
+    """
+
+    def _label(bundle_dict: dict[str, Any]) -> dict[str, Any]:
+        sev = str(getattr(hit, "severity", "medium") or "medium")
+        if sev in ("critical", "high"):
+            verdict, confidence = "real_threat", 0.9
+        elif sev == "medium":
+            verdict, confidence = "variant", 0.6
+        else:
+            verdict, confidence = "noise", 0.4
+        return {
+            "verdict": verdict,
+            "confidence": confidence,
+            "reasoning": (
+                f"innate catalog hit {hit.pattern_id} ({hit.class_id}, "
+                f"severity {sev}) on live-scanned content"),
+        }
+
+    return _label
+
+
+def _emit_event(state: _ImmuneState, kind: str,
+                payload: dict[str, Any]) -> None:
+    """Emit one immune event (AA-42): recorded on the state and, when
+    a sink is injected, pushed to the organ bus. Never raises — a
+    broken sink must not break the scan; the event still lands in
+    ``state.events`` and the failure is logged."""
+    from .events import emit_immune_event, immune_event
+
+    try:
+        event = emit_immune_event(state.event_sink, kind, payload)
+    except Exception:  # noqa: BLE001 — reporting never breaks a scan
+        _log.warning("immune event sink failed for %s", kind,
+                     exc_info=True)
+        event = immune_event(kind, payload)
+    state.events.append(event)
+    del state.events[:-50]
+
+
 class _ImmuneState:
     """Per-chat in-memory immune state."""
 
@@ -93,6 +184,14 @@ class _ImmuneState:
         self.drift = BehaviourDriftMonitor()
         self.casefiles: List[CaseFile] = []
         self.receipts: List[Any] = []
+        #: Live-scan wiring (AA-41/42): the innate catalog patterns
+        #: scanned on every /immune scan, the injected adaptive
+        #: labeller (None = the deterministic severity labeller), the
+        #: injected organ-bus event sink, and the events emitted here.
+        self.scan_patterns: list[dict[str, Any]] = _default_scan_patterns()
+        self.label_fn: Any = None
+        self.event_sink: Any = None
+        self.events: list[dict[str, Any]] = []
 
     def _record(self, receipt: Any) -> None:
         self.receipts.append(receipt)
@@ -114,10 +213,22 @@ def reset_immune_state(chat_key: str = "") -> None:
 
 def control_immune(tail: str, context: Any = None, chat: Any = None,
                    sender_id: str = "", sender: str = "",
-                   chat_key: str = "") -> str:
-    """``/immune`` — one front door over nomorals.immune. Never raises."""
+                   chat_key: str = "", event_sink: Any = None,
+                   scan_patterns: Any = None,
+                   label_fn: Any = None) -> str:
+    """``/immune`` — one front door over nomorals.immune. Never raises.
+
+    Live-scan injections (AA-41/42), all optional: ``scan_patterns``
+    replaces the innate catalog set for this chat's state,
+    ``label_fn`` is the adaptive layer's injected labeller, and
+    ``event_sink`` receives immune events (organ bus). They persist
+    on the per-chat state so later scans in the same chat use them.
+    """
     try:
-        return _control_immune(tail, chat_key=chat_key, context=context)
+        return _control_immune(tail, chat_key=chat_key, context=context,
+                               event_sink=event_sink,
+                               scan_patterns=scan_patterns,
+                               label_fn=label_fn)
     except Exception as exc:  # noqa: BLE001 — never raise from chat
         return f"Immune hit an error ({exc})."
 
@@ -140,8 +251,16 @@ def _monitor_for(context: Any = None):
 
 
 def _control_immune(tail: str, *, chat_key: str = "",
-                    context: Any = None) -> str:
+                    context: Any = None, event_sink: Any = None,
+                    scan_patterns: Any = None,
+                    label_fn: Any = None) -> str:
     state = get_immune_state(chat_key)
+    if event_sink is not None:
+        state.event_sink = event_sink
+    if scan_patterns is not None:
+        state.scan_patterns = list(scan_patterns)
+    if label_fn is not None:
+        state.label_fn = label_fn
     monitor = _monitor_for(context)
     if monitor is not None:
         # This chat's fever is an incident like any other: while it
@@ -190,6 +309,8 @@ def _status(state: _ImmuneState, monitor: Any = None) -> str:
         f"  quarantined artifacts: {len(state.vault)} (vault, never deleted)",
         f"  case files: {len(state.casefiles)}",
         f"  receipts: {len(state.receipts)}",
+        f"  live scan: {len(state.scan_patterns)} catalog patterns · "
+        f"{len(state.events)} immune event(s) emitted",
         "  constitution: revoke-only — no grant/acquire; owner work is report-only.",
     ]
     lines += _gate_status_lines(monitor)
@@ -307,19 +428,120 @@ def _scan(state: _ImmuneState, text: str) -> str:
     if not text:
         return "usage: /immune scan <text>"
     # Second-exposure matching against accepted antibodies (innate
-    # speed, compiled regexes). Catalog-pattern live evaluation needs
-    # injected redteam patterns — see innate.evaluate_live.
+    # speed, compiled regexes).
     hits = state.store.match(text)
     state._record(state.police.observe({"target": "scan", "text": text}, "scan"))
-    if not hits:
+    lines: list[str] = []
+    if hits:
+        lines.append("🛡️ scan: antibody match (second exposure, innate speed):")
+        for hit in hits:
+            lines.append(
+                f"  • {hit.get('id', '?')[:8]} pattern={hit.get('pattern', '?')!r} "
+                f"reason={hit.get('reason', '')}"
+            )
+    # First exposure (AA-42): the innate layer evaluates the catalog
+    # patterns LIVE on this content — not just in CI. Suspicious hits
+    # are presented to the adaptive layer (AA-41): an INJECTED
+    # labeller (or the deterministic severity labeller) returns a
+    # verdict, and a threat verdict seeds a real antibody through the
+    # thymus (negative selection still applies — a pattern that fires
+    # on self is rejected, never stored).
+    from .innate import evaluate_live
+
+    innate_hits = evaluate_live(text, state.scan_patterns)
+    if innate_hits:
+        _emit_event(state, "threat_detected", {
+            "source": "chat-scan",
+            "hits": [{"pattern_id": h.pattern_id, "class_id": h.class_id,
+                      "severity": h.severity} for h in innate_hits[:10]],
+        })
+        lines.append("🛡️ scan: innate catalog hit (first exposure, live):")
+        for hit in innate_hits[:10]:
+            lines.append(
+                f"  • {hit.pattern_id} class={hit.class_id} "
+                f"severity={hit.severity} matched={hit.matched_text[:60]!r}")
+        lines.extend(_label_and_learn(state, text, innate_hits))
+    if not lines:
         return "🛡️ scan: no antibody matched — no known pathogen."
-    lines = ["🛡️ scan: antibody match (second exposure, innate speed):"]
-    for hit in hits:
-        lines.append(
-            f"  • {hit.get('id', '?')[:8]} pattern={hit.get('pattern', '?')!r} "
-            f"reason={hit.get('reason', '')}"
-        )
     return "\n".join(lines)
+
+
+#: Cap on new antibodies per scan — one pasted blob must not flood
+#: the store; remaining hits stay reported, unlearned.
+_MAX_LEARN_PER_SCAN = 3
+
+
+def _label_and_learn(state: _ImmuneState, text: str,
+                     innate_hits: list[Any]) -> list[str]:
+    """Adaptive labelling of innate hits (AA-41).
+
+    Each distinct catalog pattern that hit is presented as an antigen
+    and labelled; ``real_threat`` / ``variant`` verdicts seed an
+    antibody (the catalog pattern itself) via thymus → store, and an
+    ``antibody_created`` event is emitted. ``noise`` never creates an
+    antibody, by construction. Thymus rejections (the pattern fires
+    on self) are reported honestly, never stored.
+    """
+    from .adaptive import label_antigen, present, should_create_antibody
+
+    patterns_by_id = {str(p.get("id")): p for p in state.scan_patterns}
+    active_patterns = {
+        str(entry.get("pattern", ""))
+        for entry in state.store.list_active()
+    }
+    lines: list[str] = []
+    seen: set[str] = set()
+    learned = 0
+    for hit in innate_hits:
+        if hit.pattern_id in seen:
+            continue
+        seen.add(hit.pattern_id)
+        bundle = present({
+            "content": text[:500],
+            "organ": "immune.chat",
+            "source": "chat-scan",
+            "capability": f"innate:{hit.class_id}",
+        })
+        labeller = state.label_fn or _severity_label_fn(hit)
+        try:
+            labelled = label_antigen(bundle, labeller)
+        except Exception as exc:  # noqa: BLE001 — a bad labeller must
+            lines.append(  # not take the scan down with it
+                f"  ⚠ adaptive labelling failed for {hit.pattern_id}: {exc}")
+            continue
+        lines.append(
+            f"  • adaptive: {hit.pattern_id} → {labelled.verdict} "
+            f"(confidence {labelled.confidence:.2f}) — {labelled.reasoning}")
+        if not should_create_antibody(labelled):
+            continue
+        if learned >= _MAX_LEARN_PER_SCAN:
+            continue
+        pattern = str((patterns_by_id.get(hit.pattern_id) or {}).get(
+            "pattern") or "")
+        if not pattern or pattern in active_patterns:
+            continue  # already covered by an active antibody
+        reason = (f"adaptive: innate hit {hit.pattern_id} labelled "
+                  f"{labelled.verdict} — {labelled.reasoning}")
+        try:
+            candidate = state.thymus.propose(pattern, hit.class_id, reason)
+            accepted = state.thymus.accept(candidate)
+        except ValueError as exc:
+            lines.append(
+                f"  ⚠ thymus rejected antibody for {hit.pattern_id} "
+                f"(fires on self): {exc}")
+            continue
+        state.store.add(accepted)
+        active_patterns.add(pattern)
+        learned += 1
+        _emit_event(state, "antibody_created", {
+            "antibody_id": accepted.id, "pattern": pattern,
+            "pathogen_class": hit.class_id, "verdict": labelled.verdict,
+            "source": "chat-scan",
+        })
+        lines.append(
+            f"  🧬 antibody created: {accepted.id[:8]} "
+            f"pattern={pattern!r} class={hit.class_id}")
+    return lines
 
 
 def _antibodies(state: _ImmuneState, rest: str) -> str:
@@ -380,6 +602,10 @@ def _antibodies(state: _ImmuneState, rest: str) -> str:
         full["status"] = "retired"
         full["retire_reason"] = antibody.retire_reason
         state.store.update(full)
+        _emit_event(state, "false_positive_retired", {
+            "antibody_id": str(entry.get("id", "")),
+            "reason": reason.strip(), "source": "chat",
+        })
         return f"antibody {ab_id} retired: {reason.strip()}"
     if verb == "test":
         if not tail:

@@ -389,6 +389,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "paper": (0, None),      # /paper start|status|stop|list — simulated trading, never real money
     "people": (0, None),     # /people list|show|add|note — the people spine
     "commitments": (0, None),  # /commitments list|add|kept|broken|cancel|overdue|due|reliability|verify
+    "decisions": (0, None),  # /decisions list|add <decision> [| chosen | prediction | conf%]|resolve <id> [good|bad] <outcome>|review|calibration
     "focus": (0, None),      # /focus start|pause|resume|stop|status|today|week
     "backup": (0, 1),        # /backup status | verify — read-only backup health (runs need the vault, stay scheduled)
     # expansion wave
@@ -3778,7 +3779,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "checkpoint", "checkpoints", "rewind", "novel"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
                            "benchmark", "redteam", "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible",
-                           "people", "commitments", "focus"]),
+                           "people", "commitments", "decisions", "focus"]),
     ("money & spending", ["spend", "budget", "spending", "mandate",
                           "balances", "goal", "insights", "alert"]),
     ("games — 41, DM + group, start them directly",
@@ -4095,7 +4096,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
-      "immune", "impossible", "people", "commitments", "focus"]),
+      "immune", "impossible", "people", "commitments", "decisions", "focus"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -4526,6 +4527,7 @@ LIST_ONELINERS: dict[str, str] = {
     "paper": "paper trading: /paper start <symbol> [market] [capital] | status | stop | list (simulated, never real)",
     "people": "the people spine: /people list | show <name> | add <name> | note <name> <text>",
     "commitments": "the obligation layer: /commitments list | add <what> [by <deadline>] | kept|broken|cancel <id> | overdue | due | reliability | verify",
+    "decisions": "the decision journal — calibrate your own calls: /decisions add <decision> [| chosen | prediction | conf%] | resolve <id> [good|bad] <outcome> | list | review [weekly|monthly] | calibration",
     "focus": "focus sessions: /focus start [label] | pause | resume | stop [note] | status | today | week",
     "backup": "backup health (read-only): /backup status | verify — generations, manifest, DB integrity",
     "alert": "price/money alerts: /alert add|list|remove|check|snooze|sync-bills",

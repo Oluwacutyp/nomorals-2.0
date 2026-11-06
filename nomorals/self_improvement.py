@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .core.logging_setup import get_logger
 from .missions import (
     MissionRunner,
     MissionStatus,
@@ -26,6 +27,8 @@ from .training.dataset import DatasetRegistry
 from .training.policy import PolicyDecision, RetrainingPolicy, policy_status
 from .training.preprocess import prepare
 from .training.registry import RunStatus, TrainingRegistry
+
+_log = get_logger(__name__)
 
 __all__ = [
     "PIPELINE_STEPS",
@@ -442,13 +445,71 @@ class SelfImprovementJob:
             raise RuntimeError(f"training failed: {run.error}")
         if run.gate_passed is not None:
             return {"run_id": run.id, "gate_passed": run.gate_passed, "reused": True}
+        # Evaluation gate (AA-07): the run's "score" used to come from
+        # training loss alone — the golden battery (objective checks
+        # on the trained model's own generations) and the unified gate
+        # scores in training/evaluate.py had no production caller, so
+        # nothing ever graded WHAT the fine-tune actually produces.
+        # For the native backend the artifact is local: grade the
+        # standing golden cases against its greedy completions and
+        # fold the result into the run's metrics via build_gate_scores
+        # BEFORE the registry gate ranks on "score". Non-native
+        # backends (remote inference) cannot be graded from here —
+        # they keep the loss-only score and the skip is RECORDED on
+        # the run, not silent. A grading failure degrades to the
+        # loss-only score, recorded the same way.
+        golden_payload: dict[str, Any] = {}
+        if run.output_path:
+            if (run.backend or "").strip().lower() == "native":
+                try:
+                    from .training.evaluate import (
+                        build_gate_scores,
+                        default_golden_cases,
+                        grade_golden_set,
+                        native_generator,
+                    )
+
+                    golden = grade_golden_set(
+                        default_golden_cases(),
+                        native_generator(run.output_path))
+                    scores = build_gate_scores(
+                        train_loss=run.metrics.get("train_loss"),
+                        eval_loss=run.metrics.get("eval_loss"),
+                        perplexity=run.metrics.get("perplexity"),
+                        golden=golden,
+                        steps=int(run.metrics.get("steps") or 0),
+                        backend=run.backend)
+                    run.metrics.update(scores)
+                    # build_gate_scores folds the golden signal into
+                    # the blended score + basis but does not echo the
+                    # raw battery result — record it on the run too.
+                    run.metrics["golden_score"] = golden.get("golden_score")
+                    run.metrics["golden_passed"] = golden.get("golden_passed")
+                    run.metrics["golden_total"] = golden.get("golden_total")
+                    run.metadata["golden_report"] = golden
+                    golden_payload = {
+                        "golden_score": golden.get("golden_score"),
+                        "score_basis": scores.get("score_basis"),
+                        "golden_failures": scores.get("golden_failures"),
+                    }
+                except Exception as exc:  # noqa: BLE001 - recorded above
+                    _log.warning("golden grading failed for run %s: %s",
+                                 run.id, exc)
+                    run.metadata["golden_error"] = str(exc)
+                    golden_payload = {"golden_error": str(exc)}
+            else:
+                reason = (f"golden grading not run: backend {run.backend!r} "
+                          "has no local artifact loader")
+                run.metadata["golden_skipped"] = reason
+                golden_payload = {"golden_skipped": reason}
         passed = self.runs.evaluate(
             run,
             metric="score",
             tolerance=float(self.context.settings.training.regression_tolerance),
         )
         pipeline["gate_passed"] = passed
-        return {"run_id": run.id, "gate_passed": passed, "metrics": run.metrics}
+        return {"run_id": run.id, "gate_passed": passed,
+                "metrics": run.metrics, **golden_payload}
 
     def _step_promote(self, mission: Any) -> dict[str, Any]:
         pipeline = mission.state.setdefault("pipeline", {})

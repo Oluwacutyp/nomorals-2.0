@@ -45,6 +45,11 @@ nervous system through plain language:
   the tool itself publishes real immune events (enforcement,
   incident close, baseline ready, tick error) via the Notifier —
   non-event ticks publish nothing.
+* ``__failure_loop__`` — scheduler-internal cognition failure loop:
+  cluster the recorded failures (TrajectoryStore over the workspace
+  DB), build a sandbox-checked fix proposal per cluster, file the
+  proposals as FailureKB notes. Same closure pattern. Routine job
+  (silent at the scheduler); proposals never auto-apply.
 """
 
 from __future__ import annotations
@@ -430,4 +435,56 @@ def register(registry: Any) -> None:
                     doc=doc)
         except Exception:  # noqa: BLE001 - reporting never breaks the tick
             pass
+        # Organ-bus emission (AA-42): an enforcement is a contained
+        # threat — persist it as an immune event on the cross-organ
+        # bus (dst "brain", like research/wisdom's decision-relevant
+        # events) so other organs can react to it, not only the
+        # owner's notification feed. Best-effort, like all reporting
+        # here: a bus failure never breaks the tick.
+        try:
+            if result.get("enforced"):
+                from .. import organs as _organs
+                from ..immune.events import emit_immune_event
+
+                def _bus_sink(kind: str, payload: dict) -> None:
+                    bus_db = getattr(_context, "db", None) or _db(_context)
+                    _organs.emit(bus_db, "immune", "brain", kind, payload)
+
+                emit_immune_event(_bus_sink, "threat_detected", {
+                    "source": "immune-sampler",
+                    "sample": result.get("sample") or {},
+                    "reason": result.get("reason") or "",
+                })
+                emit_immune_event(_bus_sink, "threat_contained", {
+                    "source": "immune-sampler",
+                    "action": "adaptive gate enforced — incident opened, "
+                              "sample quarantined",
+                    "reason": result.get("reason") or "",
+                })
+        except Exception:  # noqa: BLE001 - reporting never breaks the tick
+            pass
         return result
+
+    @registry.register(
+        "__failure_loop__",
+        description="Run one cognition failure-loop pass: cluster the "
+        "recorded failures, build a gated fix proposal per cluster, "
+        "sandbox-check each, and file the proposals as FailureKB "
+        "notes. Proposals never auto-apply — approval stays the "
+        "owner's. Scheduler-internal; runs every ~1h.",
+        capability="owner",
+    )
+    def _failure_loop_tool() -> dict[str, Any]:
+        # The loop reads the SAME DB the router's learning attachment
+        # records trajectories into: agents/context wires
+        # attach_learning(router, db=context.db) with the very object
+        # the tool registry's context carries as .db — so the clusters
+        # are the system's real recorded failures, not a side store.
+        from ..cognition.failure_loop import run_failure_loop_once
+
+        try:
+            db = getattr(_context, "db", None) or _db(_context)
+            return run_failure_loop_once(db)
+        except Exception as exc:  # noqa: BLE001 - one bad pass never kills the job
+            return {"ok": False,
+                    "error": f"failure loop pass failed: {exc}"}

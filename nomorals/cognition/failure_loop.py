@@ -32,6 +32,7 @@ blocks application.
 
 from __future__ import annotations
 
+import contextlib
 import time
 from typing import Any, Callable
 
@@ -47,6 +48,11 @@ __all__ = [
     "build_proposal",
     "apply_proposal",
     "FailureLoop",
+    "FAILURE_LOOP_JOB",
+    "FAILURE_LOOP_TOOL",
+    "FAILURE_LOOP_SPEC",
+    "ensure_failure_loop_job",
+    "run_failure_loop_once",
 ]
 
 #: Failure class -> (fix_kind, suggested fix).  Templates are starting
@@ -385,3 +391,129 @@ class FailureLoop:
                 f" → fix [{proposal['fix_kind']}]: {proposal['suggested_fix'][:90]}"
                 f" (status: {proposal['status']}, applied: False)")
         return "\n".join(lines)
+
+
+# ── the scheduled loop (AA-23) ─────────────────────────────────────
+#
+# The loop above existed with no production caller: nothing ever
+# clustered the recorded failures, so no proposal was ever built.
+# The wiring mirrors the immune sampler's: a scheduler-internal tool
+# (``__failure_loop__`` in tools/autonomy.py) runs
+# :func:`run_failure_loop_once` on the workspace DB — the same DB the
+# LLM learning attachment records trajectories into — and a durable
+# routine job fires it hourly. Proposals are filed as FailureKB notes
+# on their clusters (the KB is the failure system's own surface, and
+# its triage carries the notes back into the next clustering pass).
+# A proposal NEVER auto-applies: ``applied`` stays False until the
+# owner approves through :func:`apply_proposal`'s gate elsewhere.
+
+#: Durable failure-loop job: name, tool payload, default cadence.
+FAILURE_LOOP_JOB = "failure loop tick"
+FAILURE_LOOP_TOOL = "__failure_loop__"
+FAILURE_LOOP_SPEC = "every 1h"
+
+_INTERVAL_UNITS = {
+    "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
+    "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+    "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+    "d": 86400, "day": 86400, "days": 86400,
+}
+
+
+def _interval_seconds(spec: Any) -> float | None:
+    """``"every 1h"`` / ``"every 60s"`` / ``"60"`` → seconds, else None."""
+    import re
+
+    s = str(spec or "").strip()
+    if re.fullmatch(r"\d+(?:\.\d+)?", s):
+        return float(s)
+    m = re.fullmatch(r"every\s+(\d+(?:\.\d+)?)\s*([a-z]+)", s, re.IGNORECASE)
+    if not m:
+        return None
+    unit = m.group(2).lower()
+    if unit not in _INTERVAL_UNITS:
+        return None
+    return float(m.group(1)) * _INTERVAL_UNITS[unit]
+
+
+def _spec_matches(stored: Any, spec: str) -> bool:
+    """True when a stored job spec is the requested one (numeric
+    compare for ``every``-kind specs, like immune wiring / modes)."""
+    if str(stored or "") == spec:
+        return True
+    want = _interval_seconds(spec)
+    have = _interval_seconds(stored)
+    return want is not None and have is not None and want == have
+
+
+def _job_field(job: Any, name: str) -> Any:
+    if isinstance(job, dict):
+        return job.get(name, "")
+    return getattr(job, name, "")
+
+
+def ensure_failure_loop_job(scheduler: Any, *,
+                            spec: str = FAILURE_LOOP_SPEC) -> Any:
+    """Register the durable failure-loop job. Idempotent.
+
+    A job with the loop's name already at the requested cadence is
+    returned as-is; a stale one is replaced. Best-effort: never
+    raises (a missing scheduler just means no scheduled loop runs).
+    The job is ``routine=True`` — the scheduler records each run
+    (AA-67 honesty: skipped/missed runs journal with ok=False) but
+    does not page for it; proposals are housekeeping that surface in
+    the KB, not alerts.
+    """
+    if scheduler is None:
+        return None
+    try:
+        for job in (scheduler.list_jobs() or []):
+            if _job_field(job, "name") == FAILURE_LOOP_JOB:
+                if _spec_matches(_job_field(job, "spec"), spec):
+                    return job
+                with contextlib.suppress(Exception):
+                    scheduler.remove(_job_field(job, "id"))
+                break
+        return scheduler.add(FAILURE_LOOP_JOB, spec, "tool",
+                             {"tool": FAILURE_LOOP_TOOL, "args": {}},
+                             routine=True)
+    except Exception:  # noqa: BLE001 - scheduling is best-effort
+        return None
+
+
+def run_failure_loop_once(db: Any, *, limit: int = 10) -> dict[str, Any]:
+    """One production pass of the loop over the workspace DB.
+
+    Clusters the recorded failures (TrajectoryStore over ``db`` — the
+    store the router's learning attachment writes), builds a proposal
+    per open cluster, runs the sandbox check on each, and files every
+    proposal as a FailureKB note on its cluster (deduplicated by the
+    KB — a repeat pass over an unchanged cluster files nothing new).
+    Nothing is applied: approval stays the owner's explicit act.
+    """
+    store = TrajectoryStore(db)
+    kb = FailureKB(store=store)
+    loop = FailureLoop(store=store, kb=kb)
+    clusters = loop.cluster_failures(limit=limit)
+    proposals: list[dict[str, Any]] = []
+    for cluster in clusters:
+        sandbox = loop.sandbox_check(loop.propose_fix(cluster))
+        proposal = loop.build_proposal(cluster, sandbox_result=sandbox)
+        note = (
+            f"failure-loop proposal [{proposal['fix_kind']}] "
+            f"(sandbox {'passed' if proposal['sandbox_passed'] else 'FAILED'}): "
+            f"{proposal['suggested_fix']}")
+        kb.note(proposal["cluster_key"], note)
+        proposals.append({
+            "cluster_key": proposal["cluster_key"],
+            "task_kind": proposal["task_kind"],
+            "failure_class": proposal["failure_class"],
+            "count": proposal["count"],
+            "fix_kind": proposal["fix_kind"],
+            "sandbox_passed": proposal["sandbox_passed"],
+            "status": proposal["status"],
+            "applied": False,
+        })
+    return {"ok": True, "clusters": len(clusters),
+            "proposals": proposals,
+            "sandbox_passed": sum(1 for p in proposals if p["sandbox_passed"])}

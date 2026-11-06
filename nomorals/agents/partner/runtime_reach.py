@@ -853,6 +853,39 @@ class RuntimeReachMixin:
         path = self.context.settings.home_path / "data" / "commitments.json"
         return CommitmentLedger(str(path))
 
+    def _world_graph(self) -> Any:
+        """The shared planning WorldGraph (same object /graph uses).
+
+        Cached on ``_commitment_world_graph`` — NOT on the method's
+        own name (runtime_memory's ``_control_graph`` convention).
+        """
+        g = getattr(self, "_commitment_world_graph", None)
+        if g is None:
+            from ...planning.graph import WorldGraph
+
+            g = WorldGraph()
+            self._commitment_world_graph = g
+        return g
+
+    def _sync_commitment_graph(self, ledger: Any) -> int:
+        """Project the commitment ledger into the planning graph (AA-12).
+
+        Called after every ledger mutation on this surface, so
+        commitment / person / deadline nodes in the world graph track
+        the ledger (open → kept / broken / cancelled) instead of the
+        graph silently never syncing. Idempotent (identity is the
+        commitment id). Best-effort: the ledger is the truth and the
+        graph a projection — a sync failure is logged, never raised
+        into the command. Returns the number of commitments projected.
+        """
+        try:
+            from ...planning.commitment_sync import sync_ledger_to_graph
+
+            return sync_ledger_to_graph(ledger, self._world_graph())
+        except Exception as exc:  # noqa: BLE001 — projection, never fatal
+            _log.warning("commitment graph sync failed: %s", exc)
+            return 0
+
     def _resolve_commitment(self, ledger: Any, ref: str) -> Any:
         """Exact id, else unique id-prefix, else None."""
         ref = (ref or "").strip()
@@ -907,6 +940,7 @@ class RuntimeReachMixin:
                 return "usage: /commitments add <what> [by <deadline>]"
             c = ledger.add(what=what, deadline=deadline,
                            source_text=f"/commitments add {rest}")
+            self._sync_commitment_graph(ledger)
             return f"recorded: {self._fmt_commitment(c).strip()}{deadline_note}"
         if verb in ("kept", "broken", "cancel"):
             bits = rest.strip().split(None, 1)
@@ -925,6 +959,7 @@ class RuntimeReachMixin:
                     ledger.cancel(c.id, evidence)
             except (KeyError, ValueError) as exc:
                 return str(exc)
+            self._sync_commitment_graph(ledger)
             return f"marked {verb}: {c.what} [{c.id}]"
         if verb == "overdue":
             rows = ledger.overdue()
@@ -1012,7 +1047,9 @@ class RuntimeReachMixin:
             return "\n".join(lines)
         if verb == "week":
             ledger = self._commitments_ledger()
-            review = build_weekly_review(commitments=ledger, focus=timer)
+            review = build_weekly_review(
+                commitments=ledger, decisions=self._decisions_journal(),
+                focus=timer)
             return review.render_markdown()
         if verb in ("status", ""):
             active = timer.active()
@@ -1032,6 +1069,125 @@ class RuntimeReachMixin:
                     f"{today_line}")
         return ("usage: /focus start [label] · pause · resume · stop [note]\n"
                 "       /focus status · today · week")
+
+    # ── decision journal: /decisions ──────────────────────────────────
+    def _decisions_journal(self) -> Any:
+        """DecisionJournal on the durable home path (AA-24)."""
+        from ...decisions.journal import DecisionJournal
+
+        path = self.context.settings.home_path / "data" / "decisions.json"
+        return DecisionJournal(str(path))
+
+    def _resolve_decision(self, journal: Any, ref: str) -> Any:
+        """Exact id, else unique id-prefix, else None."""
+        ref = (ref or "").strip()
+        if ref in journal.decisions:
+            return journal.decisions[ref]
+        matches = [d for did, d in journal.decisions.items()
+                   if did.startswith(ref)]
+        return matches[0] if len(matches) == 1 else None
+
+    def _control_decisions(self, tail: str, *, chat_key: str = "") -> str:
+        """The decision journal: /decisions list|add|resolve|review|calibration.
+
+        Records the OWNER's decisions with their predictions BEFORE
+        outcomes, so the weekly review (and this surface) can show how
+        their judgement actually calibrates (AA-24 — the journal had
+        no production importer at all).
+        """
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else "list"
+        rest = parts[1] if len(parts) > 1 else ""
+        journal = self._decisions_journal()
+        if verb in ("list", "open", ""):
+            rows = journal.open_decisions()
+            lines = []
+            sentence = journal.calibration_sentence()
+            if sentence:
+                lines.append(f"🧭 {sentence}")
+            if not rows:
+                lines.append(
+                    "no open decisions — /decisions add <decision> "
+                    "[| chosen | prediction | conf%] records one with "
+                    "its prediction, before the outcome.")
+                return "\n".join(lines)
+            lines.append(f"open decisions ({len(rows)}):")
+            for d in rows:
+                conf = (f" · {d.confidence:.0%} sure"
+                        if d.confidence is not None else "")
+                chosen = f" → {d.chosen}" if d.chosen else ""
+                lines.append(f"  {d.id}: {d.decision}{chosen}{conf}")
+            return "\n".join(lines)
+        if verb == "add":
+            fields = [f.strip() for f in rest.split("|")]
+            decision = fields[0] if fields else ""
+            if not decision:
+                return ("usage: /decisions add <decision> "
+                        "[| chosen | prediction | conf%]")
+            chosen = fields[1] if len(fields) > 1 else ""
+            prediction = fields[2] if len(fields) > 2 else ""
+            confidence = None
+            if len(fields) > 3 and fields[3]:
+                raw_conf = fields[3].rstrip("%").strip()
+                try:
+                    confidence = float(raw_conf)
+                except ValueError:
+                    return (f"confidence {fields[3]!r} is not a number — "
+                            "use a percent like 70 or a fraction like 0.7")
+                if confidence > 1.0:
+                    confidence = confidence / 100.0
+            try:
+                d = journal.record(
+                    decision=decision, chosen=chosen,
+                    prediction=prediction, confidence=confidence)
+            except ValueError as exc:
+                return str(exc)
+            return (f"recorded: {d.id}: {d.decision}"
+                    + (f" → {d.chosen}" if d.chosen else "")
+                    + " — resolve it when the outcome lands: "
+                      f"/decisions resolve {d.id} [good|bad] <outcome>")
+        if verb == "resolve":
+            bits = rest.strip().split(None, 1)
+            if not bits:
+                return "usage: /decisions resolve <id> [good|bad] <outcome>"
+            d = self._resolve_decision(journal, bits[0])
+            if d is None:
+                return (f"no decision matching {bits[0]!r} — "
+                        "/decisions list shows ids.")
+            tail_text = bits[1].strip() if len(bits) > 1 else ""
+            success: bool | None = None
+            outcome = tail_text
+            lowered = tail_text.lower()
+            for word, verdict in (("good", True), ("bad", False)):
+                if lowered == word or lowered.startswith(word + " "):
+                    success = verdict
+                    outcome = tail_text[len(word):].strip()
+                    break
+            try:
+                d = journal.resolve(d.id, outcome=outcome, success=success)
+            except KeyError as exc:
+                return str(exc)
+            lines = [f"resolved: {d.decision} → {d.outcome or 'no outcome noted'}"]
+            sentence = journal.calibration_sentence()
+            if sentence:
+                lines.append(f"🧭 {sentence}")
+            return "\n".join(lines)
+        if verb == "review":
+            period = rest.strip().lower() or "weekly"
+            if period not in ("weekly", "monthly"):
+                return "usage: /decisions review [weekly|monthly]"
+            return journal.render_review(period)
+        if verb == "calibration":
+            sentence = journal.calibration_sentence()
+            if sentence is None:
+                return ("no resolved decisions yet — nothing to "
+                        "calibrate. Record one with /decisions add, "
+                        "then resolve it when the outcome lands.")
+            return f"🧭 {sentence}"
+        return ("usage: /decisions list · add <decision> "
+                "[| chosen | prediction | conf%]\n"
+                "       resolve <id> [good|bad] <outcome> · "
+                "review [weekly|monthly] · calibration")
 
     # ── backups: /backup ──────────────────────────────────────────────
     def _control_backup(self, tail: str, *, chat_key: str = "") -> str:
