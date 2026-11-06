@@ -549,6 +549,28 @@ class ToolRegistry:
                 "error": f"{type(exc).__name__}: {exc}",
             })
 
+        # AA-27: the community tool family (mini-apps + fun tools)
+        # joins the production registry. community/registry.py
+        # statically imports THIS module, so the import must stay
+        # deferred to call time — the same reason the books/media
+        # blocks above import inside the method. The builder returns
+        # a throwaway ToolRegistry; its specs are adopted here for
+        # every name the main registry does not already carry.
+        try:
+            import importlib
+
+            _community = importlib.import_module("nomorals.community.registry")
+            _built = _community.community_registry(context=self.context)
+            for _name, _spec in _built._tools.items():
+                self._tools.setdefault(_name, _spec)
+        except Exception as exc:  # noqa: BLE001 — community tools never sink builtins
+            _log.warning("community tool registry failed to build: %s: %s",
+                         type(exc).__name__, exc)
+            self._failed_modules.append({
+                "module": "community",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+
         try:
             self._load_custom_tools()
         except Exception as exc:  # noqa: BLE001 — a bad custom tool never sinks builtins

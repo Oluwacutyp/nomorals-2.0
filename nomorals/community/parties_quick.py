@@ -33,8 +33,10 @@ Universal: a quick party is a format, not a nation's format. The
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
@@ -42,7 +44,7 @@ from ..core.logging_setup import get_logger
 _log = get_logger("nomorals.community.parties_quick")
 
 __all__ = [
-    "QuickParty", "PartyQuick", "QuickRecap",
+    "QuickParty", "PartyQuick", "QuickRecap", "QuickPartyStore",
     "build_playlist", "QUICK_TARGET_SECONDS",
 ]
 
@@ -264,3 +266,70 @@ class PartyQuick:
             playlist_seconds=float(party.playlist.get("total_seconds", 0)),
             trivia_rounds=party.trivia_rounds, rehearsal=party.rehearsal,
             economy_dry_run=bool(party.rehearsal), failures=list(party.failures))
+
+
+# ── persistence (AA-05: the chat surface needs a store) ──────────────────
+
+_DATA_DIR = Path.home() / ".devon" / "community" / "parties_quick"
+
+
+class QuickPartyStore:
+    """JSON persistence for quick parties, per group. Never raises.
+
+    Mirrors :class:`nomorals.community.parties.PartyStore` — one file
+    per group under the community dir. PartyQuick itself stays
+    stateless (the caller owns the parties); this store is what lets
+    the /party chat surface hold a quick party between messages.
+    """
+
+    def __init__(self, data_dir: Path | str | None = None) -> None:
+        self.data_dir = Path(data_dir) if data_dir else _DATA_DIR
+
+    def _path(self, group_id: str) -> Path:
+        safe = "".join(c for c in str(group_id) if c.isalnum() or c in "-_")
+        return self.data_dir / f"{safe or 'group'}.json"
+
+    def load(self, group_id: str) -> list[QuickParty]:
+        try:
+            raw = json.loads(self._path(group_id).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        out: list[QuickParty] = []
+        for item in raw if isinstance(raw, list) else []:
+            try:
+                out.append(QuickParty.from_dict(item))
+            except (TypeError, ValueError) as exc:
+                _log.debug("quick party row skipped: %s", exc)
+        return out
+
+    def save(self, group_id: str, parties: list[QuickParty]) -> None:
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            self._path(group_id).write_text(
+                json.dumps([p.to_dict() for p in parties], indent=1),
+                encoding="utf-8")
+        except OSError as exc:
+            _log.warning("quick party save failed: %s", exc)
+
+    def get(self, group_id: str, party_id: str) -> QuickParty | None:
+        for party in self.load(group_id):
+            if party.party_id == party_id:
+                return party
+        return None
+
+    def put(self, party: QuickParty) -> None:
+        parties = [p for p in self.load(party.group_id)
+                   if p.party_id != party.party_id]
+        parties.append(party)
+        self.save(party.group_id, parties)
+
+    def live(self, group_id: str) -> QuickParty | None:
+        """The current quick party: live first, else latest not ended."""
+        parties = self.load(group_id)
+        for party in reversed(parties):
+            if party.state == "live":
+                return party
+        for party in reversed(parties):
+            if party.state != "ended":
+                return party
+        return None

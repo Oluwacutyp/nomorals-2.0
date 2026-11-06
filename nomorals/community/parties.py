@@ -41,7 +41,9 @@ never reaches outside the group boundary to find them.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -57,6 +59,7 @@ __all__ = [
     "Party", "PartyManager", "PartyStore", "PartyRecap",
     "PARTY_STATES", "REHEARSAL_COUNT", "TRIVIA_POINTS", "STREAK_BONUS_CAP",
     "format_recap", "format_last_night_card",
+    "control_party", "party_economy_hook",
 ]
 
 #: First N parties per group run as rehearsals (dry-run economy).
@@ -683,3 +686,437 @@ def format_last_night_card(recap: PartyRecap) -> str:
                      f"— {recap.top_wall[0].get('author')}")
     lines.append(f"👥 {len(recap.attendees)} showed up. Next one soon? 🪩")
     return "\n".join(lines)
+
+
+# ── chat surface: /party (AA-05) ─────────────────────────────────────────
+#
+# The PartyManager above (and the PartyQuick fast variant) shipped with
+# no caller — this control is their production surface, following the
+# community control contract (never raises, group-only, state under
+# the community dir). Two production hooks are wired by default:
+#
+# * trivia — the group's OWN quiz mini-apps are the question bank
+#   (a party round is a deterministic pick over the bank, so an
+#   answer can be re-scored later without storing the question);
+# * economy — trivia credits land in the ONE group economy (§36)
+#   through the TokenEconomy policy facade, at the same data root
+#   the runtime's economy surface uses. Rehearsal parties (the first
+#   REHEARSAL_COUNT per group) stay dry-run, as the manager intends.
+
+_PARTY_HELP = (
+    "/party — group parties (DJ queue, votes, trivia, wall, recap)\n"
+    "/party new <title> [| <theme>] [in 2h]   •   /party list\n"
+    "/party show   •   /party rsvp yes|no|maybe   •   /party start\n"
+    "/party pause   •   /party resume   •   /party end\n"
+    "/party request <track title>   •   /party vote <track id>\n"
+    "/party next   •   /party trivia   •   /party answer <number>\n"
+    "/party wall <text>   •   /party react <post id> <emoji>\n"
+    "/party lastnight\n"
+    "Fast variant: /party quick new <title> · start · request · "
+    "vote <n> · next · wall · end")
+
+
+def _party_root(context: Any) -> Path | None:
+    settings = getattr(context, "settings", None)
+    root = getattr(settings, "community_dir", None)
+    return Path(root) if root else None
+
+
+def _economy_root(context: Any) -> Path | None:
+    """Where THIS deployment's group economy lives (one purse, §36)."""
+    root = _party_root(context)
+    if root is not None:
+        return root / "group_economy"
+    settings = getattr(context, "settings", None)
+    workspace = getattr(settings, "workspace_dir", None)
+    if workspace:
+        # The root GroupSurface itself uses: <workspace>/data/social.
+        return Path(workspace) / "data" / "social" / "group_economy"
+    return None
+
+
+def party_economy_hook(context: Any = None):
+    """The production economy hook for PartyManager / PartyQuick.
+
+    Credits through :func:`persistent_token_economy` so party points
+    are group-economy coins — same ledger, same caps, no parallel
+    balance. Returns False (no credit) on any failure; the managers
+    treat the hook as best-effort by design.
+    """
+    root = _economy_root(context)
+
+    def hook(group_id: str, member: str, amount: int, reason: str) -> bool:
+        try:
+            from .token_economy import persistent_token_economy
+
+            economy = persistent_token_economy(group_id, data_dir=root)
+            return economy.earn(member, int(amount), "party",
+                                reason=reason) is not None
+        except Exception as exc:  # best-effort by the manager's design
+            _log.warning("party economy hook failed: %s", exc)
+            return False
+
+    return hook
+
+
+def _quiz_bank(context: Any, group_id: str) -> list[dict[str, Any]]:
+    """The group's quiz mini-apps as a trivia bank (options + answer)."""
+    try:
+        from .miniapps import MiniAppStore
+
+        root = _party_root(context)
+        store = MiniAppStore(data_dir=root) if root else MiniAppStore()
+        bank: list[dict[str, Any]] = []
+        for app in store.load(group_id):
+            if app.kind != "quiz":
+                continue
+            options = [str(o) for o in (app.state.get("options") or [])]
+            correct = app.state.get("correct")
+            if (len(options) >= 2 and isinstance(correct, int)
+                    and 0 <= correct < len(options)):
+                bank.append({"question": app.title, "options": options,
+                             "answer_index": correct})
+        return bank
+    except Exception as exc:  # trivia is an enhancement, never a gate
+        _log.debug("party quiz bank unavailable: %s", exc)
+        return []
+
+
+def _quiz_question(bank: list[dict[str, Any]], party_id: str,
+                   round_no: int) -> dict[str, Any] | None:
+    """Deterministic pick: the same (party, round) always re-derives
+    the same question, so /party answer needs no stored question."""
+    if not bank or round_no < 1:
+        return None
+    digest = hashlib.sha256(f"{party_id}:{round_no}".encode()).hexdigest()
+    return bank[int(digest[:8], 16) % len(bank)]
+
+
+def _party_manager(context: Any) -> PartyManager:
+    root = _party_root(context)
+    store = PartyStore(root / "parties") if root else PartyStore()
+    events = EventStore(root / "events") if root else EventStore()
+
+    def trivia(party: Party) -> dict[str, Any] | None:
+        bank = _quiz_bank(context, party.group_id)
+        return _quiz_question(bank, party.id, party.trivia_rounds + 1)
+
+    return PartyManager(store=store, event_store=events,
+                        trivia_provider=trivia,
+                        economy_hook=party_economy_hook(context))
+
+
+def _active_party(store: PartyStore, group_id: str) -> Party | None:
+    live = store.live(group_id)
+    if live is not None:
+        return live
+    open_parties = [p for p in store.load(group_id) if p.state != "ended"]
+    return open_parties[-1] if open_parties else None
+
+
+def _drain(store: PartyStore, party: Party) -> list[str]:
+    lines = [str(m) for m in party.outbox]
+    if party.outbox:
+        party.outbox = []
+        store.put(party)
+    return lines
+
+
+def _render_party(party: Party) -> str:
+    lines = [f"🎉 **{party.title}** — {party.state}"
+             + (" (rehearsal)" if party.rehearsal else ""),
+             f"Host: {party.host}"
+             + (f" · theme: {party.theme}" if party.theme else "")]
+    if party.current_track:
+        lines.append(f"🎵 Now: {party.current_track.get('title')}")
+    ranked = party.queue_ranked()
+    if ranked:
+        lines.append("Queue:")
+        for track in ranked[:6]:
+            votes = len(party.votes.get(track["id"], []))
+            lines.append(f"• {track.get('title')} — {votes} vote(s) "
+                         f"· `{track['id']}`")
+    if party.trivia_scores:
+        top = sorted(party.trivia_scores.items(), key=lambda kv: -kv[1])[:5]
+        lines.append("🏆 Trivia: " + ", ".join(f"{m} {s}" for m, s in top))
+    lines.append(f"🧱 Wall: {len(party.wall)} post(s) · `{party.id}`")
+    return "\n".join(lines)
+
+
+def control_party(tail: str = "", context: Any = None, chat: Any = None,
+                  sender_id: str = "", sender: str = "") -> str:
+    """`/party …` — the community party surface. Never raises."""
+    if chat is None or getattr(chat, "kind", "dm") != "group":
+        return "Parties live in group chats — run /party in a group. 🎉"
+    try:
+        return _control_party((tail or "").strip(), context, chat,
+                              sender_id, sender)
+    except Exception as exc:  # the surface never raises into chat
+        _log.warning("party control failed: %s", exc)
+        return "The party hit a snag — try again."
+
+
+def _control_party(tail: str, context: Any, chat: Any,
+                   sender_id: str, sender: str) -> str:
+    from .miniapps import _group_key
+
+    group_id = _group_key(chat)
+    who = sender_id or sender or "anon"
+    words = tail.split()
+    sub = words[0].lower() if words else "help"
+    rest = words[1:]
+
+    if sub in ("help", ""):
+        return _PARTY_HELP
+    if sub == "quick":
+        return _control_party_quick(" ".join(rest), context, group_id, who)
+
+    manager = _party_manager(context)
+    store = manager.store
+
+    if sub == "new":
+        body = " ".join(rest)
+        delay = 3600.0
+        match = re.search(r"\bin\s+(\d+)\s*(h|m)\s*$", body, re.IGNORECASE)
+        if match:
+            delay = int(match.group(1)) * (3600 if match.group(2).lower() == "h" else 60)
+            body = body[:match.start()].strip()
+        title, _, theme = body.partition("|")
+        title = title.strip()
+        if not title:
+            return "Name the party: /party new <title> [| <theme>] [in 2h]"
+        party = manager.create_party(group_id, title, time.time() + delay,
+                                     who, theme=theme.strip())
+        if party is None:
+            return "Couldn't create that party — try a different title."
+        lines = _drain(store, party)
+        return "\n".join(lines) or f"🎉 **{title}** is on the calendar."
+
+    if sub == "list":
+        parties = store.load(group_id)
+        if not parties:
+            return "No parties here yet — /party new <title> starts one."
+        lines = ["🎉 Parties in this group:"]
+        for party in parties[-8:]:
+            lines.append(f"• {party.title} — {party.state} · `{party.id}`")
+        return "\n".join(lines)
+
+    if sub == "lastnight":
+        return manager.last_night_card(group_id)
+
+    party = _active_party(store, group_id)
+    if party is None:
+        return "No party running here — /party new <title> starts one."
+
+    if sub == "show":
+        return _render_party(party)
+    if sub == "rsvp":
+        choice = rest[0].lower() if rest else ""
+        if choice not in ("yes", "no", "maybe"):
+            return "RSVP with: /party rsvp yes|no|maybe"
+        result = manager.rsvp(party, who, choice)
+        lines = _drain(store, party)
+        return "\n".join(lines + ([result] if result else [])) or \
+            f"RSVP noted: {choice}."
+    if sub == "start":
+        if not manager.start_party(party):
+            return f"Can't start from '{party.state}' — see /party show."
+        return "\n".join(_drain(store, party))
+    if sub == "pause":
+        if not manager.pause_party(party):
+            return "Only a live party can pause."
+        return "\n".join(_drain(store, party))
+    if sub == "resume":
+        if not manager.resume_party(party):
+            return "Only a paused party can resume."
+        return "\n".join(_drain(store, party))
+    if sub == "request":
+        title = " ".join(rest).strip()
+        if not title:
+            return "Request what? /party request <track title>"
+        track = manager.request_track(party, who, title)
+        lines = _drain(store, party)
+        if track is None:
+            return "\n".join(lines) or "Requests open when the party is live."
+        return (f"🎶 Queued **{track['title']}** — vote with "
+                f"/party vote {track['id']}")
+    if sub == "vote":
+        if not rest:
+            return "Vote with: /party vote <track id> (ids in /party show)"
+        if not manager.vote_track(party, who, rest[0]):
+            return "No such queued track here — /party show lists them."
+        return "🗳️ Vote counted."
+    if sub == "next":
+        track = manager.next_track(party)
+        lines = _drain(store, party)
+        if track is None:
+            return "\n".join(lines) or "Queue's empty — /party request a track."
+        return "\n".join(lines)
+    if sub == "trivia":
+        question = manager.play_trivia_round(party)
+        lines = _drain(store, party)
+        if question is None:
+            return ("No trivia bank here yet — party trivia draws on this "
+                    "group's quiz mini-apps (/miniapp new quiz …).")
+        return "\n".join(lines)
+    if sub == "answer":
+        if not rest or not rest[0].isdigit():
+            return "Answer with: /party answer <number>"
+        bank = _quiz_bank(context, group_id)
+        question = _quiz_question(bank, party.id, party.trivia_rounds)
+        if question is None:
+            return "No trivia round is open — /party trivia starts one."
+        result = manager.answer_trivia(party, who, question,
+                                       int(rest[0]) - 1)
+        lines = _drain(store, party)
+        return "\n".join(lines) or ("✅ Correct!" if result.get("correct")
+                                    else "❌ Not that one.")
+    if sub == "wall":
+        text = " ".join(rest).strip()
+        if not text:
+            return "Post with: /party wall <text>"
+        post = manager.post_to_wall(party, who, text)
+        if post is None:
+            return "The wall opens when the party is live or paused."
+        return f"🧱 Posted to the wall · `{post['id']}`"
+    if sub == "react":
+        if len(rest) < 2:
+            return "React with: /party react <post id> <emoji>"
+        if not manager.react_to_wall(party, who, rest[0], rest[1]):
+            return "No wall post with that id here."
+        return "❤️ Reaction added."
+    if sub == "end":
+        recap = manager.end_party(party)
+        lines = _drain(store, party)
+        return "\n".join(lines) or format_recap(recap)
+    return _PARTY_HELP
+
+
+def _control_party_quick(tail: str, context: Any, group_id: str,
+                         who: str) -> str:
+    """`/party quick …` — the PartyQuick fast variant, same surface."""
+    from .parties_quick import PartyQuick, QuickPartyStore
+
+    root = _party_root(context)
+    store = QuickPartyStore(root / "parties_quick") if root else QuickPartyStore()
+    outbox: list[str] = []
+    cell: dict[str, Any] = {}
+
+    def trivia() -> dict[str, Any] | None:
+        party = cell.get("party")
+        if party is None:
+            return None
+        bank = _quiz_bank(context, group_id)
+        question = _quiz_question(bank, party.party_id,
+                                  party.trivia_rounds + 1)
+        if question is None:
+            return None
+        return {"q": question["question"], "options": question["options"]}
+
+    quick = PartyQuick(trivia_provider=trivia,
+                       economy_hook=party_economy_hook(context),
+                       say=outbox.append)
+    words = tail.split()
+    sub = words[0].lower() if words else "help"
+    rest = words[1:]
+
+    if sub in ("help", ""):
+        return ("Quick party: /party quick new <title> · start · "
+                "request <track> · vote <number> · next · trivia · "
+                "answer <number> · wall <text> · end")
+
+    if sub == "new":
+        title = " ".join(rest).strip()
+        if not title:
+            return "Name it: /party quick new <title>"
+        rehearsal = len(store.load(group_id)) < REHEARSAL_COUNT
+        party = quick.create(group_id, title, who, mixes=[],
+                             rehearsal=rehearsal)
+        # PartyQuick numbers parties per manager instance; the store
+        # is the durable namespace, so the persisting caller allocates
+        # a collision-free id (two chats must never overwrite parties).
+        party.party_id = "qp-" + new_short_id()
+        store.put(party)
+        note = " (rehearsal — economy dry-run)" if rehearsal else ""
+        return (f"⚡ Quick party **{title}** created{note} — "
+                f"/party quick start when ready.")
+
+    party = store.live(group_id)
+    if party is None:
+        return "No quick party here — /party quick new <title> starts one."
+    cell["party"] = party
+
+    if sub == "start":
+        if not quick.start(party):
+            return "That quick party can't start now."
+        store.put(party)
+        return f"⚡ **{party.title}** is LIVE — request tracks!"
+    if sub == "request":
+        title = " ".join(rest).strip()
+        track = quick.request_track(party, who, title) if title else None
+        if track is None:
+            return "Requests open when the quick party is live."
+        store.put(party)
+        return (f"🎶 Queued **{title}** — it's #{len(party.queue)}; "
+                f"vote with /party quick vote {len(party.queue)}")
+    if sub == "vote":
+        if not rest or not rest[0].isdigit():
+            return "Vote with: /party quick vote <number> (queue order)"
+        if not quick.vote_track(party, who, int(rest[0]) - 1):
+            return "No track at that queue position."
+        store.put(party)
+        return "🗳️ Vote counted."
+    if sub == "next":
+        track = quick.next_track(party)
+        if track is None:
+            return "Queue's empty — /party quick request a track."
+        store.put(party)
+        lines = [f"🎵 Now playing: **{track['title']}**"]
+        lines.extend(outbox)  # an auto trivia round announces itself here
+        return "\n".join(lines)
+    if sub == "trivia":
+        question = quick.play_trivia_round(party)
+        if question is None:
+            return ("No trivia bank here yet — quick-party trivia draws on "
+                    "this group's quiz mini-apps (/miniapp new quiz …).")
+        store.put(party)
+        opts = "\n".join(f"{i}. {o}" for i, o in
+                         enumerate(question["options"], 1))
+        return f"🧠 Round {question['round']}: {question['question']}\n{opts}"
+    if sub == "answer":
+        if not rest or not rest[0].isdigit():
+            return "Answer with: /party quick answer <number>"
+        bank = _quiz_bank(context, group_id)
+        question = _quiz_question(bank, party.party_id, party.trivia_rounds)
+        if question is None:
+            return "No trivia round is open — /party quick trivia starts one."
+        picked = int(rest[0]) - 1
+        options = question["options"]
+        answer_text = options[picked] if 0 <= picked < len(options) else ""
+        correct_text = options[question["answer_index"]]
+        result = quick.answer_trivia(party, who, answer_text, correct_text)
+        store.put(party)
+        if not result.get("ok"):
+            return "The quick party isn't live."
+        return ("✅ Correct! +10" if result.get("correct")
+                else f"❌ It was: {correct_text}")
+    if sub == "wall":
+        text = " ".join(rest).strip()
+        if not text:
+            return "Post with: /party quick wall <text>"
+        quick.post_to_wall(party, who, text)
+        store.put(party)
+        return "🧱 Posted to the wall."
+    if sub == "end":
+        recap = quick.end(party)
+        store.put(party)
+        lines = [f"⚡ **{recap.title}** — that's a wrap."]
+        if recap.top_players:
+            lines.append("🏆 Top players: " + ", ".join(
+                f"{p['member']} {p['score']}" for p in recap.top_players))
+        if recap.trivia_rounds:
+            lines.append(f"🧠 {recap.trivia_rounds} trivia round(s) played.")
+        if recap.economy_dry_run:
+            lines.append("Rehearsal party — economy was dry-run.")
+        return "\n".join(lines)
+    return "Quick party: /party quick new <title> · start · request · end"

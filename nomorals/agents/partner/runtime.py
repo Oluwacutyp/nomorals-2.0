@@ -2855,6 +2855,20 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "failure loop job not registered: %s", exc)
+                # Community orchestration (AA-18): one durable
+                # "community orchestration tick" job (every 1m)
+                # heartbeating this device into the fleet session
+                # registry and dispatching due scheduled group posts
+                # through the router — before this wiring the device
+                # Router had no production caller and scheduled posts
+                # were never sent.  Idempotent; best-effort.
+                try:
+                    from ...community.orchestration import ensure_orchestration_job
+
+                    ensure_orchestration_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "orchestration job not registered: %s", exc)
             except Exception as exc:  # noqa: BLE001 - scheduler is optional
                 _log.warning("scheduler failed to start: %s", exc)
                 self._scheduler = None
@@ -5345,6 +5359,30 @@ class PartnerRuntime(
             # community-scoped). Anyone in the community drives it.
             from ...community.audio_rooms import control_room
             return control_room(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+                sender_id=getattr(message, "sender_id", "") if message else "",
+                sender=getattr(message, "sender", "") if message else "",
+            )
+        if kind == "party":
+            # Group parties (AA-05) — not owner-gated (shared surfaces,
+            # group-scoped). Anyone in the group drives it; trivia wins
+            # credit the one group economy through the token facade.
+            from ...community.parties import control_party
+            return control_party(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+                sender_id=getattr(message, "sender_id", "") if message else "",
+                sender=getattr(message, "sender", "") if message else "",
+            )
+        if kind == "ajo":
+            # Rotating savings circles (AA-22) — not owner-gated
+            # (shared surfaces, group-scoped). Anyone in the group
+            # drives it.
+            from ...community.ajo import control_ajo
+            return control_ajo(
                 command.tail or arg,
                 context=self.context,
                 chat=chat,

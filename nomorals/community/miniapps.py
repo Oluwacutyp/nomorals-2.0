@@ -919,6 +919,15 @@ def control_miniapp(
     sub = words[0].lower() if words else "help"
     rest = words[1:]
 
+    # Wave 2 (miniapps2: carpool / rota / market / league / split) is
+    # delegated whole — one /miniapp surface, two store families.
+    from .miniapps2 import WAVE2_FAMILIES, control_miniapp2
+
+    if sub in WAVE2_FAMILIES:
+        return control_miniapp2(
+            tail, context=context, chat=chat,
+            sender_id=sender_id, sender=sender)
+
     if sub == "help" or sub == "":
         return _HELP
     if sub == "list":
@@ -1019,7 +1028,9 @@ _HELP = ("/miniapp — group mini-apps (polls, quizzes, shared expenses, RSVPs)\
          "/miniapp expense <id> <amount> <what> [for n1,n2] [split:…] [cat:…]\n"
          "/miniapp edit|del <id> <exp_id> …   •   /miniapp summary <id>\n"
          "/miniapp settle <id> <from> <to> <amount>\n"
-         "/miniapp rsvp <id> yes|no|maybe [+N]   •   /miniapp nudge <id>   •   /miniapp capacity <id> <n>")
+         "/miniapp rsvp <id> yes|no|maybe [+N]   •   /miniapp nudge <id>   •   /miniapp capacity <id> <n>\n"
+         "Wave 2 — /miniapp carpool … · /miniapp rota … · /miniapp market … · "
+         "/miniapp league … · /miniapp split … (type the family name alone for its help)")
 
 
 # ── Panels (Hark pattern): persistent, connector-backed mini-apps ──────────

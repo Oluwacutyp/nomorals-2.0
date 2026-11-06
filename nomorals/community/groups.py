@@ -596,6 +596,7 @@ def _usage() -> str:
         "/cgroup role <group_id> <member> <owner|admin|member>\n"
         "/cgroup welcome <group_id> <text> · lang <group_id> <locale> · events <group_id>\n"
         "/cgroup rep <member> · nudge · discover <member>\n"
+        "/cgroup schedule <minutes> <text> · posts · devices (AA-18 orchestration)\n"
         "Also: /cgroup event … · /cgroup meetup … — see events.py / meetups.py."
     )
 
@@ -825,5 +826,52 @@ def _control_cgroup(tail: str, context, chat,
         for m, c in top:
             lines.append(f"  {m} — {c} shared group{'s' if c != 1 else ''}")
         return "\n".join(lines)
+
+    # ── AA-18: device orchestration — scheduled posts + fleet view ──
+    if cmd in ("schedule", "posts", "devices"):
+        from .orchestration import runtime_orchestrator
+
+        orchestrator, device_id = runtime_orchestrator(context)
+        if cmd == "devices":
+            health = orchestrator.router.registry.health()
+            if not health:
+                return "No devices registered yet."
+            lines = [f"🛰️ **Devices** (you are routed by: {device_id}):"]
+            for dev, info in sorted(health.items()):
+                mark = "🟢" if info["healthy"] else "🔴"
+                lines.append(f"  {mark} {dev} — {info['kind']} · "
+                             f"heartbeat {info['age_s']}s ago")
+            recent = orchestrator.router.log.recent(3)
+            for decision in recent:
+                lines.append(f"  ↪ {decision.task}: → "
+                             f"{decision.chosen_device or 'nobody'} "
+                             f"({decision.reason})")
+            return "\n".join(lines)
+        if chat is None or getattr(chat, "kind", "dm") != "group":
+            return "Scheduled posts belong to a group chat — run it there."
+        from .miniapps import _group_key
+
+        group_key = _group_key(chat)
+        if cmd == "posts":
+            mine = [p for p in orchestrator.posts if p.group_id == group_key]
+            if not mine:
+                return "No scheduled posts for this group."
+            lines = ["🗓️ **Scheduled posts for this group:**"]
+            for post in mine[-8:]:
+                when = time.strftime("%H:%M", time.localtime(post.due_ts))
+                state = "sent" if post.sent else "pending"
+                lines.append(f"  • {when} [{state}] {post.text[:80]}")
+            return "\n".join(lines)
+        segs = rest.split(None, 1)
+        if len(segs) < 2 or not segs[0].isdigit():
+            return "Schedule with: /cgroup schedule <minutes> <text>"
+        minutes = int(segs[0])
+        orchestrator.schedule_post(
+            group_key, str(getattr(chat, "platform", "") or ""),
+            f"{getattr(chat, 'platform', '')}:{getattr(chat, 'chat_id', '')}",
+            segs[1], time.time() + minutes * 60)
+        return (f"🗓️ Scheduled for this group in {minutes} min — "
+                f"a healthy device will post it ({device_id} is on duty "
+                f"if the router picks it).")
 
     return _usage()

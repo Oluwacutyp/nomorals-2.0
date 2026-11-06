@@ -610,6 +610,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "cgroup": (0, None),       # /cgroup … — themed groups, events, meetups (#84)
     "challenge": (0, None),    # /challenge … — photo-proof challenges + streaks + squads (#87)
     "room": (0, None),           # /room … — live audio rooms: host → speakers → hand-raise (#107)
+    "party": (0, None),          # /party … — group parties: DJ queue, votes, trivia, wall, recap (AA-05)
+    "ajo": (0, None),            # /ajo … — rotating savings circles (AA-22)
     # new layer: voice, scheduler, db, api, vision, swarm
     "tts": (1, None),        # /tts <text> — speak it (sends a voice note; file=on sends the file)
     "stt": (1, 5),           # /stt <path> — transcribe an audio file
@@ -1807,8 +1809,8 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "predict": {"what": "the prediction pit: call a d100 roll over/under a line, stake coins, correct calls pay 2x. Unlock: earn 'High Roller' (craps) or 'Boss Hunter' (raid boss) — progression-gated, the owner always has access.",
                 "usage": "/predict <stake> <over|under> <1-99>", "example": "/predict 50 over 60",
                 "related": "/game /bet /achievements"},
-    "miniapp": {"what": "group mini-apps: polls, shared-expense tracking with settle-up, and event RSVPs. Group chats only — state is group-scoped and isolated from my private memory.",
-                "usage": "/miniapp new <poll|expenses|rsvp> <title> [options…] | /miniapp list | /miniapp show <id> | /miniapp vote <id> <n> | /miniapp expense <id> <amount> <what> | /miniapp rsvp <id> yes|no|maybe",
+    "miniapp": {"what": "group mini-apps: polls, quizzes, shared-expense tracking with settle-up, and event RSVPs — plus wave 2 (AA-04): carpools, rotas, a marketplace, leagues, and split bills. Group chats only — state is group-scoped and isolated from my private memory.",
+                "usage": "/miniapp new <poll|expenses|rsvp|quiz> <title> [options…] | /miniapp list | /miniapp show <id> | /miniapp vote <id> <n> | /miniapp expense <id> <amount> <what> | /miniapp rsvp <id> yes|no|maybe | /miniapp carpool|rota|market|league|split … (type the family name alone for its help)",
                 "example": "/miniapp new poll \"Best day?\" Mon Tue Wed",
                 "related": "/game"},
     "panel": {"what": "persistent live-data panels: user-described mini-apps wired to connectors (fitness, finance, …). Panels refresh on a cadence and answer questions in chat — \"how's my marathon training going?\".",
@@ -1867,17 +1869,25 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "example": "/match daily gig",
                 "related": "/uprofile /miniapp"},
     "cgroup": {"what": "themed community groups + events + IRL meetups — group rooms with topics and post feeds, event lifecycle (create → RSVP → reminders → summary), venue polls, day-of reminders, check-in, weekly rituals, and warm-start discovery. Not owner-gated (shared surfaces).",
-                "usage": "/cgroup new <name> | <topic> · join <group_id> · list · post <group_id> <text> · show <group_id> · discover [member] · nudge | /cgroup event new <group_id> | <title> | <YYYY-MM-DD HH:MM> | [where] | [weekly] · rsvp <event_id> <yes|no|maybe> · list · summary · ritual · nudge | /cgroup meetup poll <event_id> | <venue>… · vote · results · attendees · checkin · turnout",
+                "usage": "/cgroup new <name> | <topic> · join <group_id> · list · post <group_id> <text> · show <group_id> · discover [member] · nudge · schedule <minutes> <text> · posts · devices (device orchestration, AA-18) | /cgroup event new <group_id> | <title> | <YYYY-MM-DD HH:MM> | [where] | [weekly] · rsvp <event_id> <yes|no|maybe> · list · summary · ritual · nudge | /cgroup meetup poll <event_id> | <venue>… · vote · results · attendees · checkin · turnout",
                 "example": "/cgroup event new grp_x | Lagos Devs dinner | 2026-10-10 19:00 | Ikeja | weekly",
                 "related": "/miniapp /gtrip /match"},
     "challenge": {"what": "photo-proof fitness challenges + streaks + squads — Seer-verified workout photos, leaderboards, daily streaks with loss-aversion nudges, small workout squads (3–8), and challenge-completion badges (features-as-loot). Not owner-gated (shared surfaces).",
                 "usage": "/challenge create <name> | <type> | <days> [target N] · join <id> · log <id> · proof <id> <photo-path> · board <id> · streak · risk · squad create <name> | <m1,m2,…> · squad board <squad_id>",
                 "example": "/challenge create October Grind | workout-count | 31 target 20",
                 "related": "/train /form /cgroup"},
-    "room": {"what": "live audio rooms for communities — host → speakers → hand-raise queue → listeners (Clubhouse/Spaces grammar). Rooms are scoped to a community; opt-in recording with always-visible state, live captions on by default, host mic controls + mute/block/report moderation, and tips. Not owner-gated (shared surfaces).",
-             "usage": "/room create <community_id> | <title> · list [community_id] · join <room_id> · leave <room_id> · raise <room_id> · lower <room_id> · speak <room_id> <user_id> · drop <room_id> <user_id> · mute|unmute <room_id> <user_id> · block <room_id> <user_id> · report <room_id> <user_id> <reason> · record <room_id> on|off · captions <room_id> on|off · tip <room_id> <user_id> <naira> · show <room_id> · end <room_id>",
+    "room": {"what": "live audio rooms for communities — host → speakers → hand-raise queue → listeners (Clubhouse/Spaces grammar). Rooms are scoped to a community; opt-in recording with always-visible state, live captions on by default, host mic controls + mute/block/report moderation, and tips. Recorded rooms land in the community audio archive (AA-30): recordings, clips, caller-supplied transcripts, speaker stats. Not owner-gated (shared surfaces).",
+             "usage": "/room create <community_id> | <title> · list [community_id] · join <room_id> · leave <room_id> · raise <room_id> · lower <room_id> · speak <room_id> <user_id> · drop <room_id> <user_id> · mute|unmute <room_id> <user_id> · block <room_id> <user_id> · report <room_id> <user_id> <reason> · record <room_id> on|off · captions <room_id> on|off · tip <room_id> <user_id> <naira> · show <room_id> · end <room_id> · recordings <community_id> · recording <community_id> <rec_id> · clip <community_id> <rec_id> <start_s> <end_s> <title> · clips <community_id> [rec_id] · attach <community_id> <rec_id> <speaker> | <text> · speakers <community_id> <rec_id>",
              "example": "/room create grp_devs | Friday AMA",
              "related": "/cgroup /match /challenge"},
+    "party": {"what": "group parties (AA-05): a DJ request queue with voting, trivia rounds drawn from the group's own quiz mini-apps, a moments wall, RSVPs through the linked event, and an end-of-night recap. Trivia wins pay into the one group economy; a group's first three parties are rehearsals (economy dry-run). The quick variant (/party quick …) spins up a fast playlist party. Group chats only. Not owner-gated (shared surfaces).",
+              "usage": "/party new <title> [| <theme>] [in 2h] · list · show · rsvp yes|no|maybe · start · pause · resume · request <track> · vote <track id> · next · trivia · answer <n> · wall <text> · react <post id> <emoji> · end · lastnight · quick new|start|request|vote <n>|next|trivia|answer <n>|wall|end",
+              "example": "/party new Friday Turnup | amapiano in 1h",
+              "related": "/cgroup /room /miniapp"},
+    "ajo": {"what": "ajo / esusu rotating savings circles (AA-22): members contribute a fixed amount each round and one member takes the whole pot in turn order; a full cycle nets everyone to exactly zero. Group chats only — the ledger is the circle's own, under the community dir. Not owner-gated (shared surfaces).",
+            "usage": "/ajo new <amount> <circle name> · list · join <id> · show <id> · pay <id> [amount] · payout <id> · remind <id> · balance <id> · order <id> <name1,name2,…> · close <id>",
+            "example": "/ajo new 5000 Rent circle",
+            "related": "/cgroup /treasury /balance"},
     "book": {"what": "BookForge: writes a real book on a topic (research → outline → "
                      "chapters → PDF with table of contents) and sends the finished "
                      "PDF to you when it's done. Resumable if the run is interrupted.",
@@ -3831,7 +3841,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "warn", "pin", "unpin", "purge", "report",
                             "cleanup", "rmdeleted", "rminactive",
                             "tag", "bansender", "unbansender",
-                            "reactwipe", "boosters"]),
+                            "reactwipe", "boosters", "party", "ajo"]),
     ("discovery", ["list", "commands", "menu", "help", "tour", "heal"]),
 ]
 
@@ -4137,7 +4147,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
       "unpin", "purge", "report",
       "cleanup", "rmdeleted", "rminactive",
-      "tag", "bansender", "unbansender", "reactwipe", "boosters"]),
+      "tag", "bansender", "unbansender", "reactwipe", "boosters",
+      "party", "ajo"]),
     ("discovery",
      ["list", "commands", "menu", "help"]),
 ]
@@ -4400,7 +4411,9 @@ LIST_ONELINERS: dict[str, str] = {
     "benchmark": "how sharp the system is right now (reasoning|planning|tool_use|self_correction)",
     "redteam": "attack my own loop in a sandbox and report the holes",
     "predict": "prediction pit — call a d100 roll, win 2x (unlock: beat challenges)",
-    "miniapp": "group mini-apps: polls, shared expenses, RSVPs",
+    "miniapp": "group mini-apps: polls, quizzes, shared expenses, RSVPs + carpool/rota/market/league/split",
+    "party": "group parties: /party new <title> | start | request | vote | trivia | wall | end (+ quick)",
+    "ajo": "rotating savings circles: /ajo new <amount> <name> | join | pay | payout | balance",
     "panel": "persistent live-data panels: track fitness, finance, … and ask questions",
     "game": "the social game engine — 41 games, DM + group + channel, with economy and leaderboards",
     "math": "math class — adaptive maths problems, duels, streaks, leaderboard",

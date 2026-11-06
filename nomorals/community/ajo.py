@@ -42,6 +42,7 @@ __all__ = [
     "AjoStore",
     "create_ajo",
     "default_ajo_dir",
+    "control_ajo",
 ]
 
 
@@ -388,3 +389,188 @@ class AjoStore:
             path.unlink()
             return True
         return False
+
+
+# ── chat surface: /ajo (AA-22) ───────────────────────────────────────────
+#
+# AjoGroup / AjoStore above shipped as pure logic with no caller — this
+# control is their production surface, following the community control
+# contract (never raises, group-only, state under the community dir).
+# Amounts in chat are major units ("5000", "250.50"); the ledger keeps
+# cents. The circle's starter is its first member (the creator joins
+# first at /ajo new) — turn-order changes and closing are theirs.
+
+_AJO_HELP = (
+    "/ajo — rotating savings circles (ajo / esusu)\n"
+    "/ajo new <amount> <circle name>   •   /ajo list\n"
+    "/ajo join <id>   •   /ajo show <id>\n"
+    "/ajo pay <id> [amount]   •   /ajo payout <id>\n"
+    "/ajo remind <id>   •   /ajo balance <id>\n"
+    "/ajo order <id> <name1,name2,…> (starter, before round 1)\n"
+    "/ajo close <id> (starter)")
+
+
+def _fmt_money(cents: int) -> str:
+    major, rem = divmod(int(cents), 100)
+    return f"{major:,}" if rem == 0 else f"{major:,}.{rem:02d}"
+
+
+def _parse_money(text: str) -> int | None:
+    try:
+        return int(round(float(str(text).replace(",", "")) * 100))
+    except (TypeError, ValueError):
+        return None
+
+
+def _ajo_store(context: Any) -> AjoStore:
+    settings = getattr(context, "settings", None)
+    root = getattr(settings, "community_dir", None)
+    return AjoStore(Path(root) / "ajo") if root else AjoStore()
+
+
+def _render_ajo(group: AjoGroup) -> str:
+    nxt = group.next_payout()
+    lines = [f"🔄 **{group.name}** — {_fmt_money(group.contribution_cents)} "
+             f"{group.currency} per round · round {group.current_round}",
+             "Members: " + ", ".join(
+                 f"{m.display_name}" for m in group.members)]
+    if nxt:
+        lines.append(f"Next pot: {_fmt_money(nxt['amount_cents'])} → "
+                     f"{nxt['recipient_name']}"
+                     + ("" if nxt["round_complete"] else " (round not full yet)"))
+    lines.append(f"`{group.id}`")
+    return "\n".join(lines)
+
+
+def control_ajo(tail: str = "", context: Any = None, chat: Any = None,
+                sender_id: str = "", sender: str = "") -> str:
+    """`/ajo …` — the rotating-savings surface. Never raises."""
+    if chat is None or getattr(chat, "kind", "dm") != "group":
+        return "Ajo circles live in group chats — run /ajo in a group. 🔄"
+    try:
+        return _control_ajo((tail or "").strip(), context, chat,
+                            sender_id, sender)
+    except Exception as exc:  # the surface never raises into chat
+        return f"Ajo hit a snag: {exc}"
+
+
+def _control_ajo(tail: str, context: Any, chat: Any,
+                 sender_id: str, sender: str) -> str:
+    from .miniapps import _group_key
+
+    group_key = _group_key(chat)
+    who = sender_id or sender or "anon"
+    name = sender or who
+    store = _ajo_store(context)
+    words = tail.split()
+    sub = words[0].lower() if words else "help"
+    rest = words[1:]
+
+    if sub in ("help", ""):
+        return _AJO_HELP
+
+    if sub == "new":
+        if len(rest) < 2:
+            return "Start one: /ajo new <amount> <circle name>"
+        cents = _parse_money(rest[0])
+        if cents is None or cents <= 0:
+            return "The amount must be a positive number: /ajo new 5000 Rent circle"
+        title = " ".join(rest[1:])
+        group = create_ajo(group_key, title, cents)
+        group.add_member(who, name)
+        store.put(group)
+        return (f"🔄 Ajo **{title}** opened — {_fmt_money(cents)} "
+                f"{group.currency} per round. You are member #1.\n"
+                f"Others join: /ajo join {group.id}")
+
+    if sub == "list":
+        circles = store.list(group_key)
+        if not circles:
+            return "No ajo circles here yet — /ajo new <amount> <name> opens one."
+        lines = ["🔄 Ajo circles in this group:"]
+        for group in circles:
+            lines.append(f"• {group.name} — {_fmt_money(group.contribution_cents)} "
+                         f"× {len(group.members)} member(s) · round "
+                         f"{group.current_round} · /ajo show {group.id}")
+        return "\n".join(lines)
+
+    if not rest:
+        return _AJO_HELP
+    group = store.get(rest[0])
+    if group is None or group.group_key != group_key:
+        return "No ajo circle with that id in this group — /ajo list shows them."
+    args = rest[1:]
+
+    if sub == "show":
+        return _render_ajo(group)
+    if sub == "join":
+        try:
+            group.add_member(who, name)
+        except ValueError:
+            return "You are already in this circle."
+        store.put(group)
+        return (f"🔄 {name} joined **{group.name}** — "
+                f"{len(group.members)} member(s), pot is now "
+                f"{_fmt_money(group.pot_cents)} per round.")
+    if sub == "pay":
+        cents = group.contribution_cents
+        if args:
+            cents = _parse_money(args[0])
+            if cents is None or cents <= 0:
+                return "Pay with: /ajo pay <id> [amount] — the amount must be positive."
+        try:
+            group.record_contribution(who, cents)
+        except ValueError as exc:
+            return f"Couldn't book that: {exc}"
+        store.put(group)
+        paid = group.contributed_this_round(who)
+        state = "round complete ✅" if group.round_complete() else \
+            f"you have {_fmt_money(paid)} in this round"
+        return (f"💰 {name} paid {_fmt_money(cents)} into **{group.name}** — {state}.")
+    if sub == "payout":
+        try:
+            entry = group.record_payout()
+        except ValueError as exc:
+            return f"Not yet: {exc}"
+        store.put(group)
+        recipient = group.member(entry.member_id)
+        who_name = recipient.display_name if recipient else entry.member_id
+        return (f"🎉 Pot paid: {_fmt_money(entry.amount_cents)} "
+                f"{group.currency} to {who_name} (round {entry.round_no}). "
+                f"Round {group.current_round} is open.")
+    if sub == "remind":
+        due = group.due_reminders()
+        if not due:
+            return "Everyone has paid this round. ✅"
+        lines = [f"⏰ Round {group.current_round} of **{group.name}** — still due:"]
+        for item in due:
+            lines.append(f"• {item['display_name']}: {_fmt_money(item['due_cents'])}")
+        return "\n".join(lines)
+    if sub == "balance":
+        balances = group.balances()
+        lines = [f"🔄 **{group.name}** balances (paid − received):"]
+        names = {m.user_id: m.display_name for m in group.members}
+        for user_id, cents in balances.items():
+            lines.append(f"• {names.get(user_id, user_id)}: "
+                         f"{_fmt_money(cents)} {group.currency}")
+        return "\n".join(lines)
+    if sub == "order":
+        if not group.members or group.members[0].user_id != who:
+            return "Only the circle's starter can set the turn order."
+        wanted = [n.strip() for n in " ".join(args).split(",") if n.strip()]
+        by_name = {m.display_name: m.user_id for m in group.members}
+        order = [by_name[n] for n in wanted if n in by_name]
+        if len(order) != len(wanted):
+            return "Name every member exactly once, comma-separated."
+        try:
+            group.set_turn_order(order)
+        except ValueError as exc:
+            return f"Couldn't reorder: {exc}"
+        store.put(group)
+        return "🔄 Turn order set: " + " → ".join(wanted)
+    if sub == "close":
+        if not group.members or group.members[0].user_id != who:
+            return "Only the circle's starter can close the circle."
+        store.remove(group.id)
+        return f"🔄 **{group.name}** closed."
+    return _AJO_HELP

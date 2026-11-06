@@ -45,6 +45,8 @@ __all__ = [
     "settle_balances",
     "MiniApp2Store",
     "default_miniapps2_dir",
+    "WAVE2_FAMILIES",
+    "control_miniapp2",
 ]
 
 
@@ -691,3 +693,432 @@ class MiniApp2Store:
             return False
         self._save_raw(group_key, kind, kept)
         return True
+
+
+# ── chat surface: /miniapp wave 2 (AA-04) ────────────────────────────────
+#
+# The second-wave stores above were complete but unreachable: no chat
+# surface constructed them. This control is that surface. It is driven
+# from ``miniapps.control_miniapp``, which delegates the five wave-2
+# families (carpool / rota / market / league / split) here, so members
+# reach everything through the one /miniapp command they already know.
+# Same rules as wave 1: group chats only, group-scoped JSON state,
+# never raises into the chat layer.
+
+#: First words of a /miniapp tail that belong to wave 2.
+WAVE2_FAMILIES = ("carpool", "rota", "market", "league", "split")
+
+_HELP2 = ("🚗 **Mini-apps wave 2** — carpools, rotas, marketplace, leagues, bill splits\n"
+          "/miniapp carpool new <from> -> <to> | <when> | <seats> · join <id> · leave <id> · list\n"
+          "/miniapp rota new <title> · shift <id> <date> <slot> · assign <id> <date> <slot> [name] · swap <id> <d1> <s1> <d2> <s2> · show <id>\n"
+          "/miniapp market new sell|barter <title> | <price> | <description> · offer <id> <amount> · offer <id> barter <text> · accept <id> <offer_id> · show <id>\n"
+          "/miniapp league new <name> · team <id> <team name> · result <id> <teamA> <a>-<b> <teamB> · standings <id>\n"
+          "/miniapp split new <title> · add <id> <amount> <what> for <name1,name2> · show <id>")
+
+
+def _fmt_cents(cents: int) -> str:
+    text = f"{cents / 100:,.2f}"
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _parse_cents(text: str) -> int | None:
+    try:
+        return int(round(float(str(text).replace(",", "").strip()) * 100))
+    except (TypeError, ValueError):
+        return None
+
+
+def _store_for(context: Any) -> MiniApp2Store:
+    data_dir = getattr(getattr(context, "settings", None), "community_dir", None)
+    if data_dir:
+        return MiniApp2Store(data_dir=Path(data_dir) / "miniapps2")
+    return MiniApp2Store()
+
+
+def _load(store: MiniApp2Store, gkey: str, kind: str, cls: Any,
+          obj_id: str) -> Any | None:
+    raw = store.get(gkey, kind, obj_id)
+    return cls.from_dict(raw) if raw else None
+
+
+def control_miniapp2(
+    tail: str,
+    context: Any = None,
+    chat: Any = None,
+    sender_id: str = "",
+    sender: str = "",
+) -> str:
+    """``/miniapp`` wave 2 — carpool / rota / market / league / split.
+
+    Group chats only; DMs are refused (same rule as wave 1). Never
+    raises: a bad command or a rule violation comes back as text.
+    """
+    if chat is None or getattr(chat, "kind", "dm") != "group":
+        return ("Mini-apps live in group chats — they track the whole group's "
+                "rides, rotas, listings and bills. Try this in a group. 👥")
+    try:
+        return _control_miniapp2(tail, context, chat, sender_id, sender)
+    except Exception as exc:  # noqa: BLE001 — chat must never blow up
+        return f"Mini-app hit a snag: {exc}"
+
+
+def _control_miniapp2(tail: str, context: Any, chat: Any,
+                      sender_id: str, sender: str) -> str:
+    from .miniapps import _group_key
+
+    store = _store_for(context)
+    gkey = _group_key(chat)
+    user_id = (sender_id or "").strip() or (sender or "").strip() or "anon"
+    user_name = (sender or "").strip() or user_id
+
+    words = (tail or "").split()
+    if not words:
+        return _HELP2
+    family = words[0].lower()
+    rest = words[1:]
+    try:
+        if family == "carpool":
+            return _carpool(store, gkey, rest, user_id, user_name)
+        if family == "rota":
+            return _rota(store, gkey, rest, user_id, user_name)
+        if family == "market":
+            return _market(store, gkey, rest, user_id, user_name)
+        if family == "league":
+            return _league(store, gkey, rest, user_id, user_name)
+        if family == "split":
+            return _split(store, gkey, rest, user_id, user_name)
+    except ValueError as exc:
+        return str(exc)
+    return _HELP2
+
+
+# ── carpool ──────────────────────────────────────────────────────────────
+def _carpool(store: MiniApp2Store, gkey: str, rest: list[str],
+             user_id: str, user_name: str) -> str:
+    sub = rest[0].lower() if rest else "list"
+    if sub == "new":
+        body = " ".join(rest[1:])
+        segs = [s.strip() for s in body.split("|")]
+        if len(segs) < 3 or "->" not in segs[0]:
+            return ("Usage: /miniapp carpool new <from> -> <to> | <when> | <seats>\n"
+                    "e.g. /miniapp carpool new Lekki -> Ikeja | Sat 8:00 | 3")
+        route_from, _, route_to = segs[0].partition("->")
+        try:
+            seats = int(segs[2])
+        except ValueError:
+            return "Seats must be a number: … | Sat 8:00 | 3"
+        if seats <= 0:
+            return "A ride needs at least 1 seat."
+        ride = CarpoolRide(
+            id=new_short_id("ride"), group_key=gkey,
+            route_from=route_from.strip(), route_to=route_to.strip(),
+            depart_at=segs[1], seats_total=seats,
+            driver_id=user_id, driver_name=user_name, created_ts=_now())
+        store.put(gkey, "carpools", ride)
+        return (f"🚗 Ride up: **{ride.route_from} → {ride.route_to}** · {ride.depart_at} · "
+                f"{seats} seat(s) · driver {user_name}\n"
+                f"Join: /miniapp carpool join {ride.id}")
+    if sub == "join" and len(rest) >= 2:
+        ride = _load(store, gkey, "carpools", CarpoolRide, rest[1])
+        if ride is None:
+            return f"No ride {rest[1]} in this group."
+        ride.add_rider(user_id, user_name)
+        store.put(gkey, "carpools", ride)
+        return (f"🎫 {user_name} is riding {ride.route_from} → {ride.route_to} "
+                f"({ride.depart_at}). {ride.seats_left} seat(s) left.")
+    if sub == "leave" and len(rest) >= 2:
+        ride = _load(store, gkey, "carpools", CarpoolRide, rest[1])
+        if ride is None:
+            return f"No ride {rest[1]} in this group."
+        if ride.remove_rider(user_id):
+            store.put(gkey, "carpools", ride)
+            return f"{user_name} left the ride. {ride.seats_left} seat(s) open."
+        return "You weren't on that ride."
+    if sub == "show" and len(rest) >= 2:
+        ride = _load(store, gkey, "carpools", CarpoolRide, rest[1])
+        if ride is None:
+            return f"No ride {rest[1]} in this group."
+        riders = ", ".join(r["display_name"] for r in ride.riders) or "—"
+        return (f"🚗 **{ride.route_from} → {ride.route_to}** · {ride.depart_at}\n"
+                f"Driver: {ride.driver_name} · riders: {riders} · "
+                f"{ride.seats_left}/{ride.seats_total} seats open · `{ride.id}`")
+    if sub == "rm" and len(rest) >= 2:
+        ride = _load(store, gkey, "carpools", CarpoolRide, rest[1])
+        if ride is None:
+            return f"No ride {rest[1]} in this group."
+        if ride.driver_id != user_id:
+            return "Only the driver can remove the ride."
+        store.remove(gkey, "carpools", ride.id)
+        return "Ride removed."
+    rides = [CarpoolRide.from_dict(r) for r in store.list(gkey, "carpools")]
+    if not rides:
+        return "No carpools in this group yet.\n" + _HELP2
+    lines = ["🚗 Carpools in this group:"]
+    for r in rides:
+        lines.append(f"• {r.route_from} → {r.route_to} · {r.depart_at} · "
+                     f"{r.seats_left} seat(s) left — /miniapp carpool join {r.id}")
+    return "\n".join(lines)
+
+
+# ── rota ─────────────────────────────────────────────────────────────────
+def _rota(store: MiniApp2Store, gkey: str, rest: list[str],
+          user_id: str, user_name: str) -> str:
+    sub = rest[0].lower() if rest else "list"
+    if sub == "new":
+        title = " ".join(rest[1:]).strip()
+        if not title:
+            return "Usage: /miniapp rota new <title>"
+        rota = Rota(id=new_short_id("rota"), group_key=gkey, title=title,
+                    created_ts=_now())
+        store.put(gkey, "rotas", rota)
+        return (f"🗓️ Rota **{title}** created — `{rota.id}`\n"
+                f"Add a shift: /miniapp rota shift {rota.id} 2026-11-07 morning")
+    if sub in ("shift", "assign", "unassign", "swap", "show") and len(rest) >= 2:
+        rota = _load(store, gkey, "rotas", Rota, rest[1])
+        if rota is None:
+            return f"No rota {rest[1]} in this group."
+        if sub == "shift" and len(rest) >= 4:
+            rota.add_shift(rest[2], rest[3])
+            store.put(gkey, "rotas", rota)
+            return f"Shift added: {rest[2]} {rest[3]} (unassigned)."
+        if sub == "assign" and len(rest) >= 4:
+            name = " ".join(rest[4:]).strip()
+            rota.assign(rest[2], rest[3], name or user_id, name or user_name)
+            store.put(gkey, "rotas", rota)
+            return f"Assigned {rest[2]} {rest[3]} to {name or user_name}."
+        if sub == "unassign" and len(rest) >= 4:
+            rota.unassign(rest[2], rest[3])
+            store.put(gkey, "rotas", rota)
+            return f"Shift {rest[2]} {rest[3]} is unassigned."
+        if sub == "swap" and len(rest) >= 6:
+            rota.swap((rest[2], rest[3]), (rest[4], rest[5]))
+            store.put(gkey, "rotas", rota)
+            return f"Swapped {rest[2]} {rest[3]} ↔ {rest[4]} {rest[5]}."
+        if sub == "show":
+            if not rota.shifts:
+                return f"🗓️ **{rota.title}** — no shifts yet. `{rota.id}`"
+            lines = [f"🗓️ **{rota.title}** · `{rota.id}`"]
+            for s in sorted(rota.shifts, key=lambda s: (s.date, s.slot)):
+                who = s.assignee_name or s.assignee_id or "— unassigned"
+                lines.append(f"• {s.date} {s.slot}: {who}")
+            return "\n".join(lines)
+        return _HELP2
+    rotas = [Rota.from_dict(r) for r in store.list(gkey, "rotas")]
+    if not rotas:
+        return "No rotas in this group yet.\n" + _HELP2
+    lines = ["🗓️ Rotas in this group:"]
+    for r in rotas:
+        open_n = len(r.unassigned())
+        lines.append(f"• {r.title} — {len(r.shifts)} shift(s), {open_n} open "
+                     f"— /miniapp rota show {r.id}")
+    return "\n".join(lines)
+
+
+# ── marketplace / barter ─────────────────────────────────────────────────
+def _market(store: MiniApp2Store, gkey: str, rest: list[str],
+            user_id: str, user_name: str) -> str:
+    sub = rest[0].lower() if rest else "list"
+    if sub == "new":
+        body = " ".join(rest[1:])
+        kind = "sell"
+        if body.lower().startswith("barter "):
+            kind, body = "barter", body[7:]
+        elif body.lower().startswith("sell "):
+            body = body[5:]
+        segs = [s.strip() for s in body.split("|")]
+        title = segs[0] if segs else ""
+        if not title:
+            return ("Usage: /miniapp market new sell|barter <title> | <price> | <description>\n"
+                    "e.g. /miniapp market new sell Rice cooker | 15000 | barely used")
+        price = _parse_cents(segs[1]) if len(segs) > 1 and segs[1] else None
+        if kind == "sell" and len(segs) > 1 and segs[1] and price is None:
+            return f"Price must be a number, got “{segs[1]}”."
+        listing = Listing(
+            id=new_short_id("lst"), group_key=gkey, seller_id=user_id,
+            seller_name=user_name, title=title, kind=kind,
+            price_cents=price if kind == "sell" else None,
+            description=segs[2] if len(segs) > 2 else "", created_ts=_now())
+        store.put(gkey, "listings", listing)
+        ask = f" · {_fmt_cents(price)}" if price is not None else ""
+        return (f"🛒 Listed: **{title}**{ask} by {user_name} — `{listing.id}`\n"
+                f"Offer: /miniapp market offer {listing.id} <amount>")
+    if sub in ("offer", "accept", "decline", "show", "rm") and len(rest) >= 2:
+        listing = _load(store, gkey, "listings", Listing, rest[1])
+        if listing is None:
+            return f"No listing {rest[1]} in this group."
+        if sub == "offer":
+            if len(rest) >= 3 and rest[2].lower() == "barter":
+                offer = listing.make_offer(user_id, user_name,
+                                           barter_text=" ".join(rest[3:]))
+            elif len(rest) >= 3:
+                amount = _parse_cents(rest[2])
+                if amount is None:
+                    return (f"Offer amount must be a number, got “{rest[2]}”. "
+                            "For barter: /miniapp market offer <id> barter <text>")
+                offer = listing.make_offer(user_id, user_name, amount_cents=amount)
+            else:
+                return "Usage: /miniapp market offer <id> <amount> · or · offer <id> barter <text>"
+            store.put(gkey, "listings", listing)
+            what = (_fmt_cents(offer.amount_cents) if offer.amount_cents is not None
+                    else f"barter: {offer.barter_text}")
+            return f"🤝 Offer in from {user_name}: {what} — offer `{offer.id}`"
+        if sub in ("accept", "decline"):
+            if listing.seller_id != user_id:
+                return "Only the seller can settle offers."
+            if len(rest) < 3:
+                return f"Usage: /miniapp market {sub} <listing_id> <offer_id>"
+            offer = (listing.accept_offer(rest[2]) if sub == "accept"
+                     else listing.decline_offer(rest[2]))
+            store.put(gkey, "listings", listing)
+            if sub == "accept":
+                return (f"✅ Deal! {offer.buyer_name}'s offer wins **{listing.title}**. "
+                        "Listing closed — settle between yourselves.")
+            return f"Offer {offer.id} declined."
+        if sub == "rm":
+            if listing.seller_id != user_id:
+                return "Only the seller can remove the listing."
+            store.remove(gkey, "listings", listing.id)
+            return "Listing removed."
+        # show
+        lines = [f"🛒 **{listing.title}** · {listing.kind} · {listing.status}"]
+        if listing.price_cents is not None:
+            lines.append(f"Asking: {_fmt_cents(listing.price_cents)} · seller {listing.seller_name}")
+        if listing.description:
+            lines.append(listing.description)
+        for o in listing.offers:
+            what = (_fmt_cents(o.amount_cents) if o.amount_cents is not None
+                    else f"barter: {o.barter_text}")
+            lines.append(f"• {o.buyer_name}: {what} ({o.status}) · `{o.id}`")
+        lines.append(f"`{listing.id}`")
+        return "\n".join(lines)
+    listings = [Listing.from_dict(r) for r in store.list(gkey, "listings")]
+    open_listings = [x for x in listings if x.status == LISTING_OPEN]
+    if not open_listings:
+        return "Nothing listed in this group right now.\n" + _HELP2
+    lines = ["🛒 Marketplace:"]
+    for item in open_listings:
+        ask = f" · {_fmt_cents(item.price_cents)}" if item.price_cents is not None else ""
+        lines.append(f"• {item.title}{ask} ({item.seller_name}) — /miniapp market show {item.id}")
+    return "\n".join(lines)
+
+
+# ── league / fantasy ─────────────────────────────────────────────────────
+def _league(store: MiniApp2Store, gkey: str, rest: list[str],
+            user_id: str, user_name: str) -> str:
+    sub = rest[0].lower() if rest else "list"
+    if sub == "new":
+        name = " ".join(rest[1:]).strip()
+        if not name:
+            return "Usage: /miniapp league new <name>"
+        league = League(id=new_short_id("league"), group_key=gkey, name=name,
+                        created_ts=_now())
+        store.put(gkey, "leagues", league)
+        return (f"🏆 League **{name}** created — `{league.id}`\n"
+                f"Add a team: /miniapp league team {league.id} <team name>")
+    if sub in ("team", "result", "standings", "show") and len(rest) >= 2:
+        league = _load(store, gkey, "leagues", League, rest[1])
+        if league is None:
+            return f"No league {rest[1]} in this group."
+        if sub == "team":
+            name = " ".join(rest[2:]).strip()
+            if not name:
+                return "Usage: /miniapp league team <league_id> <team name>"
+            team = league.add_team(name)
+            store.put(gkey, "leagues", league)
+            return f"Team **{name}** joined {league.name} — `{team.id}`"
+        if sub == "result":
+            if len(rest) < 5 or "-" not in rest[3]:
+                return ("Usage: /miniapp league result <league_id> <teamA_id> "
+                        "<a>-<b> <teamB_id>  · e.g. result lg1 teamA 2-1 teamB")
+            a_goals, _, b_goals = rest[3].partition("-")
+            try:
+                score_a, score_b = int(a_goals), int(b_goals)
+            except ValueError:
+                return f"Score must look like 2-1, got “{rest[3]}”."
+            league.record_result(rest[2], score_a, rest[4], score_b)
+            store.put(gkey, "leagues", league)
+            return f"⚽ Result booked in {league.name}: {score_a}–{score_b}."
+        table = league.standings()
+        if not table:
+            return f"🏆 **{league.name}** — no teams yet. `{league.id}`"
+        lines = [f"🏆 **{league.name}** standings:"]
+        for i, t in enumerate(table, 1):
+            lines.append(f"{i}. {t.name} — {t.points} pts · P{t.played} "
+                         f"W{t.won} D{t.drawn} L{t.lost} · GD {t.goal_diff:+d} · `{t.id}`")
+        return "\n".join(lines)
+    leagues = [League.from_dict(r) for r in store.list(gkey, "leagues")]
+    if not leagues:
+        return "No leagues in this group yet.\n" + _HELP2
+    lines = ["🏆 Leagues in this group:"]
+    for league in leagues:
+        lines.append(f"• {league.name} — {len(league.teams)} team(s) "
+                     f"— /miniapp league standings {league.id}")
+    return "\n".join(lines)
+
+
+# ── receipts / split ─────────────────────────────────────────────────────
+def _split(store: MiniApp2Store, gkey: str, rest: list[str],
+           user_id: str, user_name: str) -> str:
+    sub = rest[0].lower() if rest else "list"
+    if sub == "new":
+        title = " ".join(rest[1:]).strip()
+        if not title:
+            return "Usage: /miniapp split new <title>"
+        bill = SplitBill(id=new_short_id("bill"), group_key=gkey, title=title,
+                         created_ts=_now())
+        store.put(gkey, "bills", bill)
+        return (f"🧾 Split **{title}** opened — `{bill.id}`\n"
+                f"Add a receipt: /miniapp split add {bill.id} 2500 dinner for ada,bob")
+    if sub in ("add", "show") and len(rest) >= 2:
+        bill = _load(store, gkey, "bills", SplitBill, rest[1])
+        if bill is None:
+            return f"No split bill {rest[1]} in this group."
+        if sub == "add":
+            if len(rest) < 3:
+                return ("Usage: /miniapp split add <id> <amount> <what> for <name1,name2>")
+            amount = _parse_cents(rest[2])
+            if amount is None:
+                return f"Amount must be a number, got “{rest[2]}”."
+            body = " ".join(rest[3:])
+            desc, _, names = body.partition(" for ")
+            names = names.strip()
+            if not names:
+                return ("Say who shared it: … <what> for <name1,name2> — "
+                        "the payer is added automatically.")
+            shares = {n.strip(): 1.0 for n in names.split(",") if n.strip()}
+            # The payer is always a sharer. If they wrote their own
+            # name in the list (any case), that entry IS them — fold
+            # it onto their canonical display name so the bill never
+            # splits one person into two.
+            for key in list(shares):
+                if key.casefold() == user_name.casefold() and key != user_name:
+                    shares[user_name] = shares.pop(key)
+            if user_name not in shares:
+                shares[user_name] = 1.0
+            # One key space for the whole bill: display names (the
+            # payer included), so a person never appears twice under
+            # an id and a name in the same balance sheet.
+            bill.add_receipt(user_name, user_name, amount, shares,
+                             description=desc.strip())
+            store.put(gkey, "bills", bill)
+            return (f"🧾 {user_name} paid {_fmt_cents(amount)} for "
+                    f"{desc.strip() or 'the group'} — split {len(shares)} ways.")
+        balances = bill.balances()
+        lines = [f"🧾 **{bill.title}** · {len(bill.receipts)} receipt(s) · `{bill.id}`"]
+        for member, cents in sorted(balances.items()):
+            state = "is owed" if cents > 0 else "owes"
+            lines.append(f"• {member}: {state} {_fmt_cents(abs(cents))}")
+        for t in bill.who_owes_whom():
+            lines.append(f"➡️ {t['from_id']} pays {t['to_id']} "
+                         f"{_fmt_cents(t['amount_cents'])}")
+        if not balances:
+            lines.append("All settled — nobody owes anything. 🎉")
+        return "\n".join(lines)
+    bills = [SplitBill.from_dict(b) for b in store.list(gkey, "bills")]
+    if not bills:
+        return "No split bills in this group yet.\n" + _HELP2
+    lines = ["🧾 Split bills in this group:"]
+    for b in bills:
+        lines.append(f"• {b.title} — {len(b.receipts)} receipt(s) "
+                     f"— /miniapp split show {b.id}")
+    return "\n".join(lines)

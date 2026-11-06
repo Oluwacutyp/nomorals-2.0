@@ -40,6 +40,9 @@ __all__ = [
     "DeviceSession", "SessionRegistry", "RoutingDecision", "RoutingLog",
     "Router", "ScheduledPost", "Sequence", "SequenceStep", "Orchestrator",
     "OrchestratorStore", "default_orchestration_dir",
+    "ORCHESTRATION_JOB", "ORCHESTRATION_JOB_SPEC",
+    "this_device", "runtime_orchestrator", "run_orchestration_tick",
+    "ensure_orchestration_job",
 ]
 
 
@@ -77,29 +80,77 @@ class DeviceSession:
 
 
 class SessionRegistry:
-    """Device sessions + health. In-memory; persistence via OrchestratorStore."""
+    """Device sessions + health.
 
-    def __init__(self, stale_after_s: float = 120.0) -> None:
+    In-memory by default (the historical contract). With ``path``
+    set, sessions also persist to that JSON file and every health
+    read merges the file's state — that is what lets INDEPENDENT
+    processes (the phone session, the VPS session, this runtime)
+    see each other's devices: the registry stops being a per-process
+    island and becomes the fleet's shared session table (AA-18).
+    """
+
+    def __init__(self, stale_after_s: float = 120.0,
+                 path: Path | str | None = None) -> None:
         self.stale_after_s = stale_after_s
         self.sessions: dict[str, DeviceSession] = {}
+        self.path = Path(path) if path is not None else None
+        if self.path is not None:
+            self._refresh()
+
+    # ── persistence (only when path is set) ──
+    def _persist(self) -> None:
+        if self.path is None:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(
+                {d: s.to_dict() for d, s in self.sessions.items()},
+                indent=1), encoding="utf-8")
+        except OSError as exc:
+            _log.warning("session registry persist failed: %s", exc)
+
+    def _refresh(self) -> None:
+        """Merge the on-disk sessions in (newer heartbeat wins)."""
+        if self.path is None:
+            return
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(raw, dict):
+            return
+        for device_id, data in raw.items():
+            try:
+                sess = DeviceSession.from_dict(data)
+            except (KeyError, TypeError, ValueError):
+                continue
+            current = self.sessions.get(device_id)
+            if current is None or sess.last_heartbeat >= current.last_heartbeat:
+                self.sessions[device_id] = sess
 
     def register(self, device_id: str, kind: str = "phone",
                  capabilities: list[str] | None = None) -> DeviceSession:
+        self._refresh()
         now = time.time()
         sess = DeviceSession(device_id=device_id, kind=kind,
                              capabilities=list(capabilities or []),
                              last_heartbeat=now, registered_ts=now)
         self.sessions[device_id] = sess
+        self._persist()
         return sess
 
     def heartbeat(self, device_id: str, now: float | None = None) -> bool:
+        self._refresh()
         sess = self.sessions.get(device_id)
         if sess is None:
             return False
         sess.last_heartbeat = now if now is not None else time.time()
+        self._persist()
         return True
 
     def health(self, now: float | None = None) -> dict[str, dict[str, Any]]:
+        self._refresh()
         now = now if now is not None else time.time()
         return {d: {"kind": s.kind, "healthy": s.is_healthy(now, self.stale_after_s),
                     "age_s": round(s.age_s(now), 1)}
@@ -107,6 +158,7 @@ class SessionRegistry:
 
     def healthy_devices(self, kind: str | None = None,
                         now: float | None = None) -> list[DeviceSession]:
+        self._refresh()
         now = now if now is not None else time.time()
         out = [s for s in self.sessions.values()
                if s.is_healthy(now, self.stale_after_s)]
@@ -406,3 +458,121 @@ class Orchestrator:
                             "target": seq.target})
         self.store.save(self.posts, self.sequences)
         return results
+
+
+# ───────────────────────── runtime wiring (AA-18) ─────────────────────────
+#
+# Everything above shipped uncalled: the session registry was
+# per-process memory, so no two Devon processes could ever see each
+# other's devices, and nothing ever ran the dispatcher. This section
+# is the production path: a file-backed fleet registry rooted in the
+# community dir, this device registered + heartbeating on every tick,
+# and a durable one-minute job that routes and dispatches due posts
+# through the runtime's social gateway.
+
+ORCHESTRATION_JOB = "community orchestration tick"
+ORCHESTRATION_JOB_SPEC = "every 1m"
+
+_KIND_MAP = {"termux": "phone", "mobile": "phone", "vps": "vps"}
+
+
+def this_device(context: Any = None) -> tuple[str, str]:
+    """(device_id, router kind) for the machine this process runs on.
+
+    The id is the hostname (stable per machine); the kind maps the
+    core environment profile onto the Router's vocabulary.
+    """
+    import platform as _platform
+
+    from ..core.profile import detect_profile
+
+    try:
+        kind = detect_profile().kind
+    except Exception as exc:  # detection must never break the tick
+        _log.debug("profile detection failed: %s", exc)
+        kind = "pc"
+    return (_platform.node() or "this-device",
+            _KIND_MAP.get(kind, "laptop"))
+
+
+def orchestration_dir(context: Any = None) -> Path:
+    settings = getattr(context, "settings", None)
+    root = getattr(settings, "community_dir", None)
+    if root:
+        return Path(root) / "orchestration"
+    return default_orchestration_dir()
+
+
+def runtime_orchestrator(context: Any = None, *,
+                         data_dir: Path | str | None = None,
+                         ) -> tuple[Orchestrator, str]:
+    """The live orchestrator for this process + this device's id.
+
+    Builds the fleet registry over ``sessions.json``, registers (or
+    refreshes) THIS device with a fresh heartbeat, and returns an
+    Orchestrator whose Router sees every device that heartbeats into
+    the same community dir.
+    """
+    root = Path(data_dir) if data_dir is not None else orchestration_dir(context)
+    root.mkdir(parents=True, exist_ok=True)
+    registry = SessionRegistry(path=root / "sessions.json")
+    device_id, kind = this_device(context)
+    existing = registry.sessions.get(device_id)
+    if existing is None:
+        registry.register(device_id, kind=kind, capabilities=["chat"])
+    else:
+        registry.heartbeat(device_id)
+    router = Router(registry, RoutingLog(root / "routing.jsonl"))
+    orchestrator = Orchestrator(store=OrchestratorStore(root), router=router)
+    return orchestrator, device_id
+
+
+def run_orchestration_tick(sender: Callable[[str, str, str], bool] | None,
+                           context: Any = None, *,
+                           data_dir: Path | str | None = None,
+                           now: float | None = None) -> dict[str, Any]:
+    """One production tick: heartbeat, route, dispatch what is due.
+
+    The Router decides which device should speak. When the fleet
+    routes the tick to ANOTHER healthy device, this process stands
+    down (that device's own tick sends) — ``Orchestrator.dispatch``
+    alone only skips when NO device is routable, so the chosen-device
+    gate lives here, in the caller, where the device identity is
+    known. With no sender the tick still heartbeats and reports the
+    plan honestly (``sent`` stays False).
+    """
+    orchestrator, device_id = runtime_orchestrator(context, data_dir=data_dir)
+    now = now if now is not None else time.time()
+    decision = orchestrator.router.route("orchestration:tick", now=now)
+    summary: dict[str, Any] = {
+        "device": device_id,
+        "chosen_device": decision.chosen_device,
+        "reason": decision.reason,
+        "dispatched": False,
+        "sent": 0,
+        "results": [],
+    }
+    if decision.chosen_device not in (None, device_id):
+        return summary
+    results = orchestrator.dispatch(now=now, sender=sender,
+                                    device_id=device_id)
+    summary["dispatched"] = True
+    summary["results"] = results
+    summary["sent"] = sum(1 for r in results if r.get("sent"))
+    return summary
+
+
+def ensure_orchestration_job(scheduler: Any) -> None:
+    """Register the durable orchestration tick on the routine
+    scheduler, mirroring ``ensure_failure_loop_job`` in the brain —
+    idempotent, never raises (a broken registry must not stop boot).
+    """
+    try:
+        for job in scheduler.list_jobs():
+            if str(job.get("name", "")).strip().lower() == ORCHESTRATION_JOB:
+                return
+        scheduler.add(
+            ORCHESTRATION_JOB, ORCHESTRATION_JOB_SPEC, "tool",
+            {"tool": "__orchestration__", "args": {}}, routine=True)
+    except Exception as exc:  # noqa: BLE001 — boot must not fail on this
+        _log.warning("could not register orchestration job: %s", exc)

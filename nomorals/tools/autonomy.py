@@ -50,6 +50,11 @@ nervous system through plain language:
   DB), build a sandbox-checked fix proposal per cluster, file the
   proposals as FailureKB notes. Same closure pattern. Routine job
   (silent at the scheduler); proposals never auto-apply.
+* ``__orchestration__`` — scheduler-internal community orchestration
+  tick (AA-18): heartbeat this device into the fleet session
+  registry, route via the device Router, dispatch due scheduled
+  group posts through the social gateway. Same closure pattern.
+  Routine job (silent at the scheduler).
 """
 
 from __future__ import annotations
@@ -488,3 +493,37 @@ def register(registry: Any) -> None:
         except Exception as exc:  # noqa: BLE001 - one bad pass never kills the job
             return {"ok": False,
                     "error": f"failure loop pass failed: {exc}"}
+
+    @registry.register(
+        "__orchestration__",
+        description="Run one community orchestration tick (AA-18): "
+        "heartbeat this device into the fleet session registry, let "
+        "the Router pick the device that should speak, and dispatch "
+        "due scheduled group posts through the social gateway. "
+        "Scheduler-internal; runs every ~1 min.",
+        capability="owner",
+    )
+    def _orchestration_tool() -> dict[str, Any]:
+        from ..community.orchestration import run_orchestration_tick
+
+        def sender(platform: str, target: str, text: str) -> bool:
+            from ..social.chat.base import ChatRef
+            from .social import get_gateway
+
+            gateway = get_gateway()
+            if gateway is None:
+                return False  # no gateway bound: plan stays unsent, honest
+            if ":" in target:
+                plat, _, chat_id = target.partition(":")
+                platform, target = plat or platform, chat_id
+            result = gateway.send(
+                platform, ChatRef(platform=platform, chat_id=target,
+                                  kind="group"), text)
+            return bool(getattr(result, "ok", False))
+
+        try:
+            summary = run_orchestration_tick(sender, context=_context)
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"orchestration tick failed: {exc}"}
+        return {"ok": True, **summary}

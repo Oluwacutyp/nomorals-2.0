@@ -1388,8 +1388,26 @@ def _usage() -> str:
         "  /room captions <room_id> on|off · vtt <room_id> — caption export\n"
         "  /room agenda <room_id> <text> · react <room_id> <emoji>\n"
         "  /room tip <room_id> <user_id> <amount_naira>\n"
-        "  /room stats <room_id> · /room show <room_id> · /room end <room_id> · /room golive <room_id>"
+        "  /room stats <room_id> · /room show <room_id> · /room end <room_id> · /room golive <room_id>\n"
+        "  💾 archive: /room recordings <community_id> · recording <community_id> <rec_id>\n"
+        "  /room clip <community_id> <rec_id> <start_s> <end_s> <title> · clips <community_id> [rec_id]\n"
+        "  /room attach <community_id> <rec_id> <speaker> | <text> · speakers <community_id> <rec_id>"
     )
+
+
+def _audio_store(context: Any = None):
+    """The community audio archive (AA-30): recordings/clips/transcripts.
+
+    Rooted with the other community stores: ``community_dir/audio``
+    when the deployment sets one, else the AudioStore default.
+    """
+    from .audio import AudioStore
+
+    settings = getattr(context, "settings", None)
+    root = getattr(settings, "community_dir", None)
+    if root:
+        return AudioStore(data_dir=Path(root) / "audio")
+    return AudioStore()
 
 
 def control_room(tail: str, context=None, chat=None,
@@ -1673,10 +1691,139 @@ def _control_room(tail, context, chat, sender, sender_id,
         return f"couldn't tip: {res.get('reason')}"
 
     if cmd == "end":
-        res = end_room(rest.strip(), who_id, transcriber=transcriber, store=st)
+        room_id = rest.strip()
+        before = st.get(room_id)
+        was_recording = bool(before and before.recording)
+        res = end_room(room_id, who_id, transcriber=transcriber, store=st)
         if not res.get("ok"):
             return f"couldn't end: {res.get('reason')}"
         note = f"\n_{res.get('transcript_note')}_" if res.get("transcript_note") else ""
-        return f"room ended. thanks for coming 🎙️{note}"
+        # AA-30: a recorded (or transcribed) room lands in the
+        # community audio archive — until this wiring, AudioStore had
+        # no production caller and room recordings vanished with the
+        # room. Idempotent per room: re-ending never double-registers.
+        archived = ""
+        room = res.get("room")
+        if room is not None and (was_recording or room.transcript):
+            try:
+                from ..core.ids import new_short_id
+                from .audio import Recording
+
+                archive = _audio_store(context)
+                known = {r.room_id for r in
+                         archive.list_recordings(room.community_id)}
+                if room.room_id not in known:
+                    archive.put_recording(Recording(
+                        id=new_short_id("rec"), group_key=room.community_id,
+                        room_id=room.room_id, title=room.title,
+                        started_ts=room.created_at or room.starts_at,
+                        ended_ts=room.ended_at,
+                        file_ref=room.platform_ref or "",
+                        notes=("transcript on the room"
+                               if room.transcript else ""),
+                        created_ts=time.time()))
+                    archived = (f"\n💾 saved to the archive — "
+                                f"/room recordings {room.community_id}")
+            except Exception as exc:  # noqa: BLE001 — archive is additive
+                _log.warning("room archive failed: %s", exc)
+        return f"room ended. thanks for coming 🎙️{note}{archived}"
+
+    # ── AA-30: the audio archive (recordings / clips / transcripts) ──
+    if cmd == "recordings":
+        community_id = rest.strip()
+        if not community_id:
+            return "usage: /room recordings <community_id>"
+        recordings = _audio_store(context).list_recordings(community_id)
+        if not recordings:
+            return "no recordings archived for that community yet."
+        out = ["💾 recordings:"]
+        for rec in recordings[-10:]:
+            dur = int(rec.duration_s)
+            out.append(f"· {rec.title} — {dur // 60}m{dur % 60:02d}s · `{rec.id}`")
+        return "\n".join(out)
+
+    if cmd == "recording":
+        bits = rest.split()
+        if len(bits) < 2:
+            return "usage: /room recording <community_id> <rec_id>"
+        archive = _audio_store(context)
+        rec = archive.get_recording(bits[0], bits[1])
+        if rec is None:
+            return "no such recording in that community's archive."
+        clips = archive.list_clips(bits[0], rec.id)
+        source, segments = archive.get_transcript(bits[0], rec.id)
+        dur = int(rec.duration_s)
+        return (f"💾 **{rec.title}** — {dur // 60}m{dur % 60:02d}s\n"
+                f"room `{rec.room_id}` · {len(clips)} clip(s) · "
+                f"transcript: {len(segments)} segment(s)"
+                + (f" ({source})" if source else "")
+                + (f"\nfile: {rec.file_ref}" if rec.file_ref else ""))
+
+    if cmd == "clip":
+        bits = rest.split(None, 4)
+        if len(bits) < 5:
+            return ("usage: /room clip <community_id> <rec_id> "
+                    "<start_s> <end_s> <title>")
+        archive = _audio_store(context)
+        rec = archive.get_recording(bits[0], bits[1])
+        if rec is None:
+            return "no such recording in that community's archive."
+        try:
+            clip = archive.add_clip(rec, bits[4], float(bits[2]),
+                                    float(bits[3]), created_by_id=who_id,
+                                    created_by_name=who)
+        except (TypeError, ValueError) as exc:
+            return f"couldn't cut that clip: {exc}"
+        return f"✂️ clip saved: **{clip.title}** ({clip.duration_s:.0f}s) · `{clip.id}`"
+
+    if cmd == "clips":
+        bits = rest.split()
+        if not bits:
+            return "usage: /room clips <community_id> [rec_id]"
+        clips = _audio_store(context).list_clips(
+            bits[0], bits[1] if len(bits) > 1 else "")
+        if not clips:
+            return "no clips yet."
+        return "\n".join(
+            f"✂️ {c.title} — {c.start_s:.0f}s→{c.end_s:.0f}s · `{c.id}`"
+            for c in clips[-10:])
+
+    if cmd == "attach":
+        head, _, text = rest.partition("|")
+        bits = head.split()
+        if len(bits) < 3 or not text.strip():
+            return ("usage: /room attach <community_id> <rec_id> "
+                    "<speaker> | <what they said>")
+        archive = _audio_store(context)
+        rec = archive.get_recording(bits[0], bits[1])
+        if rec is None:
+            return "no such recording in that community's archive."
+        from .audio import TranscriptSegment
+
+        source, segments = archive.get_transcript(bits[0], bits[1])
+        start = segments[-1].end_s if segments else 0.0
+        speaker = " ".join(bits[2:])
+        segments.append(TranscriptSegment(
+            speaker_id=speaker, speaker_name=speaker,
+            start_s=start, end_s=start + 1.0, text=text.strip()))
+        archive.attach_transcript(bits[0], bits[1], segments,
+                                  source=source or "manual")
+        return (f"📝 transcript updated — {len(segments)} segment(s) "
+                f"on **{rec.title}**.")
+
+    if cmd == "speakers":
+        bits = rest.split()
+        if len(bits) < 2:
+            return "usage: /room speakers <community_id> <rec_id>"
+        stats = _audio_store(context).speaker_stats_for(bits[0], bits[1])
+        if not stats:
+            return "no transcript segments yet — /room attach adds them."
+        out = ["🎙️ speaker stats (from the stored transcript):"]
+        for speaker_id, info in stats.items():
+            out.append(f"· {info.get('speaker_name') or speaker_id}: "
+                       f"{info.get('segments', 0)} segment(s), "
+                       f"{info.get('words', 0)} words, "
+                       f"{info.get('talk_seconds', 0):.0f}s")
+        return "\n".join(out)
 
     return _usage()
