@@ -1461,7 +1461,11 @@ def control_contract(tail: str, context: Any = None, chat: Any = None,
         if len(rest) < 80:
             return ("Paste the contract text after the command — "
                     "I need the actual clauses to review.\n" + _usage())
-        review = review_contract(rest, ctype)
-        return format_review(review, style=style)
+        # AA-25: route through the legal product layer — it delegates
+        # the scoring back here (review_contract) and stamps every
+        # output with the disclaimer + precedent citations. Deferred
+        # import: legal.product imports from this module (cycle).
+        from .product import review_contract_product
+        return review_contract_product(rest, ctype, style=style)["text"]
     except Exception as e:  # noqa: BLE001 — never raise from chat
         return f"Contract review hit an error ({e}). {DISCLAIMER}"

@@ -476,7 +476,6 @@ class RuntimeMemoryMixin:
         it never interprets medically.
         """
         from ...health.previsit import (
-            format_costs,
             format_recap,
             format_route,
             prepare_visit,
@@ -496,7 +495,7 @@ class RuntimeMemoryMixin:
                     "       /health costs — typical private-hospital costs\n"
                     "       /health prep [symptoms] — pre-visit packet\n"
                     "       /health visited <notes> — post-visit recap\n"
-                    "       /health meal — photo meal logging (2 questions)\n"
+                    "       /health meal [photo path] — photo meal logging (2 questions)\n"
                     "tracking only — I'm not a doctor; show the log to "
                     "yours for medical guidance.")
         verb, _, rest = raw.partition(" ")
@@ -540,7 +539,11 @@ class RuntimeMemoryMixin:
                     history=tl.timeline(event_type="symptom", limit=20))
                 return format_route(route)
             if verb == "costs":
-                return format_costs()
+                # AA-38: the health surface reads costs through the
+                # health.expose facade (disclaimer-stamped), not the
+                # previsit formatter directly.
+                from ...health.expose import price_transparency
+                return price_transparency()
             if verb == "prep":
                 symptoms = [s.strip() for s in rest.split(",")
                             if s.strip()] or None
@@ -552,6 +555,33 @@ class RuntimeMemoryMixin:
                     summarize_visit(rest.strip(), timeline=tl))
             if verb == "meal":
                 # Photo meal logging (owner-only, tracking only).
+                # /health meal <photo path> — one-shot log through the
+                # health.expose facade (AA-38): identified items, the
+                # photo estimate AND the undercount-adjusted range, and
+                # the follow-up questions, in one answer.
+                photo_path = rest.strip()
+                if photo_path:
+                    from ...health.expose import log_meal_photo
+                    try:
+                        result = log_meal_photo(photo_path)
+                    except Exception as exc:  # noqa: BLE001
+                        return f"couldn't log that photo: {exc}"
+                    if not result.get("ok"):
+                        return (f"couldn't log this one — "
+                                f"{result.get('error') or 'photo unreadable'}. "
+                                "try a clearer photo of the food.")
+                    lines = ["🍽️ meal logged from photo:"]
+                    for item in result["items"]:
+                        hint = (f" ({item['portion_hint']})"
+                                if item.get("portion_hint") else "")
+                        lines.append(f"  • {item['name']}{hint} — "
+                                     f"{item['cal_low']}-{item['cal_high']} cal")
+                    lines.append(f"photo estimate: {result['photo_estimate']['text']}")
+                    lines.append(f"adjusted: {result['undercount_adjusted']['text']}")
+                    for n, q in enumerate(result["follow_up_questions"], 1):
+                        lines.append(f"{n}. {q}")
+                    lines.append(result["note"])
+                    return "\n".join(lines)
                 # /health meal — arms the flow: send a photo of your meal,
                 # Devon identifies it and asks at most 2 questions the photo
                 # can't answer (hidden fats, portion, drinks).

@@ -9,7 +9,8 @@ Usage:
     /learn flashcards due [n] | stats | list | review <id> <grade 1-4> | export <path>
     /learn mastery [weakest]
     /learn waec <subject> | waec grade <pct>
-    /learn jamb <subject> | jamb formats
+    /learn jamb <subject> | jamb formats | jamb packs | jamb align <q>
+    /learn jamb misconceptions <q> | jamb bank | jamb ekiti
 
 Every verb delegates to nomorals.learn functions — nothing is
 re-implemented here. ``quiz start`` is honestly unavailable: ExamSim
@@ -39,7 +40,8 @@ def LEARN_USAGE() -> str:
         "  /learn flashcards due [n] | stats | list | review <id> <1-4> | export <path>\n"
         "  /learn mastery [weakest] — BKT mastery snapshot\n"
         "  /learn waec <subject> | waec grade <pct>\n"
-        "  /learn jamb <subject> | jamb formats"
+        "  /learn jamb <subject> | jamb formats | jamb packs | jamb align <query>\n"
+        "  /learn jamb misconceptions <query> | jamb bank | jamb ekiti"
     )
 
 
@@ -314,6 +316,13 @@ def _jamb(rest: str) -> str:
     from .curriculum import EXAM_FORMATS, SUBJECTS, subject_topics
 
     low = rest.lower()
+    # AA-19: the JAMB product pack (learn.jamb_product) — packs,
+    # curriculum alignment, the Chief-Examiners misconception bank and
+    # the Ekiti descriptor ride the same /learn jamb door via its flow.
+    if (low in ("packs", "ekiti", "bank", "subjects")
+            or low.startswith(("topics ", "align ", "misconceptions "))):
+        from .jamb_product import jamb_flow
+        return jamb_flow(rest)
     if low == "formats" or low == "format":
         fmt = EXAM_FORMATS.get("JAMB", {})
         papers = fmt.get("papers", [])
@@ -324,7 +333,8 @@ def _jamb(rest: str) -> str:
         lines.append(f"negative marking: {fmt.get('negative_marking', False)}")
         return "\n".join(lines)
     if not rest:
-        return ("usage: /learn jamb <subject> | /learn jamb formats\n"
+        return ("usage: /learn jamb <subject> | /learn jamb formats | "
+                "/learn jamb packs | /learn jamb align <query>\n"
                 f"subjects: {', '.join(SUBJECTS)}")
     topics = [t for t in subject_topics(rest) if t.jamb]
     if not topics:

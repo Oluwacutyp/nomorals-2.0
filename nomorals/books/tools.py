@@ -998,7 +998,15 @@ def register(registry: Any) -> None:
     )
     def publish_release(story_slug: str) -> dict[str, Any]:
         from .publish import SerialPublication
-        return SerialPublication(story_slug, context=context).release()
+        result = SerialPublication(story_slug, context=context).release()
+        if result.get("ok"):
+            # AA-37: the announce payload comes from the publish
+            # extension — channel-agnostic message + follower list;
+            # the gateway decides the channel, nothing sends here.
+            from .publish_ext import release_notification
+            result["notification"] = release_notification(
+                result, chapter=int(result.get("chapter", 0)))
+        return result
 
     @registry.register(
         "publish_status",
@@ -1057,6 +1065,100 @@ def register(registry: Any) -> None:
     def publish_feedback_summary(story_slug: str) -> dict[str, Any]:
         from .publish import SerialPublication
         return SerialPublication(story_slug, context=context).feedback_summary()
+
+    # ── publish extension (AA-37): cover briefs, ARC, series ─────────────
+
+    @registry.register(
+        "book_cover_brief",
+        description=(
+            "Cover brief + image prompt for a book (books.publish_ext): "
+            "culture-pack palette/motifs/typography drawn from the book's "
+            "own metadata. Without an image generator this returns the "
+            "brief and prompt honestly — never a fake cover."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "slug": "str — the book slug",
+            "culture_pack": "str (optional) — nigeria | yoruba | generic-fantasy | generic-scifi | generic-romance",
+            "mood": "str (optional)",
+        },
+    )
+    def book_cover_brief(slug: str, *, culture_pack: str = "",
+                         mood: str = "") -> dict[str, Any]:
+        from .publish_ext import build_cover_brief, generate_cover
+        book = forge().load(slug)
+        brief = build_cover_brief(
+            book.display_title or book.title, book.author or "",
+            genre=book.genre or "", mood=mood, culture_pack=culture_pack)
+        return generate_cover(brief)
+
+    @registry.register(
+        "publish_arc",
+        description=(
+            "ARC (advance-reader-copy) program for a book: add readers, "
+            "record their chapter feedback/ratings, read program stats. "
+            "Persists beside the book (arc.json)."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "slug": "str — the book slug",
+            "action": "str — add_reader | feedback | stats",
+            "reader": "str — reader id (add_reader/feedback)",
+            "contact": "str (optional)",
+            "chapter": "int (optional) — feedback chapter",
+            "feedback": "str (optional) — feedback text",
+            "rating": "int (optional) — 1..5",
+        },
+    )
+    def publish_arc(slug: str, *, action: str = "stats", reader: str = "",
+                    contact: str = "", chapter: int = 0,
+                    feedback: str = "", rating: int = 0) -> dict[str, Any]:
+        from .publish_ext import ARCProgram
+        path = forge().books_dir() / slug / "arc.json"
+        arc = ARCProgram(slug, path=path)
+        verb = (action or "stats").strip().lower()
+        if verb == "add_reader":
+            return arc.add_reader(reader, contact=contact)
+        if verb == "feedback":
+            return arc.record_feedback(reader, int(chapter), feedback,
+                                       rating=int(rating))
+        if verb == "stats":
+            return arc.stats()
+        return {"ok": False,
+                "reason": f"unknown ARC action {action!r}"}
+
+    @registry.register(
+        "book_series",
+        description=(
+            "Series ordering for books: add a volume, mark it released, "
+            "list the order, or ask for the next unreleased volume. "
+            "Persists in the books workspace (series.json)."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "series": "str — series name",
+            "action": "str — add | release | order | next",
+            "volume": "int (optional) — volume number (add/release)",
+            "slug": "str (optional) — book slug (add)",
+            "title": "str (optional) — volume title (add)",
+        },
+    )
+    def book_series(series: str, *, action: str = "order",
+                    volume: int = 0, slug: str = "",
+                    title: str = "") -> dict[str, Any]:
+        from .publish_ext import SeriesManager
+        mgr = SeriesManager(path=forge().books_dir() / "series.json")
+        verb = (action or "order").strip().lower()
+        if verb == "add":
+            return mgr.add_volume(series, int(volume), slug, title=title)
+        if verb == "release":
+            return mgr.mark_released(series, int(volume))
+        if verb == "order":
+            return {"series": series, "volumes": mgr.order(series)}
+        if verb == "next":
+            return {"series": series, "next": mgr.next_unreleased(series)}
+        return {"ok": False,
+                "reason": f"unknown series action {action!r}"}
 
     # ── sweep additions: lorebook, beats, epub, stats, branches, publish ──
 

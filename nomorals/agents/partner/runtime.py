@@ -5738,6 +5738,19 @@ class PartnerRuntime(
             return self._control_commitments(command.tail or arg, chat_key=chat_key)
         if kind == "decisions":
             return self._control_decisions(command.tail or arg, chat_key=chat_key)
+        if kind == "iddocs":
+            # Identity document tracker (AA-31) — the owner's private
+            # documents, owner-only like /contracts.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            from ...identity.chat import control_iddocs
+            return control_iddocs(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+                sender_id=getattr(message, "sender_id", "") if message else "",
+                sender=getattr(message, "sender", "") if message else "",
+            )
         if kind == "focus":
             return self._control_focus(command.tail or arg, chat_key=chat_key)
         if kind == "backup":

@@ -560,10 +560,40 @@ def control_scamcheck(tail: str, context=None, chat=None, **kwargs) -> str:
         report = check_listing(tail, store=store,
                                photo_analyzer=photo_analyzer,
                                photo_bytes=photo_bytes)
-        return report.format()
+        return report.format() + "\n\n" + _general_signals_section(tail)
     except Exception:  # noqa: BLE001
         _log.warning("scamcheck failed", exc_info=True)
         return "scam check failed — inspect the listing manually."
+
+
+def _general_signals_section(text: str) -> str:
+    """AA-33: general scam-signal scoring (nomorals.scam.signals).
+
+    The seven checks above are property-specific; this scores the
+    same text against the general signal descriptors (urgency,
+    advance-fee, impersonation, too-good pricing, off-platform
+    pressure…). Honest failure: if the scorer itself fails, the
+    section says "not checked" — an unscored text is never "safe".
+    """
+    try:
+        from ..scam.signals import assess
+        result = assess(text or "", kind="message")
+    except Exception as exc:  # noqa: BLE001 — surface, never fake a pass
+        _log.warning("general scam signals failed", exc_info=True)
+        return (f"🧭 General scam signals: not checked "
+                f"(scorer failed: {exc}).")
+    verdict = result.get("verdict", "ok")
+    flags = result.get("flags") or []
+    icon = {"suspicious": "🚨", "review": "⚠️"}.get(verdict, "✅")
+    lines = [f"{icon} General scam signals: {verdict} "
+             f"(score {result.get('score', 0.0):.2f})"]
+    if flags:
+        lines.append("   flags: " + ", ".join(flags))
+        for reason in (result.get("reasons") or [])[:4]:
+            lines.append(f"   ↳ {reason[:160]}")
+    else:
+        lines.append("   no general scam patterns matched.")
+    return "\n".join(lines)
 
 
 def register(registry) -> None:

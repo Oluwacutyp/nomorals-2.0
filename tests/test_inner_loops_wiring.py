@@ -357,17 +357,20 @@ def test_decisions_command_round_trip(tmp_path, monkeypatch):
     assert (tmp_path / "data" / "decisions.json").exists()
     listing = host._control_decisions("list")
     assert "Raise prices" in listing and "70% sure" in listing
+    # …and the SAME journal feeds the weekly review. AA-02 supersedes
+    # the render shape: /focus week now composes through
+    # nomorals.reviews, where the still-open decision stands in the
+    # composer's "What's blocked" section (the focus builder's own
+    # "## Decisions" section is composed, not rendered verbatim).
+    week = host._control_focus("week")
+    assert "## What's blocked" in week
+    assert "Raise prices" in week
     did = host._decisions_journal().open_decisions()[0].id
     resolved = host._control_decisions(
         f"resolve {did[:11]} good churn stayed low")
     assert resolved.startswith("resolved:")
     calibration = host._control_decisions("calibration")
     assert "100% accurate" in calibration
-    # …and the SAME journal feeds the weekly review's Decisions
-    # section (the focus sessions' other consumer).
-    week = host._control_focus("week")
-    assert "## Decisions" in week
-    assert "Raise prices" in week
 
 
 def test_decisions_registered_in_the_catalog():

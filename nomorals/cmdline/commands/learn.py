@@ -19,7 +19,7 @@ def _cmd_learn(args: Any, context: Any) -> int:
               "       nm learn flashcards due [n] | stats | list | review <id> <1-4> | export <path>\n"
               "       nm learn mastery [weakest]\n"
               "       nm learn waec <subject> | waec grade <pct>\n"
-              "       nm learn jamb <subject> | jamb formats",
+              "       nm learn jamb <subject> | jamb formats | jamb packs | jamb align <q> | jamb misconceptions <q> | jamb bank | jamb ekiti",
               file=sys.stderr)
         return 2
     from ...learn.chat import control_learn

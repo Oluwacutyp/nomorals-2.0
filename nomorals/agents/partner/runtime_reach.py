@@ -998,9 +998,8 @@ class RuntimeReachMixin:
         return FocusTimer(str(path))
 
     def _control_focus(self, tail: str, *, chat_key: str = "") -> str:
-        """Focus sessions + week review: /focus start|pause|resume|stop|status|today|week."""
-        from ...focus.sessions import (
-            build_weekly_review, format_duration)
+        """Focus sessions + week review: /focus start|pause|resume|stop|status|today|week|month."""
+        from ...focus.sessions import format_duration
 
         parts = (tail or "").strip().split(None, 1)
         verb = parts[0].lower() if parts else "status"
@@ -1046,10 +1045,30 @@ class RuntimeReachMixin:
                              f"({row['sessions']}×, {row['interruptions']} interruptions)")
             return "\n".join(lines)
         if verb == "week":
+            # AA-02: the periodic-review composer (nomorals.reviews)
+            # wraps the focus builder — same wins/totals/calibration,
+            # plus slipped / blocked / next-week synthesis.
+            from ...reviews.review import build_weekly_review
             ledger = self._commitments_ledger()
             review = build_weekly_review(
                 commitments=ledger, decisions=self._decisions_journal(),
                 focus=timer)
+            return review.render_markdown()
+        if verb == "month":
+            # AA-02: monthly = aggregation of the last 4 weekly reviews,
+            # each built from the real ledgers at its own week offset —
+            # never fabricated weeks.
+            from ...reviews.review import build_monthly_review, build_weekly_review
+            ledger = self._commitments_ledger()
+            journal = self._decisions_journal()
+            now = time.time()
+            weeks = []
+            for back in range(4):
+                wk_now = now - back * 7 * 86400.0
+                weeks.append(build_weekly_review(
+                    commitments=ledger, decisions=journal, focus=timer,
+                    now=wk_now))
+            review = build_monthly_review(weeks=weeks, now=now)
             return review.render_markdown()
         if verb in ("status", ""):
             active = timer.active()
@@ -1068,7 +1087,7 @@ class RuntimeReachMixin:
             return (f"focus {state}{label} — {format_duration(active.elapsed())} so far.\n"
                     f"{today_line}")
         return ("usage: /focus start [label] · pause · resume · stop [note]\n"
-                "       /focus status · today · week")
+                "       /focus status · today · week · month")
 
     # ── decision journal: /decisions ──────────────────────────────────
     def _decisions_journal(self) -> Any:
