@@ -70,6 +70,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.errors import NoMoralsError, http_status_of
+from ..core.failures import record_failure
 from ..core.http import HttpClient, HttpResponse
 from ..core.logging_setup import get_logger
 from ..documents.errors import DocumentError
@@ -192,14 +193,40 @@ class ArchiveIngestor:
             if self._index_path.is_file():
                 try:
                     raw = json.loads(self._index_path.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
+                except (OSError, ValueError) as exc:
+                    self._index_unreadable(exc)
                     raw = {}
                 if isinstance(raw, dict):
                     self._index = {
                         str(k): v for k, v in raw.items()
                         if isinstance(v, dict) and "sha" in v
                     }
+                else:
+                    # Valid JSON, wrong shape: the file is corrupt,
+                    # not empty (AA-73).
+                    self._index_unreadable(ValueError(
+                        f"blob index root is {type(raw).__name__}, "
+                        "expected a JSON object"))
         return self._index
+
+    def _index_unreadable(self, exc: BaseException) -> None:
+        """AA-73: an existing index that cannot be read is corruption,
+        not an empty cache. Surface it (error log + failure ledger)
+        and quarantine the bytes aside, so the next ``_save_index``
+        cannot silently overwrite them and the loss is recoverable.
+        The in-memory index still starts empty — fetches re-store
+        what they need — but never again in silence."""
+        _log.error("wisdom blob index unreadable (%s): %s — starting "
+                   "from an empty index; corrupt file quarantined",
+                   self._index_path, exc)
+        record_failure("wisdom.ingestor._load_index", exc)
+        quarantine = self._index_path.with_name(
+            self._index_path.name + ".corrupt")
+        try:
+            self._index_path.replace(quarantine)
+        except OSError as qexc:
+            _log.warning("could not quarantine corrupt wisdom index "
+                         "%s: %s", self._index_path, qexc)
 
     def _save_index(self) -> None:
         self._index_path.write_text(

@@ -11,6 +11,11 @@ Adjudications (see ~/workspace/nm-tail70-verify/SURVEY.md):
   contract.  Doctor still always reports; the entry trips rc 1.
 - 83 EXCLUSION — _status None is visibly absent (payload null, text
   section omitted), never a success-shaped value.
+  SUPERSEDED by AA-69 (assembly audit 2026-11-05): "visibly absent"
+  still exits 0 and prints nothing about config, indistinguishable
+  from a clean pass at a glance. A failed config check is now a hard
+  failure: rc 1, payload carries {"error": ...}, text prints the
+  failed check. The pin below asserts the new contract.
 - 200 EXCLUSION — the durable .env write precedes the guard and fails
   loud; the guarded in-memory settings mirror is best-effort by its
   own contract ("the file is the durable truth").
@@ -95,8 +100,12 @@ def test_77_registry_probe_failure_reports_failed_entry(tmp_path, capsys,
     assert payload2["tool_modules"]["failed"] == []
 
 
-def test_83_config_status_failure_reports_none(tmp_path, capsys,
-                                               monkeypatch):
+def test_83_config_status_failure_is_a_hard_failure(tmp_path, capsys,
+                                                    monkeypatch):
+    # AA-69 (supersedes the tail-70 exclusion above): the config check
+    # crashing must surface as a failed check — rc 1 (the deploy
+    # VERIFY FAILED contract) and the error in the payload, never a
+    # silent omission that reads as a clean pass.
     import nomorals.core.config as cfg
     calls = []
 
@@ -107,7 +116,8 @@ def test_83_config_status_failure_reports_none(tmp_path, capsys,
     monkeypatch.setattr(cfg, "config_env_status", raiser)
     rc, payload = _doctor_json(tmp_path, capsys)
     assert calls == [1]
-    assert payload["config_keys"] is None
+    assert payload["config_keys"] == {"error": "RuntimeError: config broken"}
+    assert rc == 1
 
 
 # ── 200: _cmd_models promote-local settings mirror ──────────────────────────

@@ -764,6 +764,11 @@ def status(context: Any) -> dict[str, Any]:
                   "proactive_master": True, "quiet_hours": False},
         "last_run": None,
         "pending_proposals": 0,
+        # AA-70: a probe that failed leaves its name + error here, so
+        # the defaults beside it are never mistaken for measurements
+        # ("not scheduled / 0 proposals" used to also mean "the probe
+        # crashed"). Empty dict = every probe answered.
+        "errors": {},
     }
     partner = getattr(getattr(context, "settings", None), "partner", None)
     if partner is not None:
@@ -771,8 +776,8 @@ def status(context: Any) -> dict[str, Any]:
             getattr(partner, "proactive_enabled", True))
     try:
         out["gates"]["quiet_hours"] = bool(_in_quiet_hours_now(context))
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        out["errors"]["quiet_hours"] = f"{type(exc).__name__}: {exc}"
     try:
         sched = Scheduler(context)
         jobs = [j for j in sched.list_jobs()
@@ -785,14 +790,14 @@ def status(context: Any) -> dict[str, Any]:
                 "next_run_iso": j.get("next_run_iso"),
                 "interval_hours": research_hours(),
             })
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        out["errors"]["scheduler"] = f"{type(exc).__name__}: {exc}"
     out["last_run"] = last_run(context)
     try:
         out["pending_proposals"] = len(
             UpgradeQueue(context).list(status="proposed"))
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        out["errors"]["upgrade_queue"] = f"{type(exc).__name__}: {exc}"
     out["topics"] = owner_topics(context)
     out["signals"] = usefulness_signals(context)
     return out

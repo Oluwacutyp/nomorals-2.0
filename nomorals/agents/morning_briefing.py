@@ -756,8 +756,11 @@ class DevonSelfProvider(_Provider):
             n = (row["n"] if row else 0) or 0
             if n:
                 lines.append(f"• 🔧 {n} skill self-improvement edit(s) applied")
-        except Exception:  # noqa: BLE001 — table may not exist
-            pass
+        except Exception as exc:  # noqa: BLE001 — table may not exist
+            # AA-72: the section is still omitted, but the failure is
+            # recorded like its sibling probes below — a locked or
+            # corrupt DB must not read as "no edits, nothing wrong".
+            record_failure("morning_briefing.DevonSelfProvider.collect.skill_edits", exc)
 
         # watcher stats (Prompt 03) — only when there's something to say
         try:

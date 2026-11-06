@@ -148,7 +148,7 @@ class PlaidConnector(Connector):
         Credentials arrive via arguments, the ``PLAID_CLIENT_ID`` /
         ``PLAID_SECRET`` env vars, or a secure prompt, and are validated
         against the API before anything is vault-stored. ``env`` selects
-        ``sandbox`` (default) or ``production``. When ``access_token`` (or
+        ``production`` (default) or ``sandbox``. When ``access_token`` (or
         the ``PLAID_ACCESS_TOKEN`` env var) is given, that bank item is
         linked in the same step. Otherwise the owner links through Plaid
         Link — see :meth:`begin_link`.
@@ -216,7 +216,7 @@ class PlaidConnector(Connector):
                 connected=False,
                 detail="not connected — run `nm connectors connect --name plaid`",
             )
-        env = (client.metadata or {}).get("env", "sandbox")
+        env = (client.metadata or {}).get("env", "production")
         try:
             self._validate_client(
                 BASE_URLS[env], *self._client_pair(client)
@@ -243,7 +243,7 @@ class PlaidConnector(Connector):
         client = self._client_credential()
         if client is None:
             return False
-        env = (client.metadata or {}).get("env", "sandbox")
+        env = (client.metadata or {}).get("env", "production")
         try:
             self._validate_client(
                 BASE_URLS[env], *self._client_pair(client)
@@ -267,7 +267,7 @@ class PlaidConnector(Connector):
         Link returns a ``public_token`` that :meth:`link_bank` exchanges.
         """
         client = self._require_client()
-        env = (client.metadata or {}).get("env", "sandbox")
+        env = (client.metadata or {}).get("env", "production")
         cid, sec = self._client_pair(client)
         resp = self._api(
             BASE_URLS[env],
@@ -404,7 +404,7 @@ document.getElementById('link-btn').onclick = () => handler.open();
         returned to chat.
         """
         client = self._require_client()
-        env = (client.metadata or {}).get("env", "sandbox")
+        env = (client.metadata or {}).get("env", "production")
         cid, sec = self._client_pair(client)
         token = (public_token or "").strip()
         if not token:
@@ -478,7 +478,7 @@ document.getElementById('link-btn').onclick = () => handler.open();
             raise ConnectorError(
                 "no linked bank matches — see status() for linked banks"
             )
-        env = (client.metadata or {}).get("env", "sandbox")
+        env = (client.metadata or {}).get("env", "production")
         cid, sec = self._client_pair(client)
         self._api(
             BASE_URLS[env],
@@ -1333,7 +1333,7 @@ document.getElementById('link-btn').onclick = () => handler.open();
         :meth:`link_bank`. Never available in production.
         """
         client = self._require_client()
-        env = (client.metadata or {}).get("env", "sandbox")
+        env = (client.metadata or {}).get("env", "production")
         if env != "sandbox":
             raise ConnectorError(
                 "sandbox public tokens are only available in the sandbox "
@@ -1535,7 +1535,7 @@ document.getElementById('link-btn').onclick = () => handler.open();
     ) -> dict[str, Any]:
         """Plaid call for one linked item (client pair injected)."""
         client = self._require_client()
-        env = (client.metadata or {}).get("env", "sandbox")
+        env = (client.metadata or {}).get("env", "production")
         cid, sec = self._client_pair(client)
         merged = {"access_token": item["access_token"]}
         merged.update(payload)
@@ -1662,7 +1662,7 @@ document.getElementById('link-btn').onclick = () => handler.open();
         Used by Payment Initiation, which is client-scoped.
         """
         client = self._require_client()
-        env = (client.metadata or {}).get("env", "sandbox")
+        env = (client.metadata or {}).get("env", "production")
         cid, sec = self._client_pair(client)
         return self._api(BASE_URLS[env], path, payload, cid=cid, secret=sec)
 
@@ -1766,7 +1766,7 @@ document.getElementById('link-btn').onclick = () => handler.open();
     @staticmethod
     def _normalize_env(env: str | None) -> str:
         value = ((env or "").strip() or os.environ.get(ENV_ENV, "")
-                 or "sandbox")
+                 or "production")
         value = value.lower()
         if value not in BASE_URLS:
             raise ConnectorError(

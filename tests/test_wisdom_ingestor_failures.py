@@ -56,6 +56,15 @@ sites; pinned because the derivation found them):
   every other URL→sha record in the on-disk index (blob files
   survive, orphaned; the corpus itself is separate storage and
   untouched). Pinned standing, NOT converted in this pass.
+  CONVERTED by AA-73 (assembly audit 2026-11-05), the targeted fix
+  this shelf entry was waiting for: the return contract (empty
+  index, fetches re-store) is unchanged, but corruption now
+  surfaces — ERROR log + core failure-ledger record — and the
+  corrupt bytes are quarantined to index.json.corrupt so the next
+  _save_index can no longer silently overwrite them. The
+  not-logged pin below is rewritten to assert the new contract;
+  the data-loss-chain pin now also asserts the bytes survive in
+  quarantine.
 * 217 — _cached_bytes(): an OSError reading a cached blob returns
   None. The docstring's printed contract is "None on any miss/
   corruption"; the caller refetches and re-stores, and the index
@@ -122,11 +131,16 @@ def test_190_read_oserror_degrades_to_empty(tmp_path):
 
 
 def test_190_corruption_then_store_destroys_prior_records(tmp_path):
-    # The data-loss chain, pinned as standing state for the
-    # targeted-fix shelf: corrupt index -> treated as empty ->
+    # The data-loss chain, originally pinned as standing state for
+    # the targeted-fix shelf: corrupt index -> treated as empty ->
     # the next _store_blob/_save_index rewrites index.json from
     # the empty in-memory copy, permanently dropping the prior
     # URL->sha records (blob files survive, orphaned).
+    # AA-73 conversion: the in-memory/index behavior below is
+    # unchanged (the corrupt bytes held no recoverable records),
+    # but the bytes themselves are quarantined at load — the save
+    # no longer silently overwrites them, so the loss is visible
+    # and the file recoverable by hand.
     ing = _bare(tmp_path)
     ing._index_path.write_text(
         json.dumps({"https://a.test/x": {"sha": "aa" * 32, "at": 1,
@@ -138,14 +152,30 @@ def test_190_corruption_then_store_destroys_prior_records(tmp_path):
     saved = json.loads(ing._index_path.read_text(encoding="utf-8"))
     assert "https://a.test/x" not in saved
     assert saved["https://b.test/y"]["sha"] == sha
+    quarantined = ing._index_path.with_name("index.json.corrupt")
+    assert quarantined.read_text(encoding="utf-8") == "{corrupt"
 
 
-def test_190_corrupt_load_is_not_logged(tmp_path, caplog):
+def test_190_corrupt_load_surfaces_and_quarantines(tmp_path, caplog):
+    # AA-73 conversion (was: test_190_corrupt_load_is_not_logged —
+    # the silence WAS the defect). The empty-index return stays;
+    # what changes is that the corruption leaves evidence: an ERROR
+    # log line, a failure-ledger record, and the corrupt bytes
+    # preserved in quarantine instead of silently overwritten by
+    # the next _save_index.
+    from nomorals.core import failures as core_failures
     ing = _bare(tmp_path)
     ing._index_path.write_text("{not json", encoding="utf-8")
+    before = core_failures.failure_count()
     with caplog.at_level(logging.DEBUG, logger=_LOG_NAME):
         assert ing._load_index() == {}
-    assert _module_log_records(caplog) == []
+    loud = [r for r in _module_log_records(caplog)
+            if r.levelno >= logging.WARNING]
+    assert loud, "corrupt index must leave a log trace"
+    assert core_failures.failure_count() > before
+    assert not ing._index_path.exists()
+    quarantined = ing._index_path.with_name("index.json.corrupt")
+    assert quarantined.read_text(encoding="utf-8") == "{not json"
 
 
 # ── 217 (extra): _cached_bytes — blob read OSError is a miss ───────────

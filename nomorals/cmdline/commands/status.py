@@ -177,13 +177,20 @@ def _cmd_status(args: argparse.Namespace, context: Any) -> int:
                 "scheduled": bool(job.get("scheduled")),
                 "enabled": bool(job.get("enabled")),
                 "feature_research": bool(gates.get("feature_research")),
-                "pending_proposals": s.get("pending_proposals", 0)}
+                "pending_proposals": s.get("pending_proposals", 0),
+                "errors": s.get("errors") or {}}
         text = [f"research: {'scheduled' if data['scheduled'] else 'not scheduled'}"
                 + (f" (every {job.get('interval_hours')}h"
                    + ("" if data["enabled"] else ", disabled") + ")"
                    if data["scheduled"] else "")
                 + f", feature={'on' if data['feature_research'] else 'off'}"
                 + f", {data['pending_proposals']} pending proposals"]
+        if data["errors"]:
+            # AA-70: failed probes mean the values above are defaults,
+            # not measurements — say so on the surface that shows them.
+            text.append("research: ⚠ status probes failed ("
+                        + ", ".join(sorted(data["errors"]))
+                        + ") — values above may be defaults")
         return data, text
 
     def _runtime() -> tuple[dict[str, Any], list[str]]:

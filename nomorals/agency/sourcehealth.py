@@ -36,11 +36,13 @@ from __future__ import annotations
 
 import re
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Any, Callable
+
+from .failures import record_failure
 
 __all__ = [
     "SourceSpec",
@@ -133,6 +135,10 @@ class SourceRecord:
     etag: str = ""
     last_modified: str = ""
     notes: str = ""
+    #: AA-75: False when this record's durable save failed — the
+    #: in-memory state is real, but no DB-backed view will ever see
+    #: it. Not a DB column; set by note_result's save path.
+    persisted: bool = True
 
 
 @dataclass
@@ -477,8 +483,13 @@ class SourceHealth:
                 rec.status = "unverifiable"
         try:
             self._save(rec)
-        except Exception:  # noqa: BLE001 - health must never break a run
-            pass
+        except Exception as exc:  # noqa: BLE001 - health must never break a run
+            # AA-75: the run continues, but the record must not claim
+            # a persistence that did not happen — otherwise breaker
+            # progress silently evaporates while the caller believes
+            # the outcome was recorded.
+            rec.persisted = False
+            record_failure("SourceHealth.note_result", exc)
         return rec
 
     def verify_all(self, specs: list[SourceSpec],

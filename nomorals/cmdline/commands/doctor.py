@@ -67,8 +67,10 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
     # and the exit code is a contract — the EC2 deploy script treats a
     # nonzero `nm doctor` as VERIFY FAILED. Hard failures: a database
     # that fails its integrity check, tool modules that did not
-    # register, and set-but-ignored config keys (§8.1: ignored must be
-    # zero — a set-but-ignored NM_* key is a bug).
+    # register, set-but-ignored config keys (§8.1: ignored must be
+    # zero — a set-but-ignored NM_* key is a bug), and a config-key
+    # check that itself failed (AA-69: an unrun check is not a pass —
+    # it must surface as a failure, never vanish from the report).
     _failed: list = []
     try:
         from ...tools.registry import ToolRegistry
@@ -78,19 +80,22 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
         _failed = [{"module": "tool registry probe",
                     "error": f"{type(exc).__name__}: {exc}"}]
     _status = None
+    _status_error = ""
     try:
         from ...core.config import config_env_status
         _status = config_env_status()
-    except Exception:  # noqa: BLE001 — doctor must always report
-        _status = None
+    except Exception as exc:  # noqa: BLE001 — doctor must always report
+        _status_error = f"{type(exc).__name__}: {exc}"
     _hard_fail = (
         health["database"]["integrity"] != "ok"
         or bool(_failed)
         or bool(_status and _status["ignored"])
+        or bool(_status_error)
     )
     payload = {**health, **report,
                "tool_modules": {"failed": _failed},
-               "config_keys": _status}
+               "config_keys": _status if _status is not None
+               else {"error": _status_error}}
     if args.json:
         print(json.dumps(payload, indent=2, default=str))
         return 1 if _hard_fail else 0
@@ -122,6 +127,10 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
                   f"{', '.join(_ignored)}")
         else:
             print("  ✓ ignored: 0 — every set NM_* key maps to real behavior")
+    if _status is None:
+        print("\nconfig keys:")
+        print(f"  ✗ check failed — {_status_error} "
+              "(counted as a hard failure: an unrun check is not a pass)")
     return 1 if _hard_fail else 0
 
 

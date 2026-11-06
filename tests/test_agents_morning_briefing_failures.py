@@ -14,6 +14,11 @@ recent_failures() immediately before its trigger and asserts it
 unchanged after — pollution-proof against other tests in the same
 session, strictly stronger than asserting empty.
 
+SUPERSESSION (AA-72, assembly audit 2026-11-05): site 731
+(skill_edits probe) is converted — it records now, like its sibling
+probes in the same method. Its pin below asserts the record; the
+other exclusions stand as written.
+
 No bare ``except: pass`` anywhere in this file — the scanner counts
 test files too; the tests below need no except blocks at all (stubs
 raise, the code under test catches; sys.modules patches are restored
@@ -127,6 +132,11 @@ def test_687_rooms_import_failure_omits_rooms_section():
 
 
 def test_731_skill_edits_query_failure_skips_only_that_line():
+    # AA-72 (assembly audit 2026-11-05) supersedes this site's
+    # exclusion: the section is still skipped (only that line), but
+    # the failure is now RECORDED like its watcher/scheduler sibling
+    # probes — a locked or corrupt DB must not read as "no edits,
+    # nothing wrong". Everything else about the pin is unchanged.
     class BoomDb:
         def query_one(self, *a, **k):
             raise RuntimeError("skill_edits boom")
@@ -147,7 +157,9 @@ def test_731_skill_edits_query_failure_skips_only_that_line():
         assert sec is not None
         assert not any("🔧" in ln for ln in sec.lines)
         assert any("job failed" in ln for ln in sec.lines)
-        _assert_no_record(before)
+        new = [f for f in _rf() if f not in before]
+        assert [f.site for f in new] == [
+            "morning_briefing.DevonSelfProvider.collect.skill_edits"]
     finally:
         _unpatch("nomorals.agents.watchers", orig_w)
         _unpatch("nomorals.agents.scheduler", orig_s)

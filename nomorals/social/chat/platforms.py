@@ -16,7 +16,11 @@ Platform rules (verified against real client behavior):
 * **whatsapp** — ``*bold*``, ``_italic_``, `` ```mono``` ``, ``~strike~``.
   HTML tags are converted (``<b>`` → ``*`` …), unknown tags stripped,
   ``[text](url)`` links flattened to ``text: url`` (WhatsApp auto-links
-  bare URLs). No inline buttons, no HTML — channels render plain text.
+  bare URLs). No HTML. Inline buttons are real via the bridges: both
+  render a native ButtonsMessage (first 3 buttons) with overflow as
+  text action lines, and taps re-enter as commands; message editing
+  is the one missing verb, and only on the Node/Baileys rung (the Go
+  bridge edits its own messages).
 * **sms** — all markup stripped to plain text.
 * **web** — HTML converted to light markdown (``**bold**``, `` `code` ``).
 * **discord** — markdown passthrough (``**bold**``, `` `code` ``), HTML

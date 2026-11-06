@@ -172,7 +172,11 @@ def _cmd_memory_action(args: argparse.Namespace, context: Any) -> int:
     if action == "curate":
         report = MemoryCurator(memory).scheduled_pass()
         _emit(args, report, f"curation: {report}")
-        return 0
+        # AA-66: the exit code is part of the report's truth — a pass
+        # whose dedup failed (or that carries an 'error') is a failed
+        # run, matching the consolidate/health contract below.
+        dedup = report.get("dedup") or {}
+        return 0 if dedup.get("ok") and "error" not in report else 1
 
     if action == "consolidate":
         from ...memory.cadence import consolidate_now

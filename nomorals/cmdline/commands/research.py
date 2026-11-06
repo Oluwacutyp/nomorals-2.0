@@ -45,6 +45,14 @@ def _cmd_research_loop(args: argparse.Namespace, context: Any) -> int:
             f"  signals: {rlmod.signals_summary(data.get('signals') or {})}",
             f"  topics: {', '.join(data.get('topics') or []) or 'none set'}",
         ]
+        if data.get("errors"):
+            # AA-70: probe failures ride the status dict's 'errors'
+            # field; name them so defaults are never read as fact.
+            lines.append(
+                "  ⚠ probes failed: "
+                + ", ".join(f"{k} ({v})" for k, v in
+                            sorted(data["errors"].items()))
+                + " — affected values above are defaults")
         _emit(args, data, "\n".join(lines))
         return 0
 

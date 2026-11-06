@@ -687,9 +687,13 @@ class PlaidConnectTests(unittest.TestCase):
         cred = conn.vault.get("connector:plaid", "__client__")
         pair = json.loads(cred.password)
         self.assertEqual(pair, {"client_id": "cid", "secret": "sec"})
-        # validation call carried the pair in the body
+        # validation call carried the pair in the body. AA-47
+        # (assembly audit 2026-11-05): with no env argument and no
+        # PLAID_ENV set, the default environment is PRODUCTION —
+        # sandbox is opt-in only. (Was sandbox when this pin was
+        # written; the default deliberately changed.)
         _m, url, payload, _h = http.calls[0]
-        self.assertEqual(url, "https://sandbox.plaid.com/institutions/get")
+        self.assertEqual(url, "https://production.plaid.com/institutions/get")
         self.assertEqual(payload["client_id"], "cid")
         self.assertEqual(payload["secret"], "sec")
 

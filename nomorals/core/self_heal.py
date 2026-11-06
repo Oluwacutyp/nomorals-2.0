@@ -851,6 +851,7 @@ def heal_all(handle_control, kinds: list[str], chat_key: str = "",
              intelligence: Any = None) -> dict[str, Any]:
     """Run the full loop over candidate commands. Never raises."""
     results: list[HealResult] = []
+    loop_error = ""
     try:
         for kind in kinds:
             if kind in skip:
@@ -863,14 +864,17 @@ def heal_all(handle_control, kinds: list[str], chat_key: str = "",
                 r = HealResult(kind)
                 r.skip_reason = "heal probe crashed unexpectedly"
                 results.append(r)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # AA-74: a failure of the loop itself (e.g. the kinds iterable
+        # dying mid-sweep) must mark the summary as the partial run it
+        # is — never a complete-looking result set.
+        loop_error = f"{type(exc).__name__}: {exc}"
 
     healed = [r for r in results if r.fixed]
     still = [r for r in results if r.broken and not r.fixed]
     hung = [r for r in results if r.timed_out]
     would = [r for r in results if r.dry_run and r.fixable and r.broken]
-    return {
+    summary: dict[str, Any] = {
         "results": [r.to_dict() for r in results],
         "healed": [r.to_dict() for r in healed],
         "still_broken": [r.to_dict() for r in still],
@@ -879,3 +883,7 @@ def heal_all(handle_control, kinds: list[str], chat_key: str = "",
         "total": len(results),
         "dry_run": dry_run,
     }
+    if loop_error:
+        summary["error"] = loop_error
+        summary["truncated"] = True
+    return summary
