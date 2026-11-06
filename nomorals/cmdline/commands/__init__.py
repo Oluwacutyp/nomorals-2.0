@@ -16,6 +16,7 @@ from .captcha import _cmd_captcha
 from .cards import _cmd_cards
 from .code import _cmd_code, _cmd_code_review, _cmd_code_run, _cmd_code_test, _critic_verdict
 from .completion import _cmd_completion
+from .consent import _cmd_consent
 from .brain import _cmd_brain
 from .data import _cmd_data
 from .doctor import _cmd_doctor, _cmd_models, _cmd_models_doctor, _cmd_setup, _env_update_home
@@ -117,6 +118,7 @@ from .voice import (
     _voice_think_runtime,
 )
 from .weather import _cmd_weather
+from .why import _cmd_why
 
 __all__ = [
     "_cmd_run",
@@ -139,6 +141,7 @@ __all__ = [
     "_cmd_code_review",
     "_cmd_code_test",
     "_cmd_completion",
+    "_cmd_consent",
     "_cmd_data",
     "_cmd_brain",
     "_cmd_doctor",
@@ -258,4 +261,5 @@ __all__ = [
     "_cmd_voice_purge",
     "_cmd_voice_decrypt",
     "_cmd_weather",
+    "_cmd_why",
 ]

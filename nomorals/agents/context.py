@@ -733,6 +733,29 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
         attach_learning(router, db=db)
     except Exception:  # noqa: BLE001
         _log.warning("learning attach failed; continuing without it", exc_info=True)
+    # Provider-consent guard (AA-34): attach the file-backed consent
+    # ledger so the router consent-checks every provider attempt
+    # (hosted providers need a recorded grant per data kind; local
+    # providers always pass). The ledger file's EXISTENCE is the
+    # arming switch: no file means the owner has recorded no grants
+    # yet, and attaching an empty ledger would deny every hosted
+    # provider and brick the configured chain — so enforcement arms
+    # with the first grant, recorded via `nm consent grant` (which
+    # creates the file). Best-effort — a broken ledger file never
+    # breaks boot; the router's own check also fails closed per
+    # provider if the ledger raises at call time.
+    try:
+        from pathlib import Path as _Path
+
+        _consent_path = _Path(settings.home).expanduser() / "consent.json"
+        if _consent_path.is_file():
+            from ..core.consent import ConsentLedger
+
+            router.set_consent_ledger(ConsentLedger(_consent_path))
+            _log.info("consent ledger attached from %s", _consent_path)
+    except Exception:  # noqa: BLE001
+        _log.warning("consent ledger attach failed; continuing without it",
+                     exc_info=True)
     # Console debug view (key d): record LLM call traces. Chain-safe —
     # the learning hook above keeps working; this only adds telemetry.
     # Best-effort — must never break boot or routing.

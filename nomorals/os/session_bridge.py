@@ -26,6 +26,7 @@ from typing import Any
 
 from ..core.logging_setup import get_logger
 from ..social.chat.base import ChatKind, ChatMessage
+from .project import ProjectStore
 from .session import Session, SessionStore
 
 __all__ = ["SessionBridge", "conversation_id_for"]
@@ -60,7 +61,21 @@ class SessionBridge:
 
     def __init__(self, db: Any = None, gating_fn: Any = None) -> None:
         self.store = SessionStore(db=db)
+        # OS projects (AA-28): the scoping shells sessions and artifacts
+        # attach to, on the SAME database as the session store — a
+        # project summary can then count this bridge's sessions via
+        # SessionStore.list_for_project without a second store wiring.
+        self.projects = ProjectStore(db=self.store.db)
         self._gating_fn = gating_fn
+
+    def project_summary(self, project_id: str, *,
+                        artifact_store: Any = None) -> dict[str, Any] | None:
+        """Dashboard for one OS project: missions by status, this
+        bridge's session count, and (when an artifact store is given)
+        the project's scoped artifact count. None for an unknown id."""
+        return self.projects.summary(
+            project_id, session_store=self.store,
+            artifact_store=artifact_store)
 
     # ── public API ────────────────────────────────────────────────────
     def session_for_message(self, message: ChatMessage,

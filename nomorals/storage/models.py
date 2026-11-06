@@ -12,6 +12,26 @@ while making call sites readable.
 
 Every ``from_row`` tolerates a row that is missing columns, because a migration
 can add a column that older rows never had.
+
+Adjudication (AA-15, assembly audit 2026-11-05 — which of these mirrors
+is the live type, traced against the hot paths):
+
+* ``Reflection`` is the LIVE typed path: no richer counterpart exists,
+  and the two hand-decoding consumers now go through it —
+  ``MissionStore.reflections()`` (missions/mission.py) and the training
+  collector's reflection examples (training/collect.py).
+* ``MissionRecord`` is a storage-level mirror of the same ``missions``
+  table whose live type is ``nomorals.missions.mission.Mission`` — a
+  strict superset (goal validation, priority/tags/parent_id folded
+  into ``metadata``, acceptance, ``budget_exhausted``). MissionStore
+  reads and writes ``Mission``; this record stays as the raw-row
+  decoder for storage-level tooling, not a second mission type.
+* ``ModelRow`` likewise mirrors ``models`` rows; the live type is
+  ``nomorals.llm.registry.ModelRecord`` (catalog metadata + promotion
+  logic), as its own docstring below already states.
+* ``AgentRecord`` / ``TaskRecord`` have no richer counterpart and no
+  raw-row hot path today; they remain the canonical decoders for the
+  ``agents`` / ``tasks`` tables for any storage-level consumer.
 """
 
 from __future__ import annotations

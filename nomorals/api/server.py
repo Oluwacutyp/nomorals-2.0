@@ -917,6 +917,47 @@ class APIServer:
             }
 
         @self.route(
+            "GET", "/projects",
+            description="List OS projects (scoping shells for sessions/"
+                        "missions/artifacts); ?id= for one summary",
+        )
+        def projects_list(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            principal = server._current_principal()
+            _require_capability(principal, Capability.DB_READ)
+            from ..os.session_bridge import SessionBridge
+
+            bridge = SessionBridge(context.db)
+            project_id = str(query.get("id") or "")
+            if project_id:
+                summary = bridge.project_summary(project_id)
+                if summary is None:
+                    raise NoMoralsError(f"no such project: {project_id}")
+                return {"project": summary}
+            return {"projects": [p.to_dict() for p in bridge.projects.list()]}
+
+        @self.route(
+            "POST", "/projects",
+            description="Create an OS project (name, description, "
+                        "mission_ids, tags)",
+        )
+        def projects_create(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
+            principal = server._current_principal()
+            _require_capability(principal, Capability.DB_WRITE)
+            from ..os.session_bridge import SessionBridge
+
+            name = str(body.get("name") or "").strip()
+            if not name:
+                return {"ok": False, "error": "name is required"}
+            bridge = SessionBridge(context.db)
+            project = bridge.projects.create(
+                name,
+                description=str(body.get("description") or ""),
+                mission_ids=[str(m) for m in body.get("mission_ids") or []],
+                tags=[str(t) for t in body.get("tags") or []],
+            )
+            return {"project": project.to_dict()}
+
+        @self.route(
             "GET", "/triggers",
             description="List automation triggers (?enabled_only=1, ?source=NAME)",
         )

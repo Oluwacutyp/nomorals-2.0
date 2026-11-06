@@ -40,7 +40,13 @@ def _get_engine() -> NaijaShoppingEngine:
 
 
 def _build_engine() -> NaijaShoppingEngine:
-    """Build a NaijaShoppingEngine from the captured registry context."""
+    """Build a NaijaShoppingEngine from the captured registry context.
+
+    Construction goes through the integrations facade (AA-11):
+    ``expose.make_naija_shopping`` is the one place the engine is
+    assembled from a db + browser pair.
+    """
+    from ..integrations import expose as _expose
     from ..storage.db import Database
     from ..tools.browser import BrowserSession
 
@@ -52,7 +58,7 @@ def _build_engine() -> NaijaShoppingEngine:
         os.makedirs(home, exist_ok=True)
         db = Database(os.path.join(home, "shopping.db"))
     browser = BrowserSession(name="deals")
-    engine = NaijaShoppingEngine(db, browser)
+    engine = _expose.make_naija_shopping(db, browser)
     _log.info("deals engine lazily initialized")
     return engine
 

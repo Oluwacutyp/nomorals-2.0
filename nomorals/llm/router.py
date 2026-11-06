@@ -470,6 +470,17 @@ class ProviderHealth:
         }
 
 
+#: Consent data kind per router operation (AA-34): what would actually
+#: leave the machine if this provider served the call. Vision sends the
+#: image; chat/complete send the conversation. Embeddings are checked
+#: separately in embed() as "embeddings_text" (capability llm.embed).
+_CONSENT_DATA_KINDS = {
+    "chat": "chat_history",
+    "complete": "chat_history",
+    "vision": "images",
+}
+
+
 class LLMRouter:
     """Routes calls across a chain of providers.
 
@@ -498,6 +509,7 @@ class LLMRouter:
         replay: bool | None = None,
         adaptive_budget: Any | None = None,
         adaptive_config: Any | None = None,
+        consent_ledger: Any | None = None,
     ) -> None:
         """Create the router.
 
@@ -514,6 +526,13 @@ class LLMRouter:
         block); ``adaptive_config`` builds one from an
         :class:`AdaptiveBudgetConfig`.  None = no adaptation — the
         router behaves exactly as before.
+
+        ``consent_ledger`` attaches a
+        :class:`nomorals.core.consent.ConsentLedger`: every provider
+        attempt is then consent-checked for the data kind it would
+        receive (local providers always pass; a hosted provider with
+        no recorded grant is skipped and failover continues).  None =
+        no consent enforcement — the router behaves exactly as before.
         """
         self._providers: list[LLMProvider] = []
         self._by_name: dict[str, LLMProvider] = {}
@@ -584,6 +603,15 @@ class LLMRouter:
         # routing.  While unset the dispatch path below is exactly the
         # pre-learning code.
         self._learning: Any = None
+        # Optional provider-consent ledger (nomorals.core.consent.
+        # ConsentLedger), enforced per provider attempt via
+        # nomorals.llm.consent.provider_consent_decision (AA-34).
+        # While unset the dispatch path is exactly the pre-consent
+        # code — build_router attaches the file-backed ledger once the
+        # owner has recorded a first grant (`nm consent grant`), so an
+        # install with no grants recorded routes exactly as before.
+        self._consent_ledger: Any = consent_ledger
+        self._consent_skips = 0
         # LLM cassettes (record/replay). The store is lazy — no I/O
         # until the first lookup/record — so constructing it is cheap
         # even when cassettes are never used.
@@ -601,6 +629,54 @@ class LLMRouter:
         with self._lock:
             self.adaptive_budget = budget
         return self
+
+    # ── provider-consent guard (AA-34) ────────────────────────────────────
+    def set_consent_ledger(self, ledger: Any | None) -> LLMRouter:
+        """Attach/detach the provider-consent ledger.
+
+        Pass ``None`` to detach (routing returns to the pre-consent
+        behaviour exactly).
+        """
+        with self._lock:
+            self._consent_ledger = ledger
+        return self
+
+    @property
+    def consent_ledger(self) -> Any:
+        return self._consent_ledger
+
+    @property
+    def consent_skips(self) -> int:
+        """Provider attempts skipped for lack of consent, this router."""
+        return self._consent_skips
+
+    def _consent_denial(self, provider_name: str, data_kind: str, *,
+                        capability: str = "llm.chat") -> str:
+        """``""`` when the provider may receive ``data_kind``; otherwise
+        the denial reason. No ledger attached ⇒ always ``""``.
+
+        A consent check that itself fails DENIES: the ledger's own
+        doctrine is that a corrupt/unreadable ledger must never
+        silently become "everything allowed", so a broken guard fails
+        closed for that provider and failover continues.
+        """
+        ledger = self._consent_ledger
+        if ledger is None:
+            return ""
+        try:
+            from .consent import provider_consent_decision
+
+            decision = provider_consent_decision(
+                ledger, provider_name, data_kind=data_kind,
+                capability=capability)
+        except Exception as exc:  # noqa: BLE001 — broken guard denies
+            _log.warning("consent check failed for %s: %s",
+                         provider_name, exc)
+            record_failure("router.consent_check", exc)
+            return f"consent check failed: {type(exc).__name__}: {exc}"
+        if decision.allowed:
+            return ""
+        return str(decision.reason or "no consent grant recorded")
 
     def _adaptive_decide(self, operation: str,
                          urgency: str | None = None) -> Any | None:
@@ -1113,6 +1189,16 @@ class LLMRouter:
             if health and not health.available(self._clock()):
                 skipped.append(f"{provider.name} (cooling down)")
                 continue
+            # Consent gate (AA-34): embeddings text is its own data
+            # kind under the llm.embed capability.
+            if self._consent_ledger is not None:
+                denial = self._consent_denial(
+                    provider.name, "embeddings_text",
+                    capability="llm.embed")
+                if denial:
+                    self._consent_skips += 1
+                    skipped.append(f"{provider.name} (consent: {denial})")
+                    continue
             if health and health.breaker is not None:
                 try:
                     health.breaker.before_call()
@@ -1430,6 +1516,19 @@ class LLMRouter:
             if not health.available(self._clock()):
                 skipped.append(f"{provider.name} (cooling down)")
                 continue
+            # Consent gate (AA-34): a hosted provider with no recorded
+            # grant for this data kind is skipped BEFORE any byte can
+            # reach it; failover continues to the next provider, and
+            # the skip is named in the honest terminal error when
+            # nothing was attempted. Local providers always pass.
+            if self._consent_ledger is not None:
+                denial = self._consent_denial(
+                    provider.name,
+                    _CONSENT_DATA_KINDS.get(operation, "chat_history"))
+                if denial:
+                    self._consent_skips += 1
+                    skipped.append(f"{provider.name} (consent: {denial})")
+                    continue
             # Circuit breaker gate: an open breaker rejects without touching
             # the dependency; a half-open breaker admits probes within the
             # probe budget — a recovering provider must not absorb the whole

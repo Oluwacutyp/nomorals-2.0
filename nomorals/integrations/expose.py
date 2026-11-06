@@ -214,10 +214,19 @@ def make_smart_home(account_manager: Any, session_manager: Any) -> Any:
     return SmartHomeIntegration(account_manager, session_manager)
 
 
-def make_home_twin(db_path: str = ":memory:") -> Any:
-    """Build :class:`HomeTwin` on ``db_path`` (``:memory:`` = throwaway)."""
+def make_home_twin(db_path: str | None = None) -> Any:
+    """Build :class:`HomeTwin`.
+
+    No argument = the twin's own durable default
+    (``digital_twin.DEFAULT_DB``) — the same store a bare ``HomeTwin()``
+    opens, so the facade and the direct constructor can never split
+    into two different home histories. Pass ``":memory:"`` explicitly
+    for a throwaway twin.
+    """
     from .digital_twin import HomeTwin
 
+    if db_path is None:
+        return HomeTwin()
     return HomeTwin(db_path)
 
 

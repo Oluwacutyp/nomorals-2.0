@@ -92,10 +92,35 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
         or bool(_status and _status["ignored"])
         or bool(_status_error)
     )
+    # Live verification (AA-03): the LiveVerifier's checks (HF token,
+    # yt-dlp/ffmpeg, provider keys, Telegram/WhatsApp bridges, network)
+    # are environment observations, so they run ONLY under --live —
+    # the default doctor path (and its exit-code contract with the
+    # deploy script) must not start failing because a machine is
+    # offline. Under --live the operator asked for the live truth, so
+    # live failures join the exit code.
+    _live = None
+    _live_error = ""
+    if getattr(args, "live", False):
+        try:
+            import asyncio
+
+            from ...core.verify import LiveVerifier
+
+            _live = asyncio.run(LiveVerifier(settings).verify_all())
+        except Exception as exc:  # noqa: BLE001 — doctor must always report
+            _live_error = f"{type(exc).__name__}: {exc}"
+    if _live is not None and not _live.all_passed:
+        _hard_fail = True
+    if _live_error:
+        _hard_fail = True
     payload = {**health, **report,
                "tool_modules": {"failed": _failed},
                "config_keys": _status if _status is not None
                else {"error": _status_error}}
+    if getattr(args, "live", False):
+        payload["live"] = (_live.to_dict() if _live is not None
+                           else {"error": _live_error})
     if args.json:
         print(json.dumps(payload, indent=2, default=str))
         return 1 if _hard_fail else 0
@@ -131,6 +156,16 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
         print("\nconfig keys:")
         print(f"  ✗ check failed — {_status_error} "
               "(counted as a hard failure: an unrun check is not a pass)")
+    if getattr(args, "live", False):
+        print("\nlive verification:")
+        if _live is not None:
+            for check in _live.checks:
+                mark = "✓" if check.passed else "✗"
+                print(f"  {mark} {check.name}: {check.message}")
+            print(f"  {_live.passed_count}/{len(_live.checks)} passed")
+        else:
+            print(f"  ✗ verifier failed to run — {_live_error} "
+                  "(counted as a hard failure under --live)")
     return 1 if _hard_fail else 0
 
 

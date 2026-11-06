@@ -48,6 +48,11 @@ __all__ = [
     "rhythm",
     "usage",
     "preemption",
+    "interruption",
+    "model_weakness",
+    # AA-35: the composition root that constructs the real satellites
+    # and passes them to the unified scheduler.
+    "wiring",
 ]
 
 # Tier 0: power-aware gate for organ ticks (new file, additive).

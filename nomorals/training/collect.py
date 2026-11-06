@@ -463,20 +463,23 @@ class TrainingCollector:
             since,
             limit=limit,
         )
+        # Typed decode via storage.models.Reflection (AA-15) — same
+        # decoder MissionStore.reflections() uses, so the collector can
+        # never drift from the reflections table's shape.
+        from ..storage.models import Reflection
+
         out: list[Example] = []
         for row in rows:
-            summary = scrub_pii(str(row.get("summary") or "")).strip()
-            lessons = _json(row.get("lessons"), [])
+            record = Reflection.from_row(row)
+            summary = scrub_pii(str(record.summary or "")).strip()
+            lessons = record.lessons
             if not isinstance(lessons, list):
                 lessons = [lessons]
             lesson_text = "; ".join(scrub_pii(str(item)) for item in lessons if str(item).strip())
             if not summary and not lesson_text:
                 continue
             stats.reflections += 1
-            try:
-                score = f"{float(row.get('score') or 0.0):.3f}"
-            except (TypeError, ValueError):
-                score = "0.000"
+            score = f"{record.score:.3f}"
             response = f"Mission outcome score: {score}."
             if summary:
                 response += f" {summary}"

@@ -24,6 +24,15 @@ this module wires the best free options behind one interface:
   local weights, for the no-GPU path. ``pip install huggingface_hub``;
   ``HF_STT_MODEL`` picks the model (default
   ``openai/whisper-large-v3-turbo``).
+- **assemblyai** / **whisper-api**: the two paid cloud engines ported
+  from the retired ``integrations.stt.SpeechToText`` (AA-09 — that
+  module's whisper / faster-whisper / google / SRT / diarization paths
+  were already covered here or by ``integrations.voice_integration``;
+  these two were its only unique remainders). Paid and key-gated, so
+  they sit last in the auto preference order: a local backend always
+  wins when one is installed. ``pip install assemblyai`` +
+  ``ASSEMBLYAI_API_KEY``, or ``pip install openai`` +
+  ``OPENAI_API_KEY``.
 
 Usage::
 
@@ -283,15 +292,106 @@ class HFEndpointSTTBackend:
                 "segments": []}
 
 
+class AssemblyAIBackend:
+    """AssemblyAI cloud ASR — ported from ``integrations.stt`` (AA-09).
+
+    Utterances become segments (ms → s) and the transcript confidence
+    rides along in the result. Paid: needs ``pip install assemblyai``
+    and ``ASSEMBLYAI_API_KEY``.
+    """
+
+    name = "assemblyai"
+
+    def __init__(self, model: str = "") -> None:
+        try:
+            import assemblyai  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                "assemblyai backend needs: pip install assemblyai"
+            ) from exc
+        self.api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
+
+    def transcribe(self, audio_path: str, language: str = "en",
+                   **kwargs: Any) -> dict[str, Any]:
+        if not self.api_key:
+            raise RuntimeError(
+                "assemblyai backend needs ASSEMBLYAI_API_KEY set")
+        import assemblyai as aai
+
+        aai.settings.api_key = self.api_key
+        transcript = aai.Transcriber().transcribe(audio_path)
+        if transcript.status == aai.TranscriptStatus.error:
+            raise RuntimeError(f"AssemblyAI error: {transcript.error}")
+        segs = [{"start": float(u.start) / 1000.0,
+                 "end": float(u.end) / 1000.0,
+                 "text": str(u.text).strip()}
+                for u in (transcript.utterances or [])]
+        return {"text": str(transcript.text or "").strip(),
+                "language": language, "backend": self.name,
+                "segments": segs,
+                "confidence": float(transcript.confidence or 0.0)}
+
+
+class WhisperAPIBackend:
+    """OpenAI Whisper API cloud ASR — ported from ``integrations.stt``
+    (AA-09), whose copy was real but unreachable (the live
+    ``integrations.voice_integration`` whisper-api branch is a stub
+    that falls back to local whisper).
+
+    ``verbose_json`` so segments come back with timings. Paid: needs
+    ``pip install openai`` and ``OPENAI_API_KEY``.
+    """
+
+    name = "whisper-api"
+
+    def __init__(self, model: str = "") -> None:
+        try:
+            import openai  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                "whisper-api backend needs: pip install openai"
+            ) from exc
+        self.model = (model or os.environ.get("WHISPER_API_MODEL", "")
+                      or "whisper-1")
+        self.api_key = os.environ.get("OPENAI_API_KEY", "")
+
+    def transcribe(self, audio_path: str, language: str = "en",
+                   **kwargs: Any) -> dict[str, Any]:
+        if not self.api_key:
+            raise RuntimeError(
+                "whisper-api backend needs OPENAI_API_KEY set")
+        import openai
+
+        key = self.api_key
+        client = openai.OpenAI(api_key=key)
+        with open(audio_path, "rb") as audio_file:
+            response = client.audio.transcriptions.create(
+                model=self.model,
+                file=audio_file,
+                language=language or None,
+                prompt=kwargs.get("prompt") or None,
+                response_format="verbose_json",
+            )
+        segs = [{"start": float(s.start), "end": float(s.end),
+                 "text": str(s.text).strip()}
+                for s in (getattr(response, "segments", None) or [])]
+        return {"text": str(getattr(response, "text", "") or "").strip(),
+                "language": getattr(response, "language", "") or language,
+                "backend": self.name, "segments": segs}
+
+
 _STT_BACKENDS = {"faster-whisper": FasterWhisperBackend,
                  "parakeet": ParakeetBackend,
                  "whisper.cpp": WhisperCppBackend,
                  "whisper": WhisperBackend,
-                 "hf-stt": HFEndpointSTTBackend}
+                 "hf-stt": HFEndpointSTTBackend,
+                 "assemblyai": AssemblyAIBackend,
+                 "whisper-api": WhisperAPIBackend}
 
 _STT_SPECS = {"faster-whisper": "faster_whisper", "parakeet": "onnx_asr",
               "whisper.cpp": "pywhispercpp", "whisper": "whisper",
-              "hf-stt": "huggingface_hub"}
+              "hf-stt": "huggingface_hub", "assemblyai": "assemblyai",
+              "whisper-api": "openai"}
 
 
 def available_stt_backends() -> list[str]:
@@ -299,11 +399,13 @@ def available_stt_backends() -> list[str]:
 
     faster-whisper first (broad 99-language coverage), then Parakeet
     (fastest free English dictation), whisper.cpp (no torch), classic
-    whisper, and the cloud fallback.
+    whisper, the free cloud fallback, and the paid cloud engines last —
+    a key-gated paid backend never outranks a working local one.
     """
     order = [("faster-whisper", "faster_whisper"), ("parakeet", "onnx_asr"),
              ("whisper.cpp", "pywhispercpp"), ("whisper", "whisper"),
-             ("hf-stt", "huggingface_hub")]
+             ("hf-stt", "huggingface_hub"), ("assemblyai", "assemblyai"),
+             ("whisper-api", "openai")]
     return [name for name, spec in order if _spec(spec)]
 
 
@@ -337,7 +439,8 @@ class UniversalSTT:
                     "no STT backend installed — pip install one of: "
                     "faster-whisper (best free, MIT) | onnx-asr (Parakeet, "
                     "fastest English) | pywhispercpp (no torch) | "
-                    "openai-whisper | huggingface_hub (cloud)")
+                    "openai-whisper | huggingface_hub (cloud) | "
+                    "assemblyai / openai (paid cloud, API key required)")
             wanted = available[0]
         if wanted not in _STT_BACKENDS:
             raise RuntimeError(

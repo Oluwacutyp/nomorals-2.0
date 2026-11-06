@@ -1,5 +1,18 @@
 """Speech-to-text (STT) engine - transcribe voice messages.
 
+SUPERSEDED (AA-09, assembly audit 2026-11-05): the production STT path
+is :class:`nomorals.voice.stt.UniversalSTT`. Overlap, traced: local
+whisper + faster-whisper (here) = ``voice.stt`` backends of the same
+names; Google speech = ``integrations.voice_integration.STTEngine``;
+SRT/VTT export = ``voice.stt.to_srt`` / ``to_vtt``; diarization =
+``voice.stt.diarize`` (wired by the AA-29 speakers surface). This
+module's two unique engines — AssemblyAI and the OpenAI Whisper API —
+were ported into ``voice.stt`` as ``AssemblyAIBackend`` /
+``WhisperAPIBackend`` (last in the auto preference order: paid cloud
+never outranks a working local backend). ``SpeechToText`` stays
+importable for its async API and result types; it is not the
+production path and no new caller should be built on it.
+
 Supports multiple backends:
 - Whisper (OpenAI's open-source model, runs locally)
 - Whisper API (cloud-based, requires API key)

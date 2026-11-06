@@ -141,6 +141,32 @@ def _parser() -> argparse.ArgumentParser:
     doctor.add_argument("--build-native", action="store_true",
                         help="compile the native C++ accelerators before "
                              "reporting (same as: nm native --build)")
+    doctor.add_argument("--live", action="store_true",
+                        help="also run the live verifier (tokens, "
+                             "binaries, bridges, network) — its failures "
+                             "count toward the exit code")
+
+    consent = sub.add_parser("consent",
+                             help="record/inspect LLM provider-consent "
+                                  "grants (which hosted providers may "
+                                  "receive which data kinds)")
+    consent.add_argument("action", nargs="?", default="status",
+                         choices=["status", "grant", "revoke", "check"],
+                         help="status (default), grant, revoke, or check")
+    consent.add_argument("target", nargs="?", default="",
+                         help="provider id (grant/check) or record id "
+                              "(revoke)")
+    consent.add_argument("--data-kind", default="",
+                         help="comma-separated data kinds: chat_history,"
+                              "images,embeddings_text (default "
+                              "chat_history)")
+    consent.add_argument("--capability", default="",
+                         help="capability the grant covers "
+                              "(default llm.chat; embeddings use llm.embed)")
+    consent.add_argument("--ttl-hours", type=float, default=0.0,
+                         help="grant expiry in hours (default: no expiry)")
+    consent.add_argument("--json", action="store_true",
+                         help="Output as JSON")
     sub.add_parser("config", aliases=CLI_ALIASES["config"],
                    help="print the effective configuration")
     sub.add_parser("setup", aliases=CLI_ALIASES["setup"], help="guided model setup wizard")
@@ -597,6 +623,13 @@ def _parser() -> argparse.ArgumentParser:
                           help="ledger action: per-system rollup instead of entries")
     autonomy.add_argument("--window", default="24",
                           help="ledger action: summary window in hours (default 24)")
+
+    why = sub.add_parser("why", help="explain an autonomous firing "
+                                     "(autonomy why-store); 'run' runs "
+                                     "due unified work once")
+    why.add_argument("firing", nargs="*", default=[],
+                     help="a firing id, or 'run'")
+    why.add_argument("--json", action="store_true", help="Output as JSON")
 
     goal = sub.add_parser("goal", aliases=CLI_ALIASES["goal"], help="Create and manage goals")
     goal.add_argument("action", nargs="?", default="list",

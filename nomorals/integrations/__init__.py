@@ -104,6 +104,16 @@ _LAZY = {
     "sentinel_bridge": (".sentinel_bridge", None),  # the module itself
     "SpeechToText": (".stt", "SpeechToText"),
     "TranscriptionResult": (".stt", "TranscriptionResult"),
+    # The construction facade (AA-11): the one place email / calendar /
+    # payments / smart-home / home-twin / Naija-shopping engines are
+    # assembled, plus its honest backend descriptors.
+    "expose": (".expose", None),  # the module itself
+    "make_email": (".expose", "make_email"),
+    "make_calendar": (".expose", "make_calendar"),
+    "make_payments": (".expose", "make_payments"),
+    "make_smart_home": (".expose", "make_smart_home"),
+    "make_home_twin": (".expose", "make_home_twin"),
+    "make_naija_shopping": (".expose", "make_naija_shopping"),
     "home": (".home", None),  # the module itself
     "HomeBackend": (".home", "HomeBackend"),
     "HomeDevice": (".home", "HomeDevice"),

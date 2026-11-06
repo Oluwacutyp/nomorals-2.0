@@ -780,9 +780,9 @@ class RuntimeMemoryMixin:
         /routine confirm <id>        validate → activate via Home Assistant
         /routine list                pending drafts
         """
+        from ...integrations import expose as _expose
         from ...integrations.routines import (
-            activate, build_routine, confirm, describe, load_aliases,
-            pending_draft, validate,
+            describe, load_aliases, pending_draft,
         )
         rest = (tail or "").strip()
         if not rest:
@@ -806,7 +806,7 @@ class RuntimeMemoryMixin:
             if draft is None:
                 return f"no pending draft '{draft_id}'. Use /routine list."
             try:
-                routine = confirm(draft)
+                routine = _expose.confirm_automation(draft)
             except Exception as exc:  # noqa: BLE001 — show the problem
                 return f"can't activate yet:\n{exc}"
             # activate via Home Assistant (best-effort wiring)
@@ -819,7 +819,8 @@ class RuntimeMemoryMixin:
                     return (f"✅ routine validated: {describe(draft)}\n"
                             "⚠️ smart-home backend not connected here — "
                             "connect Home Assistant to activate it.")
-                result = asyncio.run(activate(routine, integration))
+                result = asyncio.run(_expose.activate_automation(
+                    routine, integration))
                 return (f"✅ routine active: {result.name}\n"
                         f"(Home Assistant automation {result.ha_automation_id})")
             except Exception as exc:  # noqa: BLE001 — never break chat
@@ -833,15 +834,19 @@ class RuntimeMemoryMixin:
         except Exception as _partner_exc:
             record_failure("runtime_memory.RuntimeMemoryMixin._control_routine", _partner_exc)
             aliases = {}
-        draft = build_routine(rest, devices=devices, aliases=aliases,
-                              memory=memory)
-        errors = validate(draft)
-        out = describe(draft)
-        if errors:
+        # Parse + validate + describe through the integrations facade
+        # (AA-11): expose.parse_automation is the one composition of
+        # build_routine → validate → describe; the draft still lands in
+        # the same routines draft store the confirm path reads.
+        parsed = _expose.parse_automation(rest, devices=devices,
+                                          aliases=aliases, memory=memory)
+        out = parsed["description"]
+        if parsed["errors"]:
             out += "\n\n⚠️ needs fixing:\n" + "\n".join(
-                f"• {e.message}" for e in errors)
+                f"• {e['message']}" for e in parsed["errors"])
         else:
-            out += (f"\n\nReply `/routine confirm {draft.id}` to activate it.")
+            out += (f"\n\nReply `/routine confirm {parsed['draft_id']}` "
+                    "to activate it.")
         return out
 
     def _control_home(self, tail: str, *, chat_key: str = "") -> str:
@@ -851,10 +856,10 @@ class RuntimeMemoryMixin:
         /home what changed [h]  changes in the last h hours (default 12)
         /home unusual?          statistical anomalies
         """
-        from ...integrations.digital_twin import HomeTwin
+        from ...integrations import expose as _expose
         twin = getattr(self, "_home_twin", None)
         if twin is None:
-            twin = HomeTwin()
+            twin = _expose.make_home_twin()
             self._home_twin = twin
         rest = (tail or "").strip().lower()
         if not rest or rest == "status":
@@ -868,7 +873,8 @@ class RuntimeMemoryMixin:
                 except ValueError as e:
                     record_failure("runtime_memory.RuntimeMemoryMixin._control_home", e)
             import time as _t
-            return twin.what_changed(_t.time() - hours * 3600)
+            return _expose.what_changed_since(
+                twin, _t.time() - hours * 3600)
         if rest in ("unusual?", "unusual", "anomalies"):
             anomalies = twin.anomalies()
             if not anomalies:

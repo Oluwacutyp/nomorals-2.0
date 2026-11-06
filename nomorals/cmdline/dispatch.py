@@ -89,6 +89,7 @@ from .commands.status import _cmd_status
 from .commands.session import _cmd_session
 from .commands.chat import _cmd_chat
 from .commands.completion import _cmd_completion
+from .commands.consent import _cmd_consent
 from .commands.swarm import _cmd_swarm
 from .commands.timeline import _cmd_timeline
 from .commands.tools import _cmd_tools
@@ -102,6 +103,7 @@ from .commands.update import _cmd_update
 from .commands.vision import _cmd_vision
 from .commands.voice import _cmd_voice
 from .commands.weather import _cmd_weather
+from .commands.why import _cmd_why
 from .commands.wisdom import _cmd_wisdom
 from .commands.mesh import _cmd_mesh
 from .commands.sync import _cmd_sync
@@ -292,6 +294,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "update": _CommandSpec(_cmd_update, needs_context=False),
     "config": _CommandSpec(_cmd_config, needs_context=False),
     "completion": _CommandSpec(_cmd_completion, needs_context=False),
+    "consent": _CommandSpec(_cmd_consent, needs_context=False),
     # everything else runs inside build_context()
     "setup": _CommandSpec(_cmd_setup),
     "models": _CommandSpec(_dispatch_models),
@@ -382,6 +385,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "pump": _CommandSpec(_cmd_pump),
     "build": _CommandSpec(_cmd_build),
     "weather": _CommandSpec(_cmd_weather),
+    "why": _CommandSpec(_cmd_why),
     "vision": _CommandSpec(_cmd_vision),
     "imggen": _CommandSpec(cmd_imggen),
     "shorts": _CommandSpec(cmd_shorts),

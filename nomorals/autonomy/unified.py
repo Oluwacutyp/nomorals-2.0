@@ -29,17 +29,19 @@ treated as due again (at-least-once, the same contract as
 ``nomorals.missions.runner`` — a step may run twice, never zero times
 without a record).
 
-Optional collaborators (all duck-typed, all optional):
+Optional collaborators (all duck-typed at this seam, all optional —
+the composition root :mod:`nomorals.autonomy.wiring` constructs the
+REAL satellites and passes them in; see ``nm why``):
 
-* ``rhythm`` — an :class:`OwnerRhythm`-like object with
+* ``rhythm`` — an :class:`OwnerRhythm` with
   ``should_fire(now, priority=..., kind=...)``. Quiet-hour / busy /
   low-intensity deferrals happen here, before any work runs.
-* ``budget`` — a :class:`BudgetGovernor`-like object with
+* ``budget`` — a :class:`BudgetGovernor` with
   ``check(organ)`` returning a mapping with ``allowed``. Over-ceiling
   work is deferred, not executed.
-* ``why_store`` — a :class:`WhyStore`-like object with ``record(...)``.
+* ``why_store`` — a :class:`WhyStore` with ``record(...)``.
   Every firing (mission or tick) is explained there for ``nm why``.
-* ``preemption`` — a :class:`PreemptionLog`-like object with
+* ``preemption`` — a :class:`PreemptionLog` with
   ``log_preempted(...)``. Used when a firing is displaced by
   higher-priority work (currently: budget deferrals are reported as
   deferred, not as preemptions — preemption is reserved for one
@@ -60,26 +62,20 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
+from .preemption import PriorityLadder
 
 _log = get_logger(__name__)
 
 __all__ = ["UnifiedScheduler", "atomic_write_json", "normalize_mission"]
 
-#: Priority order, highest first. Mirrors the coordinator ladder in
-#: ``nomorals.autonomy.preemption`` without importing it (keeps this
-#: module dependency-free so it can be imported standalone).
-_PRIORITY_RANK = {
-    "safety": 0,
-    "owner-direct": 1,
-    "owner_direct": 1,
-    "scheduled": 2,
-    "ambient": 3,
-    "background": 4,
-}
-
 
 def _priority_rank(priority: str) -> int:
-    return _PRIORITY_RANK.get(str(priority or "scheduled").lower(), 2)
+    """Rank on the canonical coordinator ladder
+    (:class:`nomorals.autonomy.preemption.PriorityLadder`) — the
+    scheduler no longer keeps a private copy of the ladder (AA-35);
+    aliases (``owner_direct``, ``urgent``, ``low``…) normalize through
+    the same table the preemption log uses."""
+    return PriorityLadder.rank(priority)
 
 
 def _new_id(prefix: str = "sched") -> str:

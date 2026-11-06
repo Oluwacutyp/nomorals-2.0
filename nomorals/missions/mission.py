@@ -1152,10 +1152,11 @@ class MissionStore:
             rows = self.db.query(
                 "SELECT * FROM reflections ORDER BY created_at DESC LIMIT ?", (limit,)
             )
-        out: list[dict[str, Any]] = []
-        for row in rows:
-            data = dict(row)
-            data["lessons"] = _json(data.get("lessons"), [])
-            data["weights"] = _json(data.get("weights"), {})
-            out.append(data)
-        return out
+        # Typed decode via storage.models.Reflection (AA-15): the one
+        # place a reflections row's JSON columns are decoded, instead of
+        # a local _json pass that can drift from the table's shape.
+        from dataclasses import asdict
+
+        from ..storage.models import Reflection
+
+        return [asdict(Reflection.from_row(row)) for row in rows]
