@@ -2905,6 +2905,7 @@ def _parser() -> argparse.ArgumentParser:
                      "nm trade scan XAUUSD [--market forex]\n"
                      "nm trade setups XAUUSD [--market forex]\n"
                      "nm trade audit [XAUUSD]\n"
+                     "nm trade pipeline status|start|stop|tick|audit\n"
                      "nm trade analyze BTC/USDT [--market crypto] [--timeframe 1h]\n"
                      "nm trade backtest XAUUSD --market forex [--profile aggressive]\n"
                      "nm trade signal ETH/USDT\n"
@@ -2960,6 +2961,16 @@ def _parser() -> argparse.ArgumentParser:
     t_manage.add_argument("symbol", nargs="?", default="", help="e.g. XAUUSD (default: all)")
     t_manage.add_argument("--mode", default="paper", help="paper|demo|mt5")
     t_manage.add_argument("--json", action="store_true", help="Output as JSON")
+    t_pipeline = trade_sub.add_parser("pipeline", help="the standing trading pipeline (Pass 6): status | start | stop | tick | audit — runs the shadow chain + management poll on a durable cadence; places no orders")
+    t_pipeline_sub = t_pipeline.add_subparsers(dest="pipeline_action", required=True)
+    for _pact, _phelp in (
+            ("status", "pipeline state: control, HALT, cadence jobs, last tick/audit/training"),
+            ("start", "stand the pipeline up (refused while the HALT kill switch is engaged)"),
+            ("stop", "stand the pipeline down (ticks skip until started)"),
+            ("tick", "run ONE pipeline tick now"),
+            ("audit", "run ONE audit cycle now (retrain + self-audit + rung comparison)")):
+        t_p = t_pipeline_sub.add_parser(_pact, help=_phelp)
+        t_p.add_argument("--json", action="store_true", help="Output as JSON")
     t_analyze = trade_sub.add_parser("analyze", help="plain-language regime + strategy brief")
     t_analyze.add_argument("symbol", help="e.g. BTC/USDT, XAUUSD")
     t_analyze.add_argument("--market", default="crypto", help="crypto|forex|stocks")

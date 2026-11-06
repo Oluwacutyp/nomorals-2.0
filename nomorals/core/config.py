@@ -580,6 +580,18 @@ class TradingSettings:
     min_profit_factor: float = 1.3
     unlock_ttl_hours: float = 24.0
     followed_symbols: list = field(default_factory=list)
+    # Trading system Pass 6 (agents/trade_pipeline): the standing
+    # pipeline's cadence + scope. The tick is the shadow chain plus
+    # the execution-desk management poll on the configured rung —
+    # it places no orders; judgment stays shadow-first.
+    pipeline_symbols: list = field(default_factory=lambda: ["XAUUSD"])
+    pipeline_market: str = "forex"
+    pipeline_mode: str = "paper"
+    pipeline_tick_spec: str = "every 15m"
+    pipeline_audit_spec: str = "every 6h"
+    # Optional GoldenSwing journal-export seed for the empirical
+    # forecast sample (owner decision 8: data, not code).
+    forecast_seed_path: str = ""
 
 @dataclass
 class OsintSettings:

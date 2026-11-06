@@ -2660,6 +2660,19 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("price source health job not "
                                  "registered: %s", exc)
+                # Trading system (Pass 6): the standing pipeline —
+                # tick (default every 15m: read → setups → forecast
+                # → judgment shadow → management poll) + audit cycle
+                # (default every 6h: retrain + self-audit).  The
+                # jobs call the trading tool; the pipeline's own
+                # control state (start/stop, HALT switch) lives in
+                # the trading journal and the tick honors it.
+                # Idempotent by name.
+                try:
+                    from ...finance.trading_jobs import ensure_trading_jobs
+                    ensure_trading_jobs(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("trading jobs not registered: %s", exc)
                 # News: the continuous poll (every 30m — fetch, store,
                 # interest-score, push the high tier).  The digests
                 # ride the briefing slots above; this job is what

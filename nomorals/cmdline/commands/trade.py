@@ -73,6 +73,15 @@ def _cmd_trade(args: argparse.Namespace, context: Any) -> int:
                 settings=getattr(context, "settings", None))
             _emit(args, rep, render_audit(rep))
             return 0
+        if action == "pipeline":
+            out = trading_tool.pipeline_action(
+                context, f"pipeline_{args.pipeline_action}")
+            if not out.get("ok"):
+                _emit(args, out, f"trade pipeline failed: "
+                                 f"{out.get('error')}")
+                return 1
+            _emit(args, out, out.get("rendered") or str(out))
+            return 0
         if action in ("execute", "positions", "manage"):
             out = trading_tool.system_action(
                 context, action, symbol=args.symbol or "",

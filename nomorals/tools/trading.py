@@ -726,6 +726,66 @@ def system_action(context: Any, action: str, **kw: Any) -> dict[str, Any]:
     raise bridge.SentinelError(f"unknown system action {action!r}")
 
 
+# ── the trading pipeline: brain control + autonomy (Pass 6) ──────────
+def pipeline_action(context: Any, action: str, **kw: Any) -> dict[str, Any]:
+    """pipeline_status | pipeline_start | pipeline_stop |
+    pipeline_tick | pipeline_audit — the Pass 6 control surface.
+
+    The orchestration lives in agents/trade_pipeline (journal-folded
+    control state, slot-idempotent ticks); this layer only builds
+    the Pass 4 engine over the vault seam and hands it in. Engine
+    construction failure (locked vault, bad mode) never fails the
+    tick: the management stage reports rung-unavailable and the
+    shadow chain still runs.
+    """
+    from ..agents import trade_pipeline as pipeline
+
+    settings = getattr(context, "settings", None)
+    cfg = pipeline.pipeline_config(settings)
+    if action == "pipeline_status":
+        extras = getattr(context, "extras", None)
+        scheduler = extras.get("scheduler") if isinstance(
+            extras, dict) else None
+        status = pipeline.pipeline_status(
+            settings=settings, scheduler=scheduler)
+        return {"ok": True, **status,
+                "rendered": pipeline.render_status(status)}
+    if action in ("pipeline_start", "pipeline_stop"):
+        out = pipeline.set_control(
+            action.removeprefix("pipeline_"), actor="brain",
+            reason=str(kw.get("reason") or ""), settings=settings)
+        return out
+    if action == "pipeline_tick":
+        engine = None
+        build_error = ""
+        try:
+            engine = _system_engine(context, cfg.mode)
+        except Exception as exc:  # noqa: BLE001 - stage reports it
+            build_error = f"{type(exc).__name__}: {exc}"
+        probe = None
+        if engine is not None and cfg.mode == "demo" \
+                and getattr(engine, "desk", None) is not None:
+            def probe(engine: Any = engine) -> tuple[bool, str]:
+                try:
+                    engine.desk.connector.get_snapshot()
+                except Exception as exc:  # noqa: BLE001 - the honest rung state
+                    return False, (f"demo rung unavailable: "
+                                   f"{type(exc).__name__}: {exc}")
+                return True, ""
+        result = pipeline.run_tick(
+            settings=settings, engine=engine, rung_probe=probe,
+            force=True, actor="brain")
+        if engine is None and build_error:
+            result = {**result, "engine_build_error": build_error}
+        return {"ok": True, **result,
+                "rendered": pipeline.render_tick(result)}
+    if action == "pipeline_audit":
+        result = pipeline.run_audit_cycle(settings=settings)
+        return {"ok": True, **result,
+                "rendered": pipeline.render_audit_cycle(result)}
+    raise bridge.SentinelError(f"unknown pipeline action {action!r}")
+
+
 # ── registry ────────────────────────────────────────────────────────────
 def register(registry: Any) -> None:
     context = registry.context
@@ -762,6 +822,19 @@ def register(registry: Any) -> None:
             "ONE position-management sweep (per-playbook profiles: "
             "QM fixed bracket only, hot-scalp earned lock + staged "
             "targets, generic profit-lock + partial tiers); "
+            "pipeline_status inspects the standing Pass 6 pipeline "
+            "(control state, HALT, cadence jobs, last tick, last "
+            "audit verdicts, last training); pipeline_start / "
+            "pipeline_stop stand it up / down (start is refused "
+            "while the HALT kill switch is engaged; the tick honors "
+            "the stopped state); pipeline_tick runs ONE tick now "
+            "(read → setups → forecast → judgment shadow → "
+            "management poll — places no orders); pipeline_audit "
+            "runs ONE audit cycle (retrain trained forecast "
+            "estimators, Pass 5 self-audit, forecast rung "
+            "comparison); the pipeline also runs itself on the "
+            "durable cadence (tick every 15m, audit every 6h by "
+            "default — settings.trading.pipeline_*); "
             "analyze/backtest/signal/compare/strategies are research tools; "
             "paper_* run simulated sessions; live_order is inert unless "
             "every live gate passes (settings + 24h unlock + loss limit); "
@@ -776,7 +849,7 @@ def register(registry: Any) -> None:
             "action=..."),
         capability=Capability.NET_OUT,
         parameters={
-            "action": "str — read|scan|setups|forecast|judge|judgments|audit|execute|positions|manage|analyze|backtest|signal|compare|strategies|"
+            "action": "str — read|scan|setups|forecast|judge|judgments|audit|execute|positions|manage|pipeline|pipeline_status|pipeline_start|pipeline_stop|pipeline_tick|pipeline_audit|analyze|backtest|signal|compare|strategies|"
                       "paper_start|paper_status|paper_stop|doctor|"
                       "live_unlock|live_order|kill|"
                       "exness_snapshot|exness_positions|exness_size|"
@@ -794,6 +867,7 @@ def register(registry: Any) -> None:
             "size": "float — order size in units (live_order)",
             "exchange": "str — exchange id (live_order)",
             "confirm": "str — 'I understand' (live_unlock)",
+            "reason": "str — why (pipeline_start|pipeline_stop)",
             "mode": "str — paper|live (exness_*, default paper)",
             "instrument": "str — e.g. XAUUSD (exness_*)",
             "volume": "float — lots (exness_open)",
@@ -813,8 +887,10 @@ def register(registry: Any) -> None:
         action = (action or "doctor").strip().lower()
         # NM_TRADING_ENABLED master switch (spec §8.1): disabled refuses
         # every trading action honestly. `doctor` (reports state) and
-        # `kill` (safety) always stay available.
-        if action not in ("doctor", "kill"):
+        # `kill` (safety) always stay available — and so do
+        # pipeline_status (a read) and pipeline_stop (safety).
+        if action not in ("doctor", "kill", "pipeline_status",
+                          "pipeline_stop"):
             if not getattr(_trading_settings(context), "enabled", True):
                 return {"ok": False,
                         "error": "trading is disabled (NM_TRADING_ENABLED=0 / settings.trading.enabled=false)"}
@@ -874,6 +950,13 @@ def register(registry: Any) -> None:
             return system_action(context, action, symbol=symbol,
                                  market=market,
                                  mode=str(kwargs.get("mode") or "paper"))
+        if action in ("pipeline", "pipeline_status", "pipeline_start",
+                      "pipeline_stop", "pipeline_tick",
+                      "pipeline_audit"):
+            return pipeline_action(
+                context,
+                "pipeline_status" if action == "pipeline" else action,
+                **kwargs)
         expert = FinancialExpert(context)
         if action == "analyze":
             return expert.analyze(
