@@ -869,6 +869,22 @@ def make_bridge_stt(bridge: Any, *, language: str = "en",
     return _stt
 
 
+def make_default_bridge_stt(*, language: str = "en",
+                            timeout: float = 120.0) -> Callable[[str], str]:
+    """Session STT backed by the production :class:`VoiceBridge`.
+
+    Builds the bridge via :func:`nomorals.voice.bridge.default_bridge`
+    (the owner's own ``UniversalSTT`` underneath) and adapts its
+    ``transcribe_voice`` through :func:`make_bridge_stt` — the bridge
+    is the live loop's STT backend, so voice notes and the live call
+    share one transcription path.
+    """
+    from .bridge import default_bridge
+
+    return make_bridge_stt(default_bridge(), language=language,
+                           timeout=timeout)
+
+
 def make_local_stt(backend: str = "auto", *, language: str = "en",
                    **kwargs: Any) -> Callable[[str], str]:
     """Local STT for the live loop: no cloud, no bridge needed.

@@ -41,7 +41,7 @@ from ..social.chat.base import ChatRef
 from ..social.chat.whatsapp import WhatsAppAdapter
 from .failures import record_failure
 
-__all__ = ["VoiceBridge"]
+__all__ = ["VoiceBridge", "default_bridge"]
 
 
 _log = get_logger(__name__)
@@ -411,3 +411,26 @@ class VoiceBridge:
                 failed += 1
         self._cleanup(audio_path, send_path)
         return {"sent": sent, "failed": failed, "receipts": receipts}
+
+
+
+def default_bridge(*, whatsapp: Any = None,
+                   telegram: Any = None) -> VoiceBridge:
+    """Build the production bridge over the owner's own STT engine.
+
+    The bridge's transcribe side is backed by
+    :class:`nomorals.voice.stt.UniversalSTT` (lazy backend load — a
+    missing STT backend surfaces as the bridge's clear transcription
+    error, never a construction crash). Platform adapters are the
+    caller's to inject: the social gateway owns the live adapters, and
+    a bridge built without them transcribes fine but refuses sends
+    with the bridge's own "adapter not available" error.
+
+    This is the construction the live voice session's bridge STT
+    backend (``voice/session.make_default_bridge_stt``) is built on:
+    one transcription path for voice notes *and* the live loop.
+    """
+    from .stt import UniversalSTT
+
+    return VoiceBridge(UniversalSTT(), whatsapp=whatsapp,
+                       telegram=telegram)

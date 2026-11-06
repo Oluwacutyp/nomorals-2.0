@@ -32,6 +32,7 @@ from ...core.ids import new_id, new_short_id
 from ...core.logging_setup import get_logger, scrub_secrets
 from ...core.retry import BackoffPolicy
 from ...storage.db import Database
+from ..identity import IdentityStore
 from .base import (
     ChatAdapter,
     ChatKind,
@@ -169,6 +170,7 @@ class ChatGateway:
         clock: Callable[[], float] = time.time,
         adapter_builder: Callable[[str], ChatAdapter | None] | None = None,
         session_bridge: Any = None,
+        identity_store: IdentityStore | None = None,
         durable_outbox: bool = False,
         outbox: Outbox | None = None,
         durable_drain_sync: bool = True,
@@ -180,6 +182,14 @@ class ChatGateway:
         this module is L4 and must not import ``os``/L6). When present,
         every inbound message is attached to its OS Session before the
         brain's handler runs (``message.meta["os_session_id"]``).
+
+        ``identity_store`` is an optional
+        :class:`nomorals.social.identity.IdentityStore`. When present,
+        every inbound sender is registered in it (auto-linking on the
+        store's HIGH-confidence signals only — a WhatsApp JID *is* a
+        phone number) and the unified ``person_id`` is stamped on
+        ``message.meta`` for downstream memory/relationship consumers,
+        the same seam as the owner verdict and the OS session id.
 
         ``durable_outbox`` (default OFF) routes sends through the durable
         outbox (:mod:`nomorals.social.chat.outbox`): every send becomes a
@@ -215,6 +225,8 @@ class ChatGateway:
         self.owner_chats = set(owner_chats or ())
         self.us_chats = set(us_chats or ())
         self._inbound: IncomingHandler | None = None
+        #: Cross-platform identity store (see __init__ docstring).
+        self.identity_store = identity_store
         #: Optional console mirror: called with each inbound ChatMessage so
         #: the local terminal can show a rich card. Best-effort — never
         #: raises, never blocks the feed. Set by scripts/run_chat_bot.py.
@@ -547,6 +559,23 @@ class ChatGateway:
         # command gating) uses the same answer instead of recomputing it
         # with less information.
         message.meta["is_owner"] = is_owner
+        # Cross-platform identity: register the sender and stamp the
+        # unified person_id on the message (the same meta seam as the
+        # owner verdict / OS session). Registration auto-links ONLY on
+        # the store's HIGH-confidence signals (phone match, owner
+        # flag); weak signals are suggestions, never merges. Identity
+        # bookkeeping never drops a message.
+        if self.identity_store is not None and message.sender_id:
+            try:
+                person = self.identity_store.register(
+                    message.chat.platform, message.sender_id,
+                    display_name=message.sender or "",
+                    username=message.sender_username or "",
+                    is_owner=is_owner)
+                message.meta["person_id"] = person.person_id
+            except Exception as exc:  # noqa: BLE001 - never drops
+                record_failure(
+                    "gateway.ChatGateway._on_inbound.identity", exc)
         if not is_owner:
             prune_windows = False
             with self._locks_guard:

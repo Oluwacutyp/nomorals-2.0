@@ -1156,6 +1156,7 @@ _USAGE = (
     "  /audio presets — style preset chains at a glance\n"
     "  /audio duck <voice> <bed> — duck music under voice, podcast mix\n"
     "  /audio analyze <file> — what Devon hears (tempo, key, chord, tuning…)\n"
+    "  /audio understand <file> — what the clip IS: sections, energy arc, mood\n"
     "  /audio fingerprint <file> [title] — index into local recognition memory\n"
     "  /audio match <file> — recognize against Devon's local library\n"
     "Natural: \"remove all the filler words from this voice note\" · "
@@ -1233,6 +1234,22 @@ def control_audio(tail: str, *, context: Any = None,
         if verb == "analyze" and len(parts) >= 2:
             from .fingerprint import describe_audio
             return f"👂 {describe_audio(parts[1])}"
+        if verb == "understand" and len(parts) >= 2:
+            # The understanding layer (audio/understanding): structure,
+            # sections, energy arc and mood on top of the acoustics —
+            # "analyze" hears the sound, "understand" reads the clip.
+            from .understanding import understand_audio
+            u = understand_audio(parts[1])
+            if not u.ok:
+                return f"👂 couldn't listen to that ({u.reason})"
+            lines = [f"👂 {u.describe()}"]
+            if u.sections:
+                lines.append("sections:")
+                for s in u.sections:
+                    lines.append(
+                        f"  {s.start:.0f}–{s.end:.0f}s {s.label} "
+                        f"(energy {s.mean_energy:.2f})")
+            return "\n".join(lines)
         if verb == "fingerprint" and len(parts) >= 2:
             from .fingerprint import default_fingerprint_db
             title = " ".join(parts[2:]) if len(parts) > 2 else ""

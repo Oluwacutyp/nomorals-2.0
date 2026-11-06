@@ -2066,6 +2066,13 @@ def _parser() -> argparse.ArgumentParser:
                         help="device id (consent + conversation identity)")
     v_call.add_argument("--keep-audio", action="store_true",
                         help="retain raw utterances (encrypted with --audio-key-file)")
+    v_call.add_argument("--stt", default="tools",
+                        choices=("tools", "local", "bridge"),
+                        help="speech-to-text backend: tools (the "
+                             "transcribe tool, default), local "
+                             "(UniversalSTT in-process), bridge "
+                             "(VoiceBridge over UniversalSTT — the "
+                             "voice-note transcription path)")
     v_call.add_argument("--audio-key-file", default="",
                         help="file holding the 32-byte audio key or a passphrase")
     v_call.add_argument("--no-tts", action="store_true",

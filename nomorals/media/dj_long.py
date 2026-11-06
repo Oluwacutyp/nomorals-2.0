@@ -34,6 +34,7 @@ Only stdlib + ``nomorals.core``. No audio is read or written here.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -53,6 +54,7 @@ __all__ = [
     "detect_drop", "plan_long_mix", "canonical_descriptor",
     "render_long_mix", "resume_render", "opus_profile",
     "tracklist_text", "make_cover_brief", "make_cover",
+    "control_dj_long",
     "TRANSITION_TYPES", "OPUS_PROFILE",
 ]
 
@@ -551,3 +553,163 @@ class LiveDJ:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+# ───────────────────────── chat control ─────────────────────────────────
+
+def _wav_duration_s(path: str) -> float:
+    """Real duration of a WAV via the stdlib ``wave`` module.
+
+    ``dj_engine.analyze_track`` reads at most 90 s of audio, so its
+    ``duration_s`` understates long tracks; the planner needs the true
+    length. 0.0 when the file is unreadable as WAV.
+    """
+    import wave
+
+    try:
+        with wave.open(path, "rb") as fh:
+            rate = fh.getframerate() or 0
+            return (fh.getnframes() / rate) if rate else 0.0
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _energy_curve_for(path: str, duration_s: float) -> list[float]:
+    """Per-second RMS energy curve (peak-normalized) from the track head.
+
+    All audio IO goes through ``dj_mixdrop`` (the sibling that owns
+    reading/writing); this module stays descriptor-only itself.
+    """
+    from . import dj_mixdrop as _md
+
+    seg = _md._read_segment(path, 0.0, min(duration_s, 120.0) or 120.0)
+    if not seg:
+        return []
+    sr = _md._SR
+    curve: list[float] = []
+    for start in range(0, len(seg), sr):
+        chunk = seg[start:start + sr]
+        if not chunk:
+            break
+        rms = math.sqrt(sum(float(s) ** 2 for s in chunk) / len(chunk))
+        curve.append(rms)
+    peak = max(curve) if curve else 0.0
+    if peak <= 0:
+        return [0.0] * len(curve)
+    return [round(v / peak, 3) for v in curve]
+
+
+def control_dj_long(tail: str, *, chat_key: str = "",
+                    deliver_audio: Any = None,
+                    deliver_text: Any = None,
+                    context: Any = None) -> str:
+    """`/dj long ...` — plan + render a long-form (30-60 min) mix.
+
+    * ``/dj long <genre>`` — trending tracks in that lane, planned long
+    * ``/dj long <minutes> <genre>`` — same, with a target length
+    * ``/dj long <song1>, <song2>, ...`` — plan exactly these
+    * ``/dj long`` — trending overall
+
+    Tracks are fetched and analyzed for real (``dj_mixdrop`` fetch +
+    ``dj_engine`` analysis), planned by :func:`plan_long_mix` (energy
+    arc, stem-aware drop-aware transitions), then rendered by
+    :func:`render_long_mix` with a segment renderer that writes REAL
+    audio chunk files — the mix lands on disk as a resumable chunk
+    manifest (``dj_mixes/long_<ts>/``), not as one chat file: a
+    45-minute mix is far too large to drop into a chat. The chat gets
+    the timestamped tracklist, the render verdict and the cover brief.
+    ``deliver_audio`` is accepted for dispatch parity with
+    ``control_dj_mix`` and deliberately unused.
+    """
+    from . import dj_engine as _de
+    from . import dj_mixdrop as _md
+
+    tail = (tail or "").strip()
+    minutes = 45.0
+    queries: list[str] = []
+    genre = ""
+    if tail:
+        parts = [p.strip() for p in tail.split(",")]
+        if len(parts) > 1:
+            queries = [p for p in parts if p]
+        else:
+            words = tail.split()
+            if words and words[0].isdigit():
+                minutes = float(words[0])
+                tail = " ".join(words[1:]).strip()
+            if tail:
+                genre = tail
+                queries = _md._trending_queries(genre, 10, context)
+                if not queries:
+                    # treat as a single song query
+                    queries = [genre]
+                    genre = ""
+    else:
+        queries = _md._trending_queries("", 10, context)
+    minutes = max(10.0, min(120.0, minutes))
+    if not queries:
+        return ("couldn't find any tracks for a long mix — charts are "
+                "empty and no songs were named")
+
+    wd = Path("dj_mixes") / f"long_{int(time.time())}"
+    if deliver_text:
+        with contextlib.suppress(Exception):
+            deliver_text(f"🎧 digging {len(queries)} tracks for a "
+                         f"{minutes:.0f}-minute long mix…")
+
+    fetches = [_md.fetch_track_audio(q, wd, context) for q in queries]
+    tracks: list[LongTrack] = []
+    paths: dict[str, str] = {}
+    for i, f in enumerate(fetches):
+        if not f.ok:
+            continue
+        a = _de.analyze_track(f.path, title=f.title or f.query)
+        duration = _wav_duration_s(f.path) or a.duration_s or 180.0
+        tid = f"t{i}"
+        paths[tid] = f.path
+        tracks.append(LongTrack(
+            id=tid, title=f.title or f.query, artist=f.artist or "",
+            bpm=a.bpm, key=f"{a.key} {a.mode}".strip(),
+            camelot=a.camelot, energy=a.energy, duration_s=duration,
+            energy_curve=_energy_curve_for(f.path, duration)))
+    if len(tracks) < 2:
+        errs = "; ".join(f"{f.query}: {f.error}"
+                         for f in fetches[:3] if not f.ok)
+        return ("need at least 2 fetchable tracks for a long mix — "
+                f"got {len(tracks)}. {errs}").strip()
+
+    if deliver_text:
+        with contextlib.suppress(Exception):
+            deliver_text(f"🎧 got {len(tracks)} tracks — planning the "
+                         "long arc + rendering segments…")
+
+    plan = plan_long_mix(tracks, target_minutes=minutes)
+
+    def _render_segment(track: LongTrack,
+                        _transition: Transition | None) -> str:
+        src = paths.get(track.id)
+        if not src:
+            raise RuntimeError(f"no fetched audio for {track.id}")
+        seg = _md._read_segment(src, _md.CUE_SKIP_S,
+                                min(track.duration_s, 300.0))
+        if not seg:
+            raise RuntimeError(f"unreadable audio segment: {src}")
+        out = str(wd / f"segment_{track.id}.wav")
+        if not _md._write_wav(out, seg):
+            raise RuntimeError(f"couldn't write segment {out}")
+        return out
+
+    artifact = render_long_mix(plan, wd, renderer=_render_segment)
+    rendered = sum(1 for c in artifact.chunks if c.audio_rendered)
+    cover = make_cover(plan)
+    lines = [tracklist_text(plan)]
+    lines.append(
+        f"🧩 segments: {rendered}/{len(artifact.chunks)} rendered as "
+        f"real audio — chunk files + resumable manifest in "
+        f"{artifact.out_dir}")
+    for f in fetches:
+        if not f.ok:
+            lines.append(f"  ⚠ skipped {f.query}: {f.error}")
+    lines.append("🖼 cover brief (no image generator wired):")
+    lines.append(cover["brief"])
+    return "\n".join(lines)

@@ -156,9 +156,21 @@ def _cmd_voice_call(args: argparse.Namespace, context: Any) -> int:
             return False
         return ans.strip().lower() in ("y", "yes")
 
+    stt_backend = getattr(args, "stt", "tools")
+    if stt_backend == "bridge":
+        from ...voice.session import make_default_bridge_stt
+
+        stt_fn = make_default_bridge_stt()
+    elif stt_backend == "local":
+        from ...voice.session import make_local_stt
+
+        stt_fn = make_local_stt()
+    else:
+        stt_fn = _voice_stt_from_tools(context)
+
     session = VoiceSession(
         think=_voice_think_runtime(context, args.device),
-        stt=_voice_stt_from_tools(context),
+        stt=stt_fn,
         tts=tts,
         deliver_text=_deliver,
         data_dir=data_dir,

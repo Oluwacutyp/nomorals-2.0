@@ -980,6 +980,8 @@ _USAGE = (
     "🎛️ /voice pipeline <audio> [lang] [private|public] — run the full voice pipeline\n"
     "🎛️ /voice engines — show profile-gated backend picks\n"
     "🎛️ /voice diarize <audio> [min] [max] — who spoke when (pyannote when available)\n"
+    "🎛️ /voice speakers <audio> [lang] — diarized transcript (segment-level, saved as <audio>.diarized.json for editing)\n"
+    "🎛️ /voice speakers rename <artifact.json> <old> <new> — rename a speaker in a saved diarized transcript\n"
     "🎛️ /voice minutes <audio> [lang] — speaker-grouped meeting minutes\n"
     "🎛️ /voice srt <audio> [lang] — SubRip subtitles with speaker labels\n"
     "🎛️ /voice keyterms add <term> [kind] [lang] — teach STT your vocabulary\n"
@@ -1088,6 +1090,71 @@ def control_voice(tail: str, *, context: Any = None,
             if len(turns) > 20:
                 lines.append(f"  … +{len(turns) - 20} more turns")
             return "\n".join(lines)
+
+        if verb == "speakers" and len(parts) >= 2 \
+                and parts[1].lower() == "rename":
+            # Edit a saved diarized transcript artifact: rename one
+            # speaker everywhere (the TranscriptEditor keeps an audit
+            # history of the edit in-process; the artifact is saved
+            # back in place).
+            if len(parts) < 5:
+                return ("🎛️ usage: /voice speakers rename "
+                        "<artifact.json> <old> <new>")
+            import json as _json
+            from pathlib import Path as _Path
+
+            from ..voice.diarized_transcript import DiarizedTranscript, TranscriptEditor
+            artifact = _Path(parts[2])
+            try:
+                data = _json.loads(artifact.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                return f"🎛️ couldn't read that artifact: {exc}"
+            editor = TranscriptEditor(DiarizedTranscript.from_dict(data))
+            changed = editor.rename_speaker(parts[3], parts[4])
+            if not changed:
+                return f"🎛️ no segments by {parts[3]!r} in that transcript"
+            try:
+                artifact.write_text(editor.transcript.to_json(),
+                                    encoding="utf-8")
+            except OSError as exc:
+                return f"🎛️ couldn't save the edited artifact: {exc}"
+            return (f"🎛️ renamed {parts[3]} → {parts[4]} across "
+                    f"{changed} segment(s) in {artifact.name}")
+
+        if verb == "speakers" and len(parts) >= 2:
+            # Segment-level diarized transcript: UniversalSTT segments
+            # joined with stt.diarize intervals (voice/diarized_
+            # transcript). Without pyannote the speakers stay honestly
+            # "unknown" — never invented. The artifact is saved next
+            # to the audio so it can be edited (rename above) or
+            # exported (srt/vtt/json on the artifact itself).
+            from pathlib import Path as _Path
+
+            from ..voice.diarized_transcript import diarize_and_transcribe
+            lang = parts[2] if len(parts) >= 3 else "en"
+            try:
+                t = diarize_and_transcribe(parts[1], language=lang)
+            except Exception as exc:  # noqa: BLE001
+                return f"🎛️ couldn't transcribe that: {exc}"
+            if not t.segments:
+                return ("🎛️ no speech transcribed in that — nothing to "
+                        "diarize.")
+            artifact = _Path(parts[1] + ".diarized.json")
+            saved = ""
+            try:
+                artifact.write_text(t.to_json(), encoding="utf-8")
+                saved = f"\n📁 {artifact}"
+            except OSError as exc:
+                record_failure("pipeline.control_voice.speakers_save", exc)
+                saved = f"\n(couldn't save the artifact: {exc})"
+            speakers = ", ".join(t.speakers) or "unknown"
+            lines = [f"🎛️ diarized transcript — speaker(s): {speakers}"]
+            body = t.to_text().splitlines()
+            lines.extend(body[:30])
+            if len(body) > 30:
+                lines.append(f"  … +{len(body) - 30} more segment(s)")
+            lines.append(saved.lstrip("\n") if saved else "")
+            return "\n".join(x for x in lines if x)
 
         if verb == "minutes" and len(parts) >= 2:
             lang = parts[2] if len(parts) >= 3 else "en"

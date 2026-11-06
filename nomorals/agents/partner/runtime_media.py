@@ -264,6 +264,84 @@ class RuntimeMediaMixin:
             text += f"\nmaster: {res.master_path or '(render failed)'}"
         return text
 
+    def _control_music_chain(self, tail: str, chat_key: str = "") -> str:
+        """ /music chain [lang:] <lyrics…> — the lyrics-first chain.
+
+        Tone-aware draft melody from the owner's own lyrics (tonal
+        G2P fixes the melody to the lyric tones), then ACE-Step bed →
+        DiffSinger vocal → RVC timbre → master, with a licence-audited
+        manifest. Stages without a provisioned backend are marked
+        skipped with the reason — the MIDI draft, spec and manifest
+        are real artifacts either way. Distinct from /music full
+        (topic → composed song): the chain starts from supplied lyrics.
+        """
+        import re as _re
+        import time as _time
+        from pathlib import Path as _Path
+
+        from ...media.musicgen_chain import ChainRequest, run_chain
+
+        raw = (tail or "").strip()
+        if not raw:
+            return ("usage: /music chain [lang:] <lyrics…>\n"
+                    "e.g. /music chain Mo dé, ayọ dé, ìfẹ́ ni mo ní\n"
+                    "prefix a language as yo: / en: / ha: … (default yo "
+                    "— the chain is tone-aware)")
+        language = "yo"
+        m = _re.match(r"^([a-z]{2}):\s*(.+)$", raw, _re.DOTALL)
+        if m:
+            language, raw = m.group(1), m.group(2).strip()
+        if not raw:
+            return "give me the lyrics: /music chain [lang:] <lyrics…>"
+        title = _re.sub(r"[^\w\-]+", "-",
+                        "-".join(raw.split()[:4]).lower()).strip("-") \
+            or "chain"
+        workdir = str(_Path("musicgen_out") / f"{title}-{int(_time.time())}")
+        req = ChainRequest(title=title, lyrics=raw, language=language,
+                           workdir=workdir)
+        try:
+            res = run_chain(req)
+        except Exception as exc:  # noqa: BLE001
+            return f"🎵 chain failed: {exc}"
+        lines = [f"🎵 chain “{res.title}” — lyrics-first generation"]
+        for s in res.stages:
+            mark = {"real": "✅", "fake": "⚠️",
+                    "skipped": "⏭"}.get(s.status, "·")
+            detail = f" — {s.detail}" if s.detail else ""
+            lines.append(f"  {mark} {s.name}: {s.status}{detail}")
+        if res.note:
+            lines.append(res.note)
+        if res.error:
+            lines.append(f"error: {res.error}")
+        chat = self._ref_from_key(chat_key) if chat_key else None
+        sent = False
+        if chat is not None:
+            for path, caption in (
+                    (res.master_path, f"🎵 {res.title} — chain master"),
+                    (res.midi_path,
+                     f"🎼 {res.title} — draft melody (MIDI)"),
+                    (res.manifest_path,
+                     f"📋 {res.title} — chain manifest (licence audit)")):
+                if path:
+                    try:
+                        self.gateway.send_file(
+                            chat.platform,
+                            f"{chat.platform}:{chat.chat_id}",
+                            path, caption=caption)
+                        sent = True
+                    except Exception as e:
+                        record_failure(
+                            "runtime_media.RuntimeMediaMixin."
+                            "_control_music_chain", e)
+        if not sent:
+            lines.append(
+                f"artifacts in {workdir}: MIDI {res.midi_path or '—'}, "
+                f"spec {res.spec_path or '—'}, manifest "
+                f"{res.manifest_path or '—'}"
+                + (f", master {res.master_path}" if res.master_path
+                   else ""))
+        return "\n".join(lines)
+
     def _control_music_voices(self, tail: str, chat_key: str = "") -> str:
         """ /music voices [add <id> <model.pth> <source>] — RVC voices. """
         from ...media.vocals import RVCVoiceRegistry, VocalModelUnavailable
@@ -293,6 +371,7 @@ class RuntimeMediaMixin:
         audio + the score PDF (lead sheet) straight to this chat.
         /music styles | /music song [slug] | /music bed <topic> [style]
         | /music full <topic> [style] [voice_id] | /music voices
+        | /music chain [lang:] <lyrics…> (lyrics-first generation chain)
         | /music draft <topic> [style] | /music revise <note>
         | /music perform | /music freestyle [seed] [bars N]."""
         from ...media.music import STYLES, MusicCreator
@@ -316,6 +395,8 @@ class RuntimeMediaMixin:
             return self._control_music_full(" ".join(words[1:]), chat_key)
         if words[0].lower() == "voices":
             return self._control_music_voices(" ".join(words[1:]), chat_key)
+        if words[0].lower() == "chain":
+            return self._control_music_chain(" ".join(words[1:]), chat_key)
         if words[0].lower() == "draft":
             return self._control_music_draft(" ".join(words[1:]), chat_key)
         if words[0].lower() == "revise":
@@ -2967,10 +3048,27 @@ class RuntimeMediaMixin:
         /dj mix <genre|songs…> → MIX-DROP: fetch real tracks, beatmatch +
                              harmonically mix into ONE continuous file,
                              drop it in chat. Then mix the next.
+        /dj long [minutes] <genre|songs…> → LONG MIX: plan a 30-60 min
+                             set (energy arc, drop-aware transitions) and
+                             render it as resumable real-audio segments
+                             on disk; the chat gets the tracklist.
         """
         from ...media.dj import DJ
 
         tail = (tail or "").strip()
+        if tail.lower().startswith("long"):
+            from ...media.dj_long import control_dj_long
+            chat = self._ref_from_key(chat_key) if chat_key else None
+            if chat is None:
+                return "run /dj long from a chat — the mix lands there."
+            gateway = self.gateway
+
+            def _dt_long(text: str) -> None:
+                gateway.send(chat.platform,
+                             f"{chat.platform}:{chat.chat_id}", text)
+            return control_dj_long(tail[4:].strip(), chat_key=chat_key,
+                                   deliver_text=_dt_long,
+                                   context=self.context)
         if tail.lower().startswith("mix"):
             from ...media.dj_mixdrop import control_dj_mix
             chat = self._ref_from_key(chat_key) if chat_key else None

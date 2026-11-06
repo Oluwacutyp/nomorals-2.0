@@ -760,3 +760,56 @@ def register(registry: Any) -> None:
         return {"ok": True,
                 "rendered": render_group_card(info, members, "telegram"),
                 "info": info}
+
+    @registry.register(
+        "weekly_content",
+        description=(
+            "Run the weekly social content pipeline NOW: bounded research "
+            "on the niche -> drafts in the owner's voice -> virality "
+            "scoring -> queued for REVIEW (never auto-posted) at the "
+            "audience's best windows. Returns the review batch. This is "
+            "what the durable 'weekly content' job runs every Monday "
+            "08:00; call directly only when the owner asks for this "
+            "week's batch early. Args: niche (optional, '' = general)."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "type": "object",
+            "properties": {
+                "niche": {"type": "string",
+                          "description": "Content niche; '' = general"},
+            },
+        },
+    )
+    def weekly_content_tool(niche: str = "") -> dict[str, Any]:
+        from ..llm.brain import brain_for
+        from ..research.pipeline import ResearchContext
+        from ..social.content_pipeline import weekly_content as _run
+        from ..social.drafts import DraftQueue
+
+        context = registry.context
+
+        def _llm(prompt: str) -> str:
+            # Brain.complete never raises; on a dead brain it returns an
+            # empty text and the pipeline falls back to its honest
+            # template drafts. Drafts are queued for review either way —
+            # this path never posts or speaks.
+            resp = brain_for(context).complete(prompt, task_kind="creative")
+            return resp.text if hasattr(resp, "text") else str(resp or "")
+
+        rctx = ResearchContext(
+            db=getattr(context, "db", None),
+            registry=getattr(context, "tools", None))
+        result = _run(
+            niche or "",
+            db=getattr(context, "db", None),
+            queue=DraftQueue(),
+            rctx=rctx,
+            llm_fn=_llm,
+        )
+        return {"ok": True, "niche": result.niche,
+                "drafts": len(result.drafts),
+                "windows_from_data": result.windows_from_data,
+                "seconds": round(result.seconds, 1),
+                "text": result.message,
+                "message": result.message}

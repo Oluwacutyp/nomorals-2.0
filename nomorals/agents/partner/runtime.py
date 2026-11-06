@@ -373,6 +373,7 @@ class PartnerRuntime(
 
         if self.gateway is None:
             from ...social.chat import build_adapters
+            from ...social.identity import IdentityStore
 
             adapters, skipped = build_adapters(
                 self.settings, on_new_member=self._on_new_discord_member,
@@ -393,6 +394,9 @@ class PartnerRuntime(
                 us_chats=us_chats,
                 adapter_builder=self._build_adapter,
                 session_bridge=self._session_bridge,
+                # Cross-platform identity: inbound senders register in
+                # the store and carry a unified person_id downstream.
+                identity_store=IdentityStore(),
                 # Ordinary chat path gets durable delivery (row first,
                 # receipt after) whenever a db exists; without a db the
                 # gateway reports durable-requested-unavailable and each
@@ -2586,6 +2590,15 @@ class PartnerRuntime(
                     ensure_finance_jobs(self._scheduler)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("finance jobs not registered: %s", exc)
+                # Social: the weekly content pipeline (Mondays 08:00 —
+                # research -> drafts queued for review at the best
+                # windows; never auto-posts). Idempotent by name.
+                try:
+                    from ...social.jobs import ensure_weekly_content_jobs
+                    ensure_weekly_content_jobs(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("weekly content job not registered: %s",
+                                 exc)
                 # Price sources: the quote-provider health loop
                 # (every 6h — one bounded real quote probe per
                 # keyless provider; keyed providers never probed;
