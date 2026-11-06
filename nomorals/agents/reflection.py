@@ -40,6 +40,7 @@ from ..core.logging_setup import get_logger
 from ..llm.base import Message, SamplingParams
 from ..llm.brain import brain_for
 from ..storage.kv import KVStore
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -339,8 +340,16 @@ class GoalReflector:
             if meta.get("skill_id"):
                 stored["skill_id"] = meta["skill_id"]
                 KVStore(self.db).set(self._key(goal.id), stored)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # The stored record is what existing()/list() read back as
+            # truth: if this patch fails it keeps skill_id "" while
+            # the skill genuinely saved. Never swallow that — surface
+            # it (error log + failure ledger) and mark the returned
+            # meta so the caller sees the link did not persist.
+            _log.error("reflection skill-id patch failed for goal %s: "
+                       "%s", goal.id, exc)
+            record_failure("agents.reflection._persist.skill_link", exc)
+            meta["skill_id_persisted"] = False
         return meta
 
 

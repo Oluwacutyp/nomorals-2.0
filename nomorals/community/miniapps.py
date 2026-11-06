@@ -49,6 +49,8 @@ from typing import Any
 
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
+from ..core.storeguard import read_json_file
+from .failures import record_failure
 
 _log = get_logger("nomorals.community.miniapps")
 
@@ -112,14 +114,18 @@ class MiniAppStore:
         return self.data_dir / f"{_sanitize_group_key(group_key)}.json"
 
     def load(self, group_key: str) -> list[MiniApp]:
-        """All mini-apps for a group. Malformed file → empty list, never raises."""
-        path = self._path(group_key)
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return []
+        """All mini-apps for a group. Malformed file → empty list, never raises.
+
+        A file that exists but cannot be parsed is corruption, not an
+        empty group: the bytes are quarantined to ``<file>.corrupt``
+        and the failure is logged + ledgered before the empty list is
+        returned, so the next save cannot silently overwrite the only
+        copy (data-loss family guard)."""
+        raw, _exc = read_json_file(
+            self._path(group_key), site="community.miniapps.MiniAppStore.load",
+            logger=_log, expect=list, record=record_failure)
         apps: list[MiniApp] = []
-        for item in raw if isinstance(raw, list) else []:
+        for item in raw or []:
             try:
                 app = MiniApp.from_dict(item)
                 if app.id and app.kind in KINDS:
@@ -128,7 +134,10 @@ class MiniAppStore:
                 continue
         return apps
 
-    def save(self, group_key: str, apps: list[MiniApp]) -> None:
+    def save(self, group_key: str, apps: list[MiniApp]) -> bool:
+        """Persist the group's apps. Returns True only when the write
+        actually landed — a failed save is logged + ledgered and
+        reported False, never ridden over."""
         try:
             self.data_dir.mkdir(parents=True, exist_ok=True)
             tmp = self._path(group_key).with_suffix(".tmp")
@@ -138,7 +147,10 @@ class MiniAppStore:
             )
             tmp.replace(self._path(group_key))
         except OSError as exc:
-            _log.warning("miniapp save failed for %s: %s", group_key, exc)
+            _log.error("miniapp save failed for %s: %s", group_key, exc)
+            record_failure("community.miniapps.MiniAppStore.save", exc)
+            return False
+        return True
 
     def get(self, group_key: str, app_id: str) -> MiniApp | None:
         for app in self.load(group_key):
@@ -146,18 +158,17 @@ class MiniAppStore:
                 return app
         return None
 
-    def put(self, app: MiniApp) -> None:
+    def put(self, app: MiniApp) -> bool:
         apps = [a for a in self.load(app.group_key) if a.id != app.id]
         apps.append(app)
-        self.save(app.group_key, apps)
+        return self.save(app.group_key, apps)
 
     def remove(self, group_key: str, app_id: str) -> bool:
         apps = self.load(group_key)
         kept = [a for a in apps if not (a.id == app_id or a.id.startswith(app_id))]
         if len(kept) == len(apps):
             return False
-        self.save(group_key, kept)
-        return True
+        return self.save(group_key, kept)
 
 
 # ── creation ───────────────────────────────────────────────────────────────
@@ -1127,13 +1138,18 @@ class PanelStore:
         return self.data_dir / f"{safe}.json"
 
     def load(self, user_key: str) -> list[Panel]:
-        """All panels for a user. Malformed file → empty list, never raises."""
-        try:
-            raw = json.loads(self._path(user_key).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return []
+        """All panels for a user. Malformed file → empty list, never raises.
+
+        A file that exists but cannot be parsed is corruption, not an
+        empty account: the bytes are quarantined to ``<file>.corrupt``
+        and the failure is logged + ledgered before the empty list is
+        returned, so the next save cannot silently overwrite the only
+        copy (data-loss family guard)."""
+        raw, _exc = read_json_file(
+            self._path(user_key), site="community.miniapps.PanelStore.load",
+            logger=_log, expect=list, record=record_failure)
         panels: list[Panel] = []
-        for item in raw if isinstance(raw, list) else []:
+        for item in raw or []:
             try:
                 panel = Panel.from_dict(item)
                 if panel.id and panel.name:
@@ -1142,7 +1158,10 @@ class PanelStore:
                 continue
         return panels
 
-    def save(self, user_key: str, panels: list[Panel]) -> None:
+    def save(self, user_key: str, panels: list[Panel]) -> bool:
+        """Persist the user's panels. Returns True only when the
+        write actually landed — a failed save is logged + ledgered
+        and reported False, never ridden over."""
         try:
             self.data_dir.mkdir(parents=True, exist_ok=True)
             tmp = self._path(user_key).with_suffix(".tmp")
@@ -1152,7 +1171,10 @@ class PanelStore:
             )
             tmp.replace(self._path(user_key))
         except OSError as exc:
-            _log.warning("panel save failed for %s: %s", user_key, exc)
+            _log.error("panel save failed for %s: %s", user_key, exc)
+            record_failure("community.miniapps.PanelStore.save", exc)
+            return False
+        return True
 
     def get(self, user_key: str, panel_id: str) -> Panel | None:
         for panel in self.load(user_key):
@@ -1167,18 +1189,17 @@ class PanelStore:
                 return panel
         return None
 
-    def put(self, panel: Panel) -> None:
+    def put(self, panel: Panel) -> bool:
         panels = [p for p in self.load(panel.user_key) if p.id != panel.id]
         panels.append(panel)
-        self.save(panel.user_key, panels)
+        return self.save(panel.user_key, panels)
 
     def remove(self, user_key: str, panel_id: str) -> bool:
         panels = self.load(user_key)
         kept = [p for p in panels if not (p.id == panel_id or p.id.startswith(panel_id))]
         if len(kept) == len(panels):
             return False
-        self.save(user_key, kept)
-        return True
+        return self.save(user_key, kept)
 
 
 # ── creation ───────────────────────────────────────────────────────────────

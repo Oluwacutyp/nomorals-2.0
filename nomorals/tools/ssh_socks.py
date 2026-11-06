@@ -43,6 +43,7 @@ from typing import Any
 from ..core.errors import ToolError
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
+from ..core.storeguard import read_kv_json
 from ..storage.kv import KVStore
 
 _log = get_logger(__name__)
@@ -317,6 +318,11 @@ class SshSocksManager:
         self.context = context
         self.tunnels = SshSocksManager._live
         self._lock = SshSocksManager._live_lock
+        #: Set when the init load of the profiles key failed; while
+        #: set, profile saves refuse (data-loss family guard) — a
+        #: transiently crashed load must not let the next routine
+        #: upsert wholesale-rewrite every stored profile away.
+        self._profiles_unreadable: BaseException | None = None
         self._profiles = self._load_json(_PROFILES_KEY, {})
         self._load_json(_RUNTIME_KEY, {})  # read for future reference only
 
@@ -325,12 +331,22 @@ class SshSocksManager:
         db = getattr(self.context, "db", None)
         if db is None:
             return default
-        try:
-            return KVStore(db).get(key, default=default)
-        except Exception:  # noqa: BLE001
+        value, exc = read_kv_json(
+            KVStore(db), key, site="tools.ssh_socks._load_json",
+            logger=_log)
+        if exc is not None:
+            if key == _PROFILES_KEY:
+                self._profiles_unreadable = exc
             return default
+        return default if value is None else value
 
     def _save_json(self, key: str, value: Any) -> None:
+        unreadable = getattr(self, "_profiles_unreadable", None)
+        if key == _PROFILES_KEY and unreadable is not None:
+            raise ToolError(
+                "stored ssh profiles could not be read "
+                f"({unreadable}); refusing to overwrite "
+                "them with a partial set")
         db = getattr(self.context, "db", None)
         if db is None:
             return

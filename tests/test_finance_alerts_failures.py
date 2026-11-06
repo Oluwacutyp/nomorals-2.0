@@ -3,15 +3,15 @@
 All four sites are held as exclusions:
 
 162 — ``AlertStore._load``: corrupt or non-dict JSON ->
-``{}``. This is the batch's most consequential site: the
+``{}``. This was the batch's most consequential site: the
 store's mutators (add/update/remove) all load-then-rewrite,
-so a corrupt alerts.json is silently emptied by the next
-mutation. It is pinned, NOT converted: the load-then-
-rewrite data-loss shape belongs to the targeted-fix shelf
-(the honest repair — quarantine the bad file or fail loud —
-changes ``_load``'s contract for every caller), and the
-batch protocol routes that shape out of batch converts.
-Flagged as targeted-fix candidate #1 of this batch.
+so a corrupt alerts.json was silently emptied by the next
+mutation. CONVERTED by the data-loss targeted fix (Pass 1):
+the load still reads as empty, but the corrupt bytes are
+quarantined to ``alerts.json.corrupt``, the failure is
+recorded in the core failures ledger, and a mutation on the
+poisoned instance raises ``StoreUnreadableError`` instead of
+rewriting over the loss. A fresh instance starts clean.
 
 192 — ``AlertStore.get``: a stored record whose
 ``created_at``/``fire_count`` cannot be coerced makes
@@ -29,18 +29,23 @@ source marks the alert unchecked, not dead"). It never
 fires on a fabricated rate. Shelved sketch: log at debug
 like the sibling ``_default_price_fn`` does.
 
-NOT-recording is pinned with the snapshot method: alerts.py
-calls no failures-ledger record function at these sites, so
-both the agency and agents ledgers must be unchanged across
-each trigger.
+NOT-recording is pinned with the snapshot method for sites
+192/200/279: both the agency and agents ledgers must be
+unchanged across each trigger. Site 162 now records into
+the CORE ledger (via core/storeguard) — the agency/agents
+snapshot still holds for it.
 """
 from __future__ import annotations
 
 from unittest import mock
 
+import pytest
+
 import nomorals.agency.failures as ag_fail
 import nomorals.agents.failures as agents_fail
+import nomorals.core.failures as core_fail
 import nomorals.integrations.naija_shopping as naija_shopping
+from nomorals.core.storeguard import StoreUnreadableError
 from nomorals.finance import alerts as A
 
 
@@ -56,19 +61,30 @@ def _raise(*args, **kwargs):
 # ── 162: corrupt store file loads as empty ──────────────────────
 
 def test_162_corrupt_store_loads_empty(tmp_path):
+    # CONVERTED (data-loss Pass 1): the corrupt load still reads
+    # as empty, but the bytes are quarantined + ledgered and the
+    # poisoned instance refuses to rewrite over them.
     before = _snap()
     path = tmp_path / "alerts.json"
     store = A.AlertStore(path)
     path.write_text("{corrupt json", encoding="utf-8")
     assert store._load() == {}
+    assert (tmp_path / "alerts.json.corrupt").read_text(
+        encoding="utf-8") == "{corrupt json"
     # valid JSON, wrong shape -> also empty, never a crash
     path.write_text("[1, 2, 3]", encoding="utf-8")
     assert store._load() == {}
     assert store.list() == []
-    # control: the store still works end to end afterwards
-    alert = A.add_alert("price_above", "BTC", 100.0, store=store)
-    assert store.get(alert.id) is not None
-    assert [a.id for a in store.list()] == [alert.id]
+    # the mutation that used to silently empty the registry refuses
+    with pytest.raises(StoreUnreadableError):
+        A.add_alert("price_above", "BTC", 100.0, store=store)
+    assert "finance.alerts._load" in [
+        f.site for f in core_fail.recent_failures(limit=200)]
+    # control: a fresh store still works end to end afterwards
+    fresh = A.AlertStore(path)
+    alert = A.add_alert("price_above", "BTC", 100.0, store=fresh)
+    assert fresh.get(alert.id) is not None
+    assert [a.id for a in fresh.list()] == [alert.id]
     assert _snap() == before
 
 

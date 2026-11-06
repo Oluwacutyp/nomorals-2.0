@@ -26,8 +26,10 @@ from pathlib import Path
 from typing import Any
 
 from ..core.logging_setup import get_logger
+from ..core.storeguard import read_json_file
 from .bible import BibleBuilder
 from .continuation import StoryContinuer
+from .failures import record_failure
 from .fiction import FictionWriter, StoryCompleteError
 from .reader import StoryReader
 from .voiceprint import Voiceprint, compare, fingerprint
@@ -67,21 +69,48 @@ class SerialManager:
         self.reader = StoryReader(context)
         self.continuer = StoryContinuer(context)
         self.bibles = BibleBuilder(context)
+        #: slug → the failure its last meta load hit; while a slug is
+        #: flagged, _save_meta refuses for it (data-loss family guard).
+        self._meta_unreadable: dict[str, BaseException] = {}
+
+    def _unreadable_metas(self) -> dict[str, BaseException]:
+        # Lazy: tests and embedders may construct the manager without
+        # __init__ (object.__new__ + injected organs).
+        flagged = getattr(self, "_meta_unreadable", None)
+        if flagged is None:
+            flagged = {}
+            self._meta_unreadable = flagged
+        return flagged
 
     # -- serial state ---------------------------------------------------------
     def _meta_path(self, slug: str) -> Path:
         return self.fiction.story_dir(slug) / "serial.json"
 
     def _load_meta(self, slug: str) -> dict[str, Any]:
+        default = {"slug": slug, "drift_log": [], "wisdom_motifs": []}
         path = self._meta_path(slug)
         if not path.exists():
-            return {"slug": slug, "drift_log": [], "wisdom_motifs": []}
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            return {"slug": slug, "drift_log": [], "wisdom_motifs": []}
+            # Missing is legitimately empty for a NEW slug — but it
+            # does not heal a flagged slug: the absence may be our
+            # own quarantine. Only a successful parse (a restored
+            # file) clears the flag below.
+            return default
+        data, exc = read_json_file(
+            path, site="books.serial._load_meta", logger=_log,
+            record=record_failure)
+        if exc is not None:
+            self._unreadable_metas()[slug] = exc
+            return default
+        self._unreadable_metas().pop(slug, None)
+        return data
 
     def _save_meta(self, slug: str, meta: dict[str, Any]) -> None:
+        flagged = self._unreadable_metas().get(slug)
+        if flagged is not None:
+            raise SerialError(
+                f"serial meta for {slug!r} is unreadable ({flagged}); "
+                "original bytes quarantined to serial.json.corrupt — "
+                "refusing to overwrite them")
         path = self._meta_path(slug)
         path.write_text(json.dumps(meta, indent=2, ensure_ascii=False),
                         encoding="utf-8")

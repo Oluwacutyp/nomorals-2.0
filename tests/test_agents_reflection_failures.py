@@ -18,17 +18,18 @@ not fabrication. EXCLUSION.
 the real skill id into the stored record crashes -> the record keeps
 its documented ``skill_id: ""`` placeholder (the first write carries
 skill_name, and the caller-visible meta dict carries the true id).
-WEAKEST EXCLUSION of this batch: the durable record is read back
-later by ``existing()``/``list()``, so the placeholder can persist —
-a persist-consistency shape, which the track protocol shelves for a
-targeted fix rather than converting inside a census batch. The
-counter-argument for converting (the code comment states the intent
-"keep the record consistent") is noted for parent adjudication; the
-placeholder is never a *wrong* id, and the skill itself is saved and
-findable by name. EXCLUSION, flagged targeted-fix candidate.
+Was the WEAKEST EXCLUSION of this batch: the durable record is read
+back later by ``existing()``/``list()``, so the placeholder persists.
+CONVERTED by the data-loss targeted fix (Pass 1): the failed patch
+can no longer be swallowed — it logs at ERROR, records in the
+agents failures ledger, and the returned meta carries
+``skill_id_persisted: False`` so the caller sees the stored record
+was not synced. The placeholder itself remains (the write genuinely
+failed); what changed is that the divergence is now surfaced.
 """
 from types import SimpleNamespace
 
+import nomorals.agents.failures as agents_fail
 import nomorals.agents.reflection as R
 
 
@@ -177,8 +178,13 @@ def test_342_persist_patch_crash_keeps_placeholder(monkeypatch):
     meta = _reflector()._persist(goal, reflection, "heuristic")
     # caller-visible meta is honest: the skill WAS saved, id is real
     assert meta["skill_id"] == "sk-42"
-    # the durable record keeps the documented placeholder — the patch
-    # swallow's exact, pinned effect (flagged for a targeted fix)
+    # CONVERTED (data-loss Pass 1): the patch failure is surfaced —
+    # meta marks the record unsynced and the ledger has the entry
+    assert meta["skill_id_persisted"] is False
+    assert "agents.reflection._persist.skill_link" in [
+        f.site for f in agents_fail.recent_failures(limit=200)]
+    # the durable record keeps the documented placeholder — now a
+    # reported fact, not a silent divergence
     stored = _PatchFailKV.store["goal.reflection.g9"]
     assert stored["skill_id"] == ""
     assert stored["skill_name"] == "s-name"

@@ -24,28 +24,30 @@ is None and every continued chapter reports ``drift: None`` —
 the gap is on the face of the result.
 
 81 — ``_load_meta()``: a corrupt serial.json -> a fresh default
-meta. ⚠ FLAGGED — DATA-LOSS SHAPE, targeted-fix candidate, NOT
-a batch convert (protocol: save/persist swallows read back
-later leave the batch). The load alone loses nothing, but
+meta. Was ⚠ FLAGGED — DATA-LOSS SHAPE, targeted-fix candidate:
 every SerialManager flow pairs the load with ``_save_meta``
 (start_serial, start_novel, _reference, write_next), so the
-first save after a corruption permanently overwrites whatever
+first save after a corruption permanently overwrote whatever
 the file still held — drift history, wisdom motifs, the
-``for:`` field — with the fresh default. The pin below proves
-the mechanism exactly as it stands today; the fix (quarantine
-the corrupt file / refuse to overwrite an unparseable meta)
-belongs to the targeted-fix pass.
+``for:`` field — with the fresh default. CONVERTED by the
+data-loss targeted fix (Pass 1): the corrupt bytes are
+quarantined to ``serial.json.corrupt``, the failure is
+recorded in the books failures ledger, and ``_save_meta``
+refuses (SerialError) for the flagged slug until a parseable
+meta is restored.
 
-NOT-recording is pinned with the snapshot method: serial.py
-calls no failures-ledger record function anywhere, so both
-the agency and agents ledgers must be unchanged across each
-trigger.
+NOT-recording is pinned with the snapshot method for the
+other sites: both the agency and agents ledgers must be
+unchanged across each trigger (site 81 now records into the
+books ledger, which the snapshot does not cover).
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 import nomorals.agency.failures as ag_fail
 import nomorals.agents.failures as agents_fail
@@ -81,9 +83,13 @@ def test_52_unreadable_chapter_is_empty(tmp_path):
     assert _snap() == before
 
 
-# ── 81: corrupt serial.json -> fresh default (FLAGGED) ──────────
+# ── 81: corrupt serial.json -> fresh default (CONVERTED) ────────
 
 def test_81_corrupt_meta_loads_fresh_and_save_overwrites(tmp_path):
+    # CONVERTED (data-loss Pass 1): the load still returns the
+    # fresh default, but the corrupt bytes are quarantined with
+    # KEEPME inside, and the save that used to make the loss
+    # durable now refuses.
     before = _snap()
     mgr = _manager(tmp_path)
     (tmp_path / "s1").mkdir(parents=True)
@@ -95,9 +101,11 @@ def test_81_corrupt_meta_loads_fresh_and_save_overwrites(tmp_path):
     loaded = mgr._load_meta("s1")
     assert loaded == {"slug": "s1", "drift_log": [],
                       "wisdom_motifs": []}
-    # the flagged mechanism: the next save makes the loss durable
-    mgr._save_meta("s1", loaded)
-    assert "KEEPME" not in meta_file.read_text()
+    assert not meta_file.exists()
+    assert "KEEPME" in (
+        tmp_path / "s1" / "serial.json.corrupt").read_text()
+    with pytest.raises(SER.SerialError):
+        mgr._save_meta("s1", loaded)
     # control: a parseable meta loads whole, nothing dropped
     meta_file.write_text(json.dumps(
         {"slug": "s1", "drift_log": [{"mark": "KEEPME"}], "extra": 3}))

@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ..core.failures import record_failure
+
 log = logging.getLogger(__name__)
 
 # Active drafts keyed by chat/session — the brain works on one song at a time
@@ -129,8 +131,29 @@ def _song(topic: str, style: str, key: str, ctx: Any) -> str:
     return (f"🎵 “{title}” [{style}]\n\n{draft_note}\n\n{perf}")
 
 
+def _save_draft_or_warn(draft: Any) -> str:
+    """Persist the active draft; "" when saved, else an honest note.
+
+    The draft always lives on in _ACTIVE_DRAFTS for the session, but
+    the saved file is the only copy that survives a restart — a failed
+    save must be loud (error log + failure ledger) and the reply must
+    say the draft is session-only, never render as if it persisted.
+    """
+    from ..media.song_draft import save_draft
+
+    try:
+        save_draft(draft)
+    except Exception as exc:  # noqa: BLE001
+        log.error("music draft save failed: %s", exc)
+        record_failure("tools.music.save_draft", exc)
+        return ("\n\n⚠️ I couldn't save this draft to disk — it lives "
+                "only in this session and will be lost when Devon "
+                "restarts.")
+    return ""
+
+
 def _draft(topic: str, style: str, key: str, ctx: Any) -> str:
-    from ..media.song_draft import draft_song, render_notebook, save_draft
+    from ..media.song_draft import draft_song, render_notebook
     from ..media.taste import TasteStore
 
     if not (topic or "").strip():
@@ -143,15 +166,12 @@ def _draft(topic: str, style: str, key: str, ctx: Any) -> str:
     except Exception as exc:  # noqa: BLE001
         return f"draft failed: {exc}"
     _ACTIVE_DRAFTS[key] = draft
-    try:
-        save_draft(draft)
-    except Exception:  # noqa: BLE001
-        pass
-    return render_notebook(draft)
+    note = _save_draft_or_warn(draft)
+    return render_notebook(draft) + note
 
 
 def _revise(instruction: str, key: str, ctx: Any) -> str:
-    from ..media.song_draft import revise_draft, render_notebook, save_draft
+    from ..media.song_draft import render_notebook, revise_draft
 
     draft = _ACTIVE_DRAFTS.get(key)
     if draft is None:
@@ -163,11 +183,8 @@ def _revise(instruction: str, key: str, ctx: Any) -> str:
     except Exception as exc:  # noqa: BLE001
         return f"revise failed: {exc}"
     _ACTIVE_DRAFTS[key] = draft
-    try:
-        save_draft(draft)
-    except Exception:  # noqa: BLE001
-        pass
-    return render_notebook(draft)
+    note = _save_draft_or_warn(draft)
+    return render_notebook(draft) + note
 
 
 def _notebook(key: str) -> str:
@@ -314,7 +331,7 @@ def _video_board(song: str, ctx: Any) -> str:
 
 def _collab(text: str, key: str, ctx: Any) -> str:
     """A character writes a verse/hook for the active draft."""
-    from ..media.song_draft import render_notebook, save_draft
+    from ..media.song_draft import render_notebook
 
     draft = _ACTIVE_DRAFTS.get(key)
     if draft is None:
@@ -342,12 +359,10 @@ def _collab(text: str, key: str, ctx: Any) -> str:
         notes = getattr(draft, "performance_notes", "") or ""
         draft.performance_notes = (
             f"{notes}\n[{char.name} — {part}]\n{bars}".strip())
-        try:
-            save_draft(draft)
-        except Exception:  # noqa: BLE001
-            pass
+        note = _save_draft_or_warn(draft)
         return (f"🎤 {char.name} wrote the {part}:\n\n{bars}\n\n"
-                f"(attached to the draft — revise or perform to use it)")
+                f"(attached to the draft — revise or perform to use it)"
+                f"{note}")
     except Exception as exc:  # noqa: BLE001
         return f"collab failed: {exc}"
 

@@ -21,24 +21,22 @@ real, sendable draft built from the application's own fields,
 and the follow_up_drafted event is recorded either way.
 
 215 — ``ApplicationStore.load_all()``: a corrupt JSONL line is
-skipped. ⚠ FLAGGED — DATA-LOSS SHAPE, targeted-fix candidate,
-NOT a batch convert (protocol: save/persist swallows read back
-later leave the batch). The load alone loses nothing durable,
-but ``save()`` is load-then-rewrite: it rewrites
-applications.jsonl from exactly what load_all returned, so
-the first save after a line corrupts permanently deletes that
-application's record — the same load/save corrupt-gate pair
-flagged when this store was first surveyed. The pin below
-proves the mechanism exactly as it stands today; the fix
-(quarantine unparseable lines instead of dropping them)
-belongs to the targeted-fix pass.
+skipped. Was ⚠ FLAGGED — DATA-LOSS SHAPE, targeted-fix
+candidate: ``save()`` is load-then-rewrite, so the first save
+after a line corrupted permanently deleted that application's
+record. CONVERTED by the data-loss targeted fix (Pass 1):
+unparseable lines are quarantined in place — preserved
+verbatim through every rewrite — and the corruption is
+recorded in the agents failures ledger (the JSONL shape of
+the family pattern: the file holds many records, so the
+quarantine is per-line rather than per-file).
 
-NOT-recording is pinned with the snapshot method:
-gig_applier.py calls no failures-ledger record function
-anywhere, so both the agency and agents ledgers must be
-unchanged across each trigger. (The representation ledger at
-485 is a cognition log, not a failures ledger — its call is
-the trigger, not the recording surface.)
+NOT-recording is pinned with the snapshot method for sites
+485/576: both the agency and agents ledgers must be unchanged
+across each trigger. Site 215 now records (agents ledger).
+(The representation ledger at 485 is a cognition log, not a
+failures ledger — its call is the trigger, not the recording
+surface.)
 """
 from __future__ import annotations
 
@@ -72,22 +70,26 @@ def _store(root: Path) -> G.ApplicationStore:
     return store
 
 
-# ── 215: corrupt JSONL line skipped (FLAGGED data-loss pair) ────
+# ── 215: corrupt JSONL line preserved (CONVERTED) ───────────────
 
 def test_215_corrupt_line_skipped_then_save_rewrites(tmp_path):
-    before = _snap()
+    # CONVERTED (data-loss Pass 1): load_all still skips the
+    # corrupt line for reads, but save() no longer deletes it —
+    # the line (and the half-formed g2 record) is preserved
+    # verbatim through the rewrite, and the load records it.
     store = _store(tmp_path)
     good = G.Application(gig_id="g1", title="T1", url="http://x/1")
     (store._path()).write_text(
         json.dumps(good.to_dict()) + "\n{corrupt line\n"
         + json.dumps({"gig_id": "g2"}) + "\n")  # missing title/url
     assert sorted(store.load_all()) == ["g1"]
-    # the flagged mechanism: save() rewrites from load_all, so
-    # the corrupt bytes — and the half-formed g2 — are deleted
     store.save(G.Application(gig_id="g3", title="T3", url="http://x/3"))
     raw = (store._path()).read_text()
-    assert "{corrupt line" not in raw
+    assert "{corrupt line" in raw
+    assert json.dumps({"gig_id": "g2"}) in raw
     assert sorted(store.load_all()) == ["g1", "g3"]
+    assert "agents.gig_applier.load_all" in [
+        f.site for f in agents_fail.recent_failures(limit=200)]
     # control: an all-valid file round-trips whole through save
     store2 = _store(tmp_path / "clean")
     a = G.Application(gig_id="a1", title="A", url="http://x/a")
@@ -95,7 +97,6 @@ def test_215_corrupt_line_skipped_then_save_rewrites(tmp_path):
     store2.save(a)
     store2.save(b)
     assert sorted(store2.load_all()) == ["a1", "a2"]
-    assert _snap() == before
 
 
 # ── 485: representation ledger crash never breaks submit ────────

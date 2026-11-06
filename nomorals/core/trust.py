@@ -29,6 +29,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .logging_setup import get_logger
+from .storeguard import read_kv_json
 
 __all__ = ["SourceTrust", "domain_tier"]
 
@@ -140,21 +141,40 @@ class SourceTrust:
         # in-memory fallback when no store is injected (persistence no-ops then)
         self._allow_mem: set[str] = set()
         self._block_mem: set[str] = set()
+        # Data-loss guard: KV key → the failure its last load hit.
+        # While a key is flagged, its _save refuses to rewrite: a
+        # crashed/wrong-shaped load must never let feedback() or a
+        # pin-write overwrite the whole persisted value with the
+        # near-empty image the failed load produced. A wrong-shaped
+        # value (ValueError) is durable — the flag sticks; a crashed
+        # read may be transient, so the next load retries and a
+        # healthy read clears the flag.
+        self._unreadable: dict[str, BaseException] = {}
 
     # ── persistence ────────────────────────────────────────────────────────
     def _load(self) -> dict[str, dict[str, Any]]:
         if self._store is None:
             return {}
-        try:
-            data = self._store.get(self._KV)
-            if isinstance(data, dict):
-                return data
-        except Exception:  # noqa: BLE001
-            pass
-        return {}
+        flagged = self._unreadable.get(self._KV)
+        if flagged is not None and isinstance(flagged, ValueError):
+            return {}
+        data, exc = read_kv_json(
+            self._store, self._KV, site="core.trust._load", logger=_log)
+        if exc is not None:
+            self._unreadable[self._KV] = exc
+            return {}
+        self._unreadable.pop(self._KV, None)
+        return data if data is not None else {}
 
     def _save(self, data: dict[str, dict[str, Any]]) -> None:
         if self._store is None:
+            return
+        if self._KV in self._unreadable:
+            _log.error(
+                "source-trust persist refused: stored history is "
+                "unreadable (%s) — keeping the persisted bytes rather "
+                "than overwriting them with a partial image",
+                self._unreadable[self._KV])
             return
         try:
             import json
@@ -202,13 +222,19 @@ class SourceTrust:
         mem = self._allow_mem if kv_key == self._ALLOW_KV else self._block_mem
         if self._store is None:
             return set(mem)
-        try:
-            data = self._store.get(kv_key)
-            if isinstance(data, list):
-                return {str(h) for h in data} | mem
-        except Exception:  # noqa: BLE001
-            pass
-        return set(mem)
+        flagged = self._unreadable.get(kv_key)
+        if flagged is not None and isinstance(flagged, ValueError):
+            return set(mem)
+        data, exc = read_kv_json(
+            self._store, kv_key, site="core.trust._host_set",
+            logger=_log, expect=list)
+        if exc is not None:
+            self._unreadable[kv_key] = exc
+            return set(mem)
+        self._unreadable.pop(kv_key, None)
+        if data is None:
+            return set(mem)
+        return {str(h) for h in data} | mem
 
     def _save_host_set(self, kv_key: str, hosts: set[str]) -> None:
         if kv_key == self._ALLOW_KV:
@@ -216,6 +242,13 @@ class SourceTrust:
         else:
             self._block_mem = set(hosts)
         if self._store is None:
+            return
+        if kv_key in self._unreadable:
+            _log.error(
+                "source-trust persist refused for %s: stored list is "
+                "unreadable (%s) — keeping the persisted pins rather "
+                "than overwriting them with a partial image",
+                kv_key, self._unreadable[kv_key])
             return
         try:
             import json

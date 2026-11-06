@@ -46,12 +46,14 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from ..llm.brain import brain_for
 from ..core.logging_setup import get_logger
+from ..core.storeguard import note_unreadable
+from ..llm.brain import brain_for
+from .failures import record_failure
 from .opportunities import Opportunity
 
 _log = get_logger(__name__)
@@ -187,6 +189,14 @@ class ApplicationStore:
     def __init__(self, settings: Any = None) -> None:
         self.settings = settings
         self._data_dir: Optional[Path] = None
+        #: Raw lines the last load could not parse. save() re-appends
+        #: them verbatim — a corrupt line is quarantined in place,
+        #: never silently deleted by a load-then-rewrite (data-loss
+        #: family guard, JSONL shape).
+        self._unparsed_lines: list[str] = []
+        #: Set when the store file itself could not be read at all;
+        #: while set, save() refuses to rewrite over the unknown.
+        self._load_error: BaseException | None = None
 
     @property
     def data_dir(self) -> Path:
@@ -203,23 +213,45 @@ class ApplicationStore:
 
     def load_all(self) -> dict[str, Application]:
         apps: dict[str, Application] = {}
+        self._unparsed_lines = []
+        self._load_error = None
         p = self._path()
         if p.exists():
-            for line in p.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
+            try:
+                text = p.read_text(encoding="utf-8")
+            except OSError as exc:
+                note_unreadable("agents.gig_applier.load_all", exc,
+                                logger=_log, record=record_failure)
+                self._load_error = exc
+                return apps
+            bad = 0
+            for line in text.splitlines():
+                if not line.strip():
                     continue
                 try:
                     a = Application.from_dict(json.loads(line))
                     apps[a.gig_id] = a
-                except Exception:  # noqa: BLE001 - skip corrupt lines
-                    continue
+                except Exception:  # noqa: BLE001 - preserve, never drop
+                    bad += 1
+                    self._unparsed_lines.append(line)
+            if bad:
+                note_unreadable(
+                    "agents.gig_applier.load_all",
+                    ValueError(
+                        f"{bad} unparseable line(s) in {p.name} "
+                        "preserved verbatim, not dropped"),
+                    logger=_log, record=record_failure)
         return apps
 
     def save(self, app: Application) -> None:
         apps = self.load_all()
+        if self._load_error is not None:
+            raise RuntimeError(
+                f"application store {self._path()} is unreadable "
+                f"({self._load_error}) — refusing to rewrite it")
         apps[app.gig_id] = app
         lines = [json.dumps(a.to_dict()) for a in apps.values()]
+        lines.extend(self._unparsed_lines)
         self._path().write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def get(self, gig_id: str) -> Optional[Application]:

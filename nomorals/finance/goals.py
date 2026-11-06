@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.logging_setup import get_logger
+from ..core.storeguard import StoreUnreadableError, read_json_file
 from .budgets import finance_paths
 from .ledger import Ledger, format_naira
 from .style import bar, current_theme
@@ -84,17 +85,35 @@ class GoalStore:
             _, budgets_path = finance_paths(None)
             path = Path(budgets_path).parent / "goals.json"
         self.path = Path(path)
+        #: Set when the last _load found the file unreadable; while
+        #: set, _save refuses rather than overwriting the quarantined
+        #: bytes with an empty-image rewrite (data-loss family guard).
+        self._unreadable: BaseException | None = None
 
     def _load(self) -> dict[str, dict[str, Any]]:
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-        except (OSError, ValueError):
-            pass
+        data, exc = read_json_file(
+            self.path, site="finance.goals._load", logger=_log)
+        if exc is not None:
+            self._unreadable = exc
+            return {}
+        if data is not None:
+            # A real parse heals the flag. A missing file does NOT:
+            # its absence may be our own quarantine, so only a fresh
+            # instance (or a restored file) restarts this store.
+            self._unreadable = None
+            return data
         return {}
 
     def _save(self, data: dict[str, dict[str, Any]]) -> None:
+        # getattr: embedders/tests may construct the store without
+        # __init__ (path-only doubles); the flag then simply reads
+        # as "not flagged".
+        unreadable = getattr(self, "_unreadable", None)
+        if unreadable is not None:
+            raise StoreUnreadableError(
+                f"goal store {self.path} is unreadable "
+                f"({unreadable}); original bytes quarantined to "
+                f"{self.path.name}.corrupt — refusing to overwrite them")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")

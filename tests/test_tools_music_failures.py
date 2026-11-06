@@ -3,18 +3,17 @@
 Four exclusions and one convert.
 
 148 / 168 / 347 — save_draft persistence swallows in _draft,
-_revise and _collab (``except Exception: pass``). Persistence is
-best-effort BY DESIGN across the whole module: the draft lives in
-_ACTIVE_DRAFTS and every flow (revise / perform / collab) works
-from the in-memory copy; the reply each function returns is the
-rendered notebook of that live draft and makes no persistence
-claim. A failed save loses only the cross-restart reload, never
-the session's work, and the failure value (continue with the
-in-memory draft) is the contract's own degraded mode. Held as
-exclusions; the trio is the batch's WEAKEST exclusion — the
-counter-argument is real: the loss is silent, so a restart
-discovers it late. Shelved sketch: log the save failure at
-warning via the module's ``log`` (observability only).
+_revise and _collab (``except Exception: pass``). CONVERTED by
+the data-loss targeted fix (Pass 1): the draft still lives on
+in _ACTIVE_DRAFTS and every flow still works from the in-memory
+copy (that degraded mode is unchanged), but a failed save is no
+longer silent — it logs at ERROR via the module's ``log``,
+records in the core failures ledger, and the reply carries an
+explicit note that the draft is session-only and will be lost
+on restart. The trio was the batch's WEAKEST exclusion — the
+loss was silent, so a restart discovered it late; the scope
+ruling (2B.8) put it in the data-loss family because the saved
+file is the only copy that survives a restart.
 
 248 — _taste_hint degrades to "" on any profile read failure.
 The hint is a prompt nudge; "" is the function's designed
@@ -32,9 +31,10 @@ revise / taste / collab / video). The except now returns
 genuine-empty paths (ok=False, ok with no usable titles) still
 return the "no trending tracks" line, pinned as controls.
 
-NOT-recording is pinned with the snapshot method: music.py
-calls no failures-ledger record function anywhere, so both the
-agency and agents ledgers must be unchanged across each trigger.
+NOT-recording is pinned with the snapshot method for the
+remaining sites: both the agency and agents ledgers must be
+unchanged across each trigger. The save trio now records into
+the CORE ledger, which the snapshot does not cover.
 """
 from __future__ import annotations
 
@@ -82,7 +82,10 @@ def test_148_draft_save_failure_keeps_session_draft():
              mock.patch.object(song_draft_mod, "render_notebook",
                                lambda d: "NOTEBOOK"):
             out = M._draft("lagos nights", "pop", key, None)
-        assert out == "NOTEBOOK"
+        # CONVERTED (data-loss Pass 1): notebook still returned,
+        # but the failed save is stated on the reply's face
+        assert out.startswith("NOTEBOOK")
+        assert "couldn't save this draft" in out
         assert M._ACTIVE_DRAFTS[key] is draft
     finally:
         M._ACTIVE_DRAFTS.pop(key, None)
@@ -104,7 +107,9 @@ def test_168_revise_save_failure_keeps_session_draft():
              mock.patch.object(song_draft_mod, "render_notebook",
                                lambda d: "NOTEBOOK2"):
             out = M._revise("make it darker", key, None)
-        assert out == "NOTEBOOK2"
+        # CONVERTED (data-loss Pass 1): see test_148
+        assert out.startswith("NOTEBOOK2")
+        assert "couldn't save this draft" in out
         assert M._ACTIVE_DRAFTS[key] is draft1
     finally:
         M._ACTIVE_DRAFTS.pop(key, None)
@@ -149,6 +154,9 @@ def test_347_collab_save_failure_keeps_verse():
              mock.patch.object(song_draft_mod, "save_draft", _raise_save):
             out = M._collab("Zara verse", key, None)
         assert "Zara wrote the verse" in out
+        # CONVERTED (data-loss Pass 1): the unsaved attachment is
+        # stated on the reply's face
+        assert "couldn't save this draft" in out
         assert "sixteen bars of rain" in out
         assert "[Zara — verse]" in draft.performance_notes
         assert "sixteen bars of rain" in draft.performance_notes

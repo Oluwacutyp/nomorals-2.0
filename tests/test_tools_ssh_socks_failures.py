@@ -15,21 +15,22 @@ Sites pinned:
   still unwaitable after SIGKILL leaves ``stop()`` reporting its
   printed contract (handle released, ``{"stopped": True, "pid"}``);
   the pid was SIGTERMed then SIGKILLed before this point.
-* 330 (exclusion in-batch; DATA-LOSS SHELF) — ``_load_json``: a
+* 330 (was exclusion in-batch; DATA-LOSS SHELF) — ``_load_json``: a
   crashing KV read yields the caller's default. For the profiles key
   that default is load-bearing: the manager loads the whole profile
   set at init and every ``upsert_profile``/``remove`` rewrites the
-  whole set, so a transiently crashed init load makes the next
-  routine mutation overwrite every stored profile (byte-proven in
-  ``test_crashed_load_then_upsert_rewrites_whole_set``). The honest
-  repair — distinguish "unreadable" from "empty" before a wholesale
-  rewrite may proceed — changes ``_load_json``'s contract for every
-  caller, so it belongs to the targeted data-loss pass (alerts-162 /
-  goals-93 / trust-152 family), not a batch convert.
+  whole set, so a transiently crashed init load made the next
+  routine mutation overwrite every stored profile. CONVERTED by
+  the targeted data-loss pass (Pass 1; alerts-162 / goals-93 /
+  trust-152 family): the crashed load still yields the default,
+  but it is logged + recorded (core failures ledger) and the
+  manager is flagged — profile saves then refuse with ToolError
+  until a manager is built on a readable store.
 
-NOT-recording: none of these guards record or log; ``ssh_socks._log``
-is patched with a MagicMock around the supervisor/stop triggers and
-``method_calls`` must stay empty. This file contains NO except
+NOT-recording: the supervisor/stop guards (226/282/295) record and
+log nothing; ``ssh_socks._log`` is patched with a MagicMock around
+those triggers and ``method_calls`` must stay empty. The 330 load
+guard now logs + records by design. This file contains NO except
 handlers: triggers are mock side_effects raised inside the target's
 own handlers.
 """
@@ -146,17 +147,19 @@ class TestLoadJson330(unittest.TestCase):
         self.assertEqual(mgr._profiles, {})
 
     def test_crashed_load_then_upsert_rewrites_whole_set(self):
-        # The shelf shape, byte-proven: the seeded profile is destroyed
-        # by one routine upsert after a transiently crashed init load.
+        # CONVERTED (data-loss Pass 1): the upsert that used to
+        # destroy the seeded profile now refuses with ToolError,
+        # and the stored set survives untouched.
         db = _db()
         seed = {"old": _profile("old").to_dict()}
         KVStore(db).set_raw(ss._PROFILES_KEY, json.dumps(seed), "json")
         with mock.patch.object(KVStore, "get",
                                side_effect=RuntimeError("kv read dead")):
             mgr = SshSocksManager(SimpleNamespace(db=db))
-        mgr.upsert_profile(name="new", host="new.invalid", user="y")
+        with self.assertRaises(ss.ToolError):
+            mgr.upsert_profile(name="new", host="new.invalid", user="y")
         after = KVStore(db).get(ss._PROFILES_KEY)
-        self.assertEqual(set(after), {"new"})
+        self.assertEqual(set(after), {"old"})
 
 
 if __name__ == "__main__":

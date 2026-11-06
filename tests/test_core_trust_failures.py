@@ -7,35 +7,30 @@ One pin per census site. All sites adjudicated EXCLUSION in-batch;
 - 89 _hostname: urlparse crash on garbage -> "" -> domain_tier
   returns _UNRESOLVED (0.30, "unresolved host"). Fail-closed
   direction; the noqa prints it: "garbage in, low score out".
-- 152 _load: store.get crash -> {} — TARGETED-FIX candidate.
-  feedback() is load-then-rewrite: it loads the history dict,
-  mutates one host, and _save() writes the WHOLE dict back. A read
-  crash therefore makes the next feedback() overwrite the entire
-  persisted fetch-history with a single-host dict (byte-proven in
-  the pin below). Excluded from batch converts per protocol
-  (data-loss shapes route to the targeted shelf: the honest repair
-  must distinguish "unreadable" from "empty" before any rewrite,
-  which changes _load's contract for _history and every caller).
+- 152 _load: store.get crash -> {} — was a TARGETED-FIX
+  candidate; CONVERTED by the data-loss targeted fix (Pass 1).
+  feedback() is load-then-rewrite, so a read crash used to make
+  the next feedback() overwrite the entire persisted
+  fetch-history with a single-host dict (byte-proven in the
+  original pin). Now the crashed/wrong-shaped load is logged at
+  ERROR, recorded in the core failures ledger (a wrong-shaped
+  value is also copied to ``<key>.corrupt``), and _save refuses
+  to rewrite while the key is flagged unreadable — the persisted
+  bytes survive untouched.
 - 209 _host_set: store.get crash -> the in-memory set only —
-  TARGETED-FIX candidate, sibling of 152. allow()/block()/
-  unallow()/unblock() are load-then-rewrite over the same guard,
-  so a read crash makes the next pin-write overwrite the persisted
-  allow/block list (byte-proven below: a previously persisted
-  blocked host is lost), and while the store is unreadable a
-  persisted block pin silently drops out of scoring. Held as an
-  exclusion rather than a posture question because the score's
-  consumers are annotation/ranking only (search engine: "trust is
-  a display bonus"; source_registry orders by score) — nothing
-  refuses a fetch on is_blocked.
+  sibling of 152, CONVERTED in the same pass. allow()/block()/
+  unallow()/unblock() still apply the pin to the in-memory set
+  for the session, but the persisted allow/block list is no
+  longer overwritten from the crashed load's partial image.
 
-Non-recording: the module HAS a logger and the sibling save
-handlers (_save, _save_host_set) debug-log their failures; the
-152/209 load guards bind nothing and log nothing (pinned below).
+Recording: 152/209 now record (module logger at ERROR + core
+failures ledger) — the pins below assert exactly that.
 """
 
 import json
 import logging
 
+import nomorals.core.failures as core_fail
 from nomorals.core import trust as tru
 
 
@@ -90,23 +85,31 @@ def test_hostname_and_tier_controls():
 
 
 # -------------------------------------------------------------------- 152
-def test_load_crash_returns_empty_and_records_nothing():
+def test_load_crash_returns_empty_and_records():
+    # CONVERTED (data-loss Pass 1): the crashed load still reads as
+    # empty, but it is no longer silent — ERROR log + core ledger.
     trust = tru.SourceTrust(None, store=_CrashGetStore())
     with _Recordings(tru._log) as records:
         assert trust._load() == {}
         assert trust._history("https://a.com/x") == (0, 0)
-    assert records == []
+    assert records != []
+    assert "core.trust._load" in [
+        f.site for f in core_fail.recent_failures(limit=200)]
 
 
-def test_feedback_after_load_crash_overwrites_history():
-    # The data-loss shape, pinned to its true (bad) shape: the save
-    # writes back only the hosts the crashed load could see.
+def test_feedback_after_load_crash_preserves_history():
+    # CONVERTED (data-loss Pass 1): the save that used to write back
+    # only the hosts the crashed load could see is now refused —
+    # the persisted history survives byte-for-byte.
+    healthy = _FakeStore()
+    seed = tru.SourceTrust(None, store=healthy)
+    seed.feedback("https://old.com/x", ok=True)
+    persisted = healthy.raw[tru.SourceTrust._KV]
     store = _CrashGetStore()
+    store.raw = healthy.raw  # same backing bytes; reads crash
     trust = tru.SourceTrust(None, store=store)
     trust.feedback("https://a.com/x", ok=True)
-    saved = json.loads(store.raw[tru.SourceTrust._KV])
-    assert list(saved.keys()) == ["a.com"]
-    assert saved["a.com"]["ok"] == 1
+    assert store.raw[tru.SourceTrust._KV] == persisted
 
 
 def test_history_roundtrip_control():
@@ -121,24 +124,27 @@ def test_history_roundtrip_control():
 
 
 # -------------------------------------------------------------------- 209
-def test_host_set_crash_returns_memory_only_and_records_nothing():
+def test_host_set_crash_returns_memory_only_and_records():
+    # CONVERTED (data-loss Pass 1): memory-only reads, but recorded.
     trust = tru.SourceTrust(None, store=_CrashGetStore())
     with _Recordings(tru._log) as records:
         assert trust._host_set(tru.SourceTrust._BLOCK_KV) == set()
         assert trust.is_blocked("https://old.com/") is False
-    assert records == []
+    assert records != []
+    assert "core.trust._host_set" in [
+        f.site for f in core_fail.recent_failures(limit=200)]
 
 
-def test_block_after_host_set_crash_overwrites_persisted_list():
-    # Sibling data-loss shape: old.com was persisted by a healthy
-    # session; with reads crashing, block() saves only what the
-    # crashed load returned (memory + the new host).
+def test_block_after_host_set_crash_preserves_persisted_list():
+    # CONVERTED (data-loss Pass 1): old.com was persisted by a
+    # healthy session; with reads crashing, block() must not save
+    # the crashed load's partial image over it.
     store = _CrashGetStore()
     store.raw[tru.SourceTrust._BLOCK_KV] = json.dumps(["old.com"])
     trust = tru.SourceTrust(None, store=store)
     trust.block("https://new.com/")
     saved = json.loads(store.raw[tru.SourceTrust._BLOCK_KV])
-    assert saved == ["new.com"]
+    assert saved == ["old.com"]
     # The new pin still holds for this instance via the memory set.
     assert trust.is_blocked("https://new.com/") is True
 

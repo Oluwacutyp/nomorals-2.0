@@ -3,14 +3,16 @@
 All three are held as exclusions:
 
 93 — ``GoalStore._load`` typed guard (OSError, ValueError) -> ``{}``.
-     TARGETED-FIX CANDIDATE (data-loss shelf, top tier): add/remove/
-     mark_done/snooze/unsnooze are all load-then-rewrite, so one
-     corrupt byte makes the next mutation overwrite the whole
+     Was a TARGETED-FIX CANDIDATE (data-loss shelf, top tier):
+     add/remove/mark_done/snooze/unsnooze are all load-then-rewrite,
+     so one corrupt byte made the next mutation overwrite the whole
      persisted goal registry with a single-goal dict (byte-proven
-     below). It stays out of the batch converts only because the
-     honest repair — distinguish "unreadable" from "empty" before
-     any rewrite may proceed — changes ``_load``'s contract for
-     every caller (get/list assume {}-on-trouble). Same shape as
+     below). CONVERTED by the data-loss targeted fix (Pass 1):
+     "unreadable" is now distinguished from "empty" — the corrupt
+     bytes are quarantined to ``goals.json.corrupt``, the failure
+     is recorded in the core failures ledger, and a mutation on
+     the poisoned instance raises ``StoreUnreadableError``. Reads
+     (get/list) still assume {}-on-trouble. Same shape as
      finance/alerts 162 and core/trust 152.
 115 — ``get``: a record whose ``Goal.from_dict`` raises -> None, the
      same answer as a missing id. Per-record parse guard.
@@ -23,6 +25,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+from nomorals.core.storeguard import StoreUnreadableError
 from nomorals.finance.goals import Goal, GoalStore
 
 
@@ -45,15 +50,21 @@ def test_load_non_dict_returns_empty(tmp_path: Path) -> None:
 
 
 def test_load_unreadable_then_add_wipes_registry(tmp_path: Path) -> None:
-    # The data-loss shape, byte-proven: a healthy registry, corrupted
-    # on disk, loses every prior goal on the next load-then-rewrite.
+    # CONVERTED (data-loss Pass 1): the add that used to wipe the
+    # registry now refuses; the corrupt bytes — the only copy of
+    # the registry — sit quarantined, and a fresh instance recovers.
     store = _store(tmp_path)
     store.add(Goal(id="a", name="Alpha", target_kobo=100))
     assert [g.id for g in store.list()] == ["a"]
     store.path.write_text("{corrupt json", encoding="utf-8")
-    store.add(Goal(id="b", name="Beta", target_kobo=200))
-    after = json.loads(store.path.read_text(encoding="utf-8"))
-    assert sorted(after) == ["b"]
+    with pytest.raises(StoreUnreadableError):
+        store.add(Goal(id="b", name="Beta", target_kobo=200))
+    assert not store.path.exists()
+    assert (tmp_path / "goals.json.corrupt").read_text(
+        encoding="utf-8") == "{corrupt json"
+    fresh = _store(tmp_path)
+    fresh.add(Goal(id="b", name="Beta", target_kobo=200))
+    assert [g.id for g in fresh.list()] == ["b"]
 
 
 def test_get_bad_record_returns_none_like_missing(tmp_path: Path) -> None:
