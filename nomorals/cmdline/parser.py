@@ -2867,6 +2867,7 @@ def _parser() -> argparse.ArgumentParser:
         description=("nm trade read XAUUSD [--market forex]\n"
                      "nm trade scan XAUUSD [--market forex]\n"
                      "nm trade setups XAUUSD [--market forex]\n"
+                     "nm trade audit [XAUUSD]\n"
                      "nm trade analyze BTC/USDT [--market crypto] [--timeframe 1h]\n"
                      "nm trade backtest XAUUSD --market forex [--profile aggressive]\n"
                      "nm trade signal ETH/USDT\n"
@@ -2906,6 +2907,9 @@ def _parser() -> argparse.ArgumentParser:
     t_judgments.add_argument("symbol", help="e.g. XAUUSD, BTC/USDT")
     t_judgments.add_argument("--market", default="crypto", help="crypto|forex|stocks")
     t_judgments.add_argument("--json", action="store_true", help="Output as JSON")
+    t_audit = trade_sub.add_parser("audit", help="self-audit: grade the journal's forecasts, judgments and playbooks against their outcomes (chronological walk-forward + locked holdout; verdicts are recommendations only)")
+    t_audit.add_argument("symbol", nargs="?", default="", help="e.g. XAUUSD (default: all symbols)")
+    t_audit.add_argument("--json", action="store_true", help="Output as JSON")
     t_execute = trade_sub.add_parser("execute", help="one DEMO-execution pass: triggered setups + judgment act, under the hard invariants (friction gate, 15% drawdown halt, caps, kill switch) — demo rung only")
     t_execute.add_argument("symbol", help="e.g. XAUUSD, BTC/USDT")
     t_execute.add_argument("--market", default="crypto", help="crypto|forex|stocks")

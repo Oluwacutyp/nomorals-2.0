@@ -66,6 +66,13 @@ def _cmd_trade(args: argparse.Namespace, context: Any) -> int:
             _emit(args, {"symbol": args.symbol, "judgments": found},
                   render_judgments(found, symbol=args.symbol))
             return 0
+        if action == "audit":
+            from ...agents.trade_audit import render_audit, run_audit
+            rep = run_audit(
+                args.symbol or None,
+                settings=getattr(context, "settings", None))
+            _emit(args, rep, render_audit(rep))
+            return 0
         if action in ("execute", "positions", "manage"):
             out = trading_tool.system_action(
                 context, action, symbol=args.symbol or "",

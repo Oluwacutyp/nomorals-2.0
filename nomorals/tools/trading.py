@@ -3,7 +3,9 @@
 Actions: analyze | backtest | signal | compare | strategies | paper_start |
 paper_status | paper_stop | doctor | live_unlock | live_order | kill |
 read | scan | setups | forecast | judge | judgments (the trading
-system's shadow passes) | execute | positions | manage (Pass 4:
+system's shadow passes) | audit (Pass 5: self-audit + validation —
+journaled claims graded against outcomes, locked holdout) |
+execute | positions | manage (Pass 4:
 demo execution + management) | exness_* (the desk, manual surfaces)
 
 Paper trading here is simulated (Sentinel's PaperBroker) and always
@@ -743,6 +745,12 @@ def register(registry: Any) -> None:
             "shadow judgment pass over armed/triggered setups (five "
             "competing scenarios, act/abstain with reasons — never "
             "executes); judgments lists the latest judgment decisions; "
+            "audit grades the system's own journaled claims against "
+            "their outcomes (forecasts per horizon, judgment "
+            "discrimination taken-vs-abstained on medians, playbooks "
+            "through their lifecycle + realized R) with a locked "
+            "holdout — verdicts are recommendations only, promotion "
+            "stays a separate owner decision; "
             "execute runs ONE demo-execution pass over triggered "
             "setups (judgment act + hard invariants above it — "
             "friction gate, 15% drawdown halt, position/loss caps, "
@@ -768,7 +776,7 @@ def register(registry: Any) -> None:
             "action=..."),
         capability=Capability.NET_OUT,
         parameters={
-            "action": "str — read|scan|setups|forecast|judge|judgments|execute|positions|manage|analyze|backtest|signal|compare|strategies|"
+            "action": "str — read|scan|setups|forecast|judge|judgments|audit|execute|positions|manage|analyze|backtest|signal|compare|strategies|"
                       "paper_start|paper_status|paper_stop|doctor|"
                       "live_unlock|live_order|kill|"
                       "exness_snapshot|exness_positions|exness_size|"
@@ -855,6 +863,13 @@ def register(registry: Any) -> None:
                 symbol, settings=getattr(context, "settings", None))
             return {"symbol": symbol, "judgments": found,
                     "rendered": render_judgments(found, symbol=symbol)}
+        if action == "audit":
+            from ..agents.trade_audit import render_audit, run_audit
+            rep = run_audit(
+                symbol or None,
+                settings=getattr(context, "settings", None))
+            rep["rendered"] = render_audit(rep)
+            return rep
         if action in ("execute", "positions", "manage"):
             return system_action(context, action, symbol=symbol,
                                  market=market,
