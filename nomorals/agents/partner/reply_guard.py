@@ -54,6 +54,9 @@ __all__ = [
     "is_scaffold",
     "fallback_reaction",
     "guard_reply_parts",
+    "deliberation_reason",
+    "is_deliberation",
+    "guard_deliberation_parts",
     "narration_reason",
     "scrub_narration",
 ]
@@ -202,6 +205,169 @@ def guard_reply_parts(parts: list[str], *, kind: Any,
         kept = [p for p in kept if str(p or "").strip()] \
             + [fallback_reaction(kind, rng)]
     return kept
+
+# ── deliberation hold (owner's WhatsApp, 2026-11-05 23:32) ─────────
+# The scaffold guard above keys on scaffold FURNITURE — an analysis
+# header, a context:/vibe verdict line. The 2026-11-05 leak wore
+# none: a healthy reasoning rung answered a contact's "ok" with its
+# raw deliberation about the conversation itself —
+#
+#     the user seems to be continuing the conversation, but the
+#     message is just "how was your night" followed by nothing
+#     else. wait, looking again, the user sent "how was your
+#     night" and then i responded. let me re-read… actually, i
+#     see the user sent "how was your night" and my previous
+#     response was "fine". … looking at the messages:
+#     user: "good morning"  me: "morning" (wait, that d…
+#
+# — sent AS THE OWNER on his personal WhatsApp, and quoted back at
+# him by the confused contact. First-person, mid-stream, no header:
+# it passed every existing check (the outcome was not degraded —
+# a real model produced it — so the competence gate passed it too).
+#
+# Semantics differ from the scaffold guard on purpose. Scaffold is
+# a bot-ism and resolves to an in-character reaction on any surface.
+# Deliberation on a PERSONAL surface is the owner's own mind-voice
+# leaking into his chats: the held turn resolves to SILENCE — no
+# reaction, no substitute line — because any text sent in that
+# moment is still the surface performing over a leak. The runtime
+# applies this hold on personal platforms only (the same predicate
+# as the competence gate); bot surfaces, where Devon speaks in her
+# own voice and deliberation reads as her own thinking-out-loud in
+# her own bot chats, are not this guard's business, and control /
+# command replies never cross the seam at all.
+#
+# Detection is body-level, like the scaffold guard's: the text must
+# carry deliberation FURNITURE — narration about "the user" as a
+# third person in this very chat, a directive to re-read / review
+# the conversation's structure, a playback of the transcript with
+# role labels, self-narration of the turn exchange. Ordinary speech
+# matches none of it: the owner's own shapes — one-word replies,
+# fragments, Pidgin, slang, emoji — carry no such furniture, and
+# the medium-marker path additionally requires a deliberation
+# STREAM (several distinct markers across a long body), so a stray
+# shared phrase in a story never holds a reply.
+
+#: Strong furniture: any single hit marks the body as deliberation.
+_DELIBERATION_STRONG: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^\s*(?:user|assistant|human|me)\s*:\s*[\"“”']",
+                re.IGNORECASE | re.MULTILINE),
+     "transcript echo"),
+    (re.compile(r"\bthe user seems\b", re.IGNORECASE),
+     "third-person narration of the user"),
+    (re.compile(r"\bthe user (?:sent|said|wrote|typed|messaged)"
+                r"\s*[\"“”']", re.IGNORECASE),
+     "quoted-send narration"),
+    (re.compile(r"\blet me (?:re-read|reread|re-examine|"
+                r"look at the (?:structure|messages|conversation|"
+                r"history)|review the (?:conversation|messages|"
+                r"history|chat)|check the (?:conversation|history|"
+                r"messages))\b", re.IGNORECASE),
+     "deliberation directive"),
+    (re.compile(r"\blooking at the (?:messages|conversation|"
+                r"structure|history)\b", re.IGNORECASE),
+     "deliberation directive"),
+    (re.compile(r"\bmy previous (?:response|reply|message) was\b",
+                re.IGNORECASE),
+     "self-narration of turns"),
+)
+
+#: Medium markers: fragments of a deliberation stream. One or two
+#: can occur in ordinary speech (a story about responding to
+#: someone); a stream of them across a long body is the model
+#: working through the turn exchange out loud.
+_DELIBERATION_MEDIUM: tuple[str, ...] = (
+    "looking again",
+    "actually, i see",
+    "actually i see",
+    "new turn where",
+    "followed by nothing",
+    "seems to be continuing",
+    "the message is just",
+    "structure again",
+    "i responded",
+    "the conversation so far",
+    "how to respond",
+)
+_DELIBERATION_MEDIUM_MIN = 3
+_DELIBERATION_STREAM_MIN_CHARS = 120
+
+
+def deliberation_reason(text: str) -> str:
+    """Why ``text`` is model deliberation, or "" when it is speech.
+
+    The incident class, not the incident string: third-person
+    narration of the interlocutor, directives to re-read the
+    conversation, transcript playback, turn self-narration — or a
+    long body carrying a stream of deliberation markers. Brevity
+    and dialect are never evidence: short bodies can only match on
+    the strong furniture, and ordinary replies (Pidgin, slang,
+    fragments, emoji) match nothing at all.
+    """
+    body = str(text or "")
+    if not body.strip():
+        return ""
+    for pattern, reason in _DELIBERATION_STRONG:
+        if pattern.search(body):
+            return reason
+    if len(body) >= _DELIBERATION_STREAM_MIN_CHARS:
+        low = body.lower()
+        hits = sum(1 for marker in _DELIBERATION_MEDIUM
+                   if marker in low)
+        if hits >= _DELIBERATION_MEDIUM_MIN:
+            return f"deliberation stream ({hits} markers)"
+    return ""
+
+
+def is_deliberation(text: str) -> bool:
+    return bool(deliberation_reason(text))
+
+
+def _journal_deliberation(reason: str, raw: str, *,
+                          platform: str, chat_key: str) -> None:
+    """Held ledger entry for a deliberation hold (hash + length only).
+
+    The deliberation's text is never journaled — like the scaffold's,
+    it is not worth keeping anywhere it could be quoted back.
+    """
+    try:
+        digest = hashlib.sha256(str(raw or "").encode("utf-8")).hexdigest()
+        record_failure(
+            "runtime.PartnerRuntime._send_reply:deliberation_guard",
+            ValueError(
+                f"reply deliberation held ({reason}) on {platform} "
+                f"in {chat_key}: sha256={digest[:16]} "
+                f"len={len(str(raw or ''))}"),
+        )
+    except Exception:  # noqa: BLE001 - journaling must never break a reply
+        pass
+
+
+def guard_deliberation_parts(parts: list[str], *, platform: str,
+                             chat_key: str) -> tuple[list[str], int]:
+    """Hold a deliberation-shaped conversational reply.
+
+    Returns ``(kept_parts, held_count)``. The reply is judged as
+    ONE body: reply parts are chunks of a single composed draft
+    (split for sending), so a deliberation convicts the whole
+    draft — a later chunk judged alone may carry too little
+    furniture, and the clean-looking front of a deliberating draft
+    is not a safe salvage. When the body is deliberation, every
+    non-blank part is held and journaled (hash + length only) and
+    the caller resolves the turn to silence: unlike the scaffold
+    guard, this hold NEVER substitutes a reaction. A clean body
+    passes through untouched and in order.
+    """
+    items = [str(p or "") for p in (parts or [])]
+    if not any(p.strip() for p in items):
+        return list(parts or []), 0
+    joined = "\n".join(items)
+    reason = deliberation_reason(joined)
+    if reason:
+        _journal_deliberation(reason, joined,
+                              platform=platform, chat_key=chat_key)
+        return [], sum(1 for p in items if p.strip())
+    return list(parts or []), 0
 
 # ── internal-narration scrub (owner order 2026-11-05, register #33) ──
 #: The CoreMind started notes carried the router's own taxonomy to

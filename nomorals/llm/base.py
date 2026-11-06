@@ -9,6 +9,7 @@ with no network at all.
 from __future__ import annotations
 
 import abc
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Literal, Sequence
@@ -26,8 +27,50 @@ __all__ = [
     "detect_template",
     "messages_to_text",
     "short_error",
+    "split_reasoning",
     "validate_messages",
 ]
+
+#: Reasoning spans inlined into a completion's content channel. A
+#: reasoning model served through a plain chat endpoint may carry a
+#: dedicated reasoning field (``reasoning_content`` / ``reasoning`` /
+#: ``thinking`` — never read into ``text`` by any provider), but some
+#: endpoints inline the deliberation in the content itself, wrapped
+#: in think tags. An unclosed tag means the generation was cut off
+#: mid-deliberation: everything after it is reasoning, not answer.
+_THINK_SPAN_RE = re.compile(
+    r"<(think|thinking)\b[^>]*>(.*?)(?:</\1\s*>|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def split_reasoning(text: str) -> tuple[str, str]:
+    """Split a completion into its ``(answer, reasoning)`` channels.
+
+    The outbound text of a generation is its final-answer channel
+    ONLY. Reasoning that a provider inlined into the content channel
+    (think-tag spans) is separated here, at extraction, by the one
+    helper every provider extraction funnels through — reasoning is
+    never concatenated into the answer, never used as a fallback
+    body. A completion whose content is entirely a reasoning span
+    yields an EMPTY answer: no clean final answer exists, and the
+    caller treats that as no generation rather than shipping the
+    deliberation. Text without think spans returns unchanged
+    (byte-identical apart from the outer strip), so non-reasoning
+    models are untouched.
+    """
+    body = str(text or "")
+    if "<" not in body or ("<think" not in body.lower()
+                           and "<thinking" not in body.lower()):
+        return body.strip(), ""
+    reasoning_parts: list[str] = []
+
+    def _take(match: re.Match[str]) -> str:
+        reasoning_parts.append(match.group(2))
+        return ""
+
+    answer = _THINK_SPAN_RE.sub(_take, body)
+    return answer.strip(), "\n".join(reasoning_parts).strip()
 
 Role = Literal["system", "user", "assistant", "tool"]
 

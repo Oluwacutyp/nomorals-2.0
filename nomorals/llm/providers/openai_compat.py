@@ -29,6 +29,7 @@ from ..base import (
     SamplingParams,
     Usage,
     short_error,
+    split_reasoning,
     validate_messages,
 )
 from ..failures import FailureClass, classify_failure
@@ -486,6 +487,13 @@ class OpenAICompatProvider(LLMProvider):
                 import json
 
                 content = json.dumps(message["tool_calls"])
+            # Channel separation: the message's dedicated reasoning
+            # fields (reasoning_content / reasoning) are never read
+            # into the text, and reasoning inlined into the content
+            # channel (think-tag spans) is split out here — the
+            # response text is the final-answer channel only.
+            if content:
+                content = split_reasoning(str(content))[0]
             usage = _parse_usage(data.get("usage"))
             response = LLMResponse(
                 text=content or "",
@@ -638,5 +646,6 @@ class OpenAICompatProvider(LLMProvider):
         data = raw.json()
         text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
         return self._record(
-            LLMResponse(text=text, model=data.get("model", served_model), raw=data), started
+            LLMResponse(text=split_reasoning(str(text))[0],
+                        model=data.get("model", served_model), raw=data), started
         )

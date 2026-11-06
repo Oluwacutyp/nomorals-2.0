@@ -687,7 +687,27 @@ class PartnerResponder:
             last_response = response
             if not response.ok or not response.text.strip():
                 continue
-            last_draft = response.text.strip()
+            # Channel separation at intake (2026-11-06): the draft is
+            # the completion's final-answer channel ONLY. Providers
+            # split reasoning at extraction; this split is the same
+            # discipline at the brain's own door, so a rung that
+            # hands back deliberation-wrapped text (think spans, a
+            # legacy router, a future provider) can never make the
+            # deliberation the draft. A generation whose answer
+            # channel is empty — pure reasoning, cut off mid-thought
+            # — is NO draft: the attempt counts as unanswered and
+            # the loop falls through to the honest fallback rather
+            # than shipping the model's scratch work as a reply.
+            from ..llm.base import split_reasoning
+
+            answer_text, _reasoning = split_reasoning(response.text)
+            if not answer_text:
+                _log.info(
+                    "responder: generation carried no final-answer "
+                    "channel (reasoning only, %d chars) — treating "
+                    "as unanswered", len(response.text))
+                continue
+            last_draft = answer_text
             if "repeating my words" in last_draft.lower():
                 # A model that echoes the rewrite instruction back at us failed
                 # the rewrite; treat it as another parrot.

@@ -36,6 +36,7 @@ from ..base import (
     Usage,
     messages_to_text,
     short_error,
+    split_reasoning,
     validate_messages,
 )
 
@@ -486,7 +487,10 @@ class HFServerlessProvider(LLMProvider):
             if not isinstance(usage, dict):
                 usage = {}
             return LLMResponse(
-                text=message.get("content") or "",
+                # Reasoning inlined into the content channel (HF
+                # chat models commonly emit think-tag spans) is split
+                # out at extraction: final-answer channel only.
+                text=split_reasoning(str(message.get("content") or ""))[0],
                 model=data.get("model", self.model),
                 usage=Usage(
                     prompt_tokens=_safe_int(usage.get("prompt_tokens")),
@@ -521,11 +525,12 @@ class HFServerlessProvider(LLMProvider):
         if isinstance(data, list) and data:
             first = data[0]
             if isinstance(first, dict):
-                return str(first.get("generated_text") or "")
-            return str(first)
+                return split_reasoning(
+                    str(first.get("generated_text") or ""))[0]
+            return split_reasoning(str(first))[0]
         if isinstance(data, dict):
             if "generated_text" in data:
-                return str(data["generated_text"])
+                return split_reasoning(str(data["generated_text"]))[0]
             if "error" in data:
                 return ""
         return ""

@@ -1023,7 +1023,14 @@ class ToolCallingLoop:
             if not calls:
                 # No tool calls: the model's text IS the final answer.
                 trace.append(step)
-                answer = _strip_tool_blocks(text).strip()
+                # Channel separation: the answer is the completion's
+                # final-answer channel only — reasoning inlined into
+                # the text (think spans) is split out before the
+                # tool-block strip, never shipped as the answer.
+                from ...llm.base import split_reasoning
+
+                answer = _strip_tool_blocks(
+                    split_reasoning(text)[0]).strip()
                 result = ToolLoopResult(
                     answer=answer or "(empty response)",
                     tools_used=tools_used, iterations=iteration,

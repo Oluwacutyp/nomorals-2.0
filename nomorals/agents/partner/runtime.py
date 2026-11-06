@@ -51,7 +51,12 @@ from .runtime_anime import RuntimeAnimeMixin
 from .runtime_chatops import RuntimeChatOpsMixin
 from .runtime_makers import RuntimeMakersMixin
 from .failures import failure_count, recent_failures, record_failure
-from .reply_guard import guard_reply_parts, scrub_narration
+from .reply_guard import (
+    deliberation_reason,
+    guard_deliberation_parts,
+    guard_reply_parts,
+    scrub_narration,
+)
 from .brain_gate import BrainGate, is_personal_platform
 _log = get_logger(__name__)
 
@@ -2254,6 +2259,27 @@ class PartnerRuntime(
             return
         if not degraded:
             gate.note_healthy()
+        # Deliberation hold (reply_guard, 2026-11-06): the third
+        # check of this one gate. A healthy model can still leak its
+        # raw deliberation as the "reply" — reasoning inlined into
+        # the content channel, untagged, narrating the conversation
+        # ("the user seems to be continuing… let me re-read…") — and
+        # neither the competence gate (the brain WAS competent) nor
+        # the scaffold guard (no scaffold furniture) stops it. On
+        # personal surfaces, where Devon speaks AS the owner, a
+        # deliberation-shaped part is HELD: journaled, counted, and
+        # never sent — and a turn whose every part is held resolves
+        # to silence, never a substitute line. Bot surfaces are out
+        # of scope (her own voice, her own chats) and control/command
+        # replies never cross this seam.
+        if is_personal_platform(message.chat.platform):
+            parts, held = guard_deliberation_parts(
+                parts, platform=message.chat.platform,
+                chat_key=message.chat.key)
+            if held:
+                self._bump("deliberation_held", held)
+            if not parts:
+                return
         # Send-boundary scaffold guard (reply_guard): the model's raw
         # analysis of the incoming message is not a reply and must
         # never reach a chat — least of all a personal-account surface
@@ -6438,6 +6464,28 @@ class PartnerRuntime(
         if is_personal_platform(message.chat.platform):
             reply = scrub_narration(reply)
             if not str(reply or "").strip():
+                return
+            # Deliberation hold (2026-11-06): the same third check
+            # as _send_reply's gate — a mind reply composed with a
+            # model can carry the model's deliberation about the
+            # conversation, and on a personal surface that is held
+            # to silence, never sent in the owner's voice. Journaled
+            # hash-only, like every hold at this boundary.
+            _delib_reason = deliberation_reason(reply)
+            if _delib_reason:
+                import hashlib
+
+                record_failure(
+                    "runtime.PartnerRuntime._send_mind_reply:"
+                    "deliberation_guard",
+                    ValueError(
+                        f"mind reply deliberation held "
+                        f"({_delib_reason}) on "
+                        f"{message.chat.platform} in "
+                        f"{message.chat.key}: sha256="
+                        f"{hashlib.sha256(reply.encode('utf-8')).hexdigest()[:16]} "
+                        f"len={len(reply)}"))
+                self._bump("deliberation_held")
                 return
         try:
             self._typing_for(message.chat, reply)

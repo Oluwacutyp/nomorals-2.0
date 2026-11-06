@@ -27,7 +27,7 @@ from typing import Any, Callable, Sequence
 from ...core.errors import ModelError, ProviderError, classify
 from ...core.http import HttpClient
 from ...core.retry import BackoffPolicy, retry_call
-from ..base import LLMProvider, LLMResponse, Message, SamplingParams, Usage, validate_messages
+from ..base import LLMProvider, LLMResponse, Message, SamplingParams, Usage, split_reasoning, validate_messages
 
 __all__ = ["OllamaProvider", "OLLAMA_DEFAULT_HOST"]
 
@@ -134,7 +134,10 @@ class OllamaProvider(LLMProvider):
         message = data.get("message") or {}
         return self._record(
             LLMResponse(
-                text=message.get("content") or "",
+                # Ollama's dedicated ``thinking`` field is never read
+                # into the text; reasoning inlined into the content
+                # channel is split out (final-answer channel only).
+                text=split_reasoning(str(message.get("content") or ""))[0],
                 model=data.get("model", self.model),
                 usage=Usage(
                     prompt_tokens=int(data.get("prompt_eval_count") or 0),
@@ -200,7 +203,8 @@ class OllamaProvider(LLMProvider):
                           timeout=req_timeout)
         content = (data.get("message") or {}).get("content") or ""
         return self._record(
-            LLMResponse(text=content, model=data.get("model", self.model), raw=data),
+            LLMResponse(text=split_reasoning(str(content))[0],
+                        model=data.get("model", self.model), raw=data),
             started,
         )
 
