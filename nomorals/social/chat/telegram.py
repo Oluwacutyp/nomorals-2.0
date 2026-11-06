@@ -1017,6 +1017,60 @@ class TelegramAdapter(ChatAdapter):
         await client(ReadStoriesRequest(peer, max_id=max_story_id))
         return True
 
+    def send_story(self, media_path: str, caption: str = "") -> bool:
+        """Post a story as the account owner (§15 status
+        posting, the Telegram rung of /poststatus): Telethon
+        ``stories.SendStoryRequest`` with an everyone-can-see
+        privacy rule. Media only — Telegram stories ARE media
+        posts; there is no text story to fake (the command
+        layer says exactly that for a text-only ask). False
+        when not connected, the file is gone, or the call
+        fails — never a fake success."""
+        client = self._client
+        if client is None or self._loop is None:
+            return False
+        path = str(media_path or "").strip()
+        if not path or not os.path.exists(path):
+            return False
+        try:
+            return bool(self._run_on_loop(
+                self._send_story_async(client, path,
+                                       str(caption or "")),
+                timeout=60.0))
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("telegram: story post failed: %s", exc)
+            return False
+
+    async def _send_story_async(self, client: Any, path: str,
+                                caption: str) -> bool:
+        import mimetypes
+        import random
+
+        from telethon.tl.functions.stories import SendStoryRequest
+        from telethon.tl.types import (
+            DocumentAttributeVideo,
+            InputMediaUploadedDocument,
+            InputMediaUploadedPhoto,
+            InputPrivacyValueAllowAll,
+        )
+
+        mime = mimetypes.guess_type(path)[0] or ""
+        uploaded = await client.upload_file(path)
+        if mime.startswith("video/"):
+            media: Any = InputMediaUploadedDocument(
+                file=uploaded, mime_type=mime,
+                attributes=[DocumentAttributeVideo(
+                    duration=0, w=0, h=0)])
+        else:
+            media = InputMediaUploadedPhoto(file=uploaded)
+        peer = await client.get_input_entity("me")
+        await client(SendStoryRequest(
+            peer=peer, media=media,
+            privacy_rules=[InputPrivacyValueAllowAll()],
+            caption=caption or None,
+            random_id=random.getrandbits(63)))
+        return True
+
         raise ValueError(f"cannot resolve chat_id={chat_id!r}")
 
     # ── inbound ──────────────────────────────────────────────────────────────

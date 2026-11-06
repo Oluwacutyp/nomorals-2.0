@@ -166,6 +166,12 @@ let reconnectTimer = null;
 let connecting = false;
 let connState = 'closed';    // mirror of the last connection.update connection value
 let lastOpenAt = 0;
+// Presence (§15 always-online): the last state the presence verb
+// successfully asserted, re-asserted on every (re)connect —
+// Baileys' assertion does not survive its socket, and a bridge
+// that only asserts when told leaves the account dark after any
+// flap until the Python beat happens to run. '' = never asked.
+let lastPresenceState = '';
 
 function saveReconnectState() {
   try {
@@ -691,6 +697,16 @@ async function connect() {
       saveReconnectState();
       log('connected as', meJid);
       broadcastStatus('open');
+      // Presence re-assert (§15): a wanted presence outlives
+      // the socket that carried it — re-send it on every open
+      // so always-online survives reconnects with no Python
+      // beat having to notice first. Best-effort: the beat
+      // remains the backstop.
+      if (lastPresenceState) {
+        wa.sendPresenceUpdate(lastPresenceState).catch(
+          (e) => log('presence re-assert on open failed:',
+                     e?.message || e));
+      }
     }
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
@@ -1031,7 +1047,61 @@ async function handleCommand(sock, req) {
         // unlike 'read', a presence that didn't land must not ack.
         const state = req.state === 'unavailable' ? 'unavailable' : 'available';
         await wa.sendPresenceUpdate(state);
+        // Remember the want: the connection.update 'open'
+        // handler re-asserts it after every reconnect.
+        lastPresenceState = state;
         return reply(sock, id, { ok: true });
+      }
+      case 'status_send': {
+        // Post a status AS the account owner (§15 status
+        // posting — the send half of the status family).
+        // Baileys shape: a send to status@broadcast whose
+        // fan-out is the statusJidList — without one Baileys
+        // encrypts for nobody, so the audience is explicit:
+        // the request's list when given, else every DM
+        // counterpart this bridge has seen this session. No
+        // audience at all is an honest refusal, never a post
+        // nobody can see. (The Go engine needs no list:
+        // whatsmeow resolves the account's server-side status
+        // recipients itself.)
+        const text = String(req.text || '').trim();
+        const mediaPath = String(req.path || '').trim();
+        if (!text && !mediaPath) {
+          return reply(sock, id, { ok: false, error: 'status_send needs text or a media path' });
+        }
+        let audience = Array.isArray(req.audience)
+          ? req.audience.map(String).filter(Boolean) : [];
+        if (!audience.length) {
+          audience = [...chatTitles.keys()].filter(
+            (j) => j.endsWith('@s.whatsapp.net') && j !== meJid);
+        }
+        if (!audience.length) {
+          return reply(sock, id, { ok: false, error: 'no status audience known — this bridge has not seen any contacts this session, and none was given' });
+        }
+        const opts = { statusJidList: audience };
+        let content;
+        if (mediaPath) {
+          let buf;
+          try {
+            buf = fs.readFileSync(mediaPath);
+          } catch {
+            return reply(sock, id, { ok: false, error: 'media file not found: ' + mediaPath });
+          }
+          const caption = String(req.caption || '') || text;
+          if (['.mp4', '.mov', '.gif'].includes(extOf(mediaPath))) {
+            content = { video: buf, caption };
+          } else if (['.jpg', '.jpeg', '.png', '.webp'].includes(extOf(mediaPath))) {
+            content = { image: buf, caption };
+          } else {
+            return reply(sock, id, { ok: false, error: 'status media must be an image or a video: ' + mediaPath });
+          }
+        } else {
+          content = { text };
+          opts.backgroundColor = '#000000';
+          opts.font = 2;
+        }
+        const sent = await wa.sendMessage('status@broadcast', content, opts);
+        return reply(sock, id, { ok: true, message_id: sent?.key?.id || '' });
       }
       case 'status_view': {
         // Mark one contact status viewed (§15 status viewing):

@@ -106,6 +106,8 @@ func (b *bridge) handleCommand(cc *clientConn, req request) {
 		b.cmdPresence(ctx, cc, id, req)
 	case "status_view":
 		b.cmdStatusView(ctx, cc, id, req)
+	case "status_send":
+		b.cmdStatusSend(ctx, cc, id, req)
 	case "status_react":
 		b.cmdStatusReact(ctx, cc, id, req)
 	case "chat_modify":
@@ -1062,14 +1064,109 @@ func (b *bridge) cmdRead(ctx context.Context, cc *clientConn, id string, req req
 // housekeeping beat while the owner wants the account online.
 func (b *bridge) cmdPresence(ctx context.Context, cc *clientConn, id string, req request) {
 	state := types.PresenceAvailable
+	want := "available"
 	if req.str("state") == "unavailable" {
 		state = types.PresenceUnavailable
+		want = "unavailable"
 	}
 	if err := b.cli.SendPresence(ctx, state); err != nil {
 		b.fail(cc, id, err)
 		return
 	}
+	// Remember the want: onConnected re-asserts it after every
+	// reconnect, so a socket flap never silently drops the
+	// account's presence until some later beat notices.
+	b.presenceMu.Lock()
+	b.presenceWant = want
+	b.presenceMu.Unlock()
 	b.reply(cc, id, map[string]any{"ok": true})
+}
+
+// cmdStatusSend posts a status AS the account owner (§15
+// status posting — the send half of the status family): a text
+// status (an ExtendedTextMessage with a background, the shape
+// the phone itself sends) or an image/video status with a
+// caption, addressed to status@broadcast. whatsmeow resolves
+// the audience itself — SendMessage to StatusBroadcastJID fans
+// out to the account's server-side status recipients — so no
+// recipient list rides the wire and nobody outside his status
+// privacy list can be reached. Refusals (not logged in, a dead
+// file, an upload failure) come back verbatim, never a fake
+// post.
+func (b *bridge) cmdStatusSend(ctx context.Context, cc *clientConn, id string, req request) {
+	text := strings.TrimSpace(req.str("text"))
+	path := strings.TrimSpace(req.str("path"))
+	caption := req.str("caption")
+	if text == "" && path == "" {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "status_send needs text or a media path"})
+		return
+	}
+	var msg *waE2E.Message
+	if path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			b.reply(cc, id, map[string]any{"ok": false,
+				"error": "media file not found: " + path})
+			return
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		var mediaType whatsmeow.MediaType
+		switch ext {
+		case ".jpg", ".jpeg", ".png", ".webp":
+			mediaType = whatsmeow.MediaImage
+		case ".mp4", ".mov", ".gif":
+			mediaType = whatsmeow.MediaVideo
+		default:
+			b.reply(cc, id, map[string]any{"ok": false,
+				"error": "status media must be an image or a " +
+					"video: " + path})
+			return
+		}
+		up, err := b.cli.Upload(ctx, data, mediaType)
+		if err != nil {
+			b.fail(cc, id, err)
+			return
+		}
+		mime := extMIME[ext]
+		if caption == "" {
+			caption = text
+		}
+		if mediaType == whatsmeow.MediaImage {
+			msg = &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+				URL:        proto.String(up.URL),
+				DirectPath: proto.String(up.DirectPath),
+				MediaKey:   up.MediaKey, Mimetype: proto.String(mime),
+				Caption:       proto.String(caption),
+				FileSHA256:    up.FileSHA256,
+				FileEncSHA256: up.FileEncSHA256,
+				FileLength:    proto.Uint64(up.FileLength),
+			}}
+		} else {
+			msg = &waE2E.Message{VideoMessage: &waE2E.VideoMessage{
+				URL:        proto.String(up.URL),
+				DirectPath: proto.String(up.DirectPath),
+				MediaKey:   up.MediaKey, Mimetype: proto.String(mime),
+				Caption:       proto.String(caption),
+				FileSHA256:    up.FileSHA256,
+				FileEncSHA256: up.FileEncSHA256,
+				FileLength:    proto.Uint64(up.FileLength),
+			}}
+		}
+	} else {
+		msg = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text:           proto.String(text),
+			BackgroundArgb: proto.Uint32(0xFF000000),
+		}}
+	}
+	resp, err := b.cli.SendMessage(ctx, types.StatusBroadcastJID,
+		msg)
+	if err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	b.reply(cc, id, map[string]any{"ok": true,
+		"message_id": string(resp.ID)})
 }
 
 // cmdStatusView marks one contact status as viewed by this

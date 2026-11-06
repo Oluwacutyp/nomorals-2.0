@@ -6073,7 +6073,8 @@ class PartnerRuntime(
                 "readchat", "unreadchat", "star", "unstar",
                 "unsend", "edit", "editmsg", "antiedit",
                 "block", "unblock", "anticall", "disappear",
-                "statusreact", "banchecker", "gcstatus",
+                "statusreact", "poststatus", "banchecker",
+                "gcstatus",
                 "statusinfo", "pollres", "tagall", "hidetag",
                 "antitag"}:
             # The chat & privacy set (FEI gap wave F): the set

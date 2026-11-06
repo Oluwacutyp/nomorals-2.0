@@ -196,6 +196,8 @@ class RuntimeChatOpsMixin:
                     "anticall", tail, message)
             if kind == "statusreact":
                 return self._chatops_statusreact(tail, message)
+            if kind == "poststatus":
+                return self._chatops_poststatus(tail, message)
             if kind == "antitag":
                 return self._chatops_toggle_command(
                     "antitag", tail, message)
@@ -560,6 +562,96 @@ class RuntimeChatOpsMixin:
                 + self._chatops_toggle_note(
                     "status_react", "whatsapp",
                     rec.toggle("status_react")))
+
+    def _chatops_poststatus(self, tail: str,
+                            message: Any) -> str:
+        """/poststatus — post a status AS the owner on his
+        personal surface (the status family's send half: the
+        presence pack shipped viewing/saving/reacting, posting
+        was never built).  WhatsApp takes text or media; the
+        Telegram userbot takes media (stories are media posts
+        — a text-only ask gets that platform truth, not a fake).
+        Media comes from the command message itself (a photo or
+        video sent with /poststatus as its caption) or from the
+        message it replies to (the bridges download the quote's
+        bytes for exactly this).  Owner-only by the control
+        gate; a standing owner stop halts it like every other
+        personal-surface act; a landed post is journaled in the
+        personal vault, never a silent act as him."""
+        platform = str(getattr(message.chat, "platform", "")
+                       or "")
+        if platform not in ("whatsapp", "telegram"):
+            return ("/poststatus lives on your personal "
+                    "WhatsApp or Telegram — run it from there.")
+        svc, rec = self._chatops_personal_account(platform)
+        if rec is None:
+            return (f"no paired {platform} account — /pair one "
+                    f"first; /poststatus posts from the personal "
+                    f"account.")
+        if svc["registry"].owner_stopped(platform):
+            return (f"{platform} is under your standing stop — "
+                    f"it stays halted until you start it again; "
+                    f"nothing was posted.")
+        adapter = self._adapter_for(platform)
+        if adapter is None:
+            return f"no live {platform} surface here to post from."
+        media_path = ""
+        media_kind = ""
+        for m in (getattr(message, "media", None) or []):
+            p = str(getattr(m, "path", "") or "")
+            if p:
+                media_path = p
+                media_kind = str(getattr(m, "kind", "") or "")
+                break
+        if not media_path:
+            meta = getattr(message, "meta", None) or {}
+            quoted = meta.get("replied_media_local") or {}
+            if isinstance(quoted, dict) and quoted.get("path"):
+                media_path = str(quoted["path"])
+                media_kind = str(quoted.get("kind") or "")
+        text = tail.strip()
+        personal = svc["personal"]
+        if platform == "whatsapp":
+            fn = getattr(adapter, "send_status", None)
+            if not callable(fn):
+                return ("this WhatsApp surface has no "
+                        "status-post verb wired.")
+            if not text and not media_path:
+                return ("usage: /poststatus <text> — or send "
+                        "a photo/video with /poststatus as the "
+                        "caption, or reply to one with it.")
+            verdict = self._chatops_call(
+                fn, text, media_path=media_path,
+                caption=text if media_path else "")
+            if isinstance(verdict, dict) and verdict.get("ok"):
+                personal.note_status_posted(
+                    platform, account_id=rec.id, text=text,
+                    media_kind=media_kind,
+                    source_id=str(verdict.get("message_id")
+                                  or ""))
+                return ("posted to your WhatsApp status"
+                        + (f" — “{text}”" if text and not media_path
+                           else "."))
+            return self._chatops_verdict(verdict, "")
+        fn = getattr(adapter, "send_story", None)
+        if not callable(fn):
+            return ("this Telegram surface has no story-post "
+                    "verb wired.")
+        if not media_path:
+            return ("Telegram stories are media posts — send "
+                    "a photo or video with /poststatus as the "
+                    "caption. (Text statuses are a WhatsApp "
+                    "shape; nothing was posted.)")
+        landed = self._chatops_call(fn, media_path, text)
+        if landed is True:
+            personal.note_status_posted(
+                platform, account_id=rec.id, text=text,
+                media_kind=media_kind)
+            return "posted to your Telegram story."
+        if isinstance(landed, dict):
+            return self._chatops_verdict(landed, "")
+        return ("couldn't do it — the story post did not land "
+                "(not connected, or Telegram refused it).")
 
     # ── privacy: block / unblock ─────────────────────────────
 

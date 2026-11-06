@@ -113,6 +113,15 @@ type bridge struct {
 	titles    map[string]string
 	msgCache  map[string]*cachedMsg
 	cacheKeys []string
+
+	// presence (§15 always-online): the last state the presence
+	// verb successfully asserted, re-asserted on every
+	// (re)connect — whatsmeow's assertion dies with its socket,
+	// and a bridge that only asserts when told leaves the
+	// account dark after any flap until the Python beat happens
+	// to run. "" = never asked; the bridge asserts nothing.
+	presenceMu   sync.Mutex
+	presenceWant string
 }
 
 type clientConn struct {
@@ -550,6 +559,24 @@ func (b *bridge) onConnected() {
 	b.saveReconnectState()
 	logf("connected as %s", me)
 	b.broadcastStatus()
+	// Presence re-assert (§15): a wanted presence outlives the
+	// socket that carried it — re-send it on every connect so
+	// always-online survives reconnects with no Python beat
+	// having to notice first. Best-effort: a failure is logged
+	// and the beat remains the backstop, never a park reason.
+	b.presenceMu.Lock()
+	want := b.presenceWant
+	b.presenceMu.Unlock()
+	if want != "" {
+		state := types.PresenceAvailable
+		if want == "unavailable" {
+			state = types.PresenceUnavailable
+		}
+		if err := b.cli.SendPresence(context.Background(),
+			state); err != nil {
+			logf("presence re-assert on connect failed: %v", err)
+		}
+	}
 }
 
 func (b *bridge) onDisconnected() {

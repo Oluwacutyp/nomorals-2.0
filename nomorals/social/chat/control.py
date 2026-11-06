@@ -529,6 +529,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "anticall": (0, 1),       # /anticall [on|off] — reject WA calls
     "disappear": (1, None),   # /disappear <off|24h|7d|90d> [chat]
     "statusreact": (0, None),  # /statusreact [on|off|emoji <e>]
+    "poststatus": (0, None),   # /poststatus [text] — post a status as the owner
     "banchecker": (0, None),  # /banchecker [number] — honest signals
     "gcstatus": (0, 0),       # /gcstatus — this group's real stats
     "statusinfo": (0, 0),     # /statusinfo — alias of /gcstatus
@@ -2450,6 +2451,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/statusreact [on|off] · /statusreact emoji <emoji>",
               "example": "/statusreact emoji 🔥",
               "related": "/anticall · /pair"},
+    "poststatus": {"what": "post a status as you, from your personal surface: on WhatsApp a text status, or an image/video status when the command rides a photo/video (as its caption, or as a reply to one); on Telegram a story from a photo/video the same way (stories are media posts — there is no text story). The post lands in the personal journal like every act taken as you. Owner only; your standing stop halts it.",
+              "usage": "/poststatus [text] · send a photo/video with /poststatus [caption] as its caption · reply to a photo/video with /poststatus [caption]",
+              "example": "/poststatus building while others flex",
+              "related": "/statusreact · /pair saved · /pair"},
     "banchecker": {"what": "the honest ban check. With no argument: your own paired accounts' status and recorded bridge errors (a WhatsApp temporary ban shows up as a connection error there). With a number: whether it's on WhatsApp at all — the only signal WhatsApp publishes for other numbers; it publishes no ban state and this never pretends otherwise.",
               "usage": "/banchecker [phone number]",
               "example": "/banchecker +2348012345678",
@@ -4102,7 +4107,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "readchat", "unreadchat", "star", "unstar",
       "unsend", "edit", "editmsg", "antiedit",
       "block", "unblock", "anticall", "disappear",
-      "statusreact", "banchecker", "gcstatus", "statusinfo",
+      "statusreact", "poststatus", "banchecker", "gcstatus", "statusinfo",
       "pollres", "tagall", "hidetag", "antitag"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
@@ -4350,6 +4355,7 @@ LIST_ONELINERS: dict[str, str] = {
     "anticall": "reject incoming WhatsApp calls as you — /anticall [on|off]",
     "disappear": "a chat's disappearing-messages timer — /disappear 7d",
     "statusreact": "react to contacts' statuses as you — /statusreact [on|off]",
+    "poststatus": "post a status/story as you — /poststatus [text]",
     "banchecker": "honest ban signals: your accounts, or a number's registration — /banchecker [number]",
     "gcstatus": "this group's real stats, sources labeled — /gcstatus",
     "statusinfo": "alias of /gcstatus",

@@ -1070,6 +1070,8 @@ class RuntimeProvisionMixin:
                 media=media,
                 source_id=str(getattr(message, "message_id", "")
                               or ""),
+                media_missing=bool(
+                    meta.get("status_media_missing")),
                 ts=ts)
             return True
         if service == "delete":

@@ -38,6 +38,11 @@ account):
   only: no replies, no reactions, each post viewed at most once
   per process.  Independent of saving: a man can have his
   statuses read without Devon keeping copies, and vice versa.
+- **Status posting** — not a toggle and not this organ's act:
+  the owner's /poststatus command posts through the adapters'
+  own verbs (bridge status_send / Telethon SendStory) and the
+  landed post is journaled here (``status_posted``), so an act
+  taken as him is never a silent one.
 
 The acting half (presence + viewing) rides injected callables —
 the same absence-honesty as ``story_fetcher``: no callable wired
@@ -372,6 +377,7 @@ class PersonalSurfaces:
         self.call_rejector = call_rejector
         self._clock = clock
         self._seen_status: set[tuple[str, str]] = set()
+        self._missed_status: set[tuple[str, str]] = set()
         self._seen_stories: set[tuple[str, str]] = set()
         self._viewed_status: set[tuple[str, str]] = set()
         self._viewed_stories: set[tuple[str, str]] = set()
@@ -389,6 +395,9 @@ class PersonalSurfaces:
             if sid and row.get("kind") == "status":
                 self._seen_status.add((str(row.get("account") or ""),
                                        sid))
+            if sid and row.get("kind") == "status_missed":
+                self._missed_status.add(
+                    (str(row.get("account") or ""), sid))
             if sid and row.get("kind") == "story":
                 self._seen_stories.add((str(row.get("account") or ""),
                                         sid))
@@ -594,6 +603,7 @@ class PersonalSurfaces:
                             poster_name: str = "", text: str = "",
                             media: list[dict[str, Any]] | None = None,
                             source_id: str = "",
+                            media_missing: bool = False,
                             account_id: str = "",
                             ts: float = 0.0) -> list[dict[str, Any]]:
         """One status post the account can see (WhatsApp
@@ -606,7 +616,11 @@ class PersonalSurfaces:
         account's configured emoji, at most once per post per
         process, journaled — and never while an owner stop order
         stands for the platform, because a reaction is an ACTION
-        on his account, not an observation."""
+        on his account, not an observation.  ``media_missing`` is
+        the adapter saying the post carried media its download
+        failed on: when saving is on, the miss is journaled
+        (``status_missed``, once per post) instead of the post
+        vanishing from the record entirely."""
         rec = self.resolve_event_account(platform, account_id)
         out: list[dict[str, Any]] = []
         ts = float(ts or self._clock())
@@ -647,6 +661,22 @@ class PersonalSurfaces:
                         "media_kind": "", "source_id": str(source_id),
                         "path": "", "bytes": 0,
                         "note": f"reacted {emoji}"})
+        if media_missing and rec.toggle("status_saving"):
+            mkey = (rec.id, str(source_id or ""))
+            if not (source_id and mkey in self._missed_status):
+                if source_id:
+                    self._missed_status.add(mkey)
+                entry = {
+                    "ts": ts, "kind": "status_missed",
+                    "account": rec.id, "platform": platform,
+                    "counterpart_id": poster_id,
+                    "poster_name": poster_name, "media_kind": "",
+                    "source_id": str(source_id or ""), "path": "",
+                    "bytes": 0,
+                    "note": "status media could not be downloaded "
+                            "before it expired"}
+                _append_jsonl(self.vault.journal_path, entry)
+                out.append(entry)
         if not rec.toggle("status_saving"):
             return out
         dedupe_key = (rec.id, str(source_id or ""))
@@ -675,6 +705,29 @@ class PersonalSurfaces:
         if source_id and out:
             self._seen_status.add(dedupe_key)
         return out
+
+    def note_status_posted(self, platform: str, *,
+                           account_id: str = "", text: str = "",
+                           media_kind: str = "",
+                           source_id: str = "",
+                           ts: float = 0.0) -> dict[str, Any]:
+        """Journal one status the OWNER posted through Devon
+        (/poststatus): his own acts on his account are part of
+        the personal record like everything the surface does —
+        an unjournaled act would be a silent one.  Returns the
+        journal entry written."""
+        rec = self.resolve_event_account(platform, account_id)
+        entry = {
+            "ts": float(ts or self._clock()),
+            "kind": "status_posted", "account": rec.id,
+            "platform": platform, "counterpart_id": "",
+            "poster_name": "", "media_kind": media_kind,
+            "source_id": str(source_id or ""), "path": "",
+            "bytes": 0,
+            "text": str(text or "")[:200],
+            "note": "posted as the owner via /poststatus"}
+        _append_jsonl(self.vault.journal_path, entry)
+        return entry
 
     def cycle_stories(self, platform: str = "telegram",
                       account_id: str = "") -> list[dict[str, Any]]:

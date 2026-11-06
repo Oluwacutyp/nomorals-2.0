@@ -1240,6 +1240,26 @@ class WhatsAppAdapter(ChatAdapter):
             msg.meta["service"] = "status_post"
             if obj.get("view_once"):
                 msg.meta["view_once"] = True
+            # Media the bridge reported WITHOUT a local path
+            # (its download failed) was filtered out of the
+            # media list above — the same silent-drop shape the
+            # 2026-11-06 photo fix killed for ordinary messages:
+            # the status saver could not tell "a text status"
+            # from "a photo status we dropped". Stamp the
+            # arrival so the personal surface journals the miss
+            # (meta["media_unavailable"] is the brain's copy of
+            # this stamp; the saver's is status_media_missing).
+            _status_missed = [
+                m for m in (obj.get("media") or [])
+                if isinstance(m, dict) and not m.get("path")
+            ]
+            if _status_missed:
+                msg.meta["status_media_missing"] = True
+                msg.meta["media_unavailable"] = [
+                    {"kind": str(m.get("kind") or "file"),
+                     "reason": "download_failed"}
+                    for m in _status_missed
+                ]
             self._deliver(handler, msg)
         elif kind in ("revoke", "edit"):
             # Evidentiary feeds (defense brief §2.1), pass-through:
@@ -1767,6 +1787,37 @@ class WhatsAppAdapter(ChatAdapter):
         return self._admin_cmd("status_view", {
             "id": message_id, "from": poster_id,
             "ts": int(float(ts or 0) * 1000)}, timeout=10)
+
+    def send_status(self, text: str = "", *,
+                    media_path: str = "",
+                    caption: str = "",
+                    audience: list[str] | None = None
+                    ) -> dict[str, Any]:
+        """Post a status as the account owner (§15 status
+        posting — the send half of the status family, the
+        owner's /poststatus): the bridges' ``status_send``
+        verb. Text, or an image/video already on disk with an
+        optional caption. The Go engine's whatsmeow resolves
+        the audience from the account's server-side status
+        recipients; the Baileys rung needs the explicit
+        statusJidList — *audience* when given, else the
+        bridge's own session contacts, else an honest refusal
+        (a status encrypted for nobody is not a post). The
+        bridge's verdict dict comes back — ok carries the new
+        status message id, ok:false the honest reason."""
+        text = str(text or "").strip()
+        media_path = str(media_path or "").strip()
+        if not text and not media_path:
+            return {"ok": False,
+                    "error": "status_send needs text or a "
+                             "media path"}
+        payload: dict[str, Any] = {
+            "text": text, "path": media_path,
+            "caption": str(caption or "")}
+        if audience:
+            payload["audience"] = [str(a) for a in audience if a]
+        return self._admin_cmd("status_send", payload,
+                               timeout=30)
 
     # ── chat & privacy ops (FEI gap wave F) ─────────────────────
     # Owner-invoked verbs on his own account, each riding a
