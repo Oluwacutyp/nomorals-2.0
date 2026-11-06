@@ -1133,13 +1133,15 @@ def test_runtime_capture_lets_the_power_gang_grant(tmp_path):
 
 
 # ── house law: the guardrail file never moves ──────────────────
-# (one sanctioned move: the assembly truth-fix AA-64 rewrote
+# (sanctioned moves: the assembly truth-fix AA-64 rewrote
 # persona.py's forget accounting so failed forgets stop reporting
-# as forgotten — digest re-pinned to the fixed file; the guard
+# as forgotten; AA-76 made check_contradiction's crashed recall
+# leave a trace — log + failure ledger — instead of reading as
+# "no contradiction". Digest re-pinned after each; the guard
 # stands against any FURTHER unsanctioned move.)
 
 def test_persona_guardrail_untouched():
     path = Path(__file__).resolve().parents[1] \
         / "nomorals" / "memory" / "persona.py"
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    assert digest.startswith("aa4a31fd"), digest
+    assert digest.startswith("ba839924"), digest

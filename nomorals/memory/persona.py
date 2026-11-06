@@ -30,6 +30,7 @@ from typing import Any
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from .base import MemoryKind, MemoryRecord
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -779,7 +780,12 @@ class MemoryCurator:
         try:
             result = self.manager.recall(new.content, limit=12,
                                          kind=new.kind)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # AA-76: a crashed recall is NOT "no contradiction" — the
+            # {} return stays (the note is advisory), but the failure
+            # leaves a trace in the log and the failure ledger.
+            _log.warning("contradiction recall failed: %s", exc)
+            record_failure("memory.check_contradiction_recall", exc)
             return {}
         for old in result.records:
             if old.id == new.id or _is_private(old):

@@ -101,6 +101,33 @@ def test_766_contradiction_recall_failure_returns_empty():
     assert mgr.updated == []
 
 
+def test_766_contradiction_recall_failure_is_recorded():
+    # AA-76: the {} above must not be the whole story — a crashed
+    # recall leaves a trace in the memory failure ledger, distinct
+    # from a genuine no-contradiction result.
+    from nomorals.memory import failures as F
+
+    class SickManager:
+        def get(self, rid):
+            return SimpleNamespace(id=rid, kind=P.MemoryKind.FACT,
+                                   content="likes tea", metadata={})
+
+        def recall(self, *a, **k):
+            raise RuntimeError("recall boom")
+
+        def update(self, rid, metadata=None):
+            raise AssertionError("must not update on a crashed recall")
+
+    F.clear_failures()
+    try:
+        out = P.MemoryCurator(SickManager()).check_contradiction("n1")
+        assert out == {}
+        sites = [f.site for f in F.recent_failures(10)]
+        assert "memory.check_contradiction_recall" in sites, sites
+    finally:
+        F.clear_failures()
+
+
 # ── 821 (E104) CONVERTED (parent adjudication): a crashed ──────
 # hygiene query must surface through scheduled_pass's error
 # channel, never as a clean-looking "forgotten: 0".
