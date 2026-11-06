@@ -666,6 +666,12 @@ def register(registry: Any) -> None:
             "scan runs ONE shadow pass of the playbook system (detect + "
             "arm setups from a fresh read, journal every transition — "
             "never executes); setups lists live + recent shadow setups; "
+            "forecast builds structured per-horizon forecasts (12h/1d/"
+            "3d/7d/15d: direction, point price, interval, excursions, "
+            "calibration state — empirical, journaled); judge runs ONE "
+            "shadow judgment pass over armed/triggered setups (five "
+            "competing scenarios, act/abstain with reasons — never "
+            "executes); judgments lists the latest judgment decisions; "
             "analyze/backtest/signal/compare/strategies are research tools; "
             "paper_* run simulated sessions; live_order is inert unless "
             "every live gate passes (settings + 24h unlock + loss limit); "
@@ -678,7 +684,7 @@ def register(registry: Any) -> None:
             "confirmed=true or a human checkpoint. action=..."),
         capability=Capability.NET_OUT,
         parameters={
-            "action": "str — read|scan|setups|analyze|backtest|signal|compare|strategies|"
+            "action": "str — read|scan|setups|forecast|judge|judgments|analyze|backtest|signal|compare|strategies|"
                       "paper_start|paper_status|paper_stop|doctor|"
                       "live_unlock|live_order|kill|"
                       "exness_snapshot|exness_positions|exness_size|"
@@ -745,6 +751,26 @@ def register(registry: Any) -> None:
                 symbol, settings=getattr(context, "settings", None))
             return {"symbol": symbol, "setups": found,
                     "rendered": render_setups(found, symbol=symbol)}
+        if action == "forecast":
+            from ..agents.forecast import make_forecasts, render_forecasts
+            rep = make_forecasts(
+                symbol, market=market,
+                settings=getattr(context, "settings", None))
+            return {"symbol": symbol, "forecasts": rep,
+                    "rendered": render_forecasts(rep, symbol=symbol)}
+        if action == "judge":
+            from ..agents.judgment import judgment_pass, render_pass
+            rep = judgment_pass(
+                symbol, market=market,
+                settings=getattr(context, "settings", None))
+            rep["rendered"] = render_pass(rep)
+            return rep
+        if action == "judgments":
+            from ..agents.judgment import recent_judgments, render_judgments
+            found = recent_judgments(
+                symbol, settings=getattr(context, "settings", None))
+            return {"symbol": symbol, "judgments": found,
+                    "rendered": render_judgments(found, symbol=symbol)}
         expert = FinancialExpert(context)
         if action == "analyze":
             return expert.analyze(

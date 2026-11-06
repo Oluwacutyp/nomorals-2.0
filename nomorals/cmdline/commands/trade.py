@@ -42,6 +42,30 @@ def _cmd_trade(args: argparse.Namespace, context: Any) -> int:
             _emit(args, {"symbol": args.symbol, "setups": found},
                   render_setups(found, symbol=args.symbol))
             return 0
+        if action == "forecast":
+            from ...agents.forecast import make_forecasts, render_forecasts
+            rep = make_forecasts(
+                args.symbol, market=args.market,
+                settings=getattr(context, "settings", None))
+            _emit(args, {"symbol": args.symbol, "forecasts": rep},
+                  render_forecasts(rep, symbol=args.symbol))
+            return 0 if any(r.get("direction") is not None
+                            for r in rep) else 1
+        if action == "judge":
+            from ...agents.judgment import judgment_pass, render_pass
+            rep = judgment_pass(
+                args.symbol, market=args.market,
+                settings=getattr(context, "settings", None))
+            _emit(args, rep, render_pass(rep))
+            return 0
+        if action == "judgments":
+            from ...agents.judgment import recent_judgments, render_judgments
+            found = recent_judgments(
+                args.symbol,
+                settings=getattr(context, "settings", None))
+            _emit(args, {"symbol": args.symbol, "judgments": found},
+                  render_judgments(found, symbol=args.symbol))
+            return 0
         if action == "analyze":
             rep = FinancialExpert(context).analyze(
                 args.symbol, market=args.market,
