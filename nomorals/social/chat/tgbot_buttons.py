@@ -97,6 +97,24 @@ def actionable(text: str, buttons: list) -> ActionableMessage:
     return ActionableMessage(text, keyboard)
 
 
+def wide_layout(keyboard: Keyboard | None) -> Keyboard | None:
+    """Reflow a keyboard to the wide layout: one button per row.
+
+    The group surfaces' wide-aspect rows are the house standard
+    EVERYWHERE buttons appear, DMs included (owner law,
+    2026-11-05): a primary action takes its full row, so labels
+    never truncate and the tap target is the whole width.  Button
+    ORDER is preserved exactly.  Named exceptions stay authored,
+    not reflowed: confirm/cancel pairs (:func:`confirm_keyboard`),
+    pagination (:func:`paginate`), and the pick-list number
+    keypad — tight grids where the pairing IS the meaning.
+    """
+    if not keyboard:
+        return None
+    rows = [[btn] for row in keyboard for btn in (row or ())]
+    return rows or None
+
+
 def buttons_for_text(text: str) -> Keyboard | None:
     """Return contextual inline-keyboard buttons for an outgoing reply.
 
@@ -279,18 +297,13 @@ def personal_buttons_for(text: str, last_command: str = "") -> Keyboard | None:
     if kind in ("help", "list", "menu", "commands"):
         from .personal_commands import PERSONAL_HELP_CATEGORIES
 
+        # Wide layout (owner law, 2026-11-05): one category per
+        # row, DMs included — the group surfaces' standard.
         rows: Keyboard = []
-        row: list[Button] = []
         for label, data in PERSONAL_HELP_CATEGORIES:
             btn = _personal_btn(label, data)
-            if btn is None:
-                continue
-            row.append(btn)
-            if len(row) == 2:
-                rows.append(row)
-                row = []
-        if row:
-            rows.append(row)
+            if btn is not None:
+                rows.append([btn])
         return rows or None
 
     # ── /toolhub — per-screen keyboards (origin + reply-text markers) ──

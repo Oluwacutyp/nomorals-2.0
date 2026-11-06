@@ -70,18 +70,23 @@ class PlatformLimits:
 
 #: One row per platform. This is the whole table — see the descriptor rule.
 _LIMITS: dict[str, PlatformLimits] = {
-    # Telegram userbot (MTProto). No edit_media on the userbot adapter,
-    # and no edit_progress seam either — progressive display is a
-    # Bot API surface today; that absence is named, not hidden.
+    # Telegram userbot (MTProto). Buttons are real end-to-end since
+    # AA-77: native inline keyboards (Telethon Button.inline) on
+    # send/edit plus a CallbackQuery handler routing taps as
+    # commands.  Text edit is real via the edit_message verb; what
+    # the surface lacks is the throttled edit_progress seam
+    # (progressive display binds the Bot API adapters) and
+    # edit_media — those absences are named, not hidden.
     "telegram": PlatformLimits(
         platform="telegram",
         max_text=4096, max_caption=1024, max_file_mb=50,
         supports_buttons=True, supports_html=True, supports_media_edit=False,
         rate_per_hour=0, cost_model="free",
         utf16_lengths=True,
-        supports_text_edit=False,
-        text_edit_scope=("absent: the MTProto userbot adapter has no "
-                         "edit_progress seam (the Bot API adapters do)"),
+        supports_text_edit=True,
+        text_edit_scope=("own messages via MTProto edit (edit_message "
+                         "verb, unthrottled); no edit_progress seam "
+                         "(the Bot API adapters have one)"),
     ),
     # Telegram Bot API. editMessageMedia is implemented.
     "telegram-bot": PlatformLimits(

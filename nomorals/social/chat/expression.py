@@ -1341,7 +1341,14 @@ MEDIA_DELIVERED_KINDS: frozenset[str] = frozenset(
      # cutout — the same delivery contract again.
      "qcard", "canvasquote", "iqc", "wndwqute", "meme2",
      "fakemsg", "fakettc", "nokiamsg", "fakeff", "fakeffduo",
-     "ffgirl", "removebg", "qr", "couplepp", "pp"})
+     "ffgirl", "removebg", "qr", "couplepp", "pp",
+     # the download family (presentation law, 2026-11-05): /play,
+     # /download, /tiktok, /instagram, /spotify and /aio answer by
+     # sending their own ONE ack message and editing it as the job
+     # runs — the handler's empty text means the ack already
+     # posted, the same delivery contract as the kinds above.
+     "play", "download", "tiktok", "ttdl", "instagram",
+     "spotify", "aio"})
 
 
 def reaction_caption(command: str, *, actor: str, target: str = "",

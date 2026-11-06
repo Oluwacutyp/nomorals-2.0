@@ -147,10 +147,12 @@ def _row(*pairs: tuple[str, str]) -> list[tuple[str, str]]:
 
 
 def hub_keyboard() -> Keyboard:
-    """Hub card buttons: one row per tool + help. Dynamic per
+    """Hub card buttons: one tool per row (the wide layout — the
+    house standard everywhere buttons appear). Dynamic per
     screen — this is the hub screen's set, not a global menu."""
     return [
-        _row(("🌐 Proxy", "toolhub proxy"), ("💳 BIN lookup", "toolhub bin")),
+        _row(("🌐 Proxy", "toolhub proxy")),
+        _row(("💳 BIN lookup", "toolhub bin")),
         _row(("❓ Help", "toolhub help")),
     ]
 

@@ -775,8 +775,9 @@ class CommandReportTests(unittest.TestCase):
 
     def test_command_report_doc_and_stored_string(self):
         sched = self.make_scheduler()
-        text, doc = sched._run_command_report(
+        text, doc, silent = sched._run_command_report(
             {"command": "echo hi"}, job_name="greeter")
+        self.assertFalse(silent)  # it produced output — it posts
         self.assertEqual(text, "exit=0\nline one\nline two")
         self.assertIsNotNone(doc)
         rendered = canonical_text(doc)

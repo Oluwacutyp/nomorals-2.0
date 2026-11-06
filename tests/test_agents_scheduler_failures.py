@@ -415,7 +415,7 @@ def test_site_execute_notify():
     s = _sched(BoomDB())
     s.db = BoomDB()
     s.notifier = types.SimpleNamespace(publish=_boom)
-    s._run_payload_guarded = lambda row, t: (False, "boom", False, None, None)
+    s._run_payload_guarded = lambda row, t: (False, "boom", False, None, None, None)
     s._next_after_run = lambda row, now: (None, True)
     s._record_run = lambda *a, **k: None
     s._ledger = lambda *a, **k: None
@@ -464,7 +464,7 @@ def test_excl_execute_cmd_name():
     s = _sched(BoomDB())
     s.db = BoomDB()
     s.notifier = types.SimpleNamespace(publish=lambda *a, **k: None)
-    s._run_payload_guarded = lambda row, t: (False, "boom", False, None, None)
+    s._run_payload_guarded = lambda row, t: (False, "boom", False, None, None, None)
     s._next_after_run = lambda row, now: (None, True)
     s._record_run = lambda *a, **k: None
     s._ledger = lambda *a, **k: None
@@ -477,7 +477,9 @@ def test_excl_execute_cmd_name():
 
 
 def test_excl_health_overlaps():
-    # E2: lock failure leaves the default empty overlaps, display-only.
+    # E2: lock failure leaves the default empty overlaps — but the
+    # failed probe is a health FACT (AA-71): recorded, and named in
+    # the verdict, never a silent hole under an ok:true verdict.
     class BadLock:
         def __enter__(self):
             raise RuntimeError("lock broken")
@@ -492,18 +494,23 @@ def test_excl_health_overlaps():
     s.notifier = _fake_notifier()
     out = s.health()
     assert out["overlaps"] == {"active": [], "count": 0}
-    assert _sites() == []
+    assert "scheduler.health_overlaps" in _sites()
+    assert any("overlaps probe failed" in r for r in out["reasons"])
+    assert out["ok"] is False
 
 
 def test_excl_health_recent_runs():
-    # E3: history query failure leaves the default empty list, display-only.
+    # E3: history query failure leaves the default empty list —
+    # recorded and named in the verdict (AA-71), not silent.
     s = _sched(BoomDB())
     s.list_jobs = lambda **k: []
     s._live_owner_channels = lambda: []
     s.notifier = _fake_notifier()
     out = s.health()
     assert out["recent_runs"] == []
-    assert _sites() == []
+    assert "scheduler.health_recent_runs" in _sites()
+    assert any("recent-runs probe failed" in r for r in out["reasons"])
+    assert out["ok"] is False
 
 
 def test_excl_ensure_persona_jobs_list(monkeypatch):

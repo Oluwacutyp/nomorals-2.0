@@ -49,7 +49,8 @@ from .present import render as _render_doc
 __all__ = [
     "SURFACE_CLASSES", "PRESETS", "THEMES", "CLASS_ICONS",
     "DEFAULT_PRESENTATION", "DEFAULT_STAMP_TEXT",
-    "STAMP_CLASSES", "ResolvedStyle", "resolve_style",
+    "STAMP_CLASSES", "STAMP_HTML", "apply_stamp",
+    "ResolvedStyle", "resolve_style",
     "WATERMARK_MODES", "DEFAULT_WATERMARK_MODE",
     "MediaMark", "resolve_media_mark",
     "Card", "render_card", "render_card_framed", "card_text",
@@ -93,6 +94,37 @@ STAMP_CLASSES: tuple[str, ...] = (
     "economy", "game", "briefing", "announcement", "leaderboard",
     "menu",
 )
+
+#: The stamp in authored-HTML form, for the send boundary
+#: (runtime's one control-reply channel and the conversational
+#: reply seam).  Owner law (2026-11-05, refining the
+#: presented-only default above): the stamp is ALWAYS present on
+#: system/presented output — no missing-stamp surfaces — and plain
+#: conversational replies carry its lightest styled form rather
+#: than omitting it.  The HTML span is the richest common form:
+#: Telegram keeps it as a real italic entity, the WhatsApp
+#: dialect converts ``<i>`` to ``_…_``, and plain transports strip
+#: it to the bare line.  Cards stamped upstream through
+#: :func:`render_card` keep their dialect-native line — the
+#: boundary never double-stamps (see :func:`apply_stamp`).
+STAMP_HTML = f"<i>{DEFAULT_STAMP_TEXT}</i>"
+
+
+def apply_stamp(text: str, *, light: bool = False) -> str:
+    """Append the stamp to outbound *text* unless already there.
+
+    Full form (presented output): a blank line, then the stamp.
+    Light form (conversational replies): a single newline, then
+    the stamp — a signature line, never a block.  Idempotent: a
+    text already carrying the stamp text (a Card stamped by
+    :func:`render_card`, a Doc footer) passes through unchanged.
+    Empty text stays empty — the stamp never manufactures a
+    message out of silence.
+    """
+    body = str(text or "")
+    if not body.strip() or DEFAULT_STAMP_TEXT in body:
+        return body
+    return body + ("\n" if light else "\n\n") + STAMP_HTML
 
 
 @dataclass(frozen=True)

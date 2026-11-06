@@ -1725,13 +1725,26 @@ class WhatsAppAdapter(ChatAdapter):
         Both bridges refuse a target that isn't the account's own
         or isn't in their memory, and WhatsApp's ~15-minute edit
         window is enforced server-side — refusals come back in
-        the verdict, verbatim."""
+        the verdict, verbatim.
+
+        The text is converted to the WhatsApp dialect first (the
+        one-formatting-system law): ``send`` and ``edit_progress``
+        both convert, and this verb skipping the conversion was a
+        divergence — canonical ``**bold**`` edited in through here
+        would have shown its raw markers in the chat.
+        """
         message_id = str(message_id or "").strip()
         if not message_id:
             return {"ok": False, "error": "edit needs a message_id"}
+        wire = str(text or "")
+        try:
+            from .platforms import format_for_platform
+            wire = format_for_platform(wire, "whatsapp")
+        except Exception as exc:  # noqa: BLE001 - raw beats no edit
+            record_failure("whatsapp.WhatsAppAdapter.edit_message", exc)
         return self._admin_cmd("edit", {
             "chat": self._jid(chat), "message_id": message_id,
-            "text": str(text or "")}, timeout=15)
+            "text": wire}, timeout=15)
 
     def chat_modify(self, chat: ChatRef, *,
                     archive: bool | None = None,

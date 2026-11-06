@@ -165,9 +165,10 @@ class ChatSendTests(unittest.TestCase):
             "ok": True, "path": "/tmp/song.mp3", "title": "Test Track"}
 
         result = inst._play_send_in_chat(engine, {"title": "Test Track"},
-                                         "queued 1:", chat)
-        self.assertIn("sent", result)
-        self.assertIn("Test Track", result)
+                                         chat)
+        # The delivered item's own line — no "sent …" receipt.
+        self.assertEqual(result, "🎵 Test Track")
+        self.assertNotIn("sent", result)
         inst.gateway.send_file.assert_called_once()
         args = inst.gateway.send_file.call_args
         self.assertEqual(args[0][0], "telegram")
@@ -187,7 +188,7 @@ class ChatSendTests(unittest.TestCase):
         engine = MagicMock()
         engine.download.return_value = {"ok": False, "reason": "no yt-dlp"}
 
-        result = inst._play_send_in_chat(engine, {"title": "X"}, "queued:", chat)
+        result = inst._play_send_in_chat(engine, {"title": "X"}, chat)
         # Download failure is "couldn't download" — there was nothing
         # to send, so "couldn't send" would mislead the user.
         self.assertIn("couldn't download", result)
@@ -211,7 +212,7 @@ class ChatSendTests(unittest.TestCase):
         engine.download.return_value = {
             "ok": True, "path": "/tmp/song.mp3", "title": "T"}
 
-        result = inst._play_send_in_chat(engine, {"title": "T"}, "q:", chat)
+        result = inst._play_send_in_chat(engine, {"title": "T"}, chat)
         self.assertIn("couldn't send it", result)
         self.assertIn("network down", result)
 

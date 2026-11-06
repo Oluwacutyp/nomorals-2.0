@@ -57,8 +57,9 @@ def test_fallthrough_send_failure_shows_real_path_not_literal():
         "ok": True, "path": "/tmp/yt-song.mp3",
         "title": "Lifestyle (YA MAN)"}
     rt.gateway.send_file.side_effect = Exception("chat write failed")
-    msg = rt._play_send_with_fallthrough(
-        engine, SC_ITEM, [], SEARCH_ATTEMPTS, "queued 1:", chat)
+    msg, sent = rt._play_send_with_fallthrough(
+        engine, SC_ITEM, [], SEARCH_ATTEMPTS, chat)
+    assert sent is False
     assert "{path}" not in msg, \
         f"message leaks the literal '{{path}}': {msg}"
     assert "/tmp/yt-song.mp3" in msg
@@ -80,8 +81,9 @@ def test_fallthrough_total_failure_drops_stranded_queue_row():
          "path": SC_ITEM["path"], "title": SC_ITEM["title"]}]
     removed = []
     engine.remove.side_effect = lambda idx: removed.append(idx)
-    msg = rt._play_send_with_fallthrough(
-        engine, SC_ITEM, [], SEARCH_ATTEMPTS, "queued 1:", chat)
+    msg, sent = rt._play_send_with_fallthrough(
+        engine, SC_ITEM, [], SEARCH_ATTEMPTS, chat)
+    assert sent is False
     assert "couldn't download" in msg
     assert removed == [0], \
         f"stranded queue row was not dropped on total failure: {removed}"

@@ -27,11 +27,13 @@ from __future__ import annotations
 
 import os
 import random
+import re
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from nomorals.agents.context import build_context
 from nomorals.agents.partner.failures import clear_failures
@@ -46,6 +48,7 @@ from nomorals.social.chat.base import (
     ChatKind,
     ChatMessage,
     ChatRef,
+    MediaRef,
     SendResult,
 )
 from nomorals.social.chat.gateway import ChatGateway
@@ -660,6 +663,149 @@ class OneCommandOneHandlingTests(unittest.TestCase):
         sent = self._sent("telegram")
         self.assertEqual(len(sent), 1, sent)
         self.assertIn("[job job0001]", sent[0])
+
+
+# ── (e) presentation law: one message, edited in place ─────────────
+#
+# Owner rulings 2026-11-05 evening, from the live bot DM: a /play
+# produced THREE pasted messages — a queue narration carrying an
+# internal job id, the audio file, and a "sources tried … sent X
+# to this chat" receipt.  The law: the ack is ONE message, edited
+# in place as the job progresses; the artifact completes it; no
+# receipts, no narration, no internal ids — on BOTH platforms.
+
+
+class FlowAdapter(RecordingAdapter):
+    """RecordingAdapter + the media/edit verbs the flow uses."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.files: list[tuple[str, str]] = []
+        self.edits: list[tuple[str, str]] = []
+
+    def send_file(self, chat: ChatRef, file_path: Any, *,
+                  caption: str = "", filename: str = "") -> SendResult:
+        self.files.append((str(file_path), caption))
+        return SendResult(ok=True, platform=self.name,
+                          message_id=f"file{len(self.files)}")
+
+    def send_media(self, chat: ChatRef, media: MediaRef, *,
+                   caption: str = "",
+                   parse_mode: str = "") -> SendResult:
+        # The gateway's media verb (send_file routes through it).
+        self.files.append((str(media.path), caption))
+        return SendResult(ok=True, platform=self.name,
+                          message_id=f"file{len(self.files)}")
+
+    def edit_message(self, chat: ChatRef, message_id: str,
+                     text: str, **kwargs: Any) -> Any:
+        self.edits.append((message_id, text))
+        return {"ok": True}
+
+    def edit_progress(self, chat: ChatRef, message_id: str,
+                      text: str, **kwargs: Any) -> Any:
+        self.edits.append((message_id, text))
+        return {"ok": True}
+
+
+class PresentationFlowTests(unittest.TestCase):
+    """The REAL /play handler, end to end, on fake adapters for
+    both platforms: ack → (progress edits) → one artifact → the ack
+    edited to its final state, with zero receipts anywhere."""
+
+    def setUp(self) -> None:
+        clear_failures()
+        self.context, self.tmp = _make_context()
+        self.adapters = {name: FlowAdapter(name)
+                         for name in ("telegram", "whatsapp")}
+        self.gateway = ChatGateway(self.adapters, db=self.context.db)
+        self.runtime = PartnerRuntime(self.context, gateway=self.gateway)
+        self.runtime._typing_enabled = lambda chat: False
+
+    def tearDown(self) -> None:
+        try:
+            self.runtime.stop()
+        except Exception as exc:  # noqa: BLE001 - teardown only
+            assert isinstance(exc, Exception)
+        self.context.close()
+        self.tmp.cleanup()
+
+    def _drive_play(self, platform: str) -> FlowAdapter:
+        from nomorals.core.jobs import shared_registry
+        from nomorals.media.picklist import PickCache
+        from nomorals.media.resolver import ResolvedAudio
+
+        PickCache.clear()
+        adapter = self.adapters[platform]
+        chat = ChatRef(platform=platform,
+                       chat_id=f"flow-{platform}", kind=ChatKind.DM,
+                       title="dm", peer=f"flow-{platform}")
+        self.runtime._ref_from_key = lambda key: chat  # type: ignore[method-assign]
+        yt = ResolvedAudio(
+            ok=True, path_or_url="https://youtu.be/fear",
+            title="FEAR", artist="NF", duration=213.0, kind="youtube",
+            source_name="YouTube search (yt-dlp)")
+        engine = mock.Mock()
+        engine._enqueue.side_effect = lambda p, k, t, **kw: {
+            "kind": k, "path": p, "title": t,
+            "artist": kw.get("artist", ""),
+            "duration": kw.get("duration", 0.0)}
+        engine.queue.return_value = [{
+            "kind": "youtube", "path": "https://youtu.be/fear",
+            "title": "FEAR"}]
+        engine.download.return_value = {
+            "ok": True, "path": "/tmp/fear-full.mp3", "title": "FEAR"}
+        with mock.patch("nomorals.media.resolver.SourceResolver") as SR, \
+                mock.patch("nomorals.media.playback.PlaybackEngine",
+                           return_value=engine):
+            SR.return_value.resolve.return_value = yt
+            SR.return_value.search_candidates_detailed.return_value = (
+                [yt], ["youtube-search — ok (1)"])
+            reply = self.runtime._control_play("fear by nf", chat.key)
+        # The handler's own return carries nothing — the ack
+        # message the flow sent IS the surface.
+        self.assertEqual(reply, "")
+        snaps = shared_registry().list(labels={
+            "owner": "play", "chat": chat.key, "title": "FEAR"})
+        self.assertTrue(snaps, "no background job was submitted")
+        job = shared_registry().collect(snaps[-1]["id"], timeout=10)
+        self.assertIsNotNone(job)
+        self.assertTrue(job.done())
+        PickCache.clear()
+        return adapter
+
+    def _assert_flow(self, platform: str) -> None:
+        adapter = self._drive_play(platform)
+        texts = [t for t, _b in adapter.sent]
+        # The designed sequence: the ack first…
+        self.assertTrue(texts and texts[0].startswith("⏳"),
+                        f"{platform} sent: {texts}")
+        # …exactly one audio artifact, captioned with the delivery
+        # line (an expression GIF may ride along; it is not the
+        # artifact and carries no caption)…
+        audio = [f for f in adapter.files if f[0].endswith(".mp3")]
+        self.assertEqual(len(audio), 1, adapter.files)
+        self.assertEqual(audio[0][1], "🎵 FEAR — NF")
+        # …and the ack EDITED to its final state — never left as a
+        # stale "downloading…" above two more messages.
+        self.assertTrue(adapter.edits,
+                        f"{platform}: the ack was never edited")
+        self.assertEqual(adapter.edits[-1][1], "🎵 FEAR — NF")
+        # Zero receipts/narration/internal ids on ANY surface text.
+        everything = "\n".join(
+            texts + [e[1] for e in adapter.edits]
+            + [c for _p, c in adapter.files])
+        for banned in ("[job ", "sources tried", "to this chat",
+                       "downloading in the background"):
+            self.assertNotIn(banned, everything)
+        self.assertIsNone(
+            re.search(r"queued \d+ \(queue \d+\)", everything))
+
+    def test_play_flow_telegram(self) -> None:
+        self._assert_flow("telegram")
+
+    def test_play_flow_whatsapp(self) -> None:
+        self._assert_flow("whatsapp")
 
 
 if __name__ == "__main__":

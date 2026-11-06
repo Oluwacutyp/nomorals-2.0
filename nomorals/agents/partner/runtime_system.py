@@ -522,7 +522,11 @@ class RuntimeSystemMixin:
         if verb == "bin":
             if not rest:
                 return self._hub_wrap(chat_key, bin_usage_text(), "bin")
-            return format_bin_result(lookup_bin(rest))
+            # The result screen carries the bin screen's keyboard
+            # too (Back / Hub) — an unwrapped result stranded the
+            # WhatsApp + userbot surfaces with no way back.
+            return self._hub_wrap(
+                chat_key, format_bin_result(lookup_bin(rest)), "bin")
         if verb == "proxy":
             # Stack: /toolhub proxy IS the tool screen (intro + Refresh +
             # Back); only "run" executes the flow.
@@ -555,9 +559,17 @@ class RuntimeSystemMixin:
         ``_send_control_reply``'s honesty rule rewrites the copy to
         a numbered fallback — the claim is never left standing
         without the buttons.
+
+        AA-77 (2026-11-05): the Telegram USERBOT surface has no
+        derivation either — it now renders real inline keyboards
+        (TelegramAdapter._inline_markup + its CallbackQuery
+        handler), so it takes the authored keyboard here exactly
+        like WhatsApp.  The Bot API surface (telegram-bot) keeps
+        the derivation path: it derives this same keyboard from
+        the origin command.
         """
         platform = (chat_key or "").partition(":")[0].strip().lower()
-        if platform != "whatsapp":
+        if platform not in ("whatsapp", "telegram"):
             return text
         from ...social.chat.hub import keyboard_for_screen
         from ...social.chat.tgbot_buttons import actionable

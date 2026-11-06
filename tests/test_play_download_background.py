@@ -5,19 +5,22 @@ Before this build, the chat handlers downloaded SYNCHRONOUSLY:
 ``_play_send_with_fallthrough`` / ``_play_send_in_chat_result`` /
 ``_control_download`` blocked the chat pump thread for the whole
 multi-minute download.  Now the handler submits a job to the shared
-JobRegistry (``nomorals/core/jobs.py``) and returns an immediate ack;
-the existing synchronous body runs on the job's worker thread,
-sends the file itself when the download lands, and posts its final
-text (tried-list / "sent" / honest "couldn't download") as a
-follow-up.  Failed workers and heartbeat-silent (presumed-dead)
-jobs are surfaced by ``_harvest_play_downloads`` — exactly once,
-honest UNKNOWN, never a fake failure.
+JobRegistry (``nomorals/core/jobs.py``); the existing synchronous
+body runs on the job's worker thread and sends the file itself when
+the download lands.  Failed workers and heartbeat-silent
+(presumed-dead) jobs are surfaced by ``_harvest_play_downloads`` —
+exactly once, honest UNKNOWN, never a fake failure.
 
-Failing-first: ``_play_download_bg`` / ``_harvest_play_downloads``
-did not exist before this build.
+Presentation overhaul (owner, 2026-11-05): the message flow is ONE
+message edited in place.  ``_play_download_bg`` sends the ack
+itself (no queue counts, no "[job …]" id), the worker edits that
+same message to the final state — the delivered item's line on
+success, the honest failure on failure — and a success posts NO
+follow-up text at all.  The handler returns "" (the kind family is
+MEDIA_DELIVERED: the ack already posted).  Jobs are found by their
+labels now — the ack no longer carries an id to parse.
 """
 
-import re
 import threading
 import time
 from types import SimpleNamespace
@@ -26,14 +29,44 @@ from unittest import mock
 import pytest
 
 
+class _FakeGateway:
+    """Records sends/files/edits; plays the adapter for edit verbs."""
+
+    def __init__(self):
+        self.sent = []    # (platform, chat, text)
+        self.files = []   # (platform, target, path, caption)
+        self.edits = []   # (message_id, text)
+        self._n = 0
+
+    def send(self, platform, chat, text, **kw):
+        self._n += 1
+        self.sent.append((platform, chat, text))
+        return SimpleNamespace(ok=True, platform=platform,
+                               message_id=f"m{self._n}")
+
+    def send_file(self, platform, target, path, caption=""):
+        self.files.append((platform, target, path, caption))
+        return SimpleNamespace(ok=True, platform=platform,
+                               message_id="f1")
+
+    def _adapter_for(self, platform):
+        return self
+
+    def edit_message(self, chat, message_id, text, *, buttons=None):
+        self.edits.append((str(message_id), text))
+        return {"ok": True}
+
+    def edit_progress(self, chat, message_id, text):
+        self.edits.append((str(message_id), text))
+        return {"ok": True}
+
+
 def _handler():
     from nomorals.agents.partner.runtime_media import RuntimeMediaMixin
 
     rt = RuntimeMediaMixin.__new__(RuntimeMediaMixin)
     rt.context = SimpleNamespace()
-    rt.gateway = mock.Mock()
-    rt.gateway.send.return_value = mock.Mock(ok=True)
-    rt.gateway.send_file.return_value = mock.Mock(ok=True)
+    rt.gateway = _FakeGateway()
     return rt
 
 
@@ -49,19 +82,20 @@ def _item(kind="soundcloud", path="https://soundcloud.com/a/b", title="Song"):
     return {"kind": kind, "path": path, "title": title, "artist": "A"}
 
 
-def _job_id_from_ack(ack: str) -> str:
-    m = re.search(r"\[job (job[0-9a-f]+)\]", ack or "")
-    assert m, f"ack carries no job id: {ack!r}"
-    return m.group(1)
-
-
-def _collect(chat_key, job_id, timeout=10.0):
+def _collect(chat_key, title="Song", timeout=10.0):
     from nomorals.core.jobs import shared_registry
 
-    job = shared_registry().collect(job_id, timeout=timeout)
+    snaps = shared_registry().list(
+        labels={"owner": "play", "chat": chat_key, "title": title})
+    assert snaps, f"no play job for {chat_key}/{title}"
+    job = shared_registry().collect(snaps[-1]["id"], timeout=timeout)
     assert job is not None and job.done(), \
-        f"job {job_id} never finished: {job.status if job else None}"
+        f"job never finished: {job.status if job else None}"
     return job
+
+
+def _sent_texts(rt):
+    return [t for _p, _c, t in rt.gateway.sent]
 
 
 # ── 1: the handler returns without blocking ───────────────────────────
@@ -83,57 +117,55 @@ def test_handler_returns_immediately_while_download_blocks():
     engine.download.side_effect = _blocking_download
     engine.queue.return_value = []
 
-    out = "queued 1 (queue 1):\n  - Song"
     t0 = time.time()
-    ack = rt._play_download_bg(
-        chat, chat.key, out,
-        lambda: rt._play_send_in_chat_result(engine, _item(), out, chat),
+    out = rt._play_download_bg(
+        chat, chat.key, "⏳ Song",
+        lambda: rt._play_send_in_chat_result(engine, _item(), chat),
         title="Song")
     elapsed = time.time() - t0
     assert elapsed < 2.0, \
         f"handler blocked for {elapsed:.1f}s on a parked download"
-    assert "downloading in the background" in ack
-    assert out in ack
-    job_id = _job_id_from_ack(ack)
+    # The ack already posted — the handler's own return is empty.
+    assert out == ""
+    assert _sent_texts(rt) == ["⏳ Song"]
     assert started.wait(5), "job worker never started the download"
     # Nothing delivered yet — the download is still parked.
-    rt.gateway.send_file.assert_not_called()
+    assert rt.gateway.files == []
     release.set()
-    job = _collect(chat.key, job_id)
+    job = _collect(chat.key)
     assert job.status == "done"
     res = job.result
     assert res["delivered"] is True and res["sent"] is True
-    rt.gateway.send_file.assert_called_once_with(
-        "telegram", "telegram:bg-1", "/tmp/song.mp3",
-        caption="🎵 Song")
+    assert res["ack_id"] == "m1"
+    assert rt.gateway.files == [
+        ("telegram", "telegram:bg-1", "/tmp/song.mp3", "🎵 Song — A")]
+    # The ack was edited to the final state — the delivered line.
+    assert rt.gateway.edits == [("m1", "🎵 Song — A")]
 
 
-# ── 2: completion delivers the file + outcome text to the right chat ──
+# ── 2: completion: file + ack edit to the right chat, no follow-up ────
 
 
-def test_completed_job_sends_file_and_followup_to_originating_chat():
+def test_completed_job_sends_file_and_edits_ack():
     rt = _handler()
     chat = _chat("bg-2")
     engine = mock.Mock()
     engine.download.return_value = {
         "ok": True, "path": "/tmp/song.mp3", "title": "Song"}
     engine.queue.return_value = []
-    out = "queued 1 (queue 1):\n  - Song"
-    ack = rt._play_download_bg(
-        chat, chat.key, out,
-        lambda: rt._play_send_in_chat_result(engine, _item(), out, chat),
+    out = rt._play_download_bg(
+        chat, chat.key, "⏳ Song",
+        lambda: rt._play_send_in_chat_result(engine, _item(), chat),
         title="Song")
-    job = _collect(chat.key, _job_id_from_ack(ack))
+    assert out == ""
+    job = _collect(chat.key)
     assert job.result["delivered"] is True
-    rt.gateway.send_file.assert_called_once_with(
-        "telegram", "telegram:bg-2", "/tmp/song.mp3", caption="🎵 Song")
-    # No meta-narration (owner rule, 2026-11-01): a successful
-    # background delivery posts NO follow-up text — the file landing
-    # in the chat is the completion signal, and the job records
-    # delivered=True so the harvester never invents a lost report.
-    followups = [c.args[2] for c in rt.gateway.send.call_args_list]
-    assert followups == [], f"unexpected follow-up text: {followups}"
-    assert job.result["delivered"] is True
+    assert rt.gateway.files == [
+        ("telegram", "telegram:bg-2", "/tmp/song.mp3", "🎵 Song — A")]
+    # No meta-narration: after the ack, NO further text is SENT —
+    # the completion is the ack's edit plus the file landing.
+    assert _sent_texts(rt) == ["⏳ Song"]
+    assert rt.gateway.edits == [("m1", "🎵 Song — A")]
 
 
 # ── 3: honest failure — wording + queue hygiene preserved in the job ──
@@ -151,17 +183,19 @@ def test_failed_download_reports_honestly_and_drops_queue_row():
          "title": item["title"]}]
     removed = []
     engine.remove.side_effect = lambda idx: removed.append(idx)
-    out = "queued 1 (queue 1):\n  - Song"
-    ack = rt._play_download_bg(
-        chat, chat.key, out,
-        lambda: rt._play_send_in_chat_result(engine, item, out, chat),
+    rt._play_download_bg(
+        chat, chat.key, "⏳ Song",
+        lambda: rt._play_send_in_chat_result(engine, item, chat),
         title="Song")
-    job = _collect(chat.key, _job_id_from_ack(ack))
+    job = _collect(chat.key)
     assert job.result["sent"] is False
-    rt.gateway.send_file.assert_not_called()
-    followups = [c.args[2] for c in rt.gateway.send.call_args_list]
-    assert any("couldn't download" in t for t in followups), followups
-    assert all("couldn't send" not in t for t in followups)
+    assert rt.gateway.files == []
+    # The failure lands as the ack's edit — once, honestly worded.
+    assert _sent_texts(rt) == ["⏳ Song"]
+    assert len(rt.gateway.edits) == 1
+    edit_text = rt.gateway.edits[0][1]
+    assert "couldn't download" in edit_text
+    assert "couldn't send" not in edit_text
     assert removed == [0], \
         f"stranded queue row not dropped in background path: {removed}"
 
@@ -181,18 +215,20 @@ def test_fallthrough_still_tries_next_candidate_in_background():
         {"ok": True, "path": "/tmp/yt.mp3", "title": "Song"}]
     engine.queue.return_value = []
     attempts = ["soundcloud-search — ok (1)", "youtube-search — ok (1)"]
-    out = "queued 1 (queue 1):\n  - Song"
-    ack = rt._play_download_bg(
-        chat, chat.key, out,
-        lambda: (rt._play_send_with_fallthrough(
-            engine, sc, [yt], attempts, out, chat), True),
+    rt._play_download_bg(
+        chat, chat.key, "⏳ Song",
+        lambda: rt._play_send_with_fallthrough(
+            engine, sc, [yt], attempts, chat),
         title="Song")
-    job = _collect(chat.key, _job_id_from_ack(ack))
+    job = _collect(chat.key)
     assert job.status == "done"
-    rt.gateway.send_file.assert_called_once()
-    assert rt.gateway.send_file.call_args.args[2] == "/tmp/yt.mp3"
-    followups = [c.args[2] for c in rt.gateway.send.call_args_list]
-    assert any("sources tried (2)" in t for t in followups), followups
+    assert len(rt.gateway.files) == 1
+    assert rt.gateway.files[0][2] == "/tmp/yt.mp3"
+    # The tried-list is journal-only now: it appears in NO surface
+    # text (ack, edits, captions).
+    surface = _sent_texts(rt) + [t for _m, t in rt.gateway.edits] \
+        + [c for _p, _t, _path, c in rt.gateway.files]
+    assert all("sources tried" not in t for t in surface), surface
     # Progress was reported between candidates (heartbeat visibility).
     progress = job.snapshot()["last_progress"]
     assert progress and "trying" in progress, \
@@ -235,9 +271,9 @@ def test_pick_consumed_on_successful_background_send():
     rt, token, engine = _pick_rt_and_token(chat, download_ok=True)
     with mock.patch("nomorals.media.playback.PlaybackEngine",
                     return_value=engine):
-        ack = rt._play_pick(f"{token} 1", chat.key)
-    assert "downloading in the background" in ack
-    job = _collect(chat.key, _job_id_from_ack(ack))
+        out = rt._play_pick(f"{token} 1", chat.key)
+    assert out == ""
+    job = _collect(chat.key)
     assert job.result["sent"] is True
     assert PickCache.get(token) is None, \
         "pick-list must be consumed once the picked track was sent"
@@ -250,8 +286,8 @@ def test_pick_not_consumed_when_background_download_fails():
     rt, token, engine = _pick_rt_and_token(chat, download_ok=False)
     with mock.patch("nomorals.media.playback.PlaybackEngine",
                     return_value=engine):
-        ack = rt._play_pick(f"{token} 1", chat.key)
-    job = _collect(chat.key, _job_id_from_ack(ack))
+        rt._play_pick(f"{token} 1", chat.key)
+    job = _collect(chat.key)
     assert job.result["sent"] is False
     assert PickCache.get(token) is not None, \
         "a failed pick must leave the list alive for another try"
@@ -275,13 +311,13 @@ def test_presumed_dead_job_surfaces_unknown_exactly_once():
     with job.lock:
         job.last_heartbeat_at = time.time() - 400.0
     rt._harvest_play_downloads(chat.key, chat)
-    sends = [c.args[2] for c in rt.gateway.send.call_args_list]
+    sends = _sent_texts(rt)
     assert len(sends) == 1, f"expected one UNKNOWN note, got {sends}"
     assert "went quiet" in sends[0] and "outcome unknown" in sends[0]
     assert "Song" in sends[0]
     # Exactly once: a second harvest must not re-report the same job.
     rt._harvest_play_downloads(chat.key, chat)
-    assert rt.gateway.send.call_count == 1
+    assert len(_sent_texts(rt)) == 1
     release.set()
     shared_registry().collect(job.id, timeout=5)
 
@@ -293,12 +329,12 @@ def test_harvest_ignores_jobs_the_body_already_delivered():
     chat = _chat("bg-8")
     job = shared_registry().submit(
         lambda: {"ok": True, "delivered": True, "sent": True,
-                 "title": "Song", "text": "▶ sent"},
+                 "title": "Song", "text": "🎵 Song"},
         tool="play-download",
         labels={"owner": "play", "chat": chat.key, "title": "Song"})
     shared_registry().collect(job.id, timeout=5)
     rt._harvest_play_downloads(chat.key, chat)
-    rt.gateway.send.assert_not_called()
+    assert rt.gateway.sent == []
 
 
 def test_harvest_reports_crashed_worker():
@@ -315,9 +351,29 @@ def test_harvest_reports_crashed_worker():
         labels={"owner": "play", "chat": chat.key, "title": "Song"})
     shared_registry().collect(job.id, timeout=5)
     rt._harvest_play_downloads(chat.key, chat)
-    sends = [c.args[2] for c in rt.gateway.send.call_args_list]
+    sends = _sent_texts(rt)
     assert len(sends) == 1 and "broke" in sends[0], sends
     assert "worker exploded" in sends[0]
+
+
+def test_harvest_edits_the_ack_when_the_body_could_not():
+    # done-but-undelivered with a surviving ack id: the outcome
+    # REPLACES the ack (edit), it does not post as a new message.
+    from nomorals.core.jobs import shared_registry
+
+    rt = _handler()
+    chat = _chat("bg-12")
+    job = shared_registry().submit(
+        lambda: {"ok": True, "delivered": False, "sent": False,
+                 "title": "Song", "ack_id": "m1",
+                 "text": "couldn't download the audio: DRM"},
+        tool="play-download",
+        labels={"owner": "play", "chat": chat.key, "title": "Song"})
+    shared_registry().collect(job.id, timeout=5)
+    rt._harvest_play_downloads(chat.key, chat)
+    assert rt.gateway.edits == [
+        ("m1", "couldn't download the audio: DRM")]
+    assert rt.gateway.sent == []
 
 
 # ── 7: /download goes to the background too ───────────────────────────
@@ -334,16 +390,19 @@ def test_control_download_returns_ack_and_sends_when_done(tmp_path):
         stages=[], hint="")
     with mock.patch("nomorals.media.downloader.MediaDownloader") as MD:
         MD.return_value.download.return_value = report
-        ack = rt._control_download(
+        out = rt._control_download(
             "https://example.com/clip.mp3 audio", chat_key=chat.key)
-    assert "downloading" in ack and "background" in ack
-    job = _collect(chat.key, _job_id_from_ack(ack))
+    assert out == ""
+    assert _sent_texts(rt) == ["⏳ https://example.com/clip.mp3"]
+    job = _collect(chat.key, title="https://example.com/clip.mp3")
     assert job.result["delivered"] is True
-    rt.gateway.send_file.assert_called_once()
-    assert rt.gateway.send_file.call_args.args[2] == str(target)
-    followups = [c.args[2] for c in rt.gateway.send.call_args_list]
-    assert any("downloaded" in t and "sent to this chat" in t
-               for t in followups), followups
+    assert len(rt.gateway.files) == 1
+    assert rt.gateway.files[0][2] == str(target)
+    # Final state replaces the ack: the item's own line — no size
+    # receipt, no "sent to this chat".
+    assert rt.gateway.edits == [("m1", "🎵 Clip")]
+    surface = _sent_texts(rt) + [t for _m, t in rt.gateway.edits]
+    assert all("sent to this chat" not in t for t in surface)
 
 
 # ── 8: registry failure falls back to the synchronous body ────────────
@@ -356,16 +415,14 @@ def test_submit_failure_falls_back_to_synchronous_send():
     engine.download.return_value = {
         "ok": True, "path": "/tmp/song.mp3", "title": "Song"}
     engine.queue.return_value = []
-    out = "queued 1 (queue 1):\n  - Song"
     with mock.patch("nomorals.core.jobs.shared_registry",
                     side_effect=RuntimeError("registry down")):
         text = rt._play_download_bg(
-            chat, chat.key, out,
+            chat, chat.key, "⏳ Song",
             lambda: rt._play_send_in_chat_result(
-                engine, _item(), out, chat),
+                engine, _item(), chat),
             title="Song")
-    # Sync fallback returns the command's own report only — the
-    # "▶ sent" delivery narration is gone (owner no-meta-narration
-    # rule, 2026-11-01); the file send itself is the delivery.
-    assert text == out and "downloading in the background" not in text
-    rt.gateway.send_file.assert_called_once()
+    # Sync fallback returns the body's own outcome line — the file
+    # send itself is the delivery, no narration around it.
+    assert text == "🎵 Song — A"
+    assert len(rt.gateway.files) == 1

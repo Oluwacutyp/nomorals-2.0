@@ -25,6 +25,7 @@ from ...partner.gating import (
 from ...partner.presence import Presence, decide_presence, human_typing_seconds
 from ...social.chat.base import ChatKind, ChatMessage, ChatRef
 from ...social.chat.gateway import ChatGateway
+from ...social.chat.typography import apply_stamp
 from ...storage.kv import KVStore
 from .brain import PartnerBrain
 from .approvals import _direct_approve, _direct_deny, _key_set
@@ -2304,8 +2305,20 @@ class PartnerRuntime(
                         seconds=typing_seconds,
                     )
                     _log.info("_send_reply: typing returned %s", typing_result)
+                # Conversational replies are NEVER stamped or
+                # otherwise mutated at this boundary: the personal-
+                # surface constitution (brain-gate + reply-guard
+                # pins, post-2026-11-04 harm) is byte-identical
+                # passage — Devon speaking as the owner in his own
+                # chats carries no brand, on any surface.  The
+                # always-present stamp (owner law, 2026-11-05)
+                # governs SYSTEM/PRESENTED output: control replies
+                # (_send_control_reply), scheduled reporters and
+                # presented cards carry it; free conversation does
+                # not.
+                send_text = part
                 result = self.gateway.send(
-                    message.chat.platform, message.chat, part,
+                    message.chat.platform, message.chat, send_text,
                     reply_to=message.reply_to if message.chat.kind == ChatKind.GROUP else "",
                     # A live turn's reply, first dispatch attempt:
                     # send-once guards must never swallow it.
@@ -4051,6 +4064,19 @@ class PartnerRuntime(
             # authored buttons is the adapter-derivation path
             # (Telegram derives hub keyboards from the text):
             # the claim stays, the adapter owns the buttons.
+        # The stamp (owner law, 2026-11-05): always present on
+        # presented output — this channel is where control replies
+        # become output, so it stamps here, once (the transports
+        # render it down: Telegram italic entity, WhatsApp _…_,
+        # plain = the bare line).  Cards already stamped upstream
+        # pass unchanged.  A plain unadorned reply (no markup, no
+        # buttons) takes the stamp's LIGHTEST form — one line,
+        # no blank-line ceremony.
+        try:
+            text = apply_stamp(
+                text, light=not buttons and "<" not in text)
+        except Exception as e:  # noqa: BLE001 - the reply must land
+            record_failure("runtime.PartnerRuntime._send_control_reply.stamp", e)
         # §16 ephemeral answers: handle_control stamps replies
         # of sensitive kinds in groups that opted in (p5
         # ephemeral).  The ladder, in order: the adapter's
@@ -4091,8 +4117,8 @@ class PartnerRuntime(
                 "that's yours alone — check your DMs with me.",
                 fresh=True)
         self._typing_for(message.chat, text)
-        parse_mode = "HTML" if ("<b>" in text or "<code>" in text) \
-            else ""
+        parse_mode = "HTML" if ("<b>" in text or "<code>" in text
+                                or "<i>" in text) else ""
         return self.gateway.send(message.chat.platform, message.chat,
                                  text, buttons=buttons,
                                  parse_mode=parse_mode,

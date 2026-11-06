@@ -190,10 +190,11 @@ def test_fallthrough_swaps_queue_to_delivered():
         [dict(sc)],
         [{"ok": False, "reason": "This video is DRM protected"},
          {"ok": True, "path": "/tmp/yt.mp3", "title": "Song"}])
-    out = rt._play_send_with_fallthrough(
+    out, sent = rt._play_send_with_fallthrough(
         engine, sc, [yt], ["soundcloud-search — ok (1)",
-                           "youtube-search — ok (1)"], "queued 1:", chat)
-    assert "sent" in out
+                           "youtube-search — ok (1)"], chat)
+    assert sent is True
+    assert out == "🎵 Song — A"
     rows = engine.queue()
     assert len(rows) == 1
     assert rows[0]["kind"] == "youtube"
@@ -208,9 +209,10 @@ def test_fallthrough_first_success_leaves_queue():
     engine = _FakeQueueEngine(
         [dict(sc)],
         [{"ok": True, "path": "/tmp/sc.mp3", "title": "Song"}])
-    out = rt._play_send_with_fallthrough(
-        engine, sc, [], ["soundcloud-search — ok (1)"], "queued 1:", chat)
-    assert "sent" in out
+    out, sent = rt._play_send_with_fallthrough(
+        engine, sc, [], ["soundcloud-search — ok (1)"], chat)
+    assert sent is True
+    assert out == "🎵 Song — A"
     rows = engine.queue()
     assert len(rows) == 1
     assert rows[0]["kind"] == "soundcloud"
@@ -226,7 +228,7 @@ def test_send_failure_removes_broken_item_from_queue():
             "title": "Song"}
     engine = _FakeQueueEngine(
         [dict(item)], [{"ok": False, "reason": "video unavailable"}])
-    out = rt._play_send_in_chat(engine, item, "queued:", chat)
+    out = rt._play_send_in_chat(engine, item, chat)
     assert "couldn't download" in out
     assert engine.queue() == []
     rt.gateway.send_file.assert_not_called()
@@ -239,8 +241,8 @@ def test_send_success_keeps_item_in_queue():
             "title": "Song"}
     engine = _FakeQueueEngine(
         [dict(item)], [{"ok": True, "path": "/tmp/s.mp3", "title": "Song"}])
-    out = rt._play_send_in_chat(engine, item, "queued:", chat)
-    assert "sent" in out
+    out = rt._play_send_in_chat(engine, item, chat)
+    assert out == "🎵 Song"
     assert len(engine.queue()) == 1
 
 
@@ -271,24 +273,30 @@ class _FakePickEngine:
         return {}
 
 
-def _wait_play_job(ack: str, timeout: float = 10.0):
-    """Collect the background play-download job an ack announced."""
-    import re
+def _wait_play_job(chat_key: str = "telegram:12345",
+                   title: str = "Song", timeout: float = 10.0):
+    """Collect the newest background play-download job for a chat —
+    found by its labels (the ack carries no job id anymore)."""
     from nomorals.core.jobs import shared_registry
 
-    m = re.search(r"\[job (job[0-9a-f]+)\]", ack or "")
-    assert m, f"ack carries no job id: {ack!r}"
-    job = shared_registry().collect(m.group(1), timeout=timeout)
+    snaps = shared_registry().list(
+        labels={"owner": "play", "chat": chat_key, "title": title})
+    assert snaps, f"no play job for {chat_key}/{title}"
+    job = shared_registry().collect(snaps[-1]["id"], timeout=timeout)
     assert job is not None and job.done(), \
         f"job never finished: {job.status if job else None}"
     return job
 
 
-def _followup_texts(rt) -> list:
-    """Texts the job body posted to the chat (the synchronous reply
-    minus the part the ack already showed)."""
-    return [c.args[2] for c in rt.gateway.send.call_args_list
-            if len(c.args) > 2]
+def _edit_texts(rt) -> list:
+    """Texts the ack was edited to (the mock adapter's edit verbs)."""
+    adapter = rt.gateway._adapter_for.return_value
+    texts = []
+    for c in adapter.edit_message.call_args_list:
+        texts.append(str(c.args[2]) if len(c.args) > 2 else "")
+    for c in adapter.edit_progress.call_args_list:
+        texts.append(str(c.args[2]) if len(c.args) > 2 else "")
+    return texts
 
 
 def test_pick_failed_download_keeps_list():
@@ -302,17 +310,19 @@ def test_pick_failed_download_keeps_list():
     _FakePickEngine.downloads = [{"ok": False, "reason": "DRM protected"}]
     with mock.patch("nomorals.media.playback.PlaybackEngine", _FakePickEngine):
         ack1 = rt._play_pick(f"{token} 1", "telegram:12345")
-    assert "downloading in the background" in ack1
-    _wait_play_job(ack1)
-    assert any("couldn't download" in t for t in _followup_texts(rt))
+    assert ack1 == ""  # the ack already posted; nothing to return
+    job1 = _wait_play_job()
+    assert job1.result["sent"] is False
+    assert any("couldn't download" in t for t in _edit_texts(rt))
     # Failed pick must NOT consume the list — the user can pick again.
     assert PickCache.get(token) is not None
     _FakePickEngine.downloads = [{"ok": True, "path": "/tmp/s.mp3",
                                    "title": "Song"}]
     with mock.patch("nomorals.media.playback.PlaybackEngine", _FakePickEngine):
         ack2 = rt._play_pick(f"{token} 1", "telegram:12345")
-    _wait_play_job(ack2)
-    assert any("sent" in t for t in _followup_texts(rt))
+    assert ack2 == ""
+    job2 = _wait_play_job()
+    assert job2.result["sent"] is True
     # Successful pick consumes the list.
     assert PickCache.get(token) is None
     PickCache.clear()
@@ -385,7 +395,7 @@ def test_single_send_botcheck_appends_short_hint():
         "ok": False,
         "reason": ("YouTube download failed: ERROR: [youtube] abc: "
                    "Sign in to confirm you're not a bot.")}
-    out = rt._play_send_in_chat(engine, {"title": "X"}, "queued:", chat)
+    out = rt._play_send_in_chat(engine, {"title": "X"}, chat)
     assert "couldn't download" in out
     assert "/cookies" in out
     assert BOT_COOKIE_HELP not in out
@@ -398,7 +408,7 @@ def test_single_send_generic_no_hint():
     engine = mock.Mock()
     engine.download.return_value = {"ok": False,
                                     "reason": "video unavailable"}
-    out = rt._play_send_in_chat(engine, {"title": "X"}, "queued:", chat)
+    out = rt._play_send_in_chat(engine, {"title": "X"}, chat)
     assert "couldn't download" in out
     assert "/cookies" not in out
 

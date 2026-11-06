@@ -25,6 +25,7 @@ Operational notes that matter:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import json
@@ -1189,6 +1190,24 @@ class TelegramAdapter(ChatAdapter):
                               "deleted_ids": deleted,
                               "envelope": None}))
 
+                # Inline-button taps (AA-77): the userbot's own
+                # messages now carry real inline keyboards (see
+                # _inline_markup), and a tap comes back as a
+                # CallbackQuery — route it through the same pipeline
+                # as a typed command.  Guarded: an ancient Telethon
+                # without the event class logs once instead of
+                # taking the whole surface down.
+                _cb_event_cls = getattr(events, "CallbackQuery", None)
+                if _cb_event_cls is not None:
+                    @client.on(_cb_event_cls())
+                    async def on_callback(event: Any) -> None:
+                        await self._handle_callback_query(event, handler)
+                else:
+                    _log.warning("telegram: Telethon has no "
+                                 "CallbackQuery event — inline "
+                                 "buttons on this surface are "
+                                 "send-only")
+
                 await client.run_until_disconnected()
             finally:
                 try:
@@ -1804,6 +1823,84 @@ class TelegramAdapter(ChatAdapter):
         _log.info("telegram: DELIVERING inbound from %s in %s: %.60s", handler_msg.sender, chat_id, text)
         self._deliver(handler, handler_msg)
 
+    async def _handle_callback_query(self, event: Any,
+                                     handler: IncomingHandler) -> None:
+        """One inline-button tap on a userbot message → a command.
+
+        The tap's data IS the command the button was authored with —
+        the same convention as the Bot API adapter's callbacks and
+        both WhatsApp bridges (a tap re-enters as ``/`` + data).  The
+        synthetic message carries the TAPPER as its sender, so every
+        downstream gate (owner-only kinds, public gates, §33) judges
+        the tap exactly like the tapper typing the command: a tap
+        never grants more than typing would.  The query is answered
+        so the client spinner stops.  Never raises.
+        """
+        try:
+            raw = getattr(event, "data", b"") or b""
+            if isinstance(raw, (bytes, bytearray)):
+                data = bytes(raw).decode("utf-8", "replace").strip()
+            else:
+                data = str(raw).strip()
+            # The answer is cosmetic (it stops the client spinner);
+            # the routing below is the substance.
+            with contextlib.suppress(Exception):
+                await event.answer()
+            if not data:
+                return
+            chat_id = str(getattr(event, "chat_id", "") or "")
+            sender_id = str(getattr(event, "sender_id", "") or "")
+            if not chat_id:
+                return
+            kind: Any = (ChatKind.GROUP if chat_id.startswith("-")
+                         else ChatKind.DM)
+            title = ""
+            try:
+                entity = await event.get_chat()
+                if entity is not None:
+                    kind = _event_kind_override(_kind_for(entity),
+                                                event)
+                    title = str(getattr(entity, "title", "") or "")
+                    chat_id = _canonical_chat_id(
+                        chat_id, str(getattr(entity, "id", "")), kind)
+            except Exception:  # noqa: BLE001 - sign heuristic stands
+                pass
+            who = sender_id
+            username = ""
+            try:
+                sender = await event.get_sender()
+                if sender is not None:
+                    username = str(getattr(sender, "username", "")
+                                   or "")
+                    who = (username
+                           or str(getattr(sender, "first_name", "")
+                                  or "")
+                           or sender_id)
+            except Exception:  # noqa: BLE001 - id alone still routes
+                pass
+            text = data if data.startswith("/") else f"/{data}"
+            message = ChatMessage(
+                chat=ChatRef(platform=self.name, chat_id=chat_id,
+                             kind=kind, title=title, peer=who),
+                incoming=True,
+                text=text,
+                sender=who,
+                sender_id=sender_id,
+                sender_username=username,
+                media=[],
+                reply_to="",
+                mentioned=False,
+                ts=time.time(),
+                message_id=f"cb_{getattr(event, 'message_id', '') or ''}",
+                meta={"callback_query": True,
+                      "partner_context": getattr(
+                          self, "partner_context", False)},
+            )
+            self._deliver(handler, message)
+        except Exception as exc:  # noqa: BLE001 - a tap must never
+            record_failure(                # break the event loop
+                'telegram.TelegramAdapter._handle_callback_query', exc)
+
     # ── outbound ─────────────────────────────────────────────────────────────
     def send(self, chat: ChatRef, text: str, *,
              reply_to: str = "",
@@ -1817,7 +1914,7 @@ class TelegramAdapter(ChatAdapter):
         try:
             result = self._run_on_loop(self._send_async(
                 client, chat, text, reply_to, parse_mode,
-                reply_keyboard=reply_keyboard))
+                reply_keyboard=reply_keyboard, buttons=buttons))
             try:
                 from ...core.error_system import heartbeat
                 heartbeat("telegram", True)
@@ -1876,9 +1973,52 @@ class TelegramAdapter(ChatAdapter):
             await asyncio.sleep(min(wait, self.flood_max_wait_s))
             return await fn()
 
+    def _inline_markup(self,
+                       buttons: list[list[tuple[str, str]]] | None,
+                       ) -> Any | None:
+        """Telethon inline-button matrix for authored chat buttons.
+
+        Each authored ``(label, data)`` becomes a native inline
+        button whose callback data is the command string itself — a
+        tap comes back through the CallbackQuery handler as that
+        command (the Bot API adapter's and both WhatsApp bridges'
+        convention).  URL payloads render as native URL buttons.
+        Rows keep their authored shape — layout is the shared
+        presentation layer's call, not the transport's.  A button
+        whose data exceeds Telegram's 64-byte callback limit is
+        skipped with a log, never a failed send.  None when nothing
+        attachable remains (or Telethon is unavailable).  Never
+        raises.
+        """
+        if not buttons:
+            return None
+        try:
+            from telethon import Button
+        except Exception:  # noqa: BLE001 - no Telethon, no buttons
+            return None
+        rows: list[list[Any]] = []
+        for row in buttons:
+            built: list[Any] = []
+            for label, data in (row or ()):
+                data = str(data or "")
+                if data.startswith(("http://", "https://")):
+                    built.append(Button.url(str(label), data))
+                    continue
+                raw = data.encode("utf-8")
+                if not raw or len(raw) > 64:
+                    _log.warning(
+                        "telegram: dropping button %r — callback data "
+                        "%d bytes (Telegram limit 64)", label, len(raw))
+                    continue
+                built.append(Button.inline(str(label), raw))
+            if built:
+                rows.append(built)
+        return rows or None
+
     async def _send_async(self, client: Any, chat: ChatRef, text: str, reply_to: str,
                           parse_mode: str = "",
-                          reply_keyboard: list[list[str]] | None = None) -> Any:
+                          reply_keyboard: list[list[str]] | None = None,
+                          buttons: list[list[tuple[str, str]]] | None = None) -> Any:
         # Try to use cached input entity first (most reliable for DMs)
         entity = self._input_entity_cache.get(chat.chat_id)
         if entity is None:
@@ -1907,6 +2047,13 @@ class TelegramAdapter(ChatAdapter):
             except Exception:  # noqa: BLE001 - keyboard is cosmetic
                 _log.debug("telegram: could not build reply keyboard",
                            exc_info=True)
+        # Inline action buttons (AA-77): a real Telethon inline
+        # matrix, attached to the last chunk like the reply keyboard.
+        # A message carries ONE reply_markup: the authored inline
+        # buttons win over the persistent reply keyboard when both
+        # were requested — the keyboard is chrome, the buttons are
+        # the message's own actions.
+        inline = self._inline_markup(buttons)
         chunks = _chunk_text(text, for_platform("telegram").max_text)
         result = None
         plain_fallback = False
@@ -1914,8 +2061,11 @@ class TelegramAdapter(ChatAdapter):
             # The keyboard goes on the last chunk only — it replaces the
             # chat's current keyboard, so an earlier chunk carrying it
             # would be immediately superseded anyway.
-            if markup is not None and i == len(chunks) - 1:
-                kwargs["buttons"] = markup
+            if i == len(chunks) - 1:
+                if inline is not None:
+                    kwargs["buttons"] = inline
+                elif markup is not None:
+                    kwargs["buttons"] = markup
             if plain_fallback:
                 from .platforms import strip_html
 
@@ -2341,23 +2491,37 @@ class TelegramAdapter(ChatAdapter):
         return self._admin(self._mark_read_coro(chat), "read state")
 
     async def _edit_coro(self, chat: ChatRef, message_id: str,
-                         text: str) -> None:
+                         text: str,
+                         buttons: list[list[tuple[str, str]]]
+                         | None = None) -> None:
         entity = await self._resolve(chat)
+        kwargs: dict[str, Any] = {}
+        if buttons:
+            markup = self._inline_markup(buttons)
+            if markup is not None:
+                kwargs["buttons"] = markup
         await self._client.edit_message(entity, int(message_id),
-                                        str(text or ""))
+                                        str(text or ""), **kwargs)
 
     def edit_message(self, chat: ChatRef, message_id: str,
-                     text: str) -> dict[str, Any]:
+                     text: str, *,
+                     buttons: list[list[tuple[str, str]]] | None = None,
+                     ) -> dict[str, Any]:
         """Edit one message — MTProto edits the account's OWN
         messages; Telethon raises on anyone else's and that
         refusal surfaces verbatim.  Telegram sets no age window
-        on editing own messages."""
+        on editing own messages.  ``buttons`` (when given) swaps
+        the message's inline keyboard for the authored one;
+        omitted/empty leaves any existing keyboard untouched —
+        the ack-edit path edits text-only messages, which never
+        carried one."""
         if not str(message_id).strip().lstrip("-").isdigit():
             return {"ok": False,
                     "error": "message_id must be the numeric "
                              "Telegram message id"}
         return self._admin(
-            self._edit_coro(chat, message_id, text), "edit_message")
+            self._edit_coro(chat, message_id, text, buttons),
+            "edit_message")
 
     async def _revoke_coro(self, chat: ChatRef,
                            message_id: str) -> None:

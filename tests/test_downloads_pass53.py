@@ -50,7 +50,6 @@ a localhost HTTP server for the direct path, injected fake sessions.
 from __future__ import annotations
 
 import http.server
-import re
 import sqlite3
 import subprocess
 import threading
@@ -492,10 +491,15 @@ def _chat(chat_id):
     return chat
 
 
-def _job_id_from_ack(ack: str) -> str:
-    m = re.search(r"\[job (job[0-9a-f]+)\]", ack or "")
-    assert m, f"ack carries no job id: {ack!r}"
-    return m.group(1)
+def _job_id_by_labels(chat_key: str, title: str) -> str:
+    """The ack no longer prints a job id (presentation law) — jobs
+    are found by their labels instead."""
+    from nomorals.core.jobs import shared_registry
+
+    snaps = shared_registry().list(
+        labels={"owner": "play", "chat": chat_key, "title": title})
+    assert snaps, f"no play job for {chat_key}/{title}"
+    return snaps[-1]["id"]
 
 
 # ── F8: duplicate submission is refused ──────────────────────────────
@@ -516,17 +520,18 @@ def test_duplicate_chat_download_is_not_submitted_twice():
 
     ack1 = rt._play_download_bg(chat, chat.key, "⏳ first", produce,
                                 title="Same Song")
-    assert "downloading in the background" in ack1
+    assert ack1 == ""  # submitted: the ack message itself was sent
     ack2 = rt._play_download_bg(chat, chat.key, "⏳ second", produce,
                                 title="Same Song")
     assert "already" in ack2.lower(), ack2
+    assert "[job " not in ack2  # no internal id in the refusal
     active = [j for j in shared_registry().list()
               if j["labels"].get("chat") == chat.key
               and j["labels"].get("title") == "Same Song"
               and j["status"] == "running"]
     assert len(active) == 1, active
     release.set()
-    _wait_job(shared_registry(), _job_id_from_ack(ack1))
+    _wait_job(shared_registry(), _job_id_by_labels(chat.key, "Same Song"))
     assert len(calls) == 1, "the download body ran more than once"
 
 
@@ -545,11 +550,13 @@ def test_different_title_still_submits():
                                 title="Song A p53")
     ack2 = rt._play_download_bg(chat, chat.key, "⏳ b", produce,
                                 title="Song B p53")
-    assert "downloading in the background" in ack2
-    assert _job_id_from_ack(ack1) != _job_id_from_ack(ack2)
+    assert ack1 == "" and ack2 == ""
+    id_a = _job_id_by_labels(chat.key, "Song A p53")
+    id_b = _job_id_by_labels(chat.key, "Song B p53")
+    assert id_a != id_b
     release.set()
-    _wait_job(shared_registry(), _job_id_from_ack(ack1))
-    _wait_job(shared_registry(), _job_id_from_ack(ack2))
+    _wait_job(shared_registry(), id_a)
+    _wait_job(shared_registry(), id_b)
 
 
 # ── F7 (chat surface): /download cancel <job> ────────────────────────
@@ -569,7 +576,8 @@ def test_download_cancel_command_requests_cancellation():
 
     ack = rt._play_download_bg(chat, chat.key, "⏳ dl", produce,
                                title="Cancel Me")
-    job_id = _job_id_from_ack(ack)
+    assert ack == ""
+    job_id = _job_id_by_labels(chat.key, "Cancel Me")
     reply = rt._control_download(f"cancel {job_id}", chat_key=chat.key)
     assert "cancel" in reply.lower(), reply
     job = shared_registry().poll(job_id)
@@ -594,7 +602,8 @@ def test_download_cancel_refuses_another_chats_job():
 
     ack = rt._play_download_bg(chat_a, chat_a.key, "⏳ dl", produce,
                                title="Not Yours")
-    job_id = _job_id_from_ack(ack)
+    assert ack == ""
+    job_id = _job_id_by_labels(chat_a.key, "Not Yours")
     reply = rt._control_download(f"cancel {job_id}",
                                  chat_key=chat_b.key)
     job = shared_registry().poll(job_id)
@@ -644,7 +653,8 @@ def test_restart_mid_download_is_reported_once_not_silently_lost():
         chat, chat.key, "⏳ dl",
         lambda: (release.wait(10), ("done", True))[1],
         title="Lost Song")
-    job_id = _job_id_from_ack(ack)
+    assert ack == ""
+    job_id = _job_id_by_labels(chat.key, "Lost Song")
     rows = db.query("SELECT * FROM play_download_jobs WHERE job_id = ?",
                     (job_id,))
     assert rows and rows[0]["status"] == "running", rows

@@ -187,6 +187,30 @@ class SendTests(unittest.TestCase):
         finally:
             bridge.close()
 
+    def test_send_forwards_buttons_to_the_bridge(self):
+        # Presentation law (register #27): a surface that attaches
+        # buttons must put them ON THE WIRE in the bridges' contract
+        # shape — rows of [label, data] pairs — never drop them
+        # between the adapter and the bridge.  Both bridges render
+        # the first three natively and degrade the rest to text
+        # action lines; the adapter's half of that contract is this
+        # payload.
+        bridge = FakeBridge({"send": {"ok": True}})
+        try:
+            adapter, _ = make_adapter(bridge)
+            chat = ChatRef(platform="whatsapp", chat_id="2348012345678",
+                           kind=ChatKind.DM)
+            res = adapter.send(
+                chat, "pick one",
+                buttons=[[("▶ Play", "play fear")],
+                         [("⏭ Next", "next")]])
+            self.assertTrue(res.ok)
+            self.assertEqual(
+                bridge.received[0]["buttons"],
+                [[["▶ Play", "play fear"]], [["⏭ Next", "next"]]])
+        finally:
+            bridge.close()
+
     def test_send_when_disconnected(self):
         adapter = WhatsAppAdapter()
         chat = ChatRef(platform="whatsapp", chat_id="123", kind=ChatKind.DM)

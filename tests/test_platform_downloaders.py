@@ -594,7 +594,7 @@ def test_spotify_playlist_cap_and_summary():
 def test_spotify_send_many_counts_honestly():
     m = _mixin()
     items = [{"title": "A"}, {"title": "B"}]
-    m._play_send_in_chat_result = lambda e, it, out, chat: (
+    m._play_send_in_chat_result = lambda e, it, chat: (
         ("", True) if it["title"] == "A"
         else ("\ncouldn't download the audio: boom", False))
     text, sent = m._spotify_send_many(object(), items, "SUMMARY",

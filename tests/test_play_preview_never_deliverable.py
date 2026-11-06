@@ -300,7 +300,9 @@ def test_incident_preview_plus_full_delivers_full_only():
             [itunes_cand, yt_cand],
             ["youtube-search — ok (1)", "itunes-search — ok (1)"])
         ack = rt._control_play("fear by nf", "telegram:99002")
-    assert "downloading in the background" in ack
+    # The handler sends the ack itself and returns nothing — no
+    # queue narration, no job id (presentation law).
+    assert ack == ""
     _wait_play_job("telegram:99002")
     # Exactly one download attempt — the full-track candidate.  The
     # preview was never attempted.
@@ -310,7 +312,12 @@ def test_incident_preview_plus_full_delivers_full_only():
     assert attempted["path"] == YT_URL
     rt.gateway.send_file.assert_called_once()
     assert "/tmp/fear-full.mp3" in rt.gateway.send_file.call_args[0]
-    texts = ack + "\n" + "\n".join(_followup_texts(rt))
+    assert rt.gateway.send_file.call_args[1]["caption"] == "🎵 FEAR — NF"
+    adapter = rt.gateway._adapter_for.return_value
+    edits = [str(c.args[2])
+             for c in adapter.edit_message.call_args_list
+             if len(c.args) > 2]
+    texts = ack + "\n" + "\n".join(_followup_texts(rt)) + "\n".join(edits)
     assert PREVIEW_URL not in texts
     assert "AudioPreview" not in texts
     PickCache.clear()
@@ -332,10 +339,11 @@ def test_fallthrough_preview_match_plus_namesake_picklist_is_clean():
              "duration": 180.0}
     engine = mock.Mock()
     engine.queue.return_value = []
-    out = rt._play_send_with_fallthrough(
+    out, sent = rt._play_send_with_fallthrough(
         engine, preview, [other], ["itunes-search — ok (1)",
                                    "youtube-search — ok (1)"],
-        "queued 1:", chat, match=("FEAR", "NF"), query="fear by nf")
+        chat, match=("FEAR", "NF"), query="fear by nf")
+    assert sent is False
     # Nothing was download-attempted: the match is a preview, the
     # other result doesn't match the request.
     engine.download.assert_not_called()
@@ -358,9 +366,10 @@ def test_fallthrough_all_previews_honest_absence():
                "downloadable": False, "preview_only": True}
     engine = mock.Mock()
     engine.queue.return_value = []
-    out = rt._play_send_with_fallthrough(
-        engine, preview, [], ["deezer-search — ok (1)"], "queued 1:",
+    out, sent = rt._play_send_with_fallthrough(
+        engine, preview, [], ["deezer-search — ok (1)"],
         chat, match=("FEAR", "NF"), query="fear by nf")
+    assert sent is False
     engine.download.assert_not_called()
     rt.gateway.send_file.assert_not_called()
     assert "only as a 30-second preview" in out
@@ -406,13 +415,13 @@ def test_fallthrough_clip_download_falls_through_to_real_track():
 
     with mock.patch("nomorals.media.library.read_metadata",
                     side_effect=_meta):
-        out = rt._play_send_with_fallthrough(
-            engine, clip, [real], ["youtube-search — ok (1)"],
-            "queued 1:", chat)
+        out, sent = rt._play_send_with_fallthrough(
+            engine, clip, [real], ["youtube-search — ok (1)"], chat)
     assert engine.download.call_count == 2
     rt.gateway.send_file.assert_called_once()
     assert "/tmp/full.mp3" in rt.gateway.send_file.call_args[0]
-    assert "sent “FEAR”" in out
+    assert sent is True
+    assert out == "🎵 FEAR — NF"
 
 
 def test_fallthrough_clip_only_candidate_is_failure_not_sent():
@@ -426,12 +435,13 @@ def test_fallthrough_clip_only_candidate_is_failure_not_sent():
         "ok": True, "path": "/tmp/clip.mp3", "title": "FEAR"}
     with mock.patch("nomorals.media.library.read_metadata",
                     return_value={"duration": 30.0}):
-        out = rt._play_send_with_fallthrough(
-            engine, clip, [], ["youtube-search — ok (1)"], "queued 1:",
-            chat)
+        out, sent = rt._play_send_with_fallthrough(
+            engine, clip, [], ["youtube-search — ok (1)"], chat)
+    assert sent is False
     rt.gateway.send_file.assert_not_called()
     assert "couldn't download" in out
-    assert "clip, not the track" in out
+    # The arrived-but-wrong fact rides the report in plain words.
+    assert "clip, not the full" in out
 
 
 # ── reply copy cleanup: URLs out, doubled wording out ────────────────

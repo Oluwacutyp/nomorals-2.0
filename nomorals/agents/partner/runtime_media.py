@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import os
 import re
 from typing import Any
 
 from ...search.adaptive import adaptive_result_limit
 from .failures import record_failure
+
+#: The ack-message handle of the background download job running on
+#: this context: ``(chat_ref, ack_message_id)``.  Set by
+#: ``_play_download_bg`` around the job body so bodies can edit the
+#: ack at real milestones (``_job_ack_progress``) without threading
+#: the handle through every signature.
+_RUNNING_JOB_ACK: contextvars.ContextVar = contextvars.ContextVar(
+    "devon_running_job_ack", default=None)
 
 
 def _looks_like_path_or_url(ref: str) -> bool:
@@ -193,7 +203,8 @@ class RuntimeMediaMixin:
                     chat.platform, f"{chat.platform}:{chat.chat_id}",
                     res.audio_path,
                     caption=f"🎹 {res.title} — AI bed (vocals come next)")
-                text += "\nsent the bed to this chat."
+                # The file landing is the delivery — no "sent …
+                # to this chat" narration (presentation law).
             except Exception as e:
                 record_failure("runtime_media.RuntimeMediaMixin._control_music_bed", e)
                 text += f"\naudio: {res.audio_path}"
@@ -244,7 +255,8 @@ class RuntimeMediaMixin:
                     chat.platform, f"{chat.platform}:{chat.chat_id}",
                     res.master_path,
                     caption=f"🎵 {res.title} — AI instrumental + {vocal_txt}")
-                text += "\nsent the master to this chat."
+                # No "sent … to this chat" narration (presentation
+                # law) — the file landing is the delivery.
             except Exception as e:
                 record_failure("runtime_media.RuntimeMediaMixin._control_music_full", e)
                 text += f"\nmaster: {res.master_path}"
@@ -379,15 +391,13 @@ class RuntimeMediaMixin:
             except Exception as e:
                 record_failure("runtime_media.RuntimeMediaMixin._control_music:376", e)
             if sent:
-                # The sent line must reflect whether vocals are in
-                # the audio — never imply a full song when the vocal
+                # The report must reflect whether vocals are in the
+                # audio — never imply a full song when the vocal
                 # track was skipped (vocals requested, none rendered).
-                vocal_gap = ""
+                # The delivery itself needs no narration line.
                 if with_vocals and not (song.vocal_path or "").strip():
-                    vocal_gap = (" (instrumental only — vocal track "
-                                 "skipped)")
-                text += (f"\n sent {' + '.join(sent)} to this chat."
-                         f"{vocal_gap}")
+                    text += ("\n⚠ instrumental only — the vocal track "
+                             "was skipped")
             else:
                 text += (f"\n audio: {song.audio_path or '(render failed)'}"
                          f"\n score: {song.score_pdf_path or '(render failed)'}")
@@ -538,12 +548,12 @@ class RuntimeMediaMixin:
                             f"can't play {rest[:80]!r} from YouTube",
                             exc, chat)
                     if chat is not None and added:
-                        out = f"queued 1:\n  - {added[0].get('title')}"
+                        yt_title = str(added[0].get("title") or "audio")
                         return self._play_download_bg(
-                            chat, chat_key, out,
+                            chat, chat_key, f"⏳ {yt_title}",
                             lambda: self._play_send_in_chat_result(
-                                engine, added[0], out, chat),
-                            title=str(added[0].get("title") or ""))
+                                engine, added[0], chat),
+                            title=yt_title)
                     # CLI: play the item _add_youtube just enqueued.
                     # Do NOT call engine.play_youtube(rest) — it
                     # re-adds the same video, double-enqueuing it.
@@ -710,26 +720,32 @@ class RuntimeMediaMixin:
                         self._play_log_tried(merged)
                         self._drop_matching_queued(engine, first_item)
                         return self._play_preview_line(first_item)
+                    ack_name = str(first_item.get("title") or "")
+                    if not ack_name or ack_name.strip().lower() in (
+                            search_q.strip().lower(),
+                            rest.strip().lower()):
+                        # The chain winner still carries the raw
+                        # query as its "title" — the ack uses the
+                        # owner's own words, not a queue receipt.
+                        ack_name = rest
                     return self._play_download_bg(
-                        chat, chat_key, out,
-                        lambda: (self._play_send_with_fallthrough(
-                            engine, first_item, fallbacks, merged, out,
+                        chat, chat_key, f"⏳ {ack_name}",
+                        lambda: self._play_send_with_fallthrough(
+                            engine, first_item, fallbacks, merged,
                             chat, match=(title_q, artist_q), query=rest),
-                                 False),
                         title=str(added[0].get("title") or "audio"))
-                # Sources tried — visible, so the user sees MANY sources
-                # were consulted, not 1–2.  Attempts already record
-                # every strategy in order (failed + the winner).
-                tried = [a for a in (resolution.attempts or [])]
-                if tried:
-                    out += ("\nsources tried "
-                            f"({len(tried)}): " + "; ".join(tried))
+                # The tried trail goes to the journal only
+                # (presentation law, 2026-11-05) — attempts record
+                # every strategy in order (failed + the winner), and
+                # the durable copy is the log, never a chat receipt.
+                self._play_log_tried(resolution.attempts)
                 if action == "play" and chat is not None:
+                    play_title = str(added[0].get("title") or "")
                     return self._play_download_bg(
-                        chat, chat_key, out,
+                        chat, chat_key, f"⏳ {play_title or 'audio'}",
                         lambda: self._play_send_in_chat_result(
-                            engine, added[0], out, chat),
-                        title=str(added[0].get("title") or ""))
+                            engine, added[0], chat),
+                        title=play_title)
                 if action == "play":
                     st = engine.play()
                     if st.get("status") == "playing":
@@ -738,6 +754,13 @@ class RuntimeMediaMixin:
                     else:
                         out += (f"\nstatus: {st.get('status')} "
                                 f"{st.get('error') or st.get('hint', '')}")
+                elif chat is not None:
+                    # /play add in chat: the titles, no queue-count
+                    # receipt (presentation law) — the counts form is
+                    # the CLI transport readout only.
+                    return ("added to the queue:\n" + "\n".join(
+                        f"  - {a.get('title') or a['path']}"
+                        for a in added))
                 return out
             if action == "seek":
                 if not rest:
@@ -837,9 +860,9 @@ class RuntimeMediaMixin:
             # download leaves the list alive for another try, exactly
             # like the old synchronous peek-don't-consume rule.
             return self._play_download_bg(
-                chat, chat_key, out,
+                chat, chat_key, f"⏳ {cand.title}",
                 lambda: self._play_send_in_chat_result(
-                    engine, item, out, chat),
+                    engine, item, chat),
                 on_sent=lambda: PickCache.consume(token),
                 title=str(cand.title or ""))
         try:
@@ -954,11 +977,12 @@ class RuntimeMediaMixin:
                 self.gateway.send_file(
                     chat.platform, f"{chat.platform}:{chat.chat_id}",
                     path, caption=f"{emoji} {title}"[:1024])
-                return (f"{emoji} downloaded “{title}” "
-                        f"({report.size_bytes // 1024}KB) — sent to this chat."), True
+                # The item's own line is the final state — no size
+                # receipt, no "sent to this chat" (presentation law).
+                return f"{emoji} {title}", True
             except Exception as exc:  # noqa: BLE001
-                return (f"downloaded “{title}” to {path} "
-                        f"but couldn't send it: {exc}"), False
+                return (f"downloaded “{title}” but couldn't send it: "
+                        f"{exc} (it's saved on the server at {path})"), False
         return f"{emoji} downloaded: {path}", False
 
     def _control_download(self, tail: str, chat_key: str = "") -> str:
@@ -1012,23 +1036,16 @@ class RuntimeMediaMixin:
         if chat is not None:
             if _platform == "tiktok":
                 return self._play_download_bg(
-                    chat, chat_key,
-                    "⏳ fetching that TikTok in the background — I'll "
-                    "send the file here when it's ready.",
+                    chat, chat_key, "⏳ fetching that TikTok…",
                     lambda: self._tiktok_produce(url, audio_only, chat),
                     title=url[:80])
             if _platform == "instagram":
                 return self._play_download_bg(
-                    chat, chat_key,
-                    "⏳ fetching that Instagram post in the "
-                    "background — I'll send the file here when it's "
-                    "ready.",
+                    chat, chat_key, "⏳ fetching that Instagram post…",
                     lambda: self._instagram_produce(url, chat),
                     title=url[:80])
             return self._play_download_bg(
-                chat, chat_key,
-                f"⏳ downloading {url[:60]} in the background — I'll "
-                "send the file here when it's ready.",
+                chat, chat_key, f"⏳ {url[:60]}",
                 lambda: self._download_produce(url, audio_only, chat),
                 title=url[:80])
         if _platform == "tiktok":
@@ -1148,9 +1165,7 @@ class RuntimeMediaMixin:
         chat = self._ref_from_key(chat_key) if chat_key else None
         if chat is not None:
             return self._play_download_bg(
-                chat, chat_key,
-                "⏳ fetching that TikTok in the background — I'll "
-                "send the file here when it's ready.",
+                chat, chat_key, "⏳ fetching that TikTok…",
                 lambda: self._tiktok_produce(url, audio_only, chat),
                 title=url[:80])
         text, _sent = self._tiktok_produce(url, audio_only, None)
@@ -1198,9 +1213,7 @@ class RuntimeMediaMixin:
         chat = self._ref_from_key(chat_key) if chat_key else None
         if chat is not None:
             return self._play_download_bg(
-                chat, chat_key,
-                "⏳ fetching that Instagram post in the background — "
-                "I'll send the file here when it's ready.",
+                chat, chat_key, "⏳ fetching that Instagram post…",
                 lambda: self._instagram_produce(url, chat),
                 title=url[:80])
         text, _sent = self._instagram_produce(url, None)
@@ -1264,24 +1277,26 @@ class RuntimeMediaMixin:
                   or getattr(meta, "artist", "") or "")
         head = f"🎧 “{name}”" + (f" — {artist}" if artist else "")
         if item is None:
-            tried = "; ".join(str(a) for a in attempts[:8])
+            # The tried trail is journal-only (presentation law).
+            self._play_log_tried(attempts)
             return (f"{head}\nfound it on Spotify, but no full-track "
                     "source has it — the only audio out there is "
                     "previews/metadata, and I won't pass a 30s preview "
-                    "off as the song."
-                    + (f"\ntried: {tried}" if tried else ""))
+                    "off as the song.")
         engine = PlaybackEngine(self.context)
         added = engine._enqueue(
             item["path"], item["kind"], item["title"],
             artist=item["artist"], duration=item["duration"])
-        out = (f"{head}\nSpotify itself serves only previews — the "
-               f"full track was matched via {label}.")
         if chat is not None:
             return self._play_download_bg(
-                chat, chat_key, out,
+                chat, chat_key, f"⏳ {name}",
                 lambda: self._play_send_in_chat_result(
-                    engine, added, out, chat),
+                    engine, added, chat,
+                    note=(f"matched via {label} — Spotify itself "
+                          "serves only previews")),
                 title=str(added.get("title") or "audio"))
+        out = (f"{head}\nSpotify itself serves only previews — the "
+               f"full track was matched via {label}.")
         st = engine.play()
         if st.get("status") == "playing":
             out += f"\n▶ playing “{st.get('current', '')}” [{st.get('backend')}]"
@@ -1298,7 +1313,7 @@ class RuntimeMediaMixin:
         failures: list[str] = []
         for item in items:
             text, ok = self._play_send_in_chat_result(
-                engine, item, "", chat)
+                engine, item, chat)
             if ok:
                 sent += 1
             else:
@@ -1354,7 +1369,8 @@ class RuntimeMediaMixin:
             if not added_items:
                 return summary
             return self._play_download_bg(
-                chat, chat_key, summary,
+                chat, chat_key,
+                f"⏳ {meta.name or 'Spotify collection'}",
                 lambda: self._spotify_send_many(
                     engine, added_items, summary, chat),
                 title=meta.name or "spotify collection")
@@ -1450,67 +1466,145 @@ class RuntimeMediaMixin:
                     + ", or a direct media file link (mp4/mp3/…).")
         return self._control_download(tail, chat_key)
 
-    # ── background downloads (owner decision 2026-10-19) ────────────────
+    # ── background downloads (owner decision 2026-10-19; presentation
+    # law 2026-11-05) ──────────────────────────────────────────────────
     #
-    # Long downloads run as background jobs on the shared JobRegistry
-    # and get SENT once done: the chat handler never blocks on a
-    # multi-minute download again.  The job body is the EXISTING
-    # synchronous download+send (``_play_send_in_chat_result`` /
-    # ``_play_send_with_fallthrough`` / the /download body) — every
-    # pass-#6 behavior (fall-through, honest wording, tried-list,
-    # queue hygiene, hints) is preserved because the same code runs,
-    # just on the job's worker thread instead of the chat pump thread.
+    # Long downloads run as background jobs on the shared JobRegistry:
+    # the chat handler never blocks on a multi-minute download.  The
+    # job body is the EXISTING synchronous download+send
+    # (``_play_send_in_chat_result`` / ``_play_send_with_fallthrough``
+    # / the /download body) on the job's worker thread.
+    #
+    # Presentation law (owner, 2026-11-05, live-bot screenshot): the
+    # whole exchange is ONE message edited in place.  The wrapper
+    # sends the ack itself, the worker edits it as real milestones
+    # land (a candidate being tried), and the finished state REPLACES
+    # the ack — the delivered item's line on success, the honest
+    # failure on failure.  No queue counts, no "[job …]" ids, no
+    # "sources tried" lists, no "sent … to this chat" receipts in
+    # chat: the tried trail goes to the journal (_play_log_tried),
+    # and the file landing is the delivery.  Where a surface has no
+    # edit verb at all, the ack stays a one-line fetch note and a
+    # failure still posts exactly once — never a three-message chain.
 
     #: Label marking a job as a chat download; the _process harvester
     #: filters on it (+ the chat key) so outcomes surface per chat.
     _PLAY_DL_JOB_OWNER = "play"
 
-    @staticmethod
-    def _play_job_delta_text(out_prefix: str, full_text: str) -> str:
-        """Follow-up text for a finished download job: the part of the
-        synchronous reply past what the ack already showed.  The ack
-        prints the queue line; the follow-up carries the outcome
-        (tried-list, sent confirmation, or honest failure).  Defensive:
-        when the body didn't start with the ack prefix, return the
-        whole text rather than a mangled slice.  Never raises."""
+    # ── the ack handle: one message, edited in place ───────────────
+
+    def _chat_adapter(self, platform: str) -> Any | None:
+        """The gateway's adapter for *platform* (or None)."""
         try:
-            if out_prefix and full_text.startswith(out_prefix):
-                # An empty delta is a real outcome now: the body's
-                # whole text was the ack's queue line and the delivery
-                # itself carries the rest (no meta-narration, owner
-                # rule 2026-11-01) — return "" so no follow-up posts.
-                return full_text[len(out_prefix):].lstrip("\n")
-            return full_text
-        except Exception as e:
-            record_failure("runtime_media.RuntimeMediaMixin._play_job_delta_text", e)
-            return full_text
+            return self.gateway._adapter_for(platform)
+        except Exception as e:  # noqa: BLE001 - edits are best-effort
+            record_failure(
+                "runtime_media.RuntimeMediaMixin._chat_adapter", e)
+            return None
+
+    def _edit_chat_message(self, chat: Any, message_id: str,
+                           text: str, *, progress: bool = False) -> bool:
+        """Edit one of Devon's own messages in *chat* in place.
+
+        Verb ladder: ``edit_message`` (the unthrottled final edit —
+        Bot API editMessageText / Telethon edit / the WhatsApp
+        bridges' edit command) → ``edit_progress`` (the throttled
+        progressive-display seam).  ``progress=True`` goes straight
+        to the throttled seam: mid-job milestones must never spam
+        edits.  Success shapes differ per adapter (API dict, verdict
+        dict with ``ok``, None on refusal/throttle) — normalized
+        here to a bool.  Never raises.
+        """
+        if not message_id:
+            return False
+        adapter = self._chat_adapter(chat.platform)
+        if adapter is None:
+            return False
+        verbs: list[str] = (["edit_progress"] if progress else
+                            ["edit_message", "edit_progress"])
+        for name in verbs:
+            verb = getattr(adapter, name, None)
+            if not callable(verb):
+                continue
+            try:
+                if name == "edit_message":
+                    try:
+                        out = verb(chat, str(message_id), text,
+                                   buttons=[])
+                    except TypeError:
+                        out = verb(chat, str(message_id), text)
+                else:
+                    out = verb(chat, str(message_id), text)
+            except Exception as e:  # noqa: BLE001 - best-effort edit
+                record_failure(
+                    "runtime_media.RuntimeMediaMixin._edit_chat_message",
+                    e)
+                continue
+            if isinstance(out, dict):
+                if out.get("ok") is False:
+                    continue  # a named refusal — try the next verb
+                return True
+            if out is not None:
+                return True
+        return False
+
+    def _job_ack_progress(self, text: str) -> None:
+        """Mid-job milestone edit of the running job's ack message.
+
+        Bodies call this at REAL milestones (a candidate being
+        tried); the handle rides a contextvar the job wrapper sets
+        for the body's thread, so concurrent jobs never cross-edit.
+        Throttled at the adapter seam.  A no-op outside a background
+        job or on surfaces without an edit verb.  Never raises.
+        """
+        try:
+            handle = _RUNNING_JOB_ACK.get()
+            if not handle:
+                return
+            chat, message_id = handle
+            if chat is not None and message_id:
+                self._edit_chat_message(chat, message_id, text,
+                                        progress=True)
+        except Exception as e:  # noqa: BLE001 - progress never breaks
+            record_failure(
+                "runtime_media.RuntimeMediaMixin._job_ack_progress", e)
 
     def _play_download_bg(self, chat: Any, chat_key: str,
-                          out_prefix: str, produce: Any, *,
+                          ack: str, produce: Any, *,
                           on_sent: Any = None, title: str = "") -> str:
-        """Start a chat download+send as a background job; return the ack.
+        """Start a chat download+send as a background job behind ONE
+        ack message, edited in place (presentation law, 2026-11-05).
 
-        ``produce()`` returns ``(full_text, sent)`` — the synchronous
-        download+send body, run on the job's worker thread.  It sends
-        the FILE itself; this wrapper then posts the body's outcome
-        text (only the delta past ``out_prefix`` — the ack already
-        showed the queue line) to the SAME chat.  ``on_sent`` runs on
-        the worker thread only when the file actually went out (e.g.
-        consuming a pick-list).  The result dict records ``delivered``
-        so :meth:`_harvest_play_downloads` never double-reports an
-        outcome the body already posted.
+        This wrapper sends *ack* itself and captures its message id;
+        ``produce()`` — the synchronous download+send body, run on
+        the job's worker thread — sends the FILE itself and returns
+        ``(text, sent)``: the outcome line (final state, no ack
+        prefix) plus whether the item went out.  When the body
+        finishes, the ack is EDITED to that outcome — the delivered
+        item's line on success, the honest failure/offer on failure —
+        and a successful delivery fires the expression organ's
+        celebration moment.  Only when the edit is impossible (no
+        edit verb on the surface, edit refused) does a failure post
+        as one fallback message; a success never posts a receipt.
+        ``on_sent`` runs on the worker thread only when the file
+        actually went out (e.g. consuming a pick-list).  The result
+        dict records ``delivered`` + ``ack_id`` so
+        :meth:`_harvest_play_downloads` never double-reports an
+        outcome and can still edit the ack after a restart.
 
         If the registry itself refuses the job, fall back to running
-        the body synchronously (today's behavior) rather than dropping
-        the download.  Never raises.
+        the body synchronously rather than dropping the download.
+        Returns "" — the ack already posted (this kind family is
+        MEDIA_DELIVERED).  Never raises.
         """
         from ...core.jobs import (
             current_job, report_progress, shared_registry)
 
         # Duplicate guard: the same chat asking for the same title
-        # while it is already downloading gets the EXISTING job named
-        # back — never a second download of the same file (and never
-        # the file sent twice).
+        # while it is already downloading is told so in plain words —
+        # never a second download of the same file (and never the
+        # file sent twice).  Internal ids never print (owner law), so
+        # /download cancel resolves the job by title.
         try:
             for snap in shared_registry().list():
                 labels = snap.get("labels") or {}
@@ -1519,15 +1613,26 @@ class RuntimeMediaMixin:
                         and labels.get("chat") == (chat_key or "")
                         and labels.get("title") == (title or "")[:80]):
                     return (
-                        out_prefix
-                        + f"\n⏳ “{(title or 'that download')[:60]}” is "
-                          "already downloading in the background "
-                          f"[job {snap.get('id')}] — I won't start a "
-                          "second copy. "
-                          f"Send /download cancel {snap.get('id')} "
-                          "to stop it.")
+                        f"⏳ “{(title or 'that download')[:60]}” is "
+                        "already on its way — it lands here when it's "
+                        "ready. "
+                        f"/download cancel {(title or '')[:60]} "
+                        "stops it.")
         except Exception as e:
             record_failure("runtime_media.RuntimeMediaMixin._play_download_bg", e)
+
+        # Send the ack NOW — its message id is the handle every later
+        # state of this exchange edits.  When even the ack can't post
+        # (surface down), the job still runs: completion then falls
+        # back to posting the outcome as one message.
+        ack_id = ""
+        try:
+            sent_ack = self.gateway.send(chat.platform, chat, ack)
+            if sent_ack is not None and getattr(sent_ack, "ok", False):
+                ack_id = str(getattr(sent_ack, "message_id", "") or "")
+        except Exception as e:  # noqa: BLE001 - the ack is best-effort
+            record_failure(
+                "runtime_media.RuntimeMediaMixin._play_download_bg.ack", e)
 
         # The worker body needs its own job id (for the durable
         # record) before submit() returns it — a one-cell holder the
@@ -1535,20 +1640,24 @@ class RuntimeMediaMixin:
         holder: dict[str, str] = {}
 
         def _body() -> dict[str, Any]:
+            token = _RUNNING_JOB_ACK.set(
+                (chat, ack_id) if ack_id else None)
             try:
                 report_progress("download started")
                 text, sent = produce()
             except Exception as exc:  # noqa: BLE001 - failure is data
                 self._play_dl_mark_finished(holder)
                 return {"ok": False, "delivered": False, "sent": False,
-                        "title": title, "text": "",
+                        "title": title, "text": "", "ack_id": ack_id,
                         "error": f"{type(exc).__name__}: {exc}"[:300]}
+            finally:
+                _RUNNING_JOB_ACK.reset(token)
             if sent and on_sent is not None:
                 try:
                     on_sent()
                 except Exception as e:
                     record_failure("runtime_media.RuntimeMediaMixin._body", e)
-            final = self._play_job_delta_text(out_prefix, text)
+            final = str(text or "").strip()
             late = False
             job_now = current_job()
             if job_now is not None:
@@ -1558,8 +1667,17 @@ class RuntimeMediaMixin:
                 final = ("⏳ that download finished late — the quiet "
                          "stretch was it still working, not a drop:\n"
                          + final)
+            # The finished state REPLACES the ack.  A success with no
+            # outcome line keeps the ack's own line as the final
+            # state; a failure always lands — edited in when
+            # possible, posted once when not.
+            edited = False
+            if ack_id and final:
+                edited = self._edit_chat_message(chat, ack_id, final)
             delivered = False
-            if final:
+            if edited:
+                delivered = True
+            elif final and not sent:
                 try:
                     self.gateway.send(chat.platform, chat, final)
                     delivered = True
@@ -1567,18 +1685,17 @@ class RuntimeMediaMixin:
                     record_failure("runtime_media.RuntimeMediaMixin._body:1105", e)
                     delivered = False
             elif sent:
-                # Success with nothing to add: the file landing in
-                # the chat IS the report (no meta-narration, owner
-                # rule 2026-11-01) — the body deliberately posts no
-                # follow-up. Mark delivered so the harvester does not
-                # invent a "its report never reached this chat"
-                # failure for a delivery that landed silently on
-                # purpose.
+                # The file landing in the chat IS the report — no
+                # receipt posts.  Mark delivered so the harvester
+                # does not invent a "its report never reached this
+                # chat" failure for a delivery that landed on purpose.
                 delivered = True
+            if sent:
+                self._celebrate_delivery(chat, chat_key, title)
             self._play_dl_mark_finished(holder)
             return {"ok": True, "delivered": delivered,
                     "sent": bool(sent), "title": title, "text": final,
-                    "late": late}
+                    "ack_id": ack_id, "late": late}
 
         try:
             job = shared_registry().submit(
@@ -1589,12 +1706,37 @@ class RuntimeMediaMixin:
         except Exception as e:
             record_failure("runtime_media.RuntimeMediaMixin._play_download_bg:1118", e)
             text, _sent = produce()
-            return text
+            return str(text or "")
         holder["job_id"] = job.id
         self._play_dl_record_start(job.id, chat_key, title)
-        return (out_prefix
-                + "\n⏳ downloading in the background — I'll send it "
-                  f"here when it's ready. [job {job.id}]")
+        return ""
+
+    def _celebrate_delivery(self, chat: Any, chat_key: str,
+                            title: str) -> None:
+        """Expression law (owner, 2026-11-05): a delivery is a moment
+        that earns one — fire the expression organ's celebration for
+        the room when its own settings allow.  DM rooms carry no
+        group settings, so the organ's defaults apply; failures never
+        reach here (warnings stay dry at every setting).  Best
+        effort: a celebration must never break a delivery."""
+        try:
+            service = self._expression_service()
+            if service is None:
+                return
+            from types import SimpleNamespace
+
+            shim = SimpleNamespace(
+                chat=chat, platform=str(getattr(chat, "platform", "")),
+                chat_id=str(getattr(chat, "chat_id", "")),
+                text="", sender_id="", kind=None)
+            service.fire(
+                "celebration", room=chat_key,
+                platform=str(getattr(chat, "platform", "")), settings={},
+                send=lambda _moment_chat, media_ref:
+                    self._expression_send(shim, media_ref))
+        except Exception as e:  # noqa: BLE001 - decoration, never fatal
+            record_failure(
+                "runtime_media.RuntimeMediaMixin._celebrate_delivery", e)
 
     # ── durable record of chat downloads (restart honesty) ─────────
     #
@@ -1688,40 +1830,84 @@ class RuntimeMediaMixin:
         if job_id:
             self._play_dl_record_finish(job_id)
 
-    def _cancel_download_job(self, job_id: str, chat_key: str) -> str:
-        """/download cancel <job-id> — cooperative cancellation.
+    def _cancel_download_job(self, arg: str, chat_key: str) -> str:
+        """/download cancel <title|job-id> — cooperative cancellation.
 
         Only the chat that owns the job may cancel it.  Cancellation
         is cooperative: the flag is set on the job and the download
         backends stop at their next progress checkpoint (yt-dlp hook,
         direct-HTTP chunk hook, CLI subprocess poll) — bytes actually
         stop; a job that already finished is reported as finished.
+
+        The argument is the download's TITLE as the owner knows it
+        (internal ids never print, presentation law 2026-11-05); an
+        exact job id still resolves for surfaces that carry one.
+        Title resolution looks at THIS chat's live download jobs:
+        exact title first, then a unique substring match.
         """
         from ...core.jobs import shared_registry
 
-        job_id = (job_id or "").strip()
-        if not job_id:
-            return ("usage: /download cancel <job-id> — the id is in "
-                    "the ack I sent when the download started.")
+        arg = (arg or "").strip()
+        if not arg:
+            return ("usage: /download cancel <title> — name the "
+                    "download the way the ack did (its title or "
+                    "link), and I'll stop it.")
         registry = shared_registry()
-        job = registry.poll(job_id)
+        job = registry.poll(arg)
         if job is None:
-            return (f"no download job {job_id} on record — it may "
-                    "already have finished and been swept.")
+            job = self._find_chat_download_job(arg, chat_key)
+            if job is None:
+                return (f"no live download matching “{arg[:60]}” in "
+                        "this chat — it may already have finished.")
         labels = job.labels or {}
         if labels.get("owner") != self._PLAY_DL_JOB_OWNER \
                 or labels.get("chat") != (chat_key or ""):
-            return "that job isn't a download belonging to this chat."
+            return "that download doesn't belong to this chat."
+        title = str(labels.get("title") or "download")
         if job.done():
-            return (f"job {job_id} already finished ({job.status}) — "
-                    "nothing left to cancel.")
-        if registry.cancel(job_id):
-            title = str(labels.get("title") or "download")
-            return (f"🛑 cancellation requested for “{title[:60]}” "
-                    f"[job {job_id}] — the download stops at its next "
-                    "progress checkpoint. If it had already finished, "
-                    "its result still arrives.")
-        return f"job {job_id} finished before the cancellation landed."
+            return (f"“{title[:60]}” already finished ({job.status}) "
+                    "— nothing left to cancel.")
+        if registry.cancel(job.id):
+            return (f"🛑 cancellation requested for “{title[:60]}” — "
+                    "the download stops at its next progress "
+                    "checkpoint. If it had already finished, its "
+                    "result still arrives.")
+        return (f"“{title[:60]}” finished before the cancellation "
+                "landed.")
+
+    def _find_chat_download_job(self, arg: str, chat_key: str) -> Any:
+        """Resolve a title (exact, then unique substring) to one of
+        this chat's live download jobs, or None.  Never raises."""
+        try:
+            from ...core.jobs import shared_registry
+
+            norm = " ".join(arg.split()).lower()
+            live = []
+            for snap in shared_registry().list():
+                labels = snap.get("labels") or {}
+                if snap.get("status") not in ("pending", "running"):
+                    continue
+                if labels.get("owner") != self._PLAY_DL_JOB_OWNER:
+                    continue
+                if labels.get("chat") != (chat_key or ""):
+                    continue
+                live.append(snap)
+            for snap in live:
+                if " ".join(str(snap["labels"].get("title") or "")
+                            .split()).lower() == norm:
+                    return shared_registry().poll(str(snap.get("id")))
+            hits = [snap for snap in live
+                    if norm in " ".join(
+                        str(snap["labels"].get("title") or "")
+                        .split()).lower()]
+            if len(hits) == 1:
+                return shared_registry().poll(str(hits[0].get("id")))
+            return None
+        except Exception as e:  # noqa: BLE001
+            record_failure(
+                "runtime_media.RuntimeMediaMixin._find_chat_download_job",
+                e)
+            return None
 
     def _harvest_play_downloads(self, chat_key: str, chat: Any) -> None:
         """Surface this chat's download jobs that never got to report.
@@ -1775,13 +1961,19 @@ class RuntimeMediaMixin:
                         "re-queued.")
                 else:
                     # done-but-undelivered, or a late finish whose own
-                    # follow-up never landed: replay the body's text.
+                    # outcome never landed: the outcome REPLACES the
+                    # ack when the ack's id survived (edit-in-place
+                    # law); only when there is no ack to edit does the
+                    # outcome post as a message.
                     text = str(res.get("text") or "")
                     if not text:
                         text = (f"⚠️ the background download of "
                                 f"“{title}” finished, but its report "
                                 "never reached this chat.")
-                    self.gateway.send(chat.platform, target, text)
+                    ack_id = str(res.get("ack_id") or "")
+                    if not (ack_id and self._edit_chat_message(
+                            chat, ack_id, text)):
+                        self.gateway.send(chat.platform, target, text)
             except Exception as e:
                 record_failure("runtime_media.RuntimeMediaMixin._harvest_play_downloads:1311", e)
                 continue
@@ -1817,7 +2009,7 @@ class RuntimeMediaMixin:
                     continue
 
     def _play_send_in_chat(self, engine: Any, item: dict[str, Any],
-                           out: str, chat: Any) -> str:
+                           chat: Any) -> str:
         """Chat path for /play: download the track, send it as a file.
 
         Never plays locally — the user receives the audio in the
@@ -1827,16 +2019,23 @@ class RuntimeMediaMixin:
         send, so the failure is "couldn't download", never
         "couldn't send".  "Couldn't send" is reserved for the case
         where the file WAS downloaded but the send itself failed.
+        The success text is the delivered item's own line — the file
+        landing is the delivery, never a "sent … to this chat"
+        receipt (presentation law, 2026-11-05).
         """
-        text, _sent = self._play_send_in_chat_result(engine, item, out, chat)
+        text, _sent = self._play_send_in_chat_result(engine, item, chat)
         return text
 
     def _play_send_in_chat_result(self, engine: Any, item: dict[str, Any],
-                                  out: str, chat: Any) -> tuple[str, bool]:
+                                  chat: Any, *,
+                                  note: str = "") -> tuple[str, bool]:
         """Same as :meth:`_play_send_in_chat`, plus whether the file
         was actually sent — callers that consume state on success
         (e.g. the pick-list) need the signal, not a string search.
-        ``sent`` is True only when send_file succeeded.  Never raises.
+        ``sent`` is True only when send_file succeeded.  ``note`` is
+        an optional provenance line appended under the delivered
+        item's line (e.g. where a Spotify match actually came from).
+        Never raises.
         """
         from ...core.jobs import report_progress
         from ...media.cookies import (
@@ -1851,11 +2050,11 @@ class RuntimeMediaMixin:
             # Undeliverable: drop the just-enqueued queue row so the
             # durable queue doesn't keep a broken item.
             self._drop_matching_queued(engine, item)
-            return out + f"\ncouldn't download the audio file: {exc}", False
+            return f"couldn't download the audio file: {exc}", False
         if not dl.get("ok"):
             reason = str(dl.get("reason", "unknown error"))
             self._drop_matching_queued(engine, item)
-            msg = out + f"\ncouldn't download the audio: {reason}"
+            msg = f"couldn't download the audio: {reason}"
             if is_bot_detection_error(reason):
                 msg += f"\n{BOT_COOKIE_SHORT_HELP}"
             return msg, False
@@ -1865,22 +2064,185 @@ class RuntimeMediaMixin:
         verify = self._play_verify_full_track(path, item)
         if verify:
             self._drop_matching_queued(engine, item)
-            return (out + f"\nthat download wasn't the song — "
-                          f"{verify}. I won't pass it off as the "
-                          "track."), False
-        title = dl.get("title") or item.get("title", "audio")
-        send_path = self._delivery_path(
-            path, str(title), str(item.get("artist", "") or ""))
+            return (f"that download wasn't the song — "
+                    f"{verify}. I won't pass it off as the "
+                    "track."), False
+        title = str(dl.get("title") or item.get("title", "audio"))
+        artist = str(dl.get("artist") or item.get("artist", "") or "")
+        send_path = self._delivery_path(path, title, artist)
+        send_path = self._tag_delivery_copy(send_path, title, artist)
+        line = f"🎵 {title}"
+        if artist and artist.lower() not in title.lower():
+            line += f" — {artist}"
+        if note:
+            line += f"\n{note}"
         try:
-            self.gateway.send_file(
+            res = self.gateway.send_file(
                 chat.platform, f"{chat.platform}:{chat.chat_id}",
-                send_path, caption=f"🎵 {title}")
-            # The track landing in the chat is the delivery — no
-            # "▶ sent … to this chat" narration appended to the report
-            # (owner no-meta-narration rule, 2026-11-01).
-            return out, True
+                send_path, caption=line[:1024])
+            # The gateway reports a failed media send as a RESULT,
+            # not a raise — an unchecked ok=False here would edit
+            # the ack to the delivery line for a file that never
+            # arrived (a false success on the owner's own surface).
+            if res is not None and getattr(res, "ok", True) is False:
+                err = str(getattr(res, "error", "") or "send failed")
+                return (f"had the file but couldn't send it: {err} "
+                        f"(it's saved on the server at {path})"), False
+            return line, True
         except Exception as exc:  # noqa: BLE001
-            return out + f"\nhad the file ({path}) but couldn't send it: {exc}", False
+            return (f"had the file but couldn't send it: {exc} "
+                    f"(it's saved on the server at {path})"), False
+
+    # ── honest artifact identity (Law 6) ────────────────────────────
+    #
+    # A delivered file must carry the track's real identity in its
+    # own metadata: chat clients render title/artist from the file's
+    # tags, and a source that shipped the track under a fan-edit name
+    # with no artist tag shows the owner "Unknown artist" for a song
+    # Devon knew perfectly well.  Tagging writes to a staged copy —
+    # the cache original is never mutated.
+
+    #: Title words marking a candidate as an EDIT of the recording
+    #: (fan edit, remix, cover…) rather than the canonical recording
+    #: itself.  Whole-token matches only — "credited" is not "edit".
+    _EDIT_MARKER_TOKENS = frozenset({
+        "nightcore", "remix", "remixed", "cover", "bootleg",
+        "mashup", "reverb", "slowed", "spedup", "edit", "flip",
+        "remake", "parody", "sped", "daycore",
+    })
+
+    @classmethod
+    def _edit_marker_of(cls, title: str) -> str:
+        """The edit marker in a candidate's title ("" when the title
+        reads as the plain recording).  "sped up" is a two-token
+        marker; the rest are single tokens."""
+        try:
+            tokens = re.findall(r"[a-z0-9]+", str(title or "").lower())
+            if "sped" in tokens and "up" in tokens:
+                return "sped up"
+            for tok in tokens:
+                if tok in cls._EDIT_MARKER_TOKENS:
+                    return "nightcore" if tok == "daycore" else tok
+            return ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    @staticmethod
+    def _tag_delivery_copy(path: str, title: str, artist: str, *,
+                           comment: str = "") -> str:
+        """Stage a tag-corrected copy of *path* when its own tags
+        don't already carry *title*/*artist*.
+
+        Ladder: mutagen when importable → ffmpeg stream-copy with
+        -metadata → the path unchanged.  Best-effort throughout: a
+        tagging failure never costs the delivery itself.  Returns
+        the path to send.
+        """
+        try:
+            if not path or not os.path.isfile(path) or not title:
+                return path
+            from ...media.library import read_metadata
+
+            meta = read_metadata(path)
+            have_title = str(meta.get("title") or "").strip()
+            have_artist = str(meta.get("artist") or "").strip()
+
+            def _norm(s: str) -> str:
+                return " ".join(re.findall(r"[a-z0-9]+", s.lower()))
+
+            if _norm(have_title) == _norm(title) \
+                    and (_norm(have_artist) == _norm(artist)
+                         or not artist) \
+                    and not comment:
+                return path
+            # No tagger on either rung → no staged copy at all
+            # (a copy that can't be tagged is litter, not identity).
+            try:
+                import mutagen  # noqa: F401
+                tagger = True
+            except ImportError:
+                import shutil as _sh
+                tagger = bool(_sh.which("ffmpeg"))
+            if not tagger:
+                return path
+            import shutil
+
+            stem, ext = os.path.splitext(path)
+            target = f"{stem}.del{ext or '.mp3'}"
+            if os.path.abspath(target) != os.path.abspath(path):
+                shutil.copyfile(path, target)
+            else:
+                target = path
+            if RuntimeMediaMixin._write_tags(
+                    target, title, artist, comment):
+                return target
+            return path
+        except Exception as e:  # noqa: BLE001 - tags are garnish
+            record_failure(
+                "runtime_media.RuntimeMediaMixin._tag_delivery_copy", e)
+            return path
+
+    @staticmethod
+    def _write_tags(path: str, title: str, artist: str,
+                    comment: str) -> bool:
+        """Write title/artist/comment tags onto *path* in place.
+
+        mutagen first (pure-Python, per-format tag classes); ffmpeg
+        stream-copy second (rewrites the container to a temp file,
+        then swaps it over *path*).  Returns True when a rung
+        landed.  Never raises.
+        """
+        try:
+            import mutagen
+
+            audio = mutagen.File(path, easy=True)
+            if audio is not None:
+                if audio.tags is None:
+                    audio.add_tags()
+                audio["title"] = [title]
+                if artist:
+                    audio["artist"] = [artist]
+                if comment:
+                    # Not all formats take a comment frame —
+                    # best-effort, never a failed delivery.
+                    with contextlib.suppress(Exception):
+                        audio["comment"] = [comment]
+                audio.save()
+                return True
+        except ImportError:
+            pass
+        except Exception as e:  # noqa: BLE001 - fall to the ffmpeg rung
+            record_failure(
+                "runtime_media.RuntimeMediaMixin._write_tags.mutagen", e)
+        try:
+            import shutil
+            import subprocess
+
+            ffmpeg = shutil.which("ffmpeg")
+            if not ffmpeg:
+                return False
+            tmp = f"{path}.tagtmp{os.path.splitext(path)[1] or '.mp3'}"
+            cmd = [ffmpeg, "-y", "-v", "error", "-i", path,
+                   "-codec", "copy",
+                   "-metadata", f"title={title}"]
+            if artist:
+                cmd += ["-metadata", f"artist={artist}"]
+            if comment:
+                cmd += ["-metadata", f"comment={comment}"]
+            cmd.append(tmp)
+            proc = subprocess.run(  # noqa: S603 - fixed argv, own file
+                cmd, capture_output=True, timeout=60)
+            if proc.returncode == 0 and os.path.isfile(tmp) \
+                    and os.path.getsize(tmp) > 0:
+                os.replace(tmp, path)
+                return True
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            return False
+        except Exception as e:  # noqa: BLE001
+            record_failure(
+                "runtime_media.RuntimeMediaMixin._write_tags.ffmpeg", e)
+            return False
 
     @staticmethod
     def _queued_index_of(engine: Any, item: dict[str, Any]) -> int | None:
@@ -2089,8 +2451,10 @@ class RuntimeMediaMixin:
     def _play_log_tried(search_attempts: Any,
                         outcomes: Any = None) -> None:
         """Record the per-source tried/outcome trail in the journal
-        (log).  The reply also carries the tried-list (owner design);
-        this is the durable copy.  Never raises."""
+        (log).  This is the ONLY home of the tried-list now:
+        presentation law (owner, 2026-11-05) — tried-lists and
+        receipts never post in chat; the trail lives here and in the
+        job record for on-demand reads.  Never raises."""
         try:
             from ...core.logging_setup import get_logger
 
@@ -2182,18 +2546,21 @@ class RuntimeMediaMixin:
 
     def _play_send_with_fallthrough(
             self, engine: Any, first_item: dict[str, Any],
-            fallbacks: Any, search_attempts: Any, out: str,
-            chat: Any, *, match: Any = None, query: str = "") -> str:
+            fallbacks: Any, search_attempts: Any,
+            chat: Any, *, match: Any = None,
+            query: str = "") -> tuple[str, bool]:
         """Chat path: try candidates in order until one DOWNLOADS.
 
         A source whose search succeeded but whose download failed is a
         *download* failure, not success — the loop keeps trying the
         next source until one both finds AND downloads, or all
-        candidates are exhausted.  The reply lists EVERY source
-        actually tried (search + download stage), says "couldn't
-        download" (never "couldn't send") on total failure, and shows
-        the short /cookies hint ONLY when YouTube was actually
-        attempted AND bot-blocked.  Never raises.
+        candidates are exhausted.  Returns ``(text, sent)``: on
+        success the text is the delivered item's own line; on total
+        failure the honest failure (never receipts — the per-source
+        tried trail goes to the journal via :meth:`_play_log_tried`,
+        presentation law 2026-11-05).  The short /cookies hint shows
+        ONLY when YouTube was actually attempted AND bot-blocked.
+        Never raises.
 
         Preview law (owner, 2026-11-05): preview-class candidates
         (iTunes/Deezer 30s clips) are partitioned out FIRST — never
@@ -2215,6 +2582,14 @@ class RuntimeMediaMixin:
         gets the found-but-blocked report plus a pick-list of the
         rest, and their pick downloads exactly what they chose.
         Without ``match`` the behaviour is the historical one.
+
+        Right-artifact law (owner, 2026-11-05): among confident
+        matches the CANONICAL recording is attempted first — a
+        candidate whose title carries an edit marker (Nightcore,
+        remix, sped up, cover…) is attempted only after every clean
+        match failed, and when an edit is what lands, its caption,
+        final line and file tags SAY it's an edit of the requested
+        track — never passed off as the original.
         """
         from ...media.cookies import (
             BOT_COOKIE_SHORT_HELP, is_bot_detection_error)
@@ -2266,6 +2641,8 @@ class RuntimeMediaMixin:
         pick_items: list[dict[str, Any]] = []
         blocked_matches: list[tuple[dict[str, Any], str]] = []
         gated = match is not None
+        q_title = ""
+        q_artist = ""
         if gated:
             from ...media.picklist import (
                 is_confident_match, match_confidence)
@@ -2282,9 +2659,19 @@ class RuntimeMediaMixin:
                         it_title, it_artist, q_title, q_artist), it))
                 elif it.get("downloadable") is not False:
                     pick_items.append(it)
-            confident.sort(key=lambda pair: -pair[0])
+            # Right-artifact law: the canonical recording first —
+            # edit-marked candidates (Nightcore/remix/cover…) sort
+            # AFTER every clean confident match, best score first
+            # within each class.  An edit may still win, but only
+            # when no original is obtainable — and then it is
+            # labeled as an edit (see the success path below).
+            confident.sort(key=lambda pair: (
+                1 if self._edit_marker_of(
+                    str(pair[1].get("title", "") or "")) else 0,
+                -pair[0]))
             attempt_items = [it for _score, it in confident]
         outcomes: dict[str, str] = {}
+        verify_notes: list[str] = []
         youtube_bot_blocked = False
         for attempt in (search_attempts or []):
             if isinstance(attempt, str) \
@@ -2311,9 +2698,14 @@ class RuntimeMediaMixin:
                 continue
             # Progress note per candidate: counts as a heartbeat when
             # this runs as a background job; a no-op synchronously.
+            # The same milestone edits the ack in place (one message,
+            # edited as the job progresses — presentation law).
             from ...core.jobs import report_progress
             report_progress(
                 f"trying {name} ({cand_no} of {len(attempt_items)})")
+            self._job_ack_progress(
+                f"⏳ {title} — trying "
+                f"{name.removesuffix('-search')}…")
             try:
                 dl = engine.download(item)
             except Exception as exc:  # noqa: BLE001
@@ -2328,23 +2720,57 @@ class RuntimeMediaMixin:
                 if verify:
                     outcomes[name] = (
                         f"downloaded a clip, not the track ({verify})")
+                    verify_notes.append(verify)
                     if gated:
                         blocked_matches.append((item, verify))
                     continue
                 outcomes[name] = "downloaded ✓"
-                tried = self._format_tried_list(search_attempts, outcomes)
-                suffix = (f"\nsources tried ({len(tried)}): "
-                          + "; ".join(tried))
+                # The tried trail's only home is the journal now —
+                # the chat gets the delivered item's line, no receipt.
+                self._play_log_tried(search_attempts, outcomes)
                 note = dl.get("note")
+                # Right-artifact labeling: an edit-marked winner is
+                # delivered AS an edit of the requested track — the
+                # caption, the final line and the file's own tags all
+                # carry the request's identity plus the edit label,
+                # never the fan-edit name passed off as the original.
+                marker = self._edit_marker_of(
+                    str(item.get("title", "") or "")) if gated else ""
+                if marker:
+                    req_title = q_title or str(dl_title)
+                    req_artist = q_artist or str(
+                        item.get("artist", "") or "")
+                    tag_title = f"{req_title} ({marker} edit)"
+                    comment = (
+                        f"This copy is a {marker} edit of "
+                        f"“{req_title}” — the original recording "
+                        "wasn't obtainable.")
+                    send_path = self._delivery_path(
+                        path, tag_title, req_artist)
+                    send_path = self._tag_delivery_copy(
+                        send_path, tag_title, req_artist,
+                        comment=comment)
+                    line = (f"🎵 {req_title}"
+                            + (f" — {req_artist}" if req_artist else "")
+                            + f" · {marker} edit — the original "
+                              "wasn't obtainable")
+                else:
+                    win_artist = str(dl.get("artist")
+                                     or item.get("artist", "") or "")
+                    send_path = self._delivery_path(
+                        path, str(dl_title), win_artist)
+                    send_path = self._tag_delivery_copy(
+                        send_path, str(dl_title), win_artist)
+                    line = f"🎵 {dl_title}"
+                    if win_artist and win_artist.lower() \
+                            not in str(dl_title).lower():
+                        line += f" — {win_artist}"
                 if note:
-                    suffix += f"\n({note})"
-                send_path = self._delivery_path(
-                    path, str(dl_title),
-                    str(item.get("artist", "") or ""))
+                    line += f"\n({note})"
                 try:
                     self.gateway.send_file(
                         chat.platform, f"{chat.platform}:{chat.chat_id}",
-                        send_path, caption=f"🎵 {dl_title}")
+                        send_path, caption=line[:1024])
                     # The queue must hold what was actually sent: if
                     # the winner differs from the first pick, swap
                     # the queued row so a later /play next doesn't
@@ -2353,11 +2779,10 @@ class RuntimeMediaMixin:
                             (str(first_item.get("kind", "")),
                              str(first_item.get("path", ""))):
                         self._replace_queued_with(engine, first_item, item)
-                    return (out + suffix
-                            + f"\n▶ sent “{dl_title}” to this chat.")
+                    return line, True
                 except Exception as exc:  # noqa: BLE001
-                    return (out + suffix + f"\nhad the file ({path}) "
-                            f"but couldn't send it: {exc}")
+                    return (f"had the file but couldn't send it: {exc} "
+                            f"(it's saved on the server at {path})"), False
             reason = str(dl.get("reason", "unknown error"))
             if gated:
                 blocked_matches.append((item, reason))
@@ -2378,23 +2803,23 @@ class RuntimeMediaMixin:
                 youtube_bot_blocked = True
             outcomes[name] = (
                 f"download blocked ({self._play_clean_reason(reason)})")
-        tried = self._format_tried_list(search_attempts, outcomes)
-        # Total failure: the pre-enqueued first pick never downloaded —
-        # drop its queue row like the single-send path does, so the
-        # durable queue doesn't keep a broken item.
+        # Total failure: the tried trail goes to the journal; the
+        # chat gets the outcome and the found-but-blocked facts.
+        self._play_log_tried(search_attempts, outcomes)
+        # The pre-enqueued first pick never downloaded — drop its
+        # queue row like the single-send path does, so the durable
+        # queue doesn't keep a broken item.
         self._drop_matching_queued(engine, first_item)
         if gated and pick_items:
             # Nothing that MATCHES could be downloaded, but other
             # results exist: they are the owner's to choose from —
             # never auto-sent as if they were the request.
             offer = self._play_picklist_offer(
-                pick_items, blocked_matches, preview_finds, out, tried,
+                pick_items, blocked_matches, preview_finds,
                 query or title, chat,
                 youtube_bot_blocked=youtube_bot_blocked)
             if offer:
-                return offer
-        msg = (out + f"\nsources tried ({len(tried)}): "
-               + "; ".join(tried))
+                return offer, False
         attempted_download = any(
             isinstance(v, str)
             and v.startswith(("download blocked", "downloaded"))
@@ -2404,34 +2829,46 @@ class RuntimeMediaMixin:
             # Previews were the ONLY thing any source had: the plain
             # honest-absence line instead of the generic failure
             # line.  Nothing was sent, nothing queued for download.
-            msg += f"\n{self._play_preview_line(preview_finds[0])}"
-        else:
-            msg += f"\ncouldn't download {title!r} from any source."
-            if preview_finds:
-                msg += f"\n{self._play_preview_note(preview_finds[0])}"
+            return self._play_preview_line(preview_finds[0]), False
+        lines = [f"couldn't download “{title}” from any source."]
+        for blocked_item, blocked_reason in blocked_matches[:3]:
+            blocked_line = self._play_blocked_line(
+                blocked_item, blocked_reason)
+            if blocked_line:
+                lines.append(blocked_line)
+        # An arrived-but-wrong file (a preview-length clip for a
+        # full-length track) is its own honesty fact — it rides the
+        # report even outside the gated path, where no blocked
+        # lines are collected (inside it, the blocked lines above
+        # already carry the same fact).
+        if not gated:
+            for note in verify_notes[:2]:
+                lines.append(f"⚠ {note}.")
+        if preview_finds:
+            lines.append(self._play_preview_note(preview_finds[0]))
         if youtube_bot_blocked:
-            msg += f"\n{BOT_COOKIE_SHORT_HELP}"
-        return msg
+            lines.append(BOT_COOKIE_SHORT_HELP)
+        return "\n".join(lines), False
 
     def _play_picklist_offer(
             self, pick_items: list[dict[str, Any]],
             blocked_matches: list[tuple[dict[str, Any], str]],
             preview_finds: list[dict[str, Any]],
-            out: str, tried: list[str], query: str, chat: Any,
+            query: str, chat: Any,
             *, youtube_bot_blocked: bool = False) -> str:
         """The no-confident-download outcome: honest report + choice.
 
-        The reply carries (1) the full tried-list, (2) every
-        found-but-blocked match BY NAME with its block reason
-        (cleaned: no raw asset URLs, no doubled wording), (3) the
-        preview truth when the track also turned up as a 30s clip,
-        and (4) the standard pick-list over the remaining
-        downloadable FULL-TRACK results — preview-class results are
-        never in the list — stored in the PickCache so a number
-        reply or a button tap downloads exactly the chosen
-        candidate.  Returns "" when the pick-list can't be stored
-        (caller falls back to the plain failure report).  Never
-        raises.
+        The reply carries (1) every found-but-blocked match BY NAME
+        with its block reason (cleaned: no raw asset URLs, no doubled
+        wording), (2) the preview truth when the track also turned
+        up as a 30s clip, and (3) the standard pick-list over the
+        remaining downloadable FULL-TRACK results — preview-class
+        results are never in the list — stored in the PickCache so a
+        number reply or a button tap downloads exactly the chosen
+        candidate.  The tried-list is NOT in the reply (journal-only,
+        presentation law 2026-11-05).  Returns "" when the pick-list
+        can't be stored (caller falls back to the plain failure
+        report).  Never raises.
         """
         try:
             from ...media.cookies import BOT_COOKIE_SHORT_HELP
@@ -2465,8 +2902,11 @@ class RuntimeMediaMixin:
             token = PickCache.store(cands, chat_key) if chat_key else ""
             if not token:
                 return ""
-            lines = [out,
-                     f"sources tried ({len(tried)}): " + "; ".join(tried)]
+            lines = []
+            if blocked_matches or preview_finds:
+                lines.append(
+                    f"couldn't download “{query}” — every match I "
+                    "found was blocked or preview-only:")
             for it, reason in blocked_matches:
                 line = self._play_blocked_line(it, reason)
                 if line:

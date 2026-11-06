@@ -1711,19 +1711,21 @@ class Scheduler:
 
     def _run_payload_guarded(
         self, row: dict[str, Any], timeout_s: float
-    ) -> tuple[bool, str, bool, bool, Any]:
+    ) -> tuple[bool, str, bool, bool, Any, Any]:
         """Execute the job payload with a wall-clock cap.
 
-        Returns ``(ok, summary, timed_out, declared, doc)`` —
+        Returns ``(ok, summary, timed_out, declared, doc, silent)`` —
         ``declared`` marks a failure the payload's own result value
         declared (see :class:`_DeclaredFailure`), as opposed to a
         machinery failure; ``doc`` is the Formatting-F3 presentation
         Doc for a successful tool run (see :mod:`.job_reports`), or
-        None for every other payload/outcome.  With ``timeout_s <= 0``
-        the payload runs inline (no cap); otherwise it runs on a
-        daemon worker thread and a join past the cap abandons the
-        worker — the tick loop is never blocked forever by a stuck
-        tool or command.
+        None for every other payload/outcome; ``silent`` is the
+        scheduled-silence reason for a successful no-op run (the run
+        journals, nothing posts — owner law 2026-11-05), else None.
+        With ``timeout_s <= 0`` the payload runs inline (no cap);
+        otherwise it runs on a daemon worker thread and a join past
+        the cap abandons the worker — the tick loop is never blocked
+        forever by a stuck tool or command.
         """
         box: dict[str, Any] = {}
 
@@ -1733,11 +1735,13 @@ class Scheduler:
                 if row["payload_kind"] == "message":
                     box["result"] = self._run_message(payload)
                 elif row["payload_kind"] == "tool":
-                    box["result"], box["doc"] = self._run_tool_report(
-                        payload, job_name=str(row.get("name") or ""))
+                    box["result"], box["doc"], box["silent"] = \
+                        self._run_tool_report(
+                            payload, job_name=str(row.get("name") or ""))
                 else:
-                    box["result"], box["doc"] = self._run_command_report(
-                        payload, job_name=str(row.get("name") or ""))
+                    box["result"], box["doc"], box["silent"] = \
+                        self._run_command_report(
+                            payload, job_name=str(row.get("name") or ""))
             except Exception as exc:  # noqa: BLE001 - a job failure is a result
                 box["error"] = exc
 
@@ -1754,12 +1758,12 @@ class Scheduler:
                         f"job failed: timed out after {timeout_s:g}s "
                         "(worker abandoned; the job is marked failed but the "
                         "stuck call may still be running)",
-                        True, False, None)
+                        True, False, None, None)
         if "error" in box:
             return (False, f"job failed: {box['error']}", False,
-                    isinstance(box["error"], _DeclaredFailure), None)
+                    isinstance(box["error"], _DeclaredFailure), None, None)
         return True, str(box.get("result") or ""), False, False, \
-            box.get("doc")
+            box.get("doc"), box.get("silent")
 
     def _execute(self, row: dict[str, Any], *,
                  trigger_source: str = "tick") -> dict[str, Any]:
@@ -1779,8 +1783,8 @@ class Scheduler:
         try:
             # the per-job cap wins; 0 falls back to the scheduler default
             timeout_s = float(row.get("run_timeout_s") or 0.0) or self.wall_seconds
-            ok, summary, timed_out, declared, report_doc = \
-                self._run_payload_guarded(row, timeout_s)
+            ok, summary, timed_out, declared, report_doc, \
+                silent_reason = self._run_payload_guarded(row, timeout_s)
         finally:
             with self._lock:
                 self._active.discard(job_id)
@@ -1835,6 +1839,11 @@ class Scheduler:
             learned = "retries exhausted - owner alerted"
         elif timed_out:
             learned = "run timed out; worker abandoned"
+        elif ok and silent_reason:
+            # Scheduled silence (owner law, 2026-11-05): the run DID
+            # execute and records ok — the journal is its only trace.
+            learned = (f"quiet run — {silent_reason}; "
+                       "journaled, not posted")
         self._ledger("run", job_id,
                      f"{job_name}: {summary[:160]}",
                      cost_seconds=seconds, ok=ok, learned=learned,
@@ -1842,7 +1851,8 @@ class Scheduler:
                                "payload_kind": row.get("payload_kind"),
                                "trigger_source": trigger_source,
                                "will_retry": will_retry,
-                               "timed_out": timed_out})
+                               "timed_out": timed_out,
+                               "silent": bool(ok and silent_reason)})
         self._emit_bus("scheduler.job.finished", {
             "job_id": job_id, "name": job_name, "kind": row.get("kind"),
             "ok": ok, "seconds": seconds, "will_retry": will_retry,
@@ -1876,6 +1886,8 @@ class Scheduler:
             alert = False
         if ok and row.get("payload_kind") == "message":
             alert = False  # the message itself already went out
+        if ok and silent_reason:
+            alert = False  # scheduled silence: nothing to report
         if alert:
             try:
                 # The alert is the job's own report, and the job is
@@ -1943,6 +1955,7 @@ class Scheduler:
             "result": summary[:2000], "seconds": seconds,
             "next_run": next_run, "will_retry": will_retry,
             "retry_count": retry_count, "timed_out": timed_out,
+            "silent": bool(ok and silent_reason),
             "trigger_source": trigger_source,
         }
 
@@ -1970,12 +1983,14 @@ class Scheduler:
         return f"stored ({state}): {text[:200]}"
 
     def _run_tool(self, payload: dict[str, Any]) -> str:
-        text, _doc = self._run_tool_report(payload)
+        text, _doc, _silent = self._run_tool_report(payload)
         return text
 
     def _run_tool_report(self, payload: dict[str, Any], *,
-                         job_name: str = "") -> tuple[str, Any]:
-        """Run a tool payload; return ``(stored string, report Doc)``.
+                         job_name: str = "") -> tuple[str, Any, Any]:
+        """Run a tool payload; return ``(stored string, report Doc,
+        silence reason)`` — the silence reason is None when the run
+        has something to report (see :func:`.job_reports.noop_reason`).
 
         The string is the run's stored form — ``"{tool}:\\n"`` plus
         the legacy :func:`render_tool_value` rendering — byte-identical
@@ -2016,22 +2031,25 @@ class Scheduler:
         if declared is not None:
             raise _DeclaredFailure(f"tool {tool} failed: {declared or text}")
         doc = None
+        silent = None
         try:
-            from .job_reports import job_report_doc
+            from .job_reports import job_report_doc, noop_reason
 
             doc = job_report_doc(tool, value, job_name=job_name)
+            silent = noop_reason(tool, value)
         except Exception:  # noqa: BLE001 - a report bug must not fail the job
             _log.debug("job report build failed for tool %s", tool,
                        exc_info=True)
-        return f"{tool}:\n{text}", doc
+        return f"{tool}:\n{text}", doc, silent
 
     def _run_command(self, payload: dict[str, Any]) -> str:
-        text, _doc = self._run_command_report(payload)
+        text, _doc, _silent = self._run_command_report(payload)
         return text
 
     def _run_command_report(self, payload: dict[str, Any], *,
-                            job_name: str = "") -> tuple[str, Any]:
-        """Run a command payload; return ``(stored string, report Doc)``.
+                            job_name: str = "") -> tuple[str, Any, Any]:
+        """Run a command payload; return ``(stored string, report
+        Doc, silence reason)``.
 
         The string is the run's stored form — ``exit=N`` plus the
         head of stdout — byte-identical to what the scheduler has
@@ -2072,14 +2090,21 @@ class Scheduler:
                     f"command failed: exit={exit_code}"
                     + (f": {detail}" if detail else ""))
         doc = None
+        silent = None
         try:
             from .job_reports import command_report_doc
 
             doc = command_report_doc(job_name, command, value)
+            # A clean command that printed nothing has nothing to
+            # report (scheduled silence) — stderr counts as output.
+            if value.get("exit_code") == 0 and not stdout.strip() \
+                    and not str(value.get("stderr") or "").strip():
+                silent = "command finished with no output"
         except Exception:  # noqa: BLE001 - a report bug must not fail the job
             _log.debug("command report build failed for %r", command,
                        exc_info=True)
-        return f"exit={value.get('exit_code')}\n{stdout}".strip(), doc
+        return (f"exit={value.get('exit_code')}\n{stdout}".strip(),
+                doc, silent)
 
     # ── loop ─────────────────────────────────────────────────────────────────
     def start(self, *, catch_up: bool = True,
@@ -2201,8 +2226,12 @@ class Scheduler:
                     "active": [by_id.get(i, i) for i in active_ids],
                     "count": len(active_ids),
                 }
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001 - a failed probe is
+                # a health fact, never a silent hole (AA-71): record
+                # it and let the verdict say the section is missing.
+                record_failure("scheduler.health_overlaps", exc)
+                out["reasons"].append(
+                    "overlaps probe failed — running-now state unknown")
             out["deferred"] = dict(self._deferrals)
             try:
                 rows = self.db.query(
@@ -2224,8 +2253,12 @@ class Scheduler:
                     }
                     for r in rows
                 ]
-            except Exception:  # noqa: BLE001 - history is best-effort
-                pass
+            except Exception as exc:  # noqa: BLE001 - history is
+                # best-effort, but its failure is a health fact
+                # (AA-71), not a silent hole in an ok:true verdict.
+                record_failure("scheduler.health_recent_runs", exc)
+                out["reasons"].append(
+                    "recent-runs probe failed — run history unknown")
             # verdict — "stopped" degrades; "not-started" is informational
             # (CLI/test contexts never spin the loop; the live runtime does).
             reasons = out["reasons"]

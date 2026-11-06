@@ -10,13 +10,18 @@ both finds AND downloads, or all sources are exhausted.
 
 Rules under test:
 - (a) source A search-ok + download-fail -> chain tries source B, sends B.
-- (b) all sources download-fail -> honest "couldn't download" with the
-      FULL tried-list, never "couldn't send the audio".
+- (b) all sources download-fail -> honest "couldn't download", never
+      "couldn't send the audio".  The full tried-list is journal-only
+      since the 2026-11-05 presentation overhaul — it is asserted in
+      the LOG (caplog), never in the chat text.
 - (c) the YouTube-cookies hint appears ONLY when YouTube was actually
       attempted AND bot-blocked; it is SHORT (points at /cookies),
       never the yt-dlp command dump.
+- (d) presentation law: success returns the delivered item's own
+      line; no "sources tried", no "sent … to this chat" receipts.
 """
 
+import logging
 from types import SimpleNamespace
 from unittest import mock
 
@@ -30,20 +35,55 @@ BOTCHECK_MSG = (
     "Use --cookies-from-browser or --cookies for the authentication."
 )
 
+_RT_LOGGER = "nomorals.agents.partner.runtime_media"
+
+
+class _FakeGateway:
+    """Records sends/files/edits; plays the adapter for edit verbs."""
+
+    def __init__(self):
+        self.sent = []
+        self.files = []
+        self.edits = []
+        self._n = 0
+
+    def send(self, platform, chat, text, **kw):
+        self._n += 1
+        self.sent.append((platform, chat, text))
+        return SimpleNamespace(ok=True, platform=platform,
+                               message_id=f"m{self._n}")
+
+    def send_file(self, platform, target, path, caption=""):
+        self.files.append((platform, target, path, caption))
+        return SimpleNamespace(ok=True, platform=platform,
+                               message_id="f1")
+
+    def _adapter_for(self, platform):
+        return self
+
+    def edit_message(self, chat, message_id, text, *, buttons=None):
+        self.edits.append((str(message_id), text))
+        return {"ok": True}
+
+    def edit_progress(self, chat, message_id, text):
+        self.edits.append((str(message_id), text))
+        return {"ok": True}
+
 
 def _handler():
     from nomorals.agents.partner.runtime_media import RuntimeMediaMixin
 
     rt = RuntimeMediaMixin.__new__(RuntimeMediaMixin)
     rt.context = SimpleNamespace()
-    rt.gateway = mock.Mock()
+    rt.gateway = _FakeGateway()
     return rt
 
 
-def _chat():
+def _chat(chat_id="12345"):
     chat = mock.Mock()
     chat.platform = "telegram"
-    chat.chat_id = "12345"
+    chat.chat_id = chat_id
+    chat.key = f"telegram:{chat_id}"
     return chat
 
 
@@ -51,22 +91,16 @@ def _item(kind, path, title):
     return {"kind": kind, "path": path, "title": title, "artist": "Ayo Maff"}
 
 
-def _wait_play_job(ack: str, timeout: float = 10.0):
-    """Collect the background play-download job an ack announced."""
-    import re
+def _collect_play_job(chat_key, title, timeout=10.0):
     from nomorals.core.jobs import shared_registry
 
-    m = re.search(r"\[job (job[0-9a-f]+)\]", ack or "")
-    assert m, f"ack carries no job id: {ack!r}"
-    job = shared_registry().collect(m.group(1), timeout=timeout)
+    snaps = shared_registry().list(
+        labels={"owner": "play", "chat": chat_key, "title": title})
+    assert snaps, f"no play job for {chat_key}/{title}"
+    job = shared_registry().collect(snaps[-1]["id"], timeout=timeout)
     assert job is not None and job.done(), \
         f"job never finished: {job.status if job else None}"
     return job
-
-
-def _followup_texts(rt) -> list:
-    return [c.args[2] for c in rt.gateway.send.call_args_list
-            if len(c.args) > 2]
 
 
 SC_ITEM = _item("soundcloud",
@@ -106,15 +140,18 @@ def test_fallthrough_soundcloud_fail_tries_youtube_and_sends():
         {"ok": False, "reason": "This video is DRM protected"},
         {"ok": True, "path": "/tmp/yt-song.mp3", "title": "Lifestyle (YA MAN)"},
     ]
-    out = rt._play_send_with_fallthrough(
-        engine, SC_ITEM, [YT_ITEM, BC_ITEM], SEARCH_ATTEMPTS,
-        "queued 1:", chat)
+    out, sent = rt._play_send_with_fallthrough(
+        engine, SC_ITEM, [YT_ITEM, BC_ITEM], SEARCH_ATTEMPTS, chat)
     assert engine.download.call_count == 2
     assert engine.download.call_args_list[0][0][0]["kind"] == "soundcloud"
     assert engine.download.call_args_list[1][0][0]["kind"] == "youtube"
-    rt.gateway.send_file.assert_called_once()
-    assert "/tmp/yt-song.mp3" in rt.gateway.send_file.call_args[0]
-    assert "sent" in out
+    assert sent is True
+    assert len(rt.gateway.files) == 1
+    assert "/tmp/yt-song.mp3" in rt.gateway.files[0]
+    # The delivered item's own line — no receipt around it.
+    assert out == "🎵 Lifestyle (YA MAN) — Ayo Maff"
+    assert "to this chat" not in out
+    assert "sources tried" not in out
     assert "couldn't download" not in out
     assert "couldn't send" not in out
 
@@ -130,17 +167,18 @@ def test_fallthrough_tries_all_candidates_in_order():
     ]
     arc = _item("archiveorg", "https://archive.org/x.mp3",
                 "Lifestyle (YA MAN)")
-    out = rt._play_send_with_fallthrough(
-        engine, SC_ITEM, [BC_ITEM, arc], SEARCH_ATTEMPTS, "queued 1:", chat)
+    out, sent = rt._play_send_with_fallthrough(
+        engine, SC_ITEM, [BC_ITEM, arc], SEARCH_ATTEMPTS, chat)
     assert engine.download.call_count == 3
-    assert "sent" in out
-    rt.gateway.send_file.assert_called_once()
+    assert sent is True
+    assert out.startswith("🎵")
+    assert len(rt.gateway.files) == 1
 
 
-# ── (b) all fail: honest "couldn't download", full tried-list ─────────
+# ── (b) all fail: honest "couldn't download"; trail in the journal ────
 
 
-def test_all_download_fail_honest_message_no_send_wording():
+def test_all_download_fail_honest_message_no_send_wording(caplog):
     rt = _handler()
     chat = _chat()
     engine = mock.Mock()
@@ -149,20 +187,26 @@ def test_all_download_fail_honest_message_no_send_wording():
         {"ok": False, "reason": "Bandcamp download failed: 404"},
         {"ok": False, "reason": "YouTube download failed: video unavailable"},
     ]
-    out = rt._play_send_with_fallthrough(
-        engine, SC_ITEM, [BC_ITEM, YT_ITEM], SEARCH_ATTEMPTS,
-        "queued 1:", chat)
+    with caplog.at_level(logging.INFO, logger=_RT_LOGGER):
+        out, sent = rt._play_send_with_fallthrough(
+            engine, SC_ITEM, [BC_ITEM, YT_ITEM], SEARCH_ATTEMPTS, chat)
+    assert sent is False
     assert "couldn't download" in out
     assert "couldn't send the audio" not in out
     assert "couldn't send it" not in out
-    # Full tried-list: every source actually attempted, not just the
-    # first 5 the old resolver chain reported.
+    # The chat text carries NO tried-list (presentation law)…
+    assert "sources tried" not in out
+    assert "soundcloud-search" not in out
+    # …the full trail is in the journal instead: every source
+    # actually attempted, with its download-stage outcome.
+    journal = "\n".join(r.getMessage() for r in caplog.records
+                        if "play tried" in r.getMessage())
+    assert journal, "tried trail never reached the journal"
     for label in ("soundcloud-search", "bandcamp-search", "youtube-search",
                   "netnaija-search", "archiveorg-search"):
-        assert label in out
-    # Stage info: search ok + download blocked, per source.
-    assert "download" in out.lower()
-    rt.gateway.send_file.assert_not_called()
+        assert label in journal
+    assert "download blocked" in journal
+    assert rt.gateway.files == []
 
 
 def test_single_item_send_wording_is_download_not_send():
@@ -170,10 +214,10 @@ def test_single_item_send_wording_is_download_not_send():
     chat = _chat()
     engine = mock.Mock()
     engine.download.return_value = {"ok": False, "reason": "no yt-dlp"}
-    out = rt._play_send_in_chat(engine, {"title": "X"}, "queued:", chat)
+    out = rt._play_send_in_chat(engine, {"title": "X"}, chat)
     assert "couldn't download" in out
     assert "couldn't send the audio" not in out
-    rt.gateway.send_file.assert_not_called()
+    assert rt.gateway.files == []
 
 
 def test_fallthrough_skips_non_downloadable():
@@ -185,27 +229,31 @@ def test_fallthrough_skips_non_downloadable():
     engine.download.return_value = {
         "ok": True, "path": "/tmp/sc.mp3", "title": "Lifestyle (YA MAN)"}
     # First item downloads fine; the non-downloadable fallback is never
-    # attempted — it is only listed.
-    out = rt._play_send_with_fallthrough(
-        engine, SC_ITEM, [boom], SEARCH_ATTEMPTS, "queued 1:", chat)
+    # attempted — it is only recorded.
+    out, sent = rt._play_send_with_fallthrough(
+        engine, SC_ITEM, [boom], SEARCH_ATTEMPTS, chat)
     assert engine.download.call_count == 1
-    assert "sent" in out
+    assert sent is True
 
 
-def test_fallthrough_records_non_downloadable_without_attempt():
+def test_fallthrough_records_non_downloadable_without_attempt(caplog):
     rt = _handler()
     chat = _chat()
     engine = mock.Mock()
     engine.download.return_value = {"ok": False, "reason": "DRM protected"}
     boom = dict(_item("boomplay", "https://boomplay.com/x", "Lifestyle"),
                 downloadable=False)
-    out = rt._play_send_with_fallthrough(
-        engine, SC_ITEM, [boom], SEARCH_ATTEMPTS, "queued 1:", chat)
+    with caplog.at_level(logging.INFO, logger=_RT_LOGGER):
+        out, sent = rt._play_send_with_fallthrough(
+            engine, SC_ITEM, [boom], SEARCH_ATTEMPTS, chat)
     # Only the downloadable candidate was attempted...
     assert engine.download.call_count == 1
-    # ...but the message still accounts for Boomplay honestly.
-    assert "boomplay" in out.lower()
+    assert sent is False
     assert "couldn't download" in out
+    # ...and Boomplay is accounted for in the journal, by name.
+    journal = "\n".join(r.getMessage() for r in caplog.records)
+    assert "boomplay" in journal.lower()
+    assert "not downloadable" in journal
 
 
 # ── (c) cookies hint: only when YouTube attempted AND bot-blocked ─────
@@ -219,8 +267,9 @@ def test_cookies_hint_when_youtube_bot_blocked():
         {"ok": False, "reason": "This video is DRM protected"},
         {"ok": False, "reason": f"YouTube download failed: {BOTCHECK_MSG}"},
     ]
-    out = rt._play_send_with_fallthrough(
-        engine, SC_ITEM, [YT_ITEM], SEARCH_ATTEMPTS, "queued 1:", chat)
+    out, sent = rt._play_send_with_fallthrough(
+        engine, SC_ITEM, [YT_ITEM], SEARCH_ATTEMPTS, chat)
+    assert sent is False
     assert "couldn't download" in out
     assert "/cookies" in out
     # SHORT hint only — never the yt-dlp command dump.
@@ -236,8 +285,8 @@ def test_no_cookies_hint_when_youtube_fails_generic():
         {"ok": False, "reason": "This video is DRM protected"},
         {"ok": False, "reason": "YouTube download failed: video unavailable"},
     ]
-    out = rt._play_send_with_fallthrough(
-        engine, SC_ITEM, [YT_ITEM], SEARCH_ATTEMPTS, "queued 1:", chat)
+    out, _sent = rt._play_send_with_fallthrough(
+        engine, SC_ITEM, [YT_ITEM], SEARCH_ATTEMPTS, chat)
     assert "/cookies" not in out
     assert BOT_COOKIE_HELP not in out
 
@@ -252,13 +301,13 @@ def test_no_cookies_hint_when_youtube_never_attempted():
     ]
     attempts = [a for a in SEARCH_ATTEMPTS
                 if not a.startswith("youtube-search")]
-    out = rt._play_send_with_fallthrough(
-        engine, SC_ITEM, [BC_ITEM], attempts, "queued 1:", chat)
+    out, _sent = rt._play_send_with_fallthrough(
+        engine, SC_ITEM, [BC_ITEM], attempts, chat)
     assert "/cookies" not in out
     assert BOT_COOKIE_HELP not in out
 
 
-def test_skip_duplicate_youtube_after_fallback_attempt():
+def test_skip_duplicate_youtube_after_fallback_attempt(caplog):
     rt = _handler()
     chat = _chat()
     engine = mock.Mock()
@@ -269,10 +318,14 @@ def test_skip_duplicate_youtube_after_fallback_attempt():
         "reason": f"SoundCloud blocked the download (DRM). {BOTCHECK_MSG}",
         "youtube_fallback_attempted": True,
     }
-    out = rt._play_send_with_fallthrough(
-        engine, SC_ITEM, [YT_ITEM], SEARCH_ATTEMPTS, "queued 1:", chat)
+    with caplog.at_level(logging.INFO, logger=_RT_LOGGER):
+        out, sent = rt._play_send_with_fallthrough(
+            engine, SC_ITEM, [YT_ITEM], SEARCH_ATTEMPTS, chat)
     assert engine.download.call_count == 1
-    assert "already attempted" in out
+    assert sent is False
+    # The skip is accounted for in the journal…
+    journal = "\n".join(r.getMessage() for r in caplog.records)
+    assert "already attempted" in journal
     assert "/cookies" in out  # YouTube WAS attempted (via fallback) + blocked
 
 
@@ -348,7 +401,7 @@ def test_control_play_chat_falls_through_to_youtube():
 
     rt = RuntimeMediaMixin.__new__(RuntimeMediaMixin)
     rt.context = SimpleNamespace()
-    rt.gateway = mock.Mock()
+    rt.gateway = _FakeGateway()
     chat = _chat()
     rt._ref_from_key = lambda key: chat
 
@@ -400,16 +453,23 @@ def test_control_play_chat_falls_through_to_youtube():
         SR.return_value.resolve.return_value = sc_res
         SR.return_value.search_candidates_detailed.return_value = (
             [sc_cand, yt_cand], detailed_attempts)
-        ack = rt._control_play("lifestyle (YA MAN)", "chat-key")
-    assert "downloading in the background" in ack
-    _wait_play_job(ack)
+        out = rt._control_play("lifestyle (YA MAN)", "chat-key")
+    # The handler returns "" — the ack already posted as a message.
+    assert out == ""
+    job = _collect_play_job("chat-key", "Lifestyle (YA MAN)")
+    assert job.result["sent"] is True
     assert engine.download.call_count == 2
-    rt.gateway.send_file.assert_called_once()
-    assert "/tmp/yt-song.mp3" in rt.gateway.send_file.call_args[0]
-    text = "\n".join(_followup_texts(rt))
-    assert "sent" in text
-    assert "couldn't download" not in text
-    assert "couldn't send" not in text
-    # Full tried-list, not just the first 5 the old chain reported.
-    assert "youtube-search" in text
-    assert "archiveorg-search" in text
+    assert len(rt.gateway.files) == 1
+    assert "/tmp/yt-song.mp3" in rt.gateway.files[0]
+    # The whole surface: one ack send, the file, ack edits.  No
+    # tried-list, no receipt, no queue counts anywhere.
+    surface = [t for _p, _c, t in rt.gateway.sent]
+    surface += [t for _m, t in rt.gateway.edits]
+    surface += [c for _p, _t, _path, c in rt.gateway.files]
+    assert surface[0].startswith("⏳")
+    for text in surface:
+        assert "sources tried" not in text
+        assert "to this chat" not in text
+        assert "[job " not in text
+    # The final state is the delivered item's line, edited in.
+    assert rt.gateway.edits[-1][1] == "🎵 Lifestyle (YA MAN) — Ayo Maff"

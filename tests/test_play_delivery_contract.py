@@ -20,6 +20,7 @@ Seams are the documented ones (fake engine/gateway/resolver, no
 network), mirroring tests/test_play_download_fallthrough.py.
 """
 
+import logging
 import re
 from types import SimpleNamespace
 from unittest import mock
@@ -53,20 +54,30 @@ def _chat(chat_id="12345"):
     return chat
 
 
-def _wait_play_job(ack: str, timeout: float = 10.0):
+def _wait_play_job(chat_key: str, title: str, timeout: float = 10.0):
+    """Collect the newest play-download job for (chat, title) — the
+    ack carries no job id anymore (presentation law), so jobs are
+    found by their labels."""
     from nomorals.core.jobs import shared_registry
 
-    m = re.search(r"\[job (job[0-9a-f]+)\]", ack or "")
-    assert m, f"ack carries no job id: {ack!r}"
-    job = shared_registry().collect(m.group(1), timeout=timeout)
+    snaps = shared_registry().list(
+        labels={"owner": "play", "chat": chat_key, "title": title})
+    assert snaps, f"no play job for {chat_key}/{title}"
+    job = shared_registry().collect(snaps[-1]["id"], timeout=timeout)
     assert job is not None and job.done(), \
         f"job never finished: {job.status if job else None}"
     return job
 
 
-def _followup_texts(rt) -> list:
-    return [c.args[2] for c in rt.gateway.send.call_args_list
-            if len(c.args) > 2]
+def _edit_texts(rt) -> list:
+    """Texts the ack was edited to (the mock adapter's edit verbs)."""
+    adapter = rt.gateway._adapter_for.return_value
+    texts = []
+    for c in adapter.edit_message.call_args_list:
+        texts.append(str(c.args[2]) if len(c.args) > 2 else "")
+    for c in adapter.edit_progress.call_args_list:
+        texts.append(str(c.args[2]) if len(c.args) > 2 else "")
+    return texts
 
 
 SC_URL = "https://soundcloud.com/ayorinde-mafoluku/lifestyle-ya-man"
@@ -165,9 +176,10 @@ def test_blocked_match_namesake_not_sent_picklist_offered():
     # match.  The namesake must never even be tried as a delivery.
     engine.download.return_value = {
         "ok": False, "reason": "This video is DRM protected"}
-    out = rt._play_send_with_fallthrough(
+    out, sent = rt._play_send_with_fallthrough(
         engine, dict(REAL), [dict(NAMESAKE)], SEARCH_ATTEMPTS,
-        "queued 1:", chat, match=MATCH, query="lifestyle (YA MAN) by Ayo Maff")
+        chat, match=MATCH, query="lifestyle (YA MAN) by Ayo Maff")
+    assert sent is False
     assert engine.download.call_count == 1
     assert engine.download.call_args[0][0]["path"] == SC_URL
     rt.gateway.send_file.assert_not_called()
@@ -188,13 +200,17 @@ def test_blocked_match_without_alternatives_reports_blocks():
     engine.queue.return_value = []
     engine.download.return_value = {
         "ok": False, "reason": "This video is DRM protected"}
-    out = rt._play_send_with_fallthrough(
-        engine, dict(REAL), [], SEARCH_ATTEMPTS, "queued 1:", chat,
+    out, sent = rt._play_send_with_fallthrough(
+        engine, dict(REAL), [], SEARCH_ATTEMPTS, chat,
         match=MATCH, query="lifestyle (YA MAN) by Ayo Maff")
+    assert sent is False
     rt.gateway.send_file.assert_not_called()
     assert "couldn't download" in out
     assert "DRM" in out
-    assert "soundcloud-search" in out
+    # The blocked match is NAMED (its source label) in the report;
+    # the per-source tried trail itself is journal-only now.
+    assert "SoundCloud" in out
+    assert "sources tried" not in out
 
 
 # ── (b) namesake first, real match later in the same source ──────────
@@ -218,21 +234,22 @@ def test_namesake_skipped_real_match_sent():
               "title": "Unrelated Jam", "artist": "Nobody"},
              {"kind": "soundcloud", "path": "https://soundcloud.com/x/5",
               "title": "Another One", "artist": "Nobody"}]
-    out = rt._play_send_with_fallthrough(
-        engine, items[0], items[1:], SEARCH_ATTEMPTS, "queued 1:", chat,
+    out, sent = rt._play_send_with_fallthrough(
+        engine, items[0], items[1:], SEARCH_ATTEMPTS, chat,
         match=MATCH, query="lifestyle (YA MAN) by Ayo Maff")
     attempted = [c[0][0]["path"] for c in engine.download.call_args_list]
     assert NAMESAKE["path"] not in attempted
     assert attempted == [SC_URL]
     rt.gateway.send_file.assert_called_once()
     assert "/tmp/real.mp3" in rt.gateway.send_file.call_args[0]
-    assert "sent “Lifestyle (YA MAN)”" in out
+    assert sent is True
+    assert out == "🎵 Lifestyle (YA MAN) — Ayo Maff"
 
 
 # ── (c) blocked on A, downloaded from C — report names A's block ─────
 
 
-def test_blocked_on_a_sent_from_c_report_names_block():
+def test_blocked_on_a_sent_from_c_report_names_block(caplog):
     rt = _handler()
     chat = _chat()
     engine = mock.Mock()
@@ -242,17 +259,22 @@ def test_blocked_on_a_sent_from_c_report_names_block():
         {"ok": True, "path": "/tmp/yt-real.mp3",
          "title": "Lifestyle (YA MAN)"},
     ]
-    out = rt._play_send_with_fallthrough(
-        engine, dict(REAL), [dict(YT_REAL)], SEARCH_ATTEMPTS,
-        "queued 1:", chat, match=MATCH,
-        query="lifestyle (YA MAN) by Ayo Maff")
+    with caplog.at_level(
+            logging.INFO,
+            logger="nomorals.agents.partner.runtime_media"):
+        out, sent = rt._play_send_with_fallthrough(
+            engine, dict(REAL), [dict(YT_REAL)], SEARCH_ATTEMPTS,
+            chat, match=MATCH, query="lifestyle (YA MAN) by Ayo Maff")
     assert engine.download.call_count == 2
     rt.gateway.send_file.assert_called_once()
     assert "/tmp/yt-real.mp3" in rt.gateway.send_file.call_args[0]
-    assert "sent “Lifestyle (YA MAN)”" in out
-    # The per-source trail carries the found-but-blocked fact.
-    assert "soundcloud-search" in out and "DRM" in out
-    assert "downloaded ✓" in out
+    assert sent is True
+    # Success reports the delivery, nothing else…
+    assert out == "🎵 Lifestyle (YA MAN) — Ayo Maff"
+    # …and the found-but-blocked fact lives in the journal trail.
+    journal = "\n".join(r.getMessage() for r in caplog.records)
+    assert "soundcloud-search" in journal and "DRM" in journal
+    assert "downloaded ✓" in journal
 
 
 # ── (d) honest terminal reports ───────────────────────────────────────
@@ -292,10 +314,10 @@ def test_found_but_blocked_everywhere_names_every_block():
         {"ok": False, "reason": "This video is DRM protected"},
         {"ok": False, "reason": "YouTube download failed: video unavailable"},
     ]
-    out = rt._play_send_with_fallthrough(
+    out, sent = rt._play_send_with_fallthrough(
         engine, dict(REAL), [dict(YT_REAL)], SEARCH_ATTEMPTS,
-        "queued 1:", chat, match=MATCH,
-        query="lifestyle (YA MAN) by Ayo Maff")
+        chat, match=MATCH, query="lifestyle (YA MAN) by Ayo Maff")
+    assert sent is False
     rt.gateway.send_file.assert_not_called()
     assert "couldn't download" in out
     assert "DRM" in out
@@ -317,9 +339,9 @@ def test_picklist_choice_delivers_the_chosen_candidate():
     # First the blocked-match outcome that produces the pick-list...
     engine.download.return_value = {
         "ok": False, "reason": "This video is DRM protected"}
-    out = rt._play_send_with_fallthrough(
+    out, _sent = rt._play_send_with_fallthrough(
         engine, dict(REAL), [dict(NAMESAKE)], SEARCH_ATTEMPTS,
-        "queued 1:", chat, match=MATCH, query="lifestyle (YA MAN) by Ayo Maff")
+        chat, match=MATCH, query="lifestyle (YA MAN) by Ayo Maff")
     token = re.search(r"pick:([0-9a-f]{8})", out).group(1)
     # ...then the owner picks the namesake ON PURPOSE.
     engine.download.return_value = {
@@ -327,11 +349,11 @@ def test_picklist_choice_delivers_the_chosen_candidate():
     with mock.patch("nomorals.media.playback.PlaybackEngine",
                     return_value=engine):
         ack = rt._control_play(f"pick {token} 1", chat.key)
-    _wait_play_job(ack)
+    assert ack == ""
+    job = _wait_play_job(chat.key, "Ya Man Ain't Me")
     rt.gateway.send_file.assert_called_once()
     assert "/tmp/namesake.mp3" in rt.gateway.send_file.call_args[0]
-    text = "\n".join(_followup_texts(rt))
-    assert "Ya Man Ain't Me" in text
+    assert "Ya Man Ain't Me" in str(job.result.get("text") or "")
 
 
 # ── (5) delivered identity: caption + filename ────────────────────────
@@ -346,16 +368,19 @@ def test_template_filename_replaced_by_real_identity(tmp_path):
     landed.write_bytes(b"ID3-fake-audio")
     engine.download.return_value = {
         "ok": True, "path": str(landed), "title": "Lifestyle (YA MAN)"}
-    out = rt._play_send_with_fallthrough(
-        engine, dict(REAL), [], SEARCH_ATTEMPTS, "queued 1:", chat,
+    out, sent = rt._play_send_with_fallthrough(
+        engine, dict(REAL), [], SEARCH_ATTEMPTS, chat,
         match=MATCH, query="lifestyle (YA MAN) by Ayo Maff")
+    assert sent is True
     rt.gateway.send_file.assert_called_once()
     sent_path = rt.gateway.send_file.call_args[0][2]
     caption = rt.gateway.send_file.call_args[1]["caption"]
     assert sent_path.endswith("Ayo Maff - Lifestyle (YA MAN).mp3")
     assert "playlist" not in sent_path
-    assert caption == "🎵 Lifestyle (YA MAN)"
-    assert "sent “Lifestyle (YA MAN)”" in out
+    # The caption/final line carries the full identity — the
+    # artist the source knew rides along, never dropped.
+    assert caption == "🎵 Lifestyle (YA MAN) — Ayo Maff"
+    assert out == caption
 
 
 def test_good_filename_sent_as_is(tmp_path):
@@ -368,7 +393,7 @@ def test_good_filename_sent_as_is(tmp_path):
     engine.download.return_value = {
         "ok": True, "path": str(landed), "title": "Lifestyle (YA MAN)"}
     rt._play_send_with_fallthrough(
-        engine, dict(REAL), [], SEARCH_ATTEMPTS, "queued 1:", chat,
+        engine, dict(REAL), [], SEARCH_ATTEMPTS, chat,
         match=MATCH, query="lifestyle (YA MAN) by Ayo Maff")
     sent_path = rt.gateway.send_file.call_args[0][2]
     assert sent_path == str(landed)
@@ -384,7 +409,7 @@ def test_single_send_path_also_carries_identity(tmp_path):
     engine.download.return_value = {
         "ok": True, "path": str(landed), "title": "Lifestyle (YA MAN)"}
     text, sent = rt._play_send_in_chat_result(
-        engine, dict(REAL), "queued 1:", chat)
+        engine, dict(REAL), chat)
     assert sent is True
     sent_path = rt.gateway.send_file.call_args[0][2]
     assert sent_path.endswith("Ayo Maff - Lifestyle (YA MAN).mp3")
@@ -440,11 +465,12 @@ def test_e2e_blocked_exact_match_no_substitution():
         SR.return_value.search_candidates_detailed.return_value = (
             [sc_cand, dealer_cand], attempts)
         ack = rt._control_play("lifestyle (YA MAN) by Ayo Maff", chat.key)
-    _wait_play_job(ack)
+    assert ack == ""
+    _wait_play_job(chat.key, "Lifestyle (YA MAN)")
     # 'Dealer' was never attempted and never sent.
     assert engine.download.call_count == 1
     rt.gateway.send_file.assert_not_called()
-    text = "\n".join(_followup_texts(rt))
+    text = "\n".join(_edit_texts(rt))
     assert "DRM" in text
     # Preview law (2026-11-05): an iTunes hit is a 30s preview — it is
     # NOT offered as a pick either.  A pick-list entry must be a
@@ -481,10 +507,10 @@ def test_e2e_namesake_chain_pick_real_match_sent():
         SR.return_value.search_candidates_detailed.return_value = (
             [ns_cand, yt_cand], attempts)
         ack = rt._control_play("lifestyle (YA MAN)", chat.key)
-    _wait_play_job(ack)
+    assert ack == ""
+    job = _wait_play_job(chat.key, "Ya Man Ain't Me")
     attempted = [c[0][0]["path"] for c in engine.download.call_args_list]
     assert attempted == [YT_REAL["path"]]
     rt.gateway.send_file.assert_called_once()
     assert "/tmp/yt-real.mp3" in rt.gateway.send_file.call_args[0]
-    text = "\n".join(_followup_texts(rt))
-    assert "sent “Lifestyle (YA MAN)”" in text
+    assert job.result.get("text") == "🎵 Lifestyle (YA MAN) — Ayo Maff"

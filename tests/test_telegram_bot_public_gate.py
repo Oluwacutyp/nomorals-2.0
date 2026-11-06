@@ -123,7 +123,8 @@ class PublicBotGateTest(unittest.TestCase):
             self.runtime._process(_msg("telegram-bot", "/duel"))
         cg.assert_called_once()
         # the gate's redirect must NOT have been sent; the game reply was
-        self.assertEqual(self.adapter.sent, ["mocked game"])
+        self.assertEqual(self.adapter.sent,
+                         ["mocked game\n<i>Powered by peacethefirst</i>"])
 
     def test_gift_passes_gate_on_telegram_bot(self) -> None:
         self._setup("telegram-bot")
@@ -131,7 +132,8 @@ class PublicBotGateTest(unittest.TestCase):
                                return_value="mocked gift") as cg:
             self.runtime._process(_msg("telegram-bot", "/gift @x 10"))
         cg.assert_called_once()
-        self.assertEqual(self.adapter.sent, ["mocked gift"])
+        self.assertEqual(self.adapter.sent,
+                         ["mocked gift\n<i>Powered by peacethefirst</i>"])
 
     def test_unknown_slash_falls_through_to_chat(self) -> None:
         # unknown slashes are ordinary text, not blocked
@@ -154,7 +156,8 @@ class PublicBotGateTest(unittest.TestCase):
                                return_value="mocked control") as hc:
             self.runtime._process(_msg("telegram", "/model", owner=True))
         hc.assert_called_once()
-        self.assertEqual(self.adapter.sent, ["mocked control"])
+        self.assertEqual(self.adapter.sent,
+                         ["mocked control\n<i>Powered by peacethefirst</i>"])
 
     def test_game_command_still_works_on_userbot(self) -> None:
         self._setup("telegram")
@@ -162,7 +165,8 @@ class PublicBotGateTest(unittest.TestCase):
                                return_value="mocked game") as cg:
             self.runtime._process(_msg("telegram", "/duel", owner=True))
         cg.assert_called_once()
-        self.assertEqual(self.adapter.sent, ["mocked game"])
+        self.assertEqual(self.adapter.sent,
+                         ["mocked game\n<i>Powered by peacethefirst</i>"])
 
 
 if __name__ == "__main__":

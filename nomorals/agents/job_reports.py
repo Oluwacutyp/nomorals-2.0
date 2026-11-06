@@ -59,7 +59,7 @@ _log = logging.getLogger(__name__)
 
 __all__ = ["job_report_doc", "failure_doc",
            "command_report_doc", "command_failure_doc",
-           "tool_result_doc", "summarize_last_result"]
+           "tool_result_doc", "summarize_last_result", "noop_reason"]
 
 #: Lists longer than this render their head + an explicit tail count.
 _LIST_LIMIT = 10
@@ -102,6 +102,119 @@ def _plain(value: Any) -> str:
             return str(int(value))
         return f"{value:.6f}".rstrip("0").rstrip(".")
     return " ".join(str(value).split())
+
+
+# ── scheduled silence (owner law, 2026-11-05) ────────────────────────
+#
+# A scheduled job with nothing to report sends NOTHING: the run is
+# journaled (its stored last_result string is untouched — the jobs
+# views still show every run), but no report posts to the owner's
+# chats.  The finance-alerts "Checked: 0 / Fired: 0" post is the
+# named class.  Findings and owner-actionable failures still post;
+# the classification below is conservative by construction — only
+# shapes that provably carry no finding are silent, and a shape it
+# doesn't understand is never silenced.
+
+#: Dict keys that state the run's own bookkeeping, never a finding.
+_NOISE_KEYS = frozenset({"ok", "delivered"})
+
+
+def _value_is_empty(value: Any) -> bool:
+    """A result field carrying nothing: None, blank, empty
+    collection, numeric zero, False."""
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, (int, float)):
+        return value == 0
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, tuple, dict)):
+        return len(value) == 0
+    return False
+
+
+def noop_reason(tool: str, value: Any) -> str | None:
+    """Why a successful run has nothing to report — None when it
+    does (and therefore posts).  Never raises.
+    """
+    try:
+        if value is None:
+            return "no output"
+        if isinstance(value, bool):
+            return "no findings" if value else None
+        if isinstance(value, str):
+            return "no output" if not value.strip() else None
+        if isinstance(value, (list, tuple)):
+            return "empty result" if not value else None
+        if isinstance(value, (int, float)):
+            return "zero result" if value == 0 else None
+        if not isinstance(value, Mapping):
+            return None
+        if tool == "finance_alert":
+            # The named class: nothing checked, nothing fired (a
+            # snoozed-only run is the same nothing — the snooze was
+            # the owner's own act).  A run that CHECKED and found
+            # nothing still posts its negative; a fired alert
+            # always posts (and also publishes itself individually).
+            if _count(value.get("fired")) == 0 \
+                    and _count(value.get("checked")) == 0:
+                return "no alerts checked, none fired"
+            return None
+        if tool == "finance_digest":
+            if not str(value.get("text") or "").strip():
+                return "empty digest"
+            return None
+        if tool == "__agency_shift__":
+            shift = value.get("shift")
+            cycle = (shift.get("cycle")
+                     if isinstance(shift, Mapping) else None)
+            if isinstance(shift, Mapping) \
+                    and isinstance(cycle, Mapping):
+                expansion = value.get("expansion")
+                expansion_ran = isinstance(expansion, Mapping)
+                if not expansion_ran:
+                    # The missing expansion is itself a finding
+                    # (the digest's warn tone) — never silenced.
+                    return None
+                triggers = _name_list(shift.get("triggers"))
+                fired = _count(shift.get("triggers_fired")) \
+                    or len(triggers)
+                quiet = (
+                    _count(cycle.get("systems_run")) == 0
+                    and _count(cycle.get("useful_turns")) == 0
+                    and fired == 0
+                    and _count(expansion.get("systems_run")) == 0)
+                return "quiet shift — nothing ran, nothing fired" \
+                    if quiet else None
+            # unparseable shift → the generic rule below
+        content = [k for k, v in value.items()
+                   if k not in _NOISE_KEYS and not _value_is_empty(v)]
+        if not content:
+            return "nothing to report"
+        return None
+    except Exception:  # noqa: BLE001 - unclassifiable posts, never hides
+        _log.debug("job_reports: noop classification failed for %s",
+                   tool, exc_info=True)
+        return None
+
+
+def _stamped(doc: Doc) -> Doc:
+    """The always-present stamp (owner law, 2026-11-05) rides the
+    Doc's footer slot — the presentation layer renders a footer
+    quiet-italic per platform (``<i>`` on Telegram, ``_…_`` on
+    WhatsApp).  A producer-set footer is never overwritten."""
+    try:
+        if doc.footer:
+            return doc
+        from dataclasses import replace
+
+        from ..social.chat.typography import DEFAULT_STAMP_TEXT
+
+        return replace(doc, footer=DEFAULT_STAMP_TEXT)
+    except Exception:  # noqa: BLE001 - the stamp never fails a report
+        return doc
 
 
 # ── finance_alert — the owner's screenshot case ──────────────────────
@@ -510,24 +623,28 @@ def job_report_doc(tool: str, value: Any, *, job_name: str = "") -> Doc:
     the plain value path.  Never raises.
     """
     title = f"scheduled: {job_name}" if job_name else f"scheduled: {tool}"
+    doc: Doc | None = None
     try:
         builder = _BUILDERS.get(tool)
         if builder is not None and isinstance(value, Mapping):
-            return builder(tool, value, title=title)
-        if isinstance(value, str):
-            return _string_doc(tool, value, title=title)
-        if isinstance(value, Mapping):
-            return _generic_doc(tool, value, title=title)
-        return _value_doc(tool, value, title=title)
+            doc = builder(tool, value, title=title)
+        elif isinstance(value, str):
+            doc = _string_doc(tool, value, title=title)
+        elif isinstance(value, Mapping):
+            doc = _generic_doc(tool, value, title=title)
+        else:
+            doc = _value_doc(tool, value, title=title)
     except Exception:  # noqa: BLE001 - degrade, never fail the job
         _log.debug("job_reports: builder failed for %s; minimal Doc",
                    tool, exc_info=True)
-    try:
-        return Doc(title=title, icon="✅", tone="ok",
-                   summary=f"{humanize_key(tool) or 'Job'} finished.",
-                   overflow_text=str(value)[:2000])
-    except Exception:  # noqa: BLE001
-        return Doc(title=title, icon="✅", tone="ok")
+    if doc is None:
+        try:
+            doc = Doc(title=title, icon="✅", tone="ok",
+                      summary=f"{humanize_key(tool) or 'Job'} finished.",
+                      overflow_text=str(value)[:2000])
+        except Exception:  # noqa: BLE001
+            doc = Doc(title=title, icon="✅", tone="ok")
+    return _stamped(doc)
 
 
 def failure_doc(job_name: str, summary: str) -> Doc:
@@ -536,8 +653,8 @@ def failure_doc(job_name: str, summary: str) -> Doc:
     the failure named plainly, exactly as the stored record states
     it.  The ``last_result`` string itself is untouched by this Doc;
     it exists only for the publish path."""
-    return Doc(title=f"scheduled: {job_name}", icon="❌", tone="error",
-               summary=str(summary or ""))
+    return _stamped(Doc(title=f"scheduled: {job_name}", icon="❌",
+                        tone="error", summary=str(summary or "")))
 
 
 # ── command payloads (Formatting F7 — the F3 residue) ───────────────
@@ -590,8 +707,9 @@ def command_report_doc(job_name: str, command: str,
     err_section = _quote_section("Errors", stderr)
     if err_section is not None:
         sections.append(err_section)
-    return Doc(title=f"scheduled: {job_name}", icon="✅", tone="ok",
-               summary=summary, sections=tuple(sections))
+    return _stamped(Doc(title=f"scheduled: {job_name}", icon="✅",
+                        tone="ok", summary=summary,
+                        sections=tuple(sections)))
 
 
 def command_failure_doc(job_name: str, command: str,
@@ -599,10 +717,11 @@ def command_failure_doc(job_name: str, command: str,
     """:func:`failure_doc` for a command payload: the failure text
     is the summary (exactly as stored), and the command that failed
     is named as a mono row — a failed run names what failed."""
-    return Doc(title=f"scheduled: {job_name}", icon="❌", tone="error",
-               summary=str(summary or ""),
-               sections=(Section("Run", rows=(
-                   KV("Command", str(command or ""), mono=True),)),))
+    return _stamped(Doc(
+        title=f"scheduled: {job_name}", icon="❌", tone="error",
+        summary=str(summary or ""),
+        sections=(Section("Run", rows=(
+            KV("Command", str(command or ""), mono=True),)),)))
 
 
 # ── chat tool results (Formatting F7 — the C2 convergence) ──────────
@@ -617,20 +736,24 @@ def tool_result_doc(tool: str, value: Any) -> Doc:
     the same summary-first, noise-suppressed treatment as a
     scheduled report.  Never raises (via :func:`job_report_doc`'s
     own degradation)."""
+    doc: Doc | None = None
     try:
         builder = _BUILDERS.get(tool)
         if builder is not None and isinstance(value, Mapping):
-            return builder(tool, value, title=tool)
-        if isinstance(value, str):
-            return _string_doc(tool, value, title=tool)
-        if isinstance(value, Mapping):
-            return _generic_doc(tool, value, title=tool)
-        return _value_doc(tool, value, title=tool)
+            doc = builder(tool, value, title=tool)
+        elif isinstance(value, str):
+            doc = _string_doc(tool, value, title=tool)
+        elif isinstance(value, Mapping):
+            doc = _generic_doc(tool, value, title=tool)
+        else:
+            doc = _value_doc(tool, value, title=tool)
     except Exception:  # noqa: BLE001 - degrade, never fail the reply
         _log.debug("job_reports: chat builder failed for %s", tool,
                    exc_info=True)
-        return Doc(title=tool, icon="✅", tone="ok",
-                   summary=f"{humanize_key(tool) or 'Tool'} finished.")
+    if doc is None:
+        doc = Doc(title=tool, icon="✅", tone="ok",
+                  summary=f"{humanize_key(tool) or 'Tool'} finished.")
+    return _stamped(doc)
 
 
 def summarize_last_result(job: Mapping[str, Any], *,
