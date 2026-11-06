@@ -6,12 +6,15 @@ Players can view their unlocks with ``nm achievements`` or in-game.
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
 
 from ..storage.db import Database
 from .failures import record_failure
+
+_log = logging.getLogger("nomorals.games.achievements")
 
 __all__ = ["Achievement", "ACHIEVEMENTS", "ACHIEVEMENT_UNLOCKS",
            "UNLOCK_SOURCE", "unlock_achievement", "get_achievements",

@@ -423,7 +423,10 @@ class CriticAgent:
             if ":" in line:
                 k, v = line.split(":", 1)
                 lines[k.strip().upper()] = v.strip()
-        score = 70.0
+        # missing AND unparseable SCORE share this default (70/100) —
+        # an unparseable score must not survive un-divided and clamp
+        # to a perfect 1.0
+        score = 0.7
         try:
             score = float(lines.get("SCORE", "70")) / 100.0
         except ValueError:

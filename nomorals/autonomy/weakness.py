@@ -264,10 +264,6 @@ def record_fix(db: Any, weakness_id: str, fix: str) -> bool:
         (key, kind, subject, str(fix or "")[:2000],
          time.time(), weakness_id),
     )
-    try:
-        db.commit()
-    except Exception as exc:  # noqa: BLE001
-        record_failure("weakness.record_fix_commit", exc)
     _log.info("fix memorized for %s", key)
     _ledger(db, "fix_memorized", weakness_id,
             f"verified fix stored for {kind} {subject}",
@@ -346,10 +342,6 @@ def report_weakness(db: Any, kind: str, subject: str,
     db.execute(
         "DELETE FROM weakness_sightings WHERE ts < ?",
         (now - 30 * 86400,))
-    try:
-        db.commit()
-    except Exception as exc:  # noqa: BLE001
-        record_failure("weakness.report_weakness_commit", exc)
 
     if new_occ >= FAILURE_THRESHOLD and status == "open":
         # Fixed-weakness memory first: known problem → one-step resolve.
@@ -366,10 +358,6 @@ def report_weakness(db: Any, kind: str, subject: str,
             "UPDATE weaknesses SET status = 'researching' WHERE id = ?",
             (wid,),
         )
-        try:
-            db.commit()
-        except Exception as exc:  # noqa: BLE001
-            record_failure("weakness.report_weakness_status_commit", exc)
         sev = severity(db, wid)
         _log.info("weakness detected: %s %s (%d occurrences, %s)",
                   kind, clustered, new_occ, sev["level"])
@@ -429,10 +417,6 @@ def record_degradation_sample(db: Any, subject: str, metric: str,
     )
     db.execute(
         "DELETE FROM weakness_metrics WHERE ts < ?", (now - 14 * 86400,))
-    try:
-        db.commit()
-    except Exception as exc:  # noqa: BLE001
-        record_failure("weakness.degradation_sample_commit", exc)
     out: dict[str, Any] = {"subject": subject, "metric": metric}
     try:
         rows = db.execute(
@@ -671,10 +655,6 @@ def idle_tick(db: Any) -> dict[str, Any]:
                     db.execute(
                         "UPDATE weaknesses SET status = 'researching' "
                         "WHERE id = ?", (wid,))
-                    try:
-                        db.commit()
-                    except Exception as exc:  # noqa: BLE001
-                        record_failure("weakness.idle_tick_status_commit", exc)
                     if investigate_weakness(db, wid):
                         report["routed"] += 1
             elif status == "researching":
@@ -702,10 +682,6 @@ def expire_stale(db: Any,
             "WHERE status NOT IN ('resolved', 'dismissed') "
             "AND last_seen < ?",
             (cutoff,))
-        try:
-            db.commit()
-        except Exception as exc:  # noqa: BLE001
-            record_failure("weakness.expire_stale_commit", exc)
         n = cur.rowcount or 0
         if n:
             _log.info("expired %d stale weakness cases", n)
@@ -725,10 +701,6 @@ def record_proposal(db: Any, weakness_id: str, proposal: str) -> None:
         "WHERE id = ?",
         (proposal, weakness_id),
     )
-    try:
-        db.commit()
-    except Exception as exc:  # noqa: BLE001
-        record_failure("weakness.record_proposal_commit", exc)
     _log.info("weakness proposal recorded: %s", weakness_id)
     _ledger(db, "proposed", weakness_id,
             f"fix proposal recorded for {weakness_id}",
@@ -765,10 +737,6 @@ def approve_weakness(db: Any, weakness_id: str) -> bool:
         "UPDATE weaknesses SET status = 'approved' WHERE id = ?",
         (weakness_id,),
     )
-    try:
-        db.commit()
-    except Exception as exc:  # noqa: BLE001
-        record_failure("weakness.approve_commit", exc)
     _log.info("weakness approved: %s", weakness_id)
     _ledger(db, "approved", weakness_id,
             f"proposal approved for {kind} {subject} — sandbox build queued",
@@ -805,10 +773,6 @@ def resolve_weakness(db: Any, weakness_id: str, how: str = "",
         "WHERE id = ? AND status NOT IN ('resolved', 'dismissed')",
         (weakness_id,),
     )
-    try:
-        db.commit()
-    except Exception as exc:  # noqa: BLE001
-        record_failure("weakness.resolve_commit", exc)
     if cur.rowcount:
         if fix:
             try:
@@ -835,10 +799,6 @@ def dismiss_weakness(db: Any, weakness_id: str) -> bool:
         "UPDATE weaknesses SET status = 'dismissed' WHERE id = ?",
         (weakness_id,),
     )
-    try:
-        db.commit()
-    except Exception as exc:  # noqa: BLE001
-        record_failure("weakness.dismiss_commit", exc)
     if cur.rowcount:
         _ledger(db, "dismissed", weakness_id,
                 f"weakness dismissed by owner: {weakness_id}")
@@ -896,10 +856,6 @@ def record_tool_result(db: Any, tool: str, ok: bool,
                               {"error": (error or "")[:300],
                                "ts": now})
         out["weakness_id"] = wid
-    try:
-        db.commit()
-    except Exception as exc:  # noqa: BLE001
-        record_failure("weakness.tool_result_commit", exc)
     return out
 
 

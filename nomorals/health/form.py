@@ -846,6 +846,7 @@ def analyze_gait(video_path: str, *,
             return GaitAnalysis(id=gid, available=False, note=reason,
                                 created_at=time.time())
         flagged: dict[str, str] = {}
+        seen: set[str] = set()
         for frame in frames:
             try:
                 text = vision(frame, _gait_prompt())
@@ -860,9 +861,19 @@ def analyze_gait(video_path: str, *,
                 rid = name.strip().lower().replace(" ", "_")
                 if rid not in GAIT_RISKS:
                     continue
+                seen.add(rid)
                 if rest.strip().upper().startswith("FLAG") and rid not in flagged:
                     observed = rest.strip()[4:].lstrip("—- ").strip() or "flagged"
                     flagged[rid] = observed
+        if not seen:
+            # no frame produced a usable per-risk read — that is
+            # "unavailable", not a clean bill of health (mirrors
+            # analyze_form's all-empty check)
+            return GaitAnalysis(
+                id=gid, available=False, frames_used=len(frames),
+                note=("the vision model didn't return usable gait "
+                      "reads — try a clearer, well-lit, side-on video."),
+                created_at=time.time())
         issues = [
             GaitIssue(risk=rid, label=GAIT_RISKS[rid][0],
                       observed=observed, fix=GAIT_RISKS[rid][2])

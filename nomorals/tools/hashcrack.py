@@ -812,10 +812,12 @@ def crack_hash(
     if db is not None and res.found:
         from ..core.decoder import learn_hash
 
+        learned = True
         for digest, plain in res.found.items():
-            learn_hash(db, digest, plain, algorithm=res.algo,
-                       source=f"hash_crack:{res.backend}")
-        res.learned = True
+            if not learn_hash(db, digest, plain, algorithm=res.algo,
+                              source=f"hash_crack:{res.backend}"):
+                learned = False
+        res.learned = learned
     return res
 
 

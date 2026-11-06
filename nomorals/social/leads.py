@@ -14,12 +14,15 @@ Every function never raises.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from .failures import record_failure
+
+_log = logging.getLogger(__name__)
 
 # ── module-level defaults ──────────────────────────────────────────────────
 

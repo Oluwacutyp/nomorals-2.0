@@ -91,7 +91,7 @@ def ensure_self_signed_cert(cert_path: str, key_path: str,
                 x509.SubjectAlternativeName(
                     [x509.DNSName(_cn), x509.DNSName("localhost")]),
                 critical=False)
-            .add_extension(x509.BasicConstraints(ca=False, pathlen=None),
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None),
                            critical=True)
             .sign(key, hashes.SHA256())
         )

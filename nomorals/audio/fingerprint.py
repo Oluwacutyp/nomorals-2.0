@@ -203,6 +203,9 @@ def read_mono(path: str | os.PathLike[str], *,
         finally:
             try:
                 os.remove(out)
+            except OSError as exc:
+                record_failure("fingerprint.decode_tmp_cleanup", exc)
+            try:
                 os.rmdir(tmp)
             except OSError as exc:
                 record_failure("fingerprint.decode_tmp_cleanup", exc)

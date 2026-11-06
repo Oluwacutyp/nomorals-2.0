@@ -735,14 +735,21 @@ class GearStore:
                 changed = False
                 for legacy_slug, gear_slug in LEGACY_GEAR_MAP.items():
                     count = int(prof.items.get(legacy_slug) or 0)
+                    granted = 0
                     for _ in range(max(0, count)):
                         try:
                             self.grant(player_key, gear_slug)
                             moved += 1
+                            granted += 1
                         except Exception:  # noqa: BLE001
                             break
-                    if count > 0:
+                    if granted >= count and count > 0:
                         prof.items.pop(legacy_slug, None)
+                        changed = True
+                    elif granted > 0:
+                        # pop only what was granted — the ungranted
+                        # remainder stays for a later migration run
+                        prof.items[legacy_slug] = count - granted
                         changed = True
                 if changed:
                     try:

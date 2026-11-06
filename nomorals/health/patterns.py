@@ -105,19 +105,21 @@ def _factor_days(events: list[Any]) -> dict[str, set[str]]:
         text = getattr(e, "text", "") or ""
         day = _day(e.ts)
         for kind, rx, _desc in FACTOR_DEFS:
-            if rx.search(text):
+            try:
+                m = rx.search(text)
+            except Exception:  # noqa: BLE001
+                continue
+            if m:
                 # sleep-short needs the hours check
                 if kind == "sleep-short":
-                    m = rx.search(text)
                     try:
-                        if m and float(m.group(2)) >= SHORT_SLEEP_H:
+                        if float(m.group(2)) >= SHORT_SLEEP_H:
                             continue
                     except Exception:  # noqa: BLE001
                         continue
                 if kind == "good-sleep":
-                    m = rx.search(text)
                     try:
-                        if not m or float(m.group(2)) < 7.0:
+                        if float(m.group(2)) < 7.0:
                             continue
                     except Exception:  # noqa: BLE001
                         continue

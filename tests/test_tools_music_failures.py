@@ -149,8 +149,15 @@ def test_347_collab_save_failure_keeps_verse():
     try:
         with mock.patch.object(characters_mod, "CharacterStore",
                                lambda: store), \
-             mock.patch.object(dialogue_mod, "converse",
-                               lambda *a, **k: "sixteen bars of rain"), \
+             mock.patch.object(
+                 dialogue_mod, "converse",
+                 # CONVERTED (targeted-fix Pass 4): converse returns a
+                 # Dialogue, never a bare string — the mock now returns
+                 # the character's turn in that real shape, and _collab
+                 # renders the character's own line as the verse
+                 lambda *a, **k: SimpleNamespace(turns=[
+                     SimpleNamespace(speaker="Zara",
+                                     text="sixteen bars of rain")])), \
              mock.patch.object(song_draft_mod, "save_draft", _raise_save):
             out = M._collab("Zara verse", key, None)
         assert "Zara wrote the verse" in out

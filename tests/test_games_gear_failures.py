@@ -34,6 +34,11 @@ how many grants landed, so a grant failure followed by a
 successful profile write loses the un-granted counts (probe-
 proven). The pop is surrounding flow, not this site; a
 pop-only-what-was-granted fix is a targeted-fix candidate.
+RESOLVED by targeted-fix Pass 4: the migration now pops only
+what was granted (a partial grant leaves the remainder count
+in the profile for a later run). The pins below assert the
+moved counts, which are unchanged; the remainder behaviour
+is pinned in tests/test_small_fixes_pass4.py.
 755 — ``_migrate_legacy`` outer crash -> 0. 0 is the genuine
 nothing-migrated value; the per-process _migrated mark is not
 persisted, the profile is untouched on this path (the write

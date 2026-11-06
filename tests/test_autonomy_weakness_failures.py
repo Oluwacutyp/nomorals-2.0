@@ -17,6 +17,17 @@ Pins rule (#169): no bare-swallow handler anywhere in this file — the
 scanner counts test files too. Where a pin must swallow, it binds
 ``as exc`` + ``assert isinstance(exc, Exception)``. Docstrings avoid
 the literal bare-swallow phrase (#173 lesson).
+
+CONVERTED by targeted-fix Pass 4: the eleven ``*_commit`` pins.
+weakness.py used to call ``db.commit()`` after its writes, wrapped
+in record_failure handlers. The production Database is autocommit
+and has no ``commit`` method at all, so on the real store every
+successful operation raised AttributeError into its own handler
+and wrote a SPURIOUS failure-ledger entry (the tail-67 shape).
+The vestigial calls are removed; the pins below keep the same
+FakeDB (whose commit still raises) and the same operation
+assertions, but now assert the commit site is NOT recorded —
+proving the call is gone, not merely that its failure was logged.
 """
 import contextlib
 import json
@@ -365,7 +376,7 @@ def _approved_db(fail_commit=False):
 def test_pin_record_fix_commit():
     db = FakeDB(fail_commit=True)
     assert wk.record_fix(db, "wid1", "do the thing") is True
-    assert "weakness.record_fix_commit" in _sites()
+    assert "weakness.record_fix_commit" not in _sites()
 
 
 def test_pin_report_weakness_commit(monkeypatch):
@@ -373,7 +384,7 @@ def test_pin_report_weakness_commit(monkeypatch):
     db.status_row = None
     wid = wk.report_weakness(db, "tool_failure", "toolx")
     assert bool(wid)
-    assert "weakness.report_weakness_commit" in _sites()
+    assert "weakness.report_weakness_commit" not in _sites()
 
 
 def test_pin_report_weakness_status_commit(monkeypatch):
@@ -382,14 +393,14 @@ def test_pin_report_weakness_status_commit(monkeypatch):
     db = FakeDB(fail_commit=True)
     wid = wk.report_weakness(db, "tool_failure", "toolx")
     assert bool(wid)
-    assert "weakness.report_weakness_status_commit" in _sites()
+    assert "weakness.report_weakness_status_commit" not in _sites()
 
 
 def test_pin_degradation_sample_commit():
     db = FakeDB(fail_commit=True)
     out = wk.record_degradation_sample(db, "subj", "metric", 1.0)
     assert out["subject"] == "subj"
-    assert "weakness.degradation_sample_commit" in _sites()
+    assert "weakness.degradation_sample_commit" not in _sites()
 
 
 def test_pin_severity_query():
@@ -419,20 +430,20 @@ def test_pin_idle_tick_status_commit(monkeypatch):
     db.rows = [("wid1", "open")]
     rep = wk.idle_tick(db)
     assert rep["routed"] == 1
-    assert "weakness.idle_tick_status_commit" in _sites()
+    assert "weakness.idle_tick_status_commit" not in _sites()
 
 
 def test_pin_expire_stale_commit():
     db = FakeDB(fail_commit=True)
     db.rowcount = 2
     assert wk.expire_stale(db) == 2
-    assert "weakness.expire_stale_commit" in _sites()
+    assert "weakness.expire_stale_commit" not in _sites()
 
 
 def test_pin_record_proposal_commit(monkeypatch):
     monkeypatch.setattr(wk.global_bus, "publish", lambda *a, **k: None)
     wk.record_proposal(FakeDB(fail_commit=True), "wid1", "fix it")
-    assert "weakness.record_proposal_commit" in _sites()
+    assert "weakness.record_proposal_commit" not in _sites()
 
 
 def test_pin_record_proposal_publish(monkeypatch):
@@ -445,7 +456,7 @@ def test_pin_approve_commit(monkeypatch):
     monkeypatch.setattr(wk._organs, "emit", lambda *a, **k: None)
     monkeypatch.setattr(wk.global_bus, "publish", lambda *a, **k: None)
     assert wk.approve_weakness(_approved_db(fail_commit=True), "wid1") is True
-    assert "weakness.approve_commit" in _sites()
+    assert "weakness.approve_commit" not in _sites()
 
 
 def test_pin_approve_publish(monkeypatch):
@@ -459,7 +470,7 @@ def test_pin_resolve_commit():
     db = FakeDB(fail_commit=True)
     db.rowcount = 1
     assert wk.resolve_weakness(db, "wid1", "fixed") is True
-    assert "weakness.resolve_commit" in _sites()
+    assert "weakness.resolve_commit" not in _sites()
 
 
 def test_pin_resolve_publish(monkeypatch):
@@ -474,14 +485,14 @@ def test_pin_dismiss_commit():
     db = FakeDB(fail_commit=True)
     db.rowcount = 1
     assert wk.dismiss_weakness(db, "wid1") is True
-    assert "weakness.dismiss_commit" in _sites()
+    assert "weakness.dismiss_commit" not in _sites()
 
 
 def test_pin_tool_result_commit():
     db = FakeDB(fail_commit=True)
     out = wk.record_tool_result(db, "toolx", True)
     assert out["ok_streak"] == 5
-    assert "weakness.tool_result_commit" in _sites()
+    assert "weakness.tool_result_commit" not in _sites()
 
 
 def test_pin_open_severity(monkeypatch):

@@ -316,9 +316,12 @@ class SevenSimProvider(TempSmsProvider):
                         continue
                     link = ""
                     try:
-                        link = m.group(1)
-                        if link.startswith("/"):
-                            link = self._BASE + link
+                        candidate = m.group(1)
+                        # only an href-shaped group(1) is an inbox —
+                        # pattern 2's group(1) is the number text
+                        # itself, which get_messages can never poll
+                        if candidate.startswith("/"):
+                            link = self._BASE + candidate
                     except IndexError:
                         pass
                     out.append(TempNumber(

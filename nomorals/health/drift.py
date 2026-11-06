@@ -717,9 +717,13 @@ class DriftMonitor:
 
     def pings_today(self, *, now: float | None = None) -> int:
         now = now if now is not None else time.time()
-        rows = self._db.query(
-            "SELECT COUNT(*) AS n FROM drift_pings WHERE day = ?",
-            (_day(now),))
+        try:
+            rows = self._db.query(
+                "SELECT COUNT(*) AS n FROM drift_pings WHERE day = ?",
+                (_day(now),))
+        except Exception:  # noqa: BLE001
+            _log.debug("pings_today failed", exc_info=True)
+            return 0
         return int(rows[0]["n"]) if rows else 0
 
     def maybe_notify(self, report: DriftReport | None, sender: Callable[[str], Any],

@@ -319,7 +319,10 @@ def control_cost(tail: str, context: Any = None, chat: Any = None,
             except Exception:  # noqa: BLE001
                 return "💰 breakdown unavailable."
         if cmd == "budget" and len(parts) > 1:
-            amount = parse_budget_nl(" ".join(parts[1:]))
+            # pass the keyword too: parse_budget_nl requires "budget"/
+            # "spend" adjacent to the amount, and parts[1:] drops it —
+            # which is why the advertised "/cost budget $0.50" failed
+            amount = parse_budget_nl(" ".join(parts))
             if amount is None:
                 return "usage: /cost budget $0.50"
             try:

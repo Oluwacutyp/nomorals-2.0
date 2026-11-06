@@ -349,12 +349,20 @@ def _collab(text: str, key: str, ctx: Any) -> str:
             return f"no character '{name}' — check the bank"
         topic = getattr(draft, "topic", "")
         style = getattr(draft, "style", "pop")
-        bars = converse(
+        suggest = getattr(ctx, "suggest", None)
+        dlg = converse(
+            "You are Devon, a warm AI companion.",
             char,
             f"Write a {part} for our song about '{topic}' ({style}). "
             f"Match the song's energy. Just the lyrics, no commentary.",
-            context=ctx,
+            suggest,
+            rounds=1,
         )
+        # the verse is the CHARACTER's line — Devon's turns are the
+        # direction, not the bars (mirrors tools/characters "talk")
+        own = [t for t in dlg.turns if t.speaker == char.name]
+        last = own[-1] if own else (dlg.turns[-1] if dlg.turns else None)
+        bars = last.text if last else "…"
         # attach to the draft's notes so it survives revise/perform
         notes = getattr(draft, "performance_notes", "") or ""
         draft.performance_notes = (

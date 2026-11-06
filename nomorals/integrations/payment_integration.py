@@ -1010,8 +1010,13 @@ class PaymentIntegration:
             except ImportError as exc:
                 raise PaymentError(
                     "ETH tx tracking needs web3: pip install web3") from exc
-            w3 = Web3(Web3.HTTPProvider("https://cloudflare-eth.com",
-                                        request_kwargs={"timeout": 10}))
+            try:
+                w3 = Web3(Web3.HTTPProvider(
+                    "https://cloudflare-eth.com",
+                    request_kwargs={"timeout": 10}))
+            except Exception as exc:  # noqa: BLE001
+                raise PaymentError(
+                    f"could not track {cur} tx {txid}: {exc}") from exc
             try:
                 receipt = w3.eth.get_transaction_receipt(txid)
             except Exception:

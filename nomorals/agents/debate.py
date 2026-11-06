@@ -746,6 +746,9 @@ def render_debate(result: Any) -> str:
     """
     from .render import ICONS, banner, bullets, kv, section, truncate
 
+    # pre-bound: the fallback below interpolates verdict, so even a
+    # failure on the try's first line must not NameError in it
+    verdict = "?"
     try:
         verdict = getattr(result, "verdict", "?")
         rounds = getattr(result, "rounds", 0)

@@ -819,9 +819,13 @@ class MCPServer:
             rows = self.two_tier.db.query(
                 "SELECT id, text, confidence, valid_from, valid_to "
                 "FROM tier_facts WHERE id = ? AND active = 1", (fact_id,))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             _log.debug("mcp: fact read failed", exc_info=True)
-            return None
+            # a sick DB is a server error, not "no such fact" — the
+            # caller turns None into RESOURCE_NOT_FOUND, so an existing
+            # fact must not be reported missing on a read failure
+            raise MCPError(f"fact read failed for {fact_id!r}",
+                           INTERNAL_ERROR) from exc
         if not rows:
             return None
         r = rows[0]

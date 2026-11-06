@@ -3,10 +3,13 @@
 359 — review(): a crashing model suggest falls back to
 _heuristic_review, the module's documented no-model floor (the
 same path taken openly when suggest is None). Designed ladder.
-429 — _parse_critique: an unparseable SCORE leaves the pre-try
-70.0 default un-divided, which the Critique clamp takes to 1.0;
-a missing SCORE parses the string "70" -> 0.7. Tolerant-parser
-conventions for free-text model output; pinned as-is.
+429 — _parse_critique: CONVERTED by targeted-fix Pass 4. An
+unparseable SCORE used to leave the pre-try 70.0 default
+un-divided, which the Critique clamp took to 1.0 — a perfect
+score for garbage — while a missing SCORE parsed the string
+"70" -> 0.7. The default is now 0.7, so unparseable and
+missing take the same honest value; parseable scores are
+honoured exactly as before.
 532 — owner voiceprint build crash -> None: advisory only, the
 genuine no-owner-texts value; never a fabricated voiceprint.
 547 — voice_check compare crash -> None: advisory drift report;
@@ -54,7 +57,7 @@ def test_359_review_model_crash_falls_back_to_heuristic_floor():
 def test_429_parse_critique_unparseable_score_defaults():
     critic = CriticAgent(None)
     c = critic._parse_critique("SCORE: not-a-number\nVERDICT: ship\n")
-    assert c.score == 1.0  # pre-try 70.0 survives, clamped to 1.0
+    assert c.score == 0.7  # CONVERTED (Pass 4): unparseable == missing
     assert c.verdict == "ship"
     # controls: missing SCORE -> "70"/100; parseable SCORE honoured
     assert critic._parse_critique("VERDICT: revise\n").score == 0.7
