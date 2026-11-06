@@ -20,6 +20,13 @@ Protocol (one JSON object per line):
     {"type":"message","id":"<wa message id>","chat":{"id","kind","title"},
      "from":{"id","name"},"text":"...",
      "media":[{"path","mime","kind"}],"reply_to":"","mentioned":false,"ts":<ms>}
+    # when the message REPLY-quotes an earlier one, the bridges
+    # also carry the quoted message's own text and media —
+    # downloaded at inbound, the only moment the bytes are
+    # reachable: "quoted_text":"..." and
+    # "quoted_media":[{"path","mime","kind"}].  Without them a
+    # reply-media command (/sticker on a replied photo) can see
+    # THAT a message was quoted but never WHAT was quoted.
     # a chat whose id ends in "@newsletter" is a CHANNEL (kind
     # "channel"); "@g.us" is a group.  The adapter derives the
     # kind from the JID (see _kind_for_jid), so a bridge build
@@ -420,6 +427,38 @@ def _wa_envelope(obj: dict[str, Any], text: str) -> dict[str, Any]:
             "quote_depth": 1 if obj.get("reply_to") else 0,
             "quoted_chars": len(str(obj.get("quoted_text") or "")),
             "sticker": sticker, "raw_len": len(text)}
+
+
+def _wa_quoted_media(obj: dict[str, Any]) -> dict[str, Any] | None:
+    """The replied-to message's media as the bridge downloaded
+    it (``quoted_media`` rows of {path, mime, kind}) — the first
+    row with a real path, shaped for the ``replied_media_local``
+    meta the runtime's media resolver reads.  None when the
+    event carries no quoted media (a text reply, no reply, or a
+    bridge too old to send the field): the resolver then falls
+    through exactly as it did before quoted media existed."""
+    rows = obj.get("quoted_media") or []
+    if isinstance(rows, list):
+        for row in rows:
+            if isinstance(row, dict) and row.get("path"):
+                return {"path": str(row["path"]),
+                        "kind": str(row.get("kind") or "file"),
+                        "mime": str(row.get("mime") or ""),
+                        "name": str(row.get("name") or "")}
+    return None
+
+
+def _wa_stamp_quoted(msg: ChatMessage, obj: dict[str, Any]) -> None:
+    """Carry a bridge event's quoted-message payload onto the
+    delivered message: the quoted media's local bytes for the
+    reply-media commands, and the quoted text for the reply
+    context readers.  Absent fields stamp nothing."""
+    quoted = _wa_quoted_media(obj)
+    if quoted is not None:
+        msg.meta["replied_media_local"] = quoted
+    quoted_text = str(obj.get("quoted_text") or "")
+    if quoted_text:
+        msg.meta["quoted_text"] = quoted_text
 
 
 def _jid_user_part(jid: str) -> str:
@@ -1057,6 +1096,7 @@ class WhatsAppAdapter(ChatAdapter):
                 )
                 turn.meta["from_owner"] = True
                 turn.meta["self_chat"] = True
+                _wa_stamp_quoted(turn, obj)
                 if ts and (time.time() - ts) > STALE_INBOUND_S:
                     # Offline-delivered at (re)connect: the owner
                     # typed this while the surface was down. It is
@@ -1088,6 +1128,7 @@ class WhatsAppAdapter(ChatAdapter):
                 )
                 turn.meta["from_owner"] = True
                 turn.meta["owner_command"] = True
+                _wa_stamp_quoted(turn, obj)
                 if ts and (time.time() - ts) > STALE_INBOUND_S:
                     # Offline-delivered at (re)connect, like the
                     # self-chat above: observed, never executed.
@@ -1117,6 +1158,7 @@ class WhatsAppAdapter(ChatAdapter):
                 msg.meta["reply_to"] = str(obj.get("reply_to"))
             # The sender IS the owner — flag it for group recognition.
             msg.meta["from_owner"] = True
+            _wa_stamp_quoted(msg, obj)
             self._deliver(handler, msg)
         elif kind == "call_offer":
             # Personal surface feed (chat & privacy wave): a call
@@ -1307,6 +1349,7 @@ class WhatsAppAdapter(ChatAdapter):
             ]
             if _wa_missed:
                 wa_msg.meta["media_unavailable"] = _wa_missed
+            _wa_stamp_quoted(wa_msg, obj)
             _alt = str((obj.get("from") or {}).get("alt") or "").strip()
             if _alt:
                 # The sender's other addressing form (LID ↔ phone

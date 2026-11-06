@@ -392,6 +392,13 @@ class DiscordAdapter(ChatAdapter):
                     sender_username=username,
                     media=media,
                     message_id=str(message.id),
+                    # A reply's target: without it the resolver's
+                    # fetch-by-message seam (fetch_media) can never
+                    # fire, so reply-media commands (/steal,
+                    # /sticker, /convert) saw no reply at all.
+                    reply_to=str(getattr(
+                        getattr(message, "reference", None),
+                        "message_id", "") or ""),
                     mentioned=self._mentions_me(message),
                     ts=(message.created_at.timestamp() if hasattr(message, "created_at") else time.time()),
                 )

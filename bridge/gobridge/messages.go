@@ -250,7 +250,15 @@ var unsafeIDChars = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
 // downloadInbound fetches a message's media into the media dir and
 // returns its wire row {path, mime, kind}, or nil.
 func (b *bridge) downloadInbound(ctx context.Context, v *events.Message) map[string]any {
-	kind := mediaKindOf(v.Message)
+	return b.downloadMediaOf(ctx, v.Message, string(v.Info.ID))
+}
+
+// downloadMediaOf downloads the media carried by one message proto
+// (a live message, or the quoted message inside a reply's
+// contextInfo — the bytes are addressed the same way) into the
+// media dir and returns its wire row {path, mime, kind}, or nil.
+func (b *bridge) downloadMediaOf(ctx context.Context, msg *waE2E.Message, idStr string) map[string]any {
+	kind := mediaKindOf(msg)
 	if kind == "" {
 		return nil
 	}
@@ -258,28 +266,33 @@ func (b *bridge) downloadInbound(ctx context.Context, v *events.Message) map[str
 	var mime, fileName string
 	switch kind {
 	case "image":
-		dl, mime = v.Message.GetImageMessage(), v.Message.GetImageMessage().GetMimetype()
+		dl, mime = msg.GetImageMessage(), msg.GetImageMessage().GetMimetype()
 	case "video":
-		dl, mime = v.Message.GetVideoMessage(), v.Message.GetVideoMessage().GetMimetype()
+		dl, mime = msg.GetVideoMessage(), msg.GetVideoMessage().GetMimetype()
 	case "voice", "audio":
-		dl, mime = v.Message.GetAudioMessage(), v.Message.GetAudioMessage().GetMimetype()
+		dl, mime = msg.GetAudioMessage(), msg.GetAudioMessage().GetMimetype()
 	case "file":
-		dl = v.Message.GetDocumentMessage()
-		mime = v.Message.GetDocumentMessage().GetMimetype()
-		fileName = v.Message.GetDocumentMessage().GetFileName()
+		dl = msg.GetDocumentMessage()
+		mime = msg.GetDocumentMessage().GetMimetype()
+		fileName = msg.GetDocumentMessage().GetFileName()
 	case "sticker":
-		dl, mime = v.Message.GetStickerMessage(), v.Message.GetStickerMessage().GetMimetype()
+		dl, mime = msg.GetStickerMessage(), msg.GetStickerMessage().GetMimetype()
 	}
 	if dl == nil {
 		return nil
 	}
-	data, err := b.cli.Download(ctx, dl)
-	if err != nil {
-		logf("media download failed: %v", err)
-		return nil
-	}
 	if mime == "" {
 		mime = "application/octet-stream"
+	}
+	data, err := b.cli.Download(ctx, dl)
+	if err != nil {
+		// The media ARRIVED but its bytes could not be fetched:
+		// emit the entry with an empty path so the payload carries
+		// the trace (media arrived, unseen) instead of looking like
+		// no media at all. The Python side stamps pathless entries
+		// media_unavailable.
+		logf("media download failed: %v", err)
+		return map[string]any{"path": "", "mime": mime, "kind": kind}
 	}
 	ext := ""
 	if idx := strings.LastIndex(fileName, "."); idx >= 0 {
@@ -293,7 +306,7 @@ func (b *bridge) downloadInbound(ctx context.Context, v *events.Message) map[str
 			ext = ".bin"
 		}
 	}
-	short := unsafeIDChars.ReplaceAllString(string(v.Info.ID), "")
+	short := unsafeIDChars.ReplaceAllString(idStr, "")
 	if len(short) > 12 {
 		short = short[:12]
 	}
@@ -301,9 +314,45 @@ func (b *bridge) downloadInbound(ctx context.Context, v *events.Message) map[str
 	p := filepath.Join(b.mediaDir, name)
 	if err := os.WriteFile(p, data, 0o644); err != nil {
 		logf("media write failed: %v", err)
-		return nil
+		return map[string]any{"path": "", "mime": mime, "kind": kind}
 	}
 	return map[string]any{"path": p, "mime": mime, "kind": kind}
+}
+
+// quotedOf resolves a message's reply quote: the quoted message
+// proto inside the contextInfo, or nil when the message quotes
+// nothing. A reply on WhatsApp carries the quoted message IN the
+// reply itself — the stanza id alone (all the event used to send)
+// tells the Python side THAT a message was quoted, never WHAT.
+func quotedOf(m *waE2E.Message) *waE2E.Message {
+	ci := contextInfoOf(m)
+	if ci == nil {
+		return nil
+	}
+	return ci.GetQuotedMessage()
+}
+
+// stampQuoted adds the reply quote's payload to an inbound event:
+// "quoted_media" (the quoted message's media, downloaded now —
+// the only moment its bytes are reachable) and "quoted_text".
+// Reply-media commands (/sticker on a replied photo, /convert,
+// /steal) read these; without them they saw a bare stanza id and
+// fell back to usage text while the photo sat in the quote.
+func (b *bridge) stampQuoted(ctx context.Context, out map[string]any, m *waE2E.Message) {
+	q := quotedOf(m)
+	if q == nil {
+		return
+	}
+	if text := textOf(q); text != "" {
+		out["quoted_text"] = text
+	}
+	stanza := ""
+	if ci := contextInfoOf(m); ci != nil {
+		stanza = ci.GetStanzaID()
+	}
+	if row := b.downloadMediaOf(ctx, q, stanza); row != nil {
+		out["quoted_media"] = []map[string]any{row}
+	}
 }
 
 // ── inbound events ────────────────────────────────────────────────
@@ -402,6 +451,7 @@ func (b *bridge) onMessage(v *events.Message) {
 			"view_once": v.IsViewOnce,
 			"ts":        tsMs,
 		}
+		b.stampQuoted(ctx, out, v.Message)
 		b.remember(chat, &remembered{
 			incoming: false, text: out["text"].(string),
 			id: v.Info.ID, chatJID: chat, senderJID: sender, tsMs: tsMs,
@@ -449,6 +499,7 @@ func (b *bridge) onMessage(v *events.Message) {
 		"view_once": v.IsViewOnce,
 		"ts":        tsMs,
 	}
+	b.stampQuoted(ctx, out, v.Message)
 	if v.Info.ID != "" {
 		b.cacheMessage(string(v.Info.ID), v.Message, sender)
 	}
@@ -739,9 +790,8 @@ func (b *bridge) cmdSend(ctx context.Context, cc *clientConn, id string, req req
 			ci = quote
 		}
 		ci.MentionedJID = mentionJIDs
-		plain = &waE2E.Message{ExtendedTextMessage:
-			&waE2E.ExtendedTextMessage{
-				Text: proto.String(text), ContextInfo: ci}}
+		plain = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text: proto.String(text), ContextInfo: ci}}
 	} else {
 		plain = b.textMessage(text, quote)
 	}
@@ -969,7 +1019,7 @@ func (b *bridge) cmdHistory(cc *clientConn, id string, req request) {
 			ts = time.Now().UnixMilli()
 		}
 		msgs = append(msgs, map[string]any{
-			"id": string(m.id),
+			"id":       string(m.id),
 			"incoming": m.incoming, "text": m.text, "sender": m.sender,
 			"media": media, "reply_to": m.replyTo, "ts": ts,
 		})

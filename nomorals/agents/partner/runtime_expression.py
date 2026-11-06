@@ -206,7 +206,13 @@ class RuntimeExpressionMixin:
     # ---- replied-media resolution (steal / convert) ----------------
     def _replied_media_local(self, message):  # type: ignore[no-untyped-def]
         """Resolve the media a command acts on, in order: the
-        message's own attachment, the replied message's Telegram
+        message's own attachment, the replied message's bytes
+        when the surface already downloaded them at inbound
+        (``replied_media_local`` meta — the WhatsApp bridges
+        download the quoted message's media with the event, and
+        the Telegram userbot downloads the replied message on
+        arrival; a reply is the only moment either surface can
+        reach those bytes), the replied message's Telegram
         handles (downloaded on demand through the adapter — the
         /sham precedent), the replied audio id, and Discord's
         fetch-by-message.  Returns ``(path, kind, file_ids)`` or
@@ -220,6 +226,10 @@ class RuntimeExpressionMixin:
                 return (path, str(getattr(media, "kind", "") or ""),
                         {platform: file_id} if file_id else {})
         meta = getattr(message, "meta", None) or {}
+        local = meta.get("replied_media_local") or {}
+        if isinstance(local, dict) and local.get("path"):
+            return (str(local["path"]),
+                    str(local.get("kind") or ""), {})
         replied = meta.get("replied_media") or {}
         download = getattr(adapter, "download_file", None) \
             if adapter else None

@@ -1615,6 +1615,65 @@ class TelegramAdapter(ChatAdapter):
                 except Exception as exc:  # noqa: BLE001 - media is best-effort
                     _log.debug("telegram media download failed: %s", exc)
                     _note_media_missed()
+        # Replied-to media (the /sticker · /steal · /convert
+        # family): a reply is the only chance to reach the quoted
+        # message's bytes on this surface — there is no
+        # get-by-message-id the resolver could call later, so the
+        # replied message is fetched and downloaded NOW, under
+        # the same gates as the message's own media, and carried
+        # as replied_media_local meta for the resolver.  The Bot
+        # API surface gets the same result from reply_to_message
+        # file ids; before this, the userbot silently dropped it
+        # and every reply-media command fell back to usage text.
+        replied_local: dict[str, Any] = {}
+        if getattr(message, "reply_to", None) is not None:
+            try:
+                _get_reply = getattr(
+                    message, "get_reply_message", None)
+                if callable(_get_reply):
+                    _replied_msg = _get_reply()
+                    if asyncio.iscoroutine(_replied_msg):
+                        _replied_msg = await _replied_msg
+                    if _replied_msg is not None and getattr(
+                            _replied_msg, "media", None):
+                        _rdoc = getattr(_replied_msg.media,
+                                        "document", None)
+                        _rsize = int(getattr(
+                            _rdoc, "size", 0) or 0)
+                        if not media_download_allowed(
+                                kind, _rsize, self.media_in_groups,
+                                self.media_max_mb):
+                            _log.debug(
+                                "telegram: skipping replied media "
+                                "download (group/size gate)")
+                        else:
+                            _rfname = (
+                                f"tg-reply-{int(time.time() * 1000)}")
+                            _rpath = await client.download_media(
+                                _replied_msg,
+                                file=os.path.join(
+                                    self.media_dir, _rfname))
+                            if _rpath:
+                                _rmime = _mime_for_download(
+                                    str(_rpath),
+                                    str(getattr(
+                                        _rdoc, "mime_type", "")
+                                        or ""))
+                                _rkind = _kind_for_mime(_rmime)
+                                if getattr(
+                                        _replied_msg, "voice",
+                                        None) is not None:
+                                    _rkind = "voice"
+                                replied_local = {
+                                    "path": str(_rpath),
+                                    "kind": _rkind,
+                                    "mime": _rmime,
+                                    "name": os.path.basename(
+                                        str(_rpath)),
+                                }
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                _log.debug("telegram replied media download "
+                           "failed: %s", exc)
         # Self-destruct TTL, read early: a view-once DM whose media
         # could not be downloaded (expired file reference, a gated
         # download) must NOT die at the drop below — the §15
@@ -1804,6 +1863,8 @@ class TelegramAdapter(ChatAdapter):
         # this delivery is an edit event (see the MessageEdited
         # registration in the connect loop).
         service_meta["envelope"] = _mtproto_envelope(message, text)
+        if replied_local:
+            service_meta["replied_media_local"] = replied_local
         if getattr(event, "_devon_edited", False):
             service_meta["edited"] = True
         # Self-destructing media (view-once photos, TTL media in

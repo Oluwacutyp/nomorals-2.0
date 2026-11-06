@@ -16,6 +16,10 @@
  *     {"type":"message","id":"<wa message id>","chat":{"id","kind","title"},
  *      "from":{"id","name"},"text":"...","media":[{"path","mime","kind"}],
  *      "reply_to":"","mentioned":false,"ts":<ms>}
+ *     (a reply also carries "quoted_text" and "quoted_media":
+ *      the quoted message's own text and media, downloaded at
+ *      inbound — a reply quotes its target inside its own
+ *      contextInfo, and those bytes are only reachable now.)
  *     {"type":"receipt","chat":"<jid>","ids":["<msg>",...],"kind":"delivered|read"}
  *     {"id":"<req>","ok":true|false,"error":"", ...extra}
  *      (send/send_media replies add "message_id": the real WA message id)
@@ -60,6 +64,7 @@ import qrcode from 'qrcode-terminal';
 import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
+  downloadContentFromMessage,
   downloadMediaMessage,
   fetchLatestBaileysVersion,
   jidNormalizedUser,
@@ -367,11 +372,65 @@ function textOf(m) {
   );
 }
 
+function contextInfoOf(m) {
+  const msg = m.message || {};
+  return msg.extendedTextMessage?.contextInfo
+    || msg.imageMessage?.contextInfo
+    || msg.videoMessage?.contextInfo
+    || msg.audioMessage?.contextInfo
+    || msg.documentMessage?.contextInfo
+    || msg.stickerMessage?.contextInfo
+    || null;
+}
+
 function replyToOf(m) {
-  const ctx = m.message?.extendedTextMessage?.contextInfo
-    || m.message?.imageMessage?.contextInfo
-    || m.message?.videoMessage?.contextInfo;
-  return ctx?.stanzaId || '';
+  return contextInfoOf(m)?.stanzaId || '';
+}
+
+// The reply quote's payload: the quoted message rides INSIDE the
+// reply's contextInfo.quotedMessage. The stanza id alone (all
+// this bridge used to send) tells the Python side THAT a message
+// was quoted, never WHAT — reply-media commands (/sticker on a
+// replied photo) fell back to usage text while the photo sat in
+// the quote. Download the quoted media now, the only moment its
+// bytes are reachable, and carry the quoted text alongside.
+async function quotedPayload(m) {
+  const ctx = contextInfoOf(m);
+  const quoted = ctx?.quotedMessage;
+  if (!quoted) return {};
+  const out = {};
+  const qtext = textOf({ message: quoted });
+  if (qtext) out.quoted_text = qtext;
+  const kind = mediaKindOf({ message: quoted });
+  if (kind) {
+    const inner = quoted.imageMessage || quoted.videoMessage
+      || quoted.audioMessage || quoted.documentMessage
+      || quoted.stickerMessage || {};
+    const mime = inner.mimetype || 'application/octet-stream';
+    try {
+      const dlType = { image: 'image', video: 'video', voice: 'audio',
+        audio: 'audio', file: 'document', sticker: 'sticker' }[kind];
+      const stream = await downloadContentFromMessage(inner, dlType);
+      const chunks = [];
+      for await (const chunk of stream) chunks.push(chunk);
+      const buf = Buffer.concat(chunks);
+      if (buf.length) {
+        const ext = inner.fileName?.includes('.')
+          ? '.' + inner.fileName.split('.').pop().toLowerCase()
+          : ({ image: '.jpg', video: '.mp4', voice: '.ogg', audio: '.ogg', sticker: '.webp' }[kind] || '.bin');
+        const name = `${Date.now()}-${String(ctx.stanzaId || 'q').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 12)}${ext}`;
+        const p = path.join(MEDIA_DIR, name);
+        fs.writeFileSync(p, buf);
+        out.quoted_media = [{ path: p, mime, kind }];
+      } else {
+        out.quoted_media = [{ path: '', mime, kind }]; // arrived, unseen
+      }
+    } catch (e) {
+      log('quoted media download failed:', e.message);
+      out.quoted_media = [{ path: '', mime, kind }]; // arrived, unseen
+    }
+  }
+  return out;
 }
 
 function mentionedJidOf(m) {
@@ -419,15 +478,20 @@ const EXT_MIME = {
 };
 
 async function downloadInbound(m) {
-  // Returns {path, mime, kind} or null.
+  // Returns {path, mime, kind} — path is "" when the media arrived
+  // but its bytes could not be fetched (the payload must carry the
+  // trace: media arrived, unseen; the Python side stamps pathless
+  // entries media_unavailable) — or null when the message carries
+  // no media at all.
+  const kind = mediaKindOf(m);
+  if (!kind) return null;
+  const inner = m.message?.imageMessage || m.message?.videoMessage
+    || m.message?.audioMessage || m.message?.documentMessage
+    || m.message?.stickerMessage || {};
+  const mime = inner.mimetype || 'application/octet-stream';
   try {
-    const kind = mediaKindOf(m);
-    if (!kind) return null;
     const buf = await downloadMediaMessage(m, 'buffer', {});
-    const inner = m.message?.imageMessage || m.message?.videoMessage
-      || m.message?.audioMessage || m.message?.documentMessage
-      || m.message?.stickerMessage || {};
-    const mime = inner.mimetype || 'application/octet-stream';
+    if (!buf || !buf.length) return { path: '', mime, kind };
     const ext = inner.fileName?.includes('.')
       ? '.' + inner.fileName.split('.').pop().toLowerCase()
       : ({ image: '.jpg', video: '.mp4', voice: '.ogg', audio: '.ogg', sticker: '.webp' }[kind] || '.bin');
@@ -437,7 +501,7 @@ async function downloadInbound(m) {
     return { path: p, mime, kind };
   } catch (e) {
     log('media download failed:', e.message);
-    return null;
+    return { path: '', mime, kind };
   }
 }
 
@@ -751,6 +815,7 @@ async function connect() {
             reply_to: replyToOf(mm),
             view_once: unwrapped.viewOnce,
             ts: tsMs,
+            ...(await quotedPayload(mm)),
           };
           remember(jid, { ...ownOut, incoming: false, sender: '', key: m.key });
           broadcast(ownOut);
@@ -802,6 +867,7 @@ async function connect() {
           mentions: mentionedJidOf(mm).map(String),
           view_once: unwrapped.viewOnce,
           ts: tsMs,
+          ...(await quotedPayload(mm)),
         };
         if (m.key.id) msgCache.set(m.key.id, m);
         remember(jid, { ...out, incoming: true, sender: m.pushName || '', key: m.key });

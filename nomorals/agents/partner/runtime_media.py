@@ -3432,8 +3432,16 @@ class RuntimeMediaMixin:
                 # instead of collapsing them to "audio".
                 if getattr(m, "kind", "") in ("audio", "voice") and getattr(m, "path", ""):
                     return str(m.path)
-            # Replied-to audio (Telegram): download on demand.
+            # Replied-to audio whose bytes the surface already
+            # downloaded at inbound (WhatsApp quoted media, the
+            # Telegram userbot's replied download): a local path.
             meta = getattr(message, "meta", None) or {}
+            local = meta.get("replied_media_local") or {}
+            if isinstance(local, dict) and local.get("path") \
+                    and str(local.get("kind") or "") in (
+                        "audio", "voice"):
+                return str(local["path"])
+            # Replied-to audio (Telegram): download on demand.
             file_id = str(meta.get("replied_audio_file_id") or "")
             if file_id and self.gateway is not None:
                 adapter = self.gateway.adapters.get("telegram")
