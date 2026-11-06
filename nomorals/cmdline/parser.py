@@ -1999,7 +1999,11 @@ def _parser() -> argparse.ArgumentParser:
                      "nm re evidence [id]\n"
                      "nm re unknowns [--status open|resolved|contradicted]\n"
                      "nm re audit\n"
-                     "nm re close <unknown-id> <resolution...>"),
+                     "nm re close <unknown-id> <resolution...>\n"
+                     "nm re mission <question> -- <targets...>\n"
+                     "nm re missions\n"
+                     "nm re mission-status <id>\n"
+                     "nm re mission-resume <id>"),
     )
     re_sub = re_p.add_subparsers(dest="re_action", required=True)
     re_sub.add_parser("status", help="engine capability matrix + store counts")
@@ -2037,6 +2041,16 @@ def _parser() -> argparse.ArgumentParser:
     r_cl.add_argument("--confidence", default="inferred",
                       choices=["observed", "derived", "inferred"],
                       help="confidence the close states")
+    r_mis = re_sub.add_parser("mission", help="plan + work a brain-directed RE mission over the rungs: question + targets → journaled steps → verified reconstruction per target (static only; run-only questions open dynamic_required unknowns naming the owner's sandbox-posture gate)")
+    r_mis.add_argument("question",
+                       help="the question the mission answers, in words")
+    r_mis.add_argument("targets", nargs="+",
+                       help="target files (a literal -- separator is accepted and ignored)")
+    re_sub.add_parser("missions", help="the mission journal, most recent first")
+    r_mst = re_sub.add_parser("mission-status", help="one mission: journaled plan, per-step results, verified reconstructions")
+    r_mst.add_argument("mission_id")
+    r_mre = re_sub.add_parser("mission-resume", help="resume a mission from its journal — pending steps work, finished steps stand")
+    r_mre.add_argument("mission_id")
     a_bi = apk_sub.add_parser("bisect", help="find the version where a dossier property flipped (git-bisect contract over the version series)")
     a_bi.add_argument("series", nargs="+",
                       help="project refs of ONE app (sorted by versionCode)")

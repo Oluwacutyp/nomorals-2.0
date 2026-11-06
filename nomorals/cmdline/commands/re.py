@@ -3,18 +3,23 @@ inspection of binaries, firmware images and captures.
 
 status | inspect <path> [--deep] | provision | graph <path>
 [query target] | evidence [id] | unknowns | audit |
-close <unknown-id> <resolution…> — thin shell over ReEngine, the
-same facade the ``re`` registry tools and the ``/re`` chat command
-call. Pass 2: inspections route to the deepest rung that can
-answer (the self-provisioned Ghidra headless rung, the binutils
-light rung, the built-in spine), ``provision`` runs the
-self-provisioning drive for those rungs, and ``graph`` answers
-Android reference questions over ApkForge's jadx output.
-Pass 3: inspections also route by content to the firmware rung
-(census + self-provisioned unblob extraction + native extractor)
-and the traffic rung (pcap/pcapng/HAR/mitmproxy-flow readers +
-a probed TShark second voice), and ``provision`` drives the
-unblob pin alongside the deep rungs.
+close <unknown-id> <resolution…> | mission <question> -- <targets…>
+| missions | mission-status <id> | mission-resume <id> — thin
+shell over ReEngine, the same facade the ``re`` registry tools
+and the ``/re`` chat command call. Pass 2: inspections route to
+the deepest rung that can answer (the self-provisioned Ghidra
+headless rung, the binutils light rung, the built-in spine),
+``provision`` runs the self-provisioning drive for those rungs,
+and ``graph`` answers Android reference questions over ApkForge's
+jadx output. Pass 3: inspections also route by content to the
+firmware rung (census + self-provisioned unblob extraction +
+native extractor) and the traffic rung (pcap/pcapng/HAR/
+mitmproxy-flow readers + a probed TShark second voice), and
+``provision`` drives the unblob pin alongside the deep rungs.
+Pass 4: ``mission`` plans + works a brain-directed mission over
+the rungs and closes with a verified reconstruction per target;
+``missions`` / ``mission-status`` / ``mission-resume`` read and
+resume the mission journal.
 """
 
 from __future__ import annotations
@@ -29,6 +34,9 @@ def _cmd_re(args: Any, context: Any) -> int:
         render_audit,
         render_evidence_card,
         render_graph_answer,
+        render_mission,
+        render_mission_list,
+        render_mission_status,
         render_provision,
         render_status,
         render_unknowns,
@@ -39,6 +47,35 @@ def _cmd_re(args: Any, context: Any) -> int:
 
     if action == "status":
         print(render_status(engine.status()))
+        return 0
+
+    if action == "mission":
+        targets = [t for t in (args.targets or []) if t != "--"]
+        res = engine.run_mission(args.question, targets)
+        if res.get("error"):
+            print(res["error"])
+            return 2
+        print(render_mission(res))
+        return 0
+
+    if action == "missions":
+        print(render_mission_list(engine.mission_list(limit=20)))
+        return 0
+
+    if action == "mission-status":
+        payload = engine.mission(args.mission_id)
+        if payload.get("error"):
+            print(payload["error"])
+            return 2
+        print(render_mission_status(payload))
+        return 0
+
+    if action == "mission-resume":
+        res = engine.resume_mission(args.mission_id)
+        if res.get("error"):
+            print(res["error"])
+            return 2
+        print(render_mission(res))
         return 0
 
     if action == "inspect":

@@ -37,13 +37,34 @@ own mitmproxy capture addon — route to built-in readers with a
 probed TShark second voice (:mod:`.traffic`). Nothing extracted
 or captured is ever executed; encrypted content is recorded as
 an unknown, never guessed.
+
+Pass 4: missions + reconstruction verify. A question plus
+targets becomes a mission (:mod:`.missions`): Devon decomposes
+it over the capability matrix, works the rungs in dependency
+order under a journal she can resume, lets the residual
+unknowns re-drive the plan, and closes with a reconstruction
+(:mod:`.verify`) — claims tied to evidence ids, cross-rung
+checks that corroborate or demote, contradictions opened as
+unknowns rather than smoothed. Questions only running a target
+could answer classify as ``dynamic_required`` unknowns naming
+the owner's sandbox-posture gate; the dynamic rung is not
+built, and nothing in this organ executes a target.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from . import android_graph, firmware, ghidra, lightbin, provision, traffic
+from . import (
+    android_graph,
+    firmware,
+    ghidra,
+    lightbin,
+    missions,
+    provision,
+    traffic,
+    verify,
+)
 from .engine import (
     ReEngine,
     capability_matrix,
@@ -58,17 +79,21 @@ from .engine import (
     render_unknowns,
 )
 from .evidence import AUTHORITIES, CONFIDENCES, Evidence, EvidenceStore, Unknown, UnknownCloseError
+from .missions import render_mission, render_mission_list, render_mission_status
+from .verify import Claim, ReconstructionError, render_reconstruction
 
 __all__ = [
     "ReEngine", "capability_matrix",
     "Evidence", "EvidenceStore", "Unknown", "UnknownCloseError",
     "AUTHORITIES", "CONFIDENCES",
     "provision", "ghidra", "lightbin", "android_graph",
-    "firmware", "traffic",
+    "firmware", "traffic", "missions", "verify",
+    "Claim", "ReconstructionError",
     "render_status", "render_inspect_card", "render_evidence_card",
     "render_unknowns", "render_audit", "render_provision",
     "render_graph_answer", "render_firmware_card",
-    "render_traffic_card",
+    "render_traffic_card", "render_mission", "render_mission_list",
+    "render_mission_status", "render_reconstruction",
     "register",
 ]
 
@@ -78,12 +103,13 @@ def register(registry: Any) -> None:
 
     ``re`` reads the evidence store (status, evidence records with
     their provenance chains, the unknowns registry, the unknowns
-    audit) and answers Android graph queries as Evidence.
-    ``re_inspect`` performs inspections — each one records a chain
-    of Evidence and registers the residual unknowns the parse
-    raises — runs the self-provisioning drive for the deep rungs,
-    builds Android reference graphs, and closes unknowns under
-    the store's lifecycle rules.
+    audit), answers Android graph queries as Evidence, and reads
+    the Pass 4 mission journal. ``re_inspect`` performs
+    inspections — each one records a chain of Evidence and
+    registers the residual unknowns the parse raises — runs the
+    self-provisioning drive for the deep rungs, builds Android
+    reference graphs, runs and resumes Pass 4 missions, and
+    closes unknowns under the store's lifecycle rules.
     """
     from ...core.policy import Capability
 
@@ -107,13 +133,18 @@ def register(registry: Any) -> None:
             "answer as a recorded Evidence record: path = an APK "
             "or a jadx output directory, query = callers|callees|"
             "class|search, target = a class ('com.x.Foo' or 'Foo') "
-            "or a method ('Foo.bar')). Evidence records are "
+            "or a method ('Foo.bar')) | mission (one Pass 4 "
+            "mission by mission_id: its journaled plan, per-step "
+            "results, per-target verified reconstructions and "
+            "parked unknowns) | missions (the mission journal, "
+            "most recent first). Evidence records are "
             "content-addressed (ev:<sha256>) and carry confidence, "
             "authority and limitations on the record itself."
         ),
         capability=Capability.DB_READ,
         parameters={
-            "action": "str — status|evidence|unknowns|audit|graph",
+            "action": "str — status|evidence|unknowns|audit|graph"
+                      "|mission|missions",
             "evidence_id": "str — evidence id or unique prefix "
                            "(action=evidence)",
             "status": "str — unknowns filter: open|resolved|"
@@ -123,12 +154,15 @@ def register(registry: Any) -> None:
             "query": "str — callers|callees|class|search "
                      "(action=graph)",
             "target": "str — class or Class.method (action=graph)",
+            "mission_id": "str — mission id or unique prefix "
+                          "(action=mission)",
         },
     )
     def re_tool(*, action: str = "status", evidence_id: str = "",
                 status: str = "", limit: str = "20",
                 path: str = "", query: str = "",
-                target: str = "") -> dict[str, Any]:
+                target: str = "",
+                mission_id: str = "") -> dict[str, Any]:
         act = (action or "status").strip().lower()
         engine = ReEngine(context)
         try:
@@ -149,8 +183,16 @@ def register(registry: Any) -> None:
             return engine.android_query(
                 path, (query or "callers").strip().lower(),
                 target)
+        if act == "mission":
+            if not (mission_id or "").strip():
+                return {"error": "action=mission needs a mission_id "
+                                 "(action=missions lists them)"}
+            return engine.mission(mission_id.strip())
+        if act == "missions":
+            return engine.mission_list(limit=n)
         return {"error": f"unknown re action {act!r} — "
-                         "status|evidence|unknowns|audit|graph"}
+                         "status|evidence|unknowns|audit|graph|"
+                         "mission|missions"}
 
     @registry.register(
         "re_inspect",
@@ -187,7 +229,22 @@ def register(registry: Any) -> None:
             "with its attempts) | "
             "graph (path = an APK or jadx output dir: build the "
             "Android class/method/reference graph and record its "
-            "census as Evidence) | close (unknown_id + status="
+            "census as Evidence) | mission (Pass 4: run a "
+            "brain-directed RE mission — question + targets "
+            "(comma-separated paths): Devon decomposes the "
+            "question over the capability matrix, works the rungs "
+            "in dependency order under a journaled plan, lets the "
+            "residual unknowns re-drive the plan, and closes with "
+            "a verified reconstruction per target — every claim "
+            "evidence-tied, contradictions demoted to unknowns; "
+            "sub_questions adds brain sub-questions through the "
+            "same planner; graph_target names the class/method "
+            "for a graph-intent query step; with mission_id set "
+            "instead of a question, the mission RESUMES from its "
+            "journal. Static only: a question only running a "
+            "target could answer opens a dynamic_required unknown "
+            "naming the owner's sandbox-posture gate — nothing "
+            "is executed) | close (unknown_id + status="
             "resolved|contradicted: resolved takes a resolution "
             "text, contradicted takes at least one contradicting "
             "evidence id in evidence_ids, and the stated "
@@ -197,11 +254,22 @@ def register(registry: Any) -> None:
         ),
         capability=Capability.DB_WRITE,
         parameters={
-            "action": "str — inspect|provision|graph|close",
+            "action": "str — inspect|provision|graph|mission|close",
             "path": "str — file to inspect (action=inspect), or "
                     "APK / jadx output dir (action=graph)",
             "deep": "str — auto|provision|off (action=inspect, "
                     "default auto)",
+            "question": "str — the mission question "
+                        "(action=mission)",
+            "targets": "str — comma-separated target paths "
+                       "(action=mission)",
+            "sub_questions": "str — comma-separated extra "
+                             "sub-questions for the planner "
+                             "(action=mission)",
+            "graph_target": "str — class or Class.method for a "
+                            "graph query step (action=mission)",
+            "mission_id": "str — mission id or unique prefix to "
+                          "resume (action=mission)",
             "unknown_id": "str — unknown id or unique prefix "
                           "(action=close)",
             "status": "str — resolved|contradicted (action=close)",
@@ -218,6 +286,9 @@ def register(registry: Any) -> None:
     )
     def re_inspect_tool(*, action: str = "inspect", path: str = "",
                         deep: str = "auto",
+                        question: str = "", targets: str = "",
+                        sub_questions: str = "",
+                        graph_target: str = "", mission_id: str = "",
                         unknown_id: str = "", status: str = "",
                         resolution: str = "", evidence_ids: str = "",
                         resolution_authority: str = "",
@@ -234,6 +305,16 @@ def register(registry: Any) -> None:
             return engine.provision_engines()
         if act == "graph":
             return engine.android_graph_build(path)
+        if act == "mission":
+            if (mission_id or "").strip():
+                return engine.resume_mission(mission_id.strip())
+            paths = [p.strip() for p in (targets or "").split(",")
+                     if p.strip()]
+            subs = tuple(s.strip() for s in
+                         (sub_questions or "").split(",") if s.strip())
+            return engine.run_mission(
+                question, paths, extra_questions=subs,
+                graph_target=(graph_target or "").strip())
         if act == "close":
             ids = tuple(x.strip() for x in (evidence_ids or "").split(",")
                         if x.strip())
@@ -246,4 +327,4 @@ def register(registry: Any) -> None:
                                        or "inferred"),
                 evidence_ids=ids)
         return {"error": f"unknown re_inspect action {act!r} — "
-                         "inspect|provision|graph|close"}
+                         "inspect|provision|graph|mission|close"}

@@ -32,6 +32,16 @@ sniffs as a capture (pcap / pcapng / HAR / mitmproxy flows /
 Devon-addon JSONL) goes to the traffic rung (built-in readers +
 a probed TShark second voice). Sniffing is by content, never by
 file name.
+
+Pass 4 adds the top layer (:mod:`.missions`, :mod:`.verify`):
+brain-directed missions that decompose a question over the
+capability matrix, work the rungs in dependency order under a
+journaled plan, let the residual unknowns re-drive the plan, and
+close with a reconstruction whose every claim is evidence-tied
+and cross-rung verified — contradictions demoted to unknowns,
+never smoothed. Questions only running a target could answer
+classify as ``dynamic_required`` unknowns naming the owner's
+sandbox-posture gate; nothing here executes a target.
 """
 
 from __future__ import annotations
@@ -195,11 +205,20 @@ def capability_matrix(root: Any = None) -> list[dict[str, Any]]:
                 "owner runs where mitmproxy lives (owner-invoked, "
                 "local); its JSONL folds into evidence here"})
     rows.append({
+        "engine": "re-missions", "kind": "built-in",
+        "available": True, "state": "ready",
+        "note": "brain-directed missions over the rungs (plan → "
+                "rung steps → reconstruction verify), journaled "
+                "end-to-end in re_missions/re_mission_steps; "
+                "unknowns re-drive the plan"})
+    rows.append({
         "engine": "frida-gdb", "kind": "external",
         "available": False,
         "note": "dynamic rung — gated on the owner's "
                 "sandbox/consent posture for executing targets; "
-                "not built"})
+                "not built, not provisioned, not probed: mission "
+                "questions that need it classify as "
+                "dynamic_required unknowns naming the gate"})
     return rows
 
 
@@ -265,13 +284,20 @@ class ReEngine:
 
     # ── status / capability ──────────────────────────────────────────
     def status(self) -> dict[str, Any]:
+        from .missions import MissionStore
+
         audit = self.store.audit()
+        counts = MissionStore(self._db).counts()
         return {
             "engines": capability_matrix(self._tools_root),
             "evidence_records": audit["evidence_records"],
             "unknowns_open": audit["unknowns_open"],
             "unknowns_resolved": audit["unknowns_resolved"],
             "unknowns_contradicted": audit["unknowns_contradicted"],
+            "missions_open": counts.get("planned", 0)
+            + counts.get("running", 0),
+            "missions_closed": counts.get("closed", 0),
+            "missions_failed": counts.get("failed", 0),
             "store": ("ephemeral (in-memory — no context database "
                       "bound)" if self._ephemeral else "durable"),
             "failures_recorded": failure_count(),
@@ -930,13 +956,59 @@ class ReEngine:
     def audit(self) -> dict[str, Any]:
         return self.store.audit()
 
+    # ── Pass 4: missions + reconstruction ────────────────────────────
+    def run_mission(self, question: str, targets: list[str], *,
+                    extra_questions: tuple[str, ...] | list[str] = (),
+                    graph_target: str = "") -> dict[str, Any]:
+        """Plan + work one RE mission (see :mod:`.missions`).
+
+        The mission is journaled before it runs a single rung, so
+        what comes back is the mission record — plan, per-step
+        results, per-target verified reconstructions, parked
+        unknowns with their reasons — not a console transcript.
+        """
+        from .missions import MissionRunner
+
+        return MissionRunner(self).start(
+            question, list(targets), extra_questions=extra_questions,
+            graph_target=graph_target)
+
+    def resume_mission(self, mission_id: str) -> dict[str, Any]:
+        """Resume a mission from its journal: pending steps work,
+        finished steps stand (evidence is content-addressed, so a
+        re-walked step lands on the same records)."""
+        from .missions import MissionRunner
+
+        return MissionRunner(self).run(mission_id)
+
+    def mission(self, mission_id: str) -> dict[str, Any]:
+        """One mission's full journal record + its reconstructions."""
+        from .missions import mission_status
+
+        return mission_status(self, mission_id)
+
+    def mission_list(self, limit: int = 20) -> dict[str, Any]:
+        from .missions import list_missions
+
+        return list_missions(self, limit=limit)
+
+    def reconstruct(self, subject_sha256: str) -> dict[str, Any]:
+        """Build + verify the reconstruction of one subject from
+        its evidence chain (see :mod:`.verify`)."""
+        from .verify import ReconstructionError, build_reconstruction
+
+        try:
+            return build_reconstruction(self.store, subject_sha256)
+        except ReconstructionError as exc:
+            return {"error": str(exc)}
+
 
 # ── renders (plain text; surfaces own the presentation layer) ────────
 
 def render_status(status: dict[str, Any]) -> str:
     lines = ["reverse engineering — evidence core + static spine "
              "+ self-provisioned deep rungs + firmware/traffic "
-             "(Passes 1–3)"]
+             "+ missions/reconstruction (Passes 1–4)"]
     for row in status["engines"]:
         mark = "yes" if row["available"] else "no"
         state = f" [{row['state']}]" if row.get("state") else ""
@@ -947,6 +1019,10 @@ def render_status(status: dict[str, Any]) -> str:
         f"unknowns: {status['unknowns_open']} open, "
         f"{status['unknowns_resolved']} resolved, "
         f"{status['unknowns_contradicted']} contradicted")
+    lines.append(
+        f"missions: {status.get('missions_open', 0)} open, "
+        f"{status.get('missions_closed', 0)} closed, "
+        f"{status.get('missions_failed', 0)} failed")
     lines.append(f"store: {status['store']}")
     if status.get("failures_recorded"):
         lines.append(f"failures recorded: "

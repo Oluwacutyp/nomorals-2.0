@@ -3700,12 +3700,28 @@ class RuntimeGamesMixin:
                                    and the store refuses a close
                                    weaker than the unknown requires
         /re audit                — the unknowns audit
+        /re mission <question> -- <target> [target…]
+                                 — Pass 4: plan + work a mission
+                                   over the rungs; closes with a
+                                   verified reconstruction per
+                                   target. Static only — a question
+                                   only running the target could
+                                   answer opens a dynamic_required
+                                   unknown naming the gate
+        /re missions             — the mission journal
+        /re mstatus <id>         — one mission: plan, steps,
+                                   reconstructions
+        /re mresume <id>         — resume a mission from its
+                                   journal
         """
         from ..reverse import (
             ReEngine,
             render_audit,
             render_evidence_card,
             render_graph_answer,
+            render_mission,
+            render_mission_list,
+            render_mission_status,
             render_provision,
             render_status,
             render_unknowns,
@@ -3730,6 +3746,14 @@ class RuntimeGamesMixin:
                 "/re close <id> [observed|derived|inferred] "
                 "<resolution> — close an unknown",
                 "/re audit — unknowns audit",
+                "/re mission <question> -- <target> [target…] — "
+                "work a mission over the rungs (verified "
+                "reconstruction per target)",
+                "/re missions — the mission journal",
+                "/re mstatus <id> — one mission: plan, steps, "
+                "reconstructions",
+                "/re mresume <id> — resume a mission from its "
+                "journal",
             ])
 
         if verb in ("", "status"):
@@ -3762,6 +3786,37 @@ class RuntimeGamesMixin:
                                    title="open residual unknowns")
         if verb == "audit":
             return render_audit(engine.audit())
+        if verb == "mission":
+            body = (tail or "").strip().split(None, 1)
+            rest = body[1] if len(body) > 1 else ""
+            if " -- " not in rest:
+                return ("usage: /re mission <question> -- "
+                        "<target> [target…]")
+            question, _, target_text = rest.partition(" -- ")
+            targets = target_text.split()
+            if not question.strip() or not targets:
+                return ("usage: /re mission <question> -- "
+                        "<target> [target…]")
+            res = engine.run_mission(question.strip(), targets)
+            if res.get("error"):
+                return f"⚠️ {res['error']}"
+            return render_mission(res)
+        if verb == "missions":
+            return render_mission_list(engine.mission_list(limit=10))
+        if verb in ("mstatus", "mission-status"):
+            if len(parts) < 2:
+                return "usage: /re mstatus <mission-id>"
+            payload = engine.mission(parts[1])
+            if payload.get("error"):
+                return f"⚠️ {payload['error']}"
+            return render_mission_status(payload)
+        if verb in ("mresume", "mission-resume"):
+            if len(parts) < 2:
+                return "usage: /re mresume <mission-id>"
+            res = engine.resume_mission(parts[1])
+            if res.get("error"):
+                return f"⚠️ {res['error']}"
+            return render_mission(res)
         if verb == "provision":
             return render_provision(engine.provision_engines())
         if verb == "graph":
