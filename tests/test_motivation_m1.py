@@ -297,7 +297,13 @@ class RunTests(unittest.TestCase):
 
     def test_synthesis_path_delivers_and_marks_served(self):
         ctx = self._wired_ctx(_Brain(WORDS_150))
-        now = _ts(2026, 10, 23, 7, 5)  # morning day-part, post-window
+        # Pass-5 test-truth repair (2026-11-06): this asserted the
+        # re-arm, so it must run at a rolling FUTURE date — the fixed
+        # 2026-10-23 pin crossed into the past and Scheduler.add
+        # correctly refused the re-arm one-shot (production sound;
+        # _future_ts's docstring names this exact disease). 07:05
+        # Lagos = morning day-part, post-window, as before.
+        now = _future_ts(7, 5)
         res = mot.run_motivation(ctx, "morning", now=now,
                                  rng=random.Random(3))
         self.assertTrue(res["delivered"], res)

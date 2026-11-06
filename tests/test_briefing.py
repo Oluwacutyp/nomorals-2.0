@@ -156,10 +156,19 @@ class RunDeliverTests(unittest.TestCase):
 
         # the ambient weather/USA providers are live-network: simulate a
         # fully quiet world (all providers empty) to keep this hermetic.
+        # Pass-5 test-truth repair (2026-11-06): FromYourPastProvider
+        # must be stubbed too — it reads the home-scoped repetition
+        # store (RepetitionScheduler() default path), which on any real
+        # machine holds due cards, so the "quiet world" was never
+        # quiet and the fallback note never fired. Production is
+        # behaving as designed (the store is home-scoped on purpose);
+        # the test's isolation was incomplete.
         from nomorals.agents import weather as _wx
         with patch.object(_wx.WeatherProvider, "collect",
                           return_value=None), \
              patch.object(_wx.USASituationsProvider, "collect",
+                          return_value=None), \
+             patch.object(mb.FromYourPastProvider, "collect",
                           return_value=None), \
              patch("nomorals.agents.notifier.Notifier", FakeNotifier):
             res = mb.run_briefing(self.ctx)

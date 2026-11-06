@@ -497,10 +497,27 @@ def test_digest_compiles_batch():
     assert rows
 
 
-def test_daypart_tone_differs():
-    db = make_db()
-    morning = pres_mod.digest(db, tz_offset=-4.0, theme="plain")  # EDT-ish
-    assert "☀️" in morning or "morning" in morning.lower()
+def test_daypart_tone_differs(monkeypatch):
+    # Pass-5 test-truth repair (2026-11-06): this test used to read
+    # the REAL clock — digest at tz_offset=-4 and hope the result was
+    # morning. It passed or failed purely by the hour the suite ran
+    # (production's daypart table is fine). Force the daypart through
+    # _now_in_tz, the same seam the heartbeat test above uses, and
+    # assert the tones genuinely differ between dayparts.
+    def _at(daypart, hour):
+        return {"hour": hour, "dow": 5, "dow_name": "Saturday",
+                "daypart": daypart, "iso": f"2026-10-10T{hour:02d}:00"}
+
+    monkeypatch.setattr(pres_mod, "_now_in_tz",
+                        lambda *a, **k: _at("morning", 9))
+    morning = pres_mod.digest(make_db(), theme="plain")
+    assert "☀️" in morning and "morning" in morning.lower()
+    monkeypatch.setattr(pres_mod, "_now_in_tz",
+                        lambda *a, **k: _at("night", 23))
+    night = pres_mod.digest(make_db(), theme="plain")
+    assert "🌌" in night and "night" in night.lower()
+    assert "☀️" not in night
+    assert morning != night
 
 
 # ── coordinator ──────────────────────────────────────────────────────

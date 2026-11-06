@@ -1,6 +1,18 @@
 """Knowledge-state-aware resurfacing + spaced repetition (build-map #40).
 
 All offline: SQLite in tmp dirs / :memory:, no network, no LLM.
+
+Pass-5 test-truth repair (2026-11-06): four TestScheduling tests still
+pinned SM-2 numbers (first GOOD interval 1.0, lapse resets reps, HARD
+= interval × 1.2, EASY raises ease above 2.5). Production migrated to
+FSRS-4.5 in 8f13241 — the module docstring is explicit ("New cards are
+always FSRS"; SM-2 survives only as a migration path for legacy cards)
+— and these tests were never updated. Verdict: tests wrong, production
+right. The rewritten tests pin the FSRS-4.5 truth with the default
+weights (S0: w0..w3 = 0.212/1.2931/2.3065/8.2956; at 90% desired
+retention the solved interval equals stability), and assert the growth
+laws through the pure FSRS transition so they still bite if the
+algorithm regresses to SM-2 behavior.
 """
 from __future__ import annotations
 
@@ -13,6 +25,7 @@ from nomorals.memory.delivery import (
     score_delivery,
 )
 from nomorals.memory.repetition import (
+    FSRS,
     GRADE_AGAIN,
     GRADE_EASY,
     GRADE_GOOD,
@@ -33,7 +46,7 @@ def _mem(mid, content, importance=0.5):
     return SimpleNamespace(id=mid, content=content, importance=importance)
 
 
-# ── SM-2 scheduling ───────────────────────────────────────────────────────
+# ── FSRS scheduling ───────────────────────────────────────────────────────
 
 class TestScheduling:
     def test_schedule_creates_due_card(self, tmp_path):
@@ -56,38 +69,78 @@ class TestScheduling:
         s = _sched(tmp_path)
         s.schedule("m1", "fact one")
         c = s.review("m1", GRADE_GOOD)
-        assert c.reps == 1 and c.interval_days == 1.0
+        assert c.reps == 1
+        # FSRS-4.5: a new card's first interval is its initial
+        # stability S0(GOOD) = w2 = 2.3065 (at 90% desired retention
+        # the solved interval equals S). SM-2's 1.0 is gone.
+        assert abs(c.interval_days - 2.3065) < 0.01
+        first = c.interval_days
         c = s.review("m1", GRADE_GOOD)
-        assert c.reps == 2 and c.interval_days == 6.0
+        assert c.reps == 2
+        # Same-day re-review: retrievability ≈ 1, so the stability
+        # increment ≈ 0 — FSRS learns almost nothing from an instant
+        # repeat (SM-2 jumped to 6.0 here).
+        assert first <= c.interval_days <= first + 0.01
         c = s.review("m1", GRADE_GOOD)
         assert c.reps == 3
-        assert abs(c.interval_days - 6.0 * 2.5) < 0.01  # × ease
+        assert first <= c.interval_days <= first + 0.02
+        # The growth law with real elapsed time, via the pure FSRS
+        # transition: reviewed when due (elapsed = S ⇒ R = 0.90),
+        # GOOD more than doubles stability.
+        d, s0, _ = FSRS().review(6.4133, 2.3065, 0.0, GRADE_GOOD)
+        _, s1, _ = FSRS().review(d, s0, s0, GRADE_GOOD)
+        assert s1 > 2.0 * s0
 
     def test_again_shrinks_and_counts_lapse(self, tmp_path):
         s = _sched(tmp_path)
         s.schedule("m1", "fact one")
         s.review("m1", GRADE_GOOD)
-        s.review("m1", GRADE_GOOD)
+        before = s.review("m1", GRADE_GOOD)
         c = s.review("m1", GRADE_AGAIN)
         assert c.lapses == 1
-        assert c.reps == 0
-        assert c.interval_days == 1.0  # relearn tomorrow
-        assert c.ease < 2.5  # ease dropped
+        # FSRS: a lapse does NOT reset the successful-rep count
+        # (SM-2 did) — reps counts recalls, lapses counts failures.
+        assert c.reps == 2
+        # Post-lapse stability (FSRS-4.5 failure formula) collapses
+        # far below the pre-lapse stability: ≈0.48 d for this state,
+        # not SM-2's flat "relearn tomorrow" 1.0.
+        assert c.stability < before.stability
+        assert abs(c.interval_days - 0.48) < 0.1
+        assert c.interval_days < before.interval_days
+        assert c.ease < 2.5  # ease (legacy sync from difficulty) dropped
 
     def test_hard_grows_slowly(self, tmp_path):
         s = _sched(tmp_path)
         s.schedule("m1", "fact one")
         s.review("m1", GRADE_GOOD)
-        s.review("m1", GRADE_GOOD)  # interval 6
+        before = s.review("m1", GRADE_GOOD)  # stability ≈ 2.3065
         c = s.review("m1", GRADE_HARD)
-        assert abs(c.interval_days - 6.0 * 1.2) < 0.01
+        # Same-day HARD: the (already ≈0) growth increment is scaled
+        # by the hard penalty w15 — the interval holds ≈ steady. It
+        # does NOT take SM-2's ×1.2 over a 6-day interval.
+        assert abs(c.interval_days - before.interval_days) < 0.05
+        # With real elapsed time, HARD grows stability strictly less
+        # than GOOD from the same state (pure FSRS transitions).
+        d0, s0 = before.difficulty, before.stability
+        _, s_good, _ = FSRS().review(d0, s0, s0, GRADE_GOOD)
+        _, s_hard, _ = FSRS().review(d0, s0, s0, GRADE_HARD)
+        assert s0 < s_hard < s_good
 
     def test_easy_boosts(self, tmp_path):
         s = _sched(tmp_path)
         s.schedule("m1", "fact one")
         c = s.review("m1", GRADE_EASY)
-        assert c.ease > 2.5
+        # FSRS-4.5: EASY seeds the largest initial stability, S0 = w3.
+        assert abs(c.interval_days - 8.2956) < 0.01
         assert c.interval_days >= 4.0
+        # …strictly more than a GOOD first review of a twin card.
+        s.schedule("m2", "fact two")
+        g = s.review("m2", GRADE_GOOD)
+        assert c.interval_days > g.interval_days
+        # ease is now a legacy column re-synced from FSRS difficulty
+        # (2.5 + (5 − D)·0.15); EASY's D0 = w4 − w5 = 5.5799 → 2.413.
+        # The SM-2 expectation "ease rises above 2.5" no longer exists.
+        assert abs(c.ease - 2.413) < 0.01
 
     def test_invalid_grade_rejected(self, tmp_path):
         s = _sched(tmp_path)

@@ -305,14 +305,18 @@ class TestDatabaseUpgrades(unittest.TestCase):
         db.optimize()  # must not raise
         db.close()
 
-    def test_migrate_reaches_87(self):
+    def test_migrate_reaches_88(self):
+        # Pass-5 test-truth repair (2026-11-06): stale pin — migration
+        # 88 (notifications_doc_and_digest_fold) has shipped, so the
+        # chain now reaches 88. Test-only; migrations.py is FROZEN
+        # (AST tamper guard) and was not touched.
         from nomorals.storage.migrations import MIGRATIONS, latest_version
 
-        self.assertEqual(latest_version(), 87)
+        self.assertEqual(latest_version(), 88)
         tmp = tempfile.mkdtemp()
         db = Database(os.path.join(tmp, "mig.db"))
         summary = db.migrate()
-        self.assertEqual(summary.version, 87)
+        self.assertEqual(summary.version, 88)
         cols = {c["name"] for c in db.table_info("kv_store")}
         self.assertIn("expires_at", cols)
         db.close()

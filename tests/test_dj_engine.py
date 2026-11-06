@@ -1,4 +1,11 @@
-"""Tests for nomorals.media.dj_engine — real DJ DSP."""
+"""Tests for nomorals.media.dj_engine — real DJ DSP.
+
+Pass-5 test-truth repair (2026-11-06): test_energy_arc_peaks_middle
+pinned the pre-curves engine (arc peaks mid-set). Since the media
+sweep (7cc4044) plan_energy_arc follows named curves and the default
+is "late_peak" — verdict: test wrong, production right; the test now
+pins the late-peak truth under its corrected name.
+"""
 
 import math
 from array import array
@@ -171,14 +178,19 @@ def test_plan_no_fake_blend_without_bpm():
 
 # ── energy arc ───────────────────────────────────────────────────────────────
 
-def test_energy_arc_peaks_middle():
+def test_energy_arc_peaks_late_by_default():
+    # The default curve is late_peak: resampled to 5 slots its targets
+    # are [0.25, 0.475, 0.74, 0.98, 0.6] — the peak target sits at
+    # index 3, NOT mid-set (len//2 == 2 was the pre-curves truth).
     tracks = [_trk(energy=e) for e in (0.9, 0.2, 0.7, 0.4, 0.6)]
     arc = plan_energy_arc(tracks)
     energies = [t.energy for t in arc]
     peak_pos = energies.index(max(energies))
-    assert peak_pos == len(arc) // 2
-    # ramps up to peak
+    assert peak_pos == 3
+    # ramps up to the peak, then falls off
     assert energies[0] <= energies[peak_pos]
+    assert energies[:peak_pos] == sorted(energies[:peak_pos])
+    assert energies[-1] < energies[peak_pos]
 
 
 # ── taste interface ──────────────────────────────────────────────────────────

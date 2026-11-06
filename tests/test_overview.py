@@ -167,7 +167,11 @@ def test_make_overview_lang_alias():
 
 
 def test_formats():
-    assert set(FORMATS) == {"deep-dive", "debate", "brief"}
+    # Pass-5 test-truth repair (2026-11-06): the module ships FOUR
+    # formats — "interview" is fully implemented (style prompt in
+    # overview.py, advertised in the /overview help). The 3-format
+    # pin predates it; test was wrong, production right.
+    assert set(FORMATS) == {"deep-dive", "debate", "brief", "interview"}
 
 
 # ── store ─────────────────────────────────────────────────────────────────

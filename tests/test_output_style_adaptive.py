@@ -13,6 +13,21 @@ results that are not normal chats. These tests pin:
   output (no ``{"...": ...}`` blobs);
 * the Notifier attaches adaptive buttons (or explicit none) to pushes;
 * the Telegram adapter never inherits buttons from a stale command.
+
+Pass-5 test-truth repairs (2026-11-06), both verdicts test-wrong /
+production-right:
+* TestAdapterNoStaleButtons built the adapter via __new__ and seeded
+  only the attributes known when the class was written. The Bot Hub
+  sweep (3185435) later added ``_nav_edit`` to TelegramBotAdapter —
+  set unconditionally in __init__ and consumed by send(); every
+  production construction uses the real constructor (two_bots /
+  chat/__init__), so the AttributeError existed only in this fixture.
+  The fixture now seeds ``_nav_edit`` like its sibling attributes.
+* test_tool_reply_no_raw_json pinned render_output's lowercase
+  ``count: 3`` line, but _tool_reply's rendering converged onto the
+  presentation layer in Formatting F7 (e48ba77): tool_result_doc +
+  canonical_text, title-cased keys ("Count: 3"). The test's named
+  intent — never a raw JSON blob — is unchanged and still asserted.
 """
 
 import unittest
@@ -240,8 +255,12 @@ class TestRenderedOutputs(unittest.TestCase):
         rt._send_long_checked = MagicMock(
             side_effect=lambda _p, _c, text: text)
         out = rt._tool_reply("probe", "telegram:1")
-        self.assertIn("count: 3", out)
+        # Canonical presentation dialect (F7): title-cased keys, the
+        # values inline — and still never a raw JSON blob.
+        self.assertIn("Count: 3", out)
+        self.assertIn("a, b", out)
         self.assertNotIn('{"count"', out)
+        self.assertNotIn('"count":', out)
 
 
 class TestNotifierAdaptiveButtons(unittest.TestCase):
@@ -345,6 +364,9 @@ class TestAdapterNoStaleButtons(unittest.TestCase):
         a.stats = {"sent": 0, "send_errors": 0}
         a._last_command = {}
         a._last_inbound_was_command = {}
+        # __init__ state send() reads: screen-stack nav markers
+        # (Bot Hub, 3185435) — empty = no pending tap, as in prod.
+        a._nav_edit = {}
         a._api = MagicMockApi()
         return a
 

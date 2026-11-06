@@ -315,7 +315,12 @@ class HandoffAndMigrationTests(_ScopeBase):
 
     def test_migration_87_registered(self):
         from nomorals.storage.migrations import MIGRATIONS, latest_version
-        self.assertEqual(latest_version(), 87)
+        # Pass-5 test-truth repair (2026-11-06): the latest_version pin
+        # was stale (87) — migration 88 has since shipped, so latest is
+        # 88. The subject of this test is unchanged: migration 87 stays
+        # registered, exactly once, under its original name.
+        # migrations.py itself is FROZEN and was not touched.
+        self.assertEqual(latest_version(), 88)
         mig = [m for m in MIGRATIONS if m.version == 87]
         self.assertEqual(len(mig), 1)
         self.assertEqual(mig[0].name, "conversation_scope_rekey")
