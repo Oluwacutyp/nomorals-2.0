@@ -1616,11 +1616,33 @@ class RuntimeProvisionMixin:
                     f"(latest {len(lines)} of {len(rows)}):")
             return "\n".join([head] + lines)
         if sub == "page":
-            return ("📟 the pairing page renders this same pool for "
-                    "a browser: GET /pair on Devon's API, with your "
-                    "owner token — it shows live pairing codes, so "
-                    "nothing less than the owner token opens it. "
-                    "Approval still only ever happens on the phone.")
+            # The web rungs, best first: Devon's own pairing page
+            # in PHP (served by Devon on loopback when a PHP
+            # runtime resolves or provisions), then the read-only
+            # render on the API.  The reply names which rung the
+            # owner actually got — never a page that isn't there.
+            from ...social import pairing_web as _pairing_web
+
+            try:
+                out = _pairing_web.launch_pairing_page(self.context)
+            except PairingUnavailable as exc:
+                return (f"📟 the PHP pairing page could not be "
+                        f"served here: {exc}\nThe read-only render "
+                        "is at GET /pair on Devon's API, with your "
+                        "owner token — it shows live pairing codes, "
+                        "so nothing less than the owner token opens "
+                        "it. Approval still only ever happens on "
+                        "the phone.")
+            verb = "already serving" if out.get("already") \
+                else "now serving"
+            return (
+                f"📟 Devon's pairing page (PHP) is {verb} on "
+                f"this machine: {out['url']}\nIt is gated by its "
+                f"own page token — yours is: {out['token']}\n"
+                "The page drives the same pool as this chat "
+                "(pair, start, stop, restart, remove, toggles) "
+                "through Devon's API with your owner token. "
+                "Approval still only ever happens on the phone.")
         return ("usage: /pair [whatsapp <number> [label]|telegram "
                 "<number> [label]|tgcode <id> <code>|tgpass <id> "
                 "<password>|code <id>|start|stop|restart|remove <id>|"

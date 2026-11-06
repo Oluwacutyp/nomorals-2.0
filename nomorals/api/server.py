@@ -1123,6 +1123,36 @@ class APIServer:
                 ],
             }
 
+        # The pairing pool's machine contract (§15, pairing_web):
+        # the seam the PHP pairing page drives.  Same gate as the
+        # HTML page at GET /pair — sys.config, which the bounded
+        # default grant does not carry: a live pairing code is a
+        # credential while it lives, and the actions pair real
+        # accounts in.
+        @self.route("GET", "/pair/state",
+                    description="Pairing pool state as JSON: counts, "
+                                "accounts with toggle states, live "
+                                "pairing codes, pending Telegram "
+                                "flows (owner only)")
+        def pair_state(body: dict[str, Any],
+                       query: dict[str, str]) -> dict[str, Any]:
+            _require_capability(server._current_principal(),
+                                Capability.SYS_CONFIG)
+            from ..social.pairing_web import pairing_state
+            return pairing_state(context)
+
+        @self.route("POST", "/pair/action",
+                    description="One pairing pool action "
+                                "(pair_whatsapp, pair_telegram, tgcode, "
+                                "tgpass, start, stop, restart, remove, "
+                                "use, toggle) — owner only")
+        def pair_action(body: dict[str, Any],
+                        query: dict[str, str]) -> dict[str, Any]:
+            _require_capability(server._current_principal(),
+                                Capability.SYS_CONFIG)
+            from ..social.pairing_web import pairing_action
+            return pairing_action(context, body)
+
         # GET /stream is served directly by the request handler (SSE cannot
         # go through the JSON dispatch); its docs entry is registered here.
         self._route_docs[("GET", "/stream")] = (

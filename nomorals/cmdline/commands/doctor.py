@@ -114,7 +114,19 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
         _hard_fail = True
     if _live_error:
         _hard_fail = True
+    # Pairing surface rungs (§15 + the polyglot order): which
+    # pairing surfaces this device carries — the PHP web rung is
+    # probed (a PHP runtime resolves + the page file is present),
+    # never assumed.  Guarded like the native section above:
+    # doctor must always report.
+    try:
+        from ...social.pairing_web import pairing_surface_rungs
+        _pairing_rungs: Any = pairing_surface_rungs(
+            workspace=settings.workspace_dir)
+    except Exception:  # noqa: BLE001 - doctor must always report
+        _pairing_rungs = []
     payload = {**health, **report,
+               "pairing_rungs": _pairing_rungs,
                "tool_modules": {"failed": _failed},
                "config_keys": _status if _status is not None
                else {"error": _status_error}}
@@ -156,6 +168,14 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
         print("\nconfig keys:")
         print(f"  ✗ check failed — {_status_error} "
               "(counted as a hard failure: an unrun check is not a pass)")
+    print("\npairing page rungs:")
+    if _pairing_rungs:
+        for _rung in _pairing_rungs:
+            _mark = "✓" if _rung.get("available") else "✗"
+            print(f"  {_mark} {_rung.get('name')} "
+                  f"({_rung.get('language')}): {_rung.get('detail')}")
+    else:
+        print("  ✗ rung probe failed — no rung state to report")
     if getattr(args, "live", False):
         print("\nlive verification:")
         if _live is not None:
