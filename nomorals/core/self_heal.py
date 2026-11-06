@@ -387,8 +387,15 @@ def _fix_unbound_local_inner(exc, dry_run, out):
         out["skip_reason"] = "could not write fixed source"
         return out
     if not _compiles(filename):
-        # revert — a fix that doesn't compile is worse than the bug
-        _write_source(filename, lines)
+        # revert — a fix that doesn't compile is worse than the bug.
+        # Branch on the revert's own outcome: a failed revert leaves
+        # the non-compiling source on disk, and saying "reverted"
+        # would hide exactly that.
+        if not _write_source(filename, lines):
+            out["skip_reason"] = ("fixed source did not compile and the "
+                                  "revert write failed — the broken "
+                                  "source is still on disk")
+            return out
         out["skip_reason"] = "fixed source did not compile; reverted"
         return out
     out["ok"] = True
@@ -626,7 +633,11 @@ def _fix_dead_method_inner(exc, dry_run, out):
         out["skip_reason"] = "could not write fixed source"
         return out
     if not _compiles(filename):
-        _write_source(filename, lines)
+        if not _write_source(filename, lines):
+            out["skip_reason"] = ("fixed source did not compile and the "
+                                  "revert write failed — the broken "
+                                  "source is still on disk")
+            return out
         out["skip_reason"] = "fixed source did not compile; reverted"
         return out
     out["ok"] = True

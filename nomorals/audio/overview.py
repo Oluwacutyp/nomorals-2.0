@@ -461,7 +461,10 @@ def make_overview(sources: list[dict[str, Any]] | None, fmt: str = "deep-dive",
                   ) -> dict[str, Any]:
     """Sources → grounded two-host script → two-voice audio.
 
-    Returns ``{"ok", "overview", "note"}`` or ``{"ok": False, "reason"}``.
+    Returns ``{"ok", "overview", "note", "saved"}`` or
+    ``{"ok": False, "reason"}``. ``saved`` is the OverviewStore.save
+    outcome when a store was passed (None when none was) — a failed
+    save is named in the note, never hidden behind "overview ready".
     Never raises; refuses rather than confabulates.
     """
     try:
@@ -516,9 +519,13 @@ def make_overview(sources: list[dict[str, Any]] | None, fmt: str = "deep-dive",
                 note += f" — audio not rendered ({res.get('reason')})"
         else:
             note += " — audio rendering skipped"
+        saved: bool | None = None
         if store is not None:
-            store.save(ov)
-        return {"ok": True, "overview": ov, "note": note}
+            saved = bool(store.save(ov))
+            if not saved:
+                note += (" — ⚠️ not saved: the store write failed, so "
+                         "this overview won't appear in /overview list")
+        return {"ok": True, "overview": ov, "note": note, "saved": saved}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": f"overview failed: {exc}"}
 

@@ -189,8 +189,11 @@ class CostTracker:
         *,
         client: str = "default",
         purpose: str = "",
-    ) -> int:
-        """Record one message. Returns the cost in kobo. Never raises."""
+    ) -> int | None:
+        """Record one message. Returns the cost in kobo, or None when
+        the write didn't land — the ledger's unknown value (the same
+        convention spent_since uses), never a phantom 0 that reads as
+        "no spend". Never raises."""
         try:
             cost = _rate_for(category)
             self._db.execute(
@@ -206,7 +209,7 @@ class CostTracker:
             raise  # unknown category is a caller bug — surface it
         except Exception:  # noqa: BLE001
             _log.debug("cost track failed", exc_info=True)
-            return 0
+            return None
 
     def spent_since(
         self, since: float, *, client: str = "default"

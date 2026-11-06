@@ -440,7 +440,9 @@ class ToolMaker:
         result = self.install(spec.name, code, description=spec.description,
                               tested=True)
         return {"ok": bool(result.get("ok")), "spec": spec.to_dict(),
-                "installed": result.get("path"), "test": probe}
+                "installed": result.get("path"), "test": probe,
+                "registered": result.get("registered"),
+                "note": result.get("note")}
 
 
 def _safe_name(name: str) -> str:

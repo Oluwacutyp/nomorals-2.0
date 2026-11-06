@@ -390,8 +390,11 @@ class MonitorAgent:
                 content = self._fetch(row)
             except Exception as exc:  # noqa: BLE001 — one bad watch must not
                 #                    #  kill the whole tick
-                self._note_error(row, str(exc), now=now)
-                errors.append({"target": row["target"], "error": str(exc)})
+                wh = self._note_error(row, str(exc), now=now)
+                entry = {"target": row["target"], "error": str(exc)}
+                if wh is not None:
+                    entry["webhook"] = wh
+                errors.append(entry)
                 continue
             self._note_check(row, content, now, changed)
         return {"checked": checked, "changed": changed, "errors": errors,
@@ -573,7 +576,11 @@ class MonitorAgent:
                 "attempts": 3, "error": last_error[:300]}
 
     def _note_error(self, row: dict[str, Any], error: str,
-                    now: float | None = None) -> None:
+                    now: float | None = None) -> dict[str, Any] | None:
+        """Record a failed check. Returns the watch_down webhook
+        delivery result when one was fired (same contract as
+        _note_check's entry["webhook"] — the outcome rides along in
+        the tick output), else None."""
         streak = int(row["error_streak"] or 0) + 1
         self.db.execute(
             "UPDATE monitors SET error_streak=?, last_ok=0 WHERE id=?",
@@ -597,7 +604,7 @@ class MonitorAgent:
                     )
                 except Exception:  # noqa: BLE001
                     pass
-            return
+            return None
         if streak == _ERROR_ALERT_STREAK:
             now = now if now is not None else time.time()
             throttled = self._throttled(row, now)
@@ -614,12 +621,14 @@ class MonitorAgent:
                 except Exception:  # noqa: BLE001
                     pass
             if not throttled:
-                self._fire_webhook(row, "watch_down",
-                                   {"error": error[:300],
-                                    "error_streak": streak}, now)
+                wh = self._fire_webhook(row, "watch_down",
+                                        {"error": error[:300],
+                                         "error_streak": streak}, now)
                 self.db.execute(
                     "UPDATE monitors SET last_alert_ts=? WHERE id=?",
                     (now, row["id"]))
+                return wh
+        return None
 
     @staticmethod
     def _diff(old: str, new: str, limit: int = 4000) -> str:

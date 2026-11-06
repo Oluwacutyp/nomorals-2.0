@@ -259,7 +259,11 @@ class TasteStore:
             p.energy_weights = {k: v for k, v in p.energy_weights.items() if v > 0.05}
             p.genre_weights = {k: v for k, v in p.genre_weights.items() if v > 0.05}
             p.bpm_bias = max(-30.0, min(30.0, p.bpm_bias))
-            self.save()
+            if not self.save():
+                # save() is honest (False, never raises) — don't claim
+                # "taste updated" for a write that didn't land; use
+                # the same hiccup wording as the raise path below.
+                return "feedback noted (taste save hiccup)."
             verdict = "liked" if liked else "noted"
             extra = f" — picked up: {', '.join(nudges)}" if nudges else ""
             return f"got it, {verdict}{extra}. taste updated."

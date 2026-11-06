@@ -133,7 +133,10 @@ class TravelClientStore:
                branding: dict | None = None,
                cost_client: str = "",
                channels: list[str] | None = None,
-               languages: list[str] | None = None) -> TravelClient:
+               languages: list[str] | None = None) -> TravelClient | None:
+        """Create and persist a client. Returns the client, or None
+        when the INSERT/commit failed — never a phantom client that
+        a later get()/list() can't find."""
         import json
         client = TravelClient(
             id="tcl_" + uuid.uuid4().hex[:10],
@@ -159,6 +162,7 @@ class TravelClientStore:
             self._db.commit()
         except Exception:  # noqa: BLE001
             _log.debug("travel client create failed", exc_info=True)
+            return None
         return client
 
     def get(self, client_id: str) -> TravelClient | None:
@@ -632,6 +636,9 @@ def _control_travelclient(self, tail: str, *, chat_key: str = "") -> str:
     if low.startswith("create "):
         name = rest[7:].strip()
         c = store.create(name)
+        if c is None:
+            return ("❌ couldn't create that travel client — the save "
+                    "failed, so nothing was stored. Try again.")
         return (f"✅ travel client `{c.name}` created (`{c.id}`).\n"
                 f"Add knowledge: `/travelclient knowledge {c.id} <title> | <text>`\n"
                 f"Readiness: `/travelclient onboard {c.id}`")
@@ -690,6 +697,8 @@ def register(registry: Any) -> None:
         store = TravelClientStore()
         if action == "create":
             c = store.create(str(kw.get("name", "Unnamed")))
+            if c is None:
+                return "create failed: the client could not be saved"
             return f"created {c.id}"
         if action == "list":
             return "\n".join(f"{c.id}: {c.name}" for c in store.list())

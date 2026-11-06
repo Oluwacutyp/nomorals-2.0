@@ -907,9 +907,17 @@ def bill_answer(
     try:
         from ..social.whatsapp_cost import CostTracker
         tracker = CostTracker(db_path=db_path) if db_path else CostTracker()
-        return tracker.track(phone or "", category or "service",
+        cost = tracker.track(phone or "", category or "service",
                              client=client or "default",
                              purpose="legal_aid")
+        if cost is None:
+            # track() reports a failed write as None (never a phantom
+            # 0); a failed bill is still recorded here (#212) while
+            # this surface's fallback stays 0.
+            record_failure("aid.bill_answer",
+                           RuntimeError("cost track write failed"))
+            return 0
+        return cost
     except ValueError:
         raise  # unknown category is a caller bug — surface it
     except Exception as exc:  # noqa: BLE001 — billing must never break answers

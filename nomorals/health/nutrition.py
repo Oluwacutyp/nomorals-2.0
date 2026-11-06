@@ -190,6 +190,8 @@ class MealLog:
     cost_kobo: int | None = None
     timeline_event_id: str = ""
     expense_txn_id: str = ""
+    meal_id: str = ""
+    meal_saved: bool = True
 
     @property
     def range_text(self) -> str:
@@ -219,6 +221,9 @@ class MealLog:
         if self.cost_kobo:
             from ..finance.ledger import format_naira
             parts.append(f"cost {format_naira(self.cost_kobo)}.")
+        if not self.meal_saved:
+            parts.append("⚠️ couldn't save this meal to the nutrition "
+                         "store — it won't count in today's totals.")
         parts.append("tracking only — not nutrition advice.")
         return " ".join(parts)
 
@@ -450,11 +455,16 @@ def complete_meal(draft: MealDraft, answers: dict[str, str], *,
     except Exception:  # noqa: BLE001
         _log.debug("meal timeline log failed", exc_info=True)
 
-    # 2. Nutrition store (daily totals, repeats, water).
+    # 2. Nutrition store (daily totals, repeats, water). save_meal
+    # never raises — it returns the meal id, or "" when the write
+    # didn't land; carry that truth on the log so the summary (and
+    # any other reader) doesn't claim a save that never happened.
     try:
-        (store or NutritionStore()).save_meal(log)
+        log.meal_id = (store or NutritionStore()).save_meal(log)
     except Exception:  # noqa: BLE001
         _log.debug("meal store save failed", exc_info=True)
+        log.meal_id = ""
+    log.meal_saved = bool(log.meal_id)
 
     # 3. Optional expense pairing: "that jollof cost ₦2,500".
     if cost_kobo and cost_kobo > 0 and ledger is not None:

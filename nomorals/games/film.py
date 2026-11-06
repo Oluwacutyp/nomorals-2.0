@@ -130,6 +130,7 @@ class FilmBreakdown:
     moments_used: int = 0
     note: str = ""
     created_at: float = 0.0
+    saved: bool = True
 
     def format(self) -> str:
         lines = [f"🎬 VOD breakdown — {_GAME_LABELS.get(self.game, self.game)} "
@@ -149,6 +150,9 @@ class FilmBreakdown:
                 lines.append(f"  [{n.label}] {n.text}")
         if self.coaching:
             lines.append(f"\n🧠 coaching: {self.coaching}")
+        if not self.saved:
+            lines.append("\n⚠️ not saved — /film export won't find "
+                         "this breakdown later.")
         lines.append(f"\n_{_DISCLAIMER}_")
         return "\n".join(lines)
 
@@ -390,10 +394,14 @@ def analyze_vod(video_path: str, game: str, *,
             highlights=top_h, coaching=coaching,
             moments_used=len(moments), created_at=time.time())
         if store is not None:
+            # FilmStore.save is honest (False, never raises) — carry
+            # the outcome on the breakdown instead of discarding it;
+            # a phantom save dead-ends /film export <id> later.
             try:
-                store.save(breakdown)
+                breakdown.saved = bool(store.save(breakdown))
             except Exception:  # noqa: BLE001
                 _log.warning("film store save failed", exc_info=True)
+                breakdown.saved = False
         return breakdown
     except Exception as exc:  # noqa: BLE001
         _log.warning("analyze_vod failed: %s", exc)
@@ -434,9 +442,10 @@ def _analyze_workout_vod(video_path: str, exercise: str, bid: str,
         moments_used=fa.frames_used, created_at=time.time())
     if store is not None and fa.available:
         try:
-            store.save(breakdown)
+            breakdown.saved = bool(store.save(breakdown))
         except Exception:  # noqa: BLE001
             _log.warning("film store save failed", exc_info=True)
+            breakdown.saved = False
     return breakdown
 
 
