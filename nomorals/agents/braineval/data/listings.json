@@ -1,0 +1,28 @@
+{
+ "core": [
+  "memory_recall",
+  "memory_remember",
+  "web_search",
+  "web_fetch",
+  "fs_read",
+  "fs_write",
+  "fs_list",
+  "wisdom_ask"
+ ],
+ "files": [
+  "fs_read",
+  "fs_write",
+  "fs_list",
+  "web_search",
+  "web_download",
+  "memory_recall"
+ ],
+ "wisdom": [
+  "wisdom_ask",
+  "wisdom_status",
+  "wisdom_ingest",
+  "web_search",
+  "memory_recall"
+ ],
+ "_about": "Listing KEYS -> the tool NAMES each tools-suite case shows the model. The listing TEXT is rendered live at run time from the real ToolRegistry (prompt_listing), so the pack always measures against the contract Devon runs today; a case tool missing from the registry fails pack validation loudly."
+}

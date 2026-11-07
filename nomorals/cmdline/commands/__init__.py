@@ -7,6 +7,7 @@ from .autonomy import _cmd_autonomy, _set_daily_call_cap
 from .backup import _cmd_backup
 from .benchmark import _BuildersBuildBackend, _cmd_benchmark
 from .bet import _cmd_bet
+from .braineval import _cmd_braineval
 from .book import _cmd_book
 from .books import _cmd_books
 from .account import _cmd_account
@@ -131,6 +132,7 @@ __all__ = [
     "_BuildersBuildBackend",
     "_cmd_benchmark",
     "_cmd_bet",
+    "_cmd_braineval",
     "_cmd_book",
     "_cmd_account",
     "_cmd_briefing",

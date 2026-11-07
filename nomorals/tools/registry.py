@@ -457,6 +457,7 @@ class ToolRegistry:
 
         for _name in (
             "archive", "attacker", "audio", "browser",
+            "braineval",
             "accounts",
             "build_app", "captcha", "cipher", "code_executor", "compress",
             "connectors", "code_indexer",

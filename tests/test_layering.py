@@ -255,6 +255,7 @@ MODULE_PINS: dict[str, int] = {
     "nomorals.tools.games": 5,       # -> games.*
     "nomorals.tools.services": 5,    # -> connectors.registry
     "nomorals.tools.trading": 5,     # -> connectors.* + agents.financial_expert
+    "nomorals.tools.braineval": 5,   # tool surface over agents.braineval (the eval-pack engine)
     # T1.6 (pass #96): the foundation-vs-composition split completed for
     # the remaining agent-composed tool modules. Each is a tool *surface*
     # over an L5 organ — it composes that organ the way tools.deals

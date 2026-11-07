@@ -38,6 +38,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "briefing": ["br"],
     "train": ["tr"],
     "benchmark": ["bm"],
+    "braineval": ["be"],
     "apps": ["ap"],
     "arena": ["ar"],
     "autonomy": ["auto"],
@@ -1991,6 +1992,32 @@ def _parser() -> argparse.ArgumentParser:
     a_rd = apk_sub.add_parser("read", help="read one text file (smali above all) from a project's decoded tree")
     a_rd.add_argument("project")
     a_rd.add_argument("target")
+
+    be_p = sub.add_parser("braineval", aliases=CLI_ALIASES["braineval"],
+        help="Brain eval pack: grade a model rung (capability / freedom / tool fluency) through Devon's router",
+        description=("nm braineval run [--rung groq|chain|local|mock] [--model M] [--base-url U] [--suites capability,refusal,tools] [--limit N]\n"
+                     "nm braineval last\n"
+                     "nm braineval compare [run-a run-b]\n"
+                     "nm braineval status"),
+    )
+    be_sub = be_p.add_subparsers(dest="braineval_action", required=True)
+    be_run = be_sub.add_parser("run", help="execute the pack on one rung and journal the run (groq = the recorded baseline rung; local = a llama.cpp server; mock = machinery smoke only, never a baseline)")
+    be_run.add_argument("--rung", default="groq",
+                        choices=["groq", "chain", "local", "mock"],
+                        help="which provider path grades the pack (default: groq)")
+    be_run.add_argument("--model", default="",
+                        help="model id override for the rung's provider")
+    be_run.add_argument("--base-url", default="",
+                        help="llama.cpp server base URL (local rung only)")
+    be_run.add_argument("--suites", default="",
+                        help="comma-separated subset of capability,refusal,tools (default: all)")
+    be_run.add_argument("--limit", type=int, default=0,
+                        help="run only the first N cases of each suite (smoke slice); 0 = full pack")
+    be_sub.add_parser("last", help="the most recent run's scorecard")
+    be_cmp = be_sub.add_parser("compare", help="two runs side by side (default: the last two)")
+    be_cmp.add_argument("run_a", nargs="?", default="")
+    be_cmp.add_argument("run_b", nargs="?", default="")
+    be_sub.add_parser("status", help="pack integrity + eval store + last run at a glance")
 
     re_p = sub.add_parser("re", aliases=CLI_ALIASES["re"],
         help="Reverse engineering: evidence-led static inspection of binaries (built-in spine + self-provisioned Ghidra rung)",
