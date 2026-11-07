@@ -172,7 +172,8 @@ def get_profile(db: Any, chat_key: str) -> dict[str, Any]:
                     profile.update(markers)
             return profile
     except Exception:  # noqa: BLE001 - no profile beats a broken chat
-        pass
+        _log.debug("chat profile read failed for %s", chat_key,
+                   exc_info=True)
     return {}
 
 

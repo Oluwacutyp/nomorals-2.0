@@ -222,7 +222,10 @@ class StoryReader:
             try:
                 story = FollowedStory.from_dict(
                     json.loads(meta_path.read_text(encoding="utf-8")))
-            except Exception:  # noqa: BLE001 - a corrupt entry never resolves
+            except Exception as exc:  # noqa: BLE001 - a corrupt entry never resolves
+                _log.warning("reader: skipping corrupt story at %s "
+                             "(%s: %s)", meta_path.parent.name,
+                             type(exc).__name__, exc)
                 continue
             stories.append((meta_path.parent.name, story))
 

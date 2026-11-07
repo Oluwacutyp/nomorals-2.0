@@ -27,8 +27,10 @@ def _service(args: Any, context: Any):
     svc = BrowserService(data_dir=default_data_dir())
     try:
         svc.restore()
-    except Exception:  # noqa: BLE001 - first run has nothing to restore
-        pass
+    except Exception as exc:  # noqa: BLE001 - first run has nothing to restore
+        print(f"browse: saved session state could not be restored "
+              f"({type(exc).__name__}: {exc}); starting fresh",
+              file=sys.stderr)
     db = getattr(context, "db", None)
     if db is not None:
         try:

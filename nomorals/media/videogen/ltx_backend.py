@@ -216,7 +216,10 @@ class LTXBackend:
                     pipe.to("cuda")
                 self._i2v_pipe = self._apply_loras(pipe)
             return self._i2v_pipe, "native-i2v"
-        except Exception:  # noqa: BLE001 - fall back to conditioning
+        except Exception as exc:  # noqa: BLE001 - fall back to conditioning
+            _log.warning(
+                "ltx: native I2V attempt failed (%s: %s); falling back "
+                "to the conditioning strategy", type(exc).__name__, exc)
             _log.info("LTXImageToVideoPipeline unavailable, "
                       "using LTXConditionPipeline strategy")
             from diffusers import LTXConditionPipeline

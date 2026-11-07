@@ -481,6 +481,7 @@ class RepetitionScheduler:
             self._db.commit()  # type: ignore[union-attr]
             return True
         except Exception:  # noqa: BLE001
+            _log.debug("repetition remove failed", exc_info=True)
             return False
 
     # -- read path --------------------------------------------------------

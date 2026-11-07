@@ -633,6 +633,7 @@ class Matchmaker:
             rows = self.db.query(
                 "SELECT * FROM match_queue ORDER BY enqueued_at") or []
         except Exception:  # noqa: BLE001
+            _log.debug("match sweep read failed", exc_info=True)
             return 0
         now = time.time()
         busy: dict[str, bool] = {}

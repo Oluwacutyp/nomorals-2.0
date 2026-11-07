@@ -70,6 +70,21 @@ from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
 
+#: Resolver identities whose failure has already been warned about —
+#: the tail-66 visibility sketch: a broken resolver warns ONCE per
+#: identity, so the failure is findable without spamming every call.
+_RESOLVER_FAILURE_WARNED: set[int] = set()
+
+
+def _warn_resolver_failure(resolver: Any, exc: BaseException) -> None:
+    key = id(resolver)
+    if key in _RESOLVER_FAILURE_WARNED:
+        return
+    _RESOLVER_FAILURE_WARNED.add(key)
+    _log.warning(
+        "acp: principal resolver failed (%s: %s); falling back to the "
+        "configured principal", type(exc).__name__, exc)
+
 PROTOCOL_VERSION = 1
 
 # ── JSON-RPC error codes ──────────────────────────────────────────────────
@@ -256,7 +271,8 @@ class ACPServer:
         if self._principal_resolver is not None:
             try:
                 resolved = self._principal_resolver()
-            except Exception:  # noqa: BLE001 - resolver must never break us
+            except Exception as exc:  # noqa: BLE001 - resolver must never break us
+                _warn_resolver_failure(self._principal_resolver, exc)
                 resolved = None
             if resolved is not None:
                 return resolved

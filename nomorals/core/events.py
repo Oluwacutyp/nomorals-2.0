@@ -179,6 +179,8 @@ class Subscription:
         try:
             return bool(self.predicate(event))
         except Exception:  # noqa: BLE001 - a broken predicate filters out
+            _log.debug("eventbus: subscription predicate failed",
+                       exc_info=True)
             return False
 
 

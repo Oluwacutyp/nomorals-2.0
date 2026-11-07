@@ -21,6 +21,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 __all__ = [
     "Theme", "THEMES", "theme", "banner", "card", "kv", "bar",
     "sparkbar", "journey_map", "status_line", "section",
@@ -91,6 +95,8 @@ class Theme:
             return "\n".join(
                 f"{indent}{k.ljust(w)} : {v}" for k, v in rows)
         except Exception:  # noqa: BLE001
+            _log.debug("style: kv render failed; plain fallback used",
+                       exc_info=True)
             return ""
 
     def card(self, title: str, pairs: Sequence[tuple[str, Any]],

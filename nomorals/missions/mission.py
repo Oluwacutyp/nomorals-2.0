@@ -660,12 +660,15 @@ class MissionStore:
             rows = self.db.query(
                 "SELECT * FROM missions ORDER BY updated_at DESC")
         except Exception:  # noqa: BLE001
+            _log.debug("mission: children query failed", exc_info=True)
             return []
         out = []
         for r in rows:
             try:
                 mission = Mission.from_row(dict(r))
             except Exception:  # noqa: BLE001 - a bad row is not our problem
+                _log.debug("mission: skipping unreadable row in "
+                           "children()", exc_info=True)
                 continue
             if mission.parent_id == mission_id:
                 out.append(mission)
@@ -916,6 +919,8 @@ class MissionStore:
             try:
                 missions.append(Mission.from_row(dict(r)))
             except Exception:  # noqa: BLE001 - a bad row is not our problem
+                _log.debug("mission: skipping unreadable row in "
+                           "list()", exc_info=True)
                 continue
         tag = (tag or "").strip().lower()
         needle = (search or "").strip().lower()

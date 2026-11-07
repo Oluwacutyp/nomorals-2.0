@@ -269,7 +269,7 @@ class ResearchOrgan:
                  "attempts": g.get("attempts", 0)}
                 for g in self.open_gaps(limit=5)]
         except Exception:  # noqa: BLE001 - stats never break the organ
-            pass
+            _log.debug("research: gap_stats failed", exc_info=True)
         return out
 
     # ── source quality (learned, not hardcoded) ──────────────────────

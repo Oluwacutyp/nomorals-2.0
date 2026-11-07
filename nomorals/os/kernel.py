@@ -28,8 +28,11 @@ import time
 from typing import Any, Callable
 
 from ..core.events import EventBus, global_bus
+from ..core.logging_setup import get_logger
 from .health import HealthMonitor
 from .services import ServiceRegistry
+
+_log = get_logger(__name__)
 
 __all__ = ["OSKernel"]
 
@@ -100,21 +103,23 @@ class OSKernel:
             try:
                 hook()
             except Exception:  # noqa: BLE001 — shutdown keeps moving
-                pass
+                _log.debug("kernel: shutdown hook %s failed", name,
+                           exc_info=True)
         try:
             self.services.stop_all()
         except Exception:  # noqa: BLE001
-            pass
+            _log.debug("kernel: services stop_all failed", exc_info=True)
         try:
             self.health.stop_background()
         except Exception:  # noqa: BLE001
-            pass
+            _log.debug("kernel: health stop_background failed",
+                       exc_info=True)
         # EventBus.stop() drains queued events before joining, so
         # async subscribers see everything published before stop().
         try:
             self.bus.stop()
         except Exception:  # noqa: BLE001
-            pass
+            _log.debug("kernel: bus stop failed", exc_info=True)
 
     @property
     def started(self) -> bool:

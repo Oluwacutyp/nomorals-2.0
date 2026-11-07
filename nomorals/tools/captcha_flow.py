@@ -283,8 +283,15 @@ class OriginCostCeiling:
             data = json.loads(self.path.read_text("utf-8"))
             if isinstance(data, dict) and data.get("day") == self._today():
                 return data
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            # A store file that EXISTS but cannot be read is not a
+            # fresh day: today's recorded spend is being lost, and
+            # that must be visible (tail-82 observability sketch).
+            if self.path.exists():
+                _log.warning(
+                    "captcha ceiling store unreadable (%s: %s); "
+                    "today's spend restarts from zero",
+                    type(exc).__name__, exc)
         return {"day": self._today(), "origins": {}}
 
     def _save(self, data: dict[str, Any]) -> None:

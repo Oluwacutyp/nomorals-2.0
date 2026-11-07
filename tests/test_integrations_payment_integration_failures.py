@@ -138,14 +138,20 @@ def test_fiat_value_feed_failure_returns_zero(caplog):
     with mock.patch.object(market_data, "quote",
                            return_value={"price": 100.0}):
         assert asyncio.run(pi.fiat_value("BTC", 2.0)) == 200.0
-    # Failure half (site 1117): feed down -> 0.0, and NOT recorded.
+    # Failure half (site 1117): feed down -> 0.0.  The exclusion's
+    # caplog silence was superseded by the §3.5 sketches pass: the
+    # tail-75 shelved sketch (bind + _log.debug in fiat_value)
+    # landed, so the failure is now on the record while the return
+    # contract (0.0) is unchanged.
     with mock.patch.object(market_data, "quote",
                            side_effect=RuntimeError("feed down")):
         with caplog.at_level(logging.DEBUG, logger=PAY_LOG):
             caplog.clear()
             value = asyncio.run(pi.fiat_value("BTC", 2.0))
     assert value == 0.0
-    assert [r for r in caplog.records if r.name == PAY_LOG] == []
+    hits = [r for r in caplog.records if r.name == PAY_LOG
+            and "fiat_value feed failed" in r.getMessage()]
+    assert hits and hits[0].levelno == logging.DEBUG
 
 
 async def _bal_raise(self, wallet, currency):
@@ -157,13 +163,19 @@ async def _bal_some(self, wallet, currency):
 
 
 async def _fiat_ten(self, currency, amount, fiat="USD"):
-    return 10.0
+    # The §3.5 sketches pass made _fiat_quote the conversion seam
+    # format_wallet consumes (it reports price-known alongside the
+    # value); fiat_value remains the public float wrapper over it.
+    return 10.0, True
 
 
 def test_format_wallet_balance_failure_skips_currency(caplog):
     pi = _pi()
     # Failure half (site 1128): every balance read fails -> the
-    # card is header + zero total, no currency lines, no record.
+    # card is header + zero total, no currency lines.  The
+    # exclusion's caplog silence was superseded by the §3.5
+    # sketches pass (the tail-75 shelved sketch covers 1128 too):
+    # each skipped currency is now on the record at debug.
     with mock.patch.object(PaymentIntegration, "get_balance",
                            _bal_raise):
         with caplog.at_level(logging.DEBUG, logger=PAY_LOG):
@@ -171,7 +183,9 @@ def test_format_wallet_balance_failure_skips_currency(caplog):
             card = asyncio.run(pi.format_wallet())
     assert "**total ≈ 0.00 USD**" in card
     assert "•" not in card
-    assert [r for r in caplog.records if r.name == PAY_LOG] == []
+    hits = [r for r in caplog.records if r.name == PAY_LOG
+            and "wallet balance read failed" in r.getMessage()]
+    assert hits and all(r.levelno == logging.DEBUG for r in hits)
     # Control: the skip is per-currency — BTC reads fine and its
     # line appears while a failing ETH read is the one skipped.
     async def bal_mixed(self, wallet, currency):
@@ -184,7 +198,7 @@ def test_format_wallet_balance_failure_skips_currency(caplog):
 
     with mock.patch.object(PaymentIntegration, "get_balance",
                            bal_mixed), \
-         mock.patch.object(PaymentIntegration, "fiat_value",
+         mock.patch.object(PaymentIntegration, "_fiat_quote",
                            _fiat_ten), \
          mock.patch.object(PaymentIntegration, "receive_crypto",
                            recv_fail):
@@ -202,7 +216,7 @@ def test_format_wallet_address_failure_omits_address_only():
     # Control: address known -> short form appended in backticks.
     with mock.patch.object(PaymentIntegration, "get_balance",
                            _bal_some), \
-         mock.patch.object(PaymentIntegration, "fiat_value",
+         mock.patch.object(PaymentIntegration, "_fiat_quote",
                            _fiat_ten), \
          mock.patch.object(PaymentIntegration, "receive_crypto",
                            _receive_ok):
@@ -212,7 +226,7 @@ def test_format_wallet_address_failure_omits_address_only():
     # balance line still prints, just without the address.
     with mock.patch.object(PaymentIntegration, "get_balance",
                            _bal_some), \
-         mock.patch.object(PaymentIntegration, "fiat_value",
+         mock.patch.object(PaymentIntegration, "_fiat_quote",
                            _fiat_ten), \
          mock.patch.object(PaymentIntegration, "receive_crypto",
                            _recv_raise):

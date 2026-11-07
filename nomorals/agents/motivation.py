@@ -651,8 +651,9 @@ def motivation_status(context: Any, *, now: float | None = None
 
         for job in Scheduler(context).list_jobs():
             jobs[job.get("name")] = job
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         jobs = {}
+        out["scheduler_error"] = f"{type(exc).__name__}: {exc}"
     for window, spec in WINDOW_DEFAULTS.items():
         cfg = _window_cfg(prefs, window)
         job = jobs.get(spec["job"]) or {}
@@ -677,8 +678,9 @@ def motivation_status(context: Any, *, now: float | None = None
         from .teachings import TeachingsLedger
 
         out["ledger"] = TeachingsLedger(context).stats(now=now_ts)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         out["ledger"] = {}
+        out["ledger_error"] = f"{type(exc).__name__}: {exc}"
     return out
 
 

@@ -816,6 +816,8 @@ def attach_twin_to_mqtt(bridge: Any, twin: "HomeTwin") -> None:
     try:
         from .mqtt_client import _entity_id as _z2m_entity
     except Exception:  # noqa: BLE001
+        _log.debug("mqtt_client unavailable — twin MQTT ids use the "
+                   "local fallback", exc_info=True)
         _z2m_entity = None  # type: ignore[assignment]
 
     def _on_message(topic: str, payload: Any) -> None:

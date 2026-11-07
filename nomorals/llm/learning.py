@@ -72,12 +72,15 @@ def _stop_all_learning_workers() -> None:
     try:
         workers = list(_live_attachments)
     except Exception:  # noqa: BLE001
+        _log.debug("learning: atexit attachment snapshot failed",
+                   exc_info=True)
         return
     for attachment in workers:
         try:
             attachment._stop.set()
         except Exception:  # noqa: BLE001
-            pass
+            _log.debug("learning: atexit stop signal failed",
+                       exc_info=True)
     for attachment in workers:
         try:
             worker = attachment._worker
@@ -85,7 +88,8 @@ def _stop_all_learning_workers() -> None:
                     and worker is not threading.current_thread()):
                 worker.join(timeout=2.0)
         except Exception:  # noqa: BLE001
-            pass
+            _log.debug("learning: atexit worker join failed",
+                       exc_info=True)
 
 
 atexit.register(_stop_all_learning_workers)

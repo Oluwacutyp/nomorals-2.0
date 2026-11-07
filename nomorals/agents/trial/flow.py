@@ -144,7 +144,8 @@ def active_delivery_platforms(gateway: Any) -> list[str]:
         return []
     try:
         status = gateway.status()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        record_failure("flow.active_delivery_platforms", exc)
         return []
     out = []
     for name in _DELIVERY_ORDER:

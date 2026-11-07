@@ -47,6 +47,8 @@ def _settings_home(manager: Any) -> Path | None:
         home = getattr(settings, "home_path", None)
         return Path(home) if home else None
     except Exception:  # noqa: BLE001
+        _log.debug("backup: settings home resolution failed",
+                   exc_info=True)
         return None
 
 
@@ -62,7 +64,8 @@ def _memory_files(manager: Any) -> dict[str, Path]:
             if p and Path(p).is_file():
                 files[key] = Path(p)
         except Exception:  # noqa: BLE001
-            pass
+            _log.debug("backup: inventory resolve failed for %s",
+                       key, exc_info=True)
 
     # main memories DB
     try:
@@ -74,7 +77,7 @@ def _memory_files(manager: Any) -> dict[str, Path]:
             for sidecar in Path(db_path).parent.glob("*.usearch"):
                 files[f"sidecar/{sidecar.name}"] = sidecar
     except Exception:  # noqa: BLE001
-        pass
+        _log.debug("backup: memories DB inventory failed", exc_info=True)
 
     from .repetition import repetition_db_path
     from .delivery import knowledge_state_db_path
@@ -88,7 +91,7 @@ def _memory_files(manager: Any) -> dict[str, Path]:
         if entities.is_dir():
             files["entities/"] = entities
     except Exception:  # noqa: BLE001
-        pass
+        _log.debug("backup: entities inventory failed", exc_info=True)
     return files
 
 

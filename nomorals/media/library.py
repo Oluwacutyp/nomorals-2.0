@@ -718,10 +718,14 @@ class ClipIndex:
                                   segment_movie(path).segments
                                   if s.kind == "scene"]
         except Exception:  # noqa: BLE001 - segmentation is best-effort
+            _log.debug("library: segmentation failed for %s", path,
+                       exc_info=True)
             bounds = [(0.0, 0.0)]
         try:
             feats = extract_features(path)
         except Exception:  # noqa: BLE001
+            _log.debug("library: feature extraction failed for %s",
+                       path, exc_info=True)
             feats = []
         for i, (s, e) in enumerate(bounds):
             words = [w for w in (transcript or [])

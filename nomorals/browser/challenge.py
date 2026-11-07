@@ -162,6 +162,7 @@ def detect_challenge_signal(html: str = "", url: str = "", *,
         from .slider_solver import detect_slider_challenge
         info = detect_slider_challenge(html or "", url or "")
     except Exception:  # noqa: BLE001 - detection never blocks
+        _log.debug("slider challenge detection failed", exc_info=True)
         info = None
     if info is not None:
         kind = ("geetest" if info.vendor == "geetest" else info.kind)
@@ -175,6 +176,7 @@ def detect_challenge_signal(html: str = "", url: str = "", *,
             QUESTION_KIND, detect_question_challenge)
         qinfo = detect_question_challenge(html or "")
     except Exception:  # noqa: BLE001 - detection never blocks
+        _log.debug("question challenge detection failed", exc_info=True)
         qinfo = None
     if qinfo is not None:
         return ChallengeSignal(
@@ -185,6 +187,7 @@ def detect_challenge_signal(html: str = "", url: str = "", *,
         from ..tools.captcha import detect as _captcha_detect
         found = _captcha_detect(html or "", url or "")
     except Exception:  # noqa: BLE001 - captcha detection never blocks
+        _log.debug("captcha detection failed", exc_info=True)
         found = []
     if found:
         first = found[0]

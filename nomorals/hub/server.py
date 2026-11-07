@@ -311,6 +311,7 @@ class HubServer:
         self._started_at = time.time()
         self._metrics_lock = threading.Lock()
         self._req_total: dict[tuple[str, str], int] = {}
+        self._scrape_errors: dict[str, int] = {}
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -427,6 +428,15 @@ class HubServer:
         with self._metrics_lock:
             key = (path, bucket)
             self._req_total[key] = self._req_total.get(key, 0) + 1
+
+    def _note_scrape_error(self, source: str) -> None:
+        """Count a failed metrics source (tail-74 follow-up feature):
+        a stats failure leaves its series absent from the exposition,
+        byte-identical to a healthy idle mesh — this counter is the
+        scrape-visible trace that it happened."""
+        with self._metrics_lock:
+            self._scrape_errors[source] = (
+                self._scrape_errors.get(source, 0) + 1)
 
     # ── routes ───────────────────────────────────────────────────────────
 
@@ -813,7 +823,7 @@ class HubServer:
                 lines.append(
                     f'nomorals_hub_mesh_tasks{{status="{status}"}} {count}')
         except Exception:  # noqa: BLE001 - metrics must not raise
-            pass
+            self._note_scrape_error("mesh_tasks")
         lines += [
             "# HELP nomorals_hub_sync_head_seq Sync store head sequence.",
             "# TYPE nomorals_hub_sync_head_seq gauge",
@@ -822,7 +832,20 @@ class HubServer:
             lines.append(
                 f"nomorals_hub_sync_head_seq {self.sync_peer.store.max_seq()}")
         except Exception:  # noqa: BLE001 - metrics must not raise
-            pass
+            self._note_scrape_error("sync_head_seq")
+        # Scrape-error series LAST: it must reflect failures from
+        # THIS exposition pass as well as earlier ones.
+        lines += [
+            "# HELP nomorals_hub_scrape_errors_total Metrics source "
+            "failures during exposition.",
+            "# TYPE nomorals_hub_scrape_errors_total counter",
+        ]
+        with self._metrics_lock:
+            scrape_items = sorted(self._scrape_errors.items())
+        for source, count in scrape_items:
+            lines.append(
+                f'nomorals_hub_scrape_errors_total{{source="{source}"}} '
+                f'{count}')
         text = "\n".join(lines) + "\n"
         return _Raw("text/plain; version=0.0.4; charset=utf-8",
                     text.encode("utf-8"))

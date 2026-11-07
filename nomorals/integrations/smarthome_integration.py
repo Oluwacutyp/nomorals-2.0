@@ -1708,7 +1708,8 @@ class HAWebSocket:
                                 "subscription": sub_id}))
                 asyncio.ensure_future(coro)
             except Exception:  # noqa: BLE001
-                pass
+                _log.debug("trigger unsubscribe send failed",
+                           exc_info=True)
         return True
 
     async def _resubscribe_triggers(self) -> None:

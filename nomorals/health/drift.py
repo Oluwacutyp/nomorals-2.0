@@ -582,6 +582,8 @@ class DriftMonitor:
                         - 86400))
             return streak
         except Exception:  # noqa: BLE001
+            _log.debug("drift: consecutive_act_days failed",
+                       exc_info=True)
             return 0
 
     def escalation_note(self, *, now: float | None = None) -> str:
@@ -596,6 +598,7 @@ class DriftMonitor:
                     f"rather than pushing through another week.")
             return guard_coaching(text)
         except Exception:  # noqa: BLE001
+            _log.debug("drift: escalation_note failed", exc_info=True)
             return ""
 
     def _severity(self, signals: list[DriftSignal], crisis: bool) -> str:

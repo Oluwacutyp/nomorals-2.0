@@ -673,14 +673,16 @@ class TutorSession:
                 found = find_topic(self.syllabus)
                 self.syllabus = found if found is not None else self.syllabus
             except Exception:  # noqa: BLE001
-                pass
+                _log.debug("tutor: syllabus resolution failed",
+                           exc_info=True)
         code_line = ""
         if self.syllabus is not None and not isinstance(self.syllabus, str):
             try:
                 from .curriculum import syllabus_code
                 code_line = f"\n📖 {syllabus_code(self.syllabus)}"
             except Exception:  # noqa: BLE001
-                pass
+                _log.debug("tutor: syllabus code render failed",
+                           exc_info=True)
         self._mastery_start = self.mastery.snapshot()
         if self.mode == "direct":
             teaching = self._teach_direct()

@@ -709,8 +709,11 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
                             _log.info("registered llama_cpp provider for %s at %s", model.id, base_url)
                         except Exception as e:
                             _log.warning("failed to register llama_cpp provider: %s", e)
-                except Exception:
-                    pass
+                except Exception:  # noqa: BLE001
+                    _log.warning(
+                        "lifecycle model %s skipped during broker "
+                        "registration", getattr(model, "id", "?"),
+                        exc_info=True)
             primary = lc.primary
             # Only promote if the provider actually loaded (not just card registered)
             # For llama_cpp, check the provider is on the router

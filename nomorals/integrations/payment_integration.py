@@ -1108,42 +1108,73 @@ class PaymentIntegration:
         return (f"┌{border}┐\n│ {data[:42]:<42} │\n└{border}┘\n"
                 f"_copy the address above — install `qrcode` for a real QR_")
 
-    async def fiat_value(self, currency: str, amount: float,
-                         fiat: str = "USD") -> float:
-        """Fiat equivalent via market_data (CoinGecko/Binance keyless)."""
+    async def _fiat_quote(self, currency: str, amount: float,
+                          fiat: str = "USD") -> tuple[float, bool]:
+        """(fiat value, price known?) — the tail-75 observability
+        sketch: a feed failure must be distinguishable from a real
+        zero price, so the quote reports its own success."""
         try:
             from . import market_data
             q = market_data.quote(f"{currency}/USDT", market="crypto")
             price = float(q.get("price") or 0)
             if fiat.upper() == "USD" or not price:
-                return amount * price
+                return amount * price, bool(price)
             fx = market_data.quote(f"USD/{fiat.upper()}", market="forex")
-            return amount * price * float(fx.get("price") or 1)
+            return amount * price * float(fx.get("price") or 1), True
         except Exception:  # noqa: BLE001
-            return 0.0
+            _log.debug("payment: fiat_value feed failed for %s",
+                       currency, exc_info=True)
+            return 0.0, False
+
+    async def fiat_value(self, currency: str, amount: float,
+                         fiat: str = "USD") -> float:
+        """Fiat equivalent via market_data (CoinGecko/Binance keyless)."""
+        value, _known = await self._fiat_quote(currency, amount, fiat)
+        return value
 
     async def format_wallet(self, wallet: str = "main",
                             fiat: str = "USD") -> str:
         """God-tier wallet card: per-currency balances + fiat totals."""
         lines = [f"💰 **wallet: {wallet}**"]
         total = 0.0
+        any_price_unknown = False
+        any_price_known = False
         for cur in self.SUPPORTED_CRYPTO:
             try:
                 bal = await self.get_balance(wallet, currency=cur)
             except Exception:  # noqa: BLE001
+                _log.debug("payment: wallet balance read failed for %s",
+                           cur, exc_info=True)
                 continue
             if bal <= 0:
                 continue
-            fv = await self.fiat_value(cur, bal, fiat)
+            fv, price_known = await self._fiat_quote(cur, bal, fiat)
             total += fv
+            if price_known:
+                any_price_known = True
+            else:
+                any_price_unknown = True
             try:
                 addr = await self.receive_crypto(cur, wallet=wallet)
                 short = f"{addr[:10]}…{addr[-6:]}" if len(addr) > 18 else addr
             except Exception:  # noqa: BLE001
                 short = ""
-            lines.append(f"• **{bal:.8f} {cur}** ≈ {fv:,.2f} {fiat}"
+            worth = (f"≈ {fv:,.2f} {fiat}" if price_known
+                     else "≈ price unavailable")
+            lines.append(f"• **{bal:.8f} {cur}** {worth}"
                          + (f"  `{short}`" if short else ""))
-        lines.append(f"\n**total ≈ {total:,.2f} {fiat}**")
+        if any_price_unknown and not any_price_known:
+            # No trustworthy price at all: no sum may be presented
+            # (tail-75 sketch: unknown-price marker).
+            lines.append("\n**total: price unavailable**")
+        elif any_price_unknown:
+            # The total must not present a failed quote's 0.00 as a
+            # trustworthy sum (tail-75 sketch: unknown-price marker).
+            lines.append(
+                f"\n**total ≈ {total:,.2f} {fiat} "
+                f"(excluding price-unavailable)**")
+        else:
+            lines.append(f"\n**total ≈ {total:,.2f} {fiat}**")
         return "\n".join(lines)
 
     # ── address book ───────────────────────────────────────────────
