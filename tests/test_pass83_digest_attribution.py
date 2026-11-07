@@ -22,6 +22,10 @@ Pins:
     the live path.
 (c) legacy rows (pre-pass shape: no attribution columns, inserted with
     the old column list) render byte-identical to today everywhere.
+    [Amended 2026-11-07, burn-down verification: the briefing half of
+    (c) was superseded by F6 + pass #85 — legacy rows are delivered by
+    construction and never re-briefed; see
+    test_legacy_row_never_rebriefed.]
 (d) a many-publisher aggregator fixture groups per publisher with the
     digest's existing item cap still authoritative — headers are
     bounded by the item count, unattributed items still coalesce under
@@ -135,6 +139,20 @@ def _legacy_insert(db, source, title, url, summary=""):
         (url, source, title, url, summary, 0.0, 1761091200.0))
 
 
+def _reset_to_undelivered(db):
+    """Present the stored rows as fetched-but-not-yet-delivered.
+
+    run() delivers its own digest, so its rows land ``digested``;
+    the briefing (F6 contract) only ever shows UNDELIVERED stories.
+    The stored-path pins below are about how stored rows are
+    labeled/grouped when the briefing reads them, so they start
+    from the undelivered state a stored row sits in between a
+    poll and its delivery.
+    """
+    db.execute(
+        "UPDATE news_items SET delivery_state = 'undelivered'")
+
+
 # ── (a) live digest grouping credits the publisher ─────────────────────
 
 class LiveDigestAttributionTests(unittest.TestCase):
@@ -212,6 +230,7 @@ class StoredAttributionTests(unittest.TestCase):
         ctx = _make_ctx(self)
         agent = NewsAgent(ctx)
         _run_with_xml(agent, [(GN_FEED, GN_MIXED_XML)])
+        _reset_to_undelivered(ctx.db)
         section = NewsProvider().collect(ctx, since=0.0)
         self.assertIsNotNone(section)
         lines = "\n".join(section.lines)
@@ -227,16 +246,24 @@ class StoredAttributionTests(unittest.TestCase):
 
 class LegacyRowTests(unittest.TestCase):
 
-    def test_legacy_row_briefing_byte_identical(self):
+    def test_legacy_row_never_rebriefed(self):
+        # Test-truth repair (burn-down verification, 2026-11-07): this
+        # pin used to expect the legacy row IN the briefing section,
+        # byte-identical — true when collect() read stored rows by
+        # recency. Two later contracts supersede it: F6 moved the
+        # briefing onto the UNDELIVERED set only (never re-show a
+        # delivered story), and pass #85 pins that pre-state-machine
+        # rows were delivered BY CONSTRUCTION (storage was the
+        # seen-marker), so a NULL-state legacy row must never be
+        # re-briefed or re-digested. The byte-identical rendering
+        # property survives where it still lives: publisher fallback
+        # via recent() (test_legacy_row_publisher_falls_back_to_feed).
         from nomorals.agents.morning_briefing import NewsProvider
         ctx = _make_ctx(self)
         _legacy_insert(ctx.db, "Google News", "Legacy story",
                        "https://news.google.com/legacy1", "Old body.")
         section = NewsProvider().collect(ctx, since=0.0)
-        self.assertIsNotNone(section)
-        self.assertEqual(section.lines,
-                         ["• Legacy story (Google News)"])
-        self.assertEqual(section.items[0]["source"], "Google News")
+        self.assertIsNone(section)
 
     def test_legacy_row_publisher_falls_back_to_feed(self):
         ctx = _make_ctx(self)
@@ -319,6 +346,7 @@ class BriefingCapTests(unittest.TestCase):
         from nomorals.agents.morning_briefing import NewsProvider
         ctx = _make_ctx(self, cap=40)
         self._seed_two_routes(ctx)
+        _reset_to_undelivered(ctx.db)
         section = NewsProvider().collect(ctx, since=0.0)
         self.assertIsNotNone(section)
         sources = [i["source"] for i in section.items]
