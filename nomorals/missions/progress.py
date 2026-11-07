@@ -861,31 +861,46 @@ class MissionWatchers:
             return []
         return [str(c) for c in data if c] if isinstance(data, list) else []
 
-    def _write(self, mission_id: str, chats: list[str]) -> None:
+    def _write(self, mission_id: str, chats: list[str]) -> bool:
+        """Persist the watcher list; True when the write landed.
+
+        Best-effort by contract — a failed write never raises into a
+        mission run or a chat command — but the outcome is REPORTED
+        (design follow-up to tail-92 site 869): a caller that tells
+        a user "you're watching" must know whether it persisted.
+        """
         if self.db is None:
-            return
+            return False
         try:
             KVStore(self.db).set(self._key(mission_id), chats)
         except Exception:  # noqa: BLE001 - subscriptions are best-effort
-            pass
+            return False
+        return True
 
-    def subscribe(self, mission_id: str, chat_key: str) -> bool:
-        """Subscribe a chat; returns True when it was newly added."""
+    def subscribe(self, mission_id: str, chat_key: str) -> str:
+        """Subscribe a chat; returns the persistence state:
+        ``"added"`` (newly subscribed AND persisted), ``"already"``
+        (was already subscribed), or ``"unpersisted"`` (the write
+        failed — nothing was saved, so no subscription exists; the
+        chat layer must not claim "watching")."""
         chats = self._read(mission_id)
         if chat_key in chats:
-            return False
+            return "already"
         chats.append(chat_key)
-        self._write(mission_id, chats)
-        return True
+        return "added" if self._write(mission_id, chats) \
+            else "unpersisted"
 
-    def unsubscribe(self, mission_id: str, chat_key: str) -> bool:
-        """Unsubscribe a chat; returns True when one was removed."""
+    def unsubscribe(self, mission_id: str, chat_key: str) -> str:
+        """Unsubscribe a chat; returns ``"removed"`` (removal
+        persisted), ``"absent"`` (was not subscribed), or
+        ``"unpersisted"`` (the write failed — the subscription is
+        still on record and may keep receiving pushes)."""
         chats = self._read(mission_id)
         if chat_key not in chats:
-            return False
+            return "absent"
         chats = [c for c in chats if c != chat_key]
-        self._write(mission_id, chats)
-        return True
+        return "removed" if self._write(mission_id, chats) \
+            else "unpersisted"
 
     def watchers(self, mission_id: str) -> list[str]:
         """Chat keys subscribed to this mission's milestones."""

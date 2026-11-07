@@ -378,13 +378,19 @@ class RuntimeMissionMixin:
             # reconcile on read: report the true state, not stale "running"
             store.reconcile(mission.id)
             mission = store.get(mission.id)
-            added = MissionWatchers(self.context.db).subscribe(
+            sub_state = MissionWatchers(self.context.db).subscribe(
                 mission.id, chat_key)
             state_note = f" (currently {mission.status})"
-            if added:
+            if sub_state == "added":
                 return (f"👀 watching {mission.name}: milestone updates "
                         f"will land in this chat.{state_note}")
-            return f"already watching {mission.name} from this chat.{state_note}"
+            if sub_state == "already":
+                return (f"already watching {mission.name} from this "
+                        f"chat.{state_note}")
+            return (f"⚠️ couldn't save the watch on {mission.name} — "
+                    f"the subscription didn't persist, so milestone "
+                    f"updates won't land in this chat. Try again in a "
+                    f"bit.{state_note}")
 
         if verb == "unwatch":
             mission, _amb = _resolve(rest)
@@ -394,11 +400,15 @@ class RuntimeMissionMixin:
                 return _no_mission_reply(rest)
             if not chat_key:
                 return "unwatch needs a chat context — run this from a chat."
-            removed = MissionWatchers(self.context.db).unsubscribe(
+            sub_state = MissionWatchers(self.context.db).unsubscribe(
                 mission.id, chat_key)
-            return (f"stopped watching {mission.name} from this chat."
-                    if removed
-                    else f"{mission.name} isn't watched from this chat.")
+            if sub_state == "removed":
+                return f"stopped watching {mission.name} from this chat."
+            if sub_state == "absent":
+                return f"{mission.name} isn't watched from this chat."
+            return (f"⚠️ couldn't save that — {mission.name} is still "
+                    f"watched from this chat on record, so milestone "
+                    f"updates may keep landing here. Try again in a bit.")
 
         if verb == "new":
             sub = rest.split(None, 1)

@@ -1252,11 +1252,52 @@ class PlayerStore:
             self._write(prof)
             return prof
 
+    def _gift_ref_seen(self, player_key: str, reason: str) -> bool:
+        """True when this gift movement already landed in the wallet
+        ledger. Caller must hold ``self._lock``.
+
+        Gift movements carry refs of the form ``gift:<verb>:<gift id>``
+        (out / in / refund; the credit ref appends the giver's name as
+        a display suffix). The (verb, gift id) pair is the idempotency
+        key: gift ids are unique ULIDs (collision-safe), and matching
+        on the pair — not the full reason — keeps the key stable even
+        if the display suffix differs. A failed check is traced and
+        reads as not-seen: within the process the profile under the
+        lock is the live truth, and the durable check is what closes
+        the cross-restart re-confirm window when the db is healthy.
+        """
+        parts = reason.split(":")
+        if len(parts) < 3 or parts[0] != "gift" \
+                or parts[1] not in ("out", "in", "refund") or not parts[2]:
+            return False
+        if self.db is None:
+            return False
+        key = f"gift:{parts[1]}:{parts[2]}"
+        try:
+            # Exact match, or the key followed by ':' (the credit
+            # ref's display suffix). substr, not LIKE: the gift id
+            # itself contains '_', a LIKE single-char wildcard.
+            row = self.db.query_one(
+                "SELECT 1 FROM game_wallet WHERE player_key = ? "
+                "AND (reason = ? OR substr(reason, 1, ?) = ?) LIMIT 1",
+                (player_key, key, len(key) + 1, key + ":"))
+        except Exception:  # noqa: BLE001
+            _log.debug("game_wallet gift-ref check failed",
+                       exc_info=True)
+            return False
+        return row is not None
+
     def add_coins(self, player: Player, amount: int, reason: str = "") -> int:
         with self._lock:
             prof = self.get(player.key, name=player.name,
                             platform=player.platform,
                             username=getattr(player, "username", ""))
+            if reason.startswith("gift:") \
+                    and self._gift_ref_seen(player.key, reason):
+                # Idempotent replay (gift-ref design follow-up): this
+                # credit already landed — moving the coins again would
+                # double-send. Return the balance as it stands.
+                return prof.coins
             prof.coins = max(0, prof.coins + amount)
             prof.updated_at = time.time()
             self._write(prof, ledger=[(amount, reason)] if reason else [])
@@ -1276,6 +1317,13 @@ class PlayerStore:
             prof = self.get(player.key, name=player.name,
                             platform=player.platform,
                             username=getattr(player, "username", ""))
+            if reason.startswith("gift:") \
+                    and self._gift_ref_seen(player.key, reason):
+                # Idempotent replay: the debit already landed, so the
+                # spend reports success at the standing balance —
+                # never None (that would read as "can't afford" and
+                # trigger a cancel/refund of a gift that went through).
+                return prof.coins
             if prof.coins < amount:
                 return None
             prof.coins -= amount

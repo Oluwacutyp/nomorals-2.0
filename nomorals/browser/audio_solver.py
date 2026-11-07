@@ -37,7 +37,7 @@ from ..tools.captcha import (
     register_backend,
 )
 from .kind_solvers import register_kind_solver
-from .tab_tools import docs_for_tab, press_key, type_answer
+from .tab_tools import docs_for_tab, docs_for_tab_checked, press_key, type_answer
 
 _log = get_logger(__name__)
 
@@ -252,6 +252,13 @@ class AudioCaptchaSolver:
                     "detail": f"transcribed {text!r} but could not "
                               f"type it into the response input"}
         self._sleep(0.3)
+        _docs, read_ok = docs_for_tab_checked(tab)
+        if not read_ok:
+            return {"ok": False, "backend": "whisper.cpp",
+                    "detail": "transcript typed but the page could "
+                              "not be re-read — cannot confirm the "
+                              "audio challenge cleared",
+                    "text": text}
         if find_audio_challenge(tab) is None:
             return {"ok": True, "backend": "whisper.cpp",
                     "detail": f"audio captcha cleared in-session: "

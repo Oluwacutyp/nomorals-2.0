@@ -12,7 +12,9 @@ own copy:
 * :func:`docs_for_tab` — the page as a list of documents (main frame
   first, then every readable frame). Challenge widgets live in
   iframes; a solver that only reads the main document is blind to
-  them.
+  them. :func:`docs_for_tab_checked` is the settle-safe variant: it
+  also reports whether the main document was actually read, because
+  "cleared" may only be claimed from a successful read.
 * :func:`click_px` — one real mouse click at CSS pixels, through
   whichever click primitive the tab actually has.
 * :func:`type_answer` — type text into an element: the tab's own
@@ -28,7 +30,8 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["docs_for_tab", "click_px", "type_answer", "press_key"]
+__all__ = ["docs_for_tab", "docs_for_tab_checked", "click_px",
+           "type_answer", "press_key"]
 
 
 def docs_for_tab(tab: Any) -> list[dict[str, str]]:
@@ -39,12 +42,34 @@ def docs_for_tab(tab: Any) -> list[dict[str, str]]:
     when the tab can read them (its main-frame entry is de-duplicated
     against the ``html()`` one). A tab with no frame primitive yields
     just the main document.
+
+    Detection contract: an unreadable main document reads as an
+    empty one, so "no challenge found" over these docs means "none
+    in what could be read" — fine for deciding what to attempt,
+    NEVER sufficient for claiming a challenge cleared. Settle
+    decisions use :func:`docs_for_tab_checked`, which also reports
+    whether the main document was actually read (tail-44 design
+    follow-up: unreadable != absent at every settle point).
+    """
+    docs, _read = docs_for_tab_checked(tab)
+    return docs
+
+
+def docs_for_tab_checked(tab: Any) -> tuple[list[dict[str, str]], bool]:
+    """``docs_for_tab`` plus the main document's readability.
+
+    Returns ``(docs, main_read)``: ``main_read`` is True only when
+    ``tab.html()`` returned without raising. A solver may claim
+    "cleared" from an absent challenge only when ``main_read`` —
+    a failed read is not evidence the wall is gone.
     """
     docs: list[dict[str, str]] = []
     try:
         main_html = str(tab.html() or "")
+        main_read = True
     except Exception:  # noqa: BLE001 - unreadable page = no documents
         main_html = ""
+        main_read = False
     main_url = str(getattr(tab, "url", "") or "")
     docs.append({"url": main_url, "html": main_html})
     frames_fn = getattr(tab, "frames_html", None)
@@ -61,7 +86,7 @@ def docs_for_tab(tab: Any) -> list[dict[str, str]]:
             if i == 0 and url == main_url and html == main_html:
                 continue  # frames_html's own main-frame entry
             docs.append({"url": url, "html": html})
-    return docs
+    return docs, main_read
 
 
 def click_px(tab: Any, x: float, y: float) -> bool:

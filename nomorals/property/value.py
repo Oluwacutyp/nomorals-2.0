@@ -141,9 +141,22 @@ class ValueEstimate:
     @property
     def confidence(self) -> int:
         """HouseCanary pattern: confidence score = 1 − FSD, as a
-        percentage. FSD .12 → 88% confidence."""
+        percentage. FSD .12 → 88% confidence.
+
+        Display-layer honesty (tail-6 design follow-up): 1 − FSD
+        cannot tell "zero spread" from "no data" — an estimate
+        built on too few comps (or none at all) carries fsd 0.0
+        and would render a fabricated "confidence 100%". A thin
+        estimate's displayed score therefore applies the same
+        FSD floor ``_estimate_from_comps`` puts under its band
+        (_THIN_MARKET_FSD_FLOOR). The stored fsd and the estimate
+        tuple keep their documented meaning; only what the score
+        claims changes."""
         try:
-            return max(0, min(100, int(round((1.0 - self.fsd) * 100))))
+            fsd = self.fsd
+            if self.thin_market:
+                fsd = max(fsd, _THIN_MARKET_FSD_FLOOR)
+            return max(0, min(100, int(round((1.0 - fsd) * 100))))
         except Exception:  # noqa: BLE001
             return 0
 

@@ -224,8 +224,11 @@ class QuestionSolver:
         self._sleep(0.3)
         try:
             after = str(tab.html() or "")
-        except Exception:  # noqa: BLE001
-            after = ""
+        except Exception:  # noqa: BLE001 - unreadable != cleared
+            return {"ok": False, "backend": "local_brain",
+                    "detail": "answer typed but the page could not "
+                              "be re-read — cannot confirm the "
+                              "question captcha cleared"}
         if detect_question_challenge(after) is None:
             return {"ok": True, "backend": "local_brain",
                     "detail": f"question captcha cleared in-session: "

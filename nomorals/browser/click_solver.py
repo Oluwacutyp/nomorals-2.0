@@ -53,7 +53,7 @@ from ..tools.captcha import (
 )
 from . import slider_solver as _slider  # noqa: F401 - base registration first
 from .kind_solvers import register_kind_solver
-from .tab_tools import click_px, docs_for_tab
+from .tab_tools import click_px, docs_for_tab, docs_for_tab_checked
 
 _log = get_logger(__name__)
 
@@ -398,7 +398,13 @@ class ClickSolver:
                     except Exception:  # noqa: BLE001 - settle decides
                         pass
             self._sleep(0.4)
-            docs2 = docs_for_tab(tab)
+            docs2, read_ok = docs_for_tab_checked(tab)
+            if not read_ok:
+                return {"ok": False, "backend": "local_click",
+                        "detail": "cells clicked but the page could "
+                                  "not be re-read — cannot confirm "
+                                  "the click challenge cleared",
+                        "rounds": round_no}
             info2 = detect_click_challenge(docs2)
             if info2 is None:
                 return {"ok": True, "backend": "local_click",

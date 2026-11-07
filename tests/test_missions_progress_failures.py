@@ -19,13 +19,15 @@ ETA, never a wrong action.
 "no subscriptions" ([]). Fan-out and subscribe/unsubscribe all
 treat [] as the empty state by the class's best-effort contract.
 869 — ``MissionWatchers._write``: a KV write failure is
-swallowed; subscribe() still returns True and the chat layer
-replies "watching …". WEAKEST EXCLUSION of this batch — see the
-pin below: the success reply is real, but the class contract is
-explicit, the milestone itself still reaches the owner via the
-primary Notifier publish (watchers are an extra fan-out), and
-making the write raise would break the stated never-break-a-
-chat-command contract.
+swallowed (never raises — the best-effort contract stands).
+UPDATE (design follow-ups pass, register §3.6 — this was the
+WEAKEST EXCLUSION of this batch, held only by the class's
+explicit contract): subscribe()/unsubscribe() no longer claim
+success over a failed write — they report their real
+persistence state ("added" / "already" / "removed" / "absent"
+/ "unpersisted") and the chat layer phrases from it, so the
+owner is told honestly when a watch did not save instead of
+being promised milestones that will never land.
 989 — ``_fanout``: resolving the watcher list raises -> the
 fan-out is skipped wholesale; the Notifier publish to owner
 channels has already happened by design (fan-out rides on top).
@@ -101,19 +103,29 @@ def test_858_watcher_read_failure_returns_empty():
     assert _snap() == before
 
 
-# ── 869: watcher write failure swallowed (weakest exclusion) ────
+# ── 869: watcher write failure — swallowed, but REPORTED ────────
+
+class _SeededBoomSetKV(_BoomSetKV):
+    """set() raises; get() returns an existing subscription list
+    so unsubscribe() takes the removal arm."""
+
+    def get(self, key):
+        return ["telegram:1"]
+
 
 def test_869_watcher_write_failure_is_best_effort():
     before = _snap()
     watchers = P.MissionWatchers(object())
     with mock.patch.object(P, "KVStore", _BoomSetKV):
-        # the write itself: swallowed, returns None, never raises
-        assert watchers._write("m1", ["telegram:1"]) is None
-        # the pinned consequence, stated honestly: subscribe still
-        # reports "newly added" although nothing persisted — held
-        # only by the class's explicit best-effort contract and
-        # because the owner still gets the milestone via Notifier.
-        assert watchers.subscribe("m1", "telegram:1") is True
+        # the write itself: swallowed, returns False, never raises
+        assert watchers._write("m1", ["telegram:1"]) is False
+        # the design follow-up landed: subscribe reports its real
+        # persistence state — "unpersisted", NOT "newly added" —
+        # so the chat layer cannot promise milestones that will
+        # never land.
+        assert watchers.subscribe("m1", "telegram:1") == "unpersisted"
+    with mock.patch.object(P, "KVStore", _SeededBoomSetKV):
+        assert watchers.unsubscribe("m1", "telegram:1") == "unpersisted"
     assert _snap() == before
 
 

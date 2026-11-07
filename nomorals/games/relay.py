@@ -128,7 +128,21 @@ class GameRelay:
         if self.db is None:
             return
         try:
+            # Reconcile on load (tail-12 design follow-up): a relay's
+            # room_id IS its invite code, so a relay row in any state
+            # proves the invite was already consumed. When the
+            # accept-time DELETE failed, the stale invite row would
+            # otherwise resurrect here and a re-accept would seat a
+            # second game on the same code. Skip those rows and
+            # retry their delete; a delete that fails again is
+            # reconciled again on the next load.
+            relay_ids = {
+                row["room_id"] for row in self.db.query(
+                    "SELECT room_id FROM game_relays") or []}
             for row in self.db.query("SELECT * FROM game_invites") or []:
+                if row["code"] in relay_ids:
+                    self._delete_invite(row["code"])
+                    continue
                 inv = GameInvite(
                     code=row["code"], game_name=row["game_name"],
                     from_chat=row["from_chat"],

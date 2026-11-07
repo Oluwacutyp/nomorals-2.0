@@ -169,6 +169,25 @@ def _sniff_zip(data: bytes) -> str:
         "(docx/xlsx/pptx/odt/ods/epub)", kind="unsupported_format")
 
 
+def _probe_structured(text: str) -> str:
+    """``"json"``/``"xml"`` when ``text`` parses as that structure,
+    else ``""``. A parse failure is negative evidence only — the
+    caller keeps sniffing and may still land on the txt fallback."""
+    if text[:1] in ("{", "["):
+        try:
+            json.loads(text)
+            return "json"
+        except Exception:  # noqa: BLE001 - not JSON, keep sniffing
+            pass
+    if text[:1] == "<" and not text.startswith("</"):
+        try:
+            ET.fromstring(text)
+            return "xml"
+        except ET.ParseError:
+            pass
+    return ""
+
+
 def _sniff(data: bytes, filename: str, mime: str) -> str:
     """Return the format key for ``data`` or raise DocumentError."""
     if not data:
@@ -205,18 +224,21 @@ def _sniff(data: bytes, filename: str, mime: str) -> str:
     # Content sniffing for extension-less JSON/XML (markitdown parity):
     # a bare '{"a": 1}' or '<root/>' with no filename should not become txt.
     stripped = text_start.decode("utf-8", "replace").strip()
-    if stripped[:1] in ("{", "["):
-        try:
-            json.loads(stripped)
-            return "json"
-        except Exception:  # noqa: BLE001 - not JSON, keep sniffing
-            pass
-    if stripped[:1] == "<" and not stripped.startswith("</"):
-        try:
-            ET.fromstring(stripped)
-            return "xml"
-        except ET.ParseError:
-            pass
+    fmt = _probe_structured(stripped)
+    if fmt:
+        return fmt
+    if len(data.lstrip()) > 4096 and stripped[:1] in ("{", "[", "<"):
+        # Probe-window corner (tail-11 design follow-up): a valid
+        # JSON/XML document longer than the window fails the windowed
+        # parse on its TRUNCATED prefix and would fall through to
+        # "txt", flattening real structure. Retry once against the
+        # full text before giving up on structure. Genuinely invalid
+        # content fails the full parse too and keeps the txt
+        # fallback, so no format is ever claimed on negative evidence.
+        full = data.lstrip().decode("utf-8", "replace").strip()
+        fmt = _probe_structured(full)
+        if fmt:
+            return fmt
     try:
         decoded = data.decode("utf-8")
     except UnicodeDecodeError:
