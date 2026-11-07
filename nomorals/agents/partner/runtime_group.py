@@ -4269,6 +4269,15 @@ class RuntimeGroupMixin:
         from ...social.chat import webshot as shot_organ
         from ...social.chat.typography import resolve_media_mark
 
+        if message is None:
+            # Message-less dispatch (tour probes, self-heal and meta
+            # re-dispatch call handle_control with message=None by
+            # design): a shot is delivered AS a reply in a live chat —
+            # there is no chat to deliver to here, and no requester
+            # or group scope to record against.
+            return ("webshot answers with a photo in a live chat — "
+                    "this dispatch arrived without one, so nothing "
+                    "was shot.")
         text = str(tail or "").strip()
         words = text.split()
         key = self._group_key_or_none(message)
@@ -5106,6 +5115,13 @@ class RuntimeGroupMixin:
         against the target group."""
         from ...social.chat.base import ChatKind
 
+        if message is None or getattr(message, "chat", None) is None:
+            # Message-less dispatch (tour probes, self-heal and meta
+            # re-dispatch call handle_control with message=None by
+            # design): the console is a live-DM surface — same answer
+            # as any non-DM chat gets.
+            return ("the console lives in my DM — open a chat "
+                    "with me there and send /console.")
         if message.chat.kind != ChatKind.DM:
             return ("the console lives in my DM — open a chat "
                     "with me there and send /console.")

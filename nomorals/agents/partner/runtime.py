@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import re
 import threading
@@ -232,6 +233,18 @@ def _numbered_button_fallback(runtime: Any, message: Any, text: str,
             _log.debug("button pick registration failed: %s", exc)
     return (body + "\n\nno buttons on this surface — reply with a "
             "number:\n" + "\n".join(rendered))
+
+
+#: Delivery mark for the #32 no-empty wrapper in handle_control:
+#: _send_long bumps this whenever it actually delivers chunks, so a
+#: handler that answered by SENDING (the _send_long_checked
+#: discipline — "" means delivered; a failed delivery returns its
+#: own ⚠️ note instead) is never mistaken for a silent handler and
+#: followed by a false "bug on my end" message. A ContextVar, so
+#: concurrent dispatches each see only their own deliveries.
+_control_deliveries: contextvars.ContextVar[int] = (
+    contextvars.ContextVar("nm_control_deliveries", default=0))
+
 
 class PartnerRuntime(
     RuntimeLiveMixin,
@@ -4492,6 +4505,7 @@ class PartnerRuntime(
         ordinary chat text) is preserved untouched.
         """
         from ...social.chat.control import parse_control as _parse
+        delivered_before = _control_deliveries.get()
         reply = self._handle_control_inner(
             text, chat_key, message=message, _no_stack=_no_stack)
         command = _parse(text)
@@ -4502,6 +4516,16 @@ class PartnerRuntime(
             not isinstance(reply, str)
             and not str(getattr(reply, "text", "") or "").strip())
         if not empty:
+            return reply
+        if _control_deliveries.get() > delivered_before:
+            # The handler answered by SENDING during this dispatch
+            # (the _send_long_checked discipline: "" means the answer
+            # was delivered; a failed delivery returns its own ⚠️
+            # note, never ""). The #32 law targets silence, not a
+            # delivered answer — converting this "" would post a
+            # false "bug on my end" after a successful send (the
+            # self-sending shape: /vision, /code, /search, /swarm,
+            # /evolve, long reports — nav audit, Devon half).
             return reply
         from ...social.chat.expression import (
             MEDIA_DELIVERED_KINDS,
@@ -6426,7 +6450,7 @@ class PartnerRuntime(
         if kind == "macro":
             return self._control_macro(command.tail or arg, chat_key=chat_key)
         if kind == "file":
-            return self._control_file(command.tail or arg)
+            return self._control_file(command.tail or arg, chat_key)
         if kind == "publish":
             return self._control_publish(command.tail or arg)
         if kind == "deliver":
@@ -6751,6 +6775,11 @@ class PartnerRuntime(
                              sent + 1, total, getattr(chat, "key", chat),
                              type(exc).__name__, exc)
                 break
+        if sent:
+            try:
+                _control_deliveries.set(_control_deliveries.get() + sent)
+            except Exception as exc:  # noqa: BLE001 - marking never breaks a send
+                _log.debug("control delivery mark failed: %s", exc)
         return sent
 
     def _send_long_checked(self, platform: str, chat, text: str,

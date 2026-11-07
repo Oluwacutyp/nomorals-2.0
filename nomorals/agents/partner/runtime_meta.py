@@ -621,6 +621,19 @@ class RuntimeMetaMixin:
                 handled.update(re.findall(r'"([^"]+)"', m.group(1)))
             for m in re.finditer(r"if kind in \(([^)]+)\)", body):
                 handled.update(re.findall(r'"([^"]+)"', m.group(1)))
+            # Dispatch also routes through NAMED membership sets
+            # (the games via GAME_START_COMMANDS / GAME_COMMANDS,
+            # the platform kind sets): a kind covered by a constant
+            # the dispatch tests is handled, even though no literal
+            # branch names it. Reading only literals reported every
+            # game undispatchable — a false FAIL (nav audit, Devon
+            # half). Unresolvable names contribute nothing, so a
+            # genuinely uncovered kind still flags.
+            from ...social.chat import control as _control_mod
+            for m in re.finditer(r"kind in ([A-Z][A-Z0-9_]*)", body):
+                members = getattr(_control_mod, m.group(1), None)
+                if members:
+                    handled.update(str(x) for x in members)
             missing = sorted(
                 k for k in CONTROL_COMMANDS
                 if k not in handled
@@ -1414,6 +1427,12 @@ class RuntimeMetaMixin:
                     location = (f"{frames[-1].filename.split('/')[-1]}:"
                                 f"{frames[-1].lineno}")
 
+        if not isinstance(reply, str):
+            # ActionableMessage replies (menus, hub screens, game
+            # boards) are a healthy dispatch shape — the probe reads
+            # their text like the send channel does, instead of
+            # dying on .strip() and reporting the command broken.
+            reply = str(getattr(reply, "text", "") or "")
         if timed_out:
             return {"kind": kind, "verdict": "skip", "reason": "slow (>6s)",
                     "help_ok": help_ok}
