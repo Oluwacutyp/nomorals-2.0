@@ -3354,9 +3354,27 @@ class PartnerRuntime(
         # the same path as Ctrl-C: the loop exits and `finally` runs
         # stop(), which writes the final beacon with stopped=True so
         # `nm status` reports a clean stop instead of a stale death.
-        from ...core.shutdown import install_sigterm_as_interrupt
+        from ...core.shutdown import (
+            install_sigint_as_interrupt,
+            install_sigterm_as_interrupt,
+            install_windows_console_handler,
+        )
 
         install_sigterm_as_interrupt()
+        # Ctrl-C gets the managed handler too: the interpreter default
+        # only fires when the disposition is default, and a launcher
+        # that ignores SIGINT hands the ignore down — on the EC2 host
+        # Ctrl-C did nothing at all and the owner had to close the
+        # console window to stop the runtime (2026-10-26).
+        install_sigint_as_interrupt()
+        # Windows console reality: Ctrl-Break and the console window's
+        # close button are not signals at all — they arrive as console
+        # control events on an OS thread. The handler flips the same
+        # stop event this loop polls, so it lands even when the main
+        # thread is slow to reach a bytecode boundary. (No-op off
+        # Windows.)
+        install_windows_console_handler(
+            lambda _event: self._stopped.set())
         started = self.start()
         _log.info("partner runtime running on: %s (Ctrl-C to stop)", ",".join(started) or "none")
         try:

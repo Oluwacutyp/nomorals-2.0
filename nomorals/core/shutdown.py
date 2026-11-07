@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import signal
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -41,6 +42,8 @@ from .logging_setup import get_logger
 
 __all__ = [
     "install_sigterm_as_interrupt",
+    "install_sigint_as_interrupt",
+    "install_windows_console_handler",
     "ShutdownCoordinator",
     "ShutdownHook",
     "get_coordinator",
@@ -88,6 +91,137 @@ def install_sigterm_as_interrupt() -> bool:
         return False
     if previous not in (signal.SIG_DFL, None):
         _log.debug("replaced existing SIGTERM handler %r", previous)
+    return True
+
+
+def install_sigint_as_interrupt() -> bool:
+    """Map SIGINT (Ctrl-C) onto KeyboardInterrupt in the main thread.
+
+    The interpreter's DEFAULT SIGINT disposition already raises
+    KeyboardInterrupt — but only when the disposition is the default.
+    A process launched by a wrapper that ignores SIGINT (some
+    supervisors, batch launchers and service hosts do) INHERITS the
+    ignore, and Ctrl-C then does nothing at all: the keystroke is
+    swallowed before the interpreter ever sees it (owner report,
+    2026-10-26: Ctrl-C did not stop EC2 Devon; the console window had
+    to be closed). Installing the handler explicitly replaces an
+    inherited ``SIG_IGN`` with the managed path.
+
+    Same contract as :func:`install_sigterm_as_interrupt`: main-thread
+    only, idempotent, returns True when the handler is in place, and
+    degrades quietly (returns False) where it cannot install.
+    """
+    try:
+        sigint = signal.SIGINT
+    except AttributeError:  # pragma: no cover - SIGINT always exists
+        return False
+    previous = signal.getsignal(sigint)
+
+    def _sigint_handler(signum: int, frame: object) -> None:  # noqa: ARG001
+        raise KeyboardInterrupt()
+
+    # Mark our own closure so a repeat install stays silent.
+    _sigint_handler._devon_sigint_handler = True  # type: ignore[attr-defined]
+    if getattr(previous, "_devon_sigint_handler", False):
+        return True
+    try:
+        signal.signal(sigint, _sigint_handler)
+    except (OSError, ValueError, RuntimeError) as exc:
+        # ValueError: not the main thread. OSError/RuntimeError: the
+        # interpreter refuses (e.g. embedded). Either way, degrade to
+        # the inherited disposition rather than breaking the boot.
+        _log.debug("SIGINT handler not installed: %s", exc)
+        return False
+    if previous not in (signal.SIG_DFL, None):
+        _log.debug("replaced existing SIGINT handler %r", previous)
+    return True
+
+
+#: Win32 console control event codes (wincon.h) → event names.
+_WIN_CTRL_EVENTS = {
+    0: "ctrl_c",        # CTRL_C_EVENT
+    1: "ctrl_break",    # CTRL_BREAK_EVENT
+    2: "ctrl_close",    # CTRL_CLOSE_EVENT (the console window's X)
+    3: "ctrl_logoff",   # CTRL_LOGOFF_EVENT
+    5: "ctrl_shutdown",  # CTRL_SHUTDOWN_EVENT
+}
+
+#: The callback the single registered console handler dispatches to.
+#: Module-level on purpose: the OS handler is registered ONCE per
+#: process (a chain of handlers would fire stale callbacks from dead
+#: runtime instances); a repeat install only replaces this dispatch
+#: target. ``_console_handler_proc`` keeps the ctypes callback object
+#: alive — if it is garbage-collected, Windows silently unregisters
+#: the handler.
+_console_callback: Callable[[str], None] | None = None
+_console_handler_proc: Any = None
+
+
+def install_windows_console_handler(
+        callback: Callable[[str], None], *,
+        _platform: str | None = None,
+        _set_handler: Callable[[Any, bool], Any] | None = None) -> bool:
+    """Install a Win32 console-control handler (Windows only).
+
+    Python signals do not cover the Windows console reality: Ctrl-C
+    reaches SIGINT only for a foreground console process holding the
+    default disposition, and Ctrl-Break, the console window's close
+    button, logoff and system shutdown have no signal at all — they
+    arrive as console control events. ``SetConsoleCtrlHandler``
+    registers a handler the OS calls on its OWN thread for all of
+    them. That thread independence is the point: the callback does not
+    wait for the main thread to reach a bytecode boundary, which is
+    exactly where the plain-signal path stalls on a busy host.
+
+    The handler records the event through ``callback(event_name)`` —
+    which must be fast and must never raise (it runs on an OS thread;
+    for close/logoff/shutdown the process is terminated shortly after
+    the handler returns regardless, so the callback's job is to flip
+    the flag the main loop polls, not to shut down inline). It returns
+    True (handled) for every known event code.
+
+    One process-level handler is registered; a repeat install only
+    replaces the callback it dispatches to. Returns True when the
+    handler is live (or already was). On non-Windows platforms this is
+    a no-op returning False — POSIX signals cover the same ground.
+    """
+    global _console_callback, _console_handler_proc
+    platform_name = sys.platform if _platform is None else _platform
+    if not platform_name.startswith("win"):
+        return False
+    _console_callback = callback
+    if _console_handler_proc is not None:
+        return True
+
+    def _handler(event_code: int) -> bool:
+        name = _WIN_CTRL_EVENTS.get(int(event_code))
+        cb = _console_callback
+        if name is None or cb is None:
+            return False
+        try:
+            cb(name)
+        except Exception:  # noqa: BLE001 - OS thread; never propagate
+            _log.debug("console control callback failed", exc_info=True)
+        return True
+
+    if _set_handler is None:
+        import ctypes
+
+        proc: Any = ctypes.WINFUNCTYPE(
+            ctypes.c_bool, ctypes.c_uint)(_handler)
+        setter: Callable[[Any, bool], Any] = (
+            ctypes.windll.kernel32.SetConsoleCtrlHandler)  # type: ignore[attr-defined]
+    else:
+        proc = _handler
+        setter = _set_handler
+    try:
+        ok = setter(proc, True)
+    except Exception:  # noqa: BLE001 - install degrades, never breaks boot
+        _log.debug("SetConsoleCtrlHandler failed", exc_info=True)
+        return False
+    if not ok:
+        return False
+    _console_handler_proc = proc
     return True
 
 

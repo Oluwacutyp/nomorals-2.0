@@ -22,6 +22,7 @@ Restore refuses to run over a live or dirty system unless ``force=True``:
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -39,6 +40,7 @@ from ..core.logging_setup import get_logger
 __all__ = [
     "Snapshot",
     "SnapshotError",
+    "SnapshotLockedError",
     "SnapshotRefused",
     "SnapshotManager",
     "system_state",
@@ -60,6 +62,29 @@ class SnapshotError(Exception):
 
 class SnapshotRefused(SnapshotError):
     """Restore refused: the live system is running or dirty."""
+
+
+class SnapshotLockedError(SnapshotRefused):
+    """The live database file is held open (the WinError 32 shape).
+
+    A refusal, not a corruption: the restore did not run because a
+    process holds the database file. The message names the holder the
+    state lock can identify — or says plainly that the holder sits
+    outside it — so the operator stops the right thing instead of
+    retrying the restore blind."""
+
+
+def _is_file_in_use(exc: BaseException) -> bool:
+    """True when `exc` is the file-in-use shape rather than a real
+    failure: Windows WinError 32/33 (sharing violation / lock), or a
+    permission/busy errno from a holder. Mirrors the classification
+    the updater's deferral path already uses."""
+    if getattr(exc, "winerror", None) in (32, 33):
+        return True
+    if isinstance(exc, PermissionError):
+        return True
+    return isinstance(exc, OSError) and exc.errno in (
+        errno.EACCES, errno.EBUSY, errno.EPERM)
 
 
 @dataclass
@@ -192,6 +217,11 @@ class SnapshotManager:
         self.config_path = Path(config_path) if config_path else None
         self.settings_dict = settings_dict or {}
         self.root = self.home / SNAPSHOT_DIRNAME
+        #: Bounded wait for a transient file-in-use failure during the
+        #: restore swap (see :meth:`_replace_file`). Attributes, not
+        #: constants, so tests can shrink the window.
+        self.swap_retry_s = 10.0
+        self.swap_retry_interval_s = 0.25
 
     # ── create ─────────────────────────────────────────────────────────────
 
@@ -586,6 +616,11 @@ class SnapshotManager:
             try:
                 self._stage_snapshot(snap, stage)
                 self._swap_into_place(stage)
+            except OSError as exc:
+                if _is_file_in_use(exc):
+                    raise SnapshotLockedError(self._locked_message(
+                        exc, running=state["running"])) from exc
+                raise
             finally:
                 shutil.rmtree(stage, ignore_errors=True)
         finally:
@@ -666,6 +701,50 @@ class SnapshotManager:
                 _log.warning("could not remove sidecar %s", sidecar,
                              exc_info=True)
 
+    def _replace_file(self, src: Path, dst: Path) -> None:
+        """``os.replace`` with a bounded retry for file-in-use failures.
+
+        On Windows, replacing a file a process still holds open raises
+        WinError 32 where POSIX would simply succeed — the failure the
+        deferred boot restore kept paging on the EC2 host. A holder
+        that is on its way out (the previous Devon still finishing its
+        stop, a scanner releasing the file) frees it within seconds,
+        so the swap waits it out briefly instead of failing the whole
+        restore on the race. A holder that stays surfaces as the
+        error itself, and :meth:`restore` names it.
+        """
+        deadline = time.time() + max(0.0, self.swap_retry_s)
+        while True:
+            try:
+                os.replace(src, dst)
+                return
+            except OSError as exc:
+                if not _is_file_in_use(exc) or time.time() >= deadline:
+                    raise
+                time.sleep(self.swap_retry_interval_s)
+
+    def _locked_message(self, exc: BaseException, *,
+                        running: bool) -> str:
+        """Name the holder of the locked live database, as far as the
+        state lock can identify it — the sentence the boot page and
+        the restore report carry instead of a bare WinError 32.
+
+        ``running`` is the state probe taken BEFORE this restore took
+        the state lock: afterwards the probe would see our own lock
+        and blame a phantom second process."""
+        if running:
+            holder = ("another Devon process is running and holds it "
+                      "(the state lock is held) — stop that process "
+                      "fully, then restore")
+        else:
+            holder = ("no Devon state lock is held, so the holder "
+                      "sits outside it — a leftover Devon process, an "
+                      "antivirus or backup scan, or this process's "
+                      "own open database connection — close it, then "
+                      "restore")
+        return (f"cannot restore: the live database {self.db_path} "
+                f"is locked ({type(exc).__name__}: {exc}); {holder}")
+
     def _swap_into_place(self, stage: Path) -> None:
         """Atomically swap staged files into the live paths.
 
@@ -679,14 +758,14 @@ class SnapshotManager:
         def swap(live: Path, staged: Path) -> None:
             backup = backup_dir / live.name
             if live.exists():
-                os.replace(live, backup)
+                self._replace_file(live, backup)
                 moved.append((live, backup))
             if staged.is_dir():
                 if live.exists():  # pragma: no cover - defensive
                     shutil.rmtree(live)
                 shutil.copytree(staged, live, symlinks=False)
             else:
-                os.replace(staged, live)
+                self._replace_file(staged, live)
 
         targets = [
             (self.db_path, stage / DB_FILENAME),

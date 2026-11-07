@@ -376,6 +376,207 @@ def football_data_key_flow(tab: Any, service: Any, *,
     return key
 
 
+#: Post-submit markers specific to a subscribe contract: the page
+#: acknowledging the subscription IS the success state (the key is
+#: emailed), on top of the shared verify/success marker sets.
+_ODDS_SUBSCRIBE_MARKERS = (
+    "you're subscribed", "you are subscribed",
+    "subscription confirmed", "thanks for subscribing",
+    "thank you for subscribing", "subscribed successfully",
+)
+
+
+def _click_free_plan_start(tab: Any) -> bool:
+    """Click the FREE (Starter) plan's START control on the Odds API
+    get-access page.
+
+    Every plan carries its own START button, so a text-only click is
+    not enough: it would take whichever plan the page lists first.
+    The plan-aware path (JS, the ``_click_text`` discipline) walks up
+    from each START control to the plan block around it and clicks
+    the one whose block says FREE / Starter. Only when no plan
+    context is readable at all does it fall back to a plain START
+    click — on the recorded page shape the free Starter plan is the
+    first listed, so the fallback lands on the same button.
+    """
+    from ...accounts.provisioning import FlowStepError, _click_text
+
+    evaluate = getattr(tab, "evaluate", None)
+    if callable(evaluate):
+        js = (
+            "(() => { const btns = [...document.querySelectorAll("
+            "'button, a, [role=button], input[type=submit]')]"
+            ".filter(e => (e.innerText || e.value || '')"
+            ".trim().toUpperCase() === 'START');"
+            " if (!btns.length) return '';"
+            " for (const b of btns) { let n = b;"
+            " for (let i = 0; i < 6 && n; i++) {"
+            " n = n.parentElement;"
+            " if (n && /free|starter/i.test(n.innerText || ''))"
+            " { b.click(); return 'free'; } } }"
+            " btns[0].click(); return 'first'; })()")
+        try:
+            if evaluate(js):
+                return True
+        except Exception:  # noqa: BLE001 - try the label click
+            pass
+    try:
+        _click_text(tab, "START")
+        return True
+    except FlowStepError:
+        return False
+
+
+def _subscribe_get_access(tab: Any) -> bool:
+    """Perform the get-access subscribe action, best mechanism first.
+
+    The page's recorded shapes, in the order they should be tried:
+
+    1. the per-plan START control (the contract the live page
+       states today — plan cards, Starter free);
+    2. a labelled subscribe control found by the text-click
+       discipline (JS first, the ``_click_text`` way);
+    3. a DIRECT click on the labelled controls — ``_click_text``
+       skips direct clicks whenever the tab has a JS engine, even
+       one that finds nothing, and the service's own recorded form
+       shape answers only to a direct "Get Access" click;
+    4. a plain form submit — the shape the desk's earlier drive
+       model recorded (an email-only form that submits).
+
+    On the live page the generic drive died because NONE of its
+    candidates (Sign Up / Create Account / … / raw submit) existed;
+    the ladder above tries the actions this page actually offers
+    before the raw submit, so the recorded failure cannot recur
+    while the page keeps any of its known shapes.
+    """
+    from ...accounts.provisioning import FlowStepError, _click_text
+
+    if _click_free_plan_start(tab):
+        return True
+    try:
+        _click_text(tab, "Subscribe", "Get Access", "Continue",
+                    "Submit", "Sign Up")
+        return True
+    except FlowStepError:
+        pass
+    for label in ("Subscribe", "Get Access"):
+        try:
+            tab.click(label)
+            return True
+        except Exception:  # noqa: BLE001 - try the next shape
+            continue
+    try:
+        tab.submit("")
+        return True
+    except Exception:  # noqa: BLE001 - no shape matched
+        return False
+
+
+def odds_api_signup_flow(tab: Any, service: Any, *,
+                         name: str, email: str, username: str,
+                         password: str,
+                         captcha_solver: Any = None) -> Any:
+    """Drive the Odds API's REAL signup contract: a subscribe form.
+
+    The service's own page states the contract — "Subscribe to
+    receive your API key via email" — and its Get Access section
+    offers per-plan START buttons (the Starter plan is free). There
+    is no username/password account form for the generic form drive
+    to fill, and "Get Access" is the section HEADING, not a control:
+    the generic drive's submit step could never match (the owner's
+    2026-10-26 drive died at step ``submit_signup`` for exactly that
+    reason).
+
+    This flow fills the one field the page has — the email — and
+    performs the subscribe action through the shape ladder in
+    ``_subscribe_get_access`` (the plan START first). The outcome is
+    read off the page that answers: an email acknowledgement is
+    ``verification_pending`` (the key arrives in the subscribed
+    inbox, where the driver's existing verification path takes
+    over); an in-page acceptance is ``created``. ``name`` /
+    ``username`` / ``password`` are accepted for the signup-flow
+    contract and unused — the service never asks for them.
+    """
+    from ...accounts.provisioning import (
+        _SIGNUP_EXISTS_MARKERS,
+        _SIGNUP_SUCCESS_MARKERS,
+        _SIGNUP_VERIFY_MARKERS,
+        FlowStepError,
+        SignupAccountExists,
+        SignupFlowResult,
+        _click_text,
+        _fill_first,
+        _solve_or_block,
+        _tab_text,
+        _wall_block,
+    )
+    from ...accounts.signup_driver import WallKind, classify_wall
+
+    if not service.signup_url:
+        raise FlowStepError(
+            "open_signup_page",
+            f"no signup URL registered for {service.display}")
+    tab.navigate(service.signup_url)
+    _solve_or_block(tab, service, captcha_solver=captcha_solver,
+                    submitted=False)
+    email_fields = ("email", "user_email", "signup_email",
+                    "your-email", "mail", "user[email]")
+    filled = bool(_fill_first(tab, email_fields, email,
+                              step="fill_email", required=False))
+    if not _subscribe_get_access(tab):
+        raise FlowStepError(
+            "submit_signup",
+            "no subscribe action matched on the Odds API "
+            "get-access page (no plan START control, no labelled "
+            "subscribe control, no submittable form) — the page's "
+            "shape has changed, so the submit step cannot be "
+            "automated against the page as it stands")
+    if not filled:
+        # The email field only appears once a plan is started.
+        _fill_first(tab, email_fields, email, step="fill_email",
+                    required=True)
+        try:
+            _click_text(tab, "Subscribe", "Get Access", "Continue",
+                        "Submit", "Sign Up", "START")
+        except FlowStepError as exc:
+            raise FlowStepError(
+                "submit_signup",
+                "the post-plan subscribe form offered no confirm "
+                "control") from exc
+    _solve_or_block(tab, service, captcha_solver=captcha_solver,
+                    submitted=True)
+    text = _tab_text(tab, max_chars=40000).lower()
+    wall, evidence = classify_wall(page_text=text)
+    if wall is WallKind.CAPTCHA:
+        _solve_or_block(tab, service, captcha_solver=captcha_solver,
+                        submitted=True)
+        text = _tab_text(tab, max_chars=40000).lower()
+        wall, evidence = classify_wall(page_text=text)
+    if wall is not WallKind.NONE and wall is not WallKind.CAPTCHA:
+        raise _wall_block(service, wall, evidence)
+    if any(m in text for m in _SIGNUP_EXISTS_MARKERS):
+        raise SignupAccountExists(
+            f"{service.display} says an account already exists for "
+            f"{email}")
+    if any(m in text for m in _SIGNUP_VERIFY_MARKERS) \
+            or any(m in text for m in _ODDS_SUBSCRIBE_MARKERS):
+        return SignupFlowResult(
+            "verification_pending",
+            "the Odds API emails the API key to the subscribed "
+            "address — the signup completes from that inbox")
+    if any(m in text for m in _SIGNUP_SUCCESS_MARKERS):
+        return SignupFlowResult(
+            "created",
+            "the subscribe step was accepted in-page; the account "
+            "page carries the API key")
+    raise FlowStepError(
+        "confirm_signup",
+        "after subscribing, the page matched no known outcome (no "
+        "email acknowledgement, no success signal, no wall) — the "
+        "post-submit step of this signup does not match the page, "
+        "so it is the step that cannot be automated as-is")
+
+
 def ensure_provisioning() -> list[str]:
     """Register the desk's keyed data services with the REAL
     self-provisioning registry (idempotent — later registrations win,
@@ -389,7 +590,7 @@ def ensure_provisioning() -> list[str]:
     fetchers, so a provisioned key takes effect with no restart).
     """
     from ...accounts.provisioning import (
-        ProvisionService, _PAGE_FLOWS, _VALIDATORS,
+        ProvisionService, _PAGE_FLOWS, _SIGNUP_FLOWS, _VALIDATORS,
         register_provision_service)
 
     _VALIDATORS.setdefault("odds_api_key", _validate_odds_api)
@@ -397,6 +598,8 @@ def ensure_provisioning() -> list[str]:
     _PAGE_FLOWS.setdefault("odds_api_key_v1", odds_api_key_flow)
     _PAGE_FLOWS.setdefault("football_data_key_v1",
                            football_data_key_flow)
+    _SIGNUP_FLOWS.setdefault("odds_api_signup_v1",
+                             odds_api_signup_flow)
 
     register_provision_service(ProvisionService(
         id=ODDS_API_SERVICE,
@@ -409,7 +612,7 @@ def ensure_provisioning() -> list[str]:
         signup_url="https://the-odds-api.com/#get-access",
         validator="odds_api_key",
         flow="odds_api_key_v1",
-        signup_flow="form_signup_v1",
+        signup_flow="odds_api_signup_v1",
     ))
     register_provision_service(ProvisionService(
         id=FOOTBALL_DATA_SERVICE,

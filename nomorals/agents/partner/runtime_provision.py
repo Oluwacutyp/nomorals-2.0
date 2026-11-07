@@ -42,6 +42,27 @@ _log = get_logger(__name__)
 _INTAKE_TTL_S = 300.0
 
 
+def _provision_failure_head(result: Any) -> str:
+    """The one-line failure head for the live view's ❌ frame.
+
+    The frame is the visual surface (screenshot + this head); the
+    drive's returned reply carries the full failure text exactly
+    once. The head names the failed step when the result carries
+    one, else the outcome — never the whole message (feeding the
+    frame the whole message put the same text in front of the owner
+    twice: once inside the ❌ frame, once as the standalone reply —
+    the 2026-10-26 double-send).
+    """
+    step = (getattr(result, "step", "") or "").strip()
+    service = (getattr(result, "service_id", "") or "").strip() \
+        or "provisioning"
+    if step:
+        return f"{service} failed at step {step}"
+    outcome = getattr(result, "outcome", "")
+    label = getattr(outcome, "value", outcome)
+    return f"{service} failed ({label})"
+
+
 class RuntimeProvisionMixin:
     """RuntimeProvisionMixin for :class:`PartnerRuntime`."""
 
@@ -205,7 +226,10 @@ class RuntimeProvisionMixin:
                 if result.ok:
                     view.finish(result.message)
                 else:
-                    view.fail(result.message)
+                    # Short head only — the full failure text is the
+                    # reply below, exactly once (see
+                    # _provision_failure_head).
+                    view.fail(_provision_failure_head(result))
             except Exception as exc:  # noqa: BLE001 - cosmetic
                 record_failure("runtime_provision._run_provision_drive", exc)
         if result.ok and chat_key:
