@@ -372,7 +372,10 @@ class TestRuntimeDispatch(unittest.TestCase):
         real_sleep = time.sleep
 
         class FakeUpdater:
-            def __init__(self, repo, snapshots):
+            # quiesce: the runtime wires its bridge quiesce into the
+            # updater (update-hardening) — the fake takes the real
+            # constructor's shape.
+            def __init__(self, repo, snapshots, quiesce=None):
                 pass
 
             def run(self, pull=True):
@@ -435,7 +438,10 @@ class TestRuntimeDispatch(unittest.TestCase):
         runtime, context, tmp = self._make_runtime("telegram")
 
         class FakeUpdater:
-            def __init__(self, repo, snapshots):
+            # quiesce: the runtime wires its bridge quiesce into the
+            # updater (update-hardening) — the fake takes the real
+            # constructor's shape.
+            def __init__(self, repo, snapshots, quiesce=None):
                 pass
 
             def run(self, pull=True):

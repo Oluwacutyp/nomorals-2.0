@@ -32,6 +32,7 @@ live sessions and forget which numbers are whose.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -1038,6 +1039,11 @@ class BridgeSupervisor:
         self._node_resolver = node_resolver
         self._node_cache: str | None = None
         self._live: dict[str, _Live] = {}
+        #: The self-update quiesce's launch hold: while set, no new
+        #: bridge launches (see stop_all_processes) — a supervision
+        #: beat must not relaunch a bridge into the middle of a pull
+        #: that is replacing the bridge's own program file.
+        self._launch_hold = False
         self._lock = threading.RLock()
         # ── self-provisioning seams (bridgefix) ──
         # deps_runner / npm_resolver stage the npm dependency
@@ -1325,6 +1331,16 @@ class BridgeSupervisor:
 
     def _launch(self, rec: AccountRecord, *, pairing_number: str = "",
                 engine: str | None = None) -> _Live:
+        if self._launch_hold:
+            # The update quiesce owns the process table until it
+            # releases: a launch now would re-lock the very files
+            # the pull is replacing. PairingUnavailable is the
+            # module's plain-words refusal; every launch caller
+            # (start, ensure_running, the sweep) already surfaces it.
+            raise PairingUnavailable(
+                "bridge launches are held while a self-update is "
+                "applying — the bridge restarts when the update "
+                "finishes")
         eng = self._clean_engine(engine) or self._engine_of(rec.id)
         program = self._require_launchable(eng)
         creds = Path(rec.creds_dir)
@@ -1749,6 +1765,116 @@ class BridgeSupervisor:
             pass
         self.registry.set_status(account_id, "stopped")
         return True
+
+    # ── update quiesce ─────────────────────────────────────────────
+    @staticmethod
+    def _proc_dead(proc: Any) -> bool:
+        try:
+            return proc.poll() is not None
+        except Exception:  # noqa: BLE001 - unpollable = gone (the
+            return True             # _finish_dead verdict too)
+
+    def _wait_dead(self, proc: Any, timeout: float) -> bool:
+        """Poll until the process exits or the budget runs out."""
+        deadline = time.time() + max(0.0, timeout)
+        while True:
+            if self._proc_dead(proc):
+                return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.05)
+
+    def stop_all_processes(self, *,
+                           timeout: float = 5.0) -> tuple[bool, str]:
+        """Stop EVERY bridge process — the self-update quiesce.
+
+        The update replaces files in the repo tree while Devon
+        runs, and a running bridge LOCKS its own program file on
+        Windows: the 2026-11-07 EC2 update died mid-pull on
+        exactly that (git could not unlink the running
+        whatsapp-bridge.exe) and left the tree half-written. So
+        before a pull, every process this supervisor owns is
+        terminated and WAITED OUT — with a kill() escalation for
+        one that ignores terminate — and launches are HELD
+        (:meth:`release_launch_hold` ends the hold) so a
+        supervision beat cannot relaunch a bridge into the middle
+        of the pull.
+
+        Registry state is deliberately untouched: no record flips
+        to "stopped" (that is an owner order with its own durable
+        meaning), so afterwards the ordinary lifecycle — the same
+        reconcile that recovers a bridge that merely died —
+        brings the bridges back.
+
+        A bridge this process did NOT spawn can still be serving:
+        bridges survive a Devon restart by design and are then
+        adopted by port, with no process handle to stop. That
+        state is a BLOCKER, named per account: the update must
+        not pull while a bridge it cannot stop may be holding
+        its program file.
+
+        Returns (True, detail) when no bridge process is running,
+        else (False, detail naming what is still running).
+        """
+        with self._lock:
+            self._launch_hold = True
+            owned = [(account_id, live)
+                     for account_id, live in self._live.items()
+                     if live.proc is not None]
+        stopped: list[str] = []
+        blockers: list[str] = []
+        for account_id, live in owned:
+            proc = live.proc
+            if not self._proc_dead(proc):
+                # terminate/kill are requests; the waits are the
+                # verdict — a raise from either changes nothing.
+                with contextlib.suppress(Exception):
+                    proc.terminate()
+                if not self._wait_dead(proc, timeout):
+                    kill = getattr(proc, "kill", None)
+                    if kill is not None:
+                        with contextlib.suppress(Exception):
+                            kill()
+                        self._wait_dead(proc, 2.0)
+            if self._proc_dead(proc):
+                with self._lock:
+                    if self._live.get(account_id) is live:
+                        self._live.pop(account_id, None)
+                stopped.append(f"{account_id} ({live.bridge_engine})")
+            else:
+                blockers.append(
+                    f"{account_id} ({live.bridge_engine} engine) is "
+                    "still running after terminate and kill")
+        for rec in self.registry.all():
+            if rec.platform != "whatsapp" or not rec.port:
+                continue
+            if not self._alive(rec.id) and self._port_listening(rec):
+                blockers.append(
+                    f"{rec.id}: a bridge is listening on port "
+                    f"{rec.port} but is not a process this Devon "
+                    "started (it survived a restart) — Devon "
+                    "cannot stop it, and it may hold its "
+                    "program file")
+        if blockers:
+            return False, ("bridge processes still running: "
+                           + "; ".join(blockers))
+        if stopped:
+            return True, ("stopped the WhatsApp bridge process(es) "
+                          "for " + ", ".join(stopped)
+                          + "; launches are held until the update "
+                          "finishes")
+        return True, "no WhatsApp bridge processes were running"
+
+    def release_launch_hold(self) -> None:
+        """End the update quiesce's launch hold (idempotent).
+
+        Called by the update flow when the update is over: on the
+        failure paths the bridges relaunch through the ordinary
+        reconcile; on the success path the process restarts anyway
+        and the hold would die with it.
+        """
+        with self._lock:
+            self._launch_hold = False
 
     def remove(self, account_id: str) -> bool:
         self.stop(account_id)

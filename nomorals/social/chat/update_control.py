@@ -194,8 +194,21 @@ def _rollback_line(report: Any) -> str:
         return ("⚠ ROLLBACK FAILED — the install may be mid-update; "
                 "see the report above before restarting anything.")
     restore = steps.get("git_restore")
+    if restore is not None and not restore.get("ok"):
+        # A tree restore was attempted (a failed pull's writes, a
+        # quarantined or unverifiable pull) and did not complete:
+        # that is a failed rollback by its true name, never the
+        # "nothing was applied" line below.
+        return ("⚠ ROLLBACK FAILED — the pulled code could not be "
+                "put back; see the report above before restarting "
+                "anything.")
     if restore is not None and restore.get("ok"):
         return "↩ the pulled code was put back to the pre-update commit."
+    # No restore was attempted because nothing was ever applied:
+    # the update stopped before the pull (preflight refusal,
+    # quiesce refusal, snapshot failure). Only here is this line
+    # the truth — UpdateManager records a git_restore step for
+    # every pull that ran, so a real pull failure never lands here.
     return "↩ no rollback performed — the update stopped before applying changes."
 
 

@@ -14,11 +14,24 @@ right after the pull: no migrate, no health gate, no rollback, no
 quarantine, no restart — an up-to-date tree has nothing to prove.
 
 If *any* step fails, the pre-update snapshot is restored automatically and
-the report says so.  The system is never left half-updated: a failed pull
-leaves the tree untouched (``--ff-only`` is all-or-nothing), and a failed
-migration or health check restores BOTH the state snapshot and the code
-tree (the files the pull changed are put back and HEAD returns to the
-pre-update commit).  One exception, by design: when the state restore
+the report says so.  The system is never left half-updated.  Before the
+pull, the update QUIESCES the children that execute files from the tree
+(the WhatsApp bridge processes — a running bridge locks its own program
+file on Windows, and git cannot replace a locked file); a quiesce that
+cannot stop a child aborts the update before anything is pulled.  The
+pull itself is NOT all-or-nothing at the filesystem level: git writes
+the new tree file by file, so a pull that dies mid-checkout leaves a
+half-written tree behind even though HEAD never moved (the 2026-11-07
+EC2 incident: the pull died on the locked bridge binary after writing
+most of the tree, and the follow-up "nothing was applied" report was
+false).  A failed pull therefore restores the working tree to the exact
+status captured before it (the pull's own writes undone, the owner's
+disjoint local edits never touched) and verifies the status matches
+before reporting; a successful pull is verified against the landed
+commit before anything runs on the new code.  A failed migration or
+health check restores BOTH the state snapshot and the code tree (the
+files the pull changed are put back and HEAD returns to the pre-update
+commit).  One exception, by design: when the state restore
 cannot swap the live database because the running process holds it open
 (Windows WinError 32), the database half is deferred — a pending-restore
 marker is written and applied by the next boot (see
@@ -101,6 +114,7 @@ from .verify_install import verify_install
 
 __all__ = [
     "HealthCheckFn",
+    "QuiesceFn",
     "UpdateReport",
     "UpdateManager",
     "default_health_checks",
@@ -111,6 +125,13 @@ _log = get_logger(__name__)
 
 #: A health check returns (ok, detail).
 HealthCheckFn = Callable[[], "tuple[bool, str]"]
+
+#: A quiesce callable stops the children that execute files from the
+#: repo tree (the WhatsApp bridge processes) so a pull can replace
+#: those files; it returns (ok, detail) in the health-check shape.
+#: ok=False ABORTS the update before the pull — the update never
+#: pulls into a tree a running child still locks.
+QuiesceFn = Callable[[], "tuple[bool, str]"]
 
 JOURNAL_FILENAME = "update-journal.jsonl"
 HISTORY_FILENAME = "update-history.jsonl"
@@ -402,10 +423,19 @@ class UpdateManager:
         advisory_checks: list[HealthCheckFn] | None = None,
         git_bin: str = "git",
         verifier: Any | None = None,
+        quiesce: QuiesceFn | None = None,
     ) -> None:
         self.repo_dir = Path(repo_dir)
         self.snapshots = snapshots
         self.git_bin = git_bin
+        # Quiesce (update hardening): the callable that stops the
+        # repo-file children (the WhatsApp bridge processes) before
+        # the pull replaces the files they execute. The chat runtime
+        # wires its bridge supervisor in; a construction without one
+        # (the console update, tests) runs no such children of its
+        # own and the quiesce step records exactly that — it never
+        # pretends a stop happened.
+        self._quiesce = quiesce
         # Verify-then-install (Wave 8): after a pull moves HEAD, the
         # landed state is verified before the update proceeds. The
         # default follows the health-gate idiom above: the production
@@ -545,6 +575,31 @@ class UpdateManager:
             if detail:
                 report.record("working_tree", True, detail)
 
+        # Step 0.75: quiesce — stop the children that execute files
+        # from the tree BEFORE anything tries to replace those files.
+        # The WhatsApp bridge is the proven locker (2026-11-07 EC2:
+        # git could not unlink the running bridge binary, died
+        # mid-checkout, and left the tree half-written). A quiesce
+        # that cannot stop a child aborts the update HERE, before
+        # the snapshot and the pull: pulling into a locked tree is
+        # how a tree gets half-applied. (After preflight on purpose:
+        # an update preflight refuses must not stop the owner's
+        # bridges on its way out.)
+        if pull:
+            q_ok, q_detail = self._run_quiesce()
+            report.record("quiesce", q_ok, q_detail)
+            self._journal({"run_id": run_id, "event": "step",
+                           "step": "quiesce", "ts": time.time(),
+                           "ok": q_ok, "detail": q_detail})
+            if not q_ok:
+                report.error = ("update stopped before pulling — "
+                                + q_detail)
+                report.seconds = time.time() - started
+                self._journal({"run_id": run_id, "event": "aborted",
+                               "ts": time.time(), "error": report.error})
+                self._append_history(report)
+                return report
+
         # Step 1: pre-update snapshot — the rollback anchor.
         try:
             snap = self.snapshots.create(label="pre-update")
@@ -561,17 +616,50 @@ class UpdateManager:
             self._append_history(report)
             return report
 
-        # Step 2: pull. --ff-only is all-or-nothing: a failed pull changes
-        # nothing, so no rollback is needed for it.
+        # Step 2: pull. --ff-only decides the MERGE atomically, but
+        # its checkout is file-by-file: a pull that dies mid-checkout
+        # (the locked bridge binary, 2026-11-07) leaves files written,
+        # deleted and created behind even though HEAD never moved.
+        # So: capture the working-tree status first, journal the
+        # pull's BEGIN entry before it runs (the migrate-begin
+        # reasoning — a crash inside the pull must be recoverable as
+        # "died in the pull", not misread as "died before anything
+        # changed"), and on failure restore the tree to exactly the
+        # captured status before reporting.
         new_sha = ""
         if pull:
+            pre_tracked, pre_untracked = self._status_paths()
+            self._journal({"run_id": run_id, "event": "step",
+                           "step": "git_pull", "phase": "begin",
+                           "ts": time.time(), "from_sha": previous_sha,
+                           "pre_dirty": sorted(pre_tracked),
+                           "pre_untracked": sorted(pre_untracked)})
             ok, detail = self._git_pull()
             report.record("git_pull", ok, detail)
             if not ok:
                 self._journal({"run_id": run_id, "event": "step",
                                "step": "git_pull", "ts": time.time(),
                                "ok": ok, "detail": detail})
-                report.error = f"git pull failed: {detail}"
+                restored, restore_detail = (
+                    self._restore_tree_after_failed_pull(
+                        previous_sha, pre_tracked, pre_untracked))
+                report.record("git_restore", restored, restore_detail)
+                self._journal({"run_id": run_id, "event": "step",
+                               "step": "git_restore", "ts": time.time(),
+                               "ok": restored, "detail": restore_detail})
+                if restored:
+                    report.error = (
+                        f"git pull failed: {detail} Nothing was "
+                        f"applied: {restore_detail} — the tree is "
+                        "exactly as it was before the update and "
+                        "your local changes are untouched.")
+                else:
+                    report.error = (
+                        f"git pull failed: {detail} The working tree "
+                        f"could NOT be put back ({restore_detail}) — "
+                        "do not restart until it is fixed; "
+                        f"`git -C {self.repo_dir} status` shows what "
+                        "still differs from the pre-update state.")
                 report.seconds = time.time() - started
                 self._journal({"run_id": run_id, "event": "aborted",
                                "ts": time.time(), "error": report.error})
@@ -636,6 +724,39 @@ class UpdateManager:
                     f"pulled version {new_sha[:12]} failed install "
                     f"verification ({verdict.get('detail', '')}) — "
                     "refusing to run unverified code."
+                    + (f" The pull was undone; the tree is back at"
+                       f" {previous_sha[:12]}." if undone else
+                       f" Undo the pull with: git -C {self.repo_dir} "
+                       f"reset --hard {previous_sha[:12]}"))
+                report.seconds = time.time() - started
+                self._journal({"run_id": run_id, "event": "aborted",
+                               "ts": time.time(), "error": report.error})
+                self._append_history(report)
+                return report
+
+        # Step 2.3: the working tree must BE the pulled commit for
+        # everything the pull changed. A transport's exit code is
+        # not proof of the landed state (the push_nm20 lesson), and
+        # this check runs for EVERY construction — scripted-gate
+        # constructions skip the deep verifier above, but no update
+        # proceeds on a tree that merely CLAIMS to be the new commit.
+        # Scoped to the incoming change set: the owner's disjoint
+        # local edits are supposed to be dirty and never fail this.
+        # A mismatch undoes the pull through the same tree restore.
+        if pull and new_sha and previous_sha and new_sha != previous_sha:
+            tree_ok, tree_detail = self._verify_tree_matches(
+                previous_sha, new_sha)
+            report.record("verify_tree", tree_ok, tree_detail)
+            self._journal({"run_id": run_id, "event": "step",
+                           "step": "verify_tree", "ts": time.time(),
+                           "ok": tree_ok, "detail": tree_detail})
+            if not tree_ok:
+                undone, undo_detail = self._restore_tree(previous_sha)
+                report.record("git_restore", undone, undo_detail)
+                report.error = (
+                    f"pulled version {new_sha[:12]} failed the "
+                    f"working-tree check ({tree_detail}) — refusing "
+                    "to run a tree that is not the pulled commit."
                     + (f" The pull was undone; the tree is back at"
                        f" {previous_sha[:12]}." if undone else
                        f" Undo the pull with: git -C {self.repo_dir} "
@@ -890,6 +1011,19 @@ class UpdateManager:
         from_sha = next((str(e.get("from_sha", "")) for e in events
                          if e.get("event") == "step"
                          and e.get("step") == "git_pull"), "")
+        # A run that journaled the pull's BEGIN entry but never its
+        # completion died INSIDE the pull: migrations never began
+        # (no state to restore), but the checkout may have
+        # half-written the tree, so the "died before anything
+        # changed" verdict would be false for it. The begin entry
+        # carries the pre-pull status the tree restore needs.
+        pull_begin = next((e for e in events
+                           if e.get("event") == "step"
+                           and e.get("step") == "git_pull"
+                           and e.get("phase") == "begin"), None)
+        pull_done = any(e.get("event") == "step"
+                        and e.get("step") == "git_pull"
+                        and "phase" not in e for e in events)
         receipt: dict[str, Any] = {
             "recovered": True, "run_id": last["run_id"],
             "last_steps": steps, "snapshot": snap_id,
@@ -917,6 +1051,29 @@ class UpdateManager:
                 receipt["error"] = f"{type(exc).__name__}: {exc}"
                 _log.error("crash recovery rollback failed: %s", exc,
                            exc_info=True)
+        elif snap_id and from_sha and pull_begin is not None \
+                and not pull_done:
+            # Died inside the pull — tree only, from the begin
+            # entry's journaled pre-pull status (see above).
+            pre_dirty = {str(p) for p in pull_begin.get("pre_dirty") or []}
+            pre_untracked = {str(p)
+                             for p in pull_begin.get("pre_untracked") or []}
+            tree_ok, tree_detail = self._restore_tree_after_failed_pull(
+                from_sha, pre_dirty, pre_untracked)
+            receipt["action"] = ("tree_restored" if tree_ok
+                                  else "tree_restore_failed")
+            receipt["tree_restore"] = tree_detail
+            if tree_ok:
+                _log.warning("crash recovery: interrupted update %s "
+                             "died inside git pull; working tree "
+                             "restored to its pre-update state",
+                             last["run_id"])
+            else:
+                receipt["error"] = tree_detail
+                _log.error("crash recovery: interrupted update %s "
+                           "died inside git pull and the tree "
+                           "restore failed: %s", last["run_id"],
+                           tree_detail)
         else:
             receipt["action"] = "aborted"
             _log.warning("crash recovery: marked interrupted update %s"
@@ -1379,6 +1536,41 @@ class UpdateManager:
             files.append(path.strip('"'))
         return files
 
+    def _status_paths(self) -> tuple[set[str], set[str]]:
+        """(dirty tracked paths, untracked paths) from one status pass.
+
+        Renames contribute BOTH paths: the source is a deletion and
+        the destination a creation, and a tree restore must know
+        both names. Untracked files are listed individually
+        (``--untracked-files=all``) — a collapsed ``newdir/`` entry
+        could not be restored file-by-file. (empty, empty) when git
+        cannot say (not a repo, git missing): callers treat that as
+        "nothing known dirty", which is exactly right for
+        scripted-seam constructions whose repo dir is not a repo.
+        """
+        rc, out, _ = self._git_out(
+            ["status", "--porcelain", "--untracked-files=all"])
+        tracked: set[str] = set()
+        untracked: set[str] = set()
+        if rc != 0:
+            return tracked, untracked
+        for line in out.splitlines():
+            if len(line) < 4:
+                continue
+            code, path = line[:2], line[3:].strip()
+            paths = [path]
+            if " -> " in path:  # rename: both names are touched
+                paths = [p.strip() for p in path.split(" -> ", 1)]
+            for name in paths:
+                name = name.strip('"')
+                if not name:
+                    continue
+                if code == "??":
+                    untracked.add(name)
+                else:
+                    tracked.add(name)
+        return tracked, untracked
+
     def _git_changed_files(self, from_ref: str, to_ref: str) -> list[str]:
         rc, out, _ = self._git_out(["diff", "--name-only", from_ref, to_ref])
         if rc != 0:
@@ -1462,7 +1654,135 @@ class UpdateManager:
         return True, (f"tree restored to {from_sha[:12]} "
                       f"({len(changed)} file(s) put back)")
 
+    def _restore_tree_after_failed_pull(
+        self, from_sha: str, pre_tracked: set[str],
+        pre_untracked: set[str],
+    ) -> tuple[bool, str]:
+        """Put the working tree back to its pre-pull state.
+
+        A failed pull can leave files written, deleted or created
+        even though HEAD never moved (git's checkout is file-by-file;
+        the 2026-11-07 EC2 pull died on the locked bridge binary
+        after writing most of the tree). The HEAD-based restore
+        (:meth:`_restore_tree`) is blind to that state — unmoved
+        HEAD, empty diff, "nothing to restore" — so this works off
+        the STATUS DELTA against the status captured before the
+        pull: anything dirty-or-untracked now that was
+        clean-or-absent before is the pull's own work and is undone
+        (checked out from the pre-update commit, or removed when
+        the pull created it); anything already dirty or untracked
+        before the pull is the owner's and is never touched
+        (preflight proved those files disjoint from the incoming
+        change set, so the pull cannot have written them). Success
+        is VERIFIED, not assumed: the post-restore status must
+        equal the captured pre-pull status exactly.
+        """
+        ref = from_sha or "HEAD"
+        head = self._git_sha()
+        if head and from_sha and head != from_sha:
+            # The pull moved HEAD before failing (not the --ff-only
+            # shape, but never assume): the HEAD-based restore owns
+            # the tracked content; the delta sweep below still runs
+            # for the untracked leftovers it cannot see.
+            moved_ok, moved_detail = self._restore_tree(from_sha)
+            if not moved_ok:
+                return False, moved_detail
+        now_tracked, now_untracked = self._status_paths()
+        put_back = 0
+        removed = 0
+        problems: list[str] = []
+        for name in sorted(now_tracked - pre_tracked):
+            rc, _, _ = self._git_out(["cat-file", "-e", f"{ref}:{name}"])
+            if rc == 0:
+                rc, _, err = self._git_out(["checkout", ref, "--", name])
+                if rc != 0:
+                    problems.append(
+                        f"{name} (checkout failed: {err.strip()})")
+                else:
+                    put_back += 1
+            else:
+                # Not in the pre-update tree: the pull created it
+                # (staged-new or an index ghost) — remove it, the
+                # same treatment _restore_tree gives added files.
+                try:
+                    (self.repo_dir / name).unlink(missing_ok=True)
+                    removed += 1
+                except OSError as exc:
+                    problems.append(f"{name} (remove failed: {exc})")
+        for name in sorted(now_untracked - pre_untracked):
+            try:
+                (self.repo_dir / name).unlink(missing_ok=True)
+                removed += 1
+            except OSError as exc:
+                problems.append(f"{name} (remove failed: {exc})")
+        if problems:
+            return False, "could not restore: " + "; ".join(problems)
+        after_tracked, after_untracked = self._status_paths()
+        if after_tracked != pre_tracked or after_untracked != pre_untracked:
+            delta = sorted((after_tracked ^ pre_tracked)
+                           | (after_untracked ^ pre_untracked))
+            return False, ("working tree still differs from its "
+                           "pre-update state at: "
+                           + ", ".join(delta[:8])
+                           + ("…" if len(delta) > 8 else ""))
+        return True, (f"working tree restored to its pre-update "
+                      f"state ({put_back} file(s) put back, "
+                      f"{removed} added file(s) removed; the status "
+                      "matches the pre-update status exactly)")
+
+    def _verify_tree_matches(self, from_sha: str,
+                             to_sha: str) -> tuple[bool, str]:
+        """The working tree IS ``to_sha`` for everything the pull
+        changed (the post-pull verification).
+
+        Scoped to the incoming change set on purpose: the owner's
+        disjoint local edits (preflight-verified) are supposed to
+        be dirty and must not fail this check — but a changed file
+        that is modified, missing, or shadowed by an untracked
+        leftover means what would run is not what was pulled.
+        """
+        head = self._git_sha()
+        if head != to_sha:
+            return False, (f"HEAD is "
+                           f"{head[:12] if head else 'unreadable'}, "
+                           f"not the pulled commit {to_sha[:12]}")
+        changed = set(self._git_changed_files(from_sha, to_sha))
+        tracked, untracked = self._status_paths()
+        offenders = sorted((tracked | untracked) & changed)
+        if offenders:
+            return False, ("working tree differs from the pulled "
+                           "commit at: " + ", ".join(offenders[:8])
+                           + ("…" if len(offenders) > 8 else ""))
+        return True, (f"working tree matches {to_sha[:12]} "
+                      f"({len(changed)} changed file(s) clean)")
+
     # ── steps ──────────────────────────────────────────────────────────────
+
+    def _run_quiesce(self) -> tuple[bool, str]:
+        """Run the wired quiesce (see the constructor seam).
+
+        No hook attached is a recorded fact, not a silent pass: this
+        process runs no repo-file children of its own (the console
+        update assumes Devon is stopped — the bridges belong to the
+        running Devon process, whose chat runtime wires the real
+        quiesce). A hook that RAISES cannot prove the tree is
+        unlocked, so it refuses the pull like a hook that reports a
+        child still running.
+        """
+        if self._quiesce is None:
+            return True, ("no quiesce hook attached — this process "
+                          "runs no repo-file children to stop (the "
+                          "chat runtime wires the WhatsApp bridge "
+                          "quiesce; a console update assumes Devon "
+                          "is stopped)")
+        try:
+            ok, detail = self._quiesce()
+        except Exception as exc:  # noqa: BLE001 - an unprovable stop
+            return False, (f"the quiesce step itself failed: "
+                           f"{type(exc).__name__}: {exc} — refusing "
+                           "to pull while a repo-file child may "
+                           "still be running")
+        return bool(ok), str(detail)
 
     def _git_pull(self) -> tuple[bool, str]:
         try:

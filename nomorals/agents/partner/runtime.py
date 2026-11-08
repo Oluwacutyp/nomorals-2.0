@@ -158,6 +158,28 @@ def _update_recovery_notice(receipt: dict) -> tuple[str, str]:
             "exactly as it is, and nothing is pending from that "
             "update. No action needed.",
         )
+    if action == "tree_restored":
+        return (
+            "interrupted update: half-applied pull put back at startup",
+            "Devon restarted while a self-update was mid-pull. A "
+            "pull writes the new code file by file, so the tree "
+            "may have been half-written; at startup I put the "
+            "working tree back to exactly its pre-update state "
+            "(verified against the status the update recorded "
+            "before pulling). The database was never touched — "
+            "the update died before migrations — and your local "
+            "changes are untouched. Run /update when you're ready.",
+        )
+    if action == "tree_restore_failed":
+        return (
+            "interrupted update: code tree could NOT be put back",
+            "Devon restarted while a self-update was mid-pull, "
+            "and the startup recovery could not restore the "
+            f"working tree ({receipt.get('tree_restore') or receipt.get('error') or 'unknown error'}). "
+            "The code on disk may be a half-written mix of the "
+            "old and new versions — check the install (git status "
+            "in the repo) before trusting it.",
+        )
     # aborted (and any future close-out action): died before the
     # dangerous steps, so nothing was changed and nothing restored.
     return (
@@ -3180,7 +3202,8 @@ class PartnerRuntime(
         """
         title, body = _update_recovery_notice(receipt)
         failed = receipt.get("action") in (
-            "rollback_failed", "pending_restore_failed")
+            "rollback_failed", "pending_restore_failed",
+            "tree_restore_failed")
         if failed:
             _log.error("update crash recovery FAILED: %s", body)
         else:
@@ -5484,11 +5507,20 @@ class PartnerRuntime(
                 snapshots = SnapshotManager(
                     home=settings.home_path, db_path=settings.db_path,
                     blob_dir=getattr(settings, "blob_dir", None))
-                updater = UpdateManager(repo_root, snapshots)
+                updater = UpdateManager(
+                    repo_root, snapshots,
+                    quiesce=self._quiesce_bridges_for_update)
                 controller = ChatUpdateController(
                     mission_store=MissionStore(self.context.db),
                     update_runner=lambda pull: updater.run(pull=pull))
-                result = controller.execute(kind)
+                try:
+                    result = controller.execute(kind)
+                finally:
+                    # The update is over either way: bridge
+                    # relaunches are the reconcile's business again
+                    # (on success the restart below replaces this
+                    # process and the hold would die with it).
+                    self._release_bridge_launch_hold()
             except Exception as exc:  # noqa: BLE001 - update wiring failure is a reply
                 return f"/{kind} failed to start: {type(exc).__name__}: {exc}"
             if result.get("restart_requested"):

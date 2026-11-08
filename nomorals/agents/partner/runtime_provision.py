@@ -512,6 +512,35 @@ class RuntimeProvisionMixin:
             self._pair_supervisor = sup
         return sup
 
+    def _quiesce_bridges_for_update(self) -> tuple[bool, str]:
+        """The self-update quiesce (the UpdateManager seam): stop
+        every WhatsApp bridge process before a pull replaces the
+        files those processes execute — a running bridge locks its
+        program file on Windows, and a pull that dies on the lock
+        leaves the tree half-written (2026-11-07). Delegates to the
+        supervisor's own lifecycle stop
+        (:meth:`BridgeSupervisor.stop_all_processes`). Never
+        raises: a quiesce that cannot run returns False so the
+        update refuses BEFORE pulling rather than pulling into a
+        tree it could not prove unlocked."""
+        try:
+            return self._pairing_supervisor().stop_all_processes()
+        except Exception as exc:  # noqa: BLE001 - verdict, not crash
+            record_failure("runtime_provision.quiesce_bridges", exc)
+            return False, (f"the bridge quiesce could not run: "
+                           f"{type(exc).__name__}: {exc}")
+
+    def _release_bridge_launch_hold(self) -> None:
+        """Release the update quiesce's bridge launch hold — the
+        update is over, so bridge relaunches are the reconcile's
+        business again (on a successful update the restart replaces
+        this process anyway). Never raises."""
+        try:
+            self._pairing_supervisor().release_launch_hold()
+        except Exception as exc:  # noqa: BLE001 - release is cleanup
+            record_failure("runtime_provision.release_bridge_hold",
+                           exc)
+
     @staticmethod
     def _pair_find(sup: Any, ref: str) -> Any | None:
         ref = (ref or "").strip()
