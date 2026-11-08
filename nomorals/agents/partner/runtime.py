@@ -158,6 +158,51 @@ def _update_recovery_notice(receipt: dict) -> tuple[str, str]:
             "exactly as it is, and nothing is pending from that "
             "update. No action needed.",
         )
+    if action == "pending_restore_unfulfillable":
+        # The marker's snapshot was deleted after the restore was
+        # deferred, so the restore can never be applied and the
+        # marker was discarded. The live database was kept — but
+        # unlike the premise-gone discard, the rollback's database
+        # half is unrecoverable, so no "no action needed": state
+        # the pairing the facts support (via the state note) and
+        # name the consequence.
+        state = str(receipt.get("state_note") or "")
+        state_line = f"Actual state: {state}. " if state else ""
+        return (
+            "deferred database restore can no longer be applied",
+            "A failed self-update deferred its database restore to "
+            "this startup, but the snapshot it would restore "
+            f"({receipt.get('snapshot') or 'unknown'}) no longer "
+            "exists — it was deleted after the restore was "
+            "deferred. There is nothing left to apply, so at this "
+            "startup I discarded the pending restore and kept the "
+            f"live database exactly as it is. {state_line}"
+            "The rollback that update performed is complete in "
+            "code; only its database half is unrecoverable. If the "
+            "database misbehaves under the rolled-back code, "
+            "restore a snapshot manually.",
+        )
+    if action == "restart_confirmed":
+        return (
+            "update restart confirmed — running the new version",
+            "Devon restarted into the self-update and this process "
+            "is back up on version "
+            f"{str(receipt.get('running_sha') or '?')[:12]} — the "
+            "version the update landed. The restart is confirmed "
+            "by the process that actually came up, not assumed by "
+            "the one that went down.",
+        )
+    if action == "restart_unconfirmed":
+        return (
+            "update restart NOT confirmed",
+            "Devon was restarted for a self-update, but the "
+            "version now running is "
+            f"{str(receipt.get('running_sha') or 'unreadable')[:12]}, "
+            "not the version the update landed "
+            f"({str(receipt.get('to_sha') or '?')[:12]}). The new "
+            "code may not be running — check the install before "
+            "trusting it, and run /update again when ready.",
+        )
     if action == "tree_restored":
         return (
             "interrupted update: half-applied pull put back at startup",
@@ -3180,11 +3225,24 @@ class PartnerRuntime(
             snapshots = SnapshotManager(
                 home=settings.home_path, db_path=settings.db_path,
                 blob_dir=getattr(settings, "blob_dir", None))
-            receipt = UpdateManager(
-                repo_root, snapshots).recover_interrupted()
+            manager = UpdateManager(repo_root, snapshots)
+            receipt = manager.recover_interrupted()
+            # Settle the restart journey: if the previous process
+            # restarted into an update, THIS process is the only
+            # witness that can confirm it came up on the landed
+            # version. Its verdict is reported on its own, whatever
+            # the journal recovery above found.
+            try:
+                intent_receipt = manager.consume_restart_intent()
+            except Exception:  # noqa: BLE001 - never blocks the boot
+                _log.warning("update restart-intent check could not "
+                             "run", exc_info=True)
+                intent_receipt = None
         except Exception as exc:  # noqa: BLE001 - boot must not fail here
             _log.warning("update crash recovery could not run: %s", exc)
             return None
+        if intent_receipt is not None:
+            self._report_update_recovery(intent_receipt)
         if not receipt.get("recovered"):
             return receipt
         self._report_update_recovery(receipt)
@@ -3203,7 +3261,7 @@ class PartnerRuntime(
         title, body = _update_recovery_notice(receipt)
         failed = receipt.get("action") in (
             "rollback_failed", "pending_restore_failed",
-            "tree_restore_failed")
+            "tree_restore_failed", "restart_unconfirmed")
         if failed:
             _log.error("update crash recovery FAILED: %s", body)
         else:
@@ -5535,6 +5593,19 @@ class PartnerRuntime(
             except Exception as exc:  # noqa: BLE001 - update wiring failure is a reply
                 return f"/{kind} failed to start: {type(exc).__name__}: {exc}"
             if result.get("restart_requested"):
+                # Record the restart intent BEFORE this process dies:
+                # the reply below promises a restart, and only the
+                # NEXT process can confirm it actually came up on the
+                # version the update landed (boot consumes the intent
+                # in _recover_interrupted_update). A plain /restart
+                # carries no update report and writes no intent.
+                report_obj = result.get("update_report")
+                if report_obj is not None:
+                    try:
+                        updater.note_restart_intent(report_obj)
+                    except Exception:  # noqa: BLE001 - never blocks the restart
+                        _log.warning("could not record the update "
+                                     "restart intent", exc_info=True)
                 # The reply goes out first; the restart thread stops the
                 # runtime and re-execs the same argv. Boot resumes from
                 # the checkpoints the controller just took.

@@ -110,7 +110,7 @@ from typing import Any
 from ..core import diskspace
 from ..core.filelock import lock_exclusive_nb, unlock as _unlock_file
 from ..core.logging_setup import get_logger
-from .snapshots import SnapshotManager, SnapshotRefused
+from .snapshots import SnapshotError, SnapshotManager, SnapshotRefused
 from .verify_install import verify_install
 
 __all__ = [
@@ -142,6 +142,11 @@ UPDATE_LOCK_FILENAME = "update.lock"
 #: running process holds the live database open; consumed at boot by
 #: :meth:`UpdateManager.apply_pending_restore` (via recover_interrupted).
 PENDING_RESTORE_FILENAME = "pending-db-restore.json"
+#: Written by the runtime just before it restarts into a successful
+#: update; consumed at boot by
+#: :meth:`UpdateManager.consume_restart_intent`, which is how the NEW
+#: process — not the dying one — confirms the restart landed.
+RESTART_INTENT_FILENAME = "update-restart-intent.json"
 
 #: Steps at/after which a crash leaves the system in a state that must be
 #: rolled back (migrations may have partially applied).
@@ -250,6 +255,49 @@ def _is_lock_error(exc: BaseException) -> bool:
     return isinstance(exc, SnapshotRefused) and "lock" in str(exc).lower()
 
 
+def _load_tree_layering_module(tests_dir: Path):
+    """Load the TARGET tree's tests/test_layering.py — never a stale
+    process cache.
+
+    The health gate judges the tree the update just pulled, but a
+    plain ``import test_layering`` answers from ``sys.modules``:
+    after a FAILED update the process keeps running (no restart on
+    failure) with the failed tree's module cached, so a retry would
+    judge the new tree by the OLD tree's KNOWN_VIOLATIONS baseline
+    and scanner — the gate rolling back the very fix for the failure
+    it just reported. So the tree's file is always loaded fresh and
+    its baseline compared with the cached module's: when they agree,
+    the cached module is returned untouched, which keeps the seam
+    the layering pins inject through (a test double whose baseline
+    matches the tree's is honored, scanner and all); when they
+    disagree — or the cache holds another tree's module, or
+    nothing — the fresh module takes the cache's place and is
+    returned. A SyntaxError in the tree's file propagates with its
+    filename, as the gate's report requires.
+    """
+    import importlib.util
+
+    path = tests_dir / "test_layering.py"
+    spec = importlib.util.spec_from_file_location("test_layering", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load the layering baseline at {path}")
+    fresh = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fresh)
+    cached = sys.modules.get("test_layering")
+    if cached is not None and cached is not fresh:
+        try:
+            same_file = Path(
+                str(getattr(cached, "__file__", ""))).resolve() \
+                == path.resolve()
+        except OSError:
+            same_file = False
+        if same_file and getattr(cached, "KNOWN_VIOLATIONS", None) \
+                == getattr(fresh, "KNOWN_VIOLATIONS", None):
+            return cached
+    sys.modules["test_layering"] = fresh
+    return fresh
+
+
 def default_health_checks(
     repo_dir: str | os.PathLike[str] | None = None,
     db_path: str | os.PathLike[str] | None = None,
@@ -343,10 +391,8 @@ def default_health_checks(
             # here instead compared against the emptied set and
             # rolled back the healthy 2026-11-08 EC2 update.
             try:
-                tests_dir = str(Path(repo_dir) / "tests")
-                if tests_dir not in sys.path:
-                    sys.path.insert(0, tests_dir)
-                import test_layering
+                test_layering = _load_tree_layering_module(
+                    Path(repo_dir) / "tests")
 
                 new, known, _seen, _scanned = \
                     test_layering.scan_layering()
@@ -492,6 +538,7 @@ class UpdateManager:
         self.quarantine_path = home / QUARANTINE_FILENAME
         self.lock_path = home / UPDATE_LOCK_FILENAME
         self.pending_restore_path = home / PENDING_RESTORE_FILENAME
+        self.restart_intent_path = home / RESTART_INTENT_FILENAME
         #: Code-move bookkeeping for the transaction in flight ("" when
         #: this run did not move the tree): the commit to restore on
         #: rollback and the commit the pull landed on.
@@ -1043,6 +1090,21 @@ class UpdateManager:
                 "from_sha": pending.get("from_sha", ""),
                 "running_sha": pending.get("running_sha", ""),
                 "state_note": pending.get("state_note", "")}
+        elif pending.get("discarded_snapshot_missing"):
+            # The marker's snapshot was deleted after the restore
+            # was deferred: the restore can never be applied, so the
+            # marker was discarded. The receipt stands on its own so
+            # the boot notice fires — the live database was kept,
+            # but the rollback's database half is gone for good,
+            # which the owner should hear once, plainly.
+            pending_receipt = {
+                "recovered": True,
+                "action": "pending_restore_unfulfillable",
+                "snapshot": pending.get("snapshot", ""), "run_id": "",
+                "update_sha": pending.get("update_sha", ""),
+                "from_sha": pending.get("from_sha", ""),
+                "running_sha": pending.get("running_sha", ""),
+                "state_note": pending.get("state_note", "")}
         runs = self._journal_runs()
         if not runs:
             return pending_receipt or {"recovered": False,
@@ -1343,7 +1405,10 @@ class UpdateManager:
         the wrongful apply nor the every-boot failure page a locked
         database would otherwise produce can occur.  When the
         recorded provenance cannot judge the premise, nothing is
-        discarded.  A current marker whose restore still cannot run
+        discarded.  A marker naming a snapshot that no longer EXISTS
+        is discarded the same way: a deleted snapshot can never be
+        restored, so treating it as a transient failure would page
+        the operator at every boot forever.  A current marker whose restore still cannot run
         keeps the marker (the next boot retries) and reports why,
         with the actual code/database state attached.
         """
@@ -1416,7 +1481,53 @@ class UpdateManager:
                         self._pending_restore_state_note(payload)}
         try:
             self.snapshots.restore(snap_id, force=True)
-        except Exception as exc:  # noqa: BLE001 — reported, marker kept
+        except Exception as exc:  # noqa: BLE001 — reported below
+            if isinstance(exc, SnapshotError) \
+                    and str(exc).startswith("no snapshot"):
+                # The restore target is GONE — the snapshot was
+                # deleted after the restore was deferred (the owner
+                # hand-deleted snapshots in the 2026-11-08 disk
+                # clear-out). That is the store's own missing-id
+                # wording (snapshots.get, the first thing restore()
+                # calls), and it is permanent, not transient:
+                # keeping the marker would re-report a restore
+                # failure at every boot forever, with no path to
+                # clear it short of a successful update. Discard it
+                # like the premise-gone case — marker out, journal
+                # entry, operator notice — and boot on the live
+                # database. A snapshot that EXISTS but fails
+                # verification raises a different SnapshotError and
+                # stays on the error path below, marker kept.
+                try:
+                    self.pending_restore_path.unlink()
+                except OSError:  # noqa: BLE001 — the discard stands
+                    _log.debug("could not remove pending-restore "
+                               "marker whose snapshot is gone",
+                               exc_info=True)
+                self._journal({"run_id": "boot",
+                               "event": "pending_restore_discarded_stale",
+                               "ts": time.time(), "snapshot": snap_id,
+                               "marker_run_id":
+                                   str(payload.get("run_id", "")),
+                               "marker_target_sha":
+                                   str(payload.get("target_sha", "")),
+                               "discarded_reason": "snapshot_missing"})
+                _log.warning(
+                    "discarded deferred database restore (snapshot "
+                    "%s, from the update that targeted %s): the "
+                    "snapshot no longer exists — it was deleted "
+                    "after the restore was deferred, so the restore "
+                    "can never be applied — booting on the live "
+                    "database", snap_id,
+                    str(payload.get("target_sha", ""))[:12] or "?")
+                return {"applied": False, "discarded_stale": True,
+                        "discarded_snapshot_missing": True,
+                        "snapshot": snap_id,
+                        "update_sha": str(payload.get("target_sha", "")),
+                        "from_sha": str(payload.get("from_sha", "")),
+                        "running_sha": self._git_sha(),
+                        "state_note":
+                            self._pending_restore_state_note(payload)}
             detail = f"{type(exc).__name__}: {exc}"
             _log.error("pending database restore of %s failed: %s",
                        snap_id, detail)
@@ -1437,6 +1548,80 @@ class UpdateManager:
         _log.warning("applied deferred database restore: snapshot %s",
                      snap_id)
         return {"applied": True, "snapshot": snap_id}
+
+    # ── restart confirmation ───────────────────────────────────────────────
+    def note_restart_intent(self, report: UpdateReport) -> bool:
+        """Record that the runtime is about to restart into ``report``.
+
+        The first half of the restart journey. The chat layer
+        restarts the process after a successful update, and the
+        process making that promise is the one about to die — its
+        "restarting now" cannot confirm anything. This marker (the
+        version the update landed, written before the restart) is
+        what the NEXT process checks at boot
+        (:meth:`consume_restart_intent`): the restart counts as
+        complete only when a process actually comes up running the
+        landed version. Returns True when a marker was written —
+        only for a real code move; a no-op update restarts into the
+        same code and needs no confirmation.
+        """
+        to_sha = str(getattr(report, "to_sha", "") or "")
+        from_sha = str(getattr(report, "from_sha", "") or "")
+        if not to_sha or (from_sha and from_sha == to_sha):
+            return False
+        try:
+            self.restart_intent_path.parent.mkdir(parents=True,
+                                                  exist_ok=True)
+            self.restart_intent_path.write_text(
+                json.dumps({"to_sha": to_sha, "from_sha": from_sha,
+                            "ts": time.time()}, indent=2),
+                encoding="utf-8")
+        except OSError:
+            _log.error("could not write the restart-intent marker at "
+                       "%s", self.restart_intent_path, exc_info=True)
+            return False
+        return True
+
+    def consume_restart_intent(self) -> dict[str, Any] | None:
+        """Settle a restart-intent marker at boot (the second half).
+
+        Returns None when no update restart was in flight. Otherwise
+        the marker is ALWAYS consumed — one-shot, so a later boot
+        never re-reports an old restart — and the receipt states the
+        verdict from facts: CONFIRMED when the running HEAD is the
+        version the update landed, UNCONFIRMED when it is anything
+        else (a hand checkout, an unreadable HEAD, a boot that never
+        took the new code). Silence after "restarting now" is
+        exactly how a dead boot used to hide.
+        """
+        try:
+            raw = self.restart_intent_path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        try:
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                payload = {}
+        except ValueError:
+            payload = {}
+        try:
+            self.restart_intent_path.unlink()
+        except OSError:  # noqa: BLE001 — the verdict still reports
+            _log.debug("could not remove the restart-intent marker",
+                       exc_info=True)
+        to_sha = str(payload.get("to_sha", "") or "")
+        running = self._git_sha()
+        confirmed = bool(to_sha) and running == to_sha
+        receipt = {"recovered": True,
+                   "action": ("restart_confirmed" if confirmed
+                              else "restart_unconfirmed"),
+                   "to_sha": to_sha,
+                   "from_sha": str(payload.get("from_sha", "") or ""),
+                   "running_sha": running}
+        self._journal({"run_id": "boot", "event": receipt["action"],
+                       "ts": time.time(), "to_sha": to_sha,
+                       "running_sha": running})
+        return receipt
 
     # ── quarantine ─────────────────────────────────────────────────────────
     def _quarantine(self) -> dict[str, Any]:
@@ -1586,23 +1771,6 @@ class UpdateManager:
             return 1, "", str(exc)
         return proc.returncode, proc.stdout or "", proc.stderr or ""
 
-    def _dirty_tracked_files(self) -> list[str]:
-        """Locally modified tracked files (untracked files excluded:
-        neither a pull nor a tree restore can destroy those)."""
-        rc, out, _ = self._git_out(
-            ["status", "--porcelain", "--untracked-files=no"])
-        if rc != 0:
-            return []  # not a repo / git missing — the pull reports it
-        files: list[str] = []
-        for line in out.splitlines():
-            if len(line) < 4:
-                continue
-            path = line[3:].strip()
-            if " -> " in path:  # rename: the destination is what's dirty
-                path = path.split(" -> ", 1)[1]
-            files.append(path.strip('"'))
-        return files
-
     def _status_paths(self) -> tuple[set[str], set[str]]:
         """(dirty tracked paths, untracked paths) from one status pass.
 
@@ -1692,14 +1860,24 @@ class UpdateManager:
     def _preflight_pull(self) -> tuple[bool, str]:
         """Decide whether pulling is safe for the owner's local changes.
 
-        Returns (proceed, detail). No local tracked changes → proceed
+        Returns (proceed, detail). No local changes → proceed
         silently. Changes that collide with the incoming change set →
         refuse (detail explains; nothing has been pulled or restored).
         Disjoint changes → proceed, with the detail naming what is
         being preserved.
+
+        Untracked files count as local changes for the collision
+        test: an untracked file sitting at a path the incoming
+        change set CREATES would stop the pull mid-checkout ("the
+        following untracked working tree file would be
+        overwritten"), leaving the cleanup machinery to undo a
+        half-applied pull — the refusal belongs here, up front,
+        exactly as for a modified tracked file. A disjoint untracked
+        file can neither be overwritten nor destroyed by the pull,
+        so it never blocks and is not named.
         """
-        dirty = self._dirty_tracked_files()
-        if not dirty:
+        tracked, untracked = self._status_paths()
+        if not tracked and not untracked:
             return True, ""
         rc, _out, err = self._git_out(["fetch", "--quiet"], timeout=300)
         if rc != 0:
@@ -1717,16 +1895,25 @@ class UpdateManager:
                 "branch cannot be determined to check them against the "
                 "incoming update — refusing to pull blind. Commit or "
                 "stash the local changes and retry.")
-        incoming = self._git_changed_files("HEAD", upstream)
-        collisions = sorted(set(dirty) & set(incoming))
-        if collisions:
+        incoming = set(self._git_changed_files("HEAD", upstream))
+        tracked_hits = sorted(tracked & incoming)
+        untracked_hits = sorted(untracked & incoming)
+        if tracked_hits or untracked_hits:
+            parts = []
+            if tracked_hits:
+                parts.append("modified: " + ", ".join(tracked_hits))
+            if untracked_hits:
+                parts.append("untracked (the update adds a file at "
+                             "this path): " + ", ".join(untracked_hits))
             return False, (
                 "uncommitted local changes collide with the incoming "
-                "update: " + ", ".join(collisions)
+                "update: " + "; ".join(parts)
                 + " — commit or stash them first; nothing was pulled "
                 "and nothing was overwritten.")
-        return True, ("local changes preserved (untouched by this "
-                      "update): " + ", ".join(sorted(dirty)))
+        if tracked:
+            return True, ("local changes preserved (untouched by this "
+                          "update): " + ", ".join(sorted(tracked)))
+        return True, ""
 
     def _restore_tree(self, from_sha: str) -> tuple[bool, str]:
         """Put the code tree back to ``from_sha``.
