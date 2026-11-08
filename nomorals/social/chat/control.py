@@ -206,7 +206,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "recheck", "joinq", "console", "undonotice",
     "flag", "rep", "repclear", "repdismiss",
     "steal", "sticker", "convert", "gif", "emoji", "customemoji",
-    "react",
+    "emojiart", "react",
     "awoo", "baka", "bite", "blush", "bonk", "bored",
     "bully", "cringe", "cry", "cuddle", "dance", "facepalm",
     "feed", "glomp", "handhold", "handshake", "happy", "highfive",
@@ -293,7 +293,7 @@ def public_menu_text() -> str:
         "see & hear — /tts /stt /look /image /lens\n"
         "tools — /decode /dns /whois /cipher /wisdom /think\n"
         "express — /steal /sticker /convert /gif /emoji "
-        "/customemoji /react\n"
+        "/customemoji /emojiart /react\n"
         "groups — /rules /member /glog /gsettings /strikes "
         "/recheck /joinq /console /undonotice /flag /rep "
         "/repclear /repdismiss /report /mute /unmute /ban "
@@ -470,6 +470,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "gif": (0, None),         # /gif <what> — a GIF from her library / providers
     "emoji": (0, None),       # /emoji <words|emoji> — the full Unicode table, searched; /emoji make <words> creates one it lacks (§22)
     "customemoji": (0, None), # /customemoji list|add|ref|show|remove — her own set (§22)
+    "emojiart": (0, None),    # /emojiart dot|ascii|mosaic|draw|combo|fancy|remix|save — text-native art (§22)
     "react": (0, None),       # /react [emoji] — react to the replied message (§22)
     # per-emotion reaction GIFs (wave C): /<emotion> [@someone] | as a reply —
     # sources + captions live in expression.REACTION_GIFS
@@ -1686,7 +1687,8 @@ def menu_session_render(topic: str = "", page: int = 1, *,
                         platform: str = "",
                         public_only: bool = False,
                         home: bool = False,
-                        continuation: bool = False):
+                        continuation: bool = False,
+                        media: dict | None = None):
     """Render one page of the live bot-DM menu — an ActionableMessage
     declaring ``session="menu"`` — or ``None`` when ``topic`` names
     no section (the caller then answers with the catalog text path).
@@ -1733,7 +1735,8 @@ def menu_session_render(topic: str = "", page: int = 1, *,
                          f"list {_menu_section_key(sections[0][1])}")])
         return actionable(render_card(card, platform=platform).text,
                           buttons, session="menu",
-                          session_edit=continuation)
+                          session_edit=continuation,
+                          media=media)
     idx = _menu_session_index(topic, sections)
     if idx is None:
         return None
@@ -2431,10 +2434,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/gif <what you're feeling>",
             "example": "/gif celebration dance",
             "related": "/steal · /sticker · /emoji"},
-    "emoji": {"what": "the FULL Unicode emoji table — every emoji that exists, named and keyworded, including rare ones some phones can't render. Search by meaning, or hand her an emoji and she'll name it (ZWJ sequences included). And what the table DOESN'T have, she creates: /emoji make <words> generates it and sends it as a sticker — a search no single emoji covers creates one too.",
-              "usage": "/emoji <words> · /emoji <an emoji> · /emoji make <words>",
+    "emoji": {"what": "the FULL Unicode emoji table — every emoji that exists, named and keyworded, including rare ones some phones can't render. Search by meaning, or hand her an emoji and she'll name it (ZWJ sequences included). And what the table DOESN'T have, she creates FOR REAL: /emoji make <words> authors a custom emoji of her own — her art at 100×100, registered in her Telegram custom-emoji pack where the surface allows, living in /customemoji with a unicode fallback (a search no single emoji covers creates one too). Emoji are not stickers: /emoji sticker <words> is the sticker maker, named for what it makes.",
+              "usage": "/emoji <words> · /emoji <an emoji> · /emoji make <words> · /emoji sticker <words>",
               "example": "/emoji make a cat riding a rocket",
-              "related": "/customemoji · /react · /sticker"},
+              "related": "/customemoji · /emojiart · /react · /sticker"},
+    "emojiart": {"what": "emoji art — pictures as TEXT: a photo becomes braille dot art (padded with braille blanks so the grid holds in chat), ASCII ramp art, or an emoji mosaic; she draws described subjects in dots; her own combo library serves kaomoji, combos and small art by topic, and grows by her drawing and your saves (never bulk-copied). Remix verbs reshape the last piece; the fancy styler restyles words in Unicode font variants.",
+                 "usage": "/emojiart dot|ascii|mosaic (reply to a picture or paste its link) · draw <subject> · combo <topic> · fancy <style> <words> · remix invert|mirror|smaller|bigger|ascii|braille|mosaic · save <name>",
+                 "example": "/emojiart draw a sleepy cat",
+                 "related": "/emoji · /customemoji · /sticker"},
     "customemoji": {"what": "Devon's own custom emoji set: named entries with a unicode face everywhere, platform custom refs where a platform carries them, and sticker art. Curated by the owner (or group admins).",
                     "usage": "/customemoji list · add <name> <emoji> · ref <name> <platform> <ref> · show <name> · remove <name>",
                     "example": "/customemoji add devon 🥷",
@@ -4041,7 +4048,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "monitor", "investigate"]),
     ("media system", ["music", "distribute", "play", "video", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
                       "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "caption", "imggen", "sham", "musicnote",
-                      "steal", "sticker", "convert", "gif", "emoji", "customemoji", "react"]),
+                      "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
@@ -4300,7 +4307,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "distribute", "dj", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
       "shorts", "caption", "imggen", "sham", "musicnote",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
-      "react",
+      "emojiart", "react",
       "awoo", "baka", "bite", "blush", "bonk", "bored",
       "bully", "cringe", "cry", "cuddle", "dance", "facepalm",
       "feed", "glomp", "handhold", "handshake", "happy", "highfive",
@@ -4482,8 +4489,9 @@ LIST_ONELINERS: dict[str, str] = {
     "sticker": "make a sticker from text/emoji, or a replied image/video",
     "convert": "convert replied media — /convert sticker-to-mp4 | gif-to-mp4 | mp4-to-gif | mp4-to-mp3 | mp3-to-video | image-to-sticker | video-to-sticker",
     "gif": "a GIF for the moment, from her library + providers — /gif <what>",
-    "emoji": "search the FULL Unicode emoji table by meaning — /emoji <words>",
+    "emoji": "search the FULL Unicode emoji table by meaning — /emoji <words> · /emoji make <words> creates a real custom emoji",
     "customemoji": "her own custom emoji set — /customemoji list|add|ref|show|remove",
+    "emojiart": "emoji art: pictures as braille dot art / ASCII / mosaics, drawn subjects, her combo library, fancy text — /emojiart draw <subject>",
     "react": "react to the replied message — /react [emoji]",
     "awoo": "reaction GIF: awoos at them — /awoo [@someone] or as a reply",
     "baka": "reaction GIF: calls them a baka — /baka [@someone] or as a reply",

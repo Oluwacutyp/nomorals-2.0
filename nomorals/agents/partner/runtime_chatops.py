@@ -528,16 +528,80 @@ class RuntimeChatOpsMixin:
         label = str(rec.label or rec.id)
         parts = tail.split(None, 1)
         head = parts[0].lower() if parts else ""
+
+        def _pool() -> list[str]:
+            from ...social.pairing import status_react_pool_for
+
+            custom: list[str] = []
+            provider = getattr(personal, "status_react_pool", None)
+            if provider is not None:
+                try:
+                    custom = list(provider(rec) or [])
+                except Exception:  # noqa: BLE001 - display garnish
+                    custom = []
+            return status_react_pool_for(rec, custom)
+
+        def _mode() -> str:
+            if rec.status_react_rotate:
+                return (f"rotating through {len(_pool())} emojis "
+                        f"(her custom set + yours + the built-in "
+                        f"pool)")
+            return f"pinned to {rec.status_react_emoji}"
+
         if head == "emoji":
             emoji = parts[1].strip() if len(parts) > 1 else ""
             if not emoji:
                 return "usage: /statusreact emoji <emoji>"
             try:
                 personal.set_status_react_emoji(rec.id, emoji)
+                personal.set_status_react_rotation(
+                    rec.id, rotate=False)
             except ValueError as exc:
                 return str(exc)
             return (f"status reactions on {label} now use "
-                    f"{emoji}.")
+                    f"{emoji} — pinned (rotation off). "
+                    f"/statusreact rotate on brings the rotation "
+                    f"back.")
+        if head == "rotate":
+            words = parts[1].split() if len(parts) > 1 else []
+            if not words or words[0].lower() not in ("on", "off"):
+                return "usage: /statusreact rotate on|off"
+            on = words[0].lower() == "on"
+            try:
+                personal.set_status_react_rotation(rec.id,
+                                                   rotate=on)
+            except ValueError as exc:
+                return str(exc)
+            rec = svc["registry"].get(rec.id) or rec
+            return (f"status reaction rotation {'ON' if on else 'OFF'} "
+                    f"for {label} — {_mode()}.")
+        if head == "pool":
+            words = parts[1].split(None, 1) if len(parts) > 1 \
+                else []
+            sub = words[0].lower() if words else ""
+            if sub in ("add", "remove") and len(words) > 1:
+                emoji = words[1].strip()
+                try:
+                    if sub == "add":
+                        personal.set_status_react_rotation(
+                            rec.id, add=[emoji])
+                    else:
+                        personal.set_status_react_rotation(
+                            rec.id, remove=[emoji])
+                except ValueError as exc:
+                    return str(exc)
+                rec = svc["registry"].get(rec.id) or rec
+                return (f"{emoji} {'added to' if sub == 'add' else 'removed from'} "
+                        f"the rotation pool for {label} "
+                        f"({len(_pool())} emojis now).")
+            if sub:
+                return ("usage: /statusreact pool · "
+                        "/statusreact pool add <emoji> · "
+                        "/statusreact pool remove <emoji>")
+            return (f"the rotation pool for {label} "
+                    f"({len(_pool())}): {' '.join(_pool())} — "
+                    f"her custom set leads; /statusreact pool "
+                    f"add <emoji> adds yours.")
         if head in ("on", "off"):
             on = head == "on"
             try:
@@ -545,20 +609,22 @@ class RuntimeChatOpsMixin:
             except ValueError as exc:
                 return str(exc)
             return (f"/statusreact {'ON' if on else 'OFF'} "
-                    f"for {label} — Devon reacts "
-                    f"{rec.status_react_emoji} to contacts' "
-                    f"statuses as you."
+                    f"for {label} — Devon reacts to contacts' "
+                    f"statuses as you, {_mode()}."
                     + self._chatops_toggle_note(
                         "status_react", "whatsapp", on))
         if tail:
             return ("usage: /statusreact [on|off] · "
-                    "/statusreact emoji <emoji>")
+                    "/statusreact emoji <emoji> (pins one) · "
+                    "/statusreact rotate on|off · "
+                    "/statusreact pool [add|remove <emoji>]")
         state = "ON" if rec.toggle("status_react") else "OFF"
+        last = (f" Last face used: {rec.status_react_last}."
+                if rec.status_react_last else "")
         return (f"/statusreact is {state} for {label} "
-                f"(emoji {rec.status_react_emoji}). When it's "
-                f"on, that reaction lands on each contact's "
-                f"status once, as you — it never messages "
-                f"anyone."
+                f"({_mode()}). When it's on, one reaction lands "
+                f"on each contact's status once, as you — it "
+                f"never messages anyone.{last}"
                 + self._chatops_toggle_note(
                     "status_react", "whatsapp",
                     rec.toggle("status_react")))

@@ -8,6 +8,17 @@ creates too — generated through the image pipeline's rung,
 post-processed into a real sticker, sent through the maker's
 own seam.  No rung configured earns one honest line, never a
 fabrication and never a near-match passed off as the answer.
+
+EXPRESSION COMPLETION (owner correction, 2026-11-07 —
+"Not stickers. Emoji is different from stickers!!!"): the
+2026-11-06 shape above was itself the mislabel.  /emoji make
+now authors a REAL custom emoji (her studio's 100×100 art,
+registered into her Telegram pack where the surface allows,
+living in /customemoji); the sticker maker survives under
+its honest name (/emoji sticker), and create_emoji_sticker
+gained her own local renderer as its floor rung — no
+configured backend no longer means no creation.  The pins
+below were updated to the corrected contract, with causes.
 """
 
 from __future__ import annotations
@@ -192,20 +203,71 @@ def test_create_core_makes_a_sticker_shaped_artifact(tmp_path):
     assert "emoji" in prompt and "outline" in prompt
 
 
-def test_create_core_without_a_rung_is_honest(tmp_path, no_backend):
+def test_create_core_without_a_backend_uses_her_own_hand(
+        tmp_path, no_backend):
+    # Expression completion (2026-11-07): no configured image
+    # backend no longer means no creation — her local studio
+    # renderer is the floor rung and the sticker still lands.
+    path = create_emoji_sticker("a gold heart", tmp_path)
+    assert path.exists() and path.suffix == ".webp"
+    with Image.open(path) as img:
+        assert img.size == (512, 512)
+
+
+def test_create_core_every_rung_down_is_honest(
+        tmp_path, no_backend, monkeypatch):
+    # The honest line survives for the case where EVERY rung
+    # fails — backend unconfigured AND her renderer broken.
+    from nomorals.social.chat import emoji_studio
+
+    def _boom(*a, **k):
+        raise RuntimeError("renderer exploded")
+
+    monkeypatch.setattr(emoji_studio, "sticker_master_png",
+                        _boom)
     with pytest.raises(EmojiCreateUnavailable) as caught:
         create_emoji_sticker("anything", tmp_path)
     assert "no generative backend" in str(caught.value)
+    assert "renderer exploded" in str(caught.value)
 
 
 # ── the command ──────────────────────────────────────────────
 
 
-def test_make_creates_and_sends_a_sticker(tmp_path, fake_backend):
+def test_make_creates_a_real_custom_emoji(tmp_path, fake_backend):
+    # Expression completion (2026-11-07): /emoji make authors
+    # a REAL custom emoji — her studio's 100×100 art, joining
+    # her /customemoji set.  This rig's adapter carries no
+    # pack verb, so no registration happens here and the art
+    # travels as a sticker WITH its honest note (the pack
+    # path itself is pinned in test_expression_completion).
     rt, adapter, chat = _rig(tmp_path)
-    out = rt._control_emoji("make a cat riding a rocket",
+    out = str(rt._control_emoji("make a cat riding a rocket",
+                                _Msg(chat)))
+    registry = rt._expression_library().custom_emoji
+    names = registry.names()
+    assert len(names) == 1
+    entry = registry.get(names[0])
+    assert entry["unicode"]  # a fallback face exists
+    assert entry["image_path"].endswith(".png")
+    with Image.open(entry["image_path"]) as img:
+        assert img.size == (100, 100)  # custom-emoji format
+    assert len(adapter.media_sent) == 1
+    assert adapter.media_sent[0].kind == "sticker"
+    assert "custom set" in out
+    # the image backend is NOT the author of a custom emoji —
+    # her studio is (the backend ladder serves /emoji sticker)
+    assert fake_backend.prompts == []
+
+
+def test_sticker_head_makes_a_sticker(tmp_path, fake_backend):
+    # The maker under its honest name: /emoji sticker goes
+    # through the image rung and sends a real sticker; the
+    # sticker WAS the reply ("").
+    rt, adapter, chat = _rig(tmp_path)
+    out = rt._control_emoji("sticker a cat riding a rocket",
                             _Msg(chat))
-    assert out == ""  # the sticker WAS the reply
+    assert out == ""
     assert len(adapter.media_sent) == 1
     ref = adapter.media_sent[0]
     assert ref.kind == "sticker"
@@ -216,13 +278,16 @@ def test_make_creates_and_sends_a_sticker(tmp_path, fake_backend):
 
 def test_uncovered_search_creates_instead_of_dumping(
         tmp_path, fake_backend):
-    # the owner's exact live test: '/emoji family rocket'
+    # the owner's exact live test: '/emoji family rocket' —
+    # still a creation, never a dump; now a REAL custom emoji
+    # (see test_make_creates_a_real_custom_emoji).
     rt, adapter, chat = _rig(tmp_path)
-    out = rt._control_emoji("family rocket", _Msg(chat))
-    assert out == ""
+    out = str(rt._control_emoji("family rocket", _Msg(chat)))
+    registry = rt._expression_library().custom_emoji
+    assert len(registry.names()) == 1
     assert len(adapter.media_sent) == 1
     assert adapter.media_sent[0].kind == "sticker"
-    assert "family rocket" in fake_backend.prompts[0]
+    assert "custom set" in out
 
 
 def test_create_grammar_needs_a_description(tmp_path, fake_backend):
@@ -232,22 +297,38 @@ def test_create_grammar_needs_a_description(tmp_path, fake_backend):
     assert adapter.media_sent == []
 
 
-def test_no_rung_configured_is_one_honest_line(
+def test_no_backend_configured_still_creates(
         tmp_path, no_backend):
-    from nomorals.agents.partner.failures import recent_failures
-
+    # The EC2 case that was dead (2026-11-07): no image
+    # backend configured — creation used to be one honest
+    # refusal.  Her own renderer is the floor now: the emoji
+    # is created for real and joins her set.
     rt, adapter, chat = _rig(tmp_path)
-    before = len(recent_failures(200))
-    out = rt._control_emoji("make a dragon made of lightning",
-                            _Msg(chat))
-    text = str(out)
-    assert "can't create one on this install yet" in text
-    assert "no generative backend is configured" in text
-    assert adapter.media_sent == []  # nothing fabricated
+    out = str(rt._control_emoji(
+        "make a dragon made of lightning", _Msg(chat)))
+    registry = rt._expression_library().custom_emoji
+    assert len(registry.names()) == 1
+    assert len(adapter.media_sent) == 1
+    assert "custom set" in out
+
+
+def test_creation_failure_is_one_honest_line(
+        tmp_path, monkeypatch):
+    # When even her renderer fails, the refusal is one plain
+    # journaled line — never a fabrication.
+    from nomorals.agents.partner.failures import recent_failures
+    from nomorals.social.chat import emoji_studio
+
+    def _boom(*a, **k):
+        raise RuntimeError("renderer exploded")
+
+    monkeypatch.setattr(emoji_studio, "render_master", _boom)
+    rt, adapter, chat = _rig(tmp_path)
+    out = str(rt._control_emoji("make a dragon", _Msg(chat)))
+    assert "my own renderer failed" in out
+    assert adapter.media_sent == []
     sites = [f.site for f in recent_failures(200)]
-    assert len(sites) > before or \
-        "expression.emoji_create.unavailable" in sites
-    assert "expression.emoji_create.unavailable" in sites
+    assert "expression.emoji_create.render" in sites
 
 
 def test_creation_respects_the_group_gate(tmp_path, fake_backend):

@@ -651,6 +651,24 @@ class RuntimeProvisionMixin:
                 return bool(res.get("ok"))
             return bool(res)
 
+        def _status_react_pool(rec: Any) -> list[str]:
+            """The rotation's custom half for one account: the
+            unicode faces of HER custom emoji set (the
+            /customemoji registry).  Read live from the
+            expression library so a set she grows mid-run joins
+            the rotation without a restart; any failure leaves
+            the built-in + account pool, never a dead chain."""
+            try:
+                registry = self._expression_library().custom_emoji
+                return [str(entry.get("unicode") or "")
+                        for _name, entry in
+                        sorted(registry.to_dict().items())
+                        if str(entry.get("unicode") or "")]
+            except Exception as exc:  # noqa: BLE001 - garnish seam
+                record_failure(
+                    "runtime_provision.status_react_pool", exc)
+                return []
+
         def _call_rejector(rec: Any, item: dict[str, Any]) -> bool:
             """Reject one ringing call as the owner (chat &
             privacy wave — the anticall toggle's verb): the
@@ -678,7 +696,8 @@ class RuntimeProvisionMixin:
             status_viewer=_status_viewer,
             story_viewer=_story_viewer,
             status_reactor=_status_reactor,
-            call_rejector=_call_rejector)
+            call_rejector=_call_rejector,
+            status_react_pool=_status_react_pool)
         svc = {
             "supervisor": sup, "registry": sup.registry,
             "pairer": pairer, "personal": personal,

@@ -1322,8 +1322,33 @@ class MakerService:
                                 caption, send)
             out.update({"source": name, **info})
             return out
-        return {"sent": False, "reason": (
-            "the picture pools are down right now — "
-            f"try again in a bit ({last})" if last else
-            "the picture pools are down right now — "
-            "try again in a bit")}
+        # Her own hand (expression completion, 2026-11-07):
+        # the pools are anime-only and can all be down — the
+        # pair still lands, drawn by HER studio: one of her
+        # own artworks, split down the middle exactly like a
+        # pool piece (the pair law holds: never two unrelated
+        # pictures dressed as a pair).
+        try:
+            import io
+
+            from . import emoji_studio
+
+            spec = emoji_studio.parse_design(
+                "two hearts together, gold and pink")
+            img = emoji_studio.render_master(spec, size=800)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            png, info = make_diptych(buf.getvalue())
+        except Exception:  # noqa: BLE001 - every rung failed
+            return {"sent": False, "reason": (
+                "the picture pools are down right now — "
+                f"try again in a bit ({last})" if last else
+                "the picture pools are down right now — "
+                "try again in a bit")}
+        caption = ("💞 couple pp — my own artwork this time "
+                   "(the picture pools are down), drawn by me "
+                   "and split down the middle: the left half "
+                   "for one of you, the right half for the other")
+        out = self._deliver(png, ".png", "image/png", caption, send)
+        out.update({"source": "self:render", **info})
+        return out

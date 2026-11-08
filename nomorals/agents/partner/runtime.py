@@ -4292,7 +4292,8 @@ class PartnerRuntime(
         if topic.lower() in ("home", "index"):
             return menu_session_render(
                 platform=platform, public_only=public_only,
-                home=True, continuation=True)
+                home=True, continuation=True,
+                media=self._menu_head_media(platform))
         if not topic:
             if tapped and command.kind in ("list", "commands"):
                 # The category menu's "All commands" tap: start the
@@ -4302,10 +4303,33 @@ class PartnerRuntime(
                     platform=platform, public_only=public_only)
             return menu_session_render(
                 platform=platform, public_only=public_only,
-                home=True, continuation=tapped)
+                home=True, continuation=tapped,
+                media=self._menu_head_media(platform))
         return menu_session_render(
             topic, page, platform=platform, public_only=public_only,
             continuation=True)
+
+    def _menu_head_media(self, platform: str):  # type: ignore[no-untyped-def]
+        """The menu home's picture head (owner, 2026-11-07:
+        "no pic no vid" — the working menu was media-dead):
+        her banner, from her media library (rendered by her
+        own studio the first time, then shelved).  Only the
+        Telegram BOT surfaces take it — photo + caption +
+        keyboard is their native send; the MTProto and
+        WhatsApp menus keep the text head (capability-checked,
+        never faked).  None on any failure: the menu never
+        breaks for its picture."""
+        if platform not in ("telegram-bot", "telegram-personal"):
+            return None
+        try:
+            item = self._expression_service().menu_banner_item()
+        except Exception as exc:  # noqa: BLE001 - menu survives it
+            record_failure(
+                "runtime.PartnerRuntime._menu_head_media", exc)
+            return None
+        if not item or not item.get("path"):
+            return None
+        return {"path": str(item["path"]), "kind": "image"}
 
     def _clear_menu_grid_once(self, message) -> None:
         """Retire the persistent catalog reply keyboard in this chat.
@@ -4367,6 +4391,15 @@ class PartnerRuntime(
         # per chat, edited in place — see social/chat/live_session.
         session = str(getattr(reply, "session", "") or "")
         session_edit = bool(getattr(reply, "session_edit", False))
+        # A declared media head (the menu's picture): the fresh
+        # send goes out as a media message — photo + this text
+        # as its caption + the same keyboard — where the
+        # surface's adapter carries it; session renders then
+        # edit the caption in place.  Any failure falls through
+        # to the plain text send below, unchanged.
+        media = getattr(reply, "media", None)
+        if not isinstance(media, dict) or not media.get("path"):
+            media = None
         text = str(text or "")
         if not text and not buttons:
             return None
@@ -4468,12 +4501,27 @@ class PartnerRuntime(
         parse_mode = "HTML" if ("<b>" in text or "<code>" in text
                                 or "<i>" in text) else ""
         if session:
+            _was_media = self._live_session_registry().is_media(
+                str(message.chat.key or ""), session)
             edited = self._try_session_edit(
                 message, session, session_edit=session_edit,
                 text=text, buttons=btn_rows or [],
-                parse_mode=parse_mode)
+                parse_mode=parse_mode, media=_was_media)
             if edited is not None:
                 return edited
+        if media is not None:
+            sent_media = self._send_reply_media_head(
+                message, media, text, btn_rows or [],
+                parse_mode=parse_mode)
+            if sent_media is not None:
+                if session:
+                    _mid = str(getattr(sent_media, "message_id", "")
+                               or "")
+                    if _mid:
+                        self._live_session_registry().record(
+                            str(message.chat.key or ""), session,
+                            _mid, media=True)
+                return sent_media
         result = self.gateway.send(message.chat.platform, message.chat,
                                    text, buttons=buttons,
                                    parse_mode=parse_mode,
@@ -4504,8 +4552,52 @@ class PartnerRuntime(
             registry = self._live_sessions_obj = LiveSessionRegistry()
         return registry
 
+    def _send_reply_media_head(self, message, media, text,  # type: ignore[no-untyped-def]
+                               buttons, *, parse_mode=""):
+        """Send a reply's declared media head through the
+        surface adapter's native media verb — photo with the
+        reply text as caption and the reply's keyboard riding
+        it.  Returns the SendResult on success, None to fall
+        back to the text send: a caption over the surface's
+        caption limit, an adapter without a button-carrying
+        media verb, or a failed send all degrade honestly —
+        the reply still lands as text, never lost."""
+        try:
+            from ...social.chat.base import MediaRef
+            from ...social.chat.platform_limits import for_platform
+
+            platform = str(message.chat.platform or "")
+            limits = for_platform(platform)
+            if limits is not None and len(text) > limits.max_caption:
+                return None
+            adapter = (getattr(self.gateway, "adapters", {})
+                       or {}).get(platform)
+            fn = getattr(adapter, "send_media", None) \
+                if adapter is not None else None
+            if fn is None:
+                return None
+            import inspect as _inspect
+
+            params = _inspect.signature(fn).parameters
+            if "buttons" not in params:
+                return None
+            ref = MediaRef(path=str(media.get("path") or ""),
+                           kind=str(media.get("kind") or "image"),
+                           name="menu")
+            result = fn(message.chat, ref, caption=text,
+                        buttons=buttons or None,
+                        parse_mode=parse_mode)
+            if result is not None and getattr(result, "ok", False):
+                return result
+            return None
+        except Exception as exc:  # noqa: BLE001 - degrade to text
+            record_failure(
+                "runtime.PartnerRuntime._send_reply_media_head", exc)
+            return None
+
     def _try_session_edit(self, message, session, *,  # type: ignore[no-untyped-def]
-                          session_edit, text, buttons, parse_mode):
+                          session_edit, text, buttons, parse_mode,
+                          media=False):
         """Render a live-session state change by EDITING the
         session's live message instead of posting a follow-up.
         Returns a SendResult when the edit landed; None falls
@@ -4531,10 +4623,11 @@ class PartnerRuntime(
                 return None
             if not edit_session_message(
                     adapter, message.chat, target, text,
-                    buttons=buttons, parse_mode=parse_mode):
+                    buttons=buttons, parse_mode=parse_mode,
+                    media=media):
                 return None
             registry.record(str(message.chat.key or ""), session,
-                            target)
+                            target, media=media)
             return SendResult(ok=True,
                               platform=message.chat.platform,
                               message_id=target)
@@ -6266,6 +6359,8 @@ class PartnerRuntime(
             return self._control_emoji(command.tail or "", message)
         if kind == "customemoji":
             return self._control_customemoji(command.tail or "", message)
+        if kind == "emojiart":
+            return self._control_emojiart(command.tail or "", message)
         if kind == "react":
             return self._control_react(command.tail or "", message)
         if kind in {

@@ -5533,8 +5533,146 @@ class TelegramBotAdapter(ChatAdapter):
             return SendResult(ok=False, platform=self.name, error=str(exc),
                               seconds=time.perf_counter() - started)
 
+    @property
+    def username(self) -> str:
+        """The bot's own @username ("" until preflight's getMe
+        lands) — custom-emoji pack names are built from it."""
+        return str(self._bot_username or "")
+
+    def _inline_markup(self, buttons) -> dict[str, Any] | None:  # type: ignore[no-untyped-def]
+        """The reply_markup dict for authored button rows —
+        the same construction send()/edit_message use (labels
+        + HMAC-signed callback data via _button_json)."""
+        if not buttons:
+            return None
+        keyboard = []
+        for row in buttons:
+            krow = [self._button_json(str(label), str(data))
+                    for label, data in row]
+            if krow:
+                keyboard.append(krow)
+        return {"inline_keyboard": keyboard} if keyboard else None
+
+    def edit_caption(self, chat: ChatRef, message_id: str,
+                     caption: str, *,
+                     buttons: list[list[tuple[str, str]]] | None = None,
+                     parse_mode: str = "",
+                     ) -> dict[str, Any] | None:
+        """Replace a MEDIA message's caption + inline keyboard
+        in place (editMessageCaption) — the live-session edit
+        verb for a session whose live message carries a photo
+        head (the menu).  Mirrors edit_message's contract:
+        the API result, or None on ANY failure, so the caller
+        falls back to a fresh send.  Never raises."""
+        params: dict[str, Any] = {
+            "chat_id": int(chat.chat_id),
+            "message_id": int(message_id),
+            "caption": (caption or "")[:for_platform(
+                "telegram-bot").max_caption],
+        }
+        if parse_mode in ("HTML", "Markdown", "MarkdownV2"):
+            params["parse_mode"] = parse_mode
+        markup = self._inline_markup(buttons)
+        if markup:
+            params["reply_markup"] = markup
+        try:
+            return self._api("editMessageCaption", **params)
+        except Exception as exc:  # noqa: BLE001 - edit is best-effort
+            _log.debug("telegram-bot: edit_caption failed: %s", exc)
+            return None
+
+    # ── custom emoji (expression completion, 2026-11-07) ────
+    def custom_emoji_pack_name(self, slug: str) -> str:
+        """Her custom-emoji pack's Bot API name for one slug:
+        pack names must end ``_by_<bot username>``."""
+        user = self.username or "devon"
+        slug = "".join(ch for ch in str(slug or "devon").lower()
+                       if ch.isalnum() or ch == "_")[:24] or "devon"
+        return f"devon_{slug}_by_{user}"
+
+    def create_or_extend_custom_emoji_pack(
+            self, user_id: str, slug: str, title: str,
+            png_path: str, fallback: str) -> dict[str, Any]:
+        """Create her custom-emoji pack (or add to it when it
+        already exists) with one new 100×100 PNG, and return
+        ``{"pack", "custom_emoji_id", "created"}`` — the id
+        read back from getStickerSet, never assumed.  Raises
+        ValidationError (the _api contract) on any refusal;
+        the caller reports it honestly and keeps the art."""
+        name = self.custom_emoji_pack_name(slug)
+        sticker = json.dumps([{
+            "sticker": "attach://emoji_file",
+            "format": "static",
+            "emoji_list": [str(fallback or "✨")],
+        }], ensure_ascii=False)
+        created = False
+        try:
+            self._api("getStickerSet", name=name)
+        except Exception:  # noqa: BLE001 - absent pack: create it
+            self._api_upload("createNewStickerSet", {
+                "user_id": str(user_id), "name": name,
+                "title": str(title or "Devon's emoji"),
+                "stickers": sticker, "sticker_type": "custom_emoji",
+            }, "emoji_file", Path(png_path))
+            created = True
+        if not created:
+            one = json.dumps({
+                "sticker": "attach://emoji_file",
+                "format": "static",
+                "emoji_list": [str(fallback or "✨")],
+            }, ensure_ascii=False)
+            self._api_upload("addStickerToSet", {
+                "user_id": str(user_id), "name": name,
+                "sticker": one,
+            }, "emoji_file", Path(png_path))
+        pack = self._api("getStickerSet", name=name)
+        stickers = pack.get("stickers") or []
+        chosen = None
+        for entry in reversed(stickers):
+            if str(entry.get("emoji") or "") == str(fallback or ""):
+                chosen = entry
+                break
+        if chosen is None and stickers:
+            chosen = stickers[-1]
+        return {"pack": name, "created": created,
+                "custom_emoji_id": str(
+                    (chosen or {}).get("custom_emoji_id") or "")}
+
+    def send_custom_emoji(self, chat: ChatRef, fallback: str,
+                          custom_emoji_id: str) -> SendResult:
+        """Send one of her created emoji AS an emoji: a message
+        whose text is the unicode fallback, carrying a
+        custom_emoji entity over it — Telegram renders her art
+        in place of the fallback.  (Bots may use custom emoji
+        from packs they created; a refusal comes back as the
+        API's own error and the caller falls back honestly.)"""
+        started = time.perf_counter()
+        fallback = str(fallback or "✨")
+        utf16_len = len(fallback.encode("utf-16-le")) // 2
+        entities = json.dumps([{
+            "type": "custom_emoji", "offset": 0,
+            "length": utf16_len,
+            "custom_emoji_id": str(custom_emoji_id),
+        }], ensure_ascii=False)
+        try:
+            result = self._api("sendMessage",
+                               chat_id=int(chat.chat_id),
+                               text=fallback, entities=entities)
+            self.stats["sent"] += 1
+            return SendResult(
+                ok=True, platform=self.name,
+                message_id=str(result.get("message_id", "")),
+                seconds=time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001
+            self.stats["send_errors"] += 1
+            return SendResult(ok=False, platform=self.name,
+                              error=str(exc),
+                              seconds=time.perf_counter() - started)
+
     def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "",
-                   parse_mode: str = "") -> SendResult:
+                   parse_mode: str = "",
+                   buttons: list[list[tuple[str, str]]] | None = None,
+                   ) -> SendResult:
         started = time.perf_counter()
         path = Path(media.path)
         if media.kind == "voice" or getattr(media, "voice_note", False):
@@ -5563,6 +5701,7 @@ class TelegramBotAdapter(ChatAdapter):
         # the expression library's cache means a GIF uploads once
         # and is re-sent by id forever after (§21).
         held_id = str(getattr(media, "file_id", "") or "")
+        markup = self._inline_markup(buttons)
         if held_id:
             try:
                 data: dict[str, Any] = {"chat_id": chat.chat_id,
@@ -5573,6 +5712,8 @@ class TelegramBotAdapter(ChatAdapter):
                         else caption[:cap0]
                     if parse_mode in ("HTML", "Markdown", "MarkdownV2"):
                         data["parse_mode"] = parse_mode
+                if markup:
+                    data["reply_markup"] = markup
                 result = self._api(method, **data)
                 self.stats["sent"] += 1
                 return SendResult(
@@ -5599,6 +5740,10 @@ class TelegramBotAdapter(ChatAdapter):
                 data["caption"] = caption if parse_mode else caption[:cap]
             if parse_mode in ("HTML", "Markdown", "MarkdownV2"):
                 data["parse_mode"] = parse_mode
+            if markup:
+                # Multipart fields are strings — the keyboard
+                # rides as its JSON form.
+                data["reply_markup"] = json.dumps(markup)
             try:
                 result = self._api_upload(method, data, field, path)
             except Exception as exc:  # noqa: BLE001 - classified below

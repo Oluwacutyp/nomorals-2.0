@@ -57,6 +57,7 @@ takes the oldest first and the journal keeps the fact of the prune.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -66,8 +67,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .pairing import (PERSONAL_TOGGLES, AccountRecord, PairingRegistry,
-                      resolve_account)
+from .pairing import PERSONAL_TOGGLES, AccountRecord, PairingRegistry, resolve_account
 
 #: Bounds (constructor-overridable; the values are the shipped caps).
 DM_CACHE_PER_CHAT = 100        # messages kept per conversation
@@ -356,6 +356,8 @@ class PersonalSurfaces:
                  call_rejector: Callable[[AccountRecord,
                                           dict[str, Any]], bool] | None
                  = None,
+                 status_react_pool: Callable[[AccountRecord],
+                                             list[str]] | None = None,
                  clock: Callable[[], float] = time.time) -> None:
         self.registry = registry
         self.vault = vault
@@ -375,6 +377,12 @@ class PersonalSurfaces:
         #: owner's sticky stop — a stopped platform never acts.
         self.status_reactor = status_reactor
         self.call_rejector = call_rejector
+        #: The rotation's custom half: her /customemoji set's
+        #: unicode faces for this account, supplied by the
+        #: runtime (the expression library lives a layer away;
+        #: this surface stays transport- and library-free).
+        #: None → the pool is the account's own + the built-in.
+        self.status_react_pool = status_react_pool
         self._clock = clock
         self._seen_status: set[tuple[str, str]] = set()
         self._missed_status: set[tuple[str, str]] = set()
@@ -612,9 +620,12 @@ class PersonalSurfaces:
         twice.  Marked viewed as the owner when the status-viewing
         toggle is on — independently of saving, at most once per
         post per process.  Reacted to as the owner when the
-        status-react toggle is on (wave F): one reaction with the
-        account's configured emoji, at most once per post per
-        process, journaled — and never while an owner stop order
+        status-react toggle is on (wave F): one reaction per
+        post, at most once per post per process, journaled —
+        the face drawn from the account's rotation pool (her
+        custom set ∪ his additions ∪ the built-in pool), or the
+        pinned emoji when rotation is off — and never while an
+        owner stop order
         stands for the platform, because a reaction is an ACTION
         on his account, not an observation.  ``media_missing`` is
         the adapter saying the post carried media its download
@@ -642,7 +653,23 @@ class PersonalSurfaces:
                 and not self.registry.owner_stopped(platform):
             rkey = (rec.id, str(source_id))
             if rkey not in self._reacted_status:
-                emoji = str(rec.status_react_emoji or "❤️")
+                # The rotation (expression completion): each
+                # status draws the NEXT face from the pool —
+                # her custom set ∪ the account's additions ∪
+                # the built-in pool — never the same face twice
+                # in a row; rotation off means the pinned emoji.
+                # The pick is a peek: cursor + last commit onto
+                # the record only when the reaction lands.
+                from .pairing import status_react_pick
+
+                custom: list[str] = []
+                if self.status_react_pool is not None:
+                    try:
+                        custom = list(self.status_react_pool(rec)
+                                      or [])
+                    except Exception:  # noqa: BLE001 - pool is garnish
+                        custom = []
+                emoji, new_cursor = status_react_pick(rec, custom)
                 try:
                     reacted = bool(self.status_reactor(rec, {
                         "poster_id": poster_id,
@@ -653,6 +680,14 @@ class PersonalSurfaces:
                     reacted = False    # records its own failures;
                 if reacted:            # a miss just stays unreacted
                     self._reacted_status.add(rkey)
+                    if rec.status_react_rotate:
+                        rec.status_react_cursor = new_cursor
+                        rec.status_react_last = emoji
+                        # the walk state is garnish — a failed
+                        # persist never undoes a landed reaction
+                        with contextlib.suppress(Exception):
+                            self.registry.upsert(rec)
+                    # (the journal below is the reaction's record)
                     _append_jsonl(self.vault.journal_path, {
                         "ts": ts, "kind": "status_react",
                         "account": rec.id, "platform": platform,
@@ -905,6 +940,34 @@ class PersonalSurfaces:
         if rec is None:
             raise ValueError(f"no paired account {account_id!r}")
         rec.status_react_emoji = emoji
+        return self.registry.upsert(rec)
+
+    def set_status_react_rotation(self, account_id: str, *,
+                                  rotate: bool | None = None,
+                                  add: Any = (),
+                                  remove: Any = ()
+                                  ) -> AccountRecord:
+        """The rotation controls behind /statusreact: turn
+        rotation on/off, and manage the account's own pool
+        additions (her custom set and the built-in pool are
+        always members — this list is only the owner's extras).
+        Same contract as set_status_react_emoji: unknown
+        account → ValueError with the plain reason."""
+        rec = self.registry.get(str(account_id or ""))
+        if rec is None:
+            raise ValueError(f"no paired account {account_id!r}")
+        pool = [str(e).strip() for e in (rec.status_react_pool
+                                         or []) if str(e).strip()]
+        for emoji in add or ():
+            emoji = str(emoji or "").strip()
+            if emoji and emoji not in pool:
+                pool.append(emoji)
+        for emoji in remove or ():
+            emoji = str(emoji or "").strip()
+            pool = [e for e in pool if e != emoji]
+        rec.status_react_pool = pool
+        if rotate is not None:
+            rec.status_react_rotate = bool(rotate)
         return self.registry.upsert(rec)
 
     # ── presence (always online) ────────────────────────────────

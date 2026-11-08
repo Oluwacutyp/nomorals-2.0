@@ -59,21 +59,30 @@ class ActionableMessage:
     live message even when the turn was typed rather than tapped.
     """
 
-    __slots__ = ("text", "buttons", "session", "session_edit")
+    __slots__ = ("text", "buttons", "session", "session_edit",
+                 "media")
 
     def __init__(self, text: str, buttons: Keyboard,
-                 session: str = "", session_edit: bool = False) -> None:
+                 session: str = "", session_edit: bool = False,
+                 media: dict | None = None) -> None:
         self.text = text
         self.buttons = buttons
         self.session = str(session or "")
         self.session_edit = bool(session_edit)
+        # An optional media head: {"path": ..., "kind": "image"}
+        # — the presentation layer sends the session's live
+        # message as a media message (photo + caption + the
+        # same keyboard) where the surface supports it; later
+        # renders edit the caption in place.  None = text-only.
+        self.media = media
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"ActionableMessage(text={self.text[:40]!r}, buttons={self.buttons!r})"
 
 
 def actionable(text: str, buttons: list, *, session: str = "",
-               session_edit: bool = False) -> ActionableMessage:
+               session_edit: bool = False,
+               media: dict | None = None) -> ActionableMessage:
     """Build a message with tappable inline buttons.
 
     ``buttons`` is ``[(label, command), …]`` — ``command`` is the chat
@@ -112,7 +121,8 @@ def actionable(text: str, buttons: list, *, session: str = "",
     keyboard: Keyboard = [[_pair(pair) for pair in row]
                           for row in rows if row]
     return ActionableMessage(text, keyboard, session=session,
-                             session_edit=session_edit)
+                             session_edit=session_edit,
+                             media=media)
 
 
 def wide_layout(keyboard: Keyboard | None) -> Keyboard | None:

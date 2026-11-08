@@ -87,6 +87,35 @@ class RuntimeExpressionMixin:
     def _expression_library(self):  # type: ignore[no-untyped-def]
         return self._expression_service().library
 
+    def _combo_library(self):  # type: ignore[no-untyped-def]
+        """Her combo library (emoji art organ): one JSON
+        beside the expression library, seeded with her own
+        drawn pieces."""
+        lib = getattr(self, "_combo_library_obj", None)
+        if lib is not None:
+            return lib
+        from ...social.chat.emoji_art import ComboLibrary
+
+        lib = ComboLibrary(self._expression_root()
+                           / "combo_library.json")
+        self._combo_library_obj = lib
+        return lib
+
+    def _emojiart_remember(self, message, text: str) -> None:  # type: ignore[no-untyped-def]
+        """The room's last art piece — the remix verbs act on
+        it ('invert that')."""
+        try:
+            keep = getattr(self, "_emojiart_last", None)
+            if keep is None:
+                keep = self._emojiart_last = {}
+            keep[str(message.chat.key)] = str(text)
+        except Exception:  # noqa: BLE001 - memory is garnish
+            pass
+
+    def _emojiart_last_for(self, message) -> str:  # type: ignore[no-untyped-def]
+        keep = getattr(self, "_emojiart_last", None) or {}
+        return str(keep.get(str(message.chat.key), "") or "")
+
     def _sticker_pack_store(self):  # type: ignore[no-untyped-def]
         """The per-user pack store: one JSON beside the
         expression library, so packs travel with it."""
@@ -469,6 +498,15 @@ class RuntimeExpressionMixin:
             return ("the sticker is made, but this room isn't "
                     "claimed for my bot-system posts (§33), so "
                     "I'm not dropping it here.")
+        # Made stickers join her media library (provenance
+        # journaled) — the maker feeds the shelf she draws
+        # moments from.
+        try:
+            self._expression_library().add_item(
+                kind="sticker", path=str(produced),
+                tags=("sticker",), source="self:sticker-maker")
+        except Exception as exc:  # noqa: BLE001 - shelving is garnish
+            record_failure("expression.sticker.shelve", exc)
         ref = MediaRef(path=produced, kind="sticker",
                        name=Path(produced).name)
         result = self._expression_send(message, ref)
@@ -664,14 +702,20 @@ class RuntimeExpressionMixin:
 
     # ---- /emoji ---------------------------------------------------------
     def _control_emoji(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
-        """Two powers.  FIND: the full Unicode table, searchable
-        by meaning — any emoji that exists, including the ones
-        some phones can't render; given an emoji itself, it
-        reports what it is.  CREATE: ``/emoji make <words>``
-        generates one the table doesn't have and sends it as a
-        sticker — and a search no single emoji confidently
-        covers ('family rocket') is a creation too, never a
-        dump of near-miss parts."""
+        """Three powers.  FIND: the full Unicode table,
+        searchable by meaning — any emoji that exists,
+        including the ones some phones can't render; given an
+        emoji itself, it reports what it is.  CREATE:
+        ``/emoji make <words>`` authors a REAL custom emoji —
+        her own art at 100×100, registered in her Telegram
+        custom-emoji pack where the surface allows, living in
+        her /customemoji set with a unicode fallback — and a
+        search no single emoji confidently covers ('family
+        rocket') is a creation too, never a dump of near-miss
+        parts.  STICKER: ``/emoji sticker <words>`` is the
+        sticker maker, named for what it makes (the two were
+        conflated until the owner's 2026-11-07 correction:
+        emoji are not stickers)."""
         from ...social.chat.expression import (
             confident_emoji_match,
             emoji_info,
@@ -683,17 +727,29 @@ class RuntimeExpressionMixin:
             return ("usage: /emoji <words> finds one in the "
                     "whole Unicode table — melting face, thumbs "
                     "up medium, rocket… /emoji make <words> "
-                    "creates one the table doesn't have, as a "
-                    "sticker. Or give me an emoji and I'll tell "
-                    "you what it is.")
+                    "creates a real custom emoji of my own. "
+                    "/emoji sticker <words> makes a sticker. "
+                    "Or give me an emoji and I'll tell you "
+                    "what it is.")
         words = query.split(None, 1)
-        if words[0].lower() in ("make", "create"):
-            description = words[1].strip() if len(words) > 1 else ""
+        head = words[0].lower()
+        rest = words[1].strip() if len(words) > 1 else ""
+        if head in ("make", "create"):
+            description = rest
+            for prefix in ("an emoji of ", "emoji of ", "of "):
+                if description.lower().startswith(prefix):
+                    description = description[len(prefix):]
+                    break
             if not description:
                 return ("usage: /emoji make <what it should "
-                        "be> — a cat in a party hat, a rocket "
-                        "with a face…")
+                        "be> — a laughing cat, a gold rocket…")
             return self._emoji_create_and_send(description, message)
+        if head == "sticker":
+            if not rest:
+                return ("usage: /emoji sticker <what it should "
+                        "be> — that makes a sticker (for a real "
+                        "emoji, /emoji make <words>).")
+            return self._emoji_sticker_and_send(rest, message)
         info = emoji_info(query)
         if info is not None and info["char"] == query:
             kws = ", ".join(info["keywords"][:8])
@@ -708,34 +764,144 @@ class RuntimeExpressionMixin:
             return f"{faces}\n{names}"
         return self._emoji_create_and_send(query, message)
 
+    @staticmethod
+    def _emoji_name_for(description: str, registry) -> str:  # type: ignore[no-untyped-def]
+        """A registry name for a created emoji: the described
+        words, slug-shaped, uniquified against her set."""
+        import re as _re
+
+        slug = _re.sub(r"[^a-z0-9]+", "_",
+                       str(description or "").lower()).strip("_")
+        slug = slug[:20].strip("_") or "emoji"
+        name, n = slug, 2
+        while registry.get(name) is not None:
+            name = f"{slug}_{n}"
+            n += 1
+        return name
+
     def _emoji_create_and_send(self, description: str, message) -> str:  # type: ignore[no-untyped-def]
-        """Create one emoji and send it as a sticker through
-        the maker's own seam.  Honest at every step: no chat
-        surface, no §33 claim, or no image rung configured
-        each earns its plain line — the unavailable case is
-        journaled, and nothing is ever fabricated."""
+        """Create one REAL custom emoji: her studio draws the
+        design at 100×100, the piece joins her custom set
+        (name → unicode fallback + art), and on a Telegram bot
+        surface it registers in her own custom-emoji pack —
+        the pack hands back a real custom_emoji_id, and the
+        emoji is SENT as an emoji (entity-carried), not as a
+        sticker.  Surfaces that cannot register (WhatsApp has
+        no custom emoji at all — a platform wall) receive the
+        art as a sticker with the wall named.  Every failure
+        is a plain line; nothing is fabricated."""
+        from ...social.chat import emoji_studio
+
+        if message is None:
+            return ("no single emoji in the Unicode table "
+                    "covers that — in a chat I'd create a real "
+                    "custom emoji of my own; here I can only "
+                    "search.")
+        if not self._group_gate(message, "emoji"):
+            return ("I can create that — but this room isn't "
+                    "claimed for my bot-system posts (§33), so "
+                    "I'm not dropping it here.")
+        library = self._expression_library()
+        registry = library.custom_emoji
+        out_dir = self._expression_root() / "expression_media"
+        try:
+            spec = emoji_studio.parse_design(description)
+            name = self._emoji_name_for(description, registry)
+            png = emoji_studio.emoji_png(spec, out_dir, name=name)
+        except Exception as exc:  # noqa: BLE001 - her renderer failed
+            record_failure("expression.emoji_create.render", exc)
+            return (f"no emoji in the table covers that, and "
+                    f"my own renderer failed too: {exc}")
+        fallback = emoji_studio.fallback_char_for(spec)
+        registry.add(name, unicode=fallback, image_path=str(png))
+        library.save_custom_emoji(registry)
+        platform = str(getattr(message.chat, "platform", "") or "")
+        adapter = self._group_adapter(platform)
+        custom_id = ""
+        wall = ""
+        if platform.startswith("telegram") and adapter is not None \
+                and hasattr(adapter, "create_or_extend_custom_emoji_pack"):
+            owners = sorted(getattr(adapter, "owner_sender_ids", ())
+                            or ())
+            if owners:
+                try:
+                    made = adapter.create_or_extend_custom_emoji_pack(
+                        owners[0], name, f"Devon — {name}", str(png),
+                        fallback)
+                    custom_id = str(made.get("custom_emoji_id") or "")
+                    if custom_id:
+                        registry.add(name, platform=platform,
+                                     ref=custom_id)
+                        library.save_custom_emoji(registry)
+                except Exception as exc:  # noqa: BLE001 - refused is a fact
+                    record_failure(
+                        "expression.emoji_create.register", exc)
+                    wall = f"Telegram refused the pack add ({exc})"
+            else:
+                wall = ("the bot doesn't know its owner's id yet, "
+                        "so the pack can't be registered")
+        elif platform.startswith("whatsapp"):
+            wall = ("WhatsApp has no custom emoji at all — "
+                    "a platform wall, not a missing feature")
+        if custom_id and adapter is not None:
+            sent = adapter.send_custom_emoji(
+                message.chat, fallback, custom_id)
+            if getattr(sent, "ok", False):
+                return (f":{name}: is live — the one above is "
+                        f"mine, a real custom emoji now. Its "
+                        f"fallback face is {fallback}; it's in "
+                        f"/customemoji.")
+            record_failure(
+                "expression.emoji_create.send",
+                RuntimeError(str(getattr(sent, "error", ""))))
+        from ...social.chat.base import MediaRef
+
+        ref = MediaRef(path=str(png), kind="sticker",
+                       name=Path(str(png)).name)
+        result = self._expression_send(message, ref)
+        note = f" :{name}: is created and in my custom set"
+        if wall:
+            note += f" — {wall}, so here it travels as a sticker"
+        note += f". Its fallback face is {fallback}."
+        if getattr(result, "ok", False):
+            return note.strip()
+        return (f"created :{name}:, but the send failed here: "
+                f"{getattr(result, 'error', '')}")
+
+    def _emoji_sticker_and_send(self, description: str, message) -> str:  # type: ignore[no-untyped-def]
+        """The STICKER maker (formerly mislabeled as emoji
+        creation): generates art through the ladder — the
+        configured image rung first, her own studio renderer
+        when no backend is configured — and sends it as what
+        it is: a sticker."""
         from ...social.chat.expression import (
             EmojiCreateUnavailable,
             create_emoji_sticker,
         )
 
         if message is None:
-            return ("no single emoji in the Unicode table "
-                    "covers that — in a chat I'd create it as "
-                    "a sticker; here I can only search.")
+            return ("in a chat I'd make that sticker; here I "
+                    "can only describe it.")
         if not self._group_gate(message, "emoji"):
-            return ("I can create that — but this room isn't "
+            return ("I can make that — but this room isn't "
                     "claimed for my bot-system posts (§33), so "
                     "I'm not dropping it here.")
         out_dir = self._expression_root() / "expression_media"
         try:
             produced = create_emoji_sticker(description, out_dir)
         except EmojiCreateUnavailable as exc:
-            record_failure("expression.emoji_create.unavailable",
+            record_failure("expression.sticker_create.unavailable",
                            exc)
-            return (f"no emoji in the table covers that, and "
-                    f"I can't create one on this install yet: "
-                    f"{exc}")
+            return (f"I can't make that sticker on this "
+                    f"install yet: {exc}")
+        # The maker feeds her media library (provenance
+        # journaled) — made stickers are hers to reuse.
+        try:
+            self._expression_library().add_item(
+                kind="sticker", path=str(produced),
+                tags=("sticker",), source="self:sticker-maker")
+        except Exception as exc:  # noqa: BLE001 - shelving is garnish
+            record_failure("expression.sticker_create.shelve", exc)
         from ...social.chat.base import MediaRef
 
         ref = MediaRef(path=str(produced), kind="sticker",
@@ -743,7 +909,7 @@ class RuntimeExpressionMixin:
         result = self._expression_send(message, ref)
         if getattr(result, "ok", False):
             return ""
-        return (f"created it, but the send failed here: "
+        return (f"made the sticker, but the send failed here: "
                 f"{getattr(result, 'error', '')}")
 
     # ---- /customemoji -------------------------------------------------
@@ -772,6 +938,23 @@ class RuntimeExpressionMixin:
             rendered = registry.render(words[1], platform)
             if rendered["kind"] == "missing":
                 return f"no custom emoji named :{words[1]}: yet."
+            if rendered["kind"] == "custom_ref" \
+                    and platform.startswith("telegram") \
+                    and message is not None:
+                # It goes out AS an emoji: the entity channel
+                # carries her art inline.  A refusal falls back
+                # to the honest description below.
+                adapter = self._group_adapter(platform)
+                fn = getattr(adapter, "send_custom_emoji", None) \
+                    if adapter is not None else None
+                entry = registry.get(words[1]) or {}
+                if fn is not None:
+                    sent = fn(message.chat,
+                              str(entry.get("unicode") or "✨"),
+                              str(rendered["value"]))
+                    if getattr(sent, "ok", False):
+                        return (f":{words[1]}: — that's it, "
+                                f"live as an emoji.")
             return (f":{words[1]}: on {platform or 'here'} goes "
                     f"out as {rendered['kind']}: {rendered['value']}")
         # mutations are curated
@@ -805,6 +988,169 @@ class RuntimeExpressionMixin:
         return ("usage: /customemoji list · add <name> <emoji> · "
                 "ref <name> <platform> <ref> · show <name> · "
                 "remove <name>")
+
+    # ---- /emojiart ------------------------------------------------------
+    def _control_emojiart(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
+        """The emoji-art organ (mined from emojicombos, built
+        native): pictures become text art — braille dot art
+        (padded with U+2800 blanks so chat renderers hold the
+        grid), ASCII ramp art, emoji mosaics; she DRAWS
+        described subjects; her own combo library serves
+        kaomoji/combos/small art; remix verbs reshape the
+        room's last piece; the fancy styler restyles words.
+        Pieces are returned as the reply text itself — the
+        art IS the message."""
+        from ...social.chat import emoji_art
+
+        if message is None:
+            return ("usage: /emojiart dot|ascii|mosaic (reply "
+                    "to a picture, or paste its link) · "
+                    "/emojiart draw <subject> · /emojiart combo "
+                    "<topic> · /emojiart fancy <style> <words> "
+                    "· /emojiart remix invert|mirror|smaller|"
+                    "bigger|ascii|braille|mosaic · /emojiart "
+                    "save <name>")
+        platform = str(getattr(message.chat, "platform", "") or "")
+        words = str(tail or "").strip().split()
+        head = words[0].lower() if words else ""
+        rest = " ".join(words[1:])
+        library = self._combo_library()
+
+        if head in ("dot", "ascii", "mosaic"):
+            width = emoji_art.width_for_platform(platform)
+            for word in words[1:]:
+                try:
+                    width = int(word)
+                except ValueError:
+                    continue
+            data = self._emojiart_image_bytes(message, tail)
+            if data is None:
+                return ("reply to a picture (or paste its "
+                        "link) and I'll render it — no image "
+                        "reached me here.")
+            if head == "dot":
+                art = emoji_art.image_to_braille(data, width=width)
+            elif head == "ascii":
+                art = emoji_art.image_to_ascii(data, width=width)
+            else:
+                art = emoji_art.image_to_mosaic(data, width=width)
+            self._emojiart_remember(message, art)
+            return art
+        if head == "draw":
+            if not rest:
+                return ("usage: /emojiart draw <subject> — "
+                        "a rocket, a sleepy cat, a gold heart…")
+            made = emoji_art.describe_art(
+                rest, library,
+                width=emoji_art.width_for_platform(platform))
+            if made is None:
+                return "I couldn't draw that one."
+            art, how = made
+            self._emojiart_remember(message, art)
+            return f"{art}\n— {how}"
+        if head == "combo":
+            hits = library.search(rest) if rest \
+                else library.pieces()[:8]
+            if not hits:
+                return (f"nothing in my combo library for "
+                        f"'{rest}' yet — /emojiart draw makes "
+                        f"new pieces, and save keeps them.")
+            if len(hits) == 1:
+                self._emojiart_remember(
+                    message, str(hits[0].get("text") or ""))
+            lines = [f"my combo library — {len(library)} pieces"
+                     f" (showing {len(hits)}):"]
+            for piece in hits[:8]:
+                lines.append(f"· {piece.get('name')}: "
+                             f"{piece.get('text')}")
+            return "\n".join(lines)
+        if head == "fancy":
+            parts = rest.split(None, 1)
+            if len(parts) < 2:
+                return ("usage: /emojiart fancy <style> "
+                        "<words> — styles: "
+                        + " · ".join(emoji_art.FANCY_STYLES))
+            styled = emoji_art.fancy_text(parts[1], parts[0])
+            if styled is None:
+                return (f"no style called '{parts[0]}' — "
+                        f"styles: "
+                        + " · ".join(emoji_art.FANCY_STYLES))
+            return styled
+        if head == "remix":
+            verb = words[1].lower() if len(words) > 1 else ""
+            last = self._emojiart_last_for(message)
+            if not last:
+                return ("nothing to remix yet — make a piece "
+                        "first (/emojiart draw or dot).")
+            out = None
+            if verb == "invert":
+                out = emoji_art.invert_piece(last)
+            elif verb == "mirror":
+                out = emoji_art.mirror_piece(last)
+            elif verb == "smaller":
+                out = emoji_art.scale_piece(last, 0.5)
+            elif verb == "bigger":
+                out = emoji_art.scale_piece(last, 2.0)
+            elif verb in ("ascii", "braille", "mosaic"):
+                out = emoji_art.restyle_piece(last, verb)
+            if out is None:
+                return (f"can't remix that piece with "
+                        f"'{verb or '?'}' — verbs: invert · "
+                        f"mirror · smaller · bigger · ascii · "
+                        f"braille · mosaic.")
+            self._emojiart_remember(message, out)
+            return out
+        if head == "save":
+            if not self._group_gate(message, "emojiart"):
+                return ("this room isn't claimed for my bot "
+                        "systems (§33) — my library doesn't "
+                        "grow from here.")
+            last = self._emojiart_last_for(message)
+            if not last:
+                return "nothing to save yet — make a piece first."
+            name = rest or "untitled piece"
+            piece = library.add(
+                name=name, text=last, kind="dotart",
+                tags=name.lower().split(),
+                source="chat")
+            return (f"saved :{piece['id']}: — '{name}' is in "
+                    f"my combo library now.")
+        topics = sorted({tag for piece in library.pieces()
+                         for tag in (piece.get("tags") or [])})
+        return ("emoji art — pictures as text:\n"
+                "/emojiart dot|ascii|mosaic — reply to a "
+                "picture or paste its link\n"
+                "/emojiart draw <subject> — I draw it in dots\n"
+                "/emojiart combo <topic> — my library "
+                f"({len(library)} pieces; topics: "
+                f"{', '.join(topics[:12])})\n"
+                "/emojiart fancy <style> <words>\n"
+                "/emojiart remix invert|mirror|smaller|bigger"
+                "|ascii|braille|mosaic\n"
+                "/emojiart save <name> — keep the last piece")
+
+    def _emojiart_image_bytes(self, message, tail: str):  # type: ignore[no-untyped-def]
+        """The picture an /emojiart conversion acts on: the
+        replied/attached media's local bytes first, else a
+        link in the command tail, fetched through the
+        expression organ's own HTTP seam.  None when neither
+        reaches her."""
+        resolved = self._replied_media_local(message)
+        if resolved is not None and resolved[0]:
+            try:
+                return Path(str(resolved[0])).read_bytes()
+            except OSError:
+                pass
+        for word in str(tail or "").split():
+            if word.startswith(("http://", "https://")):
+                try:
+                    from ...social.chat.expression import _http_bytes
+
+                    return _http_bytes(word)
+                except Exception as exc:  # noqa: BLE001 - dead link is a fact
+                    record_failure("expression.emojiart.fetch", exc)
+                    return None
+        return None
 
     # ---- /react ---------------------------------------------------------
     def _control_react(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]

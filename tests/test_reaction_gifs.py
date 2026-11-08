@@ -261,9 +261,13 @@ def test_service_never_sends_a_still(tmp_path):
     out = svc.reaction_gif("blush", room=BOT_KEY,
                            platform="telegram-bot",
                            send=_recording_send(sent))
-    assert out["sent"] is False
-    assert sent == []  # nothing was ever sent
-    assert "every source is down" in out["reason"]
+    # The stills are still refused — never sent.  What lands
+    # instead (expression completion, 2026-11-07) is HER OWN
+    # animated render of the reaction, never the still.
+    assert out["sent"] is True
+    assert len(sent) == 1
+    assert sent[0].kind == "animation"
+    assert sent[0].path.endswith(".gif")
 
 
 def test_service_still_falls_through_to_a_real_gif(tmp_path):
@@ -301,11 +305,15 @@ def test_service_all_down_empty_library_is_one_honest_line(tmp_path):
     sent = []
     out = svc.reaction_gif("hug", room=BOT_KEY, platform="telegram-bot",
                            send=_recording_send(sent))
-    assert out["sent"] is False
-    assert sent == []
-    assert out["reason"] == (
-        "no /hug GIF reached me — every source is down and my "
-        "library has none yet")
+    # Superseded by the owner's autonomy order (2026-11-07,
+    # "she can do this stuffs herself"): all-down + empty
+    # library is no longer an apology — she renders the
+    # reaction herself and it sends.  The honest line itself
+    # survives for the no-media-dir case, pinned in
+    # test_expression_completion.
+    assert out["sent"] is True
+    assert len(sent) == 1
+    assert sent[0].kind == "animation"
 
 
 def test_service_sniffed_kinds_ride_the_right_send_kind(tmp_path):

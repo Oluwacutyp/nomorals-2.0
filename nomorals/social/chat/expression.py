@@ -597,18 +597,28 @@ class EmojiCreateUnavailable(Exception):
 
 def create_emoji_sticker(description: str, out_dir: Any, *,
                          backend: Any = None) -> Path:
-    """Create a NEW emoji: generate the art through the image
-    pipeline's best configured rung, then post-process it
-    through the house sticker seam (512×512 transparent
-    canvas, WebP) and return the sticker path.
+    """Create a NEW STICKER (the maker — named for what it
+    makes; it was mislabeled "emoji creation" until the
+    owner's 2026-11-07 correction: emoji are not stickers).
 
-    Raises :class:`EmojiCreateUnavailable` when no image
-    rung is configured or generation fails — the caller
-    answers with that plain reason, journaled."""
+    The ladder: the image pipeline's best configured rung
+    first; when no backend is configured — or the rung fails —
+    HER OWN studio draws the design locally (deterministic,
+    zero-config: the rung that works on every install).  The
+    art is post-processed through the house sticker seam
+    (512×512 transparent canvas, WebP).
+
+    Raises :class:`EmojiCreateUnavailable` only when every
+    rung fails — the caller answers with that plain reason,
+    journaled."""
     subject = " ".join(str(description or "").split()).strip()
     if not subject:
         raise EmojiCreateUnavailable(
-            "an emoji creation needs a description")
+            "a sticker creation needs a description")
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    raw: Path | None = None
+    backend_error = ""
     if backend is None:
         from ...media_edit.generate import (
             GenerativeEditError,
@@ -618,30 +628,42 @@ def create_emoji_sticker(description: str, out_dir: Any, *,
         try:
             backend = get_backend()
         except GenerativeEditError as exc:
-            raise EmojiCreateUnavailable(str(exc)) from exc
-    try:
-        images = backend.generate(emoji_prompt_for(subject))
-    except Exception as exc:  # noqa: BLE001 - any rung failure is one honest line
-        raise EmojiCreateUnavailable(
-            f"the image rung failed: {exc}") from exc
-    if not images:
-        raise EmojiCreateUnavailable(
-            "the image rung returned no image")
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    raw = out / f"emoji_{time.time_ns()}.png"
-    image = images[0]
-    try:
-        if hasattr(image, "save"):
-            image.save(str(raw))
-        else:
-            from PIL import Image
+            backend_error = str(exc)
+            backend = None
+    if backend is not None:
+        try:
+            images = backend.generate(emoji_prompt_for(subject))
+        except Exception as exc:  # noqa: BLE001 - fall to her own hand
+            backend_error = f"the image rung failed: {exc}"
+            images = []
+        if images:
+            image = images[0]
+            raw = out / f"sticker_{time.time_ns()}.png"
+            try:
+                if hasattr(image, "save"):
+                    image.save(str(raw))
+                else:
+                    from PIL import Image
 
-            Image.fromarray(image).save(str(raw))
-    except Exception as exc:  # noqa: BLE001 - unsavable art is unavailable art
-        raise EmojiCreateUnavailable(
-            f"the generated art could not be saved: {exc}"
-        ) from exc
+                    Image.fromarray(image).save(str(raw))
+            except Exception as exc:  # noqa: BLE001 - fall to her hand
+                backend_error = f"the generated art could not " \
+                                f"be saved: {exc}"
+                raw = None
+    if raw is None:
+        # Her own hand: the studio's local renderer.  This is
+        # the rung that makes creation real on installs with
+        # no image backend configured at all.
+        try:
+            from . import emoji_studio
+
+            spec = emoji_studio.parse_design(subject)
+            raw = emoji_studio.sticker_master_png(
+                spec, out, name=f"sticker_{time.time_ns()}")
+        except Exception as exc:  # noqa: BLE001 - every rung failed
+            raise EmojiCreateUnavailable(
+                f"{backend_error + '; ' if backend_error else ''}"
+                f"her local renderer failed too: {exc}") from exc
     from .media_convert import ConversionError, image_to_sticker
 
     try:
@@ -657,16 +679,18 @@ class CustomEmojiRegistry:
     fallback (always renderable), per-platform custom refs
     where the platform carries them, and optional sticker art.
 
-    Platform truth, in code: a Telegram BOT can re-send a
-    custom-emoji STICKER by file_id and can name a
-    ``custom_emoji_id`` in message entities — but this gateway
-    exposes no entity channel, so her set renders through the
-    sticker path (sendSticker by cached ref) with the unicode
-    as the everywhere fallback.  Discord custom emoji need an
-    uploaded guild emoji id (``<:name:id>``) — stored as a ref
-    when the owner supplies one.  WhatsApp has no custom emoji
-    concept; the set ships there as stickers.  Nothing here
-    invents a mechanic a platform doesn't have."""
+    Platform truth, in code: emoji SHE creates are registered
+    in her own Telegram custom-emoji packs (Bot API, packs the
+    bot owns) and the pack hands back a real ``custom_emoji_id``
+    — stored here as the telegram ref; the bot adapter's
+    ``send_custom_emoji`` carries it inline through message
+    entities, so on Telegram her art renders AS an emoji in
+    text.  The unicode face is the everywhere fallback.
+    Discord custom emoji need an uploaded guild emoji id
+    (``<:name:id>``) — stored as a ref when the owner supplies
+    one.  WhatsApp has no custom emoji concept at all (a real
+    platform wall); the set ships there as stickers.  Nothing
+    here invents a mechanic a platform doesn't have."""
 
     def __init__(self, data: dict[str, Any] | None = None) -> None:
         self._data: dict[str, dict[str, Any]] = dict(data or {})
@@ -712,9 +736,10 @@ class CustomEmojiRegistry:
         refs = entry.get("refs") or {}
         platform = str(platform or "")
         if platform in refs:
-            kind = "sticker_ref" if platform.startswith("telegram") \
-                else "custom_ref"
-            return {"kind": kind, "value": str(refs[platform]),
+            # A telegram ref IS a custom_emoji_id (her packs);
+            # other platforms' refs are their own custom ids.
+            return {"kind": "custom_ref",
+                    "value": str(refs[platform]),
                     "name": str(name)}
         if entry.get("image_path"):
             return {"kind": "sticker_file",
@@ -1675,6 +1700,88 @@ class ExpressionService:
                 tags=tags, source=f"provider:{name}")
         return None
 
+    # ── her own hand: self-created media (2026-11-07) ───────
+    def _self_create(self, moment: str, tags: tuple[str, ...],
+                     moods: tuple[str, ...]
+                     ) -> dict[str, Any] | None:
+        """Render the moment's media HERSELF: celebration-class
+        moments get a studio animation, the rest a studio
+        sticker — deterministic, zero-config, journaled with
+        provenance ``self:render``.  The piece joins the
+        library under the moment's tags, so later fires pick
+        it from the shelf instead of re-rendering."""
+        if self.media_dir is None:
+            return None
+        try:
+            from . import emoji_studio
+            from .media_convert import image_to_sticker
+
+            mood = (moods[0] if moods else "") or moment
+            spec = emoji_studio.mood_design(mood)
+            if moment in ("celebration", "quest_complete",
+                          "jackpot", "season_podium", "win",
+                          "welcome", "party"):
+                path = emoji_studio.mood_animation(
+                    mood, self.media_dir, name=f"moment_{moment}")
+                kind = "animation"
+            else:
+                master = emoji_studio.sticker_master_png(
+                    spec, self.media_dir, name=f"moment_{moment}")
+                path = image_to_sticker(master,
+                                        out_dir=self.media_dir)
+                kind = "sticker"
+            return self.library.add_item(
+                kind=kind, path=str(path), tags=tags,
+                moods=moods, source="self:render")
+        except Exception as exc:  # noqa: BLE001 - degrade to text
+            _log.debug("expression self-create failed: %s", exc)
+            return None
+
+    def _self_create_reaction(self, command: str,
+                              entry: dict[str, Any] | None
+                              ) -> dict[str, Any] | None:
+        """The reaction floor when every outside source is
+        down: she renders the command's OWN face — an animated
+        studio GIF of the entry's emoji/design — tagged with
+        the command, so /hug and friends still land as media
+        instead of an apology line."""
+        if self.media_dir is None:
+            return None
+        try:
+            from . import emoji_studio
+
+            mood = str((entry or {}).get("emoji") or command)
+            path = emoji_studio.mood_animation(
+                command, self.media_dir, name=f"reaction_{command}")
+            return self.library.add_item(
+                kind="animation", path=str(path),
+                tags=(command,), moods=(mood,),
+                source="self:render")
+        except Exception as exc:  # noqa: BLE001 - degrade to text
+            _log.debug("reaction self-create failed: %s", exc)
+            return None
+
+    def menu_banner_item(self) -> dict[str, Any] | None:
+        """The menu's picture head: her library's menu piece
+        when one exists, else her studio banner, rendered once
+        and shelved (source ``self:render``)."""
+        item = self.library.pick(tags=("menu",), room="",
+                                 rng=self.rng)
+        if item is not None:
+            return item
+        if self.media_dir is None:
+            return None
+        try:
+            from . import emoji_studio
+
+            path = emoji_studio.menu_banner(self.media_dir)
+            return self.library.add_item(
+                kind="image", path=str(path),
+                tags=("menu", "banner"), source="self:render")
+        except Exception as exc:  # noqa: BLE001 - menu stays text
+            _log.debug("menu banner render failed: %s", exc)
+            return None
+
     def fire(self, moment: str, *, room: str = "",
              platform: str = "",
              settings: dict[str, Any] | None = None,
@@ -1706,6 +1813,15 @@ class ExpressionService:
                                  rng=self.rng)
         if item is None:
             item = self._fetch_from_providers(tags)
+        if item is None:
+            # Her own hand (owner, 2026-11-07: "She can do
+            # this stuffs herself"): when no library piece and
+            # no provider answers, she CREATES the moment's
+            # media — a studio render with provenance — instead
+            # of going silently text-only.  This is the rung
+            # that keeps greetings/celebrations/theatre alive
+            # on installs with no GIF keys at all.
+            item = self._self_create(moment, tags, moods)
         if item is None:
             return {"sent": False, "moment": moment,
                     "reason": "no media available — text only"}
@@ -1848,8 +1964,18 @@ class ExpressionService:
         try:
             item = self._fetch_reaction_item(command, entry)
             if item is None:
+                # Beyond-anime rung (owner, 2026-11-07): the
+                # general GIF providers (Tenor/Giphy) answer
+                # the command word too — the reaction set is
+                # not locked to anime sources.
+                item = self._fetch_from_providers((command,))
+            if item is None:
                 item = self.library.pick(tags=(command,),
                                          room=room, rng=self.rng)
+            if item is None:
+                # Her own hand: she renders the reaction
+                # herself rather than apologizing in text.
+                item = self._self_create_reaction(command, entry)
             if item is None:
                 return {"sent": False, "reason": (
                     f"no /{command} GIF reached me — every "

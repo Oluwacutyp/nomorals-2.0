@@ -78,12 +78,18 @@ class LiveSessionRegistry:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._live: dict[tuple[str, str], str] = {}
+        # Which live messages carry MEDIA (a photo head): their
+        # renders edit through the caption verb, not the text
+        # verb (Telegram: editMessageCaption).
+        self._media: dict[tuple[str, str], bool] = {}
 
-    def record(self, chat_key: str, session: str, message_id: str) -> None:
+    def record(self, chat_key: str, session: str, message_id: str,
+               *, media: bool = False) -> None:
         if not chat_key or not session or not message_id:
             return
         with self._lock:
             self._live[(str(chat_key), str(session))] = str(message_id)
+            self._media[(str(chat_key), str(session))] = bool(media)
 
     def lookup(self, chat_key: str, session: str) -> str:
         if not chat_key or not session:
@@ -91,9 +97,17 @@ class LiveSessionRegistry:
         with self._lock:
             return self._live.get((str(chat_key), str(session)), "")
 
+    def is_media(self, chat_key: str, session: str) -> bool:
+        if not chat_key or not session:
+            return False
+        with self._lock:
+            return bool(self._media.get(
+                (str(chat_key), str(session)), False))
+
     def forget(self, chat_key: str, session: str) -> None:
         with self._lock:
             self._live.pop((str(chat_key), str(session)), None)
+            self._media.pop((str(chat_key), str(session)), None)
 
 
 def tapped_message_id(message: Any) -> str:
@@ -150,7 +164,8 @@ def _edit_verdict(result: Any) -> bool:
 
 def edit_session_message(adapter: Any, chat: Any, message_id: str,
                          text: str, *, buttons: Any = None,
-                         parse_mode: str = "") -> bool:
+                         parse_mode: str = "", media: bool = False,
+                         ) -> bool:
     """Edit one live session message through whichever edit verb
     the surface's adapter exposes. Returns True only when the
     edit landed. Never raises.
@@ -162,8 +177,20 @@ def edit_session_message(adapter: Any, chat: Any, message_id: str,
     original message keeps the keyboard it was sent with); the
     Bot API adapter additionally takes the send's parse mode so
     the edited render formats exactly like the send it replaces.
+
+    A MEDIA live message (``media=True`` — it was sent as a
+    photo with the render in its caption) edits through the
+    adapter's caption verb instead; a surface whose adapter
+    has no caption verb reports False and the caller falls
+    back to a fresh send.
     """
-    verb = getattr(adapter, "edit_message", None)
+    verb = None
+    if media:
+        verb = getattr(adapter, "edit_caption", None)
+        if not callable(verb):
+            return False
+    else:
+        verb = getattr(adapter, "edit_message", None)
     if not callable(verb) or not message_id:
         return False
     try:

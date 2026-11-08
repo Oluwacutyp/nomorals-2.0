@@ -144,8 +144,11 @@ def test_custom_emoji_registry_render_order():
     assert reg.render("devon", "whatsapp") == {
         "kind": "unicode", "value": "🥷", "name": "devon"}
     reg.add("devon", platform="telegram-bot", ref="FID55")
+    # expression completion (2026-11-07): a telegram ref IS a
+    # custom_emoji_id from her own packs — the render kind
+    # says so (was "sticker_ref" when refs were file_ids).
     assert reg.render("devon", "telegram-bot")["kind"] \
-        == "sticker_ref"
+        == "custom_ref"
     assert reg.render("devon", "telegram-bot")["value"] == "FID55"
     # a platform without the ref still gets the face
     assert reg.render("devon", "discord")["value"] == "🥷"
@@ -274,6 +277,17 @@ def test_provider_health_stands_down_and_library_grows(tmp_path,
             Dead.calls += 1
             raise OSError("boom")
 
+    # The stand-down story runs with her own renderer
+    # arranged down too (the every-rung-down case), so
+    # provider health is the whole story.
+    from nomorals.social.chat import emoji_studio
+
+    def _boom(*a, **k):
+        raise RuntimeError("renderer down")
+
+    monkeypatch.setattr(emoji_studio, "mood_animation", _boom)
+    monkeypatch.setattr(emoji_studio, "sticker_master_png",
+                        _boom)
     svc = ExpressionService(lib, providers=[Dead()],
                             media_dir=tmp_path / "m", cooldown_s=0)
     for _ in range(3):
@@ -284,6 +298,20 @@ def test_provider_health_stands_down_and_library_grows(tmp_path,
     svc.fire("welcome", room="r", platform="discord",
              settings={}, send=_ok_send([]))
     assert Dead.calls == 3  # stood down: not even attempted
+    monkeypatch.undo()
+
+    # Expression completion (2026-11-07): with her renderer
+    # UP, a dead provider no longer means silence — she
+    # CREATES the moment herself and the piece joins the
+    # library with its provenance.
+    svc_self = ExpressionService(lib, providers=[Dead()],
+                                 media_dir=tmp_path / "m",
+                                 cooldown_s=0)
+    out = svc_self.fire("welcome", room="r9", platform="discord",
+                        settings={}, send=_ok_send([]))
+    assert out["sent"] is True
+    assert any(item["source"] == "self:render"
+               for item in lib.items)
 
     class Live:
         name = "live"
@@ -299,14 +327,15 @@ def test_provider_health_stands_down_and_library_grows(tmp_path,
         return dest
 
     monkeypatch.setattr(expr, "download_to_library", fake_download)
-    svc2 = ExpressionService(lib, providers=[Live()],
+    lib2 = ExpressionLibrary(tmp_path / "lib2.json")
+    svc2 = ExpressionService(lib2, providers=[Live()],
                              media_dir=tmp_path / "m", cooldown_s=0)
     out = svc2.fire("quest_complete", room="r2",
                     platform="discord", settings={},
                     send=_ok_send([]))
     assert out["sent"] is True
-    assert len(lib) == 1
-    assert lib.items[0]["source"] == "provider:live"
+    assert len(lib2) == 1
+    assert lib2.items[0]["source"] == "provider:live"
 
 
 def test_provider_health_semantics():

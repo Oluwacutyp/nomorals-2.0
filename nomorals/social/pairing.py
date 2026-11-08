@@ -558,6 +558,21 @@ class AccountRecord:
     #: (the owner's pick, set by /statusreact emoji).  Additive
     #: with a default, exactly like last_error above.
     status_react_emoji: str = "❤️"
+    # ── expression completion (2026-11-07) ──
+    #: Status reactions ROTATE (owner order: not one fixed ❤️ on
+    #: every status).  ``status_react_rotate`` is the mode — ON
+    #: draws each reaction from the rotation pool (her custom
+    #: set ∪ the account's own additions ∪ the built-in pool);
+    #: /statusreact emoji PINS one emoji and turns rotation off.
+    #: ``status_react_pool`` holds the account's own additions;
+    #: ``status_react_cursor`` / ``status_react_last`` are the
+    #: rotation state (the walk position + the last face used,
+    #: so no status ever gets the same face twice in a row).
+    #: All additive with defaults, exactly like the fields above.
+    status_react_rotate: bool = True
+    status_react_pool: list = field(default_factory=list)
+    status_react_cursor: int = 0
+    status_react_last: str = ""
 
     def toggle(self, name: str) -> bool:
         return bool((self.toggles or {}).get(name, False))
@@ -569,6 +584,57 @@ class AccountRecord:
     def from_dict(cls, data: dict[str, Any]) -> "AccountRecord":
         known = {f for f in cls.__dataclass_fields__}
         return cls(**{k: v for k, v in data.items() if k in known})
+
+
+#: The built-in status-reaction pool — warm, ordinary faces a
+#: person would actually tap on a friend's status.  The full
+#: rotation pool is this ∪ the account's own additions ∪ HER
+#: custom emoji set (expression completion, 2026-11-07).
+STATUS_REACT_BUILTIN_POOL: tuple[str, ...] = (
+    "❤️", "🔥", "🙌", "💯", "😍", "🤩", "✨", "👏",
+    "💪", "🎉", "😂", "🫶", "😮", "👍", "🥰", "🙏",
+)
+
+
+def status_react_pool_for(rec: AccountRecord,
+                          custom: Any = ()) -> list[str]:
+    """The account's full rotation pool, in draw order: her
+    custom set first (her signature leads), then the account's
+    own additions, then the built-in pool — deduped, order
+    preserved, empties dropped.  The pinned emoji is always a
+    member (it is the pool of one when rotation is off)."""
+    pool: list[str] = []
+    for source in (custom, list(rec.status_react_pool or []),
+                   STATUS_REACT_BUILTIN_POOL,
+                   [rec.status_react_emoji or "❤️"]):
+        for emoji in source or ():
+            emoji = str(emoji or "").strip()
+            if emoji and emoji not in pool:
+                pool.append(emoji)
+    return pool or ["❤️"]
+
+
+def status_react_pick(rec: AccountRecord,
+                      custom: Any = ()) -> tuple[str, int]:
+    """The next status-reaction emoji for this account, as
+    ``(emoji, new_cursor)`` — a PEEK: nothing mutates; the
+    caller commits cursor + last onto the record only when the
+    reaction actually lands (a miss stays unreacted AND
+    un-rotated).  Rotation off → the pinned emoji.  Rotation
+    on → the walk advances from the cursor, skipping the last
+    face used, so consecutive statuses never repeat a face
+    while the pool holds more than one."""
+    pinned = str(rec.status_react_emoji or "❤️")
+    if not rec.status_react_rotate:
+        return pinned, int(rec.status_react_cursor or 0)
+    pool = status_react_pool_for(rec, custom)
+    if len(pool) == 1:
+        return pool[0], 0
+    start = int(rec.status_react_cursor or 0) % len(pool)
+    idx = start
+    while pool[idx] == str(rec.status_react_last or ""):
+        idx = (idx + 1) % len(pool)
+    return pool[idx], (idx + 1) % len(pool)
 
 
 class PairingRegistry:
