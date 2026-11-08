@@ -423,22 +423,39 @@ class _PoolSource:
     def __init__(self, name: str, url: str, shape: str) -> None:
         self.name = name
         self.url = url
-        self.shape = shape  # "waifu.pics" | "nekos.best"
+        self.shape = shape  # "waifu.pics" | "nekos.best" | "nekosapi"
 
 
-#: Pool chains per picture command: seeds in try order.
+#: Pool chains per picture command: seeds in try order (the
+#: client shuffles per fetch, so the seeds genuinely rotate).
+#: Sources are seeds, never a closed list — a new pool is one
+#: more entry.  nekosapi enters only through its safe-rated
+#: door: the request asks for ``rating=safe`` and the
+#: extractor re-checks each row's rating in code, because the
+#: unfiltered pool serves suggestive/explicit rows.  kitsune
+#: and husbando stay nekos.best-only: no second verified SFW
+#: source carries those categories (delivery-shape pass,
+#: 2026-11-07 — an honest remainder, not a silent gap).
 IMAGE_POOLS: dict[str, list[_PoolSource]] = {
     "waifu": [
         _PoolSource("waifu.pics", "https://api.waifu.pics/sfw/waifu",
                     "waifu.pics"),
         _PoolSource("nekos.best", "https://nekos.best/api/v2/waifu",
                     "nekos.best"),
+        _PoolSource("nekosapi",
+                    "https://api.nekosapi.com/v4/images/random"
+                    "?rating=safe",
+                    "nekosapi"),
     ],
     "neko": [
         _PoolSource("waifu.pics", "https://api.waifu.pics/sfw/neko",
                     "waifu.pics"),
         _PoolSource("nekos.best", "https://nekos.best/api/v2/neko",
                     "nekos.best"),
+        _PoolSource("nekosapi",
+                    "https://api.nekosapi.com/v4/images/random"
+                    "?rating=safe",
+                    "nekosapi"),
     ],
     "kitsune": [
         _PoolSource("nekos.best", "https://nekos.best/api/v2/kitsune",
@@ -457,6 +474,10 @@ IMAGE_POOLS: dict[str, list[_PoolSource]] = {
                     "nekos.best"),
         _PoolSource("nekos.best", "https://nekos.best/api/v2/waifu",
                     "nekos.best"),
+        _PoolSource("nekosapi",
+                    "https://api.nekosapi.com/v4/images/random"
+                    "?rating=safe",
+                    "nekosapi"),
     ],
 }
 
@@ -495,6 +516,18 @@ class ImagePoolClient:
         if src.shape == "waifu.pics":
             if isinstance(data, dict) and isinstance(data.get("url"), str):
                 return data["url"]
+            return ""
+        if src.shape == "nekosapi":
+            # A bare list of rows; ONLY a row the pool itself
+            # rates "safe" may pass — the URL's rating filter
+            # is the source's claim, this check is ours.
+            if isinstance(data, list):
+                for row in data:
+                    if isinstance(row, dict) \
+                            and str(row.get("rating") or "") == "safe" \
+                            and isinstance(row.get("url"), str) \
+                            and row["url"]:
+                        return row["url"]
             return ""
         if isinstance(data, dict):
             results = data.get("results")

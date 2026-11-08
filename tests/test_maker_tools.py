@@ -754,10 +754,16 @@ def test_couplepp_delivers_the_labelled_pair(tmp_path):
                    bytes_fetcher=lambda url: ART_BYTES)
     out = svc.couplepp(send=send)
     assert out["sent"] is True and out["source"] == "waifu.pics"
-    ref, caption = send.calls[0]
-    assert Image.open(ref.path).size == (968, 640)
-    assert "one artwork via waifu.pics" in caption
-    assert "left half" in caption and "right half" in caption
+    # Delivery-shape law (owner, 2026-11-07): the pair lands
+    # as TWO separate profile-ready photos — the left half,
+    # then the right half — never one combined poster the
+    # couple must crop themselves.
+    assert out["parts"] == 2 and len(send.calls) == 2
+    (ref1, cap1), (ref2, cap2) = send.calls
+    assert Image.open(ref1.path).size == (480, 640)
+    assert Image.open(ref2.path).size == (480, 640)
+    assert "one artwork via waifu.pics" in cap1
+    assert "left half" in cap1 and "right half" in cap2
 
 
 def test_couplepp_sheds_a_bad_pool_and_dies_honestly(tmp_path):
@@ -972,7 +978,11 @@ def test_handler_couplepp_sends_the_pair(tmp_path):
     rt, adapter, chat = _rig(tmp_path, service=svc)
     out = rt._control_makers("pp", "", _Msg(chat))
     assert out == ""
-    assert len(adapter.media_sent) == 1
+    # the pair is TWO sends (delivery-shape law) — the left
+    # half and the right half as separate photos
+    assert len(adapter.media_sent) == 2
+    for ref, _caption in adapter.media_sent:
+        assert Image.open(ref.path).size == (480, 640)
 
 
 # ── the composed control path ────────────────────────────────

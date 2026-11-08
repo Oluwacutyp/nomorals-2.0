@@ -37,20 +37,25 @@ ANIME_KINDS = frozenset({
 
 _IMAGE_POOL_KINDS = {"waifu", "neko", "kitsune", "husbando", "charpic"}
 
+#: Usage lines are bracket-free on purpose: WhatsApp's
+#: presentation strips tag-shaped text, so a "<title>"
+#: placeholder reached the owner's phone eaten (the names
+#: inside the brackets vanished).  Plain words survive every
+#: surface.
 _USAGE = {
-    "anime": "usage: /anime <title> — e.g. /anime frieren",
-    "manga": "usage: /manga <title> — e.g. /manga berserk",
-    "anichar": "usage: /anichar <character name>",
-    "staff": "usage: /staff <person name> — voice actors, directors",
-    "studio": "usage: /studio <studio name>",
-    "episodes": "usage: /episodes <anime title>",
-    "animechars": "usage: /animechars <anime title> — its cast",
-    "trailer": "usage: /trailer <anime title>",
-    "streaming": "usage: /streaming <anime title> — legal watch links",
-    "animereview": "usage: /animereview <title> — scores + reviews",
-    "nextep": "usage: /nextep <anime title>",
-    "recommend": "usage: /recommend <title> — more like it",
-    "genre": "usage: /genre <name> — /genres lists them",
+    "anime": "usage: /anime title — e.g. /anime frieren",
+    "manga": "usage: /manga title — e.g. /manga berserk",
+    "anichar": "usage: /anichar character name",
+    "staff": "usage: /staff person name — voice actors, directors",
+    "studio": "usage: /studio studio name",
+    "episodes": "usage: /episodes anime title",
+    "animechars": "usage: /animechars anime title — its cast",
+    "trailer": "usage: /trailer anime title",
+    "streaming": "usage: /streaming anime title — legal watch links",
+    "animereview": "usage: /animereview title — scores + reviews",
+    "nextep": "usage: /nextep anime title",
+    "recommend": "usage: /recommend title — more like it",
+    "genre": "usage: /genre name — /genres lists them",
 }
 
 
@@ -110,8 +115,15 @@ class RuntimeAnimeMixin:
         return path
 
     # ── image delivery ────────────────────────────────────────────
-    def _anime_send_image(self, chat_key: str, outcome: Any) -> str:
-        """Fetch the outcome's image and send it into the chat.
+    def _anime_send_image(self, chat_key: str, outcome: Any, *,
+                          buttons: Any = None,
+                          label: str = "") -> str:
+        """Fetch the outcome's image and send it into the chat
+        AS A PHOTO (delivery-shape law, 2026-11-07): the send
+        declares kind "image" and carries a human name, so the
+        picture lands inline — never as a hash-named document
+        attachment (the /husbando defect).  ``buttons`` ride
+        the photo on surfaces whose media sends carry them.
 
         Returns "" when the image went out (or none was offered);
         a plain-words note when it could not be delivered — the
@@ -133,12 +145,22 @@ class RuntimeAnimeMixin:
                 return "(the picture itself wouldn't download)"
             suffix = ".png" if url.lower().split("?")[0].endswith(".png") \
                 else ".jpg"
-            name = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
-            path = self._anime_cache_dir() / f"{name}{suffix}"
+            digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
+            path = self._anime_cache_dir() / f"{digest}{suffix}"
             path.write_bytes(result.content)
+            raw_label = str(label or getattr(outcome, "title", "")
+                            or "").strip().lower()
+            # A presented name must be a legal file name on
+            # every host (the live install is Windows): strip
+            # the path-hostile characters, keep it human.
+            friendly = "".join(
+                ch for ch in " ".join(raw_label.split())[:40]
+                if ch not in '<>:"/\\|?*').strip() or "anime picture"
             sent = self.gateway.send_file(
                 chat.platform, chat.key, str(path),
-                caption=str(getattr(outcome, "image_caption", "") or ""))
+                caption=str(getattr(outcome, "image_caption", "") or ""),
+                kind="image", name=f"{friendly}{suffix}",
+                buttons=buttons)
             if sent is not None and getattr(sent, "ok", False):
                 return ""
             return "(the picture couldn't be sent on this surface)"
@@ -284,7 +306,11 @@ class RuntimeAnimeMixin:
             outcome = svc.picture(kind)
             if not outcome.ok:
                 return present_outcome(outcome)
-            note = self._anime_send_image(chat_key, outcome)
+            # The follow-up choice rides the photo itself
+            # (owner consistency rule): one tap draws another.
+            note = self._anime_send_image(
+                chat_key, outcome, label=kind,
+                buttons=[[("🔁 Another one", kind)]])
             if note:
                 return f"found one, but {note}."
             return "sent it here. 🖼️"

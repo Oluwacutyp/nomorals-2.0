@@ -200,9 +200,10 @@ HINT_EXCEPTIONS: list[tuple[str, str, str]] = [
     ("runtime_meta.py", "/game quit to close it",
      "reply FRAGMENT concatenated into a larger toggle reply "
      "by the chat-modes path — not a standalone reply"),
-    ("runtime_provision.py", "run /provision <service>",
+    ("runtime_provision.py", "run /provision with a service name",
      "argument-carrying: the service name is the user's own "
-     "data"),
+     "data (the line was rewritten bracket-free in the "
+     "delivery-shape pass; the exception follows the literal)"),
     ("runtime_provision.py", "toggle is on (/pair toggle)",
      "explanatory line: the toggle takes account + toggle "
      "arguments; the sentence explains when saves land"),

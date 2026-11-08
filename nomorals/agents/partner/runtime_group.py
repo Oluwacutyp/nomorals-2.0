@@ -4329,7 +4329,8 @@ class RuntimeGroupMixin:
         path.write_bytes(data)
         self.gateway.send_file(
             message.chat.platform, str(message.chat.key),
-            str(path), caption=caption)
+            str(path), caption=caption,
+            kind="" if pdf else "image")
         return str(path)
 
     def _control_webshot(self, tail, message):  # type: ignore[no-untyped-def]

@@ -95,6 +95,30 @@ _ITALIC_HTML = re.compile(r"<i>(.*?)</i>", re.S | re.I)
 _CODE_HTML = re.compile(r"<code>(.*?)</code>", re.S | re.I)
 _LINK_HTML = re.compile(r'<a\s+href="([^"]*)"(?:\s[^>]*)?>(.*?)</a>', re.S | re.I)
 _ANY_TAG = re.compile(r"<[^>]+>")
+#: A ``<…>`` span whose head word is NOT an HTML tag is prose,
+#: not markup — above all a usage placeholder (``<title>``,
+#: ``<off|24h|7d>``, ``<what you're feeling>``).  The tag
+#: stripper used to eat those whole on WhatsApp, so a usage
+#: line reached the owner's phone with the placeholder names
+#: missing (delivery-shape pass, 2026-11-07).  Placeholders
+#: are escaped before the strip and unescaped back after it;
+#: real tags keep the historical strip/convert behaviour.
+_KNOWN_TAG_HEAD = re.compile(
+    r"</?(?:b|strong|i|em|u|ins|s|strike|del|code|pre|br|hr|"
+    r"blockquote|tg-spoiler|a)(?=[\s/>])", re.I)
+_ANGLE_SPAN = re.compile(r"<[^<>]+>")
+
+
+def _protect_placeholders(text: str) -> str:
+    """Escape ``<…>`` spans that are not HTML tags, so the
+    tag stripper leaves them standing as literal text."""
+    def _one(m: re.Match[str]) -> str:
+        span = m.group(0)
+        if _KNOWN_TAG_HEAD.match(span):
+            return span
+        return "&lt;" + span[1:-1] + "&gt;"
+
+    return _ANGLE_SPAN.sub(_one, text)
 _MD_BOLD = re.compile(r"\*\*(.+?)\*\*")
 #: lone `code` — not adjacent to another backtick (leaves ``` blocks alone)
 _MD_CODE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
@@ -162,6 +186,9 @@ def to_whatsapp(text: str) -> str:
         out = _BOLD_HTML.sub(r"*\1*", out)
         out = _ITALIC_HTML.sub(r"_\1_", out)
         out = _CODE_HTML.sub(r"```\1```", out)
+        # usage placeholders (<title>, <off|24h|7d>) are prose,
+        # not tags: shield them from the strip, restore after
+        out = _protect_placeholders(out)
         out = _ANY_TAG.sub("", out)  # any other tag: drop, keep content
         return _html.unescape(out)
     except Exception as exc:  # noqa: BLE001

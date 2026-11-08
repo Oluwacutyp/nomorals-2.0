@@ -8,7 +8,7 @@ this mixin owns the live wiring:
   Reply form reads the replied author + text the adapters
   stash in message meta (``reply_to_sender`` /
   ``reply_to_text`` — the Bot API surface provides both);
-  explicit form is ``<name> | <text>``.  The rendered PNG
+  explicit form is ``name | text``.  The rendered PNG
   rides the expression send path, caption on the media
   message — one message, so success returns "" and the kinds
   ride expression.MEDIA_DELIVERED_KINDS.
@@ -22,8 +22,11 @@ this mixin owns the live wiring:
   here — the shortener reply always names the full
   destination, the bible reply caps its verses per message
   and attributes its source.
-- **/couplepp** (alias /pp): the diptych canvas attached,
-  captioned as the one split artwork it is.
+- **/couplepp** (alias /pp): the matched pair delivered as
+  TWO separate profile-ready photos (delivery-shape law) —
+  the left half for one person, the right half for the
+  other — with an Another-pair button riding the second
+  photo where the surface carries buttons on media.
 - **Gate**: in groups these are bot-system output, so they
   pass the same §33 gate as the fun/expression commands
   beside them (``_group_gate``); DMs are never gated.
@@ -106,8 +109,11 @@ class RuntimeMakersMixin:
                 return ("usage: /couplepp in a chat — the pair "
                         "needs somewhere to land.")
             out = service.couplepp(
-                send=lambda ref, caption: self._expression_send(
-                    message, ref, caption=caption))
+                send=lambda ref, caption, buttons=None:
+                    self._expression_send(
+                        message, ref, caption=caption,
+                        buttons=buttons),
+                buttons=[[("🔁 Another pair", "couplepp")]])
             if out.get("sent"):
                 return ""
             return str(out.get("reason") or "no couple pp "
@@ -142,7 +148,7 @@ class RuntimeMakersMixin:
     def _makers_card(self, kind: str, tail: str, message) -> str:  # type: ignore[no-untyped-def]
         if message is None:
             return (f"usage: reply to a message with /{kind}, "
-                    f"or /{kind} <name> | <text> — in a chat, so "
+                    f"or /{kind} name | text — in a chat, so "
                     f"the card has somewhere to land.")
         reply_name, reply_text = self._makers_reply_context(
             message)
@@ -217,7 +223,7 @@ class RuntimeMakersMixin:
                              or "(an empty payload)")
             return "\n".join(lines)
         if not tail:
-            return ("usage: /qr <text or a link> — or reply "
+            return ("usage: /qr text or a link — or reply "
                     "to a picture with /qr read to decode one.")
         if message is None:
             return ("usage: /qr in a chat — the code needs "

@@ -736,22 +736,30 @@ class ChatGateway:
         *,
         caption: str = "",
         caption_parse_mode: str = "",
+        buttons: list[list[tuple[str, str]]] | None = None,
     ) -> tuple[SendResult, int]:
         """Send one media item with classified retry."""
         def _call() -> SendResult:
+            extra: dict[str, Any] = {}
             if caption_parse_mode:
+                extra["parse_mode"] = caption_parse_mode
+            if buttons:
+                extra["buttons"] = buttons
+            try:
+                result = adapter.send_media(
+                    chat, media, caption=caption, **extra)
+            except TypeError:
+                # An adapter without the F7 caption kwarg or the
+                # media-buttons verb (third-party or test double):
+                # the file still goes — formatting/buttons
+                # degrade, delivery doesn't.
+                extra.pop("buttons", None)
                 try:
                     result = adapter.send_media(
-                        chat, media, caption=caption,
-                        parse_mode=caption_parse_mode)
+                        chat, media, caption=caption, **extra)
                 except TypeError:
-                    # An adapter without the F7 caption kwarg
-                    # (third-party or test double): the file still
-                    # goes, the caption unparsed — formatting
-                    # degrades, delivery doesn't.
-                    result = adapter.send_media(chat, media, caption=caption)
-            else:
-                result = adapter.send_media(chat, media, caption=caption)
+                    result = adapter.send_media(chat, media,
+                                                caption=caption)
             if result.ok:
                 self.touch(chat)
             return result
@@ -789,10 +797,18 @@ class ChatGateway:
                 name=str(media.get("name") or ""),
             )
             cap_mode = str(media.get("caption_parse_mode") or "")
+            media_buttons = media.get("buttons")
+            if media_buttons is not None:
+                try:
+                    media_buttons = [[(str(a), str(b)) for a, b in row]
+                                     for row in media_buttons]
+                except (TypeError, ValueError):
+                    media_buttons = None
             result, attempts = self._send_one_media(
                 adapter, chat, ref,
                 caption=str(media.get("caption") or ""),
                 caption_parse_mode=cap_mode,
+                buttons=media_buttons,
             )
             # A caption that was chunked at submit time: the remainder
             # goes out as text, in order, as part of the same row.
@@ -1119,6 +1135,9 @@ class ChatGateway:
         max_send_mb: float = 0.0,
         durable: bool | None = None,
         durable_kind: str = "media",
+        kind: str = "",
+        name: str = "",
+        buttons: list[list[tuple[str, str]]] | None = None,
     ) -> SendResult:
         """Send a file, auto-compressing when it would exceed ``max_send_mb``.
 
@@ -1132,6 +1151,22 @@ class ChatGateway:
         as the caption, the rest as follow-up text. ``durable`` routes
         through the durable outbox like :meth:`send` (default: the
         gateway's ``durable_outbox`` flag).
+
+        ``kind`` is the caller's declaration of what the file IS
+        (``image`` / ``animation`` / ``video`` / ``audio`` / ``voice``
+        / ``sticker``): a caller that knows its content is a picture
+        or a GIF passes the kind and the file rides the platform's
+        native path for it (a photo, an animation) instead of
+        landing as a document attachment.  The default ``""`` keeps
+        the historical document shape for genuine file sends; over
+        the inline cap even a declared kind still downgrades to a
+        document — that part is the platform's rule, not ours.
+        ``name`` overrides the presented file name (the on-disk
+        basename is the default); media callers pass a human name
+        so a content-hash cache name never faces the user.
+        ``buttons`` rides the media message on adapters that carry
+        buttons on media sends, and is simply not offered where
+        the adapter has no such verb.
         """
         chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
         adapter = self._adapter_for(chat.platform)
@@ -1156,7 +1191,8 @@ class ChatGateway:
             size_bytes = os.path.getsize(target)
         except OSError:
             size_bytes = 0
-        kind = media_kind_for(size_bytes, "file", limits)
+        kind = media_kind_for(size_bytes, str(kind or "file"),
+                              limits)
         caption_width = utf16_len if limits.utf16_lengths else len
         caption_chunks = split_caption(caption, max_caption=limits.max_caption,
                                        width=caption_width) \
@@ -1182,7 +1218,8 @@ class ChatGateway:
                          or caption_width(presented) <= limits.max_caption):
                 caption_first, caption_parse_mode = presented, mode
         media = MediaRef(path=target, mime="", kind=kind,
-                         name=os.path.basename(target))
+                         name=str(name or "")
+                         or os.path.basename(target))
         use_durable = durable if durable is not None else self.durable_outbox
         if use_durable and self.outbox is not None:
             group_id = new_id("send")
@@ -1191,9 +1228,11 @@ class ChatGateway:
                     platform=platform, chat=chat, kind="chat_send_file",
                     durable_kind=durable_kind, group_id=group_id,
                     media={"path": target, "mime": "", "kind": kind,
-                           "name": os.path.basename(target),
+                           "name": str(name or "")
+                           or os.path.basename(target),
                            "caption": caption_first,
-                           "caption_parse_mode": caption_parse_mode},
+                           "caption_parse_mode": caption_parse_mode,
+                           "buttons": buttons},
                     caption_rest=caption_rest,
                 )
                 if not self.durable_drain_sync:
@@ -1204,7 +1243,8 @@ class ChatGateway:
         def _do() -> SendResult:
             result, _attempts = self._send_one_media(
                 adapter, chat, media, caption=caption_first,
-                caption_parse_mode=caption_parse_mode)
+                caption_parse_mode=caption_parse_mode,
+                buttons=buttons)
             if not result.ok:
                 return result
             for piece in caption_rest:

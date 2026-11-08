@@ -48,26 +48,26 @@ class RuntimeVoiceMixin:
                 try:
                     speed = float(val)
                 except ValueError:
-                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] [auto=on|off] [file=on|off] <text>"
+                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] [auto=on|off] [file=on|off] text"
             elif m.group(1) == "gap":
                 try:
                     gap_ms = int(val)
                 except ValueError:
-                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] [auto=on|off] [file=on|off] <text>"
+                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] [auto=on|off] [file=on|off] text"
             elif m.group(1) == "auto":
                 if val.lower() in ("on", "true", "1", "yes"):
                     auto_tags = True
                 elif val.lower() in ("off", "false", "0", "no"):
                     auto_tags = False
                 else:
-                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] [auto=on|off] [file=on|off] <text>"
+                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] [auto=on|off] [file=on|off] text"
             elif m.group(1) == "file":
                 if val.lower() in ("on", "true", "1", "yes"):
                     file_mode = True
                 elif val.lower() in ("off", "false", "0", "no"):
                     file_mode = False
                 else:
-                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] [auto=on|off] [file=on|off] <text>"
+                    return "usage: /tts [speed=0.25-4.0] [pace=tight|natural|slow] [gap=<ms>] [auto=on|off] [file=on|off] text"
             else:
                 pace = val.lower()
             rest = rest[m.end():]
@@ -172,7 +172,7 @@ class RuntimeVoiceMixin:
         lines.append("\nreal laughs ([laugh] etc.) need Chatterbox/Bark — "
                      "use /speak, not /tts.")
         lines.append("\nauto-tagging: ON by default for /tts "
-                     "(/tts auto=off <text> disables it) — hesitation pauses "
+                     "(/tts auto=off text disables it) — hesitation pauses "
                      "everywhere, laughter/sentence/comma pauses where the "
                      "engine renders them. Explicit tags are always preserved.")
         return "\n".join(lines)
@@ -195,7 +195,7 @@ class RuntimeVoiceMixin:
         """Sing a melody: /sing C4:0.5:hello D4:0.5:world"""
         melody = (tail or "").strip()
         if not melody:
-            return "usage: /sing <melody> — e.g. /sing C4:0.5:la E4:0.5:la G4:1:laaa"
+            return "usage: /sing melody — e.g. /sing C4:0.5:la E4:0.5:la G4:1:laaa"
         outcome = self.context.tools.call("voice_sing", melody=melody)
         if not outcome.ok:
             return f"singing failed: {getattr(outcome.error, 'message', outcome.error)}"
@@ -203,7 +203,7 @@ class RuntimeVoiceMixin:
         chat = self._ref_from_key(chat_key)
         try:
             result = self.gateway.send_file(chat.platform, chat, info["path"],
-                                            caption="🎤")
+                                            caption="🎤", kind="audio")
             if getattr(result, "ok", False):
                 return f"🎤 sung ({info.get('notes', '?')} notes)"
         except Exception as e:
@@ -215,7 +215,7 @@ class RuntimeVoiceMixin:
         import re
         rest = (tail or "").strip()
         if not rest:
-            return ("usage: /say [direction] [accent=X] [ambient=Y] [room=Z] <text>\n"
+            return ("usage: /say [direction] [accent=X] [ambient=Y] [room=Z] text\n"
                     "e.g. /say [whispers fearfully] don't go in there")
         kwargs: dict[str, str] = {}
         # Pull leading key=value options
@@ -232,7 +232,7 @@ class RuntimeVoiceMixin:
             direction = m.group(0).strip()
             rest = rest[m.end():]
         if not rest:
-            return "usage: /say [direction] [options] <text to say>"
+            return "usage: /say [direction] [options] text to say"
         outcome = self.context.tools.call(
             "voice_rich", text=rest[:4000],
             direction=direction,
@@ -245,7 +245,7 @@ class RuntimeVoiceMixin:
         chat = self._ref_from_key(chat_key)
         try:
             result = self.gateway.send_file(chat.platform, chat, info["path"],
-                                            caption="🔊")
+                                            caption="🔊", kind="audio")
             if getattr(result, "ok", False):
                 post = ", ".join(info.get("post", []))
                 return f"🔊 said ({post or info.get('tier', '?')})"
@@ -276,10 +276,10 @@ class RuntimeVoiceMixin:
         return self._send_long_checked(chat.platform, chat, text[:6000])
 
     def _control_speak(self, tail: str, chat_key: str) -> str:
-        """`/speak <text>` — I say it: neural TTS voice note sent back here."""
+        """`/speak text` — I say it: neural TTS voice note sent back here."""
         text = (tail or "").strip()
         if not text:
-            return ("usage: /speak <text> — I'll say it as a voice note "
+            return ("usage: /speak text — I'll say it as a voice note "
                     "(tags like [happy] [whisper] [laughs] [pause:300] work)")
         # bridge the current mood into the voice, best-effort
         mood, mood_level = "", 5
@@ -362,12 +362,12 @@ class RuntimeVoiceMixin:
 
         /voice list                              catalogue + active voice
         /voice use <name>                        switch this chat's voice now
-        /voice say [voice] <text>                speak as the chat's voice,
+        /voice say [voice] text                speak as the chat's voice,
                                                  or one-shot in [voice]
         /voice clone <name> [path]               clone a voice note / file
         /voice match <path>                    which voice sounds like this clip?
-        /voice transcript <name> <text>          set a clone's prompt text
-        /voice describe <name> <text>            describe a catalogue voice
+        /voice transcript <name> text          set a clone's prompt text
+        /voice describe <name> text            describe a catalogue voice
         /voice backend <name> <backend>          change a voice's backend
         /voice design <name> <description>       design a voice from words
         /voice morph <name> <a> <b> [ratio]      blend two voices
@@ -420,15 +420,15 @@ class RuntimeVoiceMixin:
         if verb == "say":
             text = rest.strip()
             if not text:
-                return "usage: /voice say [voice] <text>"
+                return "usage: /voice say [voice] text"
             mood = self._voice_mood()
-            # optional one-shot voice override: /voice say <voicename> <text>
+            # optional one-shot voice override: /voice say <voicename> text
             first, _, remainder = text.partition(" ")
             voice_name = ""
             if remainder.strip() and cat.get(first) is not None:
                 voice_name, text = first, remainder.strip()
                 if not text:
-                    return "usage: /voice say [voice] <text>"
+                    return "usage: /voice say [voice] text"
             try:
                 if voice_name:
                     out = cat.speak_as(text, voice_name)
@@ -486,7 +486,7 @@ class RuntimeVoiceMixin:
                 return f"clone failed: {exc}"
             note = (f" (transcript: {transcript[:80]}…)"
                     if transcript else " (no transcript — set one with "
-                    "/voice transcript <name> <text>)")
+                    "/voice transcript <name> text)")
             verdict = ""
             try:
                 prof = cat.library.get(voice.profile or voice.name)
@@ -523,7 +523,7 @@ class RuntimeVoiceMixin:
         if verb == "transcript":
             tparts = rest.strip().split(None, 1)
             if len(tparts) < 2:
-                return "usage: /voice transcript <name> <text>"
+                return "usage: /voice transcript <name> text"
             name, text = tparts
             profile = cat.library.get(name)
             if profile is None:
@@ -535,7 +535,7 @@ class RuntimeVoiceMixin:
         if verb == "describe":
             dparts = rest.strip().split(None, 1)
             if len(dparts) < 2:
-                return "usage: /voice describe <name> <text>"
+                return "usage: /voice describe <name> text"
             voice = cat.get(dparts[0])
             if voice is None:
                 return f"unknown voice {dparts[0]!r} — /voice list"
@@ -649,10 +649,10 @@ class RuntimeVoiceMixin:
             return (f"🔐 {res['verdict']} "
                     f"(confidence {res.get('confidence', 0):.0%})")
 
-        return (f"usage: /voice list | use <name> | say [voice] <text> | "
+        return (f"usage: /voice list | use <name> | say [voice] text | "
                 f"clone <name> [path] | match <path> | "
-                f"transcript <name> <text> | "
-                f"describe <name> <text> | backend <name> <backend> | "
+                f"transcript <name> text | "
+                f"describe <name> text | backend <name> <backend> | "
                 f"design <name> <description> | morph <name> <a> <b> [ratio] | "
                 f"talk on|off | verify enroll | rm <name>")
 
@@ -713,7 +713,7 @@ class RuntimeVoiceMixin:
 
     def _control_say_tts(self, voice_name: str, text: str,
                          chat_key: str) -> str:
-        """TTS path for /say: /say <voice> <text> speaks as a voice note.
+        """TTS path for /say: /say voice text speaks as a voice note.
 
         Never raises — unknown voices and engine failures return text.
         """
@@ -722,7 +722,7 @@ class RuntimeVoiceMixin:
         cat = default_catalogue()
         if cat.get(voice_name) is None:
             return (f"unknown voice {voice_name!r} — /voices to list\n"
-                    f"usage: /say <voice> <text>")
+                    f"usage: /say voice text")
         try:
             out = cat.speak_as(text, voice_name)
         except Exception as exc:  # noqa: BLE001
@@ -764,7 +764,7 @@ class RuntimeVoiceMixin:
 
         Lists every usable voice: system (espeak), Piper downloads,
         and the voice catalogue. Use `/voice use <name>` to switch,
-        `/voice say <text>` to speak.
+        `/voice say text` to speak.
         """
         lines = ["🎙️ voices — every backend, one list:"]
 
@@ -846,7 +846,7 @@ class RuntimeVoiceMixin:
         except Exception as e:
             record_failure("runtime_voice.RuntimeVoiceMixin._control_voices:832", e)
 
-        lines.append("\nswitch: `/voice use <name>` · speak: `/voice say <text>`")
+        lines.append("\nswitch: `/voice use <name>` · speak: `/voice say text`")
         return "\n".join(lines)
 
     def _voice_mood(self) -> str:

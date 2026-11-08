@@ -3996,7 +3996,7 @@ class PartnerRuntime(
                     message.chat.platform,
                     f"{message.chat.platform}:{message.chat.chat_id}",
                     res.master_path,
-                    caption=f"🎵 {res.title} — AI instrumental + {vocal_txt}")
+                    caption=f"🎵 {res.title} — AI instrumental + {vocal_txt}", kind="audio")
                 text += "\nsent the master to this chat."
             except Exception as e:
                 record_failure("runtime.PartnerRuntime._music_full_hook", e)

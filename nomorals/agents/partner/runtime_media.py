@@ -11,6 +11,28 @@ from typing import Any
 from ...search.adaptive import adaptive_result_limit
 from .failures import record_failure
 
+_AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac",
+               ".wav"}
+_VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v"}
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
+
+def _send_kind_for(path: str) -> str:
+    """The delivery kind a downloaded file IS, by extension —
+    so a download lands as a playable video, an audio message
+    or a photo (delivery-shape law, 2026-11-07), never as a
+    document wearing a file name.  Anything unrecognized
+    keeps the plain file shape ("")."""
+    ext = os.path.splitext(str(path or ""))[1].lower()
+    if ext in _AUDIO_EXTS:
+        return "audio"
+    if ext in _VIDEO_EXTS:
+        return "video"
+    if ext in _IMAGE_EXTS:
+        return "image"
+    return ""
+
+
 #: The ack-message handle of the background download job running on
 #: this context: ``(chat_ref, ack_message_id)``.  Set by
 #: ``_play_download_bg`` around the job body so bodies can edit the
@@ -139,7 +161,7 @@ class RuntimeMediaMixin:
             try:
                 self.gateway.send_file(
                     "telegram", chat_key, out_path,
-                    caption=f"🎵 {res.get('draft_title', '')} — performed from draft")
+                    caption=f"🎵 {res.get('draft_title', '')} — performed from draft", kind="audio")
             except Exception as e:
                 record_failure("runtime_media.RuntimeMediaMixin._control_music_perform", e)
         return f"{res.get('note', '')}\n{out_path}"
@@ -206,7 +228,7 @@ class RuntimeMediaMixin:
                 self.gateway.send_file(
                     chat.platform, f"{chat.platform}:{chat.chat_id}",
                     res.audio_path,
-                    caption=f"🎹 {res.title} — AI bed (vocals come next)")
+                    caption=f"🎹 {res.title} — AI bed (vocals come next)", kind="audio")
                 # The file landing is the delivery — no "sent …
                 # to this chat" narration (presentation law).
             except Exception as e:
@@ -258,7 +280,7 @@ class RuntimeMediaMixin:
                 self.gateway.send_file(
                     chat.platform, f"{chat.platform}:{chat.chat_id}",
                     res.master_path,
-                    caption=f"🎵 {res.title} — AI instrumental + {vocal_txt}")
+                    caption=f"🎵 {res.title} — AI instrumental + {vocal_txt}", kind="audio")
                 # No "sent … to this chat" narration (presentation
                 # law) — the file landing is the delivery.
             except Exception as e:
@@ -462,7 +484,7 @@ class RuntimeMediaMixin:
                     self.gateway.send_file(
                         chat.platform, f"{chat.platform}:{chat.chat_id}",
                         song.audio_path,
-                        caption=f"🎵 {song.title} — listen")
+                        caption=f"🎵 {song.title} — listen", kind="audio")
                     sent.append("audio")
             except Exception as e:
                 record_failure("runtime_media.RuntimeMediaMixin._control_music", e)
@@ -1069,7 +1091,8 @@ class RuntimeMediaMixin:
             try:
                 self.gateway.send_file(
                     chat.platform, f"{chat.platform}:{chat.chat_id}",
-                    path, caption=f"{emoji} {title}"[:1024])
+                    path, caption=f"{emoji} {title}"[:1024],
+                    kind="audio" if audio_only else "video")
                 # The item's own line is the final state — no size
                 # receipt, no "sent to this chat" (presentation law).
                 return f"{emoji} {title}", True
@@ -1199,7 +1222,7 @@ class RuntimeMediaMixin:
         try:
             self.gateway.send_file(
                 chat.platform, f"{chat.platform}:{chat.chat_id}",
-                path, caption=caption[:1024])
+                path, caption=caption[:1024], kind=_send_kind_for(path))
             return note.strip(), True
         except Exception as exc:  # noqa: BLE001
             return (f"downloaded to {path} but couldn't send it: {exc}",
@@ -2172,7 +2195,7 @@ class RuntimeMediaMixin:
         try:
             res = self.gateway.send_file(
                 chat.platform, f"{chat.platform}:{chat.chat_id}",
-                send_path, caption=line[:1024])
+                send_path, caption=line[:1024], kind=_send_kind_for(send_path))
             # The gateway reports a failed media send as a RESULT,
             # not a raise — an unchecked ok=False here would edit
             # the ack to the delivery line for a file that never
@@ -2863,7 +2886,7 @@ class RuntimeMediaMixin:
                 try:
                     self.gateway.send_file(
                         chat.platform, f"{chat.platform}:{chat.chat_id}",
-                        send_path, caption=line[:1024])
+                        send_path, caption=line[:1024], kind=_send_kind_for(send_path))
                     # The queue must hold what was actually sent: if
                     # the winner differs from the first pick, swap
                     # the queued row so a later /play next doesn't
@@ -3087,7 +3110,7 @@ class RuntimeMediaMixin:
             def _da(path: str, caption: str) -> None:
                 gateway.send_file(chat.platform,
                                   f"{chat.platform}:{chat.chat_id}",
-                                  path, caption=caption[:1024])
+                                  path, caption=caption[:1024], kind="audio")
 
             def _dt(text: str) -> None:
                 gateway.send(chat.platform,
@@ -3105,7 +3128,7 @@ class RuntimeMediaMixin:
             def _da(path: str, caption: str) -> None:
                 gateway.send_file(chat.platform,
                                   f"{chat.platform}:{chat.chat_id}",
-                                  path, caption=caption[:1024])
+                                  path, caption=caption[:1024], kind="audio")
 
             def _dt(text: str) -> None:
                 gateway.send(chat.platform,
@@ -3141,7 +3164,7 @@ class RuntimeMediaMixin:
             try:
                 self.gateway.send_file(
                     chat.platform, f"{chat.platform}:{chat.chat_id}",
-                    show["path"], caption="📻 Devon FM — full show")
+                    show["path"], caption="📻 Devon FM — full show", kind="audio")
             except Exception as e:
                 record_failure("runtime_media.RuntimeMediaMixin._control_dj", e)
         return text
@@ -3174,7 +3197,7 @@ class RuntimeMediaMixin:
                 try:
                     self.gateway.send_file(
                         chat.platform, f"{chat.platform}:{chat.chat_id}",
-                        res["path"], caption=f"🎛 {res['title']} (original)")
+                        res["path"], caption=f"🎛 {res['title']} (original)", kind="audio")
                 except Exception as e:
                     record_failure("runtime_media.RuntimeMediaMixin._deliver", e)
             return text
@@ -3570,7 +3593,7 @@ class RuntimeMediaMixin:
                 try:
                     self.gateway.send_file(
                         chat.platform, f"{chat.platform}:{chat.chat_id}",
-                        res["path"], caption=f"🎛 {res['title']} (original)")
+                        res["path"], caption=f"🎛 {res['title']} (original)", kind="audio")
                 except Exception as e:
                     record_failure("runtime_media.RuntimeMediaMixin._musicnote_produce:2332", e)
             return text
@@ -3650,7 +3673,7 @@ class RuntimeMediaMixin:
                 try:
                     self.gateway.send_file(
                         chat.platform, f"{chat.platform}:{chat.chat_id}",
-                        res["path"], caption=f"🎛 {res['title']} (original)")
+                        res["path"], caption=f"🎛 {res['title']} (original)", kind="audio")
                 except Exception as e:
                     record_failure("runtime_media.RuntimeMediaMixin._produce_hook:2411", e)
             return "\n".join(lines)
@@ -4018,7 +4041,7 @@ class RuntimeMediaMixin:
                 self.gateway.send_file(
                     chat.platform, f"{chat.platform}:{chat.chat_id}",
                     out_path,
-                    caption=f"🎬 captioned ({style} style)")
+                    caption=f"🎬 captioned ({style} style)", kind="video")
                 # The captioned video IS the reply — no "video sent"
                 # receipt after it (owner no-meta-narration rule,
                 # 2026-11-01). Failures still return their text below.

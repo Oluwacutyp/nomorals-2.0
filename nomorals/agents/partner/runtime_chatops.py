@@ -297,7 +297,7 @@ class RuntimeChatOpsMixin:
 
         parts = tail.split(None, 1)
         if not parts:
-            return ("usage: /disappear <off|24h|7d|90d> "
+            return ("usage: /disappear off, 24h, 7d or 90d "
                     "[chat name] — set a chat's disappearing-"
                     "messages timer.")
         seconds = parse_disappear_duration(parts[0])
@@ -390,10 +390,10 @@ class RuntimeChatOpsMixin:
         mid = self._chatops_reply_target(message)
         if not mid:
             return ("reply to your message with "
-                    "/editmsg <new text> — the edit lands on "
+                    "/editmsg the new text — the edit lands on "
                     "the replied message.")
         if not tail:
-            return "usage: /editmsg <the new text>"
+            return "usage: /editmsg the new text"
         chat = message.chat
         platform = str(getattr(chat, "platform", "") or "")
         adapter = self._adapter_for(platform)
@@ -553,7 +553,7 @@ class RuntimeChatOpsMixin:
         if head == "emoji":
             emoji = parts[1].strip() if len(parts) > 1 else ""
             if not emoji:
-                return "usage: /statusreact emoji <emoji>"
+                return "usage: /statusreact emoji 🔥 — pins that one face"
             try:
                 personal.set_status_react_emoji(rec.id, emoji)
                 personal.set_status_react_rotation(
@@ -598,12 +598,12 @@ class RuntimeChatOpsMixin:
                         f"({len(_pool())} emojis now).")
             if sub:
                 return ("usage: /statusreact pool · "
-                        "/statusreact pool add <emoji> · "
-                        "/statusreact pool remove <emoji>")
+                        "/statusreact pool add 🔥 · "
+                        "/statusreact pool remove 🔥")
             return (f"the rotation pool for {label} "
                     f"({len(_pool())}): {' '.join(_pool())} — "
                     f"her custom set leads; /statusreact pool "
-                    f"add <emoji> adds yours.")
+                    f"add 🔥 adds yours.")
         if head in ("on", "off"):
             on = head == "on"
             try:
@@ -617,9 +617,9 @@ class RuntimeChatOpsMixin:
                         "status_react", "whatsapp", on))
         if tail:
             return ("usage: /statusreact [on|off] · "
-                    "/statusreact emoji <emoji> (pins one) · "
+                    "/statusreact emoji 🔥 (pins one) · "
                     "/statusreact rotate on|off · "
-                    "/statusreact pool [add|remove <emoji>]")
+                    "/statusreact pool [add|remove 🔥]")
         state = "ON" if rec.toggle("status_react") else "OFF"
         last = (f" Last face used: {rec.status_react_last}."
                 if rec.status_react_last else "")
@@ -644,7 +644,7 @@ class RuntimeChatOpsMixin:
         chat as a normal media message the owner can open.
 
         Forms: bare → the newest capture + the recent list;
-        ``<n>`` → the nth newest; ``list`` → the list only;
+        ``n`` → the nth newest; ``list`` → the list only;
         as a reply → the capture whose source message is the
         replied-to one.  Owner-only by the control gate like
         every chatop; reading his own vault back to his own
@@ -808,7 +808,7 @@ class RuntimeChatOpsMixin:
                 return ("this WhatsApp surface has no "
                         "status-post verb wired.")
             if not text and not media_path:
-                return ("usage: /poststatus <text> — or send "
+                return ("usage: /poststatus text — or send "
                         "a photo/video with /poststatus as the "
                         "caption, or reply to one with it.")
             verdict = self._chatops_call(
@@ -870,7 +870,7 @@ class RuntimeChatOpsMixin:
                 if isinstance(row, dict) and row.get("ok"):
                     target = str(row.get("sender_id") or "")
             if not target:
-                return (f"usage: /{kind} <number or @username> "
+                return (f"usage: /{kind} a number or @username "
                         f"— or reply to a message in a DM to "
                         f"{kind} that person.")
         if platform == "whatsapp":
@@ -940,7 +940,7 @@ class RuntimeChatOpsMixin:
         rows = list(registry.all())
         if not rows:
             return ("no paired accounts to check — /pair one "
-                    "first. For a number: /banchecker <number>.")
+                    "first. For a number: /banchecker number.")
         lines = ["Your accounts:"]
         for rec in rows:
             bits = [f"{rec.platform} · {rec.label or rec.id}",

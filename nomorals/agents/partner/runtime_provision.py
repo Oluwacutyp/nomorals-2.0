@@ -7,7 +7,7 @@ The chat face of :mod:`nomorals.accounts.provisioning`:
   one per service), creates the API key, validates it, vaults it,
   bridges it into the environment, and retries the request that
   originally failed for the missing key.
-* ``/provision login <service> <username>`` — arms a ONE-TIME login
+* ``/provision login service username`` — arms a ONE-TIME login
   intake: the owner's next message in that chat is the password. It is
   consumed at the very top of the inbound pipeline — before the
   autonomy interest recorder and before the brain — so the secret
@@ -288,13 +288,13 @@ class RuntimeProvisionMixin:
                     state = "not provisioned"
                 lines.append(
                     f"  {row['service']} ({row['display']}): {state}")
-            lines.append("run /provision <service> and I'll go get the key.")
+            lines.append("run /provision with a service name and I'll go get the key.")
             return "\n".join(lines)
 
         parts = text.split()
         if parts[0].lower() == "login":
             if len(parts) < 3:
-                return ("usage: /provision login <service> <username> — "
+                return ("usage: /provision login service username — "
                         "then your NEXT message is the password (consumed "
                         "silently, straight into the vault, never stored "
                         "or logged).")
@@ -1346,21 +1346,21 @@ class RuntimeProvisionMixin:
         """/pair — the pairing-with-code account pool (§15).
 
         /pair                              pool summary + accounts
-        /pair whatsapp <number> [label]    pair a WhatsApp account:
+        /pair whatsapp number [label]    pair a WhatsApp account:
                                            returns the 8-char code to
                                            type into Linked Devices
-        /pair telegram <number> [label]    pair a Telegram account:
+        /pair telegram number [label]    pair a Telegram account:
                                            Telegram sends IT a login
                                            code; answer with tgcode
-        /pair tgcode <id> <code>           complete a Telegram pairing
-        /pair tgpass <id> <password>       its 2FA password, when asked
-        /pair code <id>                    re-show a live code
-        /pair start|stop|restart <id>      supervise that session
-        /pair remove <id>                  forget the account
-        /pair use <id>                     name a platform's default
+        /pair tgcode id code           complete a Telegram pairing
+        /pair tgpass id password       its 2FA password, when asked
+        /pair code id                    re-show a live code
+        /pair start|stop|restart id      supervise that session
+        /pair remove id                  forget the account
+        /pair use id                     name a platform's default
                                            account (routing, §15)
         /pair route [platform]             show routing resolution
-        /pair toggle <id> <name> <on|off>  personal surfaces per
+        /pair toggle id name <on|off>  personal surfaces per
                                            account: status_saving |
                                            view_once | antidelete |
                                            always_online |
@@ -1448,8 +1448,8 @@ class RuntimeProvisionMixin:
                     "WhatsApp platform is disabled in config "
                     "(chat.whatsapp_enabled=false) — paired accounts "
                     "have no live chat surface until it's enabled.")
-            lines.append("pair one: /pair whatsapp <number> [label] "
-                         "· /pair telegram <number> [label]")
+            lines.append("pair one: /pair whatsapp number [label] "
+                         "· /pair telegram number [label]")
             lines.append(
                 "personal surfaces on these accounts: "
                 "/statusreact [on|off|emoji] sets the status "
@@ -1463,7 +1463,7 @@ class RuntimeProvisionMixin:
         sub = parts[0].lower()
         if sub == "whatsapp":
             if len(parts) < 2:
-                return ("usage: /pair whatsapp <number> [label] — the "
+                return ("usage: /pair whatsapp number [label] — the "
                         "number in international format, e.g. "
                         "2348012345678")
             label = " ".join(parts[2:])
@@ -1545,7 +1545,7 @@ class RuntimeProvisionMixin:
                     f"({int(age)}s old — type it into Linked Devices)")
         if sub == "telegram":
             if len(parts) < 2:
-                return ("usage: /pair telegram <number> [label] — the "
+                return ("usage: /pair telegram number [label] — the "
                         "number in international format; Telegram "
                         "sends that account a login code, and you "
                         "answer it here with /pair tgcode")
@@ -1558,7 +1558,7 @@ class RuntimeProvisionMixin:
             return (f"📟 login code sent to the Telegram account "
                     f"+{rec.identity} ({rec.id}). When the code "
                     f"arrives (Telegram service message or SMS), "
-                    f"send it back:\n/pair tgcode {rec.id} <code>\n"
+                    f"send it back like this:\n/pair tgcode {rec.id} the-code-from-telegram\n"
                     "The flow lives ten minutes; the code itself is "
                     "never stored anywhere.")
         if sub in ("tgcode", "tgpass"):
@@ -1568,7 +1568,7 @@ class RuntimeProvisionMixin:
                 return "which account? /pair lists them."
             if len(parts) < 3:
                 return (f"usage: /pair {sub} {rec.id} "
-                        f"<{'code' if sub == 'tgcode' else 'password'}>")
+                        f"{'the code' if sub == 'tgcode' else 'the password'}")
             try:
                 svc = self._pairing_personal()
                 if sub == "tgcode":
@@ -1585,7 +1585,7 @@ class RuntimeProvisionMixin:
             if out.get("status") == "password_needed":
                 return (f"🔐 {rec.id} has two-factor auth on. Send "
                         f"the password:\n/pair tgpass {rec.id} "
-                        "<password>\nIt goes straight to the sign-in "
+                        "your-password\nIt goes straight to the sign-in "
                         "and is not kept.")
             return (f"✅ {rec.id} is linked — its session file is "
                     "saved under its own name and the account is a "
@@ -1813,11 +1813,13 @@ class RuntimeProvisionMixin:
                 "(pair, start, stop, restart, remove, toggles) "
                 "through Devon's API with your owner token. "
                 "Approval still only ever happens on the phone.")
-        return ("usage: /pair [whatsapp <number> [label]|telegram "
-                "<number> [label]|tgcode <id> <code>|tgpass <id> "
-                "<password>|code <id>|start|stop|restart|remove <id>|"
-                "use <id>|route [platform]|toggle <id> <name> "
-                "<on|off>|saved [id]|recovered [id]|page]")
+        return ("usage: /pair whatsapp number [label] · "
+                "/pair telegram number [label] · /pair tgcode "
+                "id code · /pair tgpass id password · /pair "
+                "code id · /pair start, stop, restart or remove "
+                "id · /pair use id · /pair route [platform] · "
+                "/pair toggle id name on|off · /pair saved [id] "
+                "· /pair recovered [id] · /pair page")
 
     # ── mass actions (§14: massreact / pollvote / chfollow) ─────────
     def _mass_service(self) -> dict[str, Any]:
@@ -1931,7 +1933,7 @@ class RuntimeProvisionMixin:
         """/massreact · /pollvote · /chfollow — the §14 mass
         tools over the owner's own paired accounts.
 
-        /massreact <post link> | <emoji> [| count] [| live|dry]
+        /massreact <post link> | emoji [| count] [| live|dry]
         /pollvote <poll link> | <option> [| count] [| live|dry]
         /chfollow <channel link> [| count] [| live|dry]
         /<tool> arm|disarm|status|runs|pacing <seconds>
@@ -2007,7 +2009,7 @@ class RuntimeProvisionMixin:
             return "\n".join(lines)
         if not head:
             return (f"usage: /{tool} <link>"
-                    + (" | <emoji>" if tool == "massreact"
+                    + (" | emoji" if tool == "massreact"
                        else " | <option>" if tool == "pollvote"
                        else "")
                     + " [| count] [| live|dry] — or "
@@ -2035,7 +2037,7 @@ class RuntimeProvisionMixin:
                 payload = f"{payload} {seg}"
         if tool == "massreact" and not payload:
             return ("⚠️ massreact needs its emoji: "
-                    "/massreact <post link> | <emoji> [| count] "
+                    "/massreact <post link> | emoji [| count] "
                     "[| live]")
         if tool == "pollvote" and not payload:
             return ("⚠️ pollvote needs its option: "
@@ -2073,7 +2075,7 @@ class RuntimeProvisionMixin:
         if not name:
             return ("which session? live right now: "
                     + ", ".join(sorted(sessions))
-                    + " — say /browser watch <name>.")
+                    + " — say /browser watch name.")
         chat = getattr(message, "chat", None)
         adapter = self._adapter_for(str(getattr(chat, "platform", "") or ""))
         if adapter is None or chat is None:

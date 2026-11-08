@@ -33,10 +33,17 @@ already runs.
   lacks) — verse text quoted exactly from the response,
   attributed to its source.  It is NOT WisdomKeeper: that
   organ is corpus and practice; this one fetches a passage.
-- **/couplepp** takes ONE artwork from the anime image pools
-  and splits it into a matched diptych pair — labeled as one
-  artwork split, never two unrelated pictures passed off as
-  a designed pair.
+- **/couplepp** takes ONE artwork from the picture pools
+  and splits it into a matched pair, delivered as TWO
+  separate profile-ready photos — the left half for one
+  person, the right half for the other — never two unrelated
+  pictures passed off as a designed pair, and never one
+  combined poster the couple must crop themselves
+  (delivery-shape pass, 2026-11-07: a couple pfp IS two
+  pictures).  The pools are seeds, not a closed list, and
+  not anime-only: anime pools, a safe-rated general anime
+  pool and a general photography pool all feed the chain,
+  with her own studio render as the floor.
 
 Like ``fun.py`` beside it, the organ is transport-free:
 providers fetch, the service walks health-checked chains,
@@ -52,6 +59,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import random
 import re
 import urllib.error
 import urllib.parse
@@ -76,7 +84,9 @@ __all__ = [
     "validate_long_url", "resolve_redirect_chain",
     "BIBLE_BOOKS", "BibleRef", "parse_bible_tail",
     "BibleApiProvider", "BollsProvider", "clean_bolls_text",
-    "WaifuPoolProvider", "NekosPoolProvider", "make_diptych",
+    "WaifuPoolProvider", "NekosPoolProvider",
+    "NekosApiPoolProvider", "PicsumPoolProvider",
+    "make_diptych", "split_diptych",
 ]
 
 
@@ -1036,12 +1046,61 @@ class NekosPoolProvider:
         return _need_text(results[0].get("url"), "url")
 
 
-def make_diptych(data: bytes) -> tuple[bytes, dict[str, Any]]:
-    """Split ONE artwork into a matched pair canvas: two
-    complementary 3:4 crops (left third / right third of the
-    frame) side by side — the left half for one profile, the
-    right for the other.  Honest by construction: it IS one
-    picture, and the caption says so."""
+class NekosApiPoolProvider:
+    """nekosapi.com v4 random pool — a bare JSON list of
+    ``{"url": …, "rating": …}`` rows.  The unfiltered pool
+    is NOT safe (it serves suggestive/explicit rows), so the
+    request carries ``rating=safe`` AND the pick re-checks
+    every row's rating in code: only a row the pool itself
+    rates ``safe`` can ever be returned — the filter is the
+    source's claim, the check is ours."""
+
+    name = "nekosapi"
+
+    def __init__(self, *,
+                 fetcher: Callable[[str], Any] | None = None
+                 ) -> None:
+        self._fetch = fetcher or _http_json
+
+    def image_url(self) -> str:
+        data = self._fetch(
+            "https://api.nekosapi.com/v4/images/random"
+            "?rating=safe")
+        rows = data if isinstance(data, list) else []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("rating") or "") != "safe":
+                continue
+            url = str(row.get("url") or "").strip()
+            if url:
+                return url
+        raise MakerError("nekosapi answered no safe rows")
+
+
+class PicsumPoolProvider:
+    """picsum.photos — general photography (the Lorem Picsum
+    pool of real photos), keyless: a seeded URL answers a
+    redirect to one real photograph.  This is the chain's
+    non-anime rung: a couple pair drawn from an actual photo,
+    named as such in the caption."""
+
+    name = "picsum"
+
+    def __init__(self, *,
+                 rng: random.Random | None = None) -> None:
+        self._rng = rng or random.Random()
+
+    def image_url(self) -> str:
+        seed = self._rng.randrange(1, 10 ** 9)
+        return f"https://picsum.photos/seed/{seed}/1200/900"
+
+
+def _diptych_crops(data: bytes):
+    """The two matched halves of ONE artwork: complementary
+    3:4 crops (left third / right third of the frame), each
+    480×640 — one profile picture each.  Returns
+    ``(left_image, right_image, info)``."""
     from PIL import Image
 
     try:
@@ -1065,12 +1124,35 @@ def make_diptych(data: bytes) -> tuple[bytes, dict[str, Any]]:
         return img.crop((x, y, x + win_w, y + win_h)).resize(
             (half_w, half_h), Image.LANCZOS)
 
+    info = {"half": (half_w, half_h)}
+    return crop(0.30), crop(0.70), info
+
+
+def make_diptych(data: bytes) -> tuple[bytes, dict[str, Any]]:
+    """The two halves composed into ONE canvas side by side
+    — a preview shape.  Kept for callers that want the pair
+    on one canvas; /couplepp itself delivers the halves as
+    two separate photos (see :func:`split_diptych`)."""
+    from PIL import Image
+
+    left, right, info = _diptych_crops(data)
+    half_w, half_h = info["half"]
     canvas = Image.new("RGB", (half_w * 2 + 8, half_h),
                        (255, 255, 255))
-    canvas.paste(crop(0.30), (0, 0))
-    canvas.paste(crop(0.70), (half_w + 8, 0))
-    return _png_bytes(canvas), {"size": canvas.size,
-                                "half": (half_w, half_h)}
+    canvas.paste(left, (0, 0))
+    canvas.paste(right, (half_w + 8, 0))
+    return _png_bytes(canvas), {"size": canvas.size, **info}
+
+
+def split_diptych(data: bytes) -> tuple[bytes, bytes,
+                                        dict[str, Any]]:
+    """Split ONE artwork into its matched pair AS TWO
+    PICTURES: ``(left_png, right_png, info)`` — each half a
+    standalone 480×640 photo, ready to be set as a profile
+    picture the moment it lands.  This is the /couplepp
+    deliverable: two photos, not one poster of a pair."""
+    left, right, info = _diptych_crops(data)
+    return _png_bytes(left), _png_bytes(right), info
 
 
 # ── the service ──────────────────────────────────────────────
@@ -1081,7 +1163,8 @@ def default_maker_chains() -> dict[str, list[Any]]:
                      TinyUrlProvider()],
         "bible": [BibleApiProvider(), BollsProvider()],
         "bible_search": [BollsProvider()],
-        "couplepp": [WaifuPoolProvider(), NekosPoolProvider()],
+        "couplepp": [WaifuPoolProvider(), NekosPoolProvider(),
+                     NekosApiPoolProvider(), PicsumPoolProvider()],
     }
 
 
@@ -1292,9 +1375,66 @@ class MakerService:
         return {"ok": True, "mode": "passage", **result}
 
     # -- couplepp ---------------------------------------------------
-    def couplepp(self, *, send) -> dict[str, Any]:
+    def _deliver_pair(self, left_png: bytes, right_png: bytes,
+                      first_caption: str, second_caption: str,
+                      send, buttons=None) -> dict[str, Any]:
+        """Deliver a matched pair as TWO separate photos —
+        the delivery-shape law: each half is its own picture,
+        settable as a profile photo the moment it lands.  The
+        follow-up ``buttons`` (when the caller offers them)
+        ride the second photo, where a surface carries buttons
+        on media at all.  A pair that only half-lands says so —
+        an incomplete pair is never reported as delivered."""
+        from .base import MediaRef
+
+        try:
+            left_path = self._save(left_png, ".png")
+            right_path = self._save(right_png, ".png")
+        except MakerError as exc:
+            return {"sent": False, "reason": str(exc)}
+
+        def _one(path: Path, caption: str,
+                 with_buttons: bool, label: str = "") -> Any:
+            ref = MediaRef(path=str(path), mime="image/png",
+                           kind="image",
+                           name=f"couple pp {label}.png")
+            if with_buttons and buttons:
+                try:
+                    return send(ref, caption, buttons=buttons)
+                except TypeError:
+                    pass  # a send with no buttons verb: photo goes plain
+            return send(ref, caption)
+
+        try:
+            first = _one(left_path, first_caption, False, "left")
+        except Exception as exc:  # noqa: BLE001 - send failed
+            return {"sent": False,
+                    "reason": f"the send failed: {exc}"}
+        if first is not None and not getattr(first, "ok", True):
+            return {"sent": False,
+                    "reason": str(getattr(first, "error", "")
+                                  or "this surface couldn't send it")}
+        try:
+            second = _one(right_path, second_caption, True, "right")
+        except Exception as exc:  # noqa: BLE001 - send failed
+            return {"sent": False, "parts": 1, "reason": (
+                f"the left half landed, then the send failed: "
+                f"{exc} — the pair is incomplete")}
+        if second is not None and not getattr(second, "ok", True):
+            return {"sent": False, "parts": 1, "reason": (
+                "the left half landed but the right half "
+                "wouldn't send on this surface — the pair is "
+                "incomplete, try again")}
+        return {"sent": True, "parts": 2}
+
+    def couplepp(self, *, send, buttons=None) -> dict[str, Any]:
         last = ""
-        for provider in self.chains.get("couplepp") or []:
+        providers = list(self.chains.get("couplepp") or [])
+        # The chain is a pool, not a queue: shuffle the walk
+        # so the sources genuinely rotate across calls instead
+        # of the first healthy seed winning every time.
+        random.shuffle(providers)
+        for provider in providers:
             name = str(getattr(provider, "name", "?"))
             if not self.health.available(name):
                 continue
@@ -1311,23 +1451,25 @@ class MakerService:
                 continue
             self.health.note(name, True)
             try:
-                png, info = make_diptych(data)
+                left, right, info = split_diptych(data)
             except MakerError as exc:
                 return {"sent": False, "reason": str(exc)}
-            caption = (f"💞 couple pp — one artwork via {name}, "
-                       f"split down the middle: the left half "
-                       f"for one of you, the right half for "
-                       f"the other")
-            out = self._deliver(png, ".png", "image/png",
-                                caption, send)
+            out = self._deliver_pair(
+                left, right,
+                f"💞 couple pp — one artwork via {name}, split "
+                f"into a matched pair. This is the left half — "
+                f"for one of you (1 of 2)",
+                "💞 and the right half — for the other (2 of 2). "
+                "Each half is its own picture: set it as your "
+                "profile photo just as it is",
+                send, buttons=buttons)
             out.update({"source": name, **info})
             return out
         # Her own hand (expression completion, 2026-11-07):
-        # the pools are anime-only and can all be down — the
-        # pair still lands, drawn by HER studio: one of her
-        # own artworks, split down the middle exactly like a
-        # pool piece (the pair law holds: never two unrelated
-        # pictures dressed as a pair).
+        # every pool can be down — the pair still lands, drawn
+        # by HER studio: one of her own artworks, split into
+        # the same matched pair (the pair law holds: never two
+        # unrelated pictures dressed as a pair).
         try:
             import io
 
@@ -1338,17 +1480,22 @@ class MakerService:
             img = emoji_studio.render_master(spec, size=800)
             buf = io.BytesIO()
             img.save(buf, format="PNG")
-            png, info = make_diptych(buf.getvalue())
+            left, right, info = split_diptych(buf.getvalue())
         except Exception:  # noqa: BLE001 - every rung failed
             return {"sent": False, "reason": (
                 "the picture pools are down right now — "
                 f"try again in a bit ({last})" if last else
                 "the picture pools are down right now — "
                 "try again in a bit")}
-        caption = ("💞 couple pp — my own artwork this time "
-                   "(the picture pools are down), drawn by me "
-                   "and split down the middle: the left half "
-                   "for one of you, the right half for the other")
-        out = self._deliver(png, ".png", "image/png", caption, send)
+        out = self._deliver_pair(
+            left, right,
+            "💞 couple pp — my own artwork this time (the "
+            "picture pools are down), drawn by me and split "
+            "into a matched pair. This is the left half — for "
+            "one of you (1 of 2)",
+            "💞 and the right half — for the other (2 of 2). "
+            "Each half is its own picture: set it as your "
+            "profile photo just as it is",
+            send, buttons=buttons)
         out.update({"source": "self:render", **info})
         return out

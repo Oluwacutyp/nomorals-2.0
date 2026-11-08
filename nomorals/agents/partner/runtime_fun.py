@@ -165,7 +165,7 @@ class RuntimeFunMixin:
         spirit: what it can't compute, /calc can't either."""
         expr = str(tail or "").strip()
         if not expr:
-            return ("usage: /calc <expression> — e.g. /calc "
+            return ("usage: /calc expression — e.g. /calc "
                     "12 * (3 + 4) / 2")
         from ...games.trivia_forge import safe_eval_arith
 

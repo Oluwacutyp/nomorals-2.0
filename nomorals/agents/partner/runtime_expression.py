@@ -143,7 +143,7 @@ class RuntimeExpressionMixin:
         return person_key(platform, user_id)
 
     # ---- sending -------------------------------------------------
-    def _expression_send(self, message, ref, caption: str = ""):  # type: ignore[no-untyped-def]
+    def _expression_send(self, message, ref, caption: str = "", buttons=None):  # type: ignore[no-untyped-def]
         """Send one MediaRef through the room's own adapter
         (native media path — Telegram stickers/animations,
         Discord uploads, the WhatsApp bridge).  Falls back to
@@ -152,21 +152,37 @@ class RuntimeExpressionMixin:
         media message itself (every adapter's send_media and
         the gateway's send_file carry one) — it is only passed
         when non-empty, so existing callers and adapter shapes
-        are untouched."""
+        are untouched.  The gateway fallback declares the ref's
+        own kind and name (delivery-shape law): a picture or a
+        GIF that reaches the fallback still lands AS a picture
+        or an animation, never as a document wearing a
+        content-hash name.  ``buttons`` ride where the media
+        verb carries them and degrade silently where it doesn't
+        — the media is the deliverable, buttons are garnish."""
         from types import SimpleNamespace
 
         platform = str(getattr(message.chat, "platform", "") or "")
         adapter = self._group_adapter(platform)
         fn = getattr(adapter, "send_media", None) if adapter else None
         if fn is not None:
+            kwargs: dict = {}
             if caption:
-                return fn(message.chat, ref, caption=caption)
-            return fn(message.chat, ref)
+                kwargs["caption"] = caption
+            if buttons:
+                kwargs["buttons"] = buttons
+            try:
+                return fn(message.chat, ref, **kwargs)
+            except TypeError:
+                kwargs.pop("buttons", None)
+                return fn(message.chat, ref, **kwargs)
         gateway = getattr(self, "gateway", None)
         send_file = getattr(gateway, "send_file", None)
         if send_file is not None and ref.path:
             return send_file(platform, message.chat, ref.path,
-                             caption=caption)
+                             caption=caption,
+                             kind=str(getattr(ref, "kind", "") or ""),
+                             name=str(getattr(ref, "name", "") or ""),
+                             buttons=buttons)
         return SimpleNamespace(
             ok=False, platform=platform, message_id="",
             media_file_id="",
@@ -455,7 +471,7 @@ class RuntimeExpressionMixin:
         and ``steal`` heads route to the caller's personal
         pack and the stealer instead of the maker."""
         if message is None:
-            return "usage: /sticker <text> — or reply to an image/video."
+            return "usage: /sticker text — or reply to an image/video."
         from ...social.chat import media_convert
         from ...social.chat.base import MediaRef
 
@@ -481,7 +497,7 @@ class RuntimeExpressionMixin:
         else:
             found = self._replied_media_local(message)
             if found is None or not found[0]:
-                return ("usage: /sticker <text> — or reply to an "
+                return ("usage: /sticker text — or reply to an "
                         "image or a short video and I'll make it "
                         "a sticker.")
             path, kind, _ids = found
@@ -518,13 +534,13 @@ class RuntimeExpressionMixin:
     # ---- /sticker pack --------------------------------------------------
     def _control_sticker_pack(self, args, message=None) -> str:  # type: ignore[no-untyped-def]
         """The caller's personal pack (§21): `/sticker pack`
-        lists it, `/sticker pack <n>` sends entry n.  Listing
+        lists it, `/sticker pack` + an entry number sends that entry.  Listing
         and sending are bot-system output in a group — the
         same §33 gate as every expression post; in DM the
         pack is simply the owner's own shelf."""
         if message is None:
             return ("usage: /sticker pack — your stolen "
-                    "stickers; /sticker pack <n> sends one.")
+                    "stickers; /sticker pack + an entry number sends one.")
         if not self._group_gate(message, "sticker"):
             return ("this room isn't claimed for my bot "
                     "systems (§33), so packs stay shut here "
@@ -546,7 +562,7 @@ class RuntimeExpressionMixin:
                 lines.append(
                     f"  {i}. {item.get('name') or 'sticker'}"
                     f" — {shape}")
-            lines.append("/sticker pack <n> sends one.")
+            lines.append("/sticker pack (entry number) sends one.")
             return "\n".join(lines)
         if not str(args[0]).isdigit():
             return "usage: /sticker pack [number]"
@@ -629,7 +645,7 @@ class RuntimeExpressionMixin:
         """A GIF on demand: her library first (it grows from
         steals and sends), then the provider chain."""
         if message is None:
-            return "usage: /gif <what you're feeling>"
+            return "usage: /gif what you're feeling"
         if not self._group_gate(message, "gif"):
             return ("this room isn't claimed for my bot systems "
                     "(§33) — my GIFs only play where my bot runs.")
@@ -706,13 +722,13 @@ class RuntimeExpressionMixin:
         searchable by meaning — any emoji that exists,
         including the ones some phones can't render; given an
         emoji itself, it reports what it is.  CREATE:
-        ``/emoji make <words>`` authors a REAL custom emoji —
+        ``/emoji make words`` authors a REAL custom emoji —
         her own art at 100×100, registered in her Telegram
         custom-emoji pack where the surface allows, living in
         her /customemoji set with a unicode fallback — and a
         search no single emoji confidently covers ('family
         rocket') is a creation too, never a dump of near-miss
-        parts.  STICKER: ``/emoji sticker <words>`` is the
+        parts.  STICKER: ``/emoji sticker words`` is the
         sticker maker, named for what it makes (the two were
         conflated until the owner's 2026-11-07 correction:
         emoji are not stickers)."""
@@ -724,11 +740,11 @@ class RuntimeExpressionMixin:
 
         query = str(tail or "").strip()
         if not query:
-            return ("usage: /emoji <words> finds one in the "
+            return ("usage: /emoji words finds one in the "
                     "whole Unicode table — melting face, thumbs "
-                    "up medium, rocket… /emoji make <words> "
+                    "up medium, rocket… /emoji make words "
                     "creates a real custom emoji of my own. "
-                    "/emoji sticker <words> makes a sticker. "
+                    "/emoji sticker words makes a sticker. "
                     "Or give me an emoji and I'll tell you "
                     "what it is.")
         words = query.split(None, 1)
@@ -748,7 +764,7 @@ class RuntimeExpressionMixin:
             if not rest:
                 return ("usage: /emoji sticker <what it should "
                         "be> — that makes a sticker (for a real "
-                        "emoji, /emoji make <words>).")
+                        "emoji, /emoji make words).")
             return self._emoji_sticker_and_send(rest, message)
         info = emoji_info(query)
         if info is not None and info["char"] == query:
@@ -925,7 +941,7 @@ class RuntimeExpressionMixin:
             names = registry.names()
             if not names:
                 return ("my custom set is empty so far — "
-                        "/customemoji add <name> <emoji> starts it.")
+                        "/customemoji add name emoji starts it.")
             lines = ["my custom emoji set:"]
             for name in names:
                 entry = registry.get(name) or {}
@@ -985,9 +1001,9 @@ class RuntimeExpressionMixin:
                 library.save_custom_emoji(registry)
                 return f":{words[1]}: removed from my set."
             return f"no custom emoji named :{words[1]}:."
-        return ("usage: /customemoji list · add <name> <emoji> · "
-                "ref <name> <platform> <ref> · show <name> · "
-                "remove <name>")
+        return ("usage: /customemoji list · add name emoji · "
+                "ref name platform ref · show name · "
+                "remove name")
 
     # ---- /emojiart ------------------------------------------------------
     def _control_emojiart(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
@@ -1005,11 +1021,11 @@ class RuntimeExpressionMixin:
         if message is None:
             return ("usage: /emojiart dot|ascii|mosaic (reply "
                     "to a picture, or paste its link) · "
-                    "/emojiart draw <subject> · /emojiart combo "
-                    "<topic> · /emojiart fancy <style> <words> "
+                    "/emojiart draw subject · /emojiart combo "
+                    "topic · /emojiart fancy style words "
                     "· /emojiart remix invert|mirror|smaller|"
                     "bigger|ascii|braille|mosaic · /emojiart "
-                    "save <name>")
+                    "save name")
         platform = str(getattr(message.chat, "platform", "") or "")
         words = str(tail or "").strip().split()
         head = words[0].lower() if words else ""
@@ -1038,7 +1054,7 @@ class RuntimeExpressionMixin:
             return art
         if head == "draw":
             if not rest:
-                return ("usage: /emojiart draw <subject> — "
+                return ("usage: /emojiart draw subject — "
                         "a rocket, a sleepy cat, a gold heart…")
             made = emoji_art.describe_art(
                 rest, library,
@@ -1067,8 +1083,8 @@ class RuntimeExpressionMixin:
         if head == "fancy":
             parts = rest.split(None, 1)
             if len(parts) < 2:
-                return ("usage: /emojiart fancy <style> "
-                        "<words> — styles: "
+                return ("usage: /emojiart fancy style "
+                        "words — styles: "
                         + " · ".join(emoji_art.FANCY_STYLES))
             styled = emoji_art.fancy_text(parts[1], parts[0])
             if styled is None:
@@ -1120,14 +1136,14 @@ class RuntimeExpressionMixin:
         return ("emoji art — pictures as text:\n"
                 "/emojiart dot|ascii|mosaic — reply to a "
                 "picture or paste its link\n"
-                "/emojiart draw <subject> — I draw it in dots\n"
-                "/emojiart combo <topic> — my library "
+                "/emojiart draw subject — I draw it in dots\n"
+                "/emojiart combo topic — my library "
                 f"({len(library)} pieces; topics: "
                 f"{', '.join(topics[:12])})\n"
-                "/emojiart fancy <style> <words>\n"
+                "/emojiart fancy style words\n"
                 "/emojiart remix invert|mirror|smaller|bigger"
                 "|ascii|braille|mosaic\n"
-                "/emojiart save <name> — keep the last piece")
+                "/emojiart save name — keep the last piece")
 
     def _emojiart_image_bytes(self, message, tail: str):  # type: ignore[no-untyped-def]
         """The picture an /emojiart conversion acts on: the
