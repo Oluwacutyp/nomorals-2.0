@@ -526,6 +526,63 @@ class RuntimeProvisionMixin:
         return matches[0] if len(matches) == 1 else None
 
     @staticmethod
+    def _pair_journal_line(row: dict[str, Any],
+                           datetime_cls: Any) -> str:
+        """One journal row rendered for the owner: time, kind,
+        who it concerns, and the fields that kind exists to
+        show — never a raw JSON dump.  A status_view_trace row
+        shows its whole point (poster, the toggle read from the
+        resolved record, whether the view was attempted, the
+        bridge's verdict in words); failures show their reason
+        (the row's note); anything else falls back to kind +
+        counterpart + note, with saved text quoted like the
+        recovered list quotes it."""
+        when = datetime_cls.fromtimestamp(
+            float(row.get("ts") or 0)).strftime("%d %b %H:%M")
+        kind = str(row.get("kind") or "?")
+        who = row.get("poster_name") or \
+            row.get("counterpart_id") or "?"
+        if kind == "status_view_trace":
+            toggle = "on" if row.get("status_viewing_toggle") \
+                else "off"
+            attempted = bool(row.get("view_attempted"))
+            verdict = row.get("bridge_verdict")
+            if not attempted:
+                vtxt = "view not attempted"
+            elif isinstance(verdict, dict):
+                if verdict.get("ok"):
+                    vtxt = "bridge: landed"
+                    mode = str(verdict.get("receipt_mode") or "")
+                    if mode:
+                        vtxt += f" (receipts {mode})"
+                else:
+                    vtxt = ("bridge: refused — "
+                            + str(verdict.get("error")
+                                  or "no reason given"))
+            elif verdict:
+                vtxt = f"bridge: {verdict}"
+            else:
+                vtxt = "bridge: no verdict recorded"
+            return (f"  {when} · status view trace · {who} · "
+                    f"status_viewing {toggle} · "
+                    f"attempted {'yes' if attempted else 'no'} · "
+                    f"{vtxt}")
+        bits = [when, kind, str(who)]
+        if row.get("media_kind"):
+            bits.append(str(row["media_kind"]))
+        note = str(row.get("note") or "").strip()
+        if note:
+            if len(note) > 140:
+                note = note[:137] + "…"
+            bits.append(note)
+        elif row.get("text"):
+            text = str(row["text"])
+            if len(text) > 120:
+                text = text[:117] + "…"
+            bits.append(f"“{text}”")
+        return "  " + " · ".join(bits)
+
+    @staticmethod
     def _pair_launch_note(sup: Any, rec: Any) -> str | None:
         """The beat after a bridge (re)start: if the process died
         on the spot (missing packages, a crash on launch), the
@@ -1472,6 +1529,9 @@ class RuntimeProvisionMixin:
                                            antitag | antiedit
         /pair saved [id]                   saved statuses/view-once
         /pair recovered [id]               DM delete/edit recoveries
+        /pair journal [kind] [count]     the surfaces' journal —
+                                           status views, reactions,
+                                           refusals, newest first
         /pair page                         the pairing page (same
                                            state, in a browser)
 
@@ -1568,7 +1628,10 @@ class RuntimeProvisionMixin:
                 "posts a WhatsApp poll (read it back with "
                 "/pollres) · "
                 "/pair saved and /pair recovered list what the "
-                "surfaces kept — all of them answer in your "
+                "surfaces kept · /pair journal [kind] [count] "
+                "reads the journal itself — every status view, "
+                "reaction and refusal, newest first — all of "
+                "them answer in your "
                 "private chats (personal bot, userbot DM, "
                 "WhatsApp self-chat), never on the public bot.")
             return "\n".join(lines)
@@ -1897,6 +1960,70 @@ class RuntimeProvisionMixin:
                     f"{f' — {rec.id}' if rec else ''} "
                     f"(latest {len(lines)} of {len(rows)}):")
             return "\n".join([head] + lines)
+        if sub == "journal":
+            # The personal vault's journal, readable in chat —
+            # until now it existed only as a file on disk, so
+            # the rows that NAME surface breaks (status view
+            # traces, refused verbs) were invisible to the owner
+            # they exist for.  Grammar: /pair journal [kind]
+            # [count] [account] in any order — a short number
+            # is the count, a token naming a paired account
+            # scopes to it, anything else is the kind filter.
+            from collections import Counter
+            from datetime import datetime
+
+            svc = self._pairing_personal()
+            vault = svc["personal"].vault
+            kind = ""
+            count: int | None = None
+            rec = None
+            for token in parts[1:]:
+                if token.isdigit() and len(token) <= 3 \
+                        and count is None:
+                    count = int(token)
+                    continue
+                found = self._pair_find(sup, token)
+                if found is not None and rec is None:
+                    rec = found
+                elif not kind:
+                    kind = token.lower()
+            if count is None:
+                count = 10
+            count = max(1, min(count, 50))
+            scope = rec.id if rec else ""
+            all_rows = vault.journal(scope)
+            if not all_rows:
+                scope_txt = f" for {rec.id}" if rec else ""
+                return (f"the journal{scope_txt} is empty — "
+                        "entries land when the personal surfaces "
+                        "act: status views and reactions, saves, "
+                        "channel posts, recoveries.")
+            rows = all_rows
+            if kind:
+                rows = [r for r in all_rows
+                        if str(r.get("kind") or "") == kind]
+                if not rows:
+                    kinds = Counter(
+                        str(r.get("kind") or "?") for r in all_rows)
+                    listing = ", ".join(
+                        f"{name} ({n})"
+                        for name, n in sorted(kinds.items()))
+                    return (f"no {kind} entries in the journal "
+                            f"yet. kinds present: {listing}. "
+                            "/pair journal KIND COUNT reads one "
+                            "kind; plain /pair journal reads the "
+                            "latest of everything.")
+            rows = sorted(
+                rows,
+                key=lambda r: float(r.get("ts") or 0),
+                reverse=True)
+            shown = rows[:count]
+            lines = [self._pair_journal_line(r, datetime)
+                     for r in shown]
+            head = (f"📓 journal{f' — {rec.id}' if rec else ''}"
+                    f"{f' · {kind}' if kind else ''} "
+                    f"(latest {len(shown)} of {len(rows)}):")
+            return "\n".join([head] + lines)
         if sub == "page":
             # The web rungs, best first: Devon's own pairing page
             # in PHP (served by Devon on loopback when a PHP
@@ -1931,7 +2058,8 @@ class RuntimeProvisionMixin:
                 "code id · /pair start, stop, restart or remove "
                 "id · /pair use id · /pair route [platform] · "
                 "/pair toggle id name on|off · /pair saved [id] "
-                "· /pair recovered [id] · /pair page")
+                "· /pair recovered [id] · /pair journal [kind] "
+                "[count] · /pair page")
 
     # ── mass actions (§14: massreact / pollvote / chfollow) ─────────
     def _mass_service(self) -> dict[str, Any]:
