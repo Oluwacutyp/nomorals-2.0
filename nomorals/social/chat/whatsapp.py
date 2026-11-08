@@ -1541,6 +1541,22 @@ class WhatsAppAdapter(ChatAdapter):
             response = self._send_cmd(request)
             if response.get("ok"):
                 self.stats["sent"] += 1
+                if buttons and str(
+                        response.get("buttons_form") or "") == "text":
+                    # The bridge had to degrade the declared
+                    # buttons to text action lines (WhatsApp
+                    # refused the interactive form).  The actions
+                    # still landed — as text — but a degraded form
+                    # is a fact the ledger must carry, never a
+                    # silent drop (presentation contract).
+                    record_failure(
+                        "whatsapp.WhatsAppAdapter.send.buttons",
+                        RuntimeError(
+                            "buttons degraded to text action lines "
+                            f"for {jid} — the bridge reported "
+                            "buttons_form=text; the actions ride "
+                            "the message body as “label — /command” "
+                            "lines"))
                 # The bridge's reply id is OUR request id — the real
                 # WhatsApp message id rides in ``message_id`` (it is
                 # the key space delivery receipts use; the request id

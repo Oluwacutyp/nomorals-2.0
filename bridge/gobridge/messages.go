@@ -741,32 +741,57 @@ func (b *bridge) cmdSend(ctx context.Context, cc *clientConn, id string, req req
 			}
 			body += asLines(flat[3:])
 		}
-		buttons := make([]*waE2E.ButtonsMessage_Button, 0, len(native))
+		// The legacy ButtonsMessage is dead on current WhatsApp
+		// clients for unofficial multi-device senders: WhatsApp
+		// deprecated the form and clients simply do not render it,
+		// so button-carrying messages landed as bare text with no
+		// error anywhere (the owner's "WhatsApp has no buttons"
+		// report, 2026-11-07).  The form clients render today is
+		// an InteractiveMessage carrying a NativeFlow quick_reply
+		// button set; a tap returns as an
+		// InteractiveResponseMessage whose params JSON carries
+		// the button id — textOf already maps it back to "/<id>",
+		// so one authored keyboard works before and after.
+		flowButtons := make(
+			[]*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton,
+			0, len(native))
 		for _, it := range native {
 			label := it.label
-			if len(label) > 25 {
-				label = label[:25]
+			if runes := []rune(label); len(runes) > 25 {
+				label = string(runes[:25])
 			}
-			btnType := waE2E.ButtonsMessage_Button_RESPONSE
-			buttons = append(buttons, &waE2E.ButtonsMessage_Button{
-				ButtonID:   proto.String(it.cmd),
-				ButtonText: &waE2E.ButtonsMessage_Button_ButtonText{DisplayText: proto.String(label)},
-				Type:       &btnType,
-			})
+			params, _ := json.Marshal(map[string]string{
+				"id": it.cmd, "display_text": label})
+			flowButtons = append(flowButtons,
+				&waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+					Name:             proto.String("quick_reply"),
+					ButtonParamsJSON: proto.String(string(params)),
+				})
 		}
-		headerType := waE2E.ButtonsMessage_EMPTY
-		msg := &waE2E.Message{ButtonsMessage: &waE2E.ButtonsMessage{
-			ContentText: proto.String(body),
-			Buttons:     buttons,
-			HeaderType:  &headerType,
-			ContextInfo: quote,
-		}}
+		msg := &waE2E.Message{InteractiveMessage:
+			&waE2E.InteractiveMessage{
+				Body: &waE2E.InteractiveMessage_Body{
+					Text: proto.String(body)},
+				InteractiveMessage:
+					&waE2E.InteractiveMessage_NativeFlowMessage_{
+						NativeFlowMessage:
+							&waE2E.InteractiveMessage_NativeFlowMessage{
+								Buttons:        flowButtons,
+								MessageVersion: proto.Int32(3),
+							},
+					},
+				ContextInfo: quote,
+			}}
 		if mid, err := send(msg); err == nil {
-			b.reply(cc, id, map[string]any{"ok": true, "message_id": string(mid)})
+			b.reply(cc, id, map[string]any{
+				"ok": true, "message_id": string(mid),
+				"buttons_form": "interactive"})
 			return
 		}
-		// WhatsApp refused the button message — every action
-		// degrades to a text line; none are silently dropped.
+		// WhatsApp refused the interactive message — every action
+		// degrades to a text line; none are silently dropped, and
+		// the reply NAMES the degraded form so the Python side
+		// journals it instead of letting it pass in silence.
 		lines := asLines(flat)
 		full := text
 		if full != "" {
@@ -778,7 +803,9 @@ func (b *bridge) cmdSend(ctx context.Context, cc *clientConn, id string, req req
 			b.fail(cc, id, err)
 			return
 		}
-		b.reply(cc, id, map[string]any{"ok": true, "message_id": string(mid)})
+		b.reply(cc, id, map[string]any{
+			"ok": true, "message_id": string(mid),
+			"buttons_form": "text"})
 		return
 	}
 

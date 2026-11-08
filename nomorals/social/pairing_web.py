@@ -156,6 +156,8 @@ def pairing_state(context: Any, *, svc: dict[str, Any] | None = None,
     sup = svc["supervisor"]
     registry = svc["registry"]
     pairer = svc["pairer"]
+    from .pairing import toggle_live_verdicts
+
     accounts: list[dict[str, Any]] = []
     for rec in registry.all():
         row: dict[str, Any] = {
@@ -168,6 +170,16 @@ def pairing_state(context: Any, *, svc: dict[str, Any] | None = None,
             "port": rec.port,
             "toggles": {name: bool(rec.toggle(name))
                         for name in PERSONAL_TOGGLES},
+            # Live verdicts on the legs THIS surface can see
+            # (registry stop intent + supervisor process): a
+            # toggle that is on but not live reads as a warning
+            # here exactly as it does in chat /pair — set-state
+            # alone cannot tell "off" from "broken".
+            "live": toggle_live_verdicts(
+                rec,
+                stopped=bool(registry.owner_stopped(rec.platform)),
+                running=bool(sup.is_running(rec.id)),
+                attached=None, connected=None),
             "last_error": rec.last_error or "",
             "process": ("running" if sup.is_running(rec.id)
                         else "—"),

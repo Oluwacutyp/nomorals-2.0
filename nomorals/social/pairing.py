@@ -765,6 +765,72 @@ def resolve_account(registry: PairingRegistry, platform: str,
     return rows[0]
 
 
+def toggle_live_verdicts(rec: AccountRecord, *, stopped: bool,
+                         running: bool, attached: bool | None,
+                         connected: bool | None,
+                         presence_state: str | None = None
+                         ) -> dict[str, str]:
+    """Per-toggle LIVE verdicts for one account's ON toggles.
+
+    Set-state alone cannot tell "off" from "broken" — the owner's
+    2026-11-07 trap: he turned status_viewing / always_online /
+    status_react on, the surface was dead, and every display said
+    nothing.  A verdict is computed from the legs the CALLER can
+    actually see (this function is pure; each /pair surface passes
+    its own evidence):
+
+    * ``stopped`` — a standing owner stop for the platform: every
+      ON toggle is armed but HELD, and the verdict says so.
+    * ``running`` — the supervisor holds a live bridge process
+      for this account in the caller's process.
+    * ``attached`` / ``connected`` — the conversational adapter
+      leg (runtime surfaces only): an adapter attached for THIS
+      account (its port), and that adapter connected.  ``None``
+      means the caller cannot see this leg (the web rung) and the
+      verdict falls back to the process leg.
+    * ``presence_state`` — the personal organ's presence truth
+      for always_online, when the caller owns the organ.
+
+    Returns {toggle: verdict} for ON toggles only.  A live verdict
+    starts "✓ live"; anything else names the reason in plain
+    words — set-on-but-not-live is a WARNING, never silence."""
+    on = [name for name in PERSONAL_TOGGLES if rec.toggle(name)]
+    if not on:
+        return {}
+    if stopped:
+        return {name: ("held — your standing stop for "
+                       f"{rec.platform} is in force")
+                for name in on}
+    if rec.status != "linked":
+        reason = f"the account is {rec.status}, not linked"
+        return {name: f"⚠ not live — {reason}" for name in on}
+    if attached is not None:
+        if not attached:
+            reason = ("no live chat surface is attached for this "
+                      "account in this process")
+            return {name: f"⚠ not live — {reason}" for name in on}
+        if connected is False:
+            reason = "the surface is attached but not connected"
+            return {name: f"⚠ not live — {reason}" for name in on}
+    elif not running:
+        reason = "the bridge process is not running"
+        return {name: f"⚠ not live — {reason}" for name in on}
+    verdicts: dict[str, str] = {}
+    for name in on:
+        if name == "always_online" and presence_state is not None:
+            if presence_state == "online":
+                verdicts[name] = "✓ live — presence online"
+            elif presence_state:
+                verdicts[name] = f"⚠ not live — {presence_state}"
+            else:
+                verdicts[name] = ("⚠ not live — presence has not "
+                                  "been asserted yet; the next "
+                                  "housekeeping beat asserts it")
+        else:
+            verdicts[name] = "✓ live"
+    return verdicts
+
+
 @dataclass
 class _Live:
     proc: Any = None

@@ -125,13 +125,18 @@ _LIMITS: dict[str, PlatformLimits] = {
         max_text=65536, max_caption=1024, max_file_mb=16,
         # Buttons are REAL here (register #27, 2026-11-05): both
         # bridges implement the button contract — the Go bridge
-        # (bridge/gobridge/messages.go cmdSend) renders a native
-        # ButtonsMessage (first 3 buttons) with overflow as text
-        # action lines, the Node bridge (bridge/whatsapp-bridge.mjs
-        # cmdSend) the same shape, and taps re-enter as commands.
-        # The old False made the gateway strip every authored
-        # button bundle in silence while reply copy still said
-        # "tap a button below".
+        # (bridge/gobridge/messages.go cmdSend) and the Node bridge
+        # (bridge/whatsapp-bridge.mjs cmdSend) send the first 3
+        # buttons as an InteractiveMessage (NativeFlow quick_reply
+        # set) with overflow as text action lines, and taps
+        # re-enter as commands. (The legacy ButtonsMessage both
+        # bridges originally sent no longer renders on current
+        # WhatsApp clients for unofficial senders — replaced
+        # 2026-11-07; a refused interactive send degrades to text
+        # lines and the bridge reports the form, which the adapter
+        # journals.) The old False made the gateway strip every
+        # authored button bundle in silence while reply copy still
+        # said "tap a button below".
         supports_buttons=True, supports_html=False, supports_media_edit=False,
         rate_per_hour=0, cost_model="free",
         utf16_lengths=True,

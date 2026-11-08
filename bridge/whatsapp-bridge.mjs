@@ -26,8 +26,11 @@
  *
  *   python -> bridge
  *     {"id":"<req>","cmd":"send","chat":"<jid>","text":"...","reply_to":"",
- *      "buttons":[[["label","command"],…],…] (optional; rendered natively
- *      up to WhatsApp's 3-button cap, the rest as text action lines)}
+ *      "buttons":[[["label","command"],…],…] (optional; sent as an
+ *      InteractiveMessage/NativeFlow quick_reply set — the legacy
+ *      ButtonsMessage no longer renders on current clients — up to
+ *      WhatsApp's 3-button cap, the rest as text action lines; the
+ *      reply's "buttons_form" names the form used)}
  *     {"id":"<req>","cmd":"send_media","chat":"<jid>","path":"...","caption":"...","ptt":false}
  *     {"id":"<req>","cmd":"typing","chat":"<jid>","seconds":3,
  *      "presence":"composing|recording"}
@@ -67,6 +70,8 @@ import makeWASocket, {
   downloadContentFromMessage,
   downloadMediaMessage,
   fetchLatestBaileysVersion,
+  generateWAMessageFromContent,
+  proto,
   jidNormalizedUser,
   aesEncryptCTR,
   bytesToCrockford,
@@ -915,11 +920,20 @@ async function cmdSend({ chat, text, reply_to, buttons, mentions }) {
     opts.quoted = msgCache.get(reply_to); // raw WAMessage -> quoted reply
   }
   // Inline buttons ride the same contract as Telegram: rows of
-  // [label, command]. WhatsApp's legacy button messages cap at 3
-  // buttons — the first three render natively, the rest degrade
-  // to text action lines in the same message; if WhatsApp refuses
-  // the button message entirely (increasingly common), ALL of
-  // them degrade to text. The actions are never silently dropped.
+  // [label, command]. The LEGACY ButtonsMessage Baileys used to
+  // send is dead on current WhatsApp clients for unofficial
+  // senders — WhatsApp deprecated the form and clients do not
+  // render it, so the message landed with no buttons and no
+  // error (the owner's report, 2026-11-07). Like the Go bridge,
+  // buttons now go out as an InteractiveMessage carrying a
+  // NativeFlow quick_reply set — the form clients render today;
+  // a tap returns as an interactive response whose params carry
+  // the button id, re-entering as "/<id>" exactly like a legacy
+  // button tap. Cap: 3 native buttons; the rest degrade to text
+  // action lines in the same message. If the interactive send
+  // fails, ALL actions degrade to text lines and the reply names
+  // the degraded form (buttons_form) so the Python side journals
+  // it — actions are never silently dropped.
   const flat = [];
   for (const row of buttons || []) {
     for (const b of row || []) {
@@ -931,23 +945,39 @@ async function cmdSend({ chat, text, reply_to, buttons, mentions }) {
   if (flat.length) {
     const asLines = (items) => items
       .map(([label, id]) => `• ${label} — /${id}`).join('\n');
-    const native = flat.slice(0, 3).map(([label, id]) => ({
-      buttonId: id,
-      buttonText: { displayText: label.slice(0, 25) },
-      type: 1,
-    }));
     let body = text || '';
     if (flat.length > 3) {
       body += (body ? '\n' : '') + asLines(flat.slice(3));
     }
     try {
-      return await wa.sendMessage(
-        chat, { text: body, buttons: native, headerType: 1 }, opts);
+      const IM = proto.Message.InteractiveMessage;
+      const flowButtons = flat.slice(0, 3).map(([label, id]) =>
+        IM.NativeFlowMessage.NativeFlowButton.create({
+          name: 'quick_reply',
+          buttonParamsJson: JSON.stringify({
+            id, display_text: [...label].slice(0, 25).join(''),
+          }),
+        }));
+      const interactive = IM.create({
+        body: IM.Body.create({ text: body }),
+        nativeFlowMessage: IM.NativeFlowMessage.create({
+          buttons: flowButtons, messageVersion: 3,
+        }),
+      });
+      const waMsg = await generateWAMessageFromContent(
+        chat, { interactiveMessage: interactive }, opts);
+      await wa.relayMessage(chat, waMsg.message, {
+        messageId: waMsg.key.id,
+      });
+      waMsg.buttonsForm = 'interactive';
+      return waMsg;
     } catch {
       const lines = asLines(flat);
-      return wa.sendMessage(
+      const sent = await wa.sendMessage(
         chat, { text: (text || '') + (text ? '\n' : '') + lines },
         opts);
+      if (sent) sent.buttonsForm = 'text';
+      return sent;
     }
   }
   // Mentions (chat & privacy wave — /tagall): Baileys takes the
@@ -1002,8 +1032,14 @@ async function handleCommand(sock, req) {
         const sent = await cmdSend(req);
         // The real WhatsApp message id — the Python adapter keys
         // delivery receipts off it. (The reply's own "id" field is
-        // just the request id echoed back.)
-        return reply(sock, id, { ok: true, message_id: sent?.key?.id || '' });
+        // just the request id echoed back.) buttons_form rides
+        // along when the send carried buttons: "interactive" when
+        // the native form landed, "text" when the actions had to
+        // degrade to text lines — the adapter journals a degraded
+        // form, so it is never a silent drop.
+        const out = { ok: true, message_id: sent?.key?.id || '' };
+        if (sent?.buttonsForm) out.buttons_form = sent.buttonsForm;
+        return reply(sock, id, out);
       }
       case 'send_media': {
         const sent = await cmdSendMedia(req);

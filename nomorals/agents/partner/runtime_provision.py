@@ -1239,6 +1239,61 @@ class RuntimeProvisionMixin:
                 RuntimeError(str(getattr(result, "error", "")
                                  or "self-chat send refused")))
 
+    def _pair_toggle_live(self, rec: Any, *, svc: Any = None,
+                          sup: Any = None) -> dict[str, str]:
+        """The /pair live verdicts for one account: per ON toggle,
+        whether the running process is actually honoring it —
+        computed from the legs this runtime can see (registry stop
+        intent, supervisor process, the gateway's attached adapter
+        for THIS account and its connection, the organ's presence
+        truth).  Set-state alone cannot tell "off" from "broken";
+        this is the display half of that fix.  Never raises — a
+        verdict helper must not kill the /pair surface."""
+        from ...social.pairing import toggle_live_verdicts
+
+        try:
+            if sup is None:
+                sup = self._pairing_supervisor()
+            stopped = bool(sup.registry.owner_stopped(rec.platform))
+            running = False
+            try:
+                running = bool(sup.is_running(rec.id))
+            except Exception:  # noqa: BLE001 - one leg, not the call
+                running = False
+            attached: bool | None = None
+            connected: bool | None = None
+            gateway = getattr(self, "gateway", None)
+            if gateway is not None:
+                if rec.platform == "whatsapp":
+                    adapter = gateway.adapters.get("whatsapp")
+                    attached = bool(
+                        adapter is not None
+                        and int(getattr(adapter, "port", 0) or 0)
+                        == int(rec.port or 0))
+                    if attached:
+                        event = getattr(adapter, "connected", None)
+                        connected = bool(
+                            event is not None and event.is_set())
+                elif rec.platform == "telegram":
+                    attached = gateway.adapters.get(
+                        "telegram") is not None
+                    connected = attached
+            presence: str | None = None
+            if svc is not None:
+                try:
+                    presence = svc["personal"].presence_state(
+                        rec.id)
+                except Exception:  # noqa: BLE001 - one leg only
+                    presence = None
+            return toggle_live_verdicts(
+                rec, stopped=stopped, running=running,
+                attached=attached, connected=connected,
+                presence_state=presence)
+        except Exception as exc:  # noqa: BLE001 - display helper
+            record_failure(
+                "runtime_provision.pair_toggle_live", exc)
+            return {}
+
     def _control_pair(self, tail: str, *, chat_key: str = "",
                       message: Any = None) -> str:
         """/pair — the pairing-with-code account pool (§15).
@@ -1288,8 +1343,10 @@ class RuntimeProvisionMixin:
                      f"{counts['connected']} · Dropped: "
                      f"{counts.get('dropped', 0)}"]
             try:
-                pairer = self._pairing_personal()["pairer"]
+                pair_bundle = self._pairing_personal()
+                pairer = pair_bundle["pairer"]
             except Exception:  # noqa: BLE001 - summary never dies
+                pair_bundle = None
                 pairer = None       # on the Telegram bundle
             for row in sup.status_all():
                 label = f" “{row['label']}”" if row.get("label") else ""
@@ -1316,6 +1373,19 @@ class RuntimeProvisionMixin:
                 lines.append(
                     f"  {row['id']}{label} — {row['status']}"
                     f" (bridge {row['process']}){extra}")
+                if rec is not None:
+                    # Set-on-but-not-live must be VISIBLE, with
+                    # its reason — the owner's 2026-11-07 trap was
+                    # toggles on, surface dead, display silent.
+                    verdicts = self._pair_toggle_live(
+                        rec, svc=pair_bundle, sup=sup)
+                    if verdicts:
+                        from ...social.pairing import PERSONAL_TOGGLES as _TOGGLES
+
+                        lines.append("    live: " + " · ".join(
+                            f"{name} {verdicts[name]}"
+                            for name in _TOGGLES
+                            if name in verdicts))
             # Paired-and-linked but surfaceless is a state the owner
             # must be able to SEE: the platform config gates the
             # conversational adapter, never the pairing itself.
@@ -1597,8 +1667,18 @@ class RuntimeProvisionMixin:
                 svc["personal"].set_toggle(rec.id, name, on)
             except ValueError as exc:
                 return f"⚠️ {exc}"
-            return (f"{'✅' if on else '⏸️'} {rec.id}: {name} "
-                    f"{'on' if on else 'off'}.")
+            reply = (f"{'✅' if on else '⏸️'} {rec.id}: {name} "
+                     f"{'on' if on else 'off'}.")
+            if on:
+                # "On" is a setting, not a fact about the world:
+                # the reply names whether the toggle is LIVE right
+                # now, with the reason when it is not — the owner
+                # must never have to guess which one he got.
+                verdicts = self._pair_toggle_live(
+                    rec, svc=svc, sup=sup)
+                if name in verdicts:
+                    reply += f"\nlive: {verdicts[name]}"
+            return reply
         if sub in ("saved", "recovered"):
             from datetime import datetime
 

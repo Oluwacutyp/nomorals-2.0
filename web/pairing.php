@@ -215,7 +215,7 @@ body{font-family:system-ui,sans-serif;margin:1.5rem auto;max-width:72rem;padding
 .card{border:1px solid #ccc;border-radius:.6rem;padding:1rem}
 .card h2{margin:.1rem 0 .4rem;font-size:1.05rem;word-break:break-all}
 .chip{display:inline-block;border:1px solid #999;border-radius:1rem;padding:.05rem .5rem;margin:.1rem;font-size:.8rem}
-.chip.on{background:#e2f5e2}.chip.off{opacity:.65}
+.chip.on{background:#e2f5e2}.chip.off{opacity:.65}.chip.warn{background:#fde8e8;border-color:#c0392b;color:#7b1d12}
 .code{font-family:ui-monospace,monospace;font-size:1.9rem;letter-spacing:.15em;background:#111;color:#ffe98a;
  padding:.6rem;border-radius:.5rem;text-align:center;margin:.5rem 0}
 button{cursor:pointer} .row form{display:inline-block;margin:.1rem}
@@ -293,6 +293,11 @@ Linked Devices NOW; codes expire in minutes.</p>
 <p><?php foreach ($a['toggles'] as $name => $on): ?>
 <span class="chip <?= $on ? 'on' : 'off' ?>"><?= h($name) ?>: <?= $on ? 'on' : 'off' ?></span>
 <?php endforeach; ?></p>
+<?php if (!empty($a['live'])): ?>
+<p class="live-line"><?php foreach ($a['live'] as $name => $verdict): ?>
+<span class="chip <?= str_starts_with($verdict, '✓') ? 'on' : 'warn' ?>"><?= h($name) ?>: <?= h($verdict) ?></span>
+<?php endforeach; ?></p>
+<?php endif; ?>
 <div class="row">
 <?php foreach ($a['toggles'] as $name => $on): ?>
 <form method="post" action="/action">

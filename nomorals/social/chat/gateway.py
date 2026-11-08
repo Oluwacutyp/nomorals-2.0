@@ -596,7 +596,20 @@ class ChatGateway:
             except Exception as exc:  # noqa: BLE001 - never drops
                 record_failure(
                     "gateway.ChatGateway._on_inbound.identity", exc)
-        if not is_owner:
+        # Service-feed messages (meta["service"]: status posts, call
+        # offers, delete notices) are machine feed for the personal
+        # surfaces, not conversation — and they do not get their own
+        # buckets: EVERY WhatsApp status post lands in the single
+        # "whatsapp:status@broadcast" chat.  Rate-limiting that bucket
+        # at the conversational cap silently starved the whole status
+        # family (viewing / reacting / saving) on any account whose
+        # contacts post more statuses than the cap (2026-11-07: the
+        # owner's toggles were on and nothing ever arrived).  The
+        # limiter guards conversation; the service feed bypasses it.
+        is_service = bool((message.meta or {}).get("service"))
+        if is_service:
+            self._bump("inbound_service")
+        if not is_owner and not is_service:
             prune_windows = False
             with self._locks_guard:
                 window = self._windows.get(message.chat.key)
