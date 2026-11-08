@@ -125,11 +125,27 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
             workspace=settings.workspace_dir)
     except Exception:  # noqa: BLE001 - doctor must always report
         _pairing_rungs = []
+    # Disk state (2026-11-08 disk discipline): free space on the
+    # install volume vs. what one update needs, plus the snapshot
+    # store's footprint. Observational only — a low disk prints a
+    # warning here but is NEVER part of the exit-code contract
+    # above (the deploy script treats nonzero as VERIFY FAILED;
+    # disk pressure is the operator's cue, not a code defect).
+    _disk = None
+    _disk_error = ""
+    try:
+        from ...core import diskspace as _diskspace
+        _disk = _diskspace.disk_report(
+            settings.home_path, settings.db_path,
+            getattr(settings, "blob_dir", None))
+    except Exception as exc:  # noqa: BLE001 - doctor must always report
+        _disk_error = f"{type(exc).__name__}: {exc}"
     payload = {**health, **report,
                "pairing_rungs": _pairing_rungs,
                "tool_modules": {"failed": _failed},
                "config_keys": _status if _status is not None
                else {"error": _status_error}}
+    payload["disk"] = _disk if _disk is not None else {"error": _disk_error}
     # RE organ engine availability: the capability matrix is
     # probe-executed for the built-in inspectors — a parser that
     # cannot parse its own probe reports unavailable, never assumed.
@@ -158,6 +174,16 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
           f"pools {'on' if health['executor']['use_processes'] else 'off'}"
           + (f" (NM_PROCESS_WORKERS={health['executor']['env_override']})"
              if health['executor']['env_override'] else ""))
+    if _disk is not None:
+        from ...core.diskspace import human_bytes as _hb
+        _disk_state = ("LOW — free space before updating"
+                       if _disk["low"] else "ok")
+        print(f"disk: {_hb(_disk['free_bytes'])} free · an update needs "
+              f"~{_hb(_disk['need_bytes'])} · snapshots "
+              f"{_disk['store_count']} using "
+              f"{_hb(_disk['store_bytes'])} · {_disk_state}")
+    else:
+        print(f"disk: check failed — {_disk_error}")
     print()
     print(report_as_text(report))
     # Surface tool modules that failed to register — a broken tool must

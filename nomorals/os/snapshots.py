@@ -440,6 +440,41 @@ class SnapshotManager:
                                  exc_info=True)
         return victims
 
+    def prune_pre_update(self, *, keep: int = 3,
+                         protect: tuple[str, ...] | list[str] = (),
+                         ) -> list[str]:
+        """Bound the pre-update snapshot pile (disk discipline,
+        2026-11-08).
+
+        A snapshot created by the updater carries the label
+        "pre-update" and exists to roll back ONE update.  Left
+        alone the pile grows by a full database + blob-store copy
+        per update until the disk is full — and the update itself
+        is what discovers it, failing at its own snapshot step.
+        Keep the newest ``keep`` pre-update snapshots (the
+        in-flight update's, a deferred restore's, one spare) plus
+        any id in ``protect`` — the snapshot a pending
+        deferred-restore marker names is a rollback anchor, not
+        clutter, however old it is.  Snapshots with any other
+        label (manual takes, pre/post pairs) are not this pile
+        and are never touched here.  Deletion failures are
+        logged, never raised: retention must not fail the update
+        that triggered it.  Returns the deleted ids, oldest
+        first."""
+        snaps = [s for s in self.list() if s.label == "pre-update"]
+        keep_ids = {s.id for s in snaps[-max(0, int(keep)):]}
+        keep_ids.update(str(p) for p in protect if p)
+        victims = [s.id for s in snaps if s.id not in keep_ids]
+        deleted: list[str] = []
+        for snap_id in victims:
+            try:
+                self.delete(snap_id)
+                deleted.append(snap_id)
+            except Exception:  # noqa: BLE001 — retention keeps going
+                _log.warning("prune_pre_update could not delete %s",
+                             snap_id, exc_info=True)
+        return deleted
+
     # ── diff ─────────────────────────────────────────────────────────────
     def diff(self, old_id: str, new_id: str) -> dict[str, Any]:
         """What changed between two snapshots: files added / removed /

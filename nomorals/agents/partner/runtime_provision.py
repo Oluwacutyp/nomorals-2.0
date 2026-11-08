@@ -1294,6 +1294,43 @@ class RuntimeProvisionMixin:
         except Exception as e:  # noqa: BLE001
             record_failure(
                 "runtime_provision.presence_cycle", e)
+        # Same beat: the disk watch (2026-11-08 disk discipline) —
+        # free space on the install volume vs. what one update
+        # needs. A crossing journals one disk_low row per day, so
+        # a filling disk is visible in /pair journal long before
+        # an /update trips over it at its snapshot step.
+        try:
+            self._disk_watch(svc)
+        except Exception as e:  # noqa: BLE001
+            record_failure(
+                "runtime_provision.disk_watch", e)
+
+    def _disk_watch(self, svc: dict[str, Any]) -> None:
+        """Journal a ``disk_low`` row when the install volume's
+        free space is under one update's need — once per crossing
+        per day. ``svc`` carries the day stamp; recovery (free
+        space back above the need) clears it, so a later
+        re-crossing journals again instead of being swallowed by
+        a stale stamp."""
+        import datetime as _datetime
+
+        from ...core import diskspace
+
+        settings = self.context.settings
+        rep = diskspace.disk_report(
+            settings.home_path, settings.db_path,
+            getattr(settings, "blob_dir", None))
+        if not rep["low"]:
+            svc.pop("disk_low_day", None)
+            return
+        today = _datetime.date.today().isoformat()
+        if svc.get("disk_low_day") == today:
+            return
+        svc["disk_low_day"] = today
+        svc["personal"].note_disk_low(
+            free_bytes=rep["free_bytes"], need_bytes=rep["need_bytes"],
+            store_count=rep["store_count"],
+            store_bytes=rep["store_bytes"])
 
     def _personal_surface_turn(self, message: Any) -> bool:
         """Observe one inbound message for the §15 personal surfaces.

@@ -589,13 +589,15 @@ class RuntimeMetaMixin:
         """System health — the Telegram twin of ``nm doctor`` (spec §8.6).
 
         Owner-only (enforced by the grant check in handle_control
-        before dispatch). Five checks, each pass/fail with the REAL
+        before dispatch). Six checks, each pass/fail with the REAL
         cause — never a bare "unhealthy":
 
         - registry: every registered command has details + a list
           slot + a dispatch branch (the orphan audit, live).
         - config: every template env key mapped (ignored must be 0).
         - stores: chat-modes + style-overrides + database readable.
+        - disk: free space on the install volume vs. what one
+          update needs, plus the snapshot store's footprint.
         - adapters: every adapter's running state + health error.
         - providers: the LLM chain's keys present (no values shown).
         """
@@ -681,6 +683,36 @@ class RuntimeMetaMixin:
         except Exception as exc:  # noqa: BLE001 - report, don't crash
             from ...core.errors import exc_str
             results.append((False, f"stores: check failed: {exc_str(exc)}"))
+
+        # ── disk ──
+        try:
+            from ...core import diskspace as _diskspace
+            _settings = getattr(getattr(self, "context", None),
+                                "settings", None)
+            if _settings is None:
+                results.append((False, "disk: no settings on this "
+                                "runtime — cannot measure"))
+            else:
+                rep = _diskspace.disk_report(
+                    _settings.home_path, _settings.db_path,
+                    getattr(_settings, "blob_dir", None))
+                free = _diskspace.human_bytes(rep["free_bytes"])
+                need = _diskspace.human_bytes(rep["need_bytes"])
+                store = (f"snapshots {rep['store_count']} using "
+                         f"{_diskspace.human_bytes(rep['store_bytes'])}")
+                if rep["low"]:
+                    results.append((False,
+                                    f"disk: LOW — {free} free on the "
+                                    f"install volume, an update needs "
+                                    f"~{need}; {store}. Free space "
+                                    "before updating."))
+                else:
+                    results.append((True,
+                                    f"disk: {free} free (an update "
+                                    f"needs ~{need}); {store}"))
+        except Exception as exc:  # noqa: BLE001 - report, don't crash
+            from ...core.errors import exc_str
+            results.append((False, f"disk: check failed: {exc_str(exc)}"))
 
         # ── adapters ──
         try:

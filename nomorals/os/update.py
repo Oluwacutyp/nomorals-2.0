@@ -107,6 +107,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..core import diskspace
 from ..core.filelock import lock_exclusive_nb, unlock as _unlock_file
 from ..core.logging_setup import get_logger
 from .snapshots import SnapshotManager, SnapshotRefused
@@ -575,6 +576,29 @@ class UpdateManager:
             if detail:
                 report.record("working_tree", True, detail)
 
+        # Step 0.6: disk preflight — an update first takes a full
+        # pre-update snapshot (database + WAL + the blob store,
+        # copied wholesale) and then rewrites the tree. On a disk
+        # without room for that, step 1 is where the update used
+        # to discover the problem by failing (2026-11-08 EC2:
+        # "database or disk is full" at the snapshot step, after
+        # snapshots had piled up unbounded for weeks). Measure
+        # FIRST and refuse here — before the snapshot, before the
+        # pull, and before the quiesce: a refused update changes
+        # nothing on disk and stops nothing that is running.
+        d_ok, d_detail = self._preflight_disk()
+        report.record("disk_space", d_ok, d_detail)
+        self._journal({"run_id": run_id, "event": "step",
+                       "step": "disk_space", "ts": time.time(),
+                       "ok": d_ok, "detail": d_detail})
+        if not d_ok:
+            report.error = d_detail
+            report.seconds = time.time() - started
+            self._journal({"run_id": run_id, "event": "aborted",
+                           "ts": time.time(), "error": report.error})
+            self._append_history(report)
+            return report
+
         # Step 0.75: quiesce — stop the children that execute files
         # from the tree BEFORE anything tries to replace those files.
         # The WhatsApp bridge is the proven locker (2026-11-07 EC2:
@@ -607,6 +631,27 @@ class UpdateManager:
             report.record("snapshot", True, f"pre-update snapshot {snap.id}")
             self._journal({"run_id": run_id, "event": "step", "step": "snapshot",
                            "ts": time.time(), "snapshot": snap.id})
+            # Retention (disk discipline, 2026-11-08): the pile of
+            # pre-update snapshots is bounded the moment a new one
+            # lands — newest 3, plus the snapshot a pending
+            # deferred restore names (a rollback anchor, not
+            # clutter). Pruning failures journal here and never
+            # fail the update.
+            try:
+                protect: list[str] = []
+                pending = self._read_pending_restore()
+                if pending and pending.get("snapshot"):
+                    protect.append(str(pending["snapshot"]))
+                pruned = self.snapshots.prune_pre_update(
+                    protect=protect)
+                if pruned:
+                    self._journal({"run_id": run_id, "event": "retention",
+                                   "ts": time.time(), "pruned": pruned})
+            except Exception as exc:  # noqa: BLE001 - never fails the update
+                self._journal({"run_id": run_id,
+                               "event": "retention_failed",
+                               "ts": time.time(),
+                               "error": f"{type(exc).__name__}: {exc}"})
         except Exception as exc:  # noqa: BLE001 - snapshot failure aborts
             report.record("snapshot", False, f"{type(exc).__name__}: {exc}")
             report.error = f"could not take pre-update snapshot: {exc}"
@@ -1576,6 +1621,39 @@ class UpdateManager:
         if rc != 0:
             return []
         return [line.strip() for line in out.splitlines() if line.strip()]
+
+    def _preflight_disk(self) -> tuple[bool, str]:
+        """Decide whether the disk has room for this update.
+
+        Returns (proceed, detail). The need is the shared measure
+        (core.diskspace): the pre-update snapshot step 1 is about to
+        take — database + WAL + the blob store it copies — plus an
+        equal headroom for the pull/checkout churn. A MEASURED
+        shortage refuses here, with both numbers, before anything
+        on disk changes. A measurement FAILURE never bricks an
+        update: it is named in the step detail and the update
+        proceeds — the snapshot step still fails honestly if the
+        disk truly is full."""
+        try:
+            rep = diskspace.disk_report(
+                self.snapshots.home, self.snapshots.db_path,
+                getattr(self.snapshots, "blob_dir", None))
+        except Exception as exc:  # noqa: BLE001 - measure, don't brick
+            return True, (f"could not measure free disk space "
+                          f"({type(exc).__name__}: {exc}) — proceeding; "
+                          "the snapshot step remains the guard")
+        free = diskspace.human_bytes(rep["free_bytes"])
+        need = diskspace.human_bytes(rep["need_bytes"])
+        snap = diskspace.human_bytes(rep["snapshot_bytes"])
+        if rep["low"]:
+            return False, (
+                f"not enough free disk to update safely — free {free}, "
+                f"this update needs ~{need} (pre-update snapshot ~{snap} "
+                "plus equal headroom for the pull). Nothing was "
+                "changed. Free space on the install volume and retry — "
+                "pre-update snapshots are pruned automatically now, "
+                "but a pile already on disk may need one manual clear.")
+        return True, f"free {free} · needs ~{need}"
 
     def _preflight_pull(self) -> tuple[bool, str]:
         """Decide whether pulling is safe for the owner's local changes.

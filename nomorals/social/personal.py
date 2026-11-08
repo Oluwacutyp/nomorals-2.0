@@ -1462,6 +1462,35 @@ class PersonalSurfaces:
         _append_jsonl(self.vault.journal_path, entry)
         return entry
 
+    def note_disk_low(self, *, free_bytes: int, need_bytes: int,
+                      store_count: int, store_bytes: int,
+                      ts: float = 0.0) -> dict[str, Any]:
+        """Journal one low-disk observation (2026-11-08 disk
+        discipline): the housekeeping beat writes this when the
+        install volume's free space falls under what one update
+        needs, so a filling disk is a journal fact the owner can
+        read (/pair journal disk_low) long before an /update
+        discovers it by failing at its snapshot step.
+        Account-less on purpose: the disk belongs to the install,
+        not to any one paired account."""
+        entry = {
+            "ts": float(ts or self._clock()),
+            "kind": "disk_low",
+            "account": "", "platform": "",
+            "counterpart_id": "", "poster_name": "",
+            "media_kind": "", "source_id": "",
+            "path": "", "bytes": 0,
+            "free_bytes": int(free_bytes),
+            "need_bytes": int(need_bytes),
+            "store_count": int(store_count),
+            "store_bytes": int(store_bytes),
+            "note": (f"disk low — {int(free_bytes):,} bytes free, an "
+                     f"update needs ~{int(need_bytes):,} bytes; "
+                     f"snapshots {int(store_count)} using "
+                     f"{int(store_bytes):,} bytes")}
+        _append_jsonl(self.vault.journal_path, entry)
+        return entry
+
     def toggle_activity(self, account_id: str
                         ) -> dict[str, float]:
         """Last-activity timestamps per personal toggle,
