@@ -618,6 +618,64 @@ class GroupSurface:
         session = str(via_platform or "").split(":", 1)[0]
         return session in BOT_PLATFORMS
 
+    def system_diagnostics(self, group_key: str, *,
+                           via_platform: str = ""
+                           ) -> dict[str, Any]:
+        """The diagnostic read of the same facts the output
+        gate decides on (command audit Finding A): the
+        effective claim and its source, the economy's enabled
+        state, the ledger's health, and — when group systems
+        are off — the EXACT unmet conditions, in words.  A
+        fresh WhatsApp room and a Telegram bot room differ
+        here by design (bot platforms carry their own claim;
+        a personal-surface room needs designation or verified
+        admin standing); showing which condition is unmet is
+        what keeps that rule from reading as breakage.
+        Read-only: naming the state never flips a claim, an
+        economy toggle or any owner default."""
+        from ...community.group_economy import GroupEconomyError
+
+        state = self.claim_state(group_key)
+        allowed = self.system_output_allowed(
+            group_key, via_platform=via_platform)
+        economy_on = bool(self.store.settings(
+            group_key).get("economy_enabled"))
+        frozen = self.economy_frozen(group_key)
+        ledger_entries: int | None = None
+        if frozen is None:
+            try:
+                ledger_entries = int(self.economy.verify(
+                    group_key)["entries"])
+            except GroupEconomyError as exc:
+                frozen = str(exc)
+        unmet: list[str] = []
+        if not allowed:
+            if not state["designated"]:
+                unmet.append(
+                    "the owner has not designated this room "
+                    "(/gsettings system output on designates it)")
+            if state["bot_admin"] is False:
+                unmet.append(
+                    "Devon's bot admin standing here was "
+                    "verified LOST (demoted) — no bot claim "
+                    "forms until she is an admin again")
+            elif state["bot_admin"] is None \
+                    and not state["bot_platform"]:
+                unmet.append(
+                    "Devon is not a verified admin here, and "
+                    "this platform is not one of her bot "
+                    "platforms, so no bot claim forms on its own")
+        return {"allowed": allowed,
+                "claimed": state["claimed"],
+                "designated": state["designated"],
+                "bot_admin": state["bot_admin"],
+                "bot_platform": state["bot_platform"],
+                "source": state["source"],
+                "economy_enabled": economy_on,
+                "ledger_frozen": frozen,
+                "ledger_entries": ledger_entries,
+                "unmet": unmet}
+
     def set_designated(self, group_key: str, on: bool, *,
                        by: str = "") -> dict[str, Any]:
         """The owner's designation (§33b): name this room for

@@ -614,8 +614,10 @@ def test_reveal_found_journals_found_and_sends(tmp_path):
     _seed_capture(tmp_path, rt, svc)
     sent: list = []
 
-    def send_file(platform, chat, path, caption=""):
-        sent.append(path)
+    def send_file(platform, chat, path, caption="", kind=""):
+        # The gateway's real signature carries kind (the media
+        # kind the reveal now declares — truth build).
+        sent.append((path, kind))
         return SimpleNamespace(ok=True)
 
     rt.gateway = SimpleNamespace(send_file=send_file)

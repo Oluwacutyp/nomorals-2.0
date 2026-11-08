@@ -3117,7 +3117,11 @@ class RuntimeGroupMixin:
             # System-output claim (§33): where Devon's bot
             # systems may speak and accrue in this room — the
             # two-hats law, read from the same state the gate
-            # itself reads.
+            # itself reads.  The diagnostics read (command
+            # audit Finding A) names the claim facts, the
+            # economy state, the ledger health and the exact
+            # unmet condition — a room whose systems are off
+            # says WHY, never just "off".
             claim_now = surface.claim_state(key)
             if claim_now["claimed"]:
                 claim_line = (
@@ -3127,11 +3131,36 @@ class RuntimeGroupMixin:
                 claim_line = (
                     "system output: OFF — my bot doesn't run "
                     "here; my sessions only watch and converse")
-            card.block_lines([
+            diag = surface.system_diagnostics(
+                key, via_platform=str(
+                    getattr(message.chat, "platform", "") or ""))
+            admin_word = (
+                "verified admin" if diag["bot_admin"] is True
+                else "admin standing LOST (demoted)"
+                if diag["bot_admin"] is False
+                else "admin unverified")
+            ledger_line = (
+                f"ledger: FROZEN — {diag['ledger_frozen']}"
+                if diag["ledger_frozen"] else
+                f"ledger: healthy — {diag['ledger_entries']} "
+                f"entries, balances rebuild from it")
+            diag_lines = [
                 claim_line,
+                f"claim facts: designated "
+                f"{'yes' if diag['designated'] else 'no'} · "
+                f"{admin_word} · platform "
+                f"{'bot' if diag['bot_platform'] else 'personal'}"
+                f" · economy "
+                f"{'on' if diag['economy_enabled'] else 'off'}",
+                ledger_line,
+            ]
+            if diag["unmet"]:
+                diag_lines.append(
+                    "unmet: " + "; ".join(diag["unmet"]))
+            diag_lines.append(
                 "the owner designates a room with "
-                "`/gsettings system output on`",
-            ], title="System output")
+                "`/gsettings system output on`")
+            card.block_lines(diag_lines, title="System output")
             # Expression block (§21): her GIF/sticker voice in
             # this room — state read from the same settings the
             # moment service reads, library size included.

@@ -1611,7 +1611,11 @@ func markStatusViewed(ctx context.Context, cli statusViewClient,
 // adapters) is deliberately unused — the receipt is stamped at
 // read time inside markStatusViewed.
 func (b *bridge) cmdStatusView(ctx context.Context, cc *clientConn, id string, req request) {
-	msgID := req.str("id")
+	// The target rides "message_id": the request's "id" is the
+	// correlation id (the adapter's _send_cmd writes it over
+	// any "id" a caller set), so reading the target from "id"
+	// aimed every view at a random request id.
+	msgID := strings.TrimSpace(req.str("message_id"))
 	sender, err := parseJID(req.str("from"))
 	if err != nil || msgID == "" {
 		b.reply(cc, id, map[string]any{"ok": false,
@@ -1789,7 +1793,9 @@ func sendStatusReaction(ctx context.Context, cli statusReactClient,
 // for why the destination is the poster and not the
 // broadcast.
 func (b *bridge) cmdStatusReact(ctx context.Context, cc *clientConn, id string, req request) {
-	msgID := strings.TrimSpace(req.str("id"))
+	// Target in "message_id", never "id" (the correlation id —
+	// see cmdStatusView).
+	msgID := strings.TrimSpace(req.str("message_id"))
 	poster, err := parseJID(req.str("from"))
 	emoji := strings.TrimSpace(req.str("emoji"))
 	if err != nil || msgID == "" || emoji == "" {
@@ -1984,7 +1990,9 @@ func forwardCopy(src *waE2E.Message) (*waE2E.Message, string) {
 // cmdRejectCall rejects one ringing call (the anticall toggle's
 // verb): whatsmeow RejectCall against the offer's id + caller.
 func (b *bridge) cmdRejectCall(ctx context.Context, cc *clientConn, id string, req request) {
-	callID := strings.TrimSpace(req.str("id"))
+	// The call id rides "call_id": "id" is the request
+	// correlation id (see cmdStatusView).
+	callID := strings.TrimSpace(req.str("call_id"))
 	from, err := parseJID(req.str("from"))
 	if err != nil || callID == "" {
 		b.reply(cc, id, map[string]any{"ok": false,

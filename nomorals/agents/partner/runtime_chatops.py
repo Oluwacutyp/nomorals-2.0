@@ -57,6 +57,67 @@ _WA_EDIT_WINDOW = ("WhatsApp lets you edit a message for "
                    "about 15 minutes after sending.")
 
 
+def _digits(value: Any) -> str:
+    """The digit string of an id in any of its address forms:
+    a WhatsApp phone JID, a ``@c.us`` JID and a ``@lid`` JID for
+    the same person differ in everything but the digits, and a
+    Telegram chat id IS the digits — comparing digit strings
+    folds the forms into one identity."""
+    return "".join(c for c in str(value or "") if c.isdigit())
+
+
+def _scoped_reply_target(entries: list, message: Any,
+                         reply_to: str,
+                         account_id: str = "") -> dict | None:
+    """The view-once capture a REPLY to *reply_to* means — or
+    None, with the caller explaining the miss.
+
+    Message ids are unique only inside one conversation
+    (Telegram numbers every chat's messages from 1), so a bare
+    source_id match across the whole vault can hand back a
+    capture from an unrelated chat that happens to share the
+    id — the cross-chat collision the command audit reproduced.
+    A reply therefore resolves inside its OWN conversation:
+    same platform, same account when the seat's account is
+    known, and the capture's counterpart being this chat (its
+    peer / chat id / sender, digit-folded).  The one deliberate
+    exception is the owner's self-chat — his command seat,
+    where a reply names a capture on purpose: there the lookup
+    stays account/platform-scoped but is not counterpart-bound,
+    because no counterpart conversation exists in that seat.
+    Numbered and list forms are the intentional cross-chat
+    browsing and never pass through here."""
+    chat = getattr(message, "chat", None)
+    platform = str(getattr(chat, "platform", "") or "")
+    scope = {_digits(v) for v in (
+        getattr(chat, "peer", ""), getattr(chat, "chat_id", ""),
+        getattr(message, "sender_id", ""))}
+    scope.discard("")
+    meta = getattr(message, "meta", None)
+    self_chat = bool(isinstance(meta, dict) and meta.get("self_chat"))
+    matches = [r for r in entries
+               if str(r.get("source_id") or "") == reply_to]
+
+    def _account_ok(row: dict) -> bool:
+        return not account_id \
+            or str(row.get("account") or "") == account_id
+
+    def _platform_ok(row: dict) -> bool:
+        return not platform \
+            or str(row.get("platform") or "") == platform
+
+    for row in matches:
+        if not (_platform_ok(row) and _account_ok(row)):
+            continue
+        if _digits(row.get("counterpart_id")) in scope:
+            return row
+    if self_chat:
+        for row in matches:
+            if _platform_ok(row) and _account_ok(row):
+                return row
+    return None
+
+
 class RuntimeChatOpsMixin:
     """Chat & privacy commands for PartnerRuntime."""
 
@@ -863,17 +924,34 @@ class RuntimeChatOpsMixin:
         note = ""
         reply_to = str(getattr(message, "reply_to", "") or "")
         if reply_to:
-            for row in entries:
-                if str(row.get("source_id") or "") == reply_to:
-                    target = row
-                    break
+            # Scoped resolution (truth build): the reply means
+            # the capture taken in THIS conversation — message
+            # ids repeat across chats, so the vault never
+            # resolves a reply across them.  The seat's account
+            # joins the scope when the platform has exactly one
+            # paired account (the only case where the seat's
+            # account is knowable from the message alone).
+            seat_platform = str(getattr(message.chat, "platform",
+                                        "") or "")
+            seat_accounts = [rec.id for rec in
+                             svc["registry"].all()
+                             if rec.platform == seat_platform]
+            target = _scoped_reply_target(
+                entries, message, reply_to,
+                account_id=(seat_accounts[0]
+                            if len(seat_accounts) == 1 else ""))
             if target is None:
                 _note_reveal("miss", "reply")
                 return ("that message has no view-once capture "
-                        "in the vault — capture was off when it "
-                        "arrived, or it never reached the "
-                        f"surface. Captures I do hold:\n{listing}"
-                        f"{more}")
+                        "from this chat in the vault — a reply "
+                        "only ever opens the capture taken in "
+                        "the chat you're replying in, because "
+                        "message ids repeat across chats. It "
+                        "may have arrived with capture off, "
+                        "never reached the surface, or live in "
+                        "another chat — /viewonce N opens one "
+                        f"by number. Captures I do hold:\n"
+                        f"{listing}{more}")
         elif tail.lower() == "list":
             return (f"👁️ view-once captures (newest first) — "
                     f"/viewonce N opens one:\n{listing}{more}")
@@ -917,7 +995,14 @@ class RuntimeChatOpsMixin:
             message.chat, path,
             caption=(f"👁️ view-once from {who} · "
                      f"{_when(target)} — kept in your vault "
-                     f"before it could vanish"))
+                     f"before it could vanish"),
+            # The record's own media kind (truth build): without
+            # it the gateway defaults the reveal to a document
+            # and a photo lands as an attachment instead of a
+            # photo.  The gateway still downgrades an oversized
+            # item to a document itself — the platform's cap,
+            # honestly labelled by the send path.
+            kind=str(target.get("media_kind") or ""))
         if not getattr(result, "ok", False):
             _note_reveal("send_failed", form, target)
             return (f"the capture from {who} is in the vault "

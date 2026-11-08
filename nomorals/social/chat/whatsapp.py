@@ -46,7 +46,17 @@ Protocol (one JSON object per line):
     {"id":"<req>","cmd":"history","chat":"<jid>","limit":20}
     {"id":"<req>","cmd":"read","chat":"<jid>"}            # best-effort receipts
     {"id":"<req>","cmd":"presence","state":"available|unavailable"}   # account presence (§15)
-    {"id":"<req>","cmd":"status_view","id":"<msg id>","from":"<poster jid>","ts":<ms>}  # view one status (§15)
+    {"id":"<req>","cmd":"status_view","message_id":"<msg id>","from":"<poster jid>"}  # view one status (§15)
+    {"id":"<req>","cmd":"status_react","message_id":"<msg id>","from":"<poster jid>","emoji":"<emoji>"}  # react to one status (§15)
+    {"id":"<req>","cmd":"reject_call","call_id":"<call id>","from":"<caller jid>"}  # reject one ringing call
+    # "id" is ONLY the request correlation id — _send_cmd writes
+    # it last, over whatever the caller put there.  A command's
+    # TARGET therefore never travels in "id": a message target
+    # rides "message_id", a call target rides "call_id".  (The
+    # status family once sent its target in "id"; every view and
+    # reaction was aimed at the random request id instead, and
+    # both bridges answered ok — pinned on the real wire by
+    # tests/test_truthbuild_wire.py.)
     {"id":"<req>","cmd":"chats","limit":30}               # best-effort listing
     {"id":"<req>","cmd":"status"}
     # group/community depth (bridge read-only set):
@@ -1995,7 +2005,8 @@ class WhatsAppAdapter(ChatAdapter):
                     "error": "status_view needs the poster's jid "
                              "and the status message id"}
         return self._admin_cmd("status_view", {
-            "id": message_id, "from": poster_id}, timeout=10)
+            "message_id": message_id, "from": poster_id},
+            timeout=10)
 
     def send_status(self, text: str = "", *,
                     media_path: str = "",
@@ -2225,7 +2236,7 @@ class WhatsAppAdapter(ChatAdapter):
                     "error": "status_react needs the poster's jid, "
                              "the status message id and an emoji"}
         return self._admin_cmd("status_react", {
-            "id": message_id, "from": poster_id,
+            "message_id": message_id, "from": poster_id,
             "emoji": emoji}, timeout=15)
 
     # -- own identity (§/parity G3, census bundle #5) --------
@@ -2386,7 +2397,7 @@ class WhatsAppAdapter(ChatAdapter):
                     "error": "reject_call needs the call id and "
                              "the caller's jid"}
         return self._admin_cmd("reject_call", {
-            "id": call_id, "from": from_jid}, timeout=15)
+            "call_id": call_id, "from": from_jid}, timeout=15)
 
     def block_user(self, jid: str,
                    action: str) -> dict[str, Any]:

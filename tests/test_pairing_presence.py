@@ -383,7 +383,11 @@ def test_whatsapp_adapter_presence_and_status_view_verbs():
     res = adapter.view_status("111@s.whatsapp.net", "MSGID42", ts=7.5)
     assert res["ok"] is True
     assert sent[-1]["cmd"] == "status_view"
-    assert sent[-1]["id"] == "MSGID42"
+    # The target rides "message_id" (truth build): "id" is the
+    # request correlation id _send_cmd writes on the real wire —
+    # this pin once asserted the target in "id", the shape that
+    # never survived the transport.
+    assert sent[-1]["message_id"] == "MSGID42"
     assert sent[-1]["from"] == "111@s.whatsapp.net"
     # No ts on the wire (status fix, 2026-11-07): this pin used
     # to assert ts == 7500 — the post's timestamp plumbed into

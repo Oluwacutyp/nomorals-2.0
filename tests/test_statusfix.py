@@ -63,21 +63,27 @@ def _wa_adapter_capturing(responder=None):
     return adapter, sent
 
 
-def test_view_status_payload_is_exactly_id_and_from():
+def test_view_status_payload_is_exactly_message_id_and_from():
     adapter, sent = _wa_adapter_capturing()
     adapter.view_status(PN, "POST1", ts=POST_TS)
-    # Exactly {cmd, id, from}: the poster's JID verbatim, and
-    # NO ts — the bridges stamp the receipt at read time, like
-    # the phone; plumbing the post's ts through was divergence
-    # D5 of the mining.
-    assert sent == [{"cmd": "status_view", "id": "POST1",
+    # Exactly {cmd, message_id, from}: the poster's JID verbatim,
+    # and NO ts — the bridges stamp the receipt at read time,
+    # like the phone; plumbing the post's ts through was
+    # divergence D5 of the mining.  The target rides
+    # "message_id": "id" is the request correlation id, which
+    # _send_cmd writes over any caller-set value on the real
+    # wire (the truth-build fix — these pins once recorded the
+    # target in "id", the exact shape that never survived the
+    # transport; the wire itself is pinned in
+    # tests/test_truthbuild_wire.py).
+    assert sent == [{"cmd": "status_view", "message_id": "POST1",
                      "from": PN}]
 
 
 def test_view_status_payload_lid_poster_verbatim():
     adapter, sent = _wa_adapter_capturing()
     adapter.view_status(LID, "POST2", ts=POST_TS)
-    assert sent == [{"cmd": "status_view", "id": "POST2",
+    assert sent == [{"cmd": "status_view", "message_id": "POST2",
                      "from": LID}]
 
 
@@ -86,9 +92,9 @@ def test_react_status_payload_exact_both_poster_forms():
     adapter.react_status(PN, "POST1", "❤️")
     adapter.react_status(LID, "POST2", "🔥")
     assert sent == [
-        {"cmd": "status_react", "id": "POST1", "from": PN,
+        {"cmd": "status_react", "message_id": "POST1", "from": PN,
          "emoji": "❤️"},
-        {"cmd": "status_react", "id": "POST2", "from": LID,
+        {"cmd": "status_react", "message_id": "POST2", "from": LID,
          "emoji": "🔥"}]
 
 

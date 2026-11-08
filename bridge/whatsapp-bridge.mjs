@@ -1504,10 +1504,15 @@ async function handleCommand(sock, req) {
         // hidden behind a bare ok. A build without the fetch,
         // or a failed one, reports "unknown" — the value is
         // read, never invented.
-        if (!req.id || !req.from) {
+        // The target rides req.message_id: req.id is the
+        // request correlation id (the adapter's _send_cmd writes
+        // it over any "id" a caller set), so reading the target
+        // from req.id aimed every view at a random request id.
+        const viewMid = String(req.message_id || '').trim();
+        if (!viewMid || !req.from) {
           return reply(sock, id, { ok: false, error: 'status_view needs the status message id and the poster jid' });
         }
-        await wa.readMessages([{ remoteJid: 'status@broadcast', id: String(req.id), participant: String(req.from), fromMe: false }]);
+        await wa.readMessages([{ remoteJid: 'status@broadcast', id: viewMid, participant: String(req.from), fromMe: false }]);
         let receiptMode = 'unknown';
         try {
           if (typeof wa.fetchPrivacySettings === 'function') {
@@ -1643,7 +1648,10 @@ async function handleCommand(sock, req) {
         // (status mining, 2026-11-07; the very invariant
         // status_send's comment above states). The audience is
         // the poster alone.
-        if (!req.id || !req.from || !req.emoji) {
+        // Target in req.message_id, never req.id (the request
+        // correlation id — see status_view above).
+        const reactMid = String(req.message_id || '').trim();
+        if (!reactMid || !req.from || !req.emoji) {
           return reply(sock, id, { ok: false, error: 'status_react needs the status message id, the poster jid and an emoji' });
         }
         const poster = String(req.from);
@@ -1651,7 +1659,7 @@ async function handleCommand(sock, req) {
           await wa.sendMessage('status@broadcast', {
             react: {
               text: String(req.emoji),
-              key: { remoteJid: 'status@broadcast', id: String(req.id), participant: poster, fromMe: false },
+              key: { remoteJid: 'status@broadcast', id: reactMid, participant: poster, fromMe: false },
             },
           }, { statusJidList: [poster] });
         } catch (e) {
@@ -1714,10 +1722,13 @@ async function handleCommand(sock, req) {
         return reply(sock, id, { ok: true, message_id: sent?.key?.id || '' });
       }
       case 'reject_call': {
-        if (!req.id || !req.from) {
+        // The call id rides req.call_id: req.id is the request
+        // correlation id (see status_view above).
+        const callId = String(req.call_id || '').trim();
+        if (!callId || !req.from) {
           return reply(sock, id, { ok: false, error: 'reject_call needs the call id and the caller jid' });
         }
-        await wa.rejectCall(String(req.id), String(req.from));
+        await wa.rejectCall(callId, String(req.from));
         return reply(sock, id, { ok: true });
       }
       case 'blocklist': {
