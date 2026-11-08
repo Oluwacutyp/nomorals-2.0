@@ -74,6 +74,23 @@ DM_CACHE_PER_CHAT = 100        # messages kept per conversation
 DM_CACHE_CHATS = 200           # conversations kept per account
 SAVED_PER_ACCOUNT = 500        # saved status/view-once items
 SAVED_MAX_BYTES = 512 * 1024 * 1024
+ORIGINALS_PER_ACCOUNT = 500    # DM originals held for delete/edit recovery
+ORIGINALS_MAX_BYTES = 512 * 1024 * 1024
+#: The WhatsApp bridges' inbound-media download cache bound
+#: (media-cache discipline, 2026-11-08): one hard cap per paired
+#: account's cache directory, oldest first, swept on the
+#: housekeeping beat.  The cache is a TRANSPORT scratch space —
+#: anything a recovery feature depends on is copied into this
+#: vault at capture time, so eviction can never reach a file the
+#: record points at.  The live incident: the owner's cache grew
+#: to 11.07 GB of re-downloaded channel media and filled his
+#: disk; the session store beside it was 0.03 GB.
+MEDIA_CACHE_MAX_BYTES = 512 * 1024 * 1024
+#: Files younger than this are evicted only when the older files
+#: alone cannot satisfy the cap (the cap is hard; the grace only
+#: orders one sweep, so a capture in flight is never the first
+#: victim while anything older exists).
+MEDIA_CACHE_MIN_AGE_SECONDS = 3600.0
 JOURNAL_TAIL = 500             # entries returned by one listing
 #: Mass-tag DM flags (wave F): at most one delivered flag per
 #: (account, chat) per hour — a tagall-heavy room journals one
@@ -138,6 +155,76 @@ class PersonalVault:
         d = self.root / _slug(account_id) / "saved"
         d.mkdir(parents=True, exist_ok=True)
         return d
+
+    def originals_dir(self, account_id: str) -> Path:
+        d = self.root / _slug(account_id) / "originals"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def preserve_original(self, account_id: str,
+                          src_path: str) -> str:
+        """Copy one DM-original media file into the vault's
+        originals store and return the VAULT path.
+
+        The vault-copy rule (media-cache discipline,
+        2026-11-08): delete/edit recovery reads the DM cache's
+        media list, so those paths must name files whose
+        lifetime the vault controls — never the bridge's
+        download cache, which is volatile by design (deduped,
+        capped, evicted).  A source already inside the vault is
+        returned unchanged; the same original (same name, same
+        size) already held is served, not re-copied.  Raises
+        FileNotFoundError when the source is gone — a preserve
+        that did not happen must never record as one."""
+        src = Path(src_path)
+        if not src.exists():
+            raise FileNotFoundError(
+                f"media source gone: {src_path}")
+        root = self.root.resolve()
+        resolved = src.resolve()
+        if resolved == root or root in resolved.parents:
+            return str(src)
+        dest_dir = self.originals_dir(account_id)
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", src.name) or "media"
+        size = src.stat().st_size
+        dest = dest_dir / safe
+        n = 1
+        while dest.exists():
+            if dest.stat().st_size == size:
+                return str(dest)
+            n += 1
+            dest = dest_dir / f"{n}-{safe}"
+        shutil.copyfile(src, dest)
+        self._prune_originals(account_id)
+        return str(dest)
+
+    def _prune_originals(self, account_id: str) -> None:
+        """Bound the originals store (count + bytes, oldest
+        first) — the same cap shape as the saved store, over the
+        directory itself (originals are cache-held, not
+        journaled, so the journal-counting prune cannot see
+        them)."""
+        d = self.originals_dir(account_id)
+        files: list[tuple[float, int, Path]] = []
+        total = 0
+        for p in d.iterdir():
+            if not p.is_file():
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            files.append((float(st.st_mtime), int(st.st_size), p))
+            total += int(st.st_size)
+        files.sort(key=lambda f: f[0])
+        while files and (len(files) > ORIGINALS_PER_ACCOUNT
+                         or total > ORIGINALS_MAX_BYTES):
+            _mtime, size, victim = files.pop(0)
+            total -= size
+            try:
+                victim.unlink()
+            except OSError:
+                continue
 
     @property
     def journal_path(self) -> Path:
@@ -285,6 +372,47 @@ class PersonalVault:
 
     def note_message(self, account_id: str, chat_key: str,
                      entry: dict[str, Any]) -> None:
+        # The vault-copy rule, enforced at the vault's own
+        # boundary so EVERY writer inherits it: the media list
+        # this cache holds is what delete/edit recovery later
+        # reads, so each path is preserved into the originals
+        # store NOW, at capture.  Before this, the cache held
+        # raw bridge-download paths and a recovery row could
+        # point into a cache the eviction sweep had already
+        # reaped.  A source gone (or uncopyable) before capture
+        # is journaled as a miss, in the view-once family's
+        # shape — never silently dropped from the record.
+        entry = dict(entry)
+        held: list[str] = []
+        for raw in (entry.get("media") or []):
+            p = str(raw or "")
+            if not p:
+                continue
+            try:
+                held.append(self.preserve_original(account_id, p))
+            except FileNotFoundError:
+                _append_jsonl(self.journal_path, {
+                    "ts": time.time(), "kind": "dm_original_missed",
+                    "account": account_id, "platform": "",
+                    "counterpart_id": "", "poster_name": "",
+                    "media_kind": "", "source_id":
+                    str(entry.get("message_id") or ""), "path": "",
+                    "bytes": 0,
+                    "note": "DM original media was gone before "
+                            "it could be preserved into the "
+                            "vault"})
+            except OSError as exc:
+                _append_jsonl(self.journal_path, {
+                    "ts": time.time(), "kind": "dm_original_missed",
+                    "account": account_id, "platform": "",
+                    "counterpart_id": "", "poster_name": "",
+                    "media_kind": "", "source_id":
+                    str(entry.get("message_id") or ""), "path": "",
+                    "bytes": 0,
+                    "note": "DM original media could not be "
+                            f"preserved into the vault "
+                            f"({type(exc).__name__}: {exc})"})
+        entry["media"] = held
         with self._lock:
             acct = self._cache.setdefault(account_id, {})
             ring = acct.setdefault(chat_key, [])
@@ -365,6 +493,10 @@ class PersonalSurfaces:
                  = None,
                  status_react_pool: Callable[[AccountRecord],
                                              list[str]] | None = None,
+                 media_cache_max_bytes: int
+                 = MEDIA_CACHE_MAX_BYTES,
+                 media_cache_min_age_seconds: float
+                 = MEDIA_CACHE_MIN_AGE_SECONDS,
                  clock: Callable[[], float] = time.time) -> None:
         self.registry = registry
         self.vault = vault
@@ -398,6 +530,14 @@ class PersonalSurfaces:
         #: this surface stays transport- and library-free).
         #: None → the pool is the account's own + the built-in.
         self.status_react_pool = status_react_pool
+        #: The download-cache discipline knobs (media-cache
+        #: build, 2026-11-08): the per-account cap the
+        #: housekeeping sweep enforces over each WhatsApp
+        #: bridge's media directory, and the young-file grace
+        #: that orders eviction within one sweep.
+        self.media_cache_max_bytes = int(media_cache_max_bytes)
+        self.media_cache_min_age_seconds = float(
+            media_cache_min_age_seconds)
         self._clock = clock
         self._seen_status: set[tuple[str, str]] = set()
         self._missed_status: set[tuple[str, str]] = set()
@@ -811,8 +951,16 @@ class PersonalSurfaces:
                     "path": "", "bytes": 0,
                     "post_ts": ts,
                     "text": str(text or ""),
-                    "media": [{"path": str(m.get("path") or ""),
-                               "kind": str(m.get("kind") or "")}
+                    # Kinds only — NEVER the download-cache
+                    # paths (media-cache discipline, 2026-11-08):
+                    # a vault record must not point into the
+                    # volatile cache.  A save owed by this post
+                    # happens in the live pass below, from the
+                    # event's own media, copied into the vault
+                    # by save_media; the ledger's job is the
+                    # funnel count and the view/react replay,
+                    # neither of which needs the bytes' address.
+                    "media": [{"kind": str(m.get("kind") or "")}
                               for m in (media or [])
                               if m.get("path")],
                     "media_missing": bool(media_missing),
@@ -1098,7 +1246,15 @@ class PersonalSurfaces:
                 poster_id=str(row.get("counterpart_id") or ""),
                 poster_name=str(row.get("poster_name") or ""),
                 text=str(row.get("text") or ""),
-                media=[dict(m) for m in (row.get("media") or [])],
+                # Ledger rows written before the media-cache
+                # discipline carry download-cache paths, and the
+                # replay's save reads them while they last
+                # (a vanished file is skipped by the save loop,
+                # as always).  New rows carry kinds only: a
+                # replayed media post without bytes saves its
+                # text, never a pointer into the volatile cache.
+                media=[dict(m) for m in (row.get("media") or [])
+                       if m.get("path")],
                 source_id=str(row.get("source_id") or ""),
                 media_missing=bool(row.get("media_missing")),
                 account_id=rec.id,
@@ -1523,6 +1679,67 @@ class PersonalSurfaces:
                      f"{int(store_bytes):,} bytes")}
         _append_jsonl(self.vault.journal_path, entry)
         return entry
+
+    def cycle_media_cache(self) -> list[dict[str, Any]]:
+        """One download-cache sweep (media-cache discipline,
+        2026-11-08): every paired WhatsApp account's bridge
+        media directory is held to the cap, oldest first, and
+        each run that evicts (or fails to evict) journals ONE
+        ``media_cache_evicted`` row for the account — readable
+        in /pair journal like every other surface fact.
+
+        The directory is derived exactly as the bridge launcher
+        derives it (pairing.py): the sibling ``<creds>-media``
+        of the account's session store.  The sweep is safe to
+        run against a live bridge: downloads land as new files
+        (a file mid-write is the youngest in its directory and
+        the grace spares it while anything older exists), and
+        nothing the vault's records point at lives here — the
+        vault-copy rule (note_message / save_media) saw to
+        that at capture time."""
+        from ..core import diskspace
+
+        out: list[dict[str, Any]] = []
+        for rec in self.registry.all():
+            if rec.platform != "whatsapp":
+                continue
+            creds = Path(rec.creds_dir or "")
+            if not creds.name:
+                continue
+            media_dir = creds.parent / (creds.name + "-media")
+            if not media_dir.is_dir():
+                continue
+            res = diskspace.evict_cache_dir(
+                media_dir, cap_bytes=self.media_cache_max_bytes,
+                min_age_seconds=self.media_cache_min_age_seconds,
+                now=float(self._clock()))
+            if not res["files_evicted"] and not res["errors"]:
+                continue
+            entry = {
+                "ts": float(self._clock()),
+                "kind": "media_cache_evicted",
+                "account": rec.id, "platform": rec.platform,
+                "counterpart_id": "", "poster_name": "",
+                "media_kind": "", "source_id": "",
+                "path": str(media_dir), "bytes": 0,
+                "files_evicted": int(res["files_evicted"]),
+                "bytes_freed": int(res["bytes_freed"]),
+                "bytes_remaining": int(res["bytes_remaining"]),
+                "cap_bytes": int(self.media_cache_max_bytes),
+                "errors": int(res["errors"]),
+                "note": (f"media cache eviction — "
+                         f"{int(res['files_evicted'])} files, "
+                         f"{int(res['bytes_freed']):,} bytes "
+                         f"freed; {int(res['bytes_remaining']):,} "
+                         f"bytes remain under a "
+                         f"{int(self.media_cache_max_bytes):,} "
+                         f"byte cap"
+                         + (f"; {int(res['errors'])} file(s) "
+                            f"could not be removed"
+                            if res["errors"] else ""))}
+            _append_jsonl(self.vault.journal_path, entry)
+            out.append(entry)
+        return out
 
     def toggle_activity(self, account_id: str
                         ) -> dict[str, float]:

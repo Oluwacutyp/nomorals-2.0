@@ -1645,6 +1645,15 @@ class UpdateManager:
         free = diskspace.human_bytes(rep["free_bytes"])
         need = diskspace.human_bytes(rep["need_bytes"])
         snap = diskspace.human_bytes(rep["snapshot_bytes"])
+        # The need keeps its meaning (the snapshot this update is
+        # about to take, plus headroom) — but when the home
+        # tree's biggest area outweighs that snapshot, the
+        # refusal names it: the pile that filled the owner's
+        # disk was a WhatsApp media cache, and a preflight that
+        # only ever discussed snapshots would have left the next
+        # pile just as invisible (media-cache discipline,
+        # 2026-11-08).
+        area = diskspace.largest_area_note(rep)
         if rep["low"]:
             return False, (
                 f"not enough free disk to update safely — free {free}, "
@@ -1652,8 +1661,11 @@ class UpdateManager:
                 "plus equal headroom for the pull). Nothing was "
                 "changed. Free space on the install volume and retry — "
                 "pre-update snapshots are pruned automatically now, "
-                "but a pile already on disk may need one manual clear.")
-        return True, f"free {free} · needs ~{need}"
+                "but a pile already on disk may need one manual clear."
+                + (f" Biggest consumer on disk: {area}." if area
+                   else ""))
+        return True, (f"free {free} · needs ~{need}"
+                      + (f" · {area}" if area else ""))
 
     def _preflight_pull(self) -> tuple[bool, str]:
         """Decide whether pulling is safe for the owner's local changes.

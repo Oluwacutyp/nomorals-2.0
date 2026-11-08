@@ -555,6 +555,16 @@ async function quotedPayload(m) {
       || quoted.audioMessage || quoted.documentMessage
       || quoted.stickerMessage || {};
     const mime = inner.mimetype || 'application/octet-stream';
+    // The quoted message's identity is its stanza id: the same
+    // dedup as downloadInbound (media-cache discipline) — a
+    // quote of an already-downloaded message serves its file.
+    const qExt = mediaExtFor(kind, inner);
+    const qName = mediaCacheName(ctx.stanzaId, qExt);
+    const qHit = cachedMediaRow(qName, mime, kind);
+    if (qHit) {
+      out.quoted_media = [qHit];
+      return out;
+    }
     try {
       const dlType = { image: 'image', video: 'video', voice: 'audio',
         audio: 'audio', file: 'document', sticker: 'sticker' }[kind];
@@ -563,12 +573,9 @@ async function quotedPayload(m) {
       for await (const chunk of stream) chunks.push(chunk);
       const buf = Buffer.concat(chunks);
       if (buf.length) {
-        const ext = inner.fileName?.includes('.')
-          ? '.' + inner.fileName.split('.').pop().toLowerCase()
-          : ({ image: '.jpg', video: '.mp4', voice: '.ogg', audio: '.ogg', sticker: '.webp' }[kind] || '.bin');
-        const name = `${Date.now()}-${String(ctx.stanzaId || 'q').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 12)}${ext}`;
+        const name = qName || `${Date.now()}-anon${qExt}`;
         const p = path.join(MEDIA_DIR, name);
-        fs.writeFileSync(p, buf);
+        writeMediaAtomic(p, buf);
         out.quoted_media = [{ path: p, mime, kind }];
       } else {
         out.quoted_media = [{ path: '', mime, kind }]; // arrived, unseen
@@ -625,6 +632,55 @@ const EXT_MIME = {
   '.pdf': 'application/pdf',
 };
 
+// ── media cache identity (media-cache discipline, 2026-11-08) ──
+// One media identity (a WhatsApp message id) maps to ONE cache
+// filename, in this bridge exactly as in the Go bridge: the full
+// sanitized id (capped at 64 chars) + the media extension.  The
+// old name was "<download-time-millis>-<id fragment>", which made
+// every download of the same media a new file by construction —
+// the Go rung's channel sweep turned that into 11.07 GB of
+// duplicate channel videos on the owner's disk.  A message whose
+// identity already has a complete file is SERVED, never
+// re-downloaded; concurrent triggers of one identity share a
+// single in-flight download.
+const mediaInflight = new Map();
+
+function mediaCacheName(idStr, ext) {
+  const clean = String(idStr || '').replace(/[^a-zA-Z0-9_-]/g, '')
+    .slice(0, 64);
+  return clean ? clean + ext : '';
+}
+
+function mediaExtFor(kind, inner) {
+  return inner.fileName?.includes('.')
+    ? '.' + inner.fileName.split('.').pop().toLowerCase()
+    : ({ image: '.jpg', video: '.mp4', voice: '.ogg', audio: '.ogg', sticker: '.webp' }[kind] || '.bin');
+}
+
+function cachedMediaRow(name, mime, kind) {
+  if (!name) return null;
+  const p = path.join(MEDIA_DIR, name);
+  try {
+    const st = fs.statSync(p);
+    if (st.isFile() && st.size > 0) return { path: p, mime, kind };
+  } catch { /* not cached — the download below is the answer */ }
+  return null;
+}
+
+// Write via a sibling temp + rename: a reader (the Python side
+// copying a capture into the vault) never meets a half-written
+// file, and a lost race serves the winner's complete file.
+function writeMediaAtomic(p, buf) {
+  const tmp = p + '.part';
+  fs.writeFileSync(tmp, buf);
+  try {
+    fs.renameSync(tmp, p);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch { /* already gone */ }
+    if (!fs.existsSync(p)) throw e;
+  }
+}
+
 async function downloadInbound(m) {
   // Returns {path, mime, kind} — path is "" when the media arrived
   // but its bytes could not be fetched (the payload must carry the
@@ -637,20 +693,36 @@ async function downloadInbound(m) {
     || m.message?.audioMessage || m.message?.documentMessage
     || m.message?.stickerMessage || {};
   const mime = inner.mimetype || 'application/octet-stream';
-  try {
-    const buf = await downloadMediaMessage(m, 'buffer', {});
-    if (!buf || !buf.length) return { path: '', mime, kind };
-    const ext = inner.fileName?.includes('.')
-      ? '.' + inner.fileName.split('.').pop().toLowerCase()
-      : ({ image: '.jpg', video: '.mp4', voice: '.ogg', audio: '.ogg', sticker: '.webp' }[kind] || '.bin');
-    const name = `${Date.now()}-${(m.key.id || 'm').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 12)}${ext}`;
-    const p = path.join(MEDIA_DIR, name);
-    fs.writeFileSync(p, buf);
-    return { path: p, mime, kind };
-  } catch (e) {
-    log('media download failed:', e.message);
-    return { path: '', mime, kind };
+  const ext = mediaExtFor(kind, inner);
+  const name = mediaCacheName(m.key?.id, ext);
+  const hit = cachedMediaRow(name, mime, kind);
+  if (hit) return hit;
+  if (name && mediaInflight.has(name)) return mediaInflight.get(name);
+  const job = (async () => {
+    try {
+      const buf = await downloadMediaMessage(m, 'buffer', {});
+      if (!buf || !buf.length) return { path: '', mime, kind };
+      // No identity to dedup by: the legacy timestamped name
+      // keeps the bytes reachable.  Every real WhatsApp message
+      // carries an id, so this is the defensive path.
+      const fname = name || `${Date.now()}-anon${ext}`;
+      const p = path.join(MEDIA_DIR, fname);
+      writeMediaAtomic(p, buf);
+      return { path: p, mime, kind };
+    } catch (e) {
+      log('media download failed:', e.message);
+      return { path: '', mime, kind };
+    }
+  })();
+  if (name) {
+    mediaInflight.set(name, job);
+    try {
+      return await job;
+    } finally {
+      mediaInflight.delete(name);
+    }
   }
+  return job;
 }
 
 // ── server-confirmed pairing codes ───────────────────────────────────

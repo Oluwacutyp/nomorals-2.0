@@ -82,9 +82,14 @@ type bridge struct {
 	cli       *whatsmeow.Client
 	container *sqlstore.Container
 
-	port          int
-	credsDir      string
-	mediaDir      string
+	port     int
+	credsDir string
+	mediaDir string
+
+	// mediaLocks: per-media-identity download locks (media-cache
+	// discipline) — one fetch per identity at a time; see
+	// messages.go's mediaLock.
+	mediaLocks    sync.Map
 	pairingNumber string // digits only; "" = no pairing launch
 	pairingMode   bool   // WA_PAIRING_CODE was set
 

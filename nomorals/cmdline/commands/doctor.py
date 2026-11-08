@@ -178,10 +178,12 @@ def _cmd_doctor(args: argparse.Namespace, settings: Any) -> int:
         from ...core.diskspace import human_bytes as _hb
         _disk_state = ("LOW — free space before updating"
                        if _disk["low"] else "ok")
+        _area = _diskspace.largest_area_note(_disk)
         print(f"disk: {_hb(_disk['free_bytes'])} free · an update needs "
               f"~{_hb(_disk['need_bytes'])} · snapshots "
               f"{_disk['store_count']} using "
-              f"{_hb(_disk['store_bytes'])} · {_disk_state}")
+              f"{_hb(_disk['store_bytes'])}"
+              f"{f' · {_area}' if _area else ''} · {_disk_state}")
     else:
         print(f"disk: check failed — {_disk_error}")
     print()

@@ -700,6 +700,13 @@ class RuntimeMetaMixin:
                 need = _diskspace.human_bytes(rep["need_bytes"])
                 store = (f"snapshots {rep['store_count']} using "
                          f"{_diskspace.human_bytes(rep['store_bytes'])}")
+                # The whole-tree accounting (media-cache
+                # discipline): when the biggest area outweighs
+                # the snapshot, it is named — the pile is a
+                # measured fact on the line, not a discovery.
+                area = _diskspace.largest_area_note(rep)
+                if area:
+                    store = f"{store}; {area}"
                 if rep["low"]:
                     results.append((False,
                                     f"disk: LOW — {free} free on the "

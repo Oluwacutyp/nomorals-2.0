@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -279,17 +280,12 @@ func (b *bridge) downloadInbound(ctx context.Context, v *events.Message) map[str
 	return b.downloadMediaOf(ctx, v.Message, string(v.Info.ID))
 }
 
-// downloadMediaOf downloads the media carried by one message proto
-// (a live message, or the quoted message inside a reply's
-// contextInfo — the bytes are addressed the same way) into the
-// media dir and returns its wire row {path, mime, kind}, or nil.
-func (b *bridge) downloadMediaOf(ctx context.Context, msg *waE2E.Message, idStr string) map[string]any {
-	kind := mediaKindOf(msg)
-	if kind == "" {
-		return nil
-	}
-	var dl whatsmeow.DownloadableMessage
-	var mime, fileName string
+// mediaPartsOf extracts the downloadable media one message proto
+// carries: its kind, the whatsmeow download handle, the mime,
+// and (documents only) the sender-given file name.
+func mediaPartsOf(msg *waE2E.Message) (kind string,
+	dl whatsmeow.DownloadableMessage, mime, fileName string) {
+	kind = mediaKindOf(msg)
 	switch kind {
 	case "image":
 		dl, mime = msg.GetImageMessage(), msg.GetImageMessage().GetMimetype()
@@ -304,11 +300,119 @@ func (b *bridge) downloadMediaOf(ctx context.Context, msg *waE2E.Message, idStr 
 	case "sticker":
 		dl, mime = msg.GetStickerMessage(), msg.GetStickerMessage().GetMimetype()
 	}
-	if dl == nil {
+	return kind, dl, mime, fileName
+}
+
+// mediaExtFor is the cache file extension for one media kind:
+// a document's own file name wins, the kind map covers the rest.
+func mediaExtFor(kind, fileName string) string {
+	if idx := strings.LastIndex(fileName, "."); idx >= 0 {
+		return strings.ToLower(fileName[idx:])
+	}
+	ext := map[string]string{
+		"image": ".jpg", "video": ".mp4", "voice": ".ogg",
+		"audio": ".ogg", "sticker": ".webp",
+	}[kind]
+	if ext == "" {
+		ext = ".bin"
+	}
+	return ext
+}
+
+// mediaCacheName maps one media identity (a WhatsApp message
+// id) + extension to the ONE cache filename that identity ever
+// gets — the dedup key of the whole cache (media-cache
+// discipline, 2026-11-08).  The name used to be
+// "<download-time-millis>-<id fragment>", which made every
+// download of the same media a new file by construction: the
+// channel sweep re-served the newest posts every housekeeping
+// cycle and one 76MB channel video accumulated ~145 copies in a
+// morning, 11.07 GB in the directory, until the disk filled and
+// /update died on it.  The identity is the FULL sanitized id
+// (capped at 64 chars — real ids fit whole), never the old
+// 12-char fragment, so two different messages cannot collide
+// into one file.  "" when there is no identity to dedup by.
+func mediaCacheName(idStr, ext string) string {
+	short := unsafeIDChars.ReplaceAllString(idStr, "")
+	if len(short) > 64 {
+		short = short[:64]
+	}
+	if short == "" {
+		return ""
+	}
+	return short + ext
+}
+
+// probeMedia is the cache's existence check: the wire row for
+// a message whose media identity already has a complete file
+// in the media dir, or false.  Both layers use it — the
+// trigger sites (the channel_fetch loop, which re-serves the
+// same posts every sweep) check before asking for a download,
+// and downloadMediaOf checks again at the writer, so a
+// duplicate event that slips past a trigger (a redelivery, a
+// concurrent handler) still cannot produce a sibling copy.
+func (b *bridge) probeMedia(msg *waE2E.Message, idStr string) (map[string]any, bool) {
+	kind, _, mime, fileName := mediaPartsOf(msg)
+	if kind == "" {
+		return nil, false
+	}
+	name := mediaCacheName(idStr, mediaExtFor(kind, fileName))
+	if name == "" {
+		return nil, false
+	}
+	p := filepath.Join(b.mediaDir, name)
+	st, err := os.Stat(p)
+	if err != nil || st.IsDir() || st.Size() == 0 {
+		return nil, false
+	}
+	if mime == "" {
+		mime = "application/octet-stream"
+	}
+	return map[string]any{"path": p, "mime": mime, "kind": kind}, true
+}
+
+// mediaLock is the per-identity download lock: one download of
+// an identity at a time per bridge process, so concurrent
+// triggers of the same media serialize into ONE fetch + write
+// and the rest serve the finished file through the probe.
+func (b *bridge) mediaLock(name string) *sync.Mutex {
+	m, _ := b.mediaLocks.LoadOrStore(name, &sync.Mutex{})
+	return m.(*sync.Mutex)
+}
+
+// downloadMediaOf downloads the media carried by one message proto
+// (a live message, or the quoted message inside a reply's
+// contextInfo — the bytes are addressed the same way) into the
+// media dir and returns its wire row {path, mime, kind}, or nil.
+// A media identity that already has its file is SERVED, never
+// re-downloaded (see mediaCacheName).
+func (b *bridge) downloadMediaOf(ctx context.Context, msg *waE2E.Message, idStr string) map[string]any {
+	kind, dl, mime, fileName := mediaPartsOf(msg)
+	if kind == "" || dl == nil {
 		return nil
 	}
 	if mime == "" {
 		mime = "application/octet-stream"
+	}
+	if row, ok := b.probeMedia(msg, idStr); ok {
+		return row
+	}
+	ext := mediaExtFor(kind, fileName)
+	name := mediaCacheName(idStr, ext)
+	if name == "" {
+		// No identity to dedup by: the legacy timestamped name
+		// keeps the bytes reachable.  Every real WhatsApp
+		// message carries an id, so this is the defensive
+		// path, not the operating one.
+		name = strconv.FormatInt(time.Now().UnixMilli(), 10) +
+			"-anon" + ext
+	} else {
+		lock := b.mediaLock(name)
+		lock.Lock()
+		defer lock.Unlock()
+		if row, ok := b.probeMedia(msg, idStr); ok {
+			return row
+		}
 	}
 	data, err := b.cli.Download(ctx, dl)
 	if err != nil {
@@ -320,25 +424,22 @@ func (b *bridge) downloadMediaOf(ctx context.Context, msg *waE2E.Message, idStr 
 		logf("media download failed: %v", err)
 		return map[string]any{"path": "", "mime": mime, "kind": kind}
 	}
-	ext := ""
-	if idx := strings.LastIndex(fileName, "."); idx >= 0 {
-		ext = strings.ToLower(fileName[idx:])
-	} else {
-		ext = map[string]string{
-			"image": ".jpg", "video": ".mp4", "voice": ".ogg",
-			"audio": ".ogg", "sticker": ".webp",
-		}[kind]
-		if ext == "" {
-			ext = ".bin"
-		}
-	}
-	short := unsafeIDChars.ReplaceAllString(idStr, "")
-	if len(short) > 12 {
-		short = short[:12]
-	}
-	name := strconv.FormatInt(time.Now().UnixMilli(), 10) + "-" + short + ext
 	p := filepath.Join(b.mediaDir, name)
-	if err := os.WriteFile(p, data, 0o644); err != nil {
+	// Write to a sibling temp and rename into place: a reader
+	// (the Python side copying a capture into the vault) never
+	// meets a half-written file, and a writer that loses a race
+	// across processes serves the winner's complete file
+	// instead of clobbering it.
+	tmp := p + ".part"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		logf("media write failed: %v", err)
+		return map[string]any{"path": "", "mime": mime, "kind": kind}
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		os.Remove(tmp)
+		if _, statErr := os.Stat(p); statErr == nil {
+			return map[string]any{"path": p, "mime": mime, "kind": kind}
+		}
 		logf("media write failed: %v", err)
 		return map[string]any{"path": "", "mime": mime, "kind": kind}
 	}

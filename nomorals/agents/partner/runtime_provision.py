@@ -1463,6 +1463,19 @@ class RuntimeProvisionMixin:
         except Exception as e:  # noqa: BLE001
             record_failure(
                 "runtime_provision.disk_watch", e)
+        # Same beat: the WhatsApp download-cache sweep
+        # (media-cache discipline, 2026-11-08) — each paired
+        # account's bridge media directory is held to its cap,
+        # oldest first, one journal row per run that evicts.
+        # The cache that filled the owner's disk grew between
+        # beats for weeks because nothing ever evicted; the
+        # sweep rides the same throttled beat as the disk watch
+        # that now watches it.
+        try:
+            svc["personal"].cycle_media_cache()
+        except Exception as e:  # noqa: BLE001
+            record_failure(
+                "runtime_provision.media_cache_cycle", e)
 
     def _disk_watch(self, svc: dict[str, Any]) -> None:
         """Journal a ``disk_low`` row when the install volume's

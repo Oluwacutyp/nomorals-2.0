@@ -1259,8 +1259,24 @@ func (b *bridge) handleGroupAdminCommand(ctx context.Context, cc *clientConn, id
 				}
 				if nm.Message != nil {
 					row["text"] = textOf(nm.Message)
-					if m := b.downloadMediaOf(ctx, nm.Message,
-						string(nm.MessageID)); m != nil {
+					// Trigger-layer existence check (media-cache
+					// discipline, 2026-11-08): this sweep
+					// re-serves the newest posts every
+					// housekeeping cycle and a post sits in that
+					// window for hours, so this loop is the one
+					// that filled the owner's disk with ~145
+					// copies of one channel video.  A post whose
+					// media identity already has its cache file
+					// is served from it, never downloaded again;
+					// downloadMediaOf probes again at the writer
+					// for every other trigger.
+					m, cached := b.probeMedia(nm.Message,
+						string(nm.MessageID))
+					if !cached {
+						m = b.downloadMediaOf(ctx, nm.Message,
+							string(nm.MessageID))
+					}
+					if m != nil {
 						row["kind"] = m["kind"]
 						row["path"] = m["path"]
 						if m["path"] == "" {
