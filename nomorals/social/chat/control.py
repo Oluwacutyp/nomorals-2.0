@@ -558,6 +558,9 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "gcstatus": (0, 0),       # /gcstatus — this group's real stats
     "statusinfo": (0, 0),     # /statusinfo — alias of /gcstatus
     "pollres": (0, 0),        # /pollres as a reply to a poll
+    "myprofile": (0, None),   # /myprofile [name|about|photo] … — the WhatsApp account's identity
+    "privacy": (0, 2),        # /privacy [category value] — the account's privacy settings
+    "makepoll": (1, None),    # /makepoll Question | Opt | Opt — a native poll in this chat
     "tagall": (0, None),      # /tagall [text] — mention all (capped)
     "hidetag": (0, None),     # /hidetag [text] — mention all, hidden
     "antitag": (0, 1),        # /antitag [on|off] — mass-tag DM flags
@@ -2734,10 +2737,22 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/statusinfo (inside the group)",
               "example": "/statusinfo",
               "related": "/gcstatus"},
-    "pollres": {"what": "a poll's current results, re-read from the message itself, as a reply to it. Real on the personal Telegram surface (the tallies live on the poll media); the Bot API has no re-read endpoint and WhatsApp exposes none to the bridge — both say so.",
+    "pollres": {"what": "a poll's current results, as a reply to it. Real on the personal Telegram surface (the tallies live on the poll media). On WhatsApp the bridges tally the votes they have decrypted on polls they have seen — there is no server tally to fetch, so a poll the bridge never saw (or saw before it last started) says exactly that instead of inventing numbers; votes that arrived undecryptable are named as not counted. The Bot API has no re-read endpoint and says so.",
               "usage": "/pollres (as a reply to a poll)",
               "example": "/pollres",
-              "related": "/poll · /gcstatus"},
+              "related": "/makepoll · /poll · /gcstatus"},
+    "myprofile": {"what": "your personal WhatsApp account's own identity — the name people see, the About text, the profile photo — read it bare, change it by naming the part. Before this, Devon could only read a push name off inbound messages; nothing on the account could change. WhatsApp may rate-limit profile changes: a refusal comes back in its own words, never retried in a loop. Every landed change lands in the personal journal like every act taken as you. Owner only; your standing stop halts the setters.",
+              "usage": "/myprofile · /myprofile name New Name · /myprofile about some text (or: about clear) · /myprofile photo (as a reply to a picture, or its caption) · /myprofile photo remove",
+              "example": "/myprofile name Devon Owner",
+              "related": "/privacy · /pair"},
+    "privacy": {"what": "your personal WhatsApp account's privacy settings — who sees your last seen, profile photo, About-side profile info, status and receipts, who can add you to groups or call you. Read them bare; set one category with its protocol value (the values are WhatsApp's own vocabulary, and an out-of-vocabulary pair refuses in words before anything is sent). Two categories (defense, stickers) can be set on the Go bridge but not read back there, and the Baileys bridge has no updater for them — those limits answer in the reply, never as a fake success. Every landed change lands in the personal journal. Owner only; your standing stop halts it.",
+              "usage": "/privacy · /privacy lastseen contacts — categories: groupadd, lastseen, status, profile, readreceipts, online, calladd, messages, defense, stickers",
+              "example": "/privacy readreceipts none",
+              "related": "/myprofile · /pair"},
+    "makepoll": {"what": "post a native poll in this WhatsApp chat, as you, from your personal surface: a question and 2–12 options separated by | — add a leading 'multi |' segment to let people pick several. WhatsApp polls have no quiz mode and are never anonymous (voters are visible by design); a quiz-shaped ask refuses in words rather than posting a different instrument. Read the count back by replying to the poll with /pollres. (The /poll command is the group-economy poll — treasury governance, a different instrument.) A landed poll lands in the personal journal like every act taken as you. Owner only; your standing stop halts it.",
+              "usage": "/makepoll Question | Option | Option · /makepoll multi | Question | Option | Option",
+              "example": "/makepoll Lunch today? | Pizza | Sushi",
+              "related": "/pollres · /poll · /pair"},
     "tagall": {"what": "mention every member of this group by name, from your personal surface (the only one that can enumerate a room). Paced in chunks of 50 and capped at 100 members — the cap is named in the reply when a group is bigger.",
               "usage": "/tagall [text]",
               "example": "/tagall meeting in 10",
@@ -4381,7 +4396,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "block", "unblock", "anticall", "disappear",
       "statusreact", "poststatus", "chanstory", "banchecker", "gcstatus", "statusinfo",
       "pollres", "tagall", "hidetag", "antitag", "viewonce", "vv",
-      "joinlink", "newgroup", "newchannel", "leave"]),
+      "joinlink", "newgroup", "newchannel", "leave",
+      "myprofile", "privacy", "makepoll"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
@@ -4642,6 +4658,9 @@ LIST_ONELINERS: dict[str, str] = {
     "gcstatus": "this group's real stats, sources labeled — /gcstatus",
     "statusinfo": "alias of /gcstatus",
     "pollres": "a poll's current results, from the message — /pollres as a reply",
+    "myprofile": "your WhatsApp name, about and photo — read or set them — /myprofile [name|about|photo] …",
+    "privacy": "your WhatsApp privacy settings — read or set one — /privacy [category value]",
+    "makepoll": "post a native WhatsApp poll in this chat — /makepoll Question | Option | Option",
     "tagall": "mention every member (chunked, capped at 100) — /tagall [text]",
     "hidetag": "mention every member, names hidden — /hidetag [text]",
     "antitag": "mass-tags of you flagged to your DM — /antitag [on|off]",

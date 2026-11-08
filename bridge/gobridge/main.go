@@ -122,6 +122,14 @@ type bridge struct {
 	// to run. "" = never asked; the bridge asserts nothing.
 	presenceMu   sync.Mutex
 	presenceWant string
+
+	// poll memory (parity G3): creations this bridge has seen
+	// and the votes it managed to decrypt, so poll_results can
+	// tally — WhatsApp exposes no tally re-read, the count
+	// exists only as the sum of votes a participant observed.
+	pollsMu   sync.Mutex
+	polls     map[string]*pollState
+	pollOrder []string
 }
 
 type clientConn struct {
@@ -236,6 +244,7 @@ func main() {
 		recent:        make(map[string][]*remembered),
 		titles:        make(map[string]string),
 		msgCache:      make(map[string]*cachedMsg),
+		polls:         make(map[string]*pollState),
 	}
 
 	// whatsmeow's own logger stays OFF stdout: the supervisor drain

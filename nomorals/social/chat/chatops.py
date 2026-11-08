@@ -40,6 +40,11 @@ __all__ = [
     "chunk_mentions",
     "is_mass_tag",
     "format_poll_results",
+    "PRIVACY_CATEGORIES",
+    "PRIVACY_VALUE_WORDS",
+    "privacy_pair_error",
+    "format_privacy_settings",
+    "parse_makepoll_args",
     "compose_group_status",
     "kind_for_chat_key",
 ]
@@ -57,6 +62,7 @@ CHATOPS_COMMANDS = frozenset({
     "pollres", "tagall", "hidetag", "antitag",
     "viewonce", "vv",
     "joinlink", "newgroup", "newchannel", "leave",
+    "myprofile", "privacy", "makepoll",
 })
 
 #: Tagall pacing law: one message carries at most this many
@@ -160,6 +166,105 @@ def format_poll_results(verdict: dict[str, Any]) -> str:
     if not options:
         lines.append("The poll carries no options to read.")
     return "\n".join(lines)
+
+
+# -- own identity + polls (parity G3, census bundles #5/#6) --
+
+#: The WhatsApp privacy vocabulary, shared by the adapter,
+#: both bridges and the /privacy command so the category and
+#: value a command accepts are exactly the ones the protocol
+#: documents (whatsmeow types/user.go).  Keys are the
+#: owner-facing category names; the lists are the values that
+#: category takes.  A pair outside this table refuses in words
+#: BEFORE any traffic — the server silently ignoring a bad
+#: value would be a fake success.
+PRIVACY_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "groupadd": ("all", "contacts", "contact_blacklist", "none"),
+    "lastseen": ("all", "contacts", "contact_blacklist", "none"),
+    "status": ("all", "contacts", "contact_blacklist", "none"),
+    "profile": ("all", "contacts", "contact_blacklist", "none"),
+    "readreceipts": ("all", "none"),
+    "online": ("all", "match_last_seen"),
+    "calladd": ("all", "known"),
+    "messages": ("all", "contacts"),
+    "defense": ("on_standard", "off"),
+    "stickers": ("contacts", "contact_allowlist", "none"),
+}
+
+#: Plain-words labels for the privacy values, so a /privacy
+#: read answers in language instead of protocol tokens.
+PRIVACY_VALUE_WORDS: dict[str, str] = {
+    "all": "everyone",
+    "contacts": "my contacts",
+    "contact_blacklist": "my contacts except…",
+    "contact_allowlist": "only some contacts",
+    "none": "nobody",
+    "match_last_seen": "same as last seen",
+    "known": "people I know",
+    "on_standard": "on (standard)",
+    "off": "off",
+}
+
+
+def privacy_pair_error(category: str, value: str) -> str:
+    """'' when (category, value) is a settable privacy pair,
+    else the refusal in words — naming the category's real
+    values so the owner's next try is informed, not a guess."""
+    category = str(category or "").strip().lower()
+    value = str(value or "").strip().lower()
+    if category not in PRIVACY_CATEGORIES:
+        return ("privacy categories are: " +
+                ", ".join(sorted(PRIVACY_CATEGORIES)))
+    values = PRIVACY_CATEGORIES[category]
+    if value not in values:
+        return f"{category} can be: " + ", ".join(values)
+    return ""
+
+
+def format_privacy_settings(settings: Any,
+                            *, header: str = "") -> str:
+    """The /privacy read: one line per category the bridge
+    could actually read, in plain words.  A category missing
+    from the map was NOT read — it is listed as not readable
+    rather than dressed up with a value nobody fetched."""
+    settings = settings if isinstance(settings, dict) else {}
+    lines = [header or "🔒 Your WhatsApp privacy:"]
+    for category in sorted(PRIVACY_CATEGORIES):
+        value = settings.get(category)
+        if value in (None, ""):
+            lines.append(f"• {category}: couldn't read")
+        else:
+            word = PRIVACY_VALUE_WORDS.get(str(value),
+                                           str(value))
+            lines.append(f"• {category}: {word} ({value})")
+    lines.append("Change one: /privacy lastseen contacts")
+    return "\n".join(lines)
+
+
+def parse_makepoll_args(tail: str) -> dict[str, Any]:
+    """Parse /makepoll's tail: ``[multi |] Question | Opt | Opt
+    [| …]`` — pipe-separated.  A leading ``multi`` segment makes
+    the poll multi-choice.  Shape problems (a missing question,
+    fewer than two options) come back as ``error`` in words;
+    the platform's own count/length caps are the adapter's
+    refusal, so one grammar lives in each layer."""
+    parts = [p.strip() for p in str(tail or "").split("|")]
+    parts = [p for p in parts if p != ""]
+    multiple = False
+    if parts and parts[0].lower() == "multi":
+        multiple = True
+        parts = parts[1:]
+    if not parts:
+        return {"ok": False, "error": (
+            "usage: /makepoll Question | Option | Option — "
+            "start with 'multi |' to allow several choices")}
+    question, options = parts[0], parts[1:]
+    if len(options) < 2:
+        return {"ok": False, "error": (
+            "a poll needs a question and at least two options: "
+            "/makepoll Question | Option | Option")}
+    return {"ok": True, "question": question,
+            "options": options, "multiple": multiple}
 
 
 def compose_group_status(*, title: str, platform: str,

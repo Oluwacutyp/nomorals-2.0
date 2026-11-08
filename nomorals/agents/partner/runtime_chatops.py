@@ -29,10 +29,13 @@ The laws this mixin is built under:
   through ``partner/chat_targets.resolve_chat_target`` — a
   name, a number, or "this chat" — the register-#35 lesson.
 - **Honest absences.**  Where a platform offers no verb
-  (Telegram mark-as-unread and message star, WhatsApp poll
-  tallies, the Bot API's poll re-read and member enumeration,
-  Baileys DM disappearing timers), the reply names the limit
-  plainly instead of faking a result.
+  (Telegram mark-as-unread and message star, the Bot API's
+  poll re-read and member enumeration, Baileys DM disappearing
+  timers), the reply names the limit plainly instead of
+  faking a result.  WhatsApp poll tallies left this list in
+  the parity-G3 build: the bridges now tally the votes they
+  decrypt on polls they have seen (bridge memory — a poll
+  outside it still answers in words, never invented numbers).
 """
 
 from __future__ import annotations
@@ -219,6 +222,12 @@ class RuntimeChatOpsMixin:
                 return self._chatops_gcstatus(message)
             if kind == "pollres":
                 return self._chatops_pollres(message)
+            if kind == "myprofile":
+                return self._chatops_myprofile(tail, message)
+            if kind == "privacy":
+                return self._chatops_privacy(tail, message)
+            if kind == "makepoll":
+                return self._chatops_makepoll(tail, message)
             if kind in ("tagall", "hidetag"):
                 return self._chatops_tagall(kind, tail, message)
         except Exception as exc:  # noqa: BLE001 - a command answers
@@ -1516,9 +1525,28 @@ class RuntimeChatOpsMixin:
         chat = message.chat
         platform = str(getattr(chat, "platform", "") or "")
         if platform == "whatsapp":
-            return ("WhatsApp doesn't expose a poll's tallies "
-                    "to the bridge — no surface here can "
-                    "re-read them.")
+            # Parity G3: the bridges tally the votes they
+            # decrypt on polls they have seen (there is still
+            # no server-side tally to fetch — bridge memory is
+            # the count, and a poll outside it refuses in
+            # words rather than inventing numbers).
+            adapter = self._adapter_for(platform)
+            fn = getattr(adapter, "poll_results", None)
+            if not callable(fn):
+                return ("this WhatsApp surface can't re-read "
+                        "poll results.")
+            verdict = self._chatops_call(fn, chat, mid)
+            if not (isinstance(verdict, dict)
+                    and verdict.get("ok")):
+                return self._chatops_verdict(verdict, "")
+            text = format_poll_results(verdict)
+            unreadable = verdict.get("unreadable_votes")
+            if unreadable:
+                text += (f"\n({unreadable} vote"
+                         f"{'s' if unreadable != 1 else ''} "
+                         f"arrived that the bridge couldn't "
+                         f"decrypt — not counted.)")
+            return text
         if platform != "telegram":
             return ("the bot surface can't re-read a poll's "
                     "results — the Bot API has no such "
@@ -1534,6 +1562,247 @@ class RuntimeChatOpsMixin:
                 and verdict.get("ok")):
             return self._chatops_verdict(verdict, "")
         return format_poll_results(verdict)
+
+    # ── own identity + poll sending (parity G3) ─────────────
+
+    def _chatops_media_of(self, message: Any) -> tuple[str, str]:
+        """(path, kind) of the media a command rides on or
+        replies to — the /poststatus extraction, shared by the
+        profile-photo setter."""
+        for m in (getattr(message, "media", None) or []):
+            p = str(getattr(m, "path", "") or "")
+            if p:
+                return p, str(getattr(m, "kind", "") or "")
+        meta = getattr(message, "meta", None) or {}
+        quoted = meta.get("replied_media_local") or {}
+        if isinstance(quoted, dict) and quoted.get("path"):
+            return (str(quoted["path"]),
+                    str(quoted.get("kind") or ""))
+        return "", ""
+
+    def _chatops_identity_home(self, message: Any, kind: str
+                               ) -> tuple[Any, Any, Any, str]:
+        """The shared gate for the /myprofile + /privacy family:
+        (svc, rec, adapter, error) — WhatsApp-personal only, a
+        paired account must exist, and a live adapter must be
+        attached.  Setters additionally honor the owner's
+        standing stop (checked by the caller, since reads are
+        not acts as him)."""
+        platform = str(getattr(message.chat, "platform", "")
+                       or "")
+        if platform != "whatsapp":
+            return None, None, None, (
+                f"/{kind} shapes your personal WhatsApp "
+                f"identity — run it from your WhatsApp.")
+        svc, rec = self._chatops_personal_account(platform)
+        if rec is None:
+            return None, None, None, (
+                "no paired WhatsApp account — /pair one first; "
+                f"/{kind} acts on the personal account.")
+        adapter = self._adapter_for(platform)
+        if adapter is None:
+            return None, None, None, (
+                "no live WhatsApp surface here to act from.")
+        return svc, rec, adapter, ""
+
+    def _chatops_myprofile(self, tail: str, message: Any) -> str:
+        """/myprofile — read and set the paired WhatsApp
+        account's own identity (parity G3, census bundle #5):
+        the name people see, the About text, the profile photo.
+        Before this build Devon could only READ a push name off
+        inbound messages; nothing on the account could change.
+        Setters are acts as the owner: the standing stop gates
+        them and every landed change journals."""
+        svc, rec, adapter, error = self._chatops_identity_home(
+            message, "myprofile")
+        if error:
+            return error
+        personal = svc["personal"]
+        parts = tail.split(None, 1)
+        head = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        if not head:
+            verdict = self._chatops_call(adapter.get_profile)
+            if not (isinstance(verdict, dict)
+                    and verdict.get("ok")):
+                return self._chatops_verdict(verdict, "")
+            lines = ["👤 Your WhatsApp identity:"]
+            lines.append(f"• name: {verdict.get('name') or '—'}")
+            if "about" in verdict:
+                lines.append(
+                    f"• about: {verdict.get('about') or '(empty)'}")
+            else:
+                lines.append(
+                    "• about: couldn't read it just now"
+                    + (f" ({verdict.get('info_error')})"
+                       if verdict.get("info_error") else ""))
+            lines.append("• photo: "
+                         + ("set" if verdict.get("has_photo")
+                            else "none"))
+            lines.append("Change it: /myprofile name New Name · "
+                         "/myprofile about some text · "
+                         "/myprofile photo (reply to a picture)")
+            return "\n".join(lines)
+        if svc["registry"].owner_stopped("whatsapp"):
+            return ("WhatsApp is under your standing stop — "
+                    "it stays halted until you start it again; "
+                    "nothing was changed.")
+        if head == "name":
+            if not rest:
+                return ("usage: /myprofile name Your New Name")
+            verdict = self._chatops_call(
+                adapter.set_profile_name, rest)
+            if isinstance(verdict, dict) and verdict.get("ok"):
+                personal.note_profile_changed(
+                    "whatsapp", account_id=rec.id,
+                    field="name", value=rest)
+                return f"done — your WhatsApp name is now “{rest}”."
+            return self._chatops_verdict(verdict, "")
+        if head == "about":
+            if rest.lower() == "clear":
+                rest = ""
+            verdict = self._chatops_call(adapter.set_about, rest)
+            if isinstance(verdict, dict) and verdict.get("ok"):
+                personal.note_profile_changed(
+                    "whatsapp", account_id=rec.id,
+                    field="about", value=rest)
+                if rest:
+                    return f"done — your About now reads “{rest}”."
+                return "done — your About is cleared."
+            return self._chatops_verdict(verdict, "")
+        if head == "photo":
+            if rest.lower() == "remove":
+                verdict = self._chatops_call(
+                    adapter.set_profile_photo, remove=True)
+                if isinstance(verdict, dict) and verdict.get("ok"):
+                    personal.note_profile_changed(
+                        "whatsapp", account_id=rec.id,
+                        field="photo", value="removed")
+                    return "done — your profile photo is removed."
+                return self._chatops_verdict(verdict, "")
+            path, _kind = self._chatops_media_of(message)
+            if not path:
+                return ("reply to a picture with /myprofile photo "
+                        "(or send the picture with /myprofile photo "
+                        "as its caption) — WhatsApp needs the "
+                        "image itself, and on the Go bridge it "
+                        "must be a JPEG.")
+            verdict = self._chatops_call(
+                adapter.set_profile_photo, path)
+            if isinstance(verdict, dict) and verdict.get("ok"):
+                personal.note_profile_changed(
+                    "whatsapp", account_id=rec.id, field="photo",
+                    value=str(verdict.get("picture_id") or "set"))
+                return "done — your new profile photo is up."
+            return self._chatops_verdict(verdict, "")
+        return ("usage: /myprofile — or /myprofile name …, "
+                "/myprofile about …, /myprofile photo")
+
+    def _chatops_privacy(self, tail: str, message: Any) -> str:
+        """/privacy — read and set the paired WhatsApp
+        account's privacy settings (parity G3, census bundle
+        #5): who sees the last-seen, the photo, the status, and
+        the rest of the protocol's categories.  Values are the
+        protocol's own vocabulary, validated before traffic;
+        a category an engine has no setter for answers
+        unsupported on that rung, in the verdict's own words."""
+        from ...social.chat.chatops import (
+            PRIVACY_VALUE_WORDS,
+            format_privacy_settings,
+            privacy_pair_error,
+        )
+
+        svc, rec, adapter, error = self._chatops_identity_home(
+            message, "privacy")
+        if error:
+            return error
+        parts = tail.split()
+        if not parts:
+            verdict = self._chatops_call(adapter.get_privacy)
+            if not (isinstance(verdict, dict)
+                    and verdict.get("ok")):
+                return self._chatops_verdict(verdict, "")
+            return format_privacy_settings(
+                verdict.get("settings"))
+        if len(parts) != 2:
+            return ("usage: /privacy category value — e.g. "
+                    "/privacy lastseen contacts; bare /privacy "
+                    "lists what each category is set to.")
+        category, value = parts[0].lower(), parts[1].lower()
+        problem = privacy_pair_error(category, value)
+        if problem:
+            return f"couldn't do it — {problem}"
+        if svc["registry"].owner_stopped("whatsapp"):
+            return ("WhatsApp is under your standing stop — "
+                    "it stays halted until you start it again; "
+                    "nothing was changed.")
+        verdict = self._chatops_call(
+            adapter.set_privacy, category, value)
+        if not (isinstance(verdict, dict) and verdict.get("ok")):
+            return self._chatops_verdict(verdict, "")
+        svc["personal"].note_profile_changed(
+            "whatsapp", account_id=rec.id,
+            field=f"privacy:{category}", value=value)
+        word = PRIVACY_VALUE_WORDS.get(value, value)
+        line = f"done — {category} is now {word}."
+        back = (verdict.get("settings") or {}).get(category)
+        if back and back != value:
+            line += (f" It reads back as {back} — WhatsApp "
+                     f"kept its own value.")
+        return line
+
+    def _chatops_makepoll(self, tail: str, message: Any) -> str:
+        """/makepoll — post a native poll in THIS WhatsApp chat
+        as the owner (parity G3, census bundle #6; /poll is the
+        group-economy poll — a different instrument, kept
+        distinct).  Grammar: /makepoll Question | Option |
+        Option, with a leading 'multi |' for several choices.
+        A landed poll journals, and its results read back with
+        /pollres (reply to the poll) now that something can
+        finally produce one."""
+        from ...social.chat.chatops import parse_makepoll_args
+
+        platform = str(getattr(message.chat, "platform", "")
+                       or "")
+        if platform != "whatsapp":
+            return ("/makepoll posts on your personal WhatsApp "
+                    "— run it in the WhatsApp chat that should "
+                    "carry the poll.")
+        svc, rec = self._chatops_personal_account(platform)
+        if rec is None:
+            return ("no paired WhatsApp account — /pair one "
+                    "first; /makepoll posts from the personal "
+                    "account.")
+        if svc["registry"].owner_stopped(platform):
+            return ("WhatsApp is under your standing stop — "
+                    "it stays halted until you start it again; "
+                    "no poll was posted.")
+        adapter = self._adapter_for(platform)
+        if adapter is None:
+            return "no live WhatsApp surface here to post from."
+        fn = getattr(adapter, "send_poll", None)
+        if not callable(fn):
+            return ("this WhatsApp surface has no poll verb "
+                    "wired.")
+        parsed = parse_makepoll_args(tail)
+        if not parsed.get("ok"):
+            return str(parsed.get("error") or "bad poll shape")
+        result = self._chatops_call(
+            fn, message.chat, parsed["question"],
+            parsed["options"], multiple=parsed["multiple"])
+        if not getattr(result, "ok", False):
+            return (f"couldn't post the poll — "
+                    f"{getattr(result, 'error', '') or 'the surface refused'}")
+        svc["personal"].note_poll_posted(
+            platform, account_id=rec.id, counterpart_id=str(
+                getattr(message.chat, "key", "")
+                or getattr(message.chat, "chat_id", "")),
+            source_id=str(result.message_id or ""),
+            question=parsed["question"],
+            options=parsed["options"])
+        return (f"🗳️ poll posted: “{parsed['question']}” — "
+                f"reply to it with /pollres to read the count "
+                f"as votes land.")
 
     # ── tagging ──────────────────────────────────────────────
 

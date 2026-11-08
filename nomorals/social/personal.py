@@ -1082,6 +1082,56 @@ class PersonalSurfaces:
         _append_jsonl(self.vault.journal_path, entry)
         return entry
 
+    def note_profile_changed(self, platform: str, *,
+                             account_id: str = "", field: str = "",
+                             value: str = "",
+                             ts: float = 0.0) -> dict[str, Any]:
+        """Journal one own-identity change on a paired account
+        (parity G3): the profile name, about text or photo, or
+        one privacy category — the acts /myprofile and /privacy
+        perform AS the owner.  The change itself is the record:
+        kind ``profile_changed``, ``field`` naming what moved
+        (``name`` / ``about`` / ``photo`` / ``privacy:<cat>``)
+        and the text carrying the new value (a photo change
+        carries its picture id, or "removed")."""
+        rec = self.resolve_event_account(platform, account_id)
+        entry = {
+            "ts": float(ts or self._clock()),
+            "kind": "profile_changed", "account": rec.id,
+            "platform": platform, "counterpart_id": rec.id,
+            "poster_name": "", "media_kind": "",
+            "source_id": "", "path": "", "bytes": 0,
+            "text": str(value or "")[:200],
+            "field": str(field or ""),
+            "note": "identity change as the owner via /myprofile"}
+        _append_jsonl(self.vault.journal_path, entry)
+        return entry
+
+    def note_poll_posted(self, platform: str, *,
+                         account_id: str = "",
+                         counterpart_id: str = "",
+                         source_id: str = "", question: str = "",
+                         options: Any = (),
+                         ts: float = 0.0) -> dict[str, Any]:
+        """Journal one native poll posted AS the owner (parity
+        G3, /makepoll): kind ``poll_posted``, the chat in
+        counterpart_id, the poll's own message id in source_id
+        (the handle /pollres reads back), the question as the
+        text and the option list beside it."""
+        rec = self.resolve_event_account(platform, account_id)
+        entry = {
+            "ts": float(ts or self._clock()),
+            "kind": "poll_posted", "account": rec.id,
+            "platform": platform,
+            "counterpart_id": str(counterpart_id or ""),
+            "poster_name": "", "media_kind": "",
+            "source_id": str(source_id or ""), "path": "",
+            "bytes": 0, "text": str(question or "")[:200],
+            "options": [str(o) for o in (options or ())],
+            "note": "poll posted as the owner via /makepoll"}
+        _append_jsonl(self.vault.journal_path, entry)
+        return entry
+
     def note_message_acted(self, platform: str, *,
                            kind: str,
                            account_id: str = "",

@@ -124,6 +124,18 @@ func (b *bridge) handleCommand(cc *clientConn, req request) {
 		b.cmdBlocklist(ctx, cc, id, req)
 	case "chat_disappear":
 		b.cmdChatDisappear(ctx, cc, id, req)
+	case "profile_get":
+		b.cmdProfileGet(ctx, cc, id, req)
+	case "profile_set":
+		b.cmdProfileSet(ctx, cc, id, req)
+	case "privacy_get":
+		b.cmdPrivacyGet(ctx, cc, id, req)
+	case "privacy_set":
+		b.cmdPrivacySet(ctx, cc, id, req)
+	case "send_poll":
+		b.cmdSendPoll(ctx, cc, id, req)
+	case "poll_results":
+		b.cmdPollResults(ctx, cc, id, req)
 	case "check_number":
 		b.cmdCheckNumber(ctx, cc, id, req)
 	case "chats":
@@ -419,6 +431,13 @@ func (b *bridge) onMessage(v *events.Message) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+
+	// Poll memory (parity G3): creations teach the bridge a
+	// poll's option names; votes arrive encrypted and are
+	// tallied as they decrypt.  Neither is conversation — the
+	// capture is a side ledger on the same event, and the
+	// message itself flows on untouched below.
+	b.notePollEvent(ctx, v)
 
 	if chat == types.StatusBroadcastJID {
 		if v.Info.IsFromMe {

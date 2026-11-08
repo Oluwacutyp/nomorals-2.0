@@ -462,6 +462,27 @@ def _wa_stamp_quoted(msg: ChatMessage, obj: dict[str, Any]) -> None:
         msg.meta["quoted_text"] = quoted_text
 
 
+def _whatsapp_poll_shape_error(question: str,
+                               options: list[str]) -> str:
+    """WhatsApp's own poll shape rules, checked BEFORE any
+    bridge traffic (the bridges re-check them — a malformed
+    poll must refuse in words at every layer, never as a raw
+    protocol error): 2–12 options, a non-empty question of at
+    most 255 characters, options of at most 100 characters."""
+    if not question:
+        return "a poll needs a question"
+    if len(question) > 255:
+        return "poll questions cap at 255 characters"
+    if not 2 <= len(options) <= 12:
+        return "a WhatsApp poll needs 2–12 options"
+    for option in options:
+        if not option:
+            return "poll options cannot be empty"
+        if len(option) > 100:
+            return "poll options cap at 100 characters each"
+    return ""
+
+
 def _jid_user_part(jid: str) -> str:
     """The user part of a JID: ``2348012345678:12@s.whatsapp.net``
     → ``2348012345678``. Device parts and domains are addressing
@@ -2000,6 +2021,152 @@ class WhatsAppAdapter(ChatAdapter):
         return self._admin_cmd("status_react", {
             "id": message_id, "from": poster_id,
             "emoji": emoji}, timeout=15)
+
+    # -- own identity (§/parity G3, census bundle #5) --------
+    # The account could be READ (a push name arrives on every
+    # message) but nothing on it could be CHANGED — no verb
+    # existed on either engine.  These ride the bridges'
+    # profile/privacy verbs; a refusal (WhatsApp rate-limits
+    # profile changes) surfaces verbatim, never retried here.
+
+    def get_profile(self) -> dict[str, Any]:
+        """The account's current identity as the bridges read
+        it: {"ok", "name", "about", "has_photo"} — a bridge
+        that could not read the about/photo says so in
+        "info_error" instead of inventing values."""
+        return self._admin_cmd("profile_get", {}, timeout=15)
+
+    def set_profile_name(self, name: str) -> dict[str, Any]:
+        """Set the account's profile (push) name (bridges'
+        ``profile_set`` field=name: whatsmeow app-state
+        push-name patch / Baileys updateProfileName)."""
+        name = str(name or "").strip()
+        if not name:
+            return {"ok": False,
+                    "error": "a profile name cannot be empty"}
+        return self._admin_cmd("profile_set", {
+            "field": "name", "value": name}, timeout=20)
+
+    def set_about(self, text: str) -> dict[str, Any]:
+        """Set the account's About text (bridges' ``profile_set``
+        field=about: whatsmeow SetStatusMessage — the profile
+        "about", not a status broadcast — / Baileys
+        updateProfileStatus).  An empty text clears it."""
+        return self._admin_cmd("profile_set", {
+            "field": "about", "value": str(text or "")},
+            timeout=20)
+
+    def set_profile_photo(self, path: str = "", *,
+                          remove: bool = False) -> dict[str, Any]:
+        """Set (or remove) the account's profile photo from a
+        local image file (bridges' ``profile_set`` field=photo).
+        The Go rung needs JPEG — WhatsApp's own picture
+        contract — and refuses other formats in words; the
+        Baileys rung crops/resizes any image itself."""
+        if remove:
+            return self._admin_cmd("profile_set", {
+                "field": "photo", "remove": True}, timeout=30)
+        path = str(path or "").strip()
+        if not path:
+            return {"ok": False,
+                    "error": "profile photo needs an image path "
+                             "(or remove=True)"}
+        return self._admin_cmd("profile_set", {
+            "field": "photo", "path": path}, timeout=30)
+
+    def get_privacy(self) -> dict[str, Any]:
+        """The account's privacy settings as the bridge reads
+        them: {"ok", "settings": {category: value}} — a
+        category the protocol cannot read back is ABSENT from
+        the map, never reported with a guessed value."""
+        return self._admin_cmd("privacy_get", {}, timeout=15)
+
+    def set_privacy(self, category: str,
+                    value: str) -> dict[str, Any]:
+        """Set one privacy category (bridges' ``privacy_set``).
+        The vocabulary is the protocol's own, validated in the
+        shared table (chatops.PRIVACY_CATEGORIES) and again in
+        the bridges; a category one engine has no setter for
+        answers unsupported on that rung — honestly, in the
+        verdict."""
+        category = str(category or "").strip().lower()
+        value = str(value or "").strip().lower()
+        if not category or not value:
+            return {"ok": False,
+                    "error": "privacy_set needs a category and "
+                             "a value"}
+        return self._admin_cmd("privacy_set", {
+            "category": category, "value": value}, timeout=20)
+
+    # -- polls (§/parity G3, census bundle #6) ----------------
+
+    def send_poll(self, chat: ChatRef, question: str,
+                  options: list[str], *, anonymous: bool = True,
+                  multiple: bool = False, quiz: bool = False,
+                  correct_option: int | None = None,
+                  explanation: str = "") -> SendResult:
+        """Send a native WhatsApp poll via the bridges'
+        ``send_poll`` (whatsmeow BuildPollCreation / Baileys
+        sendMessage {poll}).  Same signature as the Telegram
+        adapters' verb, so the group runtime's cross-post call
+        works unchanged.  Platform truth that shapes the
+        mapping, stated rather than silently absorbed:
+
+        * WhatsApp polls have NO quiz mode: a quiz request
+          refuses in words — quietly posting it as an opinion
+          poll would change its meaning.
+        * WhatsApp polls are never anonymous — voters are
+          visible to participants by design, so ``anonymous``
+          is accepted for signature parity and documented
+          here, not faked.
+        * Shape rules (2–12 options, question ≤255 chars,
+          options ≤100) refuse BEFORE traffic."""
+        if quiz:
+            return SendResult(ok=False, platform=self.name, error=(
+                "WhatsApp polls have no quiz mode — there is "
+                "no correct-answer or explanation field to "
+                "carry it"))
+        question = str(question or "").strip()
+        options = [str(o).strip() for o in (options or [])]
+        problem = _whatsapp_poll_shape_error(question, options)
+        if problem:
+            return SendResult(ok=False, platform=self.name,
+                              error=problem)
+        selectable = len(options) if multiple else 1
+        result = self._admin_cmd("send_poll", {
+            "chat": self._jid(chat), "question": question,
+            "options": options, "selectable": selectable},
+            timeout=20)
+        if not result.get("ok"):
+            return SendResult(ok=False, platform=self.name,
+                              error=str(result.get("error") or
+                                        "the bridge refused the poll"))
+        message_id = str(result.get("message_id") or "")
+        if not message_id:
+            return SendResult(ok=False, platform=self.name,
+                              error=("the bridge sent the poll but "
+                                     "returned no message id — the "
+                                     "send is unproven"))
+        return SendResult(ok=True, platform=self.name,
+                          message_id=message_id)
+
+    def poll_results(self, chat: ChatRef,
+                     message_id: str) -> dict[str, Any]:
+        """Tallies for one poll (bridges' ``poll_results``):
+        {question, options: [{text, voters}], total_voters} —
+        the format_poll_results verdict shape.  Results live
+        in bridge memory: the bridges tally the votes they
+        decrypted on polls they have seen; a poll outside that
+        memory answers ok=False in words, never numbers
+        invented to fill the shape."""
+        message_id = str(message_id or "").strip()
+        if not message_id:
+            return {"ok": False,
+                    "error": "poll_results needs the poll's "
+                             "message id"}
+        return self._admin_cmd("poll_results", {
+            "chat": self._jid(chat), "message_id": message_id},
+            timeout=15)
 
     def reject_call(self, call_id: str,
                     from_jid: str) -> dict[str, Any]:

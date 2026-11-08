@@ -485,6 +485,16 @@ class _FakeWA:
     def history(self, chat, limit=20):
         return list(self.history_rows)
 
+    def poll_results(self, chat, mid):
+        # parity G3: the WhatsApp adapter carries the verb —
+        # the bridge tallies votes it decrypted on polls it has
+        # seen (bridge memory), same verdict shape as Telegram.
+        self.calls.append(("poll_results", (chat, mid)))
+        return self.fail.get("poll_results", {
+            "ok": True, "total_voters": 3,
+            "options": [{"text": "A", "voters": 2},
+                        {"text": "B", "voters": 1}]})
+
     def group_info(self, chat):
         return dict(self.info)
 
@@ -757,7 +767,12 @@ def test_pollres_shapes_and_absences(tmp_path):
     assert "Total: 3 voters" in out
     out = rt._control_chatops("pollres", "", _msg(
         WA_GROUP, reply_to="p1"))
-    assert "doesn't expose a poll's tallies" in out
+    # parity G3: WhatsApp pollres is real now — the bridges
+    # tally decrypted votes on polls they have seen, so the
+    # same reply shape answers here too (a poll outside bridge
+    # memory refuses in the bridge's own words instead).
+    assert "A — 2 votes (67%)" in out
+    assert "Total: 3 voters" in out
 
 
 def test_tagall_chunks_and_cap(tmp_path):

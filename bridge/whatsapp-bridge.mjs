@@ -61,7 +61,9 @@
 import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomBytes } from 'node:crypto';
+import {
+  createDecipheriv, createHash, createHmac, randomBytes,
+} from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import qrcode from 'qrcode-terminal';
 import makeWASocket, {
@@ -342,6 +344,16 @@ const MAX_KEEP = 200;
 const recentByChat = new Map(); // jid -> [msg, ...] newest last
 const chatTitles = new Map();   // jid -> title
 const msgCache = new Map();     // stanzaId -> raw msg (for quoted replies)
+// Poll memory (parity G3, census bundle #6): creations this
+// bridge has seen — its own sends included — and every vote
+// it managed to decrypt, so poll_results can tally. WhatsApp
+// exposes no tally re-read; the count exists only as the sum
+// of votes a participant observed. The creation's message
+// secret (messageContextInfo.messageSecret) is what vote
+// decryption keys off, so it is kept beside the shape.
+const pollCreations = new Map(); // `${chat}|${id}` -> { question, options, secret }
+const pollVotes = new Map(); // `${chat}|${id}` -> Map(voter -> [hashHex])
+const pollUnreadable = new Map(); // `${chat}|${id}` -> count
 function remember(jid, msg) {
   let arr = recentByChat.get(jid);
   if (!arr) { arr = []; recentByChat.set(jid, arr); }
@@ -350,6 +362,122 @@ function remember(jid, msg) {
   if (msgCache.size > 2000) {
     for (const k of msgCache.keys()) { msgCache.delete(k); if (msgCache.size < 1500) break; }
   }
+}
+
+// ── polls (parity G3): creation/vote capture + tally ──────
+const pollKeyOf = (chat, id) => `${chat}|${id}`;
+
+function notePollCreation(chat, id, creation, secret) {
+  if (!creation || !id) return;
+  const options = (creation.options || [])
+    .map((o) => String(o?.optionName || ''));
+  if (!options.length) return;
+  const key = pollKeyOf(chat, id);
+  if (!pollCreations.has(key) && pollCreations.size >= 200) {
+    const oldest = pollCreations.keys().next().value;
+    pollCreations.delete(oldest);
+    pollVotes.delete(oldest);
+    pollUnreadable.delete(oldest);
+  }
+  pollCreations.set(key, {
+    question: String(creation.name || ''), options,
+    secret: secret ? Buffer.from(secret) : null,
+  });
+}
+
+const optionHashHex = (name) => createHash('sha256')
+  .update(String(name)).digest('hex');
+
+// decryptPollVoteMirror — Baileys 6.7.24 does NOT decrypt
+// poll votes inside messages.upsert (its decryptPollVote util
+// exists for apps to call themselves), so the bridge mirrors
+// its exact construction: an HMAC chain over
+// (msg id ‖ creator ‖ voter ‖ "Poll Vote" ‖ 0x01), then
+// AES-256-GCM with the tag as the ciphertext's last 16 bytes
+// and AAD `${pollMsgId}\0${voterJid}`.
+function decryptPollVoteMirror(vote, ctx) {
+  const toBytes = (v) => Buffer.from(String(v));
+  const key0 = createHmac('sha256', Buffer.alloc(32))
+    .update(Buffer.from(ctx.pollEncKey)).digest();
+  const sign = Buffer.concat([
+    toBytes(ctx.pollMsgId), toBytes(ctx.pollCreatorJid),
+    toBytes(ctx.voterJid), toBytes('Poll Vote'),
+    new Uint8Array([1]),
+  ]);
+  const decKey = createHmac('sha256', key0).update(sign)
+    .digest();
+  const payload = Buffer.from(vote.encPayload);
+  const decipher = createDecipheriv('aes-256-gcm', decKey,
+    Buffer.from(vote.encIv));
+  decipher.setAuthTag(payload.subarray(payload.length - 16));
+  decipher.setAAD(toBytes(`${ctx.pollMsgId}\u0000${ctx.voterJid}`));
+  const plain = Buffer.concat([
+    decipher.update(payload.subarray(0, payload.length - 16)),
+    decipher.final(),
+  ]);
+  return proto.Message.PollVoteMessage.decode(plain);
+}
+
+function capturePollMessage(jid, m, mm) {
+  try {
+    const creation = mm.pollCreationMessage
+      || mm.pollCreationMessageV2 || mm.pollCreationMessageV3;
+    if (creation) {
+      notePollCreation(jid, m.key.id, creation,
+        mm.messageContextInfo?.messageSecret);
+    }
+    const update = mm.pollUpdateMessage;
+    if (!update) return;
+    const pollId = update.pollCreationMessageKey?.id;
+    if (!pollId) return;
+    const key = pollKeyOf(jid, pollId);
+    const state = pollCreations.get(key);
+    if (!state || !state.secret) {
+      pollUnreadable.set(key, (pollUnreadable.get(key) || 0) + 1);
+      log(`poll vote on ${pollId} not tallied: the creation ` +
+        'or its secret is not in bridge memory');
+      return;
+    }
+    const creator = jidNormalizedUser(
+      update.pollCreationMessageKey.participant
+      || update.pollCreationMessageKey.remoteJid || jid);
+    const voter = m.key.fromMe ? meJid
+      : (m.key.participant ? jidNormalizedUser(m.key.participant) : jid);
+    const decoded = decryptPollVoteMirror(update.vote, {
+      pollCreatorJid: creator, pollMsgId: pollId,
+      pollEncKey: state.secret, voterJid: voter,
+    });
+    let votes = pollVotes.get(key);
+    if (!votes) { votes = new Map(); pollVotes.set(key, votes); }
+    votes.set(voter, (decoded.selectedOptions || [])
+      .map((h) => Buffer.from(h).toString('hex')));
+  } catch (e) {
+    log(`poll capture error: ${e.message}`);
+  }
+}
+
+function pollResultsPayload(chat, messageId) {
+  const key = pollKeyOf(chat, messageId);
+  const creation = pollCreations.get(key);
+  if (!creation) return null;
+  const counts = creation.options.map(() => 0);
+  const votes = pollVotes.get(key) || new Map();
+  for (const selected of votes.values()) {
+    for (const hex of selected) {
+      creation.options.forEach((name, i) => {
+        if (optionHashHex(name) === hex) counts[i] += 1;
+      });
+    }
+  }
+  const out = {
+    question: creation.question,
+    options: creation.options.map((text, i) => (
+      { text, voters: counts[i] })),
+    total_voters: votes.size,
+  };
+  const unreadable = pollUnreadable.get(key) || 0;
+  if (unreadable > 0) out.unreadable_votes = unreadable;
+  return out;
 }
 
 // ── Baileys helpers ──────────────────────────────────────────────────────────
@@ -831,6 +959,11 @@ async function connect() {
         }
         const unwrapped = unwrapViewOnce(m);
         const mm = unwrapped.msg;
+        // Poll memory (parity G3): creations teach the bridge
+        // a poll's option names; votes arrive encrypted and
+        // are tallied as they decrypt. The capture is a side
+        // ledger — the message itself flows on untouched.
+        capturePollMessage(jid, m, mm);
         // Status posts: not conversation either — they are the
         // status-saving surface's feed (§15).  The account's OWN
         // statuses are skipped (saving a man's own posts back to
@@ -1398,6 +1531,137 @@ async function handleCommand(sock, req) {
       }
       case 'status': {
         return reply(sock, id, { ok: true, user: meJid, lid: meLid, state: wa ? 'open' : 'closed' });
+      }
+      // Own identity (parity G3, census bundle #5). Baileys
+      // carries a first-class verb for each act; refusals
+      // (rate limits included) surface verbatim, never
+      // retried in a loop.
+      case 'profile_get': {
+        const out = { ok: true, name: pushName || '' };
+        try {
+          const mine = await wa.fetchStatus(meJid);
+          const entry = Array.isArray(mine) ? mine[0] : mine;
+          out.about = (entry && typeof entry.status === 'object')
+            ? String(entry.status.status || '')
+            : String(entry?.status || '');
+          let photo = '';
+          try {
+            photo = await wa.profilePictureUrl(meJid, 'image') || '';
+          } catch { photo = ''; }
+          out.has_photo = !!photo;
+        } catch (e) {
+          out.info_error = String(e.message || e);
+        }
+        return reply(sock, id, out);
+      }
+      case 'profile_set': {
+        const field = String(req.field || '');
+        try {
+          if (field === 'name') {
+            const name = String(req.value || '').trim();
+            if (!name) return reply(sock, id, { ok: false, error: 'profile_set name needs a name' });
+            await wa.updateProfileName(name);
+            return reply(sock, id, { ok: true, field: 'name', name });
+          }
+          if (field === 'about') {
+            const text = String(req.value ?? '');
+            await wa.updateProfileStatus(text);
+            return reply(sock, id, { ok: true, field: 'about', about: text });
+          }
+          if (field === 'photo') {
+            if (req.remove) {
+              await wa.removeProfilePicture(meJid);
+              return reply(sock, id, { ok: true, field: 'photo', removed: true });
+            }
+            const path = String(req.path || '').trim();
+            if (!path) return reply(sock, id, { ok: false, error: 'profile_set photo needs a path (or remove)' });
+            const buf = fs.readFileSync(path);
+            // Baileys crops/squares the picture itself
+            // (generateProfilePicture); the bridge hands it
+            // the raw image bytes.
+            await wa.updateProfilePicture(meJid, buf);
+            return reply(sock, id, { ok: true, field: 'photo' });
+          }
+          return reply(sock, id, { ok: false, error: 'profile_set field must be name, about or photo' });
+        } catch (e) {
+          return reply(sock, id, { ok: false, error: String(e.message || e) });
+        }
+      }
+      case 'privacy_get': {
+        try {
+          const settings = await wa.fetchPrivacySettings(true);
+          return reply(sock, id, { ok: true, settings: settings || {} });
+        } catch (e) {
+          return reply(sock, id, { ok: false, error: String(e.message || e) });
+        }
+      }
+      case 'privacy_set': {
+        // Baileys exports one updater per category for the
+        // classic categories only — a category with no
+        // updater answers unsupported on this rung, never a
+        // fake success (defense/stickers land here).
+        const updaters = {
+          lastseen: 'updateLastSeenPrivacy',
+          online: 'updateOnlinePrivacy',
+          profile: 'updateProfilePicturePrivacy',
+          status: 'updateStatusPrivacy',
+          readreceipts: 'updateReadReceiptsPrivacy',
+          groupadd: 'updateGroupsAddPrivacy',
+          messages: 'updateMessagesPrivacy',
+          calladd: 'updateCallPrivacy',
+        };
+        const category = String(req.category || '').trim().toLowerCase();
+        const value = String(req.value || '').trim().toLowerCase();
+        const fn = updaters[category];
+        if (!fn || typeof wa[fn] !== 'function') {
+          return reply(sock, id, { ok: false, error: `privacy ${category || '?'} cannot be set on this bridge — Baileys has no updater for it` });
+        }
+        try {
+          await wa[fn](value);
+          const settings = await wa.fetchPrivacySettings(true).catch(() => ({}));
+          return reply(sock, id, { ok: true, category, value, settings: settings || {} });
+        } catch (e) {
+          return reply(sock, id, { ok: false, error: String(e.message || e) });
+        }
+      }
+      // Polls (parity G3, census bundle #6): sendMessage's
+      // { poll } payload is Baileys' own creation path; the
+      // creation lands in poll memory from the send result
+      // too, and votes arrive via messages.upsert.
+      case 'send_poll': {
+        const question = String(req.question || '').trim();
+        const options = Array.isArray(req.options)
+          ? req.options.map((o) => String(o).trim()) : [];
+        const selectable = Number(req.selectable) || 1;
+        const bad = !question ? 'a poll needs a question'
+          : question.length > 255 ? 'poll questions cap at 255 characters'
+          : options.length < 2 || options.length > 12 ? 'a WhatsApp poll needs 2–12 options'
+          : options.some((o) => !o || o.length > 100) ? 'poll options cap at 100 characters each and cannot be empty'
+          : selectable < 1 || selectable > options.length ? 'the selectable count must be between 1 and the number of options'
+          : '';
+        if (bad) return reply(sock, id, { ok: false, error: bad });
+        try {
+          const sent = await wa.sendMessage(req.chat, {
+            poll: { name: question, values: options, selectableCount: selectable },
+          });
+          const mid = sent?.key?.id || '';
+          if (!mid) return reply(sock, id, { ok: false, error: 'the bridge returned no message id for the poll' });
+          const creation = sent.message?.pollCreationMessage
+            || sent.message?.pollCreationMessageV2
+            || sent.message?.pollCreationMessageV3;
+          notePollCreation(req.chat, mid, creation,
+            sent.message?.messageContextInfo?.messageSecret);
+          return reply(sock, id, { ok: true, message_id: mid });
+        } catch (e) {
+          return reply(sock, id, { ok: false, error: String(e.message || e) });
+        }
+      }
+      case 'poll_results': {
+        const payload = pollResultsPayload(String(req.chat || ''), String(req.message_id || ''));
+        if (!payload) {
+          return reply(sock, id, { ok: false, error: 'that poll is not in bridge memory — results live on polls this bridge has seen since it started' });
+        }
+        return reply(sock, id, { ok: true, ...payload });
       }
       default:
         // workstream 3: group/community commands (read-only) before "unknown cmd",
