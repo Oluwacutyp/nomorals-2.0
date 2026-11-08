@@ -156,10 +156,20 @@ def pairing_state(context: Any, *, svc: dict[str, Any] | None = None,
     sup = svc["supervisor"]
     registry = svc["registry"]
     pairer = svc["pairer"]
+    personal = svc.get("personal")
     from .pairing import toggle_live_verdicts
 
     accounts: list[dict[str, Any]] = []
     for rec in registry.all():
+        # The evidence leg (2026-11-08): the organ's last
+        # activity per toggle from the journal, so the web
+        # card's "✓ live" carries the same fact as chat /pair.
+        activity = None
+        if personal is not None:
+            try:
+                activity = personal.toggle_activity(rec.id)
+            except Exception:  # noqa: BLE001 - one leg only
+                activity = None
         row: dict[str, Any] = {
             "id": rec.id,
             "platform": rec.platform,
@@ -179,7 +189,8 @@ def pairing_state(context: Any, *, svc: dict[str, Any] | None = None,
                 rec,
                 stopped=bool(registry.owner_stopped(rec.platform)),
                 running=bool(sup.is_running(rec.id)),
-                attached=None, connected=None),
+                attached=None, connected=None,
+                activity=activity),
             "last_error": rec.last_error or "",
             "process": ("running" if sup.is_running(rec.id)
                         else "—"),

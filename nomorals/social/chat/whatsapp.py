@@ -1066,26 +1066,39 @@ class WhatsAppAdapter(ChatAdapter):
             # The bridge echoes Devon's own sends through this same
             # event, so ids she sent are checked first: her reply's
             # echo stays persist-only, or she would answer herself
-            # forever. Own messages in every other chat — DMs with
-            # other people, groups — keep the persist-only discipline
-            # untouched: she never replies as the owner mid-chat.
+            # forever. Own CONVERSATION in every other chat — DMs
+            # with other people, groups — keeps the persist-only
+            # discipline untouched: she never replies as the owner
+            # mid-chat.
             #
             # SECOND carve-out — the owner's commands typed inside
-            # a GROUP. On the Telegram userbot he is the operator
-            # in groups: his commands dispatch. Here the bridge's
-            # own_message event is the same proof of authorship
-            # the self-chat carve-out already trusts (the event
-            # exists only for the paired account's own messages),
-            # so a group message of his that parses as a registered
-            # command is delivered as an owner turn (incoming,
-            # from_owner, owner_command) and reaches the same
-            # control dispatch. Everything else he types in a
-            # group — plain text, unknown slashes — is NOT
-            # promoted: it stays persist-only as-him conversation,
-            # never answered, never a game move, exactly as
-            # before. A stale command (typed while the surface
-            # was down) gets the self-chat treatment too: stamped
-            # stale_replay, observed, never detonated at reconnect.
+            # a GROUP or a 1:1 DM. On the Telegram userbot he is
+            # the operator everywhere: his commands dispatch.
+            # Here the bridge's own_message event is the same
+            # proof of authorship the self-chat carve-out already
+            # trusts (the event exists only for the paired
+            # account's own messages), so a message of his in a
+            # group — or in a DM with a third party — that parses
+            # as a registered command is delivered as an owner
+            # turn (incoming, from_owner, owner_command) and
+            # reaches the same control dispatch. The DM half is
+            # the 2026-11-08 truth fix: the groups-only promotion
+            # left EVERY chatops command typed as-him inside a
+            # contact's DM dead silent — he replied /viewonce to
+            # the very photo he wanted revealed, in the chat
+            # where the answer belongs, and the persist-only
+            # fallback swallowed the command whole (the handler
+            # was never broken; it was never reached). A typed
+            # command is an explicit summons, not conversation:
+            # promoting it does not open a conversation path,
+            # because everything else he types in that DM —
+            # plain text, unknown slashes — is NOT promoted: it
+            # stays persist-only as-him conversation, never
+            # answered, never a game move, exactly as before.
+            # A stale command (typed while the surface was down)
+            # gets the self-chat treatment too: stamped
+            # stale_replay, observed, never detonated at
+            # reconnect.
             chat = obj.get("chat") or {}
             chat_id = str(chat.get("id") or "")
             if not chat_id:
@@ -1129,8 +1142,8 @@ class WhatsAppAdapter(ChatAdapter):
                 self._deliver(handler, turn)
                 return
             if not sent_by_me \
-                    and (chat_kind or "").strip().lower() \
-                    == str(ChatKind.GROUP) \
+                    and (chat_kind or "").strip().lower() in (
+                        str(ChatKind.GROUP), str(ChatKind.DM)) \
                     and _is_command_text(str(obj.get("text") or "")):
                 turn = ChatMessage(
                     chat=ChatRef(

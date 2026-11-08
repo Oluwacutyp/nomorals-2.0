@@ -781,6 +781,45 @@ class RuntimeChatOpsMixin:
                    if r.get("kind") == "view_once"]
         entries.reverse()          # journal is oldest-first
 
+        # The account a rowless attempt (empty vault, reply
+        # miss) is recorded against: the vault's own first
+        # capture's account, else the first personal record —
+        # so the attempt lands in that account's journal view
+        # instead of an accountless limbo no /pair journal
+        # filter would ever show.
+        fallback_account = ""
+        if entries:
+            fallback_account = str(entries[0].get("account")
+                                   or "")
+        else:
+            for rec in svc["registry"].all():
+                if rec.platform in ("whatsapp", "telegram"):
+                    fallback_account = rec.id
+                    break
+
+        def _note_reveal(outcome: str, form: str,
+                         row: dict | None = None) -> None:
+            # Every reveal attempt journals (2026-11-08 truth
+            # fix): "the owner asked and the vault missed" must
+            # be distinguishable in the record from "the owner
+            # never reached the handler" — the distinction the
+            # /viewonce silence investigation had to prove by
+            # reading code because the journal said nothing.
+            try:
+                svc["personal"].note_viewonce_reveal(
+                    outcome=outcome, form=form,
+                    account_id=str((row or {}).get("account")
+                                   or fallback_account),
+                    platform=str((row or {}).get("platform")
+                                 or ""),
+                    source_id=str((row or {}).get("source_id")
+                                  or ""),
+                    poster_name=str((row or {}).get("poster_name")
+                                    or ""))
+            except Exception as exc:  # noqa: BLE001 - journal only
+                record_failure(
+                    "runtime_chatops.viewonce_reveal_note", exc)
+
         def _when(row: dict) -> str:
             try:
                 return datetime.fromtimestamp(
@@ -794,6 +833,12 @@ class RuntimeChatOpsMixin:
             return f"  {i}. {_when(row)} · {who} · {mk}"
 
         if not entries:
+            _note_reveal(
+                "empty",
+                "reply" if str(getattr(message, "reply_to", "")
+                               or "") else
+                "list" if tail.lower() == "list" else
+                "index" if tail else "bare")
             states = []
             for rec in svc["registry"].all():
                 if rec.platform in ("whatsapp", "telegram"):
@@ -823,6 +868,7 @@ class RuntimeChatOpsMixin:
                     target = row
                     break
             if target is None:
+                _note_reveal("miss", "reply")
                 return ("that message has no view-once capture "
                         "in the vault — capture was off when it "
                         "arrived, or it never reached the "
@@ -839,6 +885,7 @@ class RuntimeChatOpsMixin:
                         "/viewonce list · or reply to the "
                         "view-once message with /viewonce")
             if not 1 <= idx <= len(entries):
+                _note_reveal("miss", "index")
                 return (f"there are {len(entries)} capture"
                         f"{'s' if len(entries) != 1 else ''} — "
                         f"pick 1–{len(entries)}:\n{listing}{more}")
@@ -850,7 +897,10 @@ class RuntimeChatOpsMixin:
                         f"/viewonce N opens another.")
         path = str(target.get("path") or "")
         who = str(target.get("poster_name") or "someone")
+        form = ("reply" if reply_to else
+                "index" if tail else "bare")
         if not path or not Path(path).exists():
+            _note_reveal("file_gone", form, target)
             return (f"the capture from {who} ({_when(target)}) "
                     f"is in the record but its file is gone from "
                     f"the vault — nothing left to show. "
@@ -858,6 +908,7 @@ class RuntimeChatOpsMixin:
         gateway = getattr(self, "gateway", None)
         send_file = getattr(gateway, "send_file", None)
         if gateway is None or send_file is None:
+            _note_reveal("send_failed", form, target)
             return (f"the capture from {who} is safe in the "
                     f"vault, but this surface can't carry media "
                     f"back — ask again from a chat that can.")
@@ -868,9 +919,11 @@ class RuntimeChatOpsMixin:
                      f"{_when(target)} — kept in your vault "
                      f"before it could vanish"))
         if not getattr(result, "ok", False):
+            _note_reveal("send_failed", form, target)
             return (f"the capture from {who} is in the vault "
                     f"but sending it back failed: "
                     f"{getattr(result, 'error', '') or 'send refused'}")
+        _note_reveal("found", form, target)
         return (f"👁️ that's the view-once from {who} "
                 f"({_when(target)}), straight from your vault."
                 f"{note}")

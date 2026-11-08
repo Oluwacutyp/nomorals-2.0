@@ -363,14 +363,33 @@ def test_own_send_echo_in_self_chat_stays_persist_only(tmp_path):
 
 
 def test_self_chat_unknown_until_status_event(tmp_path):
-    """Before the bridge reports the account's own JID there is no
-    proof a chat is the self-chat — persist-only is the safe side."""
+    """Before the bridge reports the account's own JID there is
+    no proof a chat is the SELF-CHAT — and none is claimed: no
+    self_chat stamp is applied until the status event teaches
+    the identity.  What changed (2026-11-08 truth fix): a
+    REGISTERED COMMAND in the message still promotes, on the
+    own_message event's own provenance — the bridge emits that
+    event only for the paired account's own messages, the
+    same authorship proof the group carve-out always trusted.
+    Non-command own text stays persist-only, identity or not."""
     adapter = make_adapter(tmp_path)
     msgs: list = []
     adapter._dispatch(own_event(OWNER_JID), msgs.append)
     assert len(msgs) == 1
-    assert msgs[0].incoming is False
-    assert msgs[0].meta.get("own_message") is True
+    assert msgs[0].incoming is True
+    assert msgs[0].meta.get("owner_command") is True
+    assert msgs[0].meta.get("from_owner") is True
+    # the chat is NOT classified as the self-chat: that stamp
+    # still waits for the bridge's identity report
+    assert "self_chat" not in msgs[0].meta
+    assert "own_message" not in msgs[0].meta
+    plain: list = []
+    adapter._dispatch(
+        own_event(OWNER_JID, text="note to self", mid="m2"),
+        plain.append)
+    assert len(plain) == 1
+    assert plain[0].incoming is False
+    assert plain[0].meta.get("own_message") is True
 
 
 # ── owner verdicts downstream of the adapter ────────────────────────

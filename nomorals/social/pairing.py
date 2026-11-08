@@ -832,11 +832,45 @@ def resolve_account(registry: PairingRegistry, platform: str,
     return rows[0]
 
 
+#: /pair verdict evidence (2026-11-08): for these toggles a
+#: bare "✓ live" must carry the organ's last-activity fact —
+#: the label for a toggle WITH journal activity, and the words
+#: that replace the naked check when it has produced NOTHING
+#: ever.  The owner's vault was completely empty while /pair
+#: called view_once live: toggle-on + bridge-connected was
+#: the whole verdict, and a dead organ read identical to a
+#: working one.
+_ACTIVITY_LABELS: dict[str, tuple[str, str]] = {
+    "view_once": ("last capture", "NO capture ever recorded"),
+    "status_saving": ("last save", "nothing ever saved"),
+    "status_viewing": ("last view landed",
+                       "NO view ever landed"),
+    "status_react": ("last reaction", "NO reaction ever landed"),
+}
+
+
+def _live_with_evidence(name: str,
+                        activity: dict[str, float] | None) -> str:
+    """The plain-live verdict for *name*, decorated with its
+    journal evidence when the caller supplied the activity
+    map.  No map (a caller that cannot see the journal) →
+    the historic verdict, unchanged."""
+    if activity is None or name not in _ACTIVITY_LABELS:
+        return "✓ live"
+    label, none_words = _ACTIVITY_LABELS[name]
+    ts = float(activity.get(name) or 0.0)
+    if ts:
+        when = time.strftime("%d %b %H:%M", time.localtime(ts))
+        return f"✓ live · {label} {when}"
+    return f"✓ live · {none_words}"
+
+
 def toggle_live_verdicts(rec: AccountRecord, *, stopped: bool,
                          running: bool, attached: bool | None,
                          connected: bool | None,
                          presence_state: str | None = None,
-                         status_receipt_mode: str | None = None
+                         status_receipt_mode: str | None = None,
+                         activity: dict[str, float] | None = None
                          ) -> dict[str, str]:
     """Per-toggle LIVE verdicts for one account's ON toggles.
 
@@ -867,6 +901,18 @@ def toggle_live_verdicts(rec: AccountRecord, *, stopped: bool,
       status_viewing verdict names the setting (which only the
       owner can flip, in WhatsApp itself) instead of calling
       the toggle live.
+    * ``activity`` — the organ's last-activity timestamps per
+      toggle, read from the personal vault's journal by the
+      caller (``PersonalSurfaces.toggle_activity``).  For the
+      evidence-bearing toggles (view_once / status_saving /
+      status_viewing / status_react) a plain-live verdict
+      carries the fact — "✓ live · last capture 07 Nov
+      19:55" — and a toggle with NO recorded activity says
+      so in words ("✓ live · NO capture ever recorded")
+      instead of printing the naked check over an organ that
+      has never produced anything (the 2026-11-08 empty-vault
+      trap).  ``None`` = the caller cannot see the journal;
+      the historic verdict stands.
 
     Returns {toggle: verdict} for ON toggles only.  A live verdict
     starts "✓ live"; anything else names the reason in plain
@@ -911,7 +957,7 @@ def toggle_live_verdicts(rec: AccountRecord, *, stopped: bool,
                                   "been asserted yet; the next "
                                   "housekeeping beat asserts it")
         else:
-            verdicts[name] = "✓ live"
+            verdicts[name] = _live_with_evidence(name, activity)
     return verdicts
 
 

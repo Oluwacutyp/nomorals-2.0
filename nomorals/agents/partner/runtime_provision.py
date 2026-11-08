@@ -592,10 +592,27 @@ class RuntimeProvisionMixin:
                 vtxt = f"bridge: {verdict}"
             else:
                 vtxt = "bridge: no verdict recorded"
+            stage = " · sweep retry" \
+                if row.get("stage") == "sweep" else ""
             return (f"  {when} · status view trace · {who} · "
                     f"status_viewing {toggle} · "
                     f"attempted {'yes' if attempted else 'no'} · "
-                    f"{vtxt}")
+                    f"{vtxt}{stage}")
+        if kind == "view_once_trace":
+            toggle = "on" if row.get("view_once_toggle") \
+                else "OFF"
+            media = ("media present" if row.get("media_present")
+                     else "media missing"
+                     if row.get("media_missing")
+                     else "no media")
+            return (f"  {when} · view-once arrival · {who} · "
+                    f"capture {toggle} · {media} · "
+                    f"outcome {row.get('outcome') or '?'}")
+        if kind == "viewonce_reveal":
+            form = str(row.get("form") or "").strip()
+            return (f"  {when} · /viewonce attempt · {who} · "
+                    f"outcome {row.get('outcome') or '?'}"
+                    + (f" · via {form}" if form else ""))
         bits = [when, kind, str(who)]
         if row.get("media_kind"):
             bits.append(str(row["media_kind"]))
@@ -1257,6 +1274,18 @@ class RuntimeProvisionMixin:
         except Exception as e:  # noqa: BLE001
             record_failure(
                 "runtime_provision.channel_cycle", e)
+        # Same beat: the WhatsApp status coverage sweep
+        # (2026-11-08 truth fix) — status posts observed
+        # earlier but still owed a view/react attempt (toggle
+        # was off at arrival, the verb was refused, the batch
+        # arrived while the surface was down) get their one
+        # sweep attempt from the arrival ledger, inside their
+        # 24h life.  The live path alone never revisits a post.
+        try:
+            svc["personal"].cycle_statuses("whatsapp")
+        except Exception as e:  # noqa: BLE001
+            record_failure(
+                "runtime_provision.status_cycle", e)
         # Same beat: always-online keepalive (§15 presence pack) —
         # re-asserts presence for the accounts the owner flagged,
         # releases it where the flag/stop/liveness says otherwise.
@@ -1512,19 +1541,30 @@ class RuntimeProvisionMixin:
                         "telegram") is not None
                     connected = attached
             presence: str | None = None
+            activity: dict[str, float] | None = None
             if svc is not None:
                 try:
                     presence = svc["personal"].presence_state(
                         rec.id)
                 except Exception:  # noqa: BLE001 - one leg only
                     presence = None
+                try:
+                    # The evidence leg (2026-11-08): the
+                    # organ's last activity per toggle, from
+                    # the journal — so "✓ live" carries the
+                    # fact, or names its absence.
+                    activity = svc["personal"].toggle_activity(
+                        rec.id)
+                except Exception:  # noqa: BLE001 - one leg only
+                    activity = None
             return toggle_live_verdicts(
                 rec, stopped=stopped, running=running,
                 attached=attached, connected=connected,
                 presence_state=presence,
                 status_receipt_mode=(
                     getattr(self, "_status_receipt_modes", None)
-                    or {}).get(rec.id))
+                    or {}).get(rec.id),
+                activity=activity)
         except Exception as exc:  # noqa: BLE001 - display helper
             record_failure(
                 "runtime_provision.pair_toggle_live", exc)

@@ -420,7 +420,12 @@ def test_view_once_missed_is_journaled_not_faked(tmp_path):
         view_once=True, ts=1.0)
     assert out == []  # nothing saved…
     rows = vault.journal(rec.id)
-    assert [r["kind"] for r in rows] == ["view_once_missed"]  # …said so
+    # …said so — and (2026-11-08 truth fix) the arrival itself
+    # traces too: every view-once arrival leaves a
+    # view_once_trace row after its outcome rows.
+    assert [r["kind"] for r in rows] == [
+        "view_once_missed", "view_once_trace"]
+    assert rows[1]["outcome"] == "missed"
 
 
 def test_status_saving_and_dedupe(tmp_path):

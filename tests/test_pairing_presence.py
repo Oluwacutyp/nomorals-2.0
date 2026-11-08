@@ -326,18 +326,30 @@ def test_view_once_media_missing_is_journaled(tmp_path):
         media_missing=True, ts=5.0)
     assert out == []
     rows = vault.journal(rec.id)
-    assert [r["kind"] for r in rows] == ["view_once_missed"]
+    # the miss row, then (2026-11-08 truth fix) the arrival
+    # trace every view-once arrival leaves
+    assert [r["kind"] for r in rows] == [
+        "view_once_missed", "view_once_trace"]
     assert rows[0]["platform"] == "telegram"
     assert "could not be downloaded" in rows[0]["note"]
 
 
-def test_view_once_media_missing_toggle_off_journals_nothing(tmp_path):
+def test_view_once_media_missing_toggle_off_traces_arrival(tmp_path):
+    """Was "journals nothing" — the exact silent hole the
+    2026-11-08 truth fix closes: with capture OFF an arrival
+    used to leave no row of any kind, indistinguishable from
+    nothing ever arriving.  What stays forbidden is a SAVE or
+    a MISS row (she did not try); what the journal now holds
+    is the arrival trace naming the toggle state it met."""
     personal, registry, vault, rec = make_personal(
         tmp_path, platform="telegram")
     personal.observe_message(
         "telegram", chat_key="k", message_id="m1", media=[],
         ttl_seconds=30, media_missing=True, ts=5.0)
-    assert vault.journal(rec.id) == []
+    rows = vault.journal(rec.id)
+    assert [r["kind"] for r in rows] == ["view_once_trace"]
+    assert rows[0]["view_once_toggle"] is False
+    assert rows[0]["outcome"] == "skipped_toggle_off"
 
 
 # ── 6. WhatsApp adapter seam ────────────────────────────────────────
@@ -714,4 +726,5 @@ def test_runtime_turn_journals_telegram_view_once_miss(tmp_path):
         meta={"ttl_seconds": 30, "view_once_media_missing": True})
     rt._personal_surface_turn(msg)
     rows = svc["personal"].vault.journal(rec.id)
-    assert [r["kind"] for r in rows] == ["view_once_missed"]
+    assert [r["kind"] for r in rows] == [
+        "view_once_missed", "view_once_trace"]

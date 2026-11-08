@@ -430,6 +430,29 @@ class PersonalSurfaces:
         # rest of the family.
         self._view_ineffective_status: set[tuple[str, str]] = set()
         self._view_traced_status: set[tuple[str, str]] = set()
+        # Coverage truth (2026-11-08): the status feed's arrival
+        # ledger and this process's attempt record.  Viewing /
+        # reacting used to be purely event-driven and one-shot:
+        # a post observed while its toggle was off, or whose
+        # verb was refused, or that the bridge delivered while
+        # the surface was down, was gone forever — and with no
+        # arrival record anywhere, the loss was invisible (the
+        # owner watched a tray of dozens of statuses sit
+        # unviewed while the journal showed seven landed
+        # attempts).  Now every observed post writes a
+        # status_arrival row (durable, seeded back below), the
+        # landed view/react sets seed from the journal too (a
+        # restart no longer re-fires verbs at posts already
+        # done), and cycle_statuses sweeps the ledger for posts
+        # still owed an attempt inside their 24h life.
+        self._status_arrivals: dict[tuple[str, str],
+                                    dict[str, Any]] = {}
+        self._status_attempted: set[tuple[str, str]] = set()
+        self._status_react_attempted: set[tuple[str, str]] = set()
+        #: View-once arrival traces already written this process
+        #: (one row per arrival; a bridge redelivery of the same
+        #: message does not write a second one).
+        self._view_once_traced: set[tuple[str, str]] = set()
         #: Mass-tag DM flags: (account, chat_key) → last delivered
         #: flag ts, and the count suppressed since (carried into
         #: the next delivered flag so he sees the volume, once).
@@ -454,6 +477,27 @@ class PersonalSurfaces:
                     (str(row.get("account") or ""), sid))
             if sid and row.get("kind") == "channel_post_missed":
                 self._missed_channel_posts.add(
+                    (str(row.get("account") or ""), sid))
+            if sid and row.get("kind") == "status_arrival":
+                self._status_arrivals[
+                    (str(row.get("account") or ""), sid)] = row
+            if sid and row.get("kind") == "status_view_trace" \
+                    and row.get("view_attempted"):
+                # A landed view in an earlier process is a fact,
+                # not a per-process accident: seed the viewed
+                # set so a restart (and the sweep) never re-fires
+                # the verb at a post already viewed.  A
+                # read-self verdict is NOT landed — the poster
+                # was never notified — so it never seeds.
+                verdict = row.get("bridge_verdict")
+                if isinstance(verdict, dict) \
+                        and verdict.get("ok") \
+                        and str(verdict.get("receipt_mode")
+                                or "") != "read-self":
+                    self._viewed_status.add(
+                        (str(row.get("account") or ""), sid))
+            if sid and row.get("kind") == "status_react":
+                self._reacted_status.add(
                     (str(row.get("account") or ""), sid))
 
     # ── account resolution ──────────────────────────────────────────
@@ -529,44 +573,93 @@ class PersonalSurfaces:
                 "media": [str(m.get("path") or "") for m in media],
                 "incoming": bool(incoming), "ts": ts})
         ephemeral = bool(view_once) or int(ttl_seconds or 0) > 0
-        if ephemeral and media and rec.toggle("view_once"):
-            for m in media:
-                path = str(m.get("path") or "")
-                if not path:
-                    continue
-                try:
-                    out.append(self.vault.save_media(
-                        rec.id, "view_once", path, platform=platform,
-                        counterpart_id=counterpart_id or sender_id,
-                        poster_name=sender_name,
-                        media_kind=str(m.get("kind") or ""),
-                        source_id=message_id, ts=ts))
-                except FileNotFoundError:
-                    _append_jsonl(self.vault.journal_path, {
-                        "ts": ts, "kind": "view_once_missed",
-                        "account": rec.id, "platform": platform,
-                        "counterpart_id": counterpart_id or sender_id,
-                        "poster_name": sender_name,
-                        "media_kind": str(m.get("kind") or ""),
-                        "source_id": message_id, "path": "",
-                        "bytes": 0,
-                        "note": "media was gone before it could be "
-                                "preserved"})
-        if ephemeral and media_missing and not media \
-                and rec.toggle("view_once"):
-            # The adapter saw the ephemeral message but its media
-            # never made it to disk (expired file reference, a
-            # failed download) — the same honest miss as a vanished
-            # file, journaled instead of silently dropped.
-            _append_jsonl(self.vault.journal_path, {
-                "ts": ts, "kind": "view_once_missed",
-                "account": rec.id, "platform": platform,
-                "counterpart_id": counterpart_id or sender_id,
-                "poster_name": sender_name,
-                "media_kind": "", "source_id": message_id,
-                "path": "", "bytes": 0,
-                "note": "media could not be downloaded before it "
-                        "expired"})
+        if ephemeral:
+            # EVERY view-once-class arrival leaves a trace row
+            # (2026-11-08 truth fix): with the toggle OFF the
+            # branches below used to write nothing at all, so a
+            # lifetime of arrivals read in the journal exactly
+            # like a lifetime of nothing arriving — the owner's
+            # vault held zero view-once rows of any kind while
+            # /pair called the toggle "live".  The trace names
+            # the toggle state the arrival met, whether media
+            # was present, and the outcome, so "did she see it,
+            # did she try" is always answerable from the record.
+            vo_toggle = bool(rec.toggle("view_once"))
+            saved_any = False
+            missed_any = False
+            if media and vo_toggle:
+                for m in media:
+                    path = str(m.get("path") or "")
+                    if not path:
+                        continue
+                    try:
+                        out.append(self.vault.save_media(
+                            rec.id, "view_once", path,
+                            platform=platform,
+                            counterpart_id=counterpart_id
+                            or sender_id,
+                            poster_name=sender_name,
+                            media_kind=str(m.get("kind") or ""),
+                            source_id=message_id, ts=ts))
+                        saved_any = True
+                    except FileNotFoundError:
+                        missed_any = True
+                        _append_jsonl(self.vault.journal_path, {
+                            "ts": ts, "kind": "view_once_missed",
+                            "account": rec.id, "platform": platform,
+                            "counterpart_id": counterpart_id
+                            or sender_id,
+                            "poster_name": sender_name,
+                            "media_kind": str(m.get("kind") or ""),
+                            "source_id": message_id, "path": "",
+                            "bytes": 0,
+                            "note": "media was gone before it "
+                                    "could be preserved"})
+            if media_missing and not media and vo_toggle:
+                # The adapter saw the ephemeral message but its
+                # media never made it to disk (expired file
+                # reference, a failed download) — the same honest
+                # miss as a vanished file, journaled instead of
+                # silently dropped.
+                missed_any = True
+                _append_jsonl(self.vault.journal_path, {
+                    "ts": ts, "kind": "view_once_missed",
+                    "account": rec.id, "platform": platform,
+                    "counterpart_id": counterpart_id or sender_id,
+                    "poster_name": sender_name,
+                    "media_kind": "", "source_id": message_id,
+                    "path": "", "bytes": 0,
+                    "note": "media could not be downloaded before "
+                            "it expired"})
+            if not vo_toggle:
+                vo_outcome = "skipped_toggle_off"
+            elif saved_any:
+                vo_outcome = "saved"
+            elif missed_any:
+                vo_outcome = "missed"
+            else:
+                vo_outcome = "no_media"
+            vo_tkey = (rec.id, str(message_id or ""))
+            if not message_id or vo_tkey not in \
+                    self._view_once_traced:
+                if message_id:
+                    self._view_once_traced.add(vo_tkey)
+                _append_jsonl(self.vault.journal_path, {
+                    "ts": ts, "kind": "view_once_trace",
+                    "account": rec.id, "platform": platform,
+                    "counterpart_id": counterpart_id or sender_id,
+                    "poster_name": sender_name,
+                    "media_kind": (str(media[0].get("kind") or "")
+                                   if media else ""),
+                    "source_id": message_id, "path": "",
+                    "bytes": 0,
+                    "view_once_toggle": vo_toggle,
+                    "media_present": bool(media),
+                    "media_missing": bool(media_missing),
+                    "outcome": vo_outcome,
+                    "note": "view-once arrival — capture "
+                            f"{'on' if vo_toggle else 'OFF'}; "
+                            f"outcome {vo_outcome}"})
         return out
 
     def observe_delete(self, platform: str, *, chat_key: str,
@@ -659,7 +752,9 @@ class PersonalSurfaces:
                             source_id: str = "",
                             media_missing: bool = False,
                             account_id: str = "",
-                            ts: float = 0.0) -> list[dict[str, Any]]:
+                            ts: float = 0.0,
+                            sweep: bool = False
+                            ) -> list[dict[str, Any]]:
         """One status post the account can see (WhatsApp
         status@broadcast feed).  Saved when the account's
         status-saving toggle is on; the same post never saves
@@ -683,10 +778,48 @@ class PersonalSurfaces:
         the adapter saying the post carried media its download
         failed on: when saving is on, the miss is journaled
         (``status_missed``, once per post) instead of the post
-        vanishing from the record entirely."""
+        vanishing from the record entirely.
+
+        Coverage (2026-11-08 truth fix): the FIRST thing an
+        observed post does is enter the arrival ledger
+        (``status_arrival``, once per post, durable across
+        processes) — before any toggle is read — so the funnel
+        reconciles from the record: arrivals → attempts →
+        landed/failed.  ``cycle_statuses`` replays ledger
+        entries still owed a view/react attempt inside their
+        24h life with ``sweep=True``; those passes write their
+        trace with stage "sweep".  Viewing and reacting are
+        ONE act in this pass: when both toggles are on, the
+        post is viewed and then reacted to right here, each
+        keeping its own journal rows and its own honest
+        verdict — a failed view never blocks the reaction
+        and a failed reaction never unlands the view."""
         rec = self.resolve_event_account(platform, account_id)
         out: list[dict[str, Any]] = []
         ts = float(ts or self._clock())
+        if source_id:
+            akey = (rec.id, str(source_id))
+            if akey not in self._status_arrivals:
+                arrival = {
+                    "ts": float(self._clock()),
+                    "kind": "status_arrival",
+                    "account": rec.id, "platform": platform,
+                    "counterpart_id": poster_id,
+                    "poster_name": poster_name,
+                    "media_kind": "",
+                    "source_id": str(source_id),
+                    "path": "", "bytes": 0,
+                    "post_ts": ts,
+                    "text": str(text or ""),
+                    "media": [{"path": str(m.get("path") or ""),
+                               "kind": str(m.get("kind") or "")}
+                              for m in (media or [])
+                              if m.get("path")],
+                    "media_missing": bool(media_missing),
+                    "note": "status post observed — the funnel's "
+                            "arrival record"}
+                _append_jsonl(self.vault.journal_path, arrival)
+                self._status_arrivals[akey] = arrival
         # The exact item handed to the viewer seam for this post
         # (kept so the trace below can journal what the chain
         # carried, including the seam's verdict annotation).
@@ -699,6 +832,7 @@ class PersonalSurfaces:
                     "poster_id": poster_id,
                     "poster_name": poster_name,
                     "source_id": str(source_id), "ts": ts}
+                self._status_attempted.add(vkey)
                 try:
                     viewed = bool(self.status_viewer(rec, view_item))
                 except Exception:  # noqa: BLE001 - the wired seam
@@ -764,9 +898,13 @@ class PersonalSurfaces:
             # has been read three times and found canonically
             # shaped while dying live; this row is the evidence
             # that names the break point on the real account
-            # instead of a fourth reading.
+            # instead of a fourth reading.  A SWEEP pass
+            # (2026-11-08) always writes its row — its attempt
+            # is a distinct funnel event the once-per-process
+            # guard would otherwise hide — with stage "sweep"
+            # against the live pass's "live".
             tkey = (rec.id, str(source_id))
-            if tkey not in self._view_traced_status:
+            if sweep or tkey not in self._view_traced_status:
                 self._view_traced_status.add(tkey)
                 _append_jsonl(self.vault.journal_path, {
                     "ts": ts, "kind": "status_view_trace",
@@ -775,6 +913,7 @@ class PersonalSurfaces:
                     "poster_name": poster_name,
                     "media_kind": "", "source_id": str(source_id),
                     "path": "", "bytes": 0,
+                    "stage": "sweep" if sweep else "live",
                     "status_viewing_toggle": bool(
                         rec.toggle("status_viewing")),
                     "seam_poster_id": poster_id,
@@ -809,6 +948,7 @@ class PersonalSurfaces:
                     except Exception:  # noqa: BLE001 - pool is garnish
                         custom = []
                 emoji, new_cursor = status_react_pick(rec, custom)
+                self._status_react_attempted.add(rkey)
                 try:
                     reacted = bool(self.status_reactor(rec, {
                         "poster_id": poster_id,
@@ -895,6 +1035,76 @@ class PersonalSurfaces:
                 source_id=source_id, ts=ts))
         if source_id and out:
             self._seen_status.add(dedupe_key)
+        return out
+
+    def cycle_statuses(self, platform: str = "whatsapp",
+                       account_id: str = ""
+                       ) -> list[dict[str, Any]]:
+        """One WhatsApp status sweep: replay the arrival
+        ledger for posts still owed a view/react attempt.
+
+        The live path is one-shot — a post observed while its
+        toggle was off, whose verb was refused, or that
+        arrived in a reconnect batch the live pass only
+        traced, never gets a second chance from observation
+        alone (WhatsApp does not redeliver acked posts).
+        This sweep is the backlog half the story/channel
+        cycles already have: every ledger entry inside its
+        24h life whose view (toggle on, not landed, not
+        already attempted in THIS process) or reaction
+        (same tests) is still owed is re-observed through
+        the full consumer path with ``sweep=True`` — view
+        and react together, exactly like a live arrival,
+        with the trace staging the attempt "sweep".  One
+        sweep attempt per post per process: a persistently
+        refused verb is retried on the next process (where
+        the journal re-derives what's landed), never beaten
+        on every housekeeping beat.  WhatsApp only —
+        Telegram stories have their own fetcher sweep
+        (cycle_stories); a platform with no ledger simply
+        has nothing to replay."""
+        if platform != "whatsapp":
+            return []
+        rec = self.resolve_event_account(platform, account_id)
+        viewing = bool(rec.toggle("status_viewing")) \
+            and self.status_viewer is not None
+        reacting = bool(rec.toggle("status_react")) \
+            and self.status_reactor is not None \
+            and not self.registry.owner_stopped(platform)
+        if not viewing and not reacting:
+            return []
+        now = float(self._clock())
+        owed: list[dict[str, Any]] = []
+        for (acc, sid), row in self._status_arrivals.items():
+            if acc != rec.id or not sid:
+                continue
+            if now - float(row.get("post_ts")
+                           or row.get("ts") or 0.0) > 86400.0:
+                continue            # the post has expired
+            key = (acc, sid)
+            need_view = viewing and key not in self._viewed_status \
+                and key not in self._status_attempted
+            need_react = reacting \
+                and key not in self._reacted_status \
+                and key not in self._status_react_attempted
+            if need_view or need_react:
+                owed.append(row)
+        owed.sort(key=lambda r: float(r.get("post_ts")
+                                      or r.get("ts") or 0.0))
+        out: list[dict[str, Any]] = []
+        for row in owed:
+            out.extend(self.observe_status_post(
+                platform,
+                poster_id=str(row.get("counterpart_id") or ""),
+                poster_name=str(row.get("poster_name") or ""),
+                text=str(row.get("text") or ""),
+                media=[dict(m) for m in (row.get("media") or [])],
+                source_id=str(row.get("source_id") or ""),
+                media_missing=bool(row.get("media_missing")),
+                account_id=rec.id,
+                ts=float(row.get("post_ts") or row.get("ts")
+                         or 0.0),
+                sweep=True))
         return out
 
     def note_status_posted(self, platform: str, *,
@@ -1217,6 +1427,80 @@ class PersonalSurfaces:
             entry["dest_id"] = str(dest_id)
         _append_jsonl(self.vault.journal_path, entry)
         return entry
+
+    def note_viewonce_reveal(self, *,
+                             outcome: str,
+                             account_id: str = "",
+                             platform: str = "",
+                             source_id: str = "",
+                             poster_name: str = "",
+                             form: str = "",
+                             ts: float = 0.0) -> dict[str, Any]:
+        """Journal one /viewonce reveal ATTEMPT (2026-11-08
+        truth fix): the handler used to journal nothing, so
+        the record could never distinguish "the owner asked
+        and the vault missed" from "the owner never reached
+        the handler at all" — the distinction the /viewonce
+        silence investigation had to establish by reading
+        code.  Every handler exit that answers the owner
+        about a capture (found / miss / empty / file_gone /
+        send_failed) leaves this row; usage errors are not
+        attempts and stay unjournaled."""
+        entry = {
+            "ts": float(ts or self._clock()),
+            "kind": "viewonce_reveal",
+            "account": str(account_id or ""),
+            "platform": platform,
+            "counterpart_id": "",
+            "poster_name": str(poster_name or ""),
+            "media_kind": "",
+            "source_id": str(source_id or ""),
+            "path": "", "bytes": 0,
+            "outcome": str(outcome or ""),
+            "form": str(form or ""),
+            "note": f"/viewonce reveal attempt — {outcome}"}
+        _append_jsonl(self.vault.journal_path, entry)
+        return entry
+
+    def toggle_activity(self, account_id: str
+                        ) -> dict[str, float]:
+        """Last-activity timestamps per personal toggle,
+        read from the journal: view_once → the newest
+        capture; status_saving → the newest saved status or
+        story; status_viewing → the newest LANDED view (a
+        trace whose bridge verdict is ok and not downgraded
+        to read-self); status_react → the newest landed
+        reaction.  A toggle with no activity ever is ABSENT
+        from the map — the /pair verdict layer renders that
+        absence in words, so "✓ live" never again prints
+        naked over an organ that has produced nothing."""
+        last: dict[str, float] = {}
+        for row in self.vault.journal(account_id):
+            kind = str(row.get("kind") or "")
+            try:
+                rts = float(row.get("ts") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not rts:
+                continue
+            name: str | None = None
+            if kind == "view_once":
+                name = "view_once"
+            elif kind == "status_react":
+                name = "status_react"
+            elif kind in ("status", "story"):
+                name = "status_saving"
+            elif kind == "status_view_trace" \
+                    and row.get("view_attempted"):
+                verdict = row.get("bridge_verdict")
+                if isinstance(verdict, dict) \
+                        and verdict.get("ok") \
+                        and str(verdict.get("receipt_mode")
+                                or "") != "read-self":
+                    name = "status_viewing"
+            if name and rts > last.get(name, 0.0):
+                last[name] = rts
+        return last
 
     def cycle_stories(self, platform: str = "telegram",
                       account_id: str = "") -> list[dict[str, Any]]:

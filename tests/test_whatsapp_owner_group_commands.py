@@ -175,18 +175,27 @@ class OwnerGroupCommandAdapterTests(unittest.TestCase):
         self.assertEqual(msgs[0].meta.get("owner_command"), True)
         self.assertEqual(msgs[0].meta.get("stale_replay"), True)
 
-    def test_owner_dm_command_outside_self_chat_stays_persist_only(self):
-        """The promotion is groups-only: his commands typed in
-        somebody else's DM keep the standing discipline (she
-        never acts as him mid-chat with another person)."""
+    def test_owner_dm_command_outside_self_chat_promotes(self):
+        """2026-11-08 truth fix: the promotion covers 1:1 DMs
+        too.  The groups-only shape was the /viewonce silence:
+        the owner's commands typed as-him inside a contact's
+        DM (the natural place to answer a view-once photo)
+        fell to the persist-only fallback and died without a
+        word — EVERY chatops command, not just /viewonce.
+        A registered command in a DM now promotes exactly
+        like a group one; non-command DM text still stays
+        persist-only (see test_truthfix_personal for the
+        full DM matrix)."""
         adapter, msgs = self._adapter()
         adapter._dispatch(
             self._own("/status", kind="dm",
                       chat_id="2347099999999@s.whatsapp.net"),
             msgs.append)
         self.assertEqual(len(msgs), 1)
-        self.assertFalse(msgs[0].incoming)
-        self.assertEqual(msgs[0].meta.get("own_message"), True)
+        self.assertTrue(msgs[0].incoming)
+        self.assertEqual(msgs[0].meta.get("from_owner"), True)
+        self.assertEqual(msgs[0].meta.get("owner_command"), True)
+        self.assertNotIn("own_message", msgs[0].meta)
 
 
 # ── pipeline: the promoted turn reaches control dispatch ────
