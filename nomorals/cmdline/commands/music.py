@@ -100,13 +100,17 @@ def _cmd_music(args: argparse.Namespace, context: Any) -> int:
 
         tail_words = [t for t in [topic, *extra] if t]
         if action == "sources":
-            text = control_music_sources("sources " + " ".join(tail_words))
+            text = control_music_sources(
+                "sources " + " ".join(tail_words), context=context)
         elif action == "enrich":
-            text = control_music_sources("enrich " + " ".join(tail_words))
+            text = control_music_sources(
+                "enrich " + " ".join(tail_words), context=context)
         elif action == "health":
-            text = control_music_sources("health " + " ".join(tail_words))
+            text = control_music_sources(
+                "health " + " ".join(tail_words), context=context)
         else:
-            text = control_music_sources("registry-play " + " ".join(tail_words))
+            text = control_music_sources(
+                "registry-play " + " ".join(tail_words), context=context)
         return show({"action": action, "query": " ".join(tail_words)}, text)
 
     # ── composition (original surface, unchanged) ──────────────────────────

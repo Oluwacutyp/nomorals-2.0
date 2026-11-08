@@ -409,8 +409,32 @@ class RuntimeMediaMixin:
         words = tail.split()
         if words and words[0].lower() in ("sources", "enrich", "health", "registry-play"):
             # Legal music registry surface — licence always shown.
+            # The runtime context rides along (registry health +
+            # the wired play pipeline consult it) and, in chat, a
+            # deliver_fn over the gateway so a fetched registry
+            # track is SENT, not just described (doc 7).
             from ...music_sources.chat import control_music_sources
-            return control_music_sources(tail)
+            _reg_chat = self._ref_from_key(chat_key) if chat_key else None
+            _reg_deliver = None
+            if _reg_chat is not None:
+                def _reg_deliver(path: str, caption: str,
+                                 _chat: Any = _reg_chat) -> tuple[bool, str]:
+                    try:
+                        res = self.gateway.send_file(
+                            _chat.platform,
+                            f"{_chat.platform}:{_chat.chat_id}",
+                            path, caption=caption[:1024],
+                            kind=_send_kind_for(path))
+                        if res is not None and getattr(
+                                res, "ok", True) is False:
+                            return False, str(
+                                getattr(res, "error", "")
+                                or "send failed")
+                        return True, ""
+                    except Exception as exc:  # noqa: BLE001
+                        return False, str(exc)
+            return control_music_sources(
+                tail, context=self.context, deliver_fn=_reg_deliver)
         if words[0].lower() == "styles":
             return ("styles:\n" + "\n".join(
                 f"  {k:12s} {v.label}  ({v.mode}, {v.tempo[0]}-{v.tempo[1]} bpm)"
@@ -616,11 +640,29 @@ class RuntimeMediaMixin:
                 query = query.strip()
                 source_id = (source_id.strip().split() or [None])[0]
             from ...music_sources import registry_bridge as _ms_bridge
-            return _registry_play.registry_play_text(
-                _registry_play.play_via_registry(
-                    query, source_id=source_id,
-                    registry=_ms_bridge.music_registry_for_context(
-                        self.context)))
+            from ...music_sources.live import live_collaborators
+            # Doc 7: wire the REAL search/download steps — the same
+            # resolver sweep and playback-engine downloader ordinary
+            # /play uses — instead of the helper's unwired defaults
+            # (no_search / plan_only presented as results).
+            _search_fn, _download_fn = live_collaborators(self.context)
+            _result = _registry_play.play_via_registry(
+                query, search_fn=_search_fn, download_fn=_download_fn,
+                source_id=source_id,
+                registry=_ms_bridge.music_registry_for_context(
+                    self.context))
+            _payload = _result.download.payload \
+                if _result.download is not None else None
+            if _result.status == "ready" \
+                    and isinstance(_payload, dict) \
+                    and _payload.get("path"):
+                _chat = self._ref_from_key(chat_key) if chat_key else None
+                if _chat is not None:
+                    # The journey ends like ordinary /play ends: the
+                    # verified file delivered to the chat as audio.
+                    return self._play_deliver_fetched(
+                        _chat, _result, _payload)
+            return _registry_play.registry_play_text(_result)
         actions = {"add", "pause", "resume", "stop", "seek", "volume",
                    "next", "prev", "queue", "remove", "clear", "status",
                    "pick"}
@@ -2142,6 +2184,43 @@ class RuntimeMediaMixin:
         text, _sent = self._play_send_in_chat_result(engine, item, chat)
         return text
 
+    def _play_deliver_fetched(self, chat: Any, result: Any,
+                              payload: dict[str, Any]) -> str:
+        """Deliver a file a wired journey already fetched (the
+        registry play path, doc 7): tag a delivery copy and send it
+        natively, exactly like the ordinary /play send paths.  The
+        full-track verdict rides the payload from fetch time; an
+        UNVERIFIED verdict is labelled on the delivered line, never
+        passed off as proof.  Never raises.
+        """
+        path = str(payload.get("path") or "")
+        title = str(payload.get("title") or result.query or "audio")
+        artist = str(payload.get("artist") or "")
+        line = f"🎵 {title}"
+        if artist and artist.lower() not in title.lower():
+            line += f" — {artist}"
+        line += (f"\nvia {result.source_name} · licence: {result.licence}"
+                 f" · fetched via "
+                 f"{payload.get('served_via') or 'a wired source'}")
+        if payload.get("verify_state") == "unverified":
+            line += (f"\n(full-track length unverified — "
+                     f"{payload.get('verify_why') or 'not probed'})")
+        send_path = self._delivery_path(path, title, artist)
+        send_path = self._tag_delivery_copy(send_path, title, artist)
+        try:
+            res = self.gateway.send_file(
+                chat.platform, f"{chat.platform}:{chat.chat_id}",
+                send_path, caption=line[:1024],
+                kind=_send_kind_for(send_path))
+            if res is not None and getattr(res, "ok", True) is False:
+                err = str(getattr(res, "error", "") or "send failed")
+                return (f"had the file but couldn't send it: {err} "
+                        f"(it's saved on the server at {path})")
+            return line
+        except Exception as exc:  # noqa: BLE001
+            return (f"had the file but couldn't send it: {exc} "
+                    f"(it's saved on the server at {path})")
+
     def _play_send_in_chat_result(self, engine: Any, item: dict[str, Any],
                                   chat: Any, *,
                                   note: str = "") -> tuple[str, bool]:
@@ -2177,11 +2256,18 @@ class RuntimeMediaMixin:
         path = dl["path"]
         # Verify what arrived: a preview-length file for a full-length
         # track is a failed download, never the song — don't send it.
-        verify = self._play_verify_full_track(path, item)
-        if verify:
+        # The verdict is three-valued (doc 7): only REJECTED refuses
+        # delivery; an UNVERIFIED file is delivered (absence of
+        # evidence is not a failure) under its plain identity line —
+        # the line claims the track's identity, never a verification
+        # the state doesn't support.  Surfaces that REPORT the
+        # journey (the registry path) label the state explicitly.
+        verify_state, verify_why = self._play_verify_full_track_state(
+            path, item)
+        if verify_state == "rejected":
             self._drop_matching_queued(engine, item)
             return (f"that download wasn't the song — "
-                    f"{verify}. I won't pass it off as the "
+                    f"{verify_why}. I won't pass it off as the "
                     "track."), False
         title = str(dl.get("title") or item.get("title", "audio"))
         artist = str(dl.get("artist") or item.get("artist", "") or "")
@@ -2585,6 +2671,24 @@ class RuntimeMediaMixin:
             pass
 
     @staticmethod
+    def _play_verify_full_track_state(path: str,
+                                      item: Any) -> tuple[str, str]:
+        """Three-valued full-track verdict (doc 7, §2):
+        ``(state, why)`` with state verified / rejected / UNVERIFIED
+        — see :func:`nomorals.media.library.full_track_verdict`.
+        A downloaded file whose length could not be checked is
+        UNVERIFIED, and delivery surfaces label it as such; it is
+        never silently a pass.  Never raises.
+        """
+        try:
+            expected = float((item or {}).get("duration") or 0)
+        except (TypeError, ValueError):
+            expected = 0.0
+        from ...media.library import full_track_verdict
+
+        return full_track_verdict(path, expected)
+
+    @staticmethod
     def _play_verify_full_track(path: str, item: Any) -> str:
         """Verify a downloaded file is the FULL track, not a clip.
 
@@ -2592,29 +2696,15 @@ class RuntimeMediaMixin:
         duration, the file on disk must not be preview-length: a
         ~30s file for a minutes-long song is a FAILED download (a
         source served its preview stream anyway), reported as such
-        and never sent as the song.  Returns "" when the file passes
-        — including when there is nothing to verify against (unknown
-        expected duration, or the file's own duration unprobeable:
-        absence of evidence is never fabricated into a failure).
-        Never raises.
+        and never sent as the song.  Returns the rejection reason,
+        or "" when the file is not rejected — note "" now covers
+        both VERIFIED and UNVERIFIED outcomes; surfaces that report
+        a delivery use :meth:`_play_verify_full_track_state` and
+        label the unverified state honestly.  Never raises.
         """
-        try:
-            expected = float((item or {}).get("duration") or 0)
-            if expected < 90:
-                return ""
-            from ...media.library import read_metadata
-
-            actual = float(read_metadata(path).get("duration") or 0)
-            if actual > 0 and actual < min(45.0, expected * 0.5):
-                return (f"the file that came down is only "
-                        f"{actual:.0f}s long — a preview-length "
-                        f"clip, not the full {expected:.0f}s track")
-            return ""
-        except Exception as e:  # noqa: BLE001
-            record_failure(
-                "runtime_media.RuntimeMediaMixin._play_verify_full_track",
-                e)
-            return ""
+        state, why = RuntimeMediaMixin._play_verify_full_track_state(
+            path, item)
+        return why if state == "rejected" else ""
 
     @staticmethod
     def _merge_search_attempts(resolution_attempts: Any,
@@ -2832,13 +2922,18 @@ class RuntimeMediaMixin:
                 # Verify what arrived before anything is sent: a
                 # preview-length file for a full-length track is a
                 # failed download — record it, keep falling through.
-                verify = self._play_verify_full_track(path, item)
-                if verify:
+                # Three-valued verdict (doc 7): only REJECTED fails
+                # the route; UNVERIFIED delivers under the plain
+                # identity line, which claims no verification.
+                verify_state, verify_why = \
+                    self._play_verify_full_track_state(path, item)
+                if verify_state == "rejected":
                     outcomes[name] = (
-                        f"downloaded a clip, not the track ({verify})")
-                    verify_notes.append(verify)
+                        f"downloaded a clip, not the track "
+                        f"({verify_why})")
+                    verify_notes.append(verify_why)
                     if gated:
-                        blocked_matches.append((item, verify))
+                        blocked_matches.append((item, verify_why))
                     continue
                 outcomes[name] = "downloaded ✓"
                 # The tried trail's only home is the journal now —

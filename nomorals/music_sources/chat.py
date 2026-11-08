@@ -42,15 +42,23 @@ def MUSIC_SOURCES_USAGE() -> str:
 
 def control_music_sources(tail: str, context: Any = None, chat: Any = None,
                           sender_id: str = "", sender: str = "",
-                          chat_key: str = "") -> str:
-    """Registry surface. Never raises."""
+                          chat_key: str = "", deliver_fn: Any = None) -> str:
+    """Registry surface. Never raises.
+
+    ``deliver_fn(path, caption) -> (ok, error)`` is the host surface's
+    media transport when it has one (the partner runtime passes its
+    gateway sender): a fetched registry track is then DELIVERED, not
+    just described.  Without one this surface returns text — the
+    fetched file is named as saved on the server, never claimed sent.
+    """
     try:
-        return _control_music_sources(tail, context)
+        return _control_music_sources(tail, context, deliver_fn)
     except Exception as exc:  # noqa: BLE001 — never raise from chat
         return f"Music sources hit an error ({exc})."
 
 
-def _control_music_sources(tail: str, context: Any = None) -> str:
+def _control_music_sources(tail: str, context: Any = None,
+                           deliver_fn: Any = None) -> str:
     from . import play as play_mod
     from . import registry as reg
 
@@ -67,7 +75,7 @@ def _control_music_sources(tail: str, context: Any = None) -> str:
     if verb == "health":
         return _health(rest, context)
     if verb in ("registry-play", "play"):
-        return _registry_play(play_mod, rest, context)
+        return _registry_play(play_mod, rest, context, deliver_fn)
     return MUSIC_SOURCES_USAGE()
 
 
@@ -183,7 +191,8 @@ def _health(rest: str, context: Any = None) -> str:
     )
 
 
-def _registry_play(play_mod: Any, rest: str, context: Any = None) -> str:
+def _registry_play(play_mod: Any, rest: str, context: Any = None,
+                   deliver_fn: Any = None) -> str:
     if not rest:
         return "usage: /music registry-play <query> [--source <id>]"
     source_id = None
@@ -196,6 +205,43 @@ def _registry_play(play_mod: Any, rest: str, context: Any = None) -> str:
     # health when a registry is in reach (db-carrying context).
     from . import registry_bridge
     reg = registry_bridge.music_registry_for_context(context)
-    result = play_mod.play_via_registry(query, source_id=source_id,
-                                        registry=reg)
-    return play_mod.registry_play_text(result)
+    # Doc 7: the REAL search/download steps are wired — this branch
+    # runs the same resolver/downloader pipeline as ordinary /play
+    # instead of stopping at no_search / plan_only.
+    from .live import live_collaborators
+    search_fn, download_fn = live_collaborators(context)
+    result = play_mod.play_via_registry(
+        query, search_fn=search_fn, download_fn=download_fn,
+        source_id=source_id, registry=reg)
+    text = play_mod.registry_play_text(result)
+    payload = result.download.payload \
+        if result.download is not None else None
+    if result.status != "ready" or not isinstance(payload, dict) \
+            or not payload.get("path"):
+        return text
+    path = str(payload["path"])
+    title = str(payload.get("title") or query)
+    artist = str(payload.get("artist") or "")
+    line = f"🎵 {title}"
+    if artist and artist.lower() not in title.lower():
+        line += f" — {artist}"
+    line += (f"\nvia {result.source_name} · licence: {result.licence}"
+             f" · fetched via {payload.get('served_via') or 'a wired source'}")
+    if payload.get("verify_state") == "unverified":
+        line += (f"\n(full-track length unverified — "
+                 f"{payload.get('verify_why') or 'not probed'})")
+    if deliver_fn is None:
+        # This surface returns text: the file was fetched and saved
+        # on the server — say exactly that, never claim a delivery.
+        return (f"{text}\n{line}\n"
+                f"saved on the server at {path} — this surface "
+                f"returns text; /play {path} sends it here.")
+    try:
+        ok, err = deliver_fn(path, line)
+    except Exception as exc:  # noqa: BLE001 — delivery failure is data
+        ok, err = False, str(exc)
+    if ok:
+        return f"{line}\n(source: {result.source_name} · licence: {result.licence})"
+    return (f"{text}\n{line}\n"
+            f"had the file but couldn't send it: {err} "
+            f"(it's saved on the server at {path})")

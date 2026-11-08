@@ -173,6 +173,48 @@ def read_metadata(path: str) -> dict[str, Any]:
     return meta
 
 
+def full_track_verdict(path: str,
+                       expected_duration: float) -> tuple[str, str]:
+    """Three-valued full-track verdict for a downloaded file.
+
+    Returns ``(state, why)`` with state one of:
+
+    * ``"verified"`` — an expected duration exists and the file's own
+      probed duration corroborates it (not preview-length);
+    * ``"rejected"`` — the file probed as preview-length against a
+      known full-track expectation: it is a clip, not the track;
+    * ``"unverified"`` — the check could not run: no expected
+      duration to compare against, or the file's own duration is
+      unprobeable.  Unverified is NOT a pass — callers must label it
+      as unverified wherever they report the delivery, never present
+      it as full-track proof (doc 7, §2).
+
+    Never raises.
+    """
+    try:
+        expected = float(expected_duration or 0)
+    except (TypeError, ValueError):
+        expected = 0.0
+    if expected < 90:
+        return ("unverified",
+                "no full-track duration on record to check against")
+    try:
+        actual = float(read_metadata(path).get("duration") or 0)
+    except Exception:  # noqa: BLE001 - probing is best-effort
+        actual = 0.0
+    if actual <= 0:
+        return ("unverified",
+                "the file's own duration could not be probed")
+    if actual < min(45.0, expected * 0.5):
+        return ("rejected",
+                f"the file that came down is only {actual:.0f}s "
+                f"long — a preview-length clip, not the full "
+                f"{expected:.0f}s track")
+    return ("verified",
+            f"duration corroborated ({actual:.0f}s of "
+            f"{expected:.0f}s expected)")
+
+
 def _slug_id(prefix: str) -> str:
     return f"{prefix}-{time.time_ns()}-{uuid.uuid4().hex[:8]}"
 

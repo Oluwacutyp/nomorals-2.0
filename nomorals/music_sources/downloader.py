@@ -50,6 +50,10 @@ class DownloadResult:
     detail: str = ""
     payload: Any = None
     plan: Optional[DownloadPlan] = None
+    #: True when a wired fetcher actually attempted retrieval (doc 7):
+    #: distinguishes "download attempted, no route delivered" from
+    #: the unwired plan-only default, which attempted nothing.
+    attempted: bool = False
 
 
 def plan_download(source: MusicSource, *, query: str = "") -> DownloadPlan:

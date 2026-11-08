@@ -15,6 +15,11 @@ without network and honest without wiring:
   one, enrichment is recorded as ``missing`` and playback proceeds
   with the download result alone.
 
+Production call sites (``/play registry``, ``/music registry-play``)
+inject the real resolver/downloader steps via :mod:`.live` — the
+unwired defaults above remain only as the honest floor for callers
+that wire nothing.
+
 Every :class:`PlayResult` carries the source's licence label and its
 quality ceiling — licence is shown on every /play result, never
 hidden. Purchase sources resolve to a checkout plan, never to a
@@ -203,6 +208,12 @@ def registry_play_text(result: PlayResult) -> str:
         lines.append("  action: buy in the store — checkout plan, never auto-downloaded.")
     elif result.status == "ready":
         lines.append("  action: downloaded via wired fetcher — ready to play.")
+        payload = result.download.payload \
+            if result.download is not None else None
+        if isinstance(payload, dict) and payload.get("path"):
+            lines.append(f"  file: {payload['path']}")
+    elif result.download is not None and result.download.attempted:
+        lines.append("  action: download attempted — no route delivered the track.")
     else:
         lines.append("  action: plan only — no fetcher wired, nothing downloaded.")
     if result.detail:
