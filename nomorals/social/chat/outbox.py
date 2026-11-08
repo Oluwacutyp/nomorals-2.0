@@ -347,7 +347,8 @@ class Outbox:
             fresh_head = self._head(topic)
             if fresh_head is not None and str(fresh_head.get("id")) != str(job.id):
                 try:
-                    self.queue.requeue(job.id)
+                    self.queue.requeue(job.id,
+                                       lease_token=job.lease_token)
                 except Exception as exc:  # noqa: BLE001 - best-effort
                     record_failure('outbox.Outbox.deliver_chat', exc)
                 break
@@ -372,7 +373,17 @@ class Outbox:
             error = str(getattr(result, "error", "") or "") or send_error
             if ok:
                 try:
-                    self.queue.complete(job.id, result={"message_id": message_id})
+                    landed = self.queue.complete(
+                        job.id, result={"message_id": message_id},
+                        lease_token=job.lease_token)
+                    if not landed:
+                        # Our send happened, but the lease had been
+                        # reclaimed — the current owner will deliver
+                        # (at-least-once) and own the terminal state.
+                        _log.warning(
+                            "outbox: completion refused for %s "
+                            "(lease moved on); the send still happened",
+                            job.id)
                 except Exception as exc:  # noqa: BLE001
                     _log.warning("outbox: complete failed for %s: %s", job.id, exc)
                 outcomes.append({"job_id": job.id, "ok": True, "state": "sent",
@@ -382,7 +393,8 @@ class Outbox:
             kind = classify_send_error(error or "unknown")
             if kind == "terminal":
                 try:
-                    self.queue.fail(job.id, error, retry=False)
+                    self.queue.fail(job.id, error, retry=False,
+                                    lease_token=job.lease_token)
                 except Exception as exc:  # noqa: BLE001
                     _log.warning("outbox: fail failed for %s: %s", job.id, exc)
                 outcomes.append({"job_id": job.id, "ok": False,
@@ -396,7 +408,8 @@ class Outbox:
             # backoff (or dead when outer attempts are spent), then stop —
             # later jobs wait for this head's outcome.
             try:
-                self.queue.fail(job.id, error, retry=True)
+                self.queue.fail(job.id, error, retry=True,
+                                lease_token=job.lease_token)
             except Exception as exc:  # noqa: BLE001
                 _log.warning("outbox: fail failed for %s: %s", job.id, exc)
             outcomes.append({"job_id": job.id, "ok": False,

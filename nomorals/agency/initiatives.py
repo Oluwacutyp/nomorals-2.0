@@ -16,9 +16,12 @@ Invariants
 ----------
 * Nonterminal initiative ⇒ ``next_action`` OR ``next_review_at`` in
   the future OR a non-empty ``blocker``. Enforced on create/advance.
-* One owner at a time: ``claim()`` takes a lease; a second entrypoint
-  cannot advance the same initiative until the lease expires or is
-  released. Boot reconcile recovers expired leases.
+* One owner at a time: ``claim()`` takes a lease — atomically, in
+  one conditional UPDATE at the storage layer, so two competing
+  connections produce exactly one winner — and returns the lease
+  generation token. While a lease is live, ``advance`` / ``complete``
+  / ``cancel`` require that token: a stale owner cannot move another
+  generation's initiative. Boot reconcile recovers expired leases.
 * Dedupe: ``dedupe_key`` (e.g. ``gig:<board>:<id>``) merges repeat
   signals — evidence is appended, effects are NOT multiplied.
 """
@@ -30,10 +33,16 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from typing import Any
 
-__all__ = ["Initiative", "InitiativeStore"]
+__all__ = ["Initiative", "InitiativeStore", "StaleInitiativeLease"]
 
 #: Terminal statuses — nothing further is owed.
 TERMINAL = ("completed", "cancelled")
+
+
+class StaleInitiativeLease(RuntimeError):
+    """A mutation was refused: the initiative is leased to another
+    generation (F03). Raised — never a silent overwrite — so the
+    caller learns its view of ownership is stale."""
 #: Initiative kinds (audit §2A): explicit / standing / evidence / explore.
 KINDS = ("explicit_goal", "standing", "evidence_opportunity", "exploration")
 
@@ -67,6 +76,7 @@ class Initiative:
     owner: str = ""
     lease_owner: str | None = None
     lease_until: float = 0.0
+    lease_token: str = ""
     last_action_at: float = 0.0
     created_at: float = 0.0
     updated_at: float = 0.0
@@ -114,9 +124,18 @@ class InitiativeStore:
                 status TEXT NOT NULL DEFAULT 'active',
                 owner TEXT NOT NULL DEFAULT '',
                 lease_owner TEXT, lease_until REAL NOT NULL DEFAULT 0,
+                lease_token TEXT NOT NULL DEFAULT '',
                 last_action_at REAL NOT NULL DEFAULT 0,
                 created_at REAL NOT NULL, updated_at REAL NOT NULL
             )""")
+        # Databases created before the lease-token column existed get
+        # it via a guarded ALTER (the queueing_lock precedent) — the
+        # store owns this table, so no migration is involved.
+        cols = {r["name"] for r in db.table_info("agency_initiatives")}
+        if "lease_token" not in cols:
+            db.execute(
+                "ALTER TABLE agency_initiatives "
+                "ADD COLUMN lease_token TEXT NOT NULL DEFAULT ''")
         db.execute(
             "CREATE INDEX IF NOT EXISTS idx_agency_dedupe "
             "ON agency_initiatives(dedupe_key)")
@@ -139,8 +158,8 @@ class InitiativeStore:
                 it.deadline, it.priority, it.dedupe_key, it.parent_id,
                 json.dumps(it.dependencies), json.dumps(it.verification),
                 it.stop_reason, it.status, it.owner,
-                it.lease_owner, it.lease_until, it.last_action_at,
-                it.created_at, it.updated_at)
+                it.lease_owner, it.lease_until, it.lease_token,
+                it.last_action_at, it.created_at, it.updated_at)
 
     @staticmethod
     def _from_row(r: dict[str, Any]) -> Initiative:
@@ -160,6 +179,7 @@ class InitiativeStore:
             stop_reason=r["stop_reason"], status=r["status"],
             owner=r["owner"], lease_owner=r["lease_owner"],
             lease_until=float(r["lease_until"] or 0),
+            lease_token=str(r.get("lease_token") or ""),
             last_action_at=float(r["last_action_at"] or 0),
             created_at=float(r["created_at"] or 0),
             updated_at=float(r["updated_at"] or 0))
@@ -193,7 +213,7 @@ class InitiativeStore:
         it.updated_at = now
         self.db.execute(
             "INSERT INTO agency_initiatives VALUES (?,?,?,?,?,?,?,?,?,?,?,?,"
-            "?,?,?,?,?,?,?,?,?,?,?,?,?,?)", self._row(it))
+            "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", self._row(it))
         self._event(it.id, "created", f"kind={it.kind} objective={it.objective}")
         if it.parent_id:
             self._event(it.id, "lineage", f"parent={it.parent_id}")
@@ -207,8 +227,8 @@ class InitiativeStore:
             " benefit=?, uncertainty=?, effort=?, cost=?, deadline=?,"
             " priority=?, dedupe_key=?, parent_id=?, dependencies=?,"
             " verification=?, stop_reason=?, status=?, owner=?,"
-            " lease_owner=?, lease_until=?, last_action_at=?,"
-            " created_at=?, updated_at=? WHERE id=?",
+            " lease_owner=?, lease_until=?, lease_token=?,"
+            " last_action_at=?, created_at=?, updated_at=? WHERE id=?",
             self._row(it)[1:] + (it.id,))
 
     def get(self, initiative_id: str) -> Initiative | None:
@@ -249,34 +269,75 @@ class InitiativeStore:
 
     # ── leases: one entrypoint advances an initiative at a time ─────
     def claim(self, initiative_id: str, *, owner: str, lease_s: float = 300,
-              now: float | None = None) -> bool:
+              now: float | None = None) -> str | None:
+        """Atomically claim the initiative's lease (F03).
+
+        ONE conditional UPDATE at the storage layer: the row is
+        claimed only when it is non-terminal and unleased, expired,
+        or already ours. Two competing connections therefore produce
+        exactly one winner — there is no read-check-save window.
+        Returns the lease generation token the winner must present
+        to :meth:`advance` / :meth:`complete` / :meth:`cancel`, or
+        None when the claim was lost.
+        """
         now = _now() if now is None else now
-        it = self.get(initiative_id)
-        if it is None or it.status in TERMINAL:
+        token = uuid.uuid4().hex
+        cursor = self.db.execute(
+            "UPDATE agency_initiatives"
+            " SET lease_owner = ?, lease_until = ?, lease_token = ?,"
+            " updated_at = ?"
+            " WHERE id = ? AND status NOT IN ('completed','cancelled')"
+            " AND (lease_owner IS NULL OR lease_owner = ''"
+            "      OR lease_until <= ? OR lease_owner = ?)",
+            (owner, now + lease_s, token, now, initiative_id, now,
+             owner))
+        if not cursor or not cursor.rowcount:
+            return None
+        self._event(initiative_id, "claimed", f"owner={owner}")
+        return token
+
+    def release(self, initiative_id: str, *, owner: str,
+                lease_token: str | None = None) -> bool:
+        fence = ""
+        params: list[Any] = [initiative_id, owner]
+        if lease_token:
+            fence = " AND lease_token = ?"
+            params.append(lease_token)
+        cursor = self.db.execute(
+            "UPDATE agency_initiatives"
+            " SET lease_owner = NULL, lease_until = 0, lease_token = ''"
+            f" WHERE id = ? AND lease_owner = ?{fence}",
+            tuple(params))
+        if not cursor or not cursor.rowcount:
             return False
-        if it.lease_owner and it.lease_until > now and it.lease_owner != owner:
-            return False
-        it.lease_owner, it.lease_until = owner, now + lease_s
-        self._save(it)
-        self._event(it.id, "claimed", f"owner={owner}")
+        self._event(initiative_id, "released", f"owner={owner}")
         return True
 
-    def release(self, initiative_id: str, *, owner: str) -> bool:
-        it = self.get(initiative_id)
-        if it is None or it.lease_owner != owner:
-            return False
-        it.lease_owner, it.lease_until = None, 0.0
-        self._save(it)
-        self._event(it.id, "released", f"owner={owner}")
-        return True
+    def _check_lease(self, it: Initiative, lease_token: str | None,
+                     *, now: float) -> None:
+        """The F03 fence: while a lease is LIVE, only its generation
+        token may mutate the initiative. A stale owner — or a caller
+        presenting no token at all — is refused with
+        :class:`StaleInitiativeLease`, never a silent overwrite.
+        Unleased and expired-lease initiatives are unfenced, so the
+        direct/bookkeeping paths keep working."""
+        if it.lease_owner and it.lease_until > now:
+            if not lease_token or lease_token != (it.lease_token or ""):
+                raise StaleInitiativeLease(
+                    f"initiative {it.id} is leased to {it.lease_owner} "
+                    f"until {it.lease_until}; the presented lease "
+                    "generation does not hold it")
 
     # ── advance / complete ─────────────────────────────────────────
     def advance(self, initiative_id: str, *, next_action: str = "",
                 next_review_at: float | None = None, blocker: str | None = None,
-                evidence: str = "", now: float | None = None) -> Initiative:
+                evidence: str = "", now: float | None = None,
+                lease_token: str | None = None) -> Initiative:
         it = self.get(initiative_id)
         if it is None:
             raise KeyError(initiative_id)
+        ts = _now() if now is None else now
+        self._check_lease(it, lease_token, now=ts)
         if next_action != "":
             it.next_action = next_action
         if next_review_at is not None:
@@ -285,34 +346,40 @@ class InitiativeStore:
             it.blocker = blocker
         if evidence:
             it.evidence = (it.evidence + "\n" + evidence)[:4000]
-        it.last_action_at = _now() if now is None else now
+        it.last_action_at = ts
         it.validate(now=it.last_action_at)
         self._save(it)
         self._event(it.id, "advanced", f"next={it.next_action[:200]}")
         return it
 
     def complete(self, initiative_id: str, *, stop_reason: str,
-                 verification: dict[str, Any] | None = None) -> Initiative:
+                 verification: dict[str, Any] | None = None,
+                 lease_token: str | None = None) -> Initiative:
         it = self.get(initiative_id)
         if it is None:
             raise KeyError(initiative_id)
+        self._check_lease(it, lease_token, now=_now())
         it.status = "completed"
         it.stop_reason = stop_reason
         if verification is not None:
             it.verification = verification
         it.lease_owner, it.lease_until = None, 0.0
+        it.lease_token = ""
         self._save(it)
         self._event(it.id, "completed",
                     f"stop={stop_reason} verification={json.dumps(it.verification)[:500]}")
         return it
 
-    def cancel(self, initiative_id: str, *, stop_reason: str) -> Initiative:
+    def cancel(self, initiative_id: str, *, stop_reason: str,
+               lease_token: str | None = None) -> Initiative:
         it = self.get(initiative_id)
         if it is None:
             raise KeyError(initiative_id)
+        self._check_lease(it, lease_token, now=_now())
         it.status = "cancelled"
         it.stop_reason = stop_reason
         it.lease_owner, it.lease_until = None, 0.0
+        it.lease_token = ""
         self._save(it)
         self._event(it.id, "cancelled", f"stop={stop_reason}")
         return it
@@ -331,6 +398,7 @@ class InitiativeStore:
         for it in self.list_active():
             if it.lease_owner and it.lease_until <= now:
                 it.lease_owner, it.lease_until = None, 0.0
+                it.lease_token = ""
                 self._save(it)
                 self._event(it.id, "lease_recovered",
                             "expired lease released on boot")

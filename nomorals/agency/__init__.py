@@ -51,7 +51,7 @@ specific blocker. "Monitoring" with no next check is NOT active.
 """
 from __future__ import annotations
 
-from .initiatives import Initiative, InitiativeStore
+from .initiatives import Initiative, InitiativeStore, StaleInitiativeLease
 from .deliberation import DeliberationLoop
 from .adequacy import assess_gap_adequacy
 from .digestion import Claim, ThreeDeltas, digest
@@ -76,7 +76,8 @@ from .sourcehealth import SourceHealth, SourceRecord, SourceSpec, check_one
 from .sources_registry import collect as collect_sources, spec_by_key
 
 __all__ = [
-    "Initiative", "InitiativeStore", "DeliberationLoop",
+    "Initiative", "InitiativeStore", "StaleInitiativeLease",
+    "DeliberationLoop",
     "assess_gap_adequacy", "Claim", "ThreeDeltas", "digest",
     "WaitRecord", "PlanTracker", "STOP_REASONS",
     "LEAD_TRANSITIONS", "GIG_POST_SUBMISSION", "advance_lead", "score_gig",

@@ -62,8 +62,11 @@ class DeliberationLoop:
             return []
         active = self.store.list_active()
         # Blocked initiatives are not executable — but they stay visible
-        # with their wake-up; deliberation never drops them.
-        executable = [it for it in active if not it.blocker]
+        # with their wake-up; deliberation never drops them. Neither
+        # are initiatives under a live lease: another entrypoint owns
+        # them this cycle (F03), so choosing them would double-work.
+        executable = [it for it in active if not it.blocker
+                      and not (it.lease_owner and it.lease_until > now)]
         blocked = [it for it in active if it.blocker]
         # Starvation guard: overdue-critical first, always.
         critical = [it for it in executable

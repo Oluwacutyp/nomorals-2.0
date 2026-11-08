@@ -34,6 +34,7 @@ def register(registry: Any) -> None:
             "smoke, never a baseline."
         ),
         capability=Capability.NET_OUT,
+        result_protocol="dict_ok",
     )
     def brain_eval(action: str = "status", *, rung: str = "groq",
                    model: str = "", base_url: str = "",

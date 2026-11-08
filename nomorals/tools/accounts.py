@@ -22,6 +22,7 @@ def register(registry: Any) -> None:
             "wait for the verification code."
         ),
         capability=Capability.NET_OUT,
+        result_protocol="dict_ok",
     )
     def temp_email(*, provider: str = "") -> dict[str, Any]:
         from ..accounts.temp_mail import grab_address_cascade
@@ -40,6 +41,7 @@ def register(registry: Any) -> None:
             "Pass the dict from temp_email. Returns the extracted code."
         ),
         capability=Capability.NET_OUT,
+        result_protocol="dict_ok",
     )
     def temp_email_code(email_info: dict[str, Any], *,
                         sender_hint: str = "",
@@ -62,6 +64,7 @@ def register(registry: Any) -> None:
             "Keyless providers. Use temp_sms_code to wait for the code."
         ),
         capability=Capability.NET_OUT,
+        result_protocol="dict_ok",
     )
     def temp_sms_number(*, country: str = "us",
                         provider: str = "") -> dict[str, Any]:
@@ -86,6 +89,7 @@ def register(registry: Any) -> None:
             "Pass the dict from temp_sms_number. Returns the code."
         ),
         capability=Capability.NET_OUT,
+        result_protocol="dict_ok",
     )
     def temp_sms_code(number_info: dict[str, Any], *,
                       sender_hint: str = "",

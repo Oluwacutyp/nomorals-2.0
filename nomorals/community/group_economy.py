@@ -54,8 +54,11 @@ connectors, no accounts. Participants are group-local ids.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import os
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -63,6 +66,15 @@ from typing import Any
 
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
+
+try:
+    import fcntl
+except ImportError:  # Windows (the EC2 host) — msvcrt instead
+    fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt
+except ImportError:  # POSIX — fcntl instead
+    msvcrt = None  # type: ignore[assignment]
 
 _log = get_logger("nomorals.community.group_economy")
 
@@ -222,6 +234,72 @@ class GroupEconomyError(RuntimeError):
     the group's money history to the next append."""
 
 
+class EconomyPersistenceError(GroupEconomyError):
+    """A state write failed (disk full, replace refused, …).
+
+    Raised to the caller — never logged-and-forgotten — so no
+    command can report a success the disk never took (doc 3,
+    finding B). The operation that raised it did NOT commit: the
+    pre-operation file is intact because every save is a
+    write-temp-then-replace."""
+
+
+# ── cross-process writer lock (finding C) ─────────────────────────
+#
+# One lock file per group directory serializes every writer —
+# across GroupEconomy instances AND across processes. A bare
+# threading.Lock cannot do that (the audit's lost-update probe used
+# two instances), and atomic file replacement alone does not make
+# a read-modify-write transaction atomic.
+
+_fallback_locks: dict[str, threading.Lock] = {}
+_fallback_locks_guard = threading.Lock()
+
+
+def _acquire_file_lock(fd: int, lock_path: Path) -> None:
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    elif msvcrt is not None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+    else:  # neither primitive: process-local fallback (named, not silent)
+        key = str(lock_path)
+        with _fallback_locks_guard:
+            lock = _fallback_locks.setdefault(key, threading.Lock())
+        lock.acquire()
+        _fallback_held[threading.get_ident()] = (key, lock)
+
+
+def _release_file_lock(fd: int, lock_path: Path) -> None:
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    elif msvcrt is not None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        held = _fallback_held.pop(threading.get_ident(), None)
+        if held is not None:
+            held[1].release()
+
+
+_fallback_held: dict[int, tuple[str, threading.Lock]] = {}
+
+
+@contextlib.contextmanager
+def _locked_path(lock_path: Path):
+    """Hold the OS file lock at ``lock_path`` for the block."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        _acquire_file_lock(fd, lock_path)
+        try:
+            yield
+        finally:
+            _release_file_lock(fd, lock_path)
+    finally:
+        os.close(fd)
+
+
 @dataclass
 class LedgerEntry:
     """One append-only ledger line. Nothing here is ever deleted."""
@@ -239,6 +317,12 @@ class LedgerEntry:
     ts: float = 0.0
     reversed_by: str = ""  # reversal entry id, when this entry was reversed
     reverses: str = ""  # original entry id, when this entry IS a reversal
+    #: Operation identity (finding D): every leg of one logical
+    #: operation carries the same caller-supplied ``op_id``. A retry
+    #: with the same op_id finds these legs and returns the original
+    #: receipt instead of moving the money twice. Empty = the
+    #: caller supplied no identity (legacy behavior).
+    op_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -257,6 +341,7 @@ class LedgerEntry:
             ts=float(data.get("ts") or 0.0),
             reversed_by=str(data.get("reversed_by", "")),
             reverses=str(data.get("reverses", "")),
+            op_id=str(data.get("op_id", "")),
         )
 
 
@@ -270,12 +355,46 @@ class GroupEconomy:
 
     def __init__(self, data_dir: Path | str | None = None) -> None:
         self.data_dir = Path(data_dir) if data_dir else _DATA_DIR
+        #: Per-thread stack of groups this instance currently holds
+        #: the writer lock for — the lock is reentrant within a
+        #: thread so a public operation can wrap its whole body
+        #: while the primitives it calls lock again underneath.
+        self._lock_local = threading.local()
 
     # ── persistence ──
-    def _path(self, group_id: str, name: str) -> Path:
+    def _group_dir(self, group_id: str) -> Path:
         safe = "".join(c if c.isalnum() or c in ("_", "-", ".") else "_"
                        for c in str(group_id)).strip("_") or "group"
-        return self.data_dir / safe / f"{name}.json"
+        return self.data_dir / safe
+
+    def _path(self, group_id: str, name: str) -> Path:
+        return self._group_dir(group_id) / f"{name}.json"
+
+    @contextlib.contextmanager
+    def _locked(self, group_id: str):
+        """Serialize all writers of one group's state (finding C).
+
+        The balance check and every leg it authorizes run inside
+        one hold, so two instances/processes can no longer
+        read-modify-write over each other. The lock file carries
+        no state; it only names the group directory's turn.
+        """
+        stack: list[str] = getattr(self._lock_local, "stack", None) \
+            or []
+        self._lock_local.stack = stack
+        if group_id in stack:
+            stack.append(group_id)
+            try:
+                yield
+            finally:
+                stack.pop()
+            return
+        with _locked_path(self._group_dir(group_id) / "economy.lock"):
+            stack.append(group_id)
+            try:
+                yield
+            finally:
+                stack.pop()
 
     def _load_json(self, group_id: str, name: str, default: Any) -> Any:
         try:
@@ -284,6 +403,12 @@ class GroupEconomy:
             return default
 
     def _save_json(self, group_id: str, name: str, data: Any) -> None:
+        """Persist one state file — or raise (finding B).
+
+        A failed save is an :class:`EconomyPersistenceError` at the
+        caller, never a warning line under a success report. The
+        write is temp-then-replace, so a failure leaves the previous
+        good file untouched: the operation did not commit."""
         try:
             path = self._path(group_id, name)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -292,7 +417,9 @@ class GroupEconomy:
                            encoding="utf-8")
             tmp.replace(path)
         except OSError as exc:
-            _log.warning("group economy save failed %s/%s: %s", group_id, name, exc)
+            raise EconomyPersistenceError(
+                f"group economy save failed for {group_id}/{name}: "
+                f"{exc} — the operation was not committed") from exc
 
     def _ledger(self, group_id: str) -> list[LedgerEntry]:
         # The ledger is the money: an existing-but-unreadable
@@ -329,20 +456,69 @@ class GroupEconomy:
         self._save_json(group_id, "ledger", [e.to_dict() for e in entries])
 
     def _append(self, group_id: str, entry: LedgerEntry) -> LedgerEntry:
-        entries = self._ledger(group_id)
-        entries.append(entry)
-        self._save_ledger(group_id, entries)
+        self._append_many(group_id, [entry])
         return entry
+
+    def _append_many(self, group_id: str,
+                     new_entries: list[LedgerEntry]) -> list[LedgerEntry]:
+        """Commit a whole operation's legs in ONE save (finding D).
+
+        The ledger is loaded once, every leg appended in memory,
+        and the file replaced once — under the group writer lock.
+        A crash or write failure anywhere leaves either the whole
+        operation or none of it; the old per-leg appends could
+        strand half a transfer.
+        """
+        with self._locked(group_id):
+            entries = self._ledger(group_id)
+            entries.extend(new_entries)
+            self._save_ledger(group_id, entries)
+        return new_entries
 
     def _new_entry(self, group_id: str, member: str, kind: str, amount: int,
                    reason: str, ref: str = "", ts: float | None = None,
-                   reverses: str = "") -> LedgerEntry:
+                   reverses: str = "", op_id: str = "") -> LedgerEntry:
         now = ts if ts is not None else time.time()
         return LedgerEntry(
             id="led_" + new_short_id(), group_id=group_id, member=member,
             kind=kind, amount=int(amount), reason=(reason or "")[:300],
             ref=(ref or "")[:120], season=season_key(now), ts=now,
-            reverses=reverses)
+            reverses=reverses, op_id=op_id)
+
+    def _receipt(self, group_id: str, op_id: str,
+                 expected_legs: int) -> list[LedgerEntry]:
+        """The recorded legs of a previous operation (finding D).
+
+        Empty when this op_id never ran. A PARTIAL set — a legacy
+        crash between legs — raises: it must be reconciled by a
+        human, never completed silently or reported as whole.
+        """
+        if not op_id:
+            return []
+        found = [e for e in self._ledger(group_id) if e.op_id == op_id]
+        if not found:
+            return []
+        if len(found) != expected_legs:
+            raise GroupEconomyError(
+                f"operation {op_id!r} in group {group_id} is "
+                f"partially recorded ({len(found)} of "
+                f"{expected_legs} legs) — refusing to repeat or "
+                "complete it silently; reconcile the ledger first")
+        return found
+
+    def _post_commit(self, fn: Any, *args: Any) -> None:
+        """Run post-commit bookkeeping (abuse checks).
+
+        The operation has already committed. A persistence failure
+        here must NOT be reported as the operation failing — that
+        lie would invite a duplicate retry of money that already
+        moved. It is logged at error level instead: visible and
+        named, in the one place the distinction is documented.
+        """
+        try:
+            fn(*args)
+        except EconomyPersistenceError as exc:
+            _log.error("post-commit bookkeeping failed: %s", exc)
 
     # ── balances: always recomputed from the ledger ──
     def balance(self, group_id: str, member: str) -> int:
@@ -386,13 +562,16 @@ class GroupEconomy:
         """Mark a member verified. ``fingerprint`` is a group-local
         device/join fingerprint the host supplies — used only for
         alt-farming detection, never stored outside the group file."""
-        verified = self._load_json(group_id, "verified", {}) or {}
-        verified[str(member)] = {"fingerprint": hashlib.sha256(
-            str(fingerprint or member).encode()).hexdigest()[:16],
-            "at": time.time()}
-        self._save_json(group_id, "verified", verified)
-        self._check_alt_farming(group_id)
-        return True
+        with self._locked(group_id):
+            verified = self._load_json(group_id, "verified", {}) or {}
+            verified[str(member)] = {"fingerprint": hashlib.sha256(
+                str(fingerprint or member).encode()).hexdigest()[:16],
+                "at": time.time()}
+            self._save_json(group_id, "verified", verified)
+            # The verification has committed above; the alt-farming
+            # check's flag bookkeeping is post-commit.
+            self._post_commit(self._check_alt_farming, group_id)
+            return True
 
     def is_verified(self, group_id: str, member: str) -> bool:
         verified = self._load_json(group_id, "verified", {}) or {}
@@ -415,26 +594,36 @@ class GroupEconomy:
 
     def award(self, group_id: str, member: str, amount: int, reason: str,
               ref: str = "", *, kind: str = "earn",
-              now: float | None = None) -> LedgerEntry | None:
+              now: float | None = None,
+              op_id: str = "") -> LedgerEntry | None:
         """Credit points for real activity. Returns None when blocked.
 
         Blocked when: unverified member, non-positive amount, or either
         earn cap (daily / weekly) would be exceeded. Caps are enforced
-        here, in the one place all earns flow through.
+        here, in the one place all earns flow through. With ``op_id``,
+        a retry returns the ORIGINAL entry — the receipt — before any
+        cap check: the award already happened, so it is never paid
+        twice and never re-judged.
         """
         now = now if now is not None else time.time()
         amount = int(amount)
         if amount <= 0 or not member:
             return None
-        if not self.is_verified(group_id, member):
-            return None
-        for period, cap in EARN_CAPS.items():
-            if self._earned_in_period(group_id, member, period, now) + amount > cap:
-                self._flag(group_id, member, f"earn_cap_{period}",
-                           f"earn of {amount} would exceed {period} cap {cap}")
+        with self._locked(group_id):
+            if op_id:
+                found = self._receipt(group_id, op_id, 1)
+                if found:
+                    return found[0]
+            if not self.is_verified(group_id, member):
                 return None
-        return self._append(group_id, self._new_entry(
-            group_id, member, kind, amount, reason, ref=ref, ts=now))
+            for period, cap in EARN_CAPS.items():
+                if self._earned_in_period(group_id, member, period, now) + amount > cap:
+                    self._flag(group_id, member, f"earn_cap_{period}",
+                               f"earn of {amount} would exceed {period} cap {cap}")
+                    return None
+            return self._append(group_id, self._new_entry(
+                group_id, member, kind, amount, reason, ref=ref, ts=now,
+                op_id=op_id))
 
     # ── wagering (games): the member's own money, both ways ──
     # Wager movements are NOT earns: no caps, no faucet.  A debit is
@@ -444,29 +633,41 @@ class GroupEconomy:
 
     def wager_debit(self, group_id: str, member: str, amount: int,
                     reason: str, ref: str = "",
-                    now: float | None = None) -> LedgerEntry | None:
+                    now: float | None = None,
+                    op_id: str = "") -> LedgerEntry | None:
         """Escrow ``amount`` from the member's wallet for a game
         wager.  Returns None — moving nothing — when the balance
         cannot cover it."""
         amount = int(amount)
         if amount <= 0 or not member:
             return None
-        if self.balance(group_id, member) < amount:
-            return None
-        return self._append(group_id, self._new_entry(
-            group_id, member, "wager", -amount, reason, ref=ref,
-            ts=now))
+        with self._locked(group_id):
+            if op_id:
+                found = self._receipt(group_id, op_id, 1)
+                if found:
+                    return found[0]
+            if self.balance(group_id, member) < amount:
+                return None
+            return self._append(group_id, self._new_entry(
+                group_id, member, "wager", -amount, reason, ref=ref,
+                ts=now, op_id=op_id))
 
     def wager_credit(self, group_id: str, member: str, amount: int,
                      reason: str, ref: str = "",
-                     now: float | None = None) -> LedgerEntry | None:
+                     now: float | None = None,
+                     op_id: str = "") -> LedgerEntry | None:
         """Return a stake / pay winnings to the member's wallet."""
         amount = int(amount)
         if amount <= 0 or not member:
             return None
-        return self._append(group_id, self._new_entry(
-            group_id, member, "wager", amount, reason, ref=ref,
-            ts=now))
+        with self._locked(group_id):
+            if op_id:
+                found = self._receipt(group_id, op_id, 1)
+                if found:
+                    return found[0]
+            return self._append(group_id, self._new_entry(
+                group_id, member, "wager", amount, reason, ref=ref,
+                ts=now, op_id=op_id))
 
     # ── conversion (the §25 exchange): the member's own money ──
     # Conversion legs journal as kind "convert" under one shared
@@ -479,30 +680,42 @@ class GroupEconomy:
 
     def convert_credit(self, group_id: str, member: str,
                        amount: int, reason: str, ref: str = "",
-                       now: float | None = None) -> LedgerEntry | None:
+                       now: float | None = None,
+                       op_id: str = "") -> LedgerEntry | None:
         """Credit converted sparks.  ``member`` may be the
         treasury ("") — the territory skim leg lands there."""
         amount = int(amount)
         if amount <= 0:
             return None
-        return self._append(group_id, self._new_entry(
-            group_id, member, "convert", amount, reason, ref=ref,
-            ts=now))
+        with self._locked(group_id):
+            if op_id:
+                found = self._receipt(group_id, op_id, 1)
+                if found:
+                    return found[0]
+            return self._append(group_id, self._new_entry(
+                group_id, member, "convert", amount, reason, ref=ref,
+                ts=now, op_id=op_id))
 
     def convert_debit(self, group_id: str, member: str,
                       amount: int, reason: str, ref: str = "",
-                      now: float | None = None) -> LedgerEntry | None:
+                      now: float | None = None,
+                      op_id: str = "") -> LedgerEntry | None:
         """Debit sparks for a reverse conversion.  Balance-
         checked: returns None — moving nothing — when the
         wallet cannot cover it."""
         amount = int(amount)
         if amount <= 0 or not member:
             return None
-        if self.balance(group_id, member) < amount:
-            return None
-        return self._append(group_id, self._new_entry(
-            group_id, member, "convert", -amount, reason, ref=ref,
-            ts=now))
+        with self._locked(group_id):
+            if op_id:
+                found = self._receipt(group_id, op_id, 1)
+                if found:
+                    return found[0]
+            if self.balance(group_id, member) < amount:
+                return None
+            return self._append(group_id, self._new_entry(
+                group_id, member, "convert", -amount, reason, ref=ref,
+                ts=now, op_id=op_id))
 
     def record_activity(self, group_id: str, member: str, kind: str,
                         now: float | None = None) -> LedgerEntry | None:
@@ -512,19 +725,23 @@ class GroupEconomy:
         hashrate. Unknown kinds are recorded but pay nothing.
         """
         now = now if now is not None else time.time()
-        activities = self._load_json(group_id, "activities", []) or []
-        activities.append({"member": member, "kind": kind, "ts": now})
-        self._save_json(group_id, "activities", activities[-5000:])
-        amount = EARN_TABLE.get(kind, 0)
-        if amount > 0:
-            # Monetary policy: when issuance runs hot, the faucet
-            # halves — visibly (issuance_state is on /treasury),
-            # never silently.
-            if self.issuance_state(group_id, now=now)["throttled"]:
-                amount = max(1, amount // 2)
-            return self.award(group_id, member, amount,
-                              f"activity: {kind}", ref=kind, now=now)
-        return None
+        with self._locked(group_id):
+            activities = self._load_json(group_id, "activities", []) or []
+            activities.append({"member": member, "kind": kind, "ts": now})
+            # The record lands BEFORE the award: if this save fails
+            # the error propagates and no award is reported for an
+            # activity that was never recorded.
+            self._save_json(group_id, "activities", activities[-5000:])
+            amount = EARN_TABLE.get(kind, 0)
+            if amount > 0:
+                # Monetary policy: when issuance runs hot, the faucet
+                # halves — visibly (issuance_state is on /treasury),
+                # never silently.
+                if self.issuance_state(group_id, now=now)["throttled"]:
+                    amount = max(1, amount // 2)
+                return self.award(group_id, member, amount,
+                                  f"activity: {kind}", ref=kind, now=now)
+            return None
 
     def activity_count(self, group_id: str, member: str, kind: str,
                        period: str, now: float | None = None) -> int:
@@ -557,95 +774,218 @@ class GroupEconomy:
 
     def claim_quest(self, group_id: str, member: str, quest_id: str,
                     now: float | None = None) -> LedgerEntry | None:
-        """Claim a completed quest's reward. Once per period, never twice."""
+        """Claim a completed quest's reward. Once per period, never twice.
+
+        The award and the claim record live in two files, so the
+        pair cannot commit in one save. The LEDGER is therefore the
+        authority on "was this quest paid": if the award committed
+        but the claim-record save failed (the caller saw the error),
+        a retry finds the paid award below, finishes the claim
+        record, and returns the original entry — never a second
+        payment.
+        """
         now = now if now is not None else time.time()
         q = QUESTS.get(quest_id)
         if q is None:
             return None
-        prog = self.quest_progress(group_id, member, now).get(quest_id) or {}
-        if not prog.get("complete") or prog.get("claimed"):
-            return None
-        entry = self.award(group_id, member, int(q["reward"]),
-                           f"quest: {q['name']}", ref=f"quest:{quest_id}", now=now)
-        if entry is None:
-            return None  # cap hit — the quest stays claimable next period
-        claims = self._load_json(group_id, "quest_claims", {}) or {}
-        claims[f"{member}:{quest_id}:{_period_key(q['period'], now)}"] = True
-        self._save_json(group_id, "quest_claims", claims)
-        return entry
+        with self._locked(group_id):
+            prog = self.quest_progress(group_id, member, now).get(quest_id) or {}
+            if not prog.get("complete") or prog.get("claimed"):
+                return None
+            period = _period_key(q["period"], now)
+            paid = next(
+                (e for e in self._ledger(group_id)
+                 if e.member == member and e.kind == "earn"
+                 and e.ref == f"quest:{quest_id}"
+                 and _period_key(q["period"], e.ts) == period),
+                None)
+            claims = self._load_json(group_id, "quest_claims", {}) or {}
+            claim_key = f"{member}:{quest_id}:{period}"
+            if paid is not None:
+                claims[claim_key] = True
+                self._save_json(group_id, "quest_claims", claims)
+                return paid
+            entry = self.award(group_id, member, int(q["reward"]),
+                               f"quest: {q['name']}", ref=f"quest:{quest_id}",
+                               now=now)
+            if entry is None:
+                return None  # cap hit — the quest stays claimable next period
+            claims[claim_key] = True
+            self._save_json(group_id, "quest_claims", claims)
+            return entry
 
     # ── spending: the status shop ──
     def buy_status(self, group_id: str, member: str, item_id: str,
-                   now: float | None = None) -> dict[str, Any] | None:
+                   now: float | None = None,
+                   op_id: str = "") -> dict[str, Any] | None:
         """Buy a status item. Returns the grant record or None.
 
         The grant is what the chat layer acts on (shout-out, pin, …).
-        Nothing here confers gameplay power — status only.
+        Nothing here confers gameplay power — status only. With
+        ``op_id``, a retry returns the original grant (same
+        ``ledger_id``) instead of charging twice.
         """
         now = now if now is not None else time.time()
         item = STATUS_SHOP.get(item_id)
         if item is None:
             return None
-        if self.balance(group_id, member) < int(item["cost"]):
-            return None
-        entry = self._append(group_id, self._new_entry(
-            group_id, member, "spend", -int(item["cost"]),
-            f"status shop: {item['name']}", ref=f"shop:{item_id}", ts=now))
-        return {"item": item_id, "name": item["name"], "cost": item["cost"],
-                "member": member, "ledger_id": entry.id,
-                "granted_at": now, "disclaimer": CURRENCY_DISCLAIMER}
+        with self._locked(group_id):
+            if op_id:
+                found = self._receipt(group_id, op_id, 1)
+                if found:
+                    return {"item": item_id, "name": item["name"],
+                            "cost": item["cost"], "member": member,
+                            "ledger_id": found[0].id,
+                            "granted_at": found[0].ts,
+                            "disclaimer": CURRENCY_DISCLAIMER}
+            if self.balance(group_id, member) < int(item["cost"]):
+                return None
+            entry = self._append(group_id, self._new_entry(
+                group_id, member, "spend", -int(item["cost"]),
+                f"status shop: {item['name']}", ref=f"shop:{item_id}",
+                ts=now, op_id=op_id))
+            return {"item": item_id, "name": item["name"],
+                    "cost": item["cost"], "member": member,
+                    "ledger_id": entry.id, "granted_at": now,
+                    "disclaimer": CURRENCY_DISCLAIMER}
 
     # ── transfers + treasury ──
     def transfer(self, group_id: str, sender: str, recipient: str, amount: int,
-                 note: str = "", now: float | None = None) -> bool:
-        """Tip another member. Both sides are ledger entries; never a delete."""
+                 note: str = "", now: float | None = None,
+                 op_id: str = "") -> bool:
+        """Tip another member. Both sides are ledger entries; never a delete.
+
+        The two legs commit in ONE save (finding D): a crash can no
+        longer leave the debit without the credit. With ``op_id``, a
+        retry reports the original operation's success without
+        moving the money again.
+        """
         now = now if now is not None else time.time()
         amount = int(amount)
         if amount <= 0 or sender == recipient or not sender or not recipient:
             return False
-        if self.balance(group_id, sender) < amount:
+        with self._locked(group_id):
+            if op_id and self._receipt(group_id, op_id, 2):
+                return True
+            if self.balance(group_id, sender) < amount:
+                return False
+            self._append_many(group_id, [
+                self._new_entry(
+                    group_id, sender, "transfer_out", -amount,
+                    f"tip to {recipient}: {note}"[:300],
+                    ref=f"to:{recipient}", ts=now, op_id=op_id),
+                self._new_entry(
+                    group_id, recipient, "transfer_in", amount,
+                    f"tip from {sender}: {note}"[:300],
+                    ref=f"from:{sender}", ts=now, op_id=op_id),
+            ])
+            self._post_commit(self._check_collusion, group_id, now)
+            return True
+
+    def transfer_taxed(self, group_id: str, sender: str, recipient: str,
+                       gross: int, fee: int, note: str = "",
+                       now: float | None = None,
+                       op_id: str = "") -> bool:
+        """A transfer with its treasury tax, as ONE operation.
+
+        All four legs — the fee out of the sender, the fee into the
+        treasury, the net out of the sender, the net into the
+        recipient — commit in a single save, balance-checked
+        against the gross. (Before this, the surface ran the fee as
+        a separate contribution and the transfer after it: a failure
+        between them took the fee and delivered nothing.) With
+        ``fee == 0`` this is exactly :meth:`transfer`'s two legs.
+        """
+        now = now if now is not None else time.time()
+        gross = int(gross)
+        fee = int(fee)
+        if gross <= 0 or fee < 0 or fee >= gross \
+                or sender == recipient or not sender or not recipient:
             return False
-        self._append(group_id, self._new_entry(
-            group_id, sender, "transfer_out", -amount,
-            f"tip to {recipient}: {note}"[:300], ref=f"to:{recipient}", ts=now))
-        self._append(group_id, self._new_entry(
-            group_id, recipient, "transfer_in", amount,
-            f"tip from {sender}: {note}"[:300], ref=f"from:{sender}", ts=now))
-        self._check_collusion(group_id, now)
-        return True
+        net = gross - fee
+        legs = 4 if fee else 2
+        with self._locked(group_id):
+            if op_id and self._receipt(group_id, op_id, legs):
+                return True
+            if self.balance(group_id, sender) < gross:
+                return False
+            entries: list[LedgerEntry] = []
+            if fee:
+                entries += [
+                    self._new_entry(
+                        group_id, sender, "treasury_in", -fee,
+                        "contributed to group treasury", ref="treasury",
+                        ts=now, op_id=op_id),
+                    self._new_entry(
+                        group_id, "", "treasury_in", fee,
+                        f"contribution from {sender}",
+                        ref=f"from:{sender}", ts=now, op_id=op_id),
+                ]
+            entries += [
+                self._new_entry(
+                    group_id, sender, "transfer_out", -net,
+                    f"tip to {recipient}: {note}"[:300],
+                    ref=f"to:{recipient}", ts=now, op_id=op_id),
+                self._new_entry(
+                    group_id, recipient, "transfer_in", net,
+                    f"tip from {sender}: {note}"[:300],
+                    ref=f"from:{sender}", ts=now, op_id=op_id),
+            ]
+            self._append_many(group_id, entries)
+            self._post_commit(self._check_collusion, group_id, now)
+            return True
 
     def treasury_balance(self, group_id: str) -> int:
         return self.balance(group_id, "")
 
     def contribute_treasury(self, group_id: str, member: str, amount: int,
-                            now: float | None = None) -> bool:
+                            now: float | None = None,
+                            op_id: str = "") -> bool:
         now = now if now is not None else time.time()
         amount = int(amount)
-        if amount <= 0 or self.balance(group_id, member) < amount:
+        if amount <= 0:
             return False
-        self._append(group_id, self._new_entry(
-            group_id, member, "treasury_in", -amount,
-            "contributed to group treasury", ref="treasury", ts=now))
-        self._append(group_id, self._new_entry(
-            group_id, "", "treasury_in", amount,
-            f"contribution from {member}", ref=f"from:{member}", ts=now))
-        return True
+        with self._locked(group_id):
+            if op_id and self._receipt(group_id, op_id, 2):
+                return True
+            if self.balance(group_id, member) < amount:
+                return False
+            self._append_many(group_id, [
+                self._new_entry(
+                    group_id, member, "treasury_in", -amount,
+                    "contributed to group treasury", ref="treasury",
+                    ts=now, op_id=op_id),
+                self._new_entry(
+                    group_id, "", "treasury_in", amount,
+                    f"contribution from {member}", ref=f"from:{member}",
+                    ts=now, op_id=op_id),
+            ])
+            return True
 
     def treasury_grant(self, group_id: str, recipient: str, amount: int,
-                       reason: str = "", now: float | None = None) -> bool:
+                       reason: str = "", now: float | None = None,
+                       op_id: str = "") -> bool:
         """Pay out of the treasury (party prize, shout-out pool, …)."""
         now = now if now is not None else time.time()
         amount = int(amount)
-        if amount <= 0 or self.treasury_balance(group_id) < amount:
+        if amount <= 0:
             return False
-        self._append(group_id, self._new_entry(
-            group_id, "", "treasury_out", -amount,
-            f"treasury grant to {recipient}: {reason}"[:300],
-            ref=f"to:{recipient}", ts=now))
-        self._append(group_id, self._new_entry(
-            group_id, recipient, "treasury_out", amount,
-            f"treasury grant: {reason}"[:300], ref="treasury", ts=now))
-        return True
+        with self._locked(group_id):
+            if op_id and self._receipt(group_id, op_id, 2):
+                return True
+            if self.treasury_balance(group_id) < amount:
+                return False
+            self._append_many(group_id, [
+                self._new_entry(
+                    group_id, "", "treasury_out", -amount,
+                    f"treasury grant to {recipient}: {reason}"[:300],
+                    ref=f"to:{recipient}", ts=now, op_id=op_id),
+                self._new_entry(
+                    group_id, recipient, "treasury_out", amount,
+                    f"treasury grant: {reason}"[:300], ref="treasury",
+                    ts=now, op_id=op_id),
+            ])
+            return True
 
     # ── bank vaults / jackpot / gambling / robbery ──
     # The Septorch loop, on this ledger's mechanics: every move is
@@ -670,34 +1010,44 @@ class GroupEconomy:
 
     def _move(self, group_id: str, src: str, dst: str, amount: int,
               kind: str, reason: str,
-              now: float | None = None) -> bool:
-        """Paired-leg move between any two ledger members."""
+              now: float | None = None, op_id: str = "") -> bool:
+        """Paired-leg move between any two ledger members — one
+        commit for both legs (finding D), receipt-idempotent under
+        ``op_id``."""
         now = now if now is not None else time.time()
         amount = int(amount)
-        if amount <= 0 or src == dst \
-                or self.balance(group_id, src) < amount:
+        if amount <= 0 or src == dst:
             return False
-        self._append(group_id, self._new_entry(
-            group_id, src, kind, -amount, reason[:300],
-            ref=f"to:{dst}", ts=now))
-        self._append(group_id, self._new_entry(
-            group_id, dst, kind, amount, reason[:300],
-            ref=f"from:{src}", ts=now))
-        return True
+        with self._locked(group_id):
+            if op_id and self._receipt(group_id, op_id, 2):
+                return True
+            if self.balance(group_id, src) < amount:
+                return False
+            self._append_many(group_id, [
+                self._new_entry(
+                    group_id, src, kind, -amount, reason[:300],
+                    ref=f"to:{dst}", ts=now, op_id=op_id),
+                self._new_entry(
+                    group_id, dst, kind, amount, reason[:300],
+                    ref=f"from:{src}", ts=now, op_id=op_id),
+            ])
+            return True
 
     def bank_deposit(self, group_id: str, member: str, amount: int,
-                     now: float | None = None) -> bool:
+                     now: float | None = None,
+                     op_id: str = "") -> bool:
         """Wallet → the member's own vault.  Vaulted sparks are
         safe from robbery and count toward their total wealth."""
         return self._move(group_id, member, self.bank_member(member),
                           amount, "bank_deposit",
-                          "deposited to bank vault", now)
+                          "deposited to bank vault", now, op_id=op_id)
 
     def bank_withdraw(self, group_id: str, member: str, amount: int,
-                      now: float | None = None) -> bool:
+                      now: float | None = None,
+                      op_id: str = "") -> bool:
         return self._move(group_id, self.bank_member(member), member,
                           amount, "bank_withdraw",
-                          "withdrew from bank vault", now)
+                          "withdrew from bank vault", now, op_id=op_id)
 
     def jackpot_balance(self, group_id: str) -> int:
         return self.balance(group_id, JACKPOT_MEMBER)
@@ -712,43 +1062,57 @@ class GroupEconomy:
         multiplier; triple 7s ALSO empties the jackpot pot."""
         now = now if now is not None else time.time()
         bet = int(bet)
-        if bet <= 0 or self.balance(group_id, member) < bet:
-            return {"ok": False, "reason": "funds"}
-        self._append(group_id, self._new_entry(
-            group_id, member, "gamble", -bet, "slots bet",
-            ref="slots", ts=now))
-        symbols = [rng.choices(
-            [s for s, _w in SLOTS_REELS],
-            weights=[w for _s, w in SLOTS_REELS])[0] for _ in range(3)]
-        mult = 0
-        if symbols[0] == symbols[1] == symbols[2]:
-            mult = SLOTS_TRIPLE[symbols[0]]
-        elif len(set(symbols)) == 2:
-            mult = SLOTS_PAIR_PAYS
-        payout = bet * mult
-        jackpot = 0
-        if payout > 0:
-            self._append(group_id, self._new_entry(
-                group_id, member, "gamble", payout,
-                f"slots win {''.join(symbols)} ×{mult}",
-                ref="slots", ts=now))
-        else:
-            to_treasury = bet // 2
-            to_jackpot = bet - to_treasury
-            if to_treasury:
-                self._append(group_id, self._new_entry(
-                    group_id, "", "treasury_in", to_treasury,
-                    "slots house share", ref="slots", ts=now))
-            if to_jackpot:
-                self._append(group_id, self._new_entry(
-                    group_id, JACKPOT_MEMBER, "jackpot_in", to_jackpot,
-                    "slots jackpot feed", ref="slots", ts=now))
-        if symbols == ["7️⃣", "7️⃣", "7️⃣"]:
-            pot = self.jackpot_balance(group_id)
-            if pot > 0 and self._move(
-                    group_id, JACKPOT_MEMBER, member, pot,
-                    "jackpot_win", "JACKPOT — triple 7s", now):
-                jackpot = pot
+        with self._locked(group_id):
+            if bet <= 0 or self.balance(group_id, member) < bet:
+                return {"ok": False, "reason": "funds"}
+            # The whole spin settles in ONE commit (finding D): bet,
+            # payout / house legs, and the jackpot sweep are computed
+            # first and appended together.
+            symbols = [rng.choices(
+                [s for s, _w in SLOTS_REELS],
+                weights=[w for _s, w in SLOTS_REELS])[0] for _ in range(3)]
+            mult = 0
+            if symbols[0] == symbols[1] == symbols[2]:
+                mult = SLOTS_TRIPLE[symbols[0]]
+            elif len(set(symbols)) == 2:
+                mult = SLOTS_PAIR_PAYS
+            payout = bet * mult
+            jackpot = 0
+            legs = [self._new_entry(
+                group_id, member, "gamble", -bet, "slots bet",
+                ref="slots", ts=now)]
+            if payout > 0:
+                legs.append(self._new_entry(
+                    group_id, member, "gamble", payout,
+                    f"slots win {''.join(symbols)} ×{mult}",
+                    ref="slots", ts=now))
+            else:
+                to_treasury = bet // 2
+                to_jackpot = bet - to_treasury
+                if to_treasury:
+                    legs.append(self._new_entry(
+                        group_id, "", "treasury_in", to_treasury,
+                        "slots house share", ref="slots", ts=now))
+                if to_jackpot:
+                    legs.append(self._new_entry(
+                        group_id, JACKPOT_MEMBER, "jackpot_in",
+                        to_jackpot, "slots jackpot feed",
+                        ref="slots", ts=now))
+            if symbols == ["7️⃣", "7️⃣", "7️⃣"]:
+                pot = self.jackpot_balance(group_id)
+                if pot > 0:
+                    legs += [
+                        self._new_entry(
+                            group_id, JACKPOT_MEMBER, "jackpot_win",
+                            -pot, "JACKPOT — triple 7s",
+                            ref=f"to:{member}", ts=now),
+                        self._new_entry(
+                            group_id, member, "jackpot_win", pot,
+                            "JACKPOT — triple 7s", ref="from:jackpot:",
+                            ts=now),
+                    ]
+                    jackpot = pot
+            self._append_many(group_id, legs)
         return {"ok": True, "symbols": symbols, "multiplier": mult,
                 "payout": payout, "jackpot": jackpot,
                 "balance": self.balance(group_id, member)}
@@ -760,29 +1124,33 @@ class GroupEconomy:
         a loss splits treasury/jackpot like slots."""
         now = now if now is not None else time.time()
         bet = int(bet)
-        if bet <= 0 or self.balance(group_id, member) < bet:
-            return {"ok": False, "reason": "funds"}
-        flip = "heads" if rng.random() < 0.5 else "tails"
-        won = (choice or "").lower().startswith(flip[0])
-        self._append(group_id, self._new_entry(
-            group_id, member, "gamble", -bet, "coinflip bet",
-            ref="coinflip", ts=now))
-        payout = int(bet * 1.9) if won else 0
-        if won:
-            self._append(group_id, self._new_entry(
-                group_id, member, "gamble", payout,
-                f"coinflip win ({flip})", ref="coinflip", ts=now))
-        else:
-            to_treasury = bet // 2
-            to_jackpot = bet - to_treasury
-            if to_treasury:
-                self._append(group_id, self._new_entry(
-                    group_id, "", "treasury_in", to_treasury,
-                    "coinflip house share", ref="coinflip", ts=now))
-            if to_jackpot:
-                self._append(group_id, self._new_entry(
-                    group_id, JACKPOT_MEMBER, "jackpot_in", to_jackpot,
-                    "coinflip jackpot feed", ref="coinflip", ts=now))
+        with self._locked(group_id):
+            if bet <= 0 or self.balance(group_id, member) < bet:
+                return {"ok": False, "reason": "funds"}
+            flip = "heads" if rng.random() < 0.5 else "tails"
+            won = (choice or "").lower().startswith(flip[0])
+            payout = int(bet * 1.9) if won else 0
+            # One commit for the whole flip (finding D).
+            legs = [self._new_entry(
+                group_id, member, "gamble", -bet, "coinflip bet",
+                ref="coinflip", ts=now)]
+            if won:
+                legs.append(self._new_entry(
+                    group_id, member, "gamble", payout,
+                    f"coinflip win ({flip})", ref="coinflip", ts=now))
+            else:
+                to_treasury = bet // 2
+                to_jackpot = bet - to_treasury
+                if to_treasury:
+                    legs.append(self._new_entry(
+                        group_id, "", "treasury_in", to_treasury,
+                        "coinflip house share", ref="coinflip", ts=now))
+                if to_jackpot:
+                    legs.append(self._new_entry(
+                        group_id, JACKPOT_MEMBER, "jackpot_in",
+                        to_jackpot, "coinflip jackpot feed",
+                        ref="coinflip", ts=now))
+            self._append_many(group_id, legs)
         return {"ok": True, "flip": flip, "won": won,
                 "payout": payout,
                 "balance": self.balance(group_id, member)}
@@ -796,18 +1164,19 @@ class GroupEconomy:
         The money legs live here; consequences (jail) are state
         the surface owns."""
         now = now if now is not None else time.time()
-        if actor == target or not actor or not target:
-            return {"ok": False, "reason": "target"}
-        wallet = self.balance(group_id, target)
-        if wallet <= 0:
-            return {"ok": False, "reason": "empty"}
-        if rng.random() < 0.45:
-            amount = max(1, min(200, int(wallet * rng.uniform(0.10, 0.25))))
-            moved = self._move(group_id, target, actor, amount,
-                               "robbery", f"robbed by {actor}", now)
-            return {"ok": True, "success": bool(moved),
-                    "amount": amount if moved else 0}
-        return {"ok": True, "success": False, "amount": 0}
+        with self._locked(group_id):
+            if actor == target or not actor or not target:
+                return {"ok": False, "reason": "target"}
+            wallet = self.balance(group_id, target)
+            if wallet <= 0:
+                return {"ok": False, "reason": "empty"}
+            if rng.random() < 0.45:
+                amount = max(1, min(200, int(wallet * rng.uniform(0.10, 0.25))))
+                moved = self._move(group_id, target, actor, amount,
+                                   "robbery", f"robbed by {actor}", now)
+                return {"ok": True, "success": bool(moved),
+                        "amount": amount if moved else 0}
+            return {"ok": True, "success": False, "amount": 0}
 
     # ── group quests / monetary policy / seasons ──
 
@@ -906,10 +1275,11 @@ class GroupEconomy:
     def archive_season(self, group_id: str, season: str) -> int:
         """Snapshot one season's ledger entries to the archive
         file (rollover keeps the proof, not just the totals)."""
-        rows = [e.to_dict() for e in self._ledger(group_id)
-                if e.season == season]
-        self._save_json(group_id, f"archive-{season}", rows)
-        return len(rows)
+        with self._locked(group_id):
+            rows = [e.to_dict() for e in self._ledger(group_id)
+                    if e.season == season]
+            self._save_json(group_id, f"archive-{season}", rows)
+            return len(rows)
 
     # ── reversals: never delete ──
     def reverse(self, group_id: str, entry_id: str, reason: str,
@@ -920,18 +1290,20 @@ class GroupEconomy:
         or was already reversed. Reversing a reversal is refused.
         """
         now = now if now is not None else time.time()
-        entries = self._ledger(group_id)
-        target = next((e for e in entries if e.id == entry_id), None)
-        if target is None or target.reversed_by or target.kind == "reversal":
-            return None
-        reversal = self._new_entry(
-            group_id, target.member, "reversal", -target.amount,
-            f"reversal: {reason}"[:300], ref=target.id, ts=now,
-            reverses=target.id)
-        target.reversed_by = reversal.id
-        entries.append(reversal)
-        self._save_ledger(group_id, entries)
-        return reversal
+        with self._locked(group_id):
+            entries = self._ledger(group_id)
+            target = next((e for e in entries if e.id == entry_id), None)
+            if target is None or target.reversed_by \
+                    or target.kind == "reversal":
+                return None
+            reversal = self._new_entry(
+                group_id, target.member, "reversal", -target.amount,
+                f"reversal: {reason}"[:300], ref=target.id, ts=now,
+                reverses=target.id)
+            target.reversed_by = reversal.id
+            entries.append(reversal)
+            self._save_ledger(group_id, entries)
+            return reversal
 
     # ── seasons ──
     def badges(self, group_id: str, member: str = "") -> list[dict[str, Any]]:
@@ -950,29 +1322,38 @@ class GroupEconomy:
         """
         now = now if now is not None else time.time()
         season = season or season_key(now)
-        entries = self._ledger(group_id)
-        balances = self.balances(group_id)
-        ranked = sorted(((m, b) for m, b in balances.items() if m),
-                        key=lambda kv: -kv[1])
-        badges = self._load_json(group_id, "badges", []) or []
-        medals = ["Season Champion", "Season Runner-up", "Season Third"]
-        for i, (member, _) in enumerate(ranked[:3]):
-            badges.append({"member": member, "badge": medals[i],
-                           "season": season, "at": now})
-        self._save_json(group_id, "badges", badges)
-        closed: list[dict[str, Any]] = []
-        for member, bal in list(balances.items()):
-            if bal == 0:
-                continue
-            closing = self._new_entry(
-                group_id, member, "season_close", -bal,
-                f"season {season} close: balance reset", ref=season, ts=now)
-            entries.append(closing)
-            closed.append({"member": member, "closed": bal})
-        self._save_ledger(group_id, entries)
-        return {"season": season, "closed": closed,
-                "badges": badges[-len(ranked[:3]):] if ranked else [],
-                "disclaimer": CURRENCY_DISCLAIMER}
+        with self._locked(group_id):
+            entries = self._ledger(group_id)
+            balances = self.balances(group_id)
+            ranked = sorted(((m, b) for m, b in balances.items() if m),
+                            key=lambda kv: -kv[1])
+            badges = self._load_json(group_id, "badges", []) or []
+            medals = ["Season Champion", "Season Runner-up",
+                      "Season Third"]
+            for i, (member, _) in enumerate(ranked[:3]):
+                # Badge dedupe: a retried close must not mint the
+                # same season badge twice (finding D).
+                if not any(b.get("member") == member
+                           and b.get("badge") == medals[i]
+                           and b.get("season") == season
+                           for b in badges):
+                    badges.append({"member": member, "badge": medals[i],
+                                   "season": season, "at": now})
+            self._save_json(group_id, "badges", badges)
+            closed: list[dict[str, Any]] = []
+            for member, bal in list(balances.items()):
+                if bal == 0:
+                    continue
+                closing = self._new_entry(
+                    group_id, member, "season_close", -bal,
+                    f"season {season} close: balance reset",
+                    ref=season, ts=now)
+                entries.append(closing)
+                closed.append({"member": member, "closed": bal})
+            self._save_ledger(group_id, entries)
+            return {"season": season, "closed": closed,
+                    "badges": badges[-len(ranked[:3]):] if ranked else [],
+                    "disclaimer": CURRENCY_DISCLAIMER}
 
     # ── anti-abuse ──
     def flags(self, group_id: str) -> list[dict[str, Any]]:
@@ -1054,19 +1435,31 @@ class GroupEconomy:
         not a multiplier.
         """
         now = now if now is not None else time.time()
-        mining = self._load_json(group_id, "mining", {}) or {}
-        last = float((mining.get(member) or {}).get("last_claim") or 0)
-        if now - last < MINING_CLAIM_COOLDOWN_S:
-            return None
-        rate = self.claim_rate(group_id, member, now)
-        entry = self.award(group_id, member, rate,
-                           "mining claim (game points only)",
-                           ref="mining", kind="mining", now=now)
-        if entry is None:
-            return None  # cap hit or unverified
-        mining[member] = {"last_claim": now}
-        self._save_json(group_id, "mining", mining)
-        return entry
+        with self._locked(group_id):
+            # The ledger is the cooldown authority (finding D): the
+            # award IS the cooldown record, so the pair commits as
+            # one save; the mining.json timestamp write remains for
+            # display, as post-commit bookkeeping — and the fallback
+            # authority for members with no ledger history.
+            last_ledger = max(
+                (e.ts for e in self._ledger(group_id)
+                 if e.member == member and e.kind == "mining"),
+                default=0.0)
+            mining = self._load_json(group_id, "mining", {}) or {}
+            last = last_ledger or float(
+                (mining.get(member) or {}).get("last_claim") or 0)
+            if now - last < MINING_CLAIM_COOLDOWN_S:
+                return None
+            rate = self.claim_rate(group_id, member, now)
+            entry = self.award(group_id, member, rate,
+                               "mining claim (game points only)",
+                               ref="mining", kind="mining", now=now)
+            if entry is None:
+                return None  # cap hit or unverified
+            mining[member] = {"last_claim": now}
+            self._post_commit(self._save_json, group_id, "mining",
+                              mining)
+            return entry
 
 
 class PrizePool:
@@ -1098,6 +1491,8 @@ class PrizePool:
             return []
 
     def _save(self, group_id: str, prizes: list[dict[str, Any]]) -> None:
+        """Persist prizes — or raise (finding B, same contract as
+        the economy ledger): a failed save never reports success."""
         try:
             path = self._path(group_id)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1106,7 +1501,9 @@ class PrizePool:
                            encoding="utf-8")
             tmp.replace(path)
         except OSError as exc:
-            _log.warning("prize save failed for %s: %s", group_id, exc)
+            raise EconomyPersistenceError(
+                f"prize save failed for {group_id}: {exc} — the "
+                "operation was not committed") from exc
 
     def create_prize(self, group_id: str, description: str,
                      funded_by_owner: bool = False,
@@ -1119,25 +1516,29 @@ class PrizePool:
                  "owner_approval": (owner_approval or "").strip()[:300],
                  "winner": "", "redeemed_at": 0.0,
                  "created_at": time.time()}
-        prizes = self._load(group_id)
-        prizes.append(prize)
-        self._save(group_id, prizes)
+        # The group writer lock serializes this against every other
+        # writer of the group's state (finding C).
+        with _locked_path(self._path(group_id).parent / "economy.lock"):
+            prizes = self._load(group_id)
+            prizes.append(prize)
+            self._save(group_id, prizes)
         return prize
 
     def redeem(self, group_id: str, prize_id: str, winner: str) -> dict[str, Any] | None:
         """Redeem a prize to a winner. Refuses unless owner-funded."""
-        prizes = self._load(group_id)
-        for prize in prizes:
-            if prize["id"] == prize_id or prize["id"].startswith(prize_id):
-                if prize.get("winner"):
-                    return None  # already claimed
-                if not prize.get("funded_by_owner") or not prize.get("owner_approval"):
-                    return None  # not funded — no prize exists to redeem
-                prize["winner"] = winner
-                prize["redeemed_at"] = time.time()
-                self._save(group_id, prizes)
-                return prize
-        return None
+        with _locked_path(self._path(group_id).parent / "economy.lock"):
+            prizes = self._load(group_id)
+            for prize in prizes:
+                if prize["id"] == prize_id or prize["id"].startswith(prize_id):
+                    if prize.get("winner"):
+                        return None  # already claimed
+                    if not prize.get("funded_by_owner") or not prize.get("owner_approval"):
+                        return None  # not funded — no prize exists to redeem
+                    prize["winner"] = winner
+                    prize["redeemed_at"] = time.time()
+                    self._save(group_id, prizes)
+                    return prize
+            return None
 
     def list_prizes(self, group_id: str) -> list[dict[str, Any]]:
         return self._load(group_id)

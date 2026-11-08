@@ -188,6 +188,7 @@ def register(registry: Any) -> None:
             spec["fn"],
             description=spec["description"],
             capability="owner",
+            result_protocol="dict_ok",
         )
     # Scheduler-internal heartbeat tool. The ``presence-heartbeat`` job is
     # stored with payload_kind="tool" and payload
@@ -209,6 +210,7 @@ def register(registry: Any) -> None:
         "interests, prepare surfaces, surface one due item. "
         "Scheduler-internal; runs every ~30 min.",
         capability="owner",
+        result_protocol="dict_ok",
     )
     def _presence_heartbeat_tool() -> dict[str, Any]:
         from ..autonomy.idle import workspace_db
@@ -225,6 +227,7 @@ def register(registry: Any) -> None:
         "fire proactive triggers, work them through the rotation, "
         "verify. Scheduler-internal; runs every ~30 min.",
         capability="owner",
+        result_protocol="dict_ok",
     )
     def _agency_shift_tool() -> dict[str, Any]:
         # Real organs are constructed HERE (this module is pinned L5,
@@ -354,6 +357,7 @@ def register(registry: Any) -> None:
         "initiatives; ones needing approval land in /proposals). "
         "Scheduler-internal; runs every ~30 min.",
         capability="owner",
+        result_protocol="dict_ok",
     )
     def _agent_modes_tick_tool() -> dict[str, Any]:
         # The runtime's persistent engine (context.extras["agent_modes"])
@@ -393,6 +397,7 @@ def register(registry: Any) -> None:
         "Consults the adaptive cancer gate on each sample. "
         "Scheduler-internal; runs every ~1 min.",
         capability="owner",
+        result_protocol="dict_ok",
     )
     def _immune_sampler_tool() -> dict[str, Any]:
         # The shared monitor resolves its store from the same
@@ -483,6 +488,7 @@ def register(registry: Any) -> None:
         "notes. Proposals never auto-apply — approval stays the "
         "owner's. Scheduler-internal; runs every ~1h.",
         capability="owner",
+        result_protocol="dict_ok",
     )
     def _failure_loop_tool() -> dict[str, Any]:
         # The loop reads the SAME DB the router's learning attachment
@@ -506,6 +512,7 @@ def register(registry: Any) -> None:
         "closed seasons' prizes (ranks 1-3) through the group "
         "economy. Scheduler-internal; runs every ~1h.",
         capability="owner",
+        result_protocol="dict_ok",
     )
     def _season_tick_tool() -> dict[str, Any]:
         from ..games.tournaments_seasons import run_season_tick_once
@@ -524,6 +531,7 @@ def register(registry: Any) -> None:
         "due scheduled group posts through the social gateway. "
         "Scheduler-internal; runs every ~1 min.",
         capability="owner",
+        result_protocol="dict_ok",
     )
     def _orchestration_tool() -> dict[str, Any]:
         from ..community.orchestration import run_orchestration_tick

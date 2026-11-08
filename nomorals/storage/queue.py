@@ -68,6 +68,12 @@ class Job:
     lease_until: float = 0.0
     lease_owner: str = ""
     queueing_lock: str = ""
+    #: F02 lease generation: a fresh random token per lease. Terminal
+    #: writes (complete / fail / requeue) presented with this token
+    #: land only while this exact lease still owns the job — the
+    #: owner STRING is not fencing (the same worker name can hold a
+    #: later generation), the token is.
+    lease_token: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,6 +85,7 @@ class Job:
             "max_attempts": self.max_attempts,
             "status": self.status,
             "queueing_lock": self.queueing_lock,
+            "lease_token": self.lease_token,
         }
 
 
@@ -103,6 +110,9 @@ class WorkQueue:
         #: Migration 88 adds ``queueing_lock``; older databases keep working
         #: with the lock feature quietly disabled.
         self._lock_column: bool | None = None
+        #: ``lease_token`` rides the same guarded-ALTER precedent: it is
+        #: added lazily on first lease, never via the frozen migrations.
+        self._token_column: bool | None = None
 
     def _has_lock_column(self) -> bool:
         if self._lock_column is None:
@@ -113,6 +123,33 @@ class WorkQueue:
                 cols = set()
             self._lock_column = "queueing_lock" in cols
         return self._lock_column
+
+    def _has_token_column(self) -> bool:
+        if self._token_column is None:
+            try:
+                cols = {r["name"] for r in self.db.table_info(self.TABLE)}
+            except Exception as e:  # table may not exist yet
+                record_failure('queue.WorkQueue._has_token_column', e)
+                cols = set()
+            self._token_column = "lease_token" in cols
+        return self._token_column
+
+    def _ensure_token_column(self) -> bool:
+        """Add ``lease_token`` on databases predating it (guarded
+        ALTER, the queueing_lock precedent). Returns False when the
+        column is unavailable — fencing then fails closed for
+        token-presenting callers rather than guessing."""
+        if self._has_token_column():
+            return True
+        try:
+            self.db.execute(
+                f"ALTER TABLE {self.TABLE} "
+                "ADD COLUMN lease_token TEXT NOT NULL DEFAULT ''")
+            self._token_column = True
+        except Exception as e:  # table may not exist yet
+            record_failure('queue.WorkQueue._ensure_token_column', e)
+            self._token_column = False
+        return self._token_column
 
     # ── producer ─────────────────────────────────────────────────────────────
     def enqueue(
@@ -208,6 +245,7 @@ class WorkQueue:
         """
         ttl = lease_seconds if lease_seconds is not None else self.default_lease_seconds
         now = time.time()
+        has_token = self._ensure_token_column()
         claimed: list[Job] = []
         with self.db.transaction():
             rows = self.db.query(
@@ -222,16 +260,34 @@ class WorkQueue:
                 (topic, now, now, batch),
             )
             for row in rows:
-                self.db.execute(
-                    f"""
-                    UPDATE {self.TABLE}
-                       SET status = 'leased', lease_owner = ?, lease_until = ?,
-                           attempts = attempts + 1, updated_at = ?
-                     WHERE id = ?
-                    """,
-                    (worker, now + ttl, now, row["id"]),
-                )
-                claimed.append(self._to_job(row, status="leased", attempts=row["attempts"] + 1))
+                # Every lease is a new generation: a fresh token the
+                # worker must present to commit terminal state (F02).
+                token = new_id() if has_token else ""
+                if has_token:
+                    self.db.execute(
+                        f"""
+                        UPDATE {self.TABLE}
+                           SET status = 'leased', lease_owner = ?,
+                               lease_until = ?, lease_token = ?,
+                               attempts = attempts + 1, updated_at = ?
+                         WHERE id = ?
+                        """,
+                        (worker, now + ttl, token, now, row["id"]),
+                    )
+                else:
+                    self.db.execute(
+                        f"""
+                        UPDATE {self.TABLE}
+                           SET status = 'leased', lease_owner = ?, lease_until = ?,
+                               attempts = attempts + 1, updated_at = ?
+                         WHERE id = ?
+                        """,
+                        (worker, now + ttl, now, row["id"]),
+                    )
+                claimed.append(self._to_job(
+                    row, status="leased", attempts=row["attempts"] + 1,
+                    lease_owner=worker, lease_until=now + ttl,
+                    lease_token=token))
         self.stats["leased"] += len(claimed)
         return claimed
 
@@ -239,53 +295,120 @@ class WorkQueue:
         jobs = self.lease(topic, worker, batch=1, **kwargs)
         return jobs[0] if jobs else None
 
-    def complete(self, job_id: str, result: Any = None) -> None:
-        now = time.time()
-        self.db.execute(
-            f"""
-            UPDATE {self.TABLE}
-               SET status = 'done', result = ?, error = '', lease_owner = '',
-                   lease_until = 0, updated_at = ?
-             WHERE id = ?
-            """,
-            (json.dumps(result, default=str) if result is not None else "", now, job_id),
-        )
-        self.stats["completed"] += 1
+    def complete(self, job_id: str, result: Any = None, *,
+                 lease_token: str | None = None) -> bool:
+        """Mark a job done. Returns True when the write landed.
 
-    def fail(self, job_id: str, error: str = "", *, retry: bool = True) -> str:
-        """Record a failure. Re-queues with exponential backoff, or moves to dead."""
+        Fencing (F02): with ``lease_token`` — the token :meth:`lease`
+        handed the worker — the update lands only while that exact
+        lease generation still owns the job; a stale worker's late
+        completion returns False and mutates nothing (it must not
+        overwrite the current owner's state or result). Without a
+        token this remains the deliberate administrative completion
+        path (operator tooling, tests); workers never use it.
+        """
+        now = time.time()
+        payload = json.dumps(result, default=str) \
+            if result is not None else ""
+        if lease_token:
+            self._ensure_token_column()
+            cursor = self.db.execute(
+                f"""
+                UPDATE {self.TABLE}
+                   SET status = 'done', result = ?, error = '',
+                       lease_owner = '', lease_until = 0,
+                       lease_token = '', updated_at = ?
+                 WHERE id = ? AND status = 'leased' AND lease_token = ?
+                """,
+                (payload, now, job_id, lease_token),
+            )
+            if not cursor.rowcount:
+                return False
+        else:
+            self.db.execute(
+                f"""
+                UPDATE {self.TABLE}
+                   SET status = 'done', result = ?, error = '', lease_owner = '',
+                       lease_until = 0, updated_at = ?
+                 WHERE id = ?
+                """,
+                (payload, now, job_id),
+            )
+        self.stats["completed"] += 1
+        return True
+
+    def fail(self, job_id: str, error: str = "", *, retry: bool = True,
+             lease_token: str | None = None) -> str:
+        """Record a failure. Re-queues with exponential backoff, or moves to dead.
+
+        With ``lease_token`` the write is fenced like
+        :meth:`complete`: a stale generation gets ``"stale"`` back
+        and the current owner's job is untouched.
+        """
         row = self.db.query_one(f"SELECT * FROM {self.TABLE} WHERE id = ?", (job_id,))
         if row is None:
             raise NotFound(f"job {job_id} not found")
+        fence = ""
+        fence_params: tuple[Any, ...] = ()
+        if lease_token:
+            self._ensure_token_column()
+            if row["status"] != "leased" \
+                    or str(row.get("lease_token") or "") != lease_token:
+                return "stale"
+            fence = " AND status = 'leased' AND lease_token = ?"
+            fence_params = (lease_token,)
         now = time.time()
         attempts = int(row["attempts"])
         if retry and attempts < int(row["max_attempts"]):
             # Full jitter: avoids a thundering herd when a whole batch fails together.
             delay = min(self.backoff_cap, self.backoff_base ** attempts)
             delay = random.uniform(0.0, delay)
-            self.db.execute(
+            cursor = self.db.execute(
                 f"""
                 UPDATE {self.TABLE}
                    SET status = 'ready', error = ?, available_at = ?,
-                       lease_owner = '', lease_until = 0, updated_at = ?
-                 WHERE id = ?
+                       lease_owner = '', lease_until = 0, lease_token = '',
+                       updated_at = ?
+                 WHERE id = ?{fence}
                 """,
-                (error[:2000], now + delay, now, job_id),
+                (error[:2000], now + delay, now, job_id, *fence_params),
             )
+            if fence and not cursor.rowcount:
+                return "stale"
             self.stats["failed"] += 1
             return "retrying"
-        self.db.execute(
+        cursor = self.db.execute(
             f"""
             UPDATE {self.TABLE}
-               SET status = 'dead', error = ?, lease_owner = '', lease_until = 0, updated_at = ?
-             WHERE id = ?
+               SET status = 'dead', error = ?, lease_owner = '',
+                   lease_until = 0, lease_token = '', updated_at = ?
+             WHERE id = ?{fence}
             """,
-            (error[:2000], now, job_id),
+            (error[:2000], now, job_id, *fence_params),
         )
+        if fence and not cursor.rowcount:
+            return "stale"
         self.stats["dead"] += 1
         return "dead"
 
-    def requeue(self, job_id: str, *, delay: float = 0.0) -> None:
+    def requeue(self, job_id: str, *, delay: float = 0.0,
+                lease_token: str | None = None) -> bool:
+        """Return a job to the ready pool. With ``lease_token`` the
+        release is fenced to the current lease generation (a stale
+        worker cannot release another generation's job); returns
+        whether the write landed."""
+        if lease_token:
+            self._ensure_token_column()
+            cursor = self.db.execute(
+                f"""
+                UPDATE {self.TABLE}
+                   SET status = 'ready', available_at = ?, lease_owner = '',
+                       lease_until = 0, lease_token = '', updated_at = ?
+                 WHERE id = ? AND status = 'leased' AND lease_token = ?
+                """,
+                (time.time() + delay, time.time(), job_id, lease_token),
+            )
+            return bool(cursor.rowcount)
         self.db.execute(
             f"""
             UPDATE {self.TABLE}
@@ -295,14 +418,18 @@ class WorkQueue:
             """,
             (time.time() + delay, time.time(), job_id),
         )
+        return True
 
     def reclaim_expired(self) -> int:
         """Return expired-lease jobs to the ready pool."""
         now = time.time()
+        token_clear = ", lease_token = ''" \
+            if self._ensure_token_column() else ""
         cursor = self.db.execute(
             f"""
             UPDATE {self.TABLE}
-               SET status = 'ready', lease_owner = '', lease_until = 0, updated_at = ?
+               SET status = 'ready', lease_owner = '', lease_until = 0,
+                   updated_at = ?{token_clear}
              WHERE status = 'leased' AND lease_until <= ?
             """,
             (now, now),
@@ -313,22 +440,32 @@ class WorkQueue:
             _log.debug("reclaimed %d expired leases", count)
         return count
 
-    def extend_lease(self, job_id: str, worker: str, extra_seconds: float) -> bool:
+    def extend_lease(self, job_id: str, worker: str, extra_seconds: float,
+                     *, lease_token: str | None = None) -> bool:
         """Heartbeat a long-running job: push its lease deadline out.
 
         Only the lease owner can extend (a stolen/reclaimed lease returns
         False — the worker must stop, not keep working on a job another
-        worker may have picked up).
+        worker may have picked up). With ``lease_token`` the heartbeat
+        is fenced to the lease generation too: the same worker NAME
+        holding a later generation does not revive this one (F02).
         """
         now = time.time()
+        fence = ""
+        params: tuple[Any, ...] = (
+            now + max(1.0, extra_seconds), now, job_id, worker, now)
+        if lease_token:
+            self._ensure_token_column()
+            fence = " AND lease_token = ?"
+            params = (*params, lease_token)
         cursor = self.db.execute(
             f"""
             UPDATE {self.TABLE}
                SET lease_until = ?, updated_at = ?
              WHERE id = ? AND status = 'leased' AND lease_owner = ?
-               AND lease_until > ?
+               AND lease_until > ?{fence}
             """,
-            (now + max(1.0, extra_seconds), now, job_id, worker, now),
+            params,
         )
         return bool(cursor.rowcount)
 
@@ -524,9 +661,14 @@ class WorkQueue:
             try:
                 result = handler(job)
             except Exception as exc:  # noqa: BLE001 - worker must not die on one job
-                self.fail(job.id, f"{type(exc).__name__}: {exc}")
+                self.fail(job.id, f"{type(exc).__name__}: {exc}",
+                          lease_token=job.lease_token)
             else:
-                self.complete(job.id, result)
+                # Fenced (F02): if the lease was reclaimed mid-flight,
+                # the completion is refused and the current owner's
+                # state stands — this worker's result is dropped.
+                self.complete(job.id, result,
+                              lease_token=job.lease_token)
             processed += 1
             if max_jobs is not None and processed >= max_jobs:
                 break
@@ -565,9 +707,11 @@ class WorkQueue:
             try:
                 result = handler(job)
             except Exception as exc:  # noqa: BLE001 - worker must not die on one job
-                self.fail(job.id, f"{type(exc).__name__}: {exc}")
+                self.fail(job.id, f"{type(exc).__name__}: {exc}",
+                          lease_token=job.lease_token)
             else:
-                self.complete(job.id, result)
+                self.complete(job.id, result,
+                              lease_token=job.lease_token)
             processed += 1
         return processed
 
@@ -837,9 +981,11 @@ class WorkQueue:
             status=overrides.get("status", row["status"]),
             created_at=row["created_at"],
             available_at=row["available_at"],
-            lease_until=row["lease_until"],
-            lease_owner=row["lease_owner"],
+            lease_until=overrides.get("lease_until", row["lease_until"]),
+            lease_owner=overrides.get("lease_owner", row["lease_owner"]),
             queueing_lock=row.get("queueing_lock") or "",
+            lease_token=overrides.get(
+                "lease_token", row.get("lease_token") or ""),
         )
 
 

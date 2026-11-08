@@ -3272,10 +3272,13 @@ class GroupSurface:
                 "balance": econ.balance(group_key, user_id)}
 
     def pay(self, group_key: str, sender: str, recipient: str,
-            amount: int, *, now: float | None = None
+            amount: int, *, now: float | None = None,
+            op_id: str = ""
             ) -> dict[str, Any]:
         """/pay with the treasury tax: the fee leg is a treasury
-        contribution, the net leg a transfer — both ledgered."""
+        contribution, the net leg a transfer — committed as ONE
+        atomic operation, so a failure can no longer take the fee
+        and deliver nothing."""
         now = now if now is not None else time.time()
         if not self.economy_on(group_key):
             return {"ok": False, "reason": "off"}
@@ -3299,12 +3302,8 @@ class GroupSurface:
         if power is not None and power.get("tax_pct") is not None:
             pct = int(power["tax_pct"])
         fee = (amount * pct) // 100
-        if fee:
-            if not econ.contribute_treasury(group_key, sender, fee,
-                                            now=now):
-                return {"ok": False, "reason": "funds"}
-        if not econ.transfer(group_key, sender, recipient,
-                             amount - fee, now=now):
+        if not econ.transfer_taxed(group_key, sender, recipient,
+                                   amount, fee, now=now, op_id=op_id):
             return {"ok": False, "reason": "funds"}
         return {"ok": True, "fee": fee, "net": amount - fee,
                 "balance": econ.balance(group_key, sender),

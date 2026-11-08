@@ -97,8 +97,11 @@ def test_direct_import_surface_and_all_unchanged():
     import nomorals.tools.registry_failures as lf
 
     assert lf.format_failures() == "no recorded registry failures"
+    # Batch B (finding F08) deliberately extends the surface with
+    # OpResult — the typed tool result callers consume.
     assert reg_mod.__all__ == ["ToolRegistry", "ToolSpec", "ToolHealth",
-                              "sanitize_tool_description", "annotations_for_kind"]
+                              "OpResult", "sanitize_tool_description",
+                              "annotations_for_kind"]
 
 
 # ── converted sites ─────────────────────────────────────────────────

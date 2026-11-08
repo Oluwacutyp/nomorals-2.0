@@ -95,6 +95,11 @@ class ActiveSystems:
         self._research_organ = research_organ
         self._wisdom_organ = wisdom_organ
         self._impossible = impossible
+        #: F03: lease generation tokens for initiatives this executor
+        #: is currently working, keyed by initiative id. Every store
+        #: mutation below presents the token, so a stale executor can
+        #: never move another generation's initiative.
+        self._initiative_leases: dict[str, str] = {}
         #: Real organ adapters, keyed by system name (+ "planner").
         #: Organ-less adapters degrade to empty observations.
         self.adapters = dict(adapters or {})
@@ -147,6 +152,33 @@ class ActiveSystems:
         is NOT completed, the discrepancy is visible, and the next
         turn can retry. The worker never grades its own work.
         """
+        # F03: completion is a lease-fenced mutation. Called from
+        # _work_trigger the lease is already held; called directly
+        # (the impossible-claim path) the gate claims it here — and
+        # stands down when another entrypoint owns the initiative.
+        claimed_here = False
+        if it.id not in self._initiative_leases:
+            token = self.store.claim(
+                it.id, owner=f"executor:{system}", lease_s=300, now=now)
+            if not token:
+                return WorkResult(useful=False,
+                                  work_key=f"{system}:{it.id}")
+            self._initiative_leases[it.id] = token
+            claimed_here = True
+        try:
+            return self._complete_verified_inner(
+                it, system, stop_reason=stop_reason,
+                verification=verification, now=now)
+        finally:
+            if claimed_here:
+                token = self._initiative_leases.pop(it.id, None)
+                self.store.release(it.id, owner=f"executor:{system}",
+                                   lease_token=token)
+
+    def _complete_verified_inner(self, it: Initiative, system: str, *,
+                                 stop_reason: str,
+                                 verification: dict[str, Any],
+                                 now: float) -> WorkResult:
         # The checker re-reads through adapters AND the injected organs:
         # research / wisdom / impossible organs are not in the adapters
         # dict (they are separate constructor args), but their re-reads
@@ -167,13 +199,13 @@ class ActiveSystems:
             merged["maker_checker"] = {"passed": True,
                                        "checks": list(check.checks)}
             self.store.complete(it.id, stop_reason=stop_reason,
-                                verification=merged)
+                                verification=merged, lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=True, work_key=f"{system}:{it.id}")
         self.store.advance(
             it.id, next_review_at=now + 3600,
             blocker=f"maker-checker rejected: {check.reason}",
             evidence=f"completion claim rejected: "
-                     f"{str(verification)[:400]}")
+                     f"{str(verification)[:400]}", lease_token=self._initiative_leases.get(it.id))
         return WorkResult(useful=False, work_key=f"{system}:{it.id}")
 
     def names(self) -> list[str]:
@@ -502,11 +534,14 @@ class ActiveSystems:
             name, f"{name} standing watch checked: {it.outcome}",
             source=f"agency:{name}")
         self.store.advance(it.id, next_review_at=now + 3600,
-                           evidence=f"{name} watch checked at {now}")
+                           evidence=f"{name} watch checked at {now}", lease_token=self._initiative_leases.get(it.id))
         return WorkResult(useful=deposited, work_key=f"{name}:{it.id}")
 
     def _tick_digestion(self, now: float) -> WorkResult:
-        active = self.store.list_active()
+        # Initiatives under a live lease are being worked by their
+        # owner this cycle — digestion skips them (F03 fence).
+        active = [i for i in self.store.list_active()
+                  if not (i.lease_owner and i.lease_until > now)]
         if not active:
             return WorkResult(useful=False)
         # Digest the oldest active initiative's evidence (AA-43):
@@ -550,18 +585,33 @@ class ActiveSystems:
             self.store.advance(
                 it.id, next_review_at=now + 3600,
                 evidence="digestion action delta: "
-                         + "; ".join(deltas.action_delta))
+                         + "; ".join(deltas.action_delta), lease_token=self._initiative_leases.get(it.id))
         return WorkResult(useful=deposited, work_key=f"digestion:{it.id}")
 
     # ── working one trigger initiative ─────────────────────────────
     def _work_trigger(self, it: Initiative, now: float) -> WorkResult:
+        # F03: the executor works under the initiative lease. Claim
+        # first; if another entrypoint holds it, this turn stands
+        # down WITHOUT touching the initiative (its mutations would
+        # be refused by the fence anyway). The claim is released when
+        # the turn ends, whatever happened inside.
+        owner = f"executor:{it.objective}"
+        token = self.store.claim(it.id, owner=owner, lease_s=300,
+                                 now=now)
+        if not token:
+            return WorkResult(useful=False,
+                              work_key=f"{it.objective}:{it.id}")
+        self._initiative_leases[it.id] = token
         try:
             return self._work_trigger_inner(it, now)
         except Exception as exc:  # noqa: BLE001 - trigger work never crashes
             self.store.advance(
                 it.id, next_review_at=now + 3600,
-                blocker=f"trigger work failed: {exc}")
+                blocker=f"trigger work failed: {exc}", lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=False, work_key=f"{it.objective}:{it.id}")
+        finally:
+            self._initiative_leases.pop(it.id, None)
+            self.store.release(it.id, owner=owner, lease_token=token)
 
     def _work_trigger_inner(self, it: Initiative, now: float) -> WorkResult:
         name = it.objective
@@ -587,7 +637,7 @@ class ActiveSystems:
         # the lifecycle moving.
         self.store.advance(it.id, next_review_at=now + 3600,
                             evidence=f"{name} trigger noted; organ tick "
-                                     "handles execution")
+                                     "handles execution", lease_token=self._initiative_leases.get(it.id))
         return WorkResult(useful=True, work_key=f"{name}:{it.id}")
 
     def _work_research_trigger(self, it: Initiative, payload: dict,
@@ -605,7 +655,7 @@ class ActiveSystems:
         organ = self._research_organ
         if organ is None:
             self.store.advance(it.id, next_review_at=now + 3600,
-                                blocker="no research organ injected")
+                                blocker="no research organ injected", lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=False, work_key=f"research:{it.id}")
         gap = payload.get("gap") or {}
         watch = payload.get("watch") or {}
@@ -649,7 +699,7 @@ class ActiveSystems:
                     now=now)
         except Exception as exc:  # noqa: BLE001 - per-trigger failure
             self.store.advance(it.id, next_review_at=now + 3600,
-                                blocker=f"research trigger work failed: {exc}")
+                                blocker=f"research trigger work failed: {exc}", lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=False, work_key=f"research:{it.id}")
         # No per-trigger method on this organ (or no gap/watch in the
         # payload): fall back to a generic tick and note the trigger.
@@ -668,12 +718,12 @@ class ActiveSystems:
             # other per-trigger failure in this module.
             self.store.advance(it.id, next_review_at=now + 3600,
                                blocker=f"research trigger fallback tick "
-                                       f"failed: {exc}")
+                                       f"failed: {exc}", lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=False, work_key=f"research:{it.id}")
         self.store.advance(it.id, next_review_at=now + 3600,
                             evidence="research trigger noted; organ tick "
                                      "handles execution (no per-trigger "
-                                     "method)")
+                                     "method)", lease_token=self._initiative_leases.get(it.id))
         return WorkResult(useful=True, work_key=f"research:{it.id}")
 
     def _work_wisdom_trigger(self, it: Initiative, payload: dict,
@@ -685,7 +735,7 @@ class ActiveSystems:
         organ = self._wisdom_organ
         if organ is None:
             self.store.advance(it.id, next_review_at=now + 3600,
-                                blocker="no wisdom organ injected")
+                                blocker="no wisdom organ injected", lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=False, work_key=f"wisdom:{it.id}")
         try:
             if callable(getattr(organ, "ingest_next", None)):
@@ -697,7 +747,7 @@ class ActiveSystems:
                 if not ingested:
                     self.store.advance(it.id, next_review_at=now + 3600,
                                        evidence="wisdom ingest trigger: "
-                                               "nothing pending")
+                                               "nothing pending", lease_token=self._initiative_leases.get(it.id))
                     return WorkResult(useful=True,
                                       work_key=f"wisdom:{it.id}")
                 return self._complete_verified(
@@ -707,7 +757,7 @@ class ActiveSystems:
                     now=now)
         except Exception as exc:  # noqa: BLE001 - per-trigger failure
             self.store.advance(it.id, next_review_at=now + 3600,
-                                blocker=f"wisdom trigger work failed: {exc}")
+                                blocker=f"wisdom trigger work failed: {exc}", lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=False, work_key=f"wisdom:{it.id}")
         try:
             report = organ.tick(budget_seconds=60.0)
@@ -722,12 +772,12 @@ class ActiveSystems:
             # useful.
             self.store.advance(it.id, next_review_at=now + 3600,
                                blocker=f"wisdom trigger fallback tick "
-                                       f"failed: {exc}")
+                                       f"failed: {exc}", lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=False, work_key=f"wisdom:{it.id}")
         self.store.advance(it.id, next_review_at=now + 3600,
                             evidence="wisdom trigger noted; organ tick "
                                      "handles execution (no per-item "
-                                     "method)")
+                                     "method)", lease_token=self._initiative_leases.get(it.id))
         return WorkResult(useful=True, work_key=f"wisdom:{it.id}")
 
     def _work_deals_trigger(self, it: Initiative, payload: dict,
@@ -735,7 +785,7 @@ class ActiveSystems:
         adapter = self.adapters.get("deals")
         if adapter is None:
             self.store.advance(it.id, next_review_at=now + 3600,
-                                blocker="no deals adapter injected")
+                                blocker="no deals adapter injected", lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=False, work_key=f"deals:{it.id}")
         alert = payload.get("alert") or {}
         if not alert:
@@ -744,7 +794,7 @@ class ActiveSystems:
         product = str(alert.get("product", alert.get("query", "")))
         if not product:
             self.store.advance(it.id, next_review_at=now + 3600,
-                                blocker="deal trigger has no product")
+                                blocker="deal trigger has no product", lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=False, work_key=f"deals:{it.id}")
         need: dict[str, Any] = dict(alert.get("need") or {})
         need.setdefault("product", product)
@@ -811,7 +861,7 @@ class ActiveSystems:
                 self.store.advance(
                     it.id, next_review_at=now + 3600, blocker=blocker,
                     evidence=f"saving verified; purchase blocked: "
-                             f"{res.get('reason', blocker)}")
+                             f"{res.get('reason', blocker)}", lease_token=self._initiative_leases.get(it.id))
                 return WorkResult(useful=True, work_key=f"deals:{it.id}")
             # Legacy path (adapter without an executor, e.g. a test
             # double): verify + report readiness, never buy.
@@ -829,7 +879,7 @@ class ActiveSystems:
                 "no authority configured — cannot verify spending"
             self.store.advance(
                 it.id, next_review_at=now + 3600,
-                blocker=f"saving verified but {reason} (no purchase made)")
+                blocker=f"saving verified but {reason} (no purchase made)", lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=True, work_key=f"deals:{it.id}")
         return self._complete_verified(
             it, "deals", stop_reason="deal checked: not a saving",
@@ -846,7 +896,7 @@ class ActiveSystems:
             place = places[0] if places else ""
         if adapter is None or not place:
             self.store.advance(it.id, next_review_at=now + 3600,
-                                blocker="no weather adapter / place configured")
+                                blocker="no weather adapter / place configured", lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=False, work_key=f"weather:{it.id}")
         snap = adapter.snapshot(place) or {}
         alerts = snap.get("alerts") or []
@@ -869,7 +919,7 @@ class ActiveSystems:
         adapter = self.adapters.get("news")
         if adapter is None:
             self.store.advance(it.id, next_review_at=now + 3600,
-                                blocker="no news adapter injected")
+                                blocker="no news adapter injected", lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=False, work_key=f"news:{it.id}")
         digest = adapter.fetch_digest() or {}
         clusters = adapter.clusters() or []
@@ -889,7 +939,7 @@ class ActiveSystems:
         adapter = self.adapters.get("social")
         if adapter is None:
             self.store.advance(it.id, next_review_at=now + 3600,
-                                blocker="no social adapter injected")
+                                blocker="no social adapter injected", lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=False, work_key=f"social:{it.id}")
         backlog = adapter.backlog() or {}
         if backlog.get("stop_signal"):
@@ -929,7 +979,7 @@ class ActiveSystems:
             blocker = "no authority configured — draft held, nothing sent"
         self.store.advance(it.id, next_review_at=now + 3600,
                             blocker=blocker,
-                            evidence=f"draft ready: {draft}")
+                            evidence=f"draft ready: {draft}", lease_token=self._initiative_leases.get(it.id))
         self.knowledge.deposit(
             "social", f"social draft held for approval: {action}",
             source="agency:social")
@@ -940,7 +990,7 @@ class ActiveSystems:
         adapter = self.adapters.get("leads")
         if adapter is None:
             self.store.advance(it.id, next_review_at=now + 3600,
-                                blocker="no leads adapter injected")
+                                blocker="no leads adapter injected", lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=False, work_key=f"leads:{it.id}")
         lead = dict(payload.get("lead") or {})
         if not lead:
@@ -948,7 +998,7 @@ class ActiveSystems:
             lead = live[0] if live else {}
         if not lead:
             self.store.advance(it.id, next_review_at=now + 3600,
-                                blocker="lead trigger has no lead")
+                                blocker="lead trigger has no lead", lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=False, work_key=f"leads:{it.id}")
         kind = it.dedupe_key.split(":")[1] if ":" in it.dedupe_key else ""
         if "quiet" in it.dedupe_key or kind == "quiet":
@@ -967,7 +1017,7 @@ class ActiveSystems:
         if not nxt_options:
             self.store.complete(
                 it.id, stop_reason=f"lead {current}: no forward transition",
-                verification={"lead": lead})
+                verification={"lead": lead}, lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=True, work_key=f"leads:{it.id}")
         res = None
         # Idempotency: when the blocker is one of the DM-wait markers,
@@ -983,7 +1033,7 @@ class ActiveSystems:
             if res.get("status") != "advanced":
                 self.store.advance(it.id, next_review_at=now + 3600,
                                     blocker=f"lead advance failed: "
-                                            f"{res.get('error', res)}")
+                                            f"{res.get('error', res)}", lease_token=self._initiative_leases.get(it.id))
                 return WorkResult(useful=False, work_key=f"leads:{it.id}")
             self.knowledge.deposit(
                 "leads",
@@ -1023,7 +1073,7 @@ class ActiveSystems:
                 blocker=f"DM send blocked: {reason}"
                         + (f" (proposal {proposal})" if proposal else ""),
                 evidence=f"lead advanced {current} → {nxt_options[0]}; "
-                         f"draft held: {draft}")
+                         f"draft held: {draft}", lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=True, work_key=f"leads:{it.id}")
         # No DM-send executor on this adapter: the next action is a
         # DM draft held for owner approval, recorded as a blocker.
@@ -1031,7 +1081,7 @@ class ActiveSystems:
             it.id, next_review_at=now + 3600,
             next_action=f"send approved DM draft for lead {lead.get('lead_id', '')}",
             blocker="DM send needs owner-approved draft (no DM executor)",
-            evidence=f"lead advanced {current} → {nxt_options[0]}")
+            evidence=f"lead advanced {current} → {nxt_options[0]}", lease_token=self._initiative_leases.get(it.id))
         return WorkResult(useful=True, work_key=f"leads:{it.id}")
 
     def _work_gigs_trigger(self, it: Initiative, payload: dict,
@@ -1039,7 +1089,7 @@ class ActiveSystems:
         adapter = self.adapters.get("gigs")
         if adapter is None:
             self.store.advance(it.id, next_review_at=now + 3600,
-                                blocker="no gigs adapter injected")
+                                blocker="no gigs adapter injected", lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=False, work_key=f"gigs:{it.id}")
         if "followup" in it.dedupe_key:
             gig_id = str(payload.get("gig_id", ""))
@@ -1060,7 +1110,7 @@ class ActiveSystems:
             opp = opps[0] if opps else {}
         if not opp:
             self.store.advance(it.id, next_review_at=now + 3600,
-                                blocker="gig trigger has no opportunity")
+                                blocker="gig trigger has no opportunity", lease_token=self._initiative_leases.get(it.id))
             return WorkResult(useful=False, work_key=f"gigs:{it.id}")
         score = adapter.score(opp)
         draft = adapter.draft(opp)

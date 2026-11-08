@@ -24,16 +24,16 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from ..core.errors import (
-    CapabilityDenied, NotFound, ToolError, ToolNotFound, ValidationError,
-    classify,
+    CapabilityDenied, ConstraintViolation, NotFound, ToolError, ToolNotFound,
+    ValidationError, classify,
 )
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..core.policy import CapabilitySet
 from ..core.result import Err, Ok, Outcome
 
-__all__ = ["ToolRegistry", "ToolSpec", "ToolHealth", "sanitize_tool_description",
-           "annotations_for_kind"]
+__all__ = ["ToolRegistry", "ToolSpec", "ToolHealth", "OpResult",
+           "sanitize_tool_description", "annotations_for_kind"]
 
 _log = get_logger(__name__)
 
@@ -158,6 +158,14 @@ class ToolSpec:
     # JSON schema describing the tool's result shape (optional but
     # recommended — models use it to parse structured output).
     output_schema: dict[str, Any] = field(default_factory=dict)
+    # Result protocol (F08): "" = the return value is data, passed
+    # through untouched. "dict_ok" = the tool speaks the legacy dict
+    # protocol ({"ok": bool, "error": str, "retryable": bool}) and
+    # the registry translates it into a typed Outcome at the
+    # boundary, so a domain failure is never wrapped — or memoized —
+    # as a success. Opt-in per tool: an arbitrary dict that merely
+    # CONTAINS an "ok" field is data, never a protocol.
+    result_protocol: str = ""
     # Short usage examples shown to the model.
     examples: list[str] = field(default_factory=list)
     # Long string results are truncated past this many chars, with an
@@ -303,6 +311,50 @@ class _IdempotencyRecord:
     created_at: float = 0.0
 
 
+@dataclass(frozen=True)
+class OpResult:
+    """A typed operation result a tool may return (F08).
+
+    Dispatch success and domain success are different facts; this is
+    how a tool states the domain fact in a type instead of a dict
+    callers pattern-match. The registry translates it at the
+    boundary:
+
+    * ``success``   → ``Ok(value)``; memoizable under an
+      idempotency key.
+    * ``partial``   → ``Ok(self)`` — the caller sees the degraded
+      state in the type; never memoized as a terminal success, so a
+      retry can finish the job.
+    * ``failed``    → ``Err(ToolError)`` carrying ``retryable``.
+    * ``uncertain`` → ``Err`` with code ``tool.result_uncertain`` —
+      the external effect may already have happened, so the result
+      is not retryable by default and never a success.
+    """
+
+    status: str
+    value: Any = None
+    error: str = ""
+    retryable: bool = False
+
+    @classmethod
+    def success(cls, value: Any = None) -> "OpResult":
+        return cls(status="success", value=value)
+
+    @classmethod
+    def partial(cls, value: Any = None, *, error: str = "",
+                retryable: bool = False) -> "OpResult":
+        return cls(status="partial", value=value, error=error,
+                   retryable=retryable)
+
+    @classmethod
+    def failed(cls, error: str, *, retryable: bool = False) -> "OpResult":
+        return cls(status="failed", error=error, retryable=retryable)
+
+    @classmethod
+    def uncertain(cls, error: str) -> "OpResult":
+        return cls(status="uncertain", error=error, retryable=False)
+
+
 class ToolRegistry:
     """Registers, gates, dispatches, and audits tool calls."""
 
@@ -334,6 +386,15 @@ class ToolRegistry:
         self._idempotency_inflight: dict[tuple[str, str], threading.Event] = {}
         self._idempotency_cond = threading.Condition(threading.Lock())
         self._idempotency_db_ready = False
+        # F01: how long a duplicate caller waits for the owner's
+        # terminal record before receiving an explicit uncertain
+        # outcome (never a silent second execution), and how old a
+        # durable claim may get before its owner is presumed crashed
+        # (the key then reports uncertain until reconciled — the
+        # effect may already have happened, so it is never stolen
+        # and re-executed at this boundary).
+        self._idempotency_wait_s = 120.0
+        self._idempotency_claim_stale_s = 600.0
 
     # ── registration ─────────────────────────────────────────────────────────
     def register(
@@ -354,6 +415,7 @@ class ToolRegistry:
         output_schema: dict[str, Any] | None = None,
         examples: list[str] | None = None,
         max_result_chars: int = 200_000,
+        result_protocol: str = "",
     ) -> Callable[..., Any]:
         """Register a tool, usable directly or as a decorator."""
 
@@ -380,6 +442,7 @@ class ToolRegistry:
                 output_schema=output_schema or {},
                 examples=examples or [],
                 max_result_chars=max_result_chars,
+                result_protocol=result_protocol,
             )
             self._tools[name] = spec
             return func
@@ -991,8 +1054,54 @@ class ToolRegistry:
             return Err(error)
 
         elapsed = time.perf_counter() - started
-        self._audit(name, actor, spec.capability, "allow", kwargs, elapsed, ok=True)
-        self._bump_stats(calls=1, seconds=elapsed)
+        outcome = self._translate_result(spec, result)
+        if outcome.ok:
+            self._audit(name, actor, spec.capability, "allow", kwargs,
+                        elapsed, ok=True)
+            self._bump_stats(calls=1, seconds=elapsed)
+        else:
+            # A domain failure reported in-band (typed result or the
+            # legacy dict protocol) is a failure for events, stats,
+            # and the failure ledger exactly like a raised one — F08:
+            # it must not flow down the successful-call path.
+            error = outcome.error
+            self._audit(name, actor, spec.capability, "allow", kwargs,
+                        elapsed, error=error.message)
+            self._bump_stats(errors=1, calls=1, seconds=elapsed)
+            _log.debug("tool %s reported failure: %s", name, error.message)
+            self._record_failure_ledger(name, error.message, error.message)
+        return outcome
+
+    def _translate_result(self, spec: ToolSpec,
+                          result: Any) -> Outcome[Any]:
+        """Join dispatch success and domain success (F08).
+
+        A tool returning an :class:`OpResult` states its domain
+        outcome in the type. A tool registered with
+        ``result_protocol="dict_ok"`` speaks the legacy dict
+        protocol; its ``{"ok": False, ...}`` becomes a typed error
+        here instead of a wrapped success. Every other value —
+        including dicts that merely contain an ``ok`` field — is
+        data and passes through untouched.
+        """
+        if isinstance(result, OpResult):
+            if result.status == "success":
+                return Ok(_maybe_truncate(result.value,
+                                          spec.max_result_chars))
+            if result.status == "partial":
+                return Ok(result)
+            if result.status == "uncertain":
+                return Err(ToolError(
+                    result.error or "the operation's outcome is uncertain",
+                    code="tool.result_uncertain", retryable=False))
+            return Err(ToolError(
+                result.error or "the tool reported failure",
+                retryable=bool(result.retryable)))
+        if spec.result_protocol == "dict_ok" and isinstance(result, dict):
+            if result.get("ok") is False:
+                return Err(ToolError(
+                    str(result.get("error") or "the tool reported failure"),
+                    retryable=bool(result.get("retryable", False))))
         return Ok(_maybe_truncate(result, spec.max_result_chars))
 
     def _record_failure_ledger(self, tool: str, message: str,
@@ -1082,6 +1191,18 @@ class ToolRegistry:
                 " args_digest TEXT NOT NULL, tool_version TEXT NOT NULL,"
                 " outcome_json TEXT NOT NULL, ts REAL NOT NULL,"
                 " PRIMARY KEY (tool, key))")
+            # F01: the durable claim — written BEFORE the effect runs,
+            # so a crash between effect and record leaves a visible
+            # in-flight operation (reported uncertain), never a key a
+            # retry can silently re-execute. One row per (tool, key):
+            # the primary key IS the cross-process fence.
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS idempotency_claims ("
+                "tool TEXT NOT NULL, key TEXT NOT NULL,"
+                " owner_token TEXT NOT NULL, actor TEXT NOT NULL,"
+                " args_digest TEXT NOT NULL, tool_version TEXT NOT NULL,"
+                " claimed_at REAL NOT NULL,"
+                " PRIMARY KEY (tool, key))")
             self._idempotency_db_ready = True
             return True
         except Exception as e:  # noqa: BLE001 - durability is best-effort
@@ -1167,28 +1288,133 @@ class ToolRegistry:
                 f"return a stale result or re-execute"))
         return rec.outcome
 
-    def _idempotency_acquire(self, name: str, key: str) -> bool:
-        """Reserve (tool, key) for this caller. True = we own it.
+    def _idempotency_uncertain(self, name: str, key: str,
+                               why: str) -> Outcome[Any]:
+        """The explicit uncertain outcome (F01): another owner holds
+        this key and its result cannot be known yet. Returned instead
+        of ever letting a waiter become a duplicate executor."""
+        return Err(ToolError(
+            f"idempotent operation {name!r} with key {key!r} {why}; "
+            "refusing to execute a duplicate — the outcome is "
+            "uncertain until the original operation is reconciled",
+            code="tool.idempotency_uncertain", retryable=False))
 
-        A concurrent duplicate waits for the owner's completion instead
-        of executing twice. The wait is bounded: a pathological stall
-        degrades to executing rather than deadlocking.
+    def _idempotency_claim_row(self, name: str, key: str) -> Any:
+        if not self._idempotency_table():
+            return None
+        db = getattr(self.context, "db", None)
+        try:
+            return db.query_one(
+                "SELECT * FROM idempotency_claims "
+                "WHERE tool = ? AND key = ?", (name, key))
+        except Exception as e:  # noqa: BLE001 - a read failure is a miss
+            record_failure("ToolRegistry._idempotency_claim_row", e)
+            return None
+
+    def _idempotency_claim_forget(self, name: str, key: str,
+                                  owner_token: str) -> None:
+        """Drop our durable claim (only ours — the token must match)."""
+        if not self._idempotency_table():
+            return
+        db = getattr(self.context, "db", None)
+        try:
+            db.execute(
+                "DELETE FROM idempotency_claims "
+                "WHERE tool = ? AND key = ? AND owner_token = ?",
+                (name, key, owner_token))
+        except Exception as e:  # noqa: BLE001 - claim cleanup is recorded
+            record_failure("ToolRegistry._idempotency_claim_forget", e)
+
+    def _idempotency_claim(
+        self, name: str, key: str, actor: str, digest: str,
+        tool_version: str, owner_token: str,
+    ) -> tuple[str, Outcome[Any] | None]:
+        """Claim (tool, key) for execution, durably and atomically.
+
+        Returns ``("owner", None)`` when this caller holds the claim
+        and must execute; ``("replay", outcome)`` when a terminal
+        record already exists (the replay performs the actor /
+        digest / version conflict checks); ``("uncertain", outcome)``
+        when another owner — in this process or another — holds the
+        claim and no terminal record has appeared within the wait
+        budget, or the claim is stale (its owner may have crashed
+        after applying the effect). A waiter NEVER falls through to
+        executing someone else's key.
         """
         slot = (name, key)
-        with self._idempotency_cond:
-            while slot in self._idempotency_inflight:
-                event = self._idempotency_inflight[slot]
-                waited = self._idempotency_cond.wait_for(
-                    lambda: slot not in self._idempotency_inflight,
-                    timeout=120.0)
-                if not waited:
-                    _log.warning(
-                        "idempotency: waited out for %s %r; executing anyway",
-                        name, key)
-                    return True
-                _ = event
-            self._idempotency_inflight[slot] = threading.Event()
-            return True
+        deadline = time.time() + max(0.05, float(self._idempotency_wait_s))
+        while True:
+            with self._idempotency_cond:
+                while slot in self._idempotency_inflight:
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        return "uncertain", self._idempotency_uncertain(
+                            name, key,
+                            "is still in flight under another caller")
+                    self._idempotency_cond.wait(
+                        timeout=min(0.5, remaining))
+                    hit = self._idempotency_replay(
+                        name, key, actor, digest,
+                        tool_version=tool_version)
+                    if hit is not None:
+                        return "replay", hit
+                # The slot is free in this process. Take the durable
+                # claim before marking the slot — the claim row is the
+                # cross-process fence, inserted BEFORE any effect.
+                if self._idempotency_table():
+                    db = getattr(self.context, "db", None)
+                    try:
+                        db.execute(
+                            "INSERT INTO idempotency_claims "
+                            "(tool, key, owner_token, actor, args_digest,"
+                            " tool_version, claimed_at)"
+                            " VALUES (?,?,?,?,?,?,?)",
+                            (name, key, owner_token, actor, digest,
+                             tool_version, time.time()))
+                    except ConstraintViolation:
+                        # Another process owns the claim — the flag
+                        # drops control to the poll below.
+                        owner_here = False
+                    except Exception as e:  # noqa: BLE001
+                        # Durability degraded, never silent: record it
+                        # and fall back to the in-process fence.
+                        record_failure(
+                            "ToolRegistry._idempotency_claim:insert", e)
+                        self._idempotency_inflight[slot] = threading.Event()
+                        return "owner", None
+                    else:
+                        owner_here = True
+                    if owner_here:
+                        self._idempotency_inflight[slot] = \
+                            threading.Event()
+                        return "owner", None
+                else:
+                    self._idempotency_inflight[slot] = threading.Event()
+                    return "owner", None
+            # Another process holds the durable claim: poll for its
+            # terminal record until it lands, the claim is abandoned
+            # (owner failed — the key frees up), the claim goes stale,
+            # or the wait budget elapses.
+            while True:
+                hit = self._idempotency_replay(
+                    name, key, actor, digest, tool_version=tool_version)
+                if hit is not None:
+                    return "replay", hit
+                row = self._idempotency_claim_row(name, key)
+                if row is None:
+                    break  # claim gone with no record: try to claim
+                if time.time() - float(row["claimed_at"] or 0) \
+                        > self._idempotency_claim_stale_s:
+                    return "uncertain", self._idempotency_uncertain(
+                        name, key,
+                        "was claimed by an owner that never published "
+                        "a result (it may have crashed after applying "
+                        "the effect)")
+                if time.time() >= deadline:
+                    return "uncertain", self._idempotency_uncertain(
+                        name, key,
+                        "is still in flight under another process")
+                time.sleep(0.05)
 
     def _idempotency_release(self, name: str, key: str) -> None:
         slot = (name, key)
@@ -1250,7 +1476,12 @@ class ToolRegistry:
         different actor is denied. Concurrent duplicates execute once:
         the second caller waits for the owner's result. Successful
         results persist to the db when one is available, so a restart
-        keeps the protection.
+        keeps the protection. The claim is taken durably BEFORE the
+        effect runs: a caller that cannot obtain the owner's result
+        within the wait budget — or that finds a claim whose owner
+        never published (a crash after the effect) — receives an
+        explicit ``tool.idempotency_uncertain`` error instead of
+        silently executing the operation a second time.
         """
         # Reject extra positional arguments with a proper error outcome
         if args:
@@ -1286,40 +1517,63 @@ class ToolRegistry:
                 self._audit(name, actor, spec.capability, "allow", kwargs,
                             0.0, ok=True)
             return hit
-        # Reserve: a concurrent duplicate waits for our result.
-        self._idempotency_acquire(name, idempotency_key)
+        # Claim BEFORE the effect runs (F01): the durable claim is
+        # the fence against both concurrent callers and a crash
+        # between the effect and its record. A duplicate waits for
+        # the owner's terminal record; if none appears within the
+        # wait budget it receives an explicit uncertain outcome —
+        # never a silent second execution.
+        owner_token = new_id()
+        verdict, verdict_outcome = self._idempotency_claim(
+            name, idempotency_key, actor, digest, spec.version,
+            owner_token)
+        if verdict != "owner":
+            if verdict_outcome is not None and verdict_outcome.ok:
+                self._audit(name, actor, spec.capability, "allow", kwargs,
+                            0.0, ok=True)
+            return verdict_outcome
+        started = time.perf_counter()
+        self._emit_tool_call(name=name, actor=actor, digest=digest,
+                             ok=True, seconds=0.0, phase="start")
+        completed = False
         try:
-            # A waiter that found the slot freed re-checks: the owner
-            # may have stored a result (replay) or failed (execute).
-            hit = self._idempotency_replay(name, idempotency_key, actor,
-                                           digest,
-                                           tool_version=spec.version)
-            if hit is not None:
-                if hit.ok:
-                    self._audit(name, actor, spec.capability, "allow", kwargs,
-                                0.0, ok=True)
-                return hit
-            started = time.perf_counter()
-            self._emit_tool_call(name=name, actor=actor, digest=digest,
-                                 ok=True, seconds=0.0, phase="start")
             outcome = self._call_inner(
                 name, actor=actor, capabilities=capabilities,
                 confirmation=confirmation, **kwargs)
-            elapsed = time.perf_counter() - started
-            self._emit_tool_call(
-                name=name, actor=actor, digest=digest,
-                ok=bool(getattr(outcome, "ok", False)), seconds=elapsed,
-                error="" if getattr(outcome, "ok", False)
-                else str(getattr(getattr(outcome, "error", None),
-                                 "message", "") or ""),
-                phase="finish")
+            completed = True
         finally:
-            self._idempotency_release(name, idempotency_key)
-        if outcome.ok:
+            if not completed:
+                # _call_inner escaped (error or interrupt): free the
+                # key so a later retry can run, then let the
+                # exception propagate untouched.
+                self._idempotency_claim_forget(name, idempotency_key,
+                                               owner_token)
+                self._idempotency_release(name, idempotency_key)
+        elapsed = time.perf_counter() - started
+        self._emit_tool_call(
+            name=name, actor=actor, digest=digest,
+            ok=bool(getattr(outcome, "ok", False)), seconds=elapsed,
+            error="" if getattr(outcome, "ok", False)
+            else str(getattr(getattr(outcome, "error", None),
+                             "message", "") or ""),
+            phase="finish")
+        # Publish BEFORE waking any waiter: the terminal record is
+        # stored first, then the claim is dropped, and only then is
+        # the in-flight reservation released. (The previous order —
+        # release in a finally, store afterward — let a waiter slip
+        # into the gap and execute the same key a second time.)
+        # Only a true success is terminal: failures free the key for
+        # a retry, and a partial OpResult is not a finished effect.
+        if outcome.ok and not (
+                isinstance(outcome.value, OpResult)
+                and outcome.value.status != "success"):
             self._idempotency_store(_IdempotencyRecord(
                 tool=name, key=idempotency_key, actor=actor,
                 args_digest=digest, tool_version=spec.version,
                 outcome=outcome, created_at=time.time()))
+        self._idempotency_claim_forget(name, idempotency_key,
+                                       owner_token)
+        self._idempotency_release(name, idempotency_key)
         return outcome
 
     def call_many(self, calls: list[tuple[str, dict[str, Any]]],
