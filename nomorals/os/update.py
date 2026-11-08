@@ -37,6 +37,23 @@ independently discards a marker the journal shows superseded —
 silently, because booting on the live database is the correct state,
 not an incident.
 
+Recovery also discards a marker whose premise is gone when the
+journal cannot prove it — the case of an install updated by hand
+(``git pull``), where no update ever completes in the journal.  The
+test is the pairing the marker itself records: the restore exists
+to pair the pre-update snapshot with the pre-update CODE, the
+version the failed run started from.  When the code actually
+running is provably not that version, the pairing the restore
+would serve no longer exists, and applying the snapshot could only
+regress the live database under code it does not belong to — so
+the marker is discarded before any restore is attempted and the
+owner is told with an informational notice (not a failure page:
+the live database is the correct state, kept untouched).  When the
+recorded facts cannot decide — the marker names no starting
+version, or the running version cannot be read — recovery keeps
+the old behaviour exactly: attempt the restore, and report the
+outcome honestly.
+
 The owner's own uncommitted changes are never silently destroyed: before
 pulling, the update fetches and refuses up front when a locally modified
 file collides with the incoming change set; disjoint local edits are left
@@ -825,6 +842,19 @@ class UpdateManager:
                 "update_sha": pending.get("update_sha", ""),
                 "running_sha": pending.get("running_sha", ""),
                 "state_note": pending.get("state_note", "")}
+        elif pending.get("discarded_premise"):
+            # A premise-gone marker was discarded before any restore
+            # was attempted. The receipt stands on its own so the
+            # boot notice fires: information, not a failure — the
+            # live database was kept, exactly as it is.
+            pending_receipt = {
+                "recovered": True,
+                "action": "pending_restore_discarded",
+                "snapshot": pending.get("snapshot", ""), "run_id": "",
+                "update_sha": pending.get("update_sha", ""),
+                "from_sha": pending.get("from_sha", ""),
+                "running_sha": pending.get("running_sha", ""),
+                "state_note": pending.get("state_note", "")}
         runs = self._journal_runs()
         if not runs:
             return pending_receipt or {"recovered": False,
@@ -1008,6 +1038,35 @@ class UpdateManager:
                     return str(event.get("sha") or "") or run["run_id"]
         return ""
 
+    def _pending_restore_premise_gone(
+            self, payload: dict[str, Any]) -> dict[str, str] | None:
+        """The marker's pairing facts when its premise is provably
+        gone, or None when the premise holds or cannot be judged.
+
+        The deferred restore exists to pair the failed update's
+        pre-update snapshot with its pre-update CODE — the rollback
+        restored the tree to ``from_sha`` and deferred the database
+        half to match.  That premise is gone when the code actually
+        running is not ``from_sha``: the install demonstrably moved
+        on (a hand pull, a checkout — however the code arrived), the
+        live database belongs to the running code's own history, and
+        applying the snapshot would regress it to serve a rollback
+        nobody is running.  Every input is a recorded fact — the
+        marker's ``from_sha`` and the running HEAD this boot resolves
+        (the same resolution the failure notice quotes).  A marker
+        that records no ``from_sha`` (written by an older build) or
+        a running version that cannot be read leaves the premise
+        UNJUDGED — None — and the caller keeps today's behaviour
+        exactly: a discard on a guess is never acceptable.
+        """
+        from_sha = str(payload.get("from_sha") or "")
+        if not from_sha:
+            return None
+        running = self._git_sha()
+        if not running or running == from_sha:
+            return None
+        return {"from_sha": from_sha, "running_sha": running}
+
     def _pending_restore_state_note(self, payload: dict[str, Any]) -> str:
         """Describe the ACTUAL code/database state for a marker.
 
@@ -1052,9 +1111,17 @@ class UpdateManager:
         applied: the successful run is expected to clear it itself,
         but a marker that survived (written by an older build, or its
         clearing failed) must not regress the live database at boot.
-        A current marker whose restore still cannot run keeps the
-        marker (the next boot retries) and reports why, with the
-        actual code/database state attached.
+        A marker whose PREMISE is gone — the running code is provably
+        not the rolled-back version the marker pairs with, the case
+        of an install updated by hand where no journal completion
+        ever supersedes it — is likewise discarded before any
+        restore is attempted, but WITH an operator notice: neither
+        the wrongful apply nor the every-boot failure page a locked
+        database would otherwise produce can occur.  When the
+        recorded provenance cannot judge the premise, nothing is
+        discarded.  A current marker whose restore still cannot run
+        keeps the marker (the next boot retries) and reports why,
+        with the actual code/database state attached.
         """
         try:
             payload = json.loads(
@@ -1091,6 +1158,38 @@ class UpdateManager:
                 superseded_by[:12])
             return {"applied": False, "discarded_stale": True,
                     "snapshot": snap_id, "superseded_by": superseded_by}
+        premise = self._pending_restore_premise_gone(payload)
+        if premise is not None:
+            try:
+                self.pending_restore_path.unlink()
+            except OSError:  # noqa: BLE001 — the discard stands
+                _log.debug("could not remove premise-gone "
+                           "pending-restore marker", exc_info=True)
+            self._journal({"run_id": "boot",
+                           "event": "pending_restore_discarded_stale",
+                           "ts": time.time(), "snapshot": snap_id,
+                           "marker_run_id":
+                               str(payload.get("run_id", "")),
+                           "marker_target_sha":
+                               str(payload.get("target_sha", "")),
+                           "marker_from_sha": premise["from_sha"],
+                           "running_sha": premise["running_sha"],
+                           "discarded_reason": "premise_gone"})
+            _log.warning(
+                "discarded deferred database restore (snapshot %s, "
+                "from the update that targeted %s): its premise is "
+                "gone — the running code is %s, not the rolled-back "
+                "version %s it pairs with — booting on the live "
+                "database", snap_id,
+                str(payload.get("target_sha", ""))[:12] or "?",
+                premise["running_sha"][:12], premise["from_sha"][:12])
+            return {"applied": False, "discarded_stale": True,
+                    "discarded_premise": True, "snapshot": snap_id,
+                    "update_sha": str(payload.get("target_sha", "")),
+                    "from_sha": premise["from_sha"],
+                    "running_sha": premise["running_sha"],
+                    "state_note":
+                        self._pending_restore_state_note(payload)}
         try:
             self.snapshots.restore(snap_id, force=True)
         except Exception as exc:  # noqa: BLE001 — reported, marker kept

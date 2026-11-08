@@ -274,11 +274,19 @@ class TestGenuineMarkerStillWorks(unittest.TestCase):
             self.assertIn("Actual state:", body)
             self.assertIn(SHA_B[:12], body)
 
-    def test_failure_never_claims_rolled_back_code_when_code_moved_on(self):
-        # Marker is journal-current (no successful update after it),
-        # but the code on disk is NOT the rolled-back version (e.g.
-        # the owner hand-pulled). The notice must describe that —
-        # never assert the rolled-back pairing.
+    def test_code_moved_on_discards_instead_of_failing(self):
+        # UPDATED with cause (deferred-restore premise fix): this
+        # scenario — marker journal-current (no successful update
+        # after it), code on disk NOT the rolled-back version (the
+        # owner hand-pulled; the 2026-11-07 EC2 incident shape) —
+        # previously pinned a FAILED page whose note honestly said
+        # "NOT the rolled-back version" while the restore was still
+        # attempted (and would have applied had the file been free).
+        # The premise fix supersedes that contract: a marker whose
+        # pairing is provably gone is DISCARDED before any attempt,
+        # and the notice states the same facts as information. The
+        # full branch matrix lives in
+        # tests/test_update_pending_restore_premise.py.
         with tempfile.TemporaryDirectory() as tmp:
             mgr, _ = _manager(tmp)
             mgr._write_pending_restore(
@@ -289,14 +297,21 @@ class TestGenuineMarkerStillWorks(unittest.TestCase):
             mgr_boot, _ = _manager(tmp, start=SHA_C, snaps=snaps)
             receipt = mgr_boot.recover_interrupted()
             self.assertEqual(receipt["action"],
-                             "pending_restore_failed")
+                             "pending_restore_discarded")
             self.assertEqual(receipt["running_sha"], SHA_C)
+            # The restore was never attempted — the error the fake
+            # was armed with never surfaces.
+            self.assertEqual(snaps.restored, [])
+            self.assertNotIn("error", receipt)
+            self.assertFalse(Path(mgr_boot.pending_restore_path)
+                             .exists())
             self.assertIn("NOT the rolled-back version",
                           receipt["state_note"])
             from nomorals.agents.partner.runtime import (
                 _update_recovery_notice)
             _title, body = _update_recovery_notice(receipt)
             self.assertNotIn("paired with rolled-back code", body)
+            self.assertNotIn("FAILED", _title)
             self.assertIn("NOT the rolled-back version", body)
             self.assertIn(SHA_C[:12], body)
 

@@ -138,6 +138,26 @@ def _update_recovery_notice(receipt: dict) -> tuple[str, str]:
             "Check the install before trusting it; a manual "
             "snapshot restore may be needed.",
         )
+    if action == "pending_restore_discarded":
+        # The marker's premise was provably gone (the running code
+        # is not the rolled-back version the deferred restore pairs
+        # with), so recovery discarded it BEFORE attempting the
+        # restore. Information, not a failure: the live database —
+        # the correct state — was kept untouched. The receipt's
+        # state note carries the facts, as on the failure notice.
+        state = str(receipt.get("state_note") or "")
+        state_line = f"Actual state: {state}. " if state else ""
+        return (
+            "stale deferred database restore discarded at startup",
+            "A failed self-update left a database restore pending, "
+            "but that rollback no longer applies — the code Devon "
+            f"is running is not the version it was meant to pair "
+            f"with. {state_line}"
+            "At this startup I discarded the pending restore "
+            "instead of applying it: the live database is kept, "
+            "exactly as it is, and nothing is pending from that "
+            "update. No action needed.",
+        )
     # aborted (and any future close-out action): died before the
     # dangerous steps, so nothing was changed and nothing restored.
     return (
