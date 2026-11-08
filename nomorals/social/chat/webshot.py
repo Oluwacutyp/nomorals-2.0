@@ -123,6 +123,11 @@ class ShotOptions:
 
     full_page: bool = False
     device: str = "desktop"
+    #: True only when the request NAMED the device.  An
+    #: unchosen device is not a desktop request — the
+    #: navigation pipeline walks its default fingerprint
+    #: ladder (mobile first) for those.
+    device_chosen: bool = False
     scheme: str = "light"          # light | dark
     wait: str = "load"             # load | idle
     clip: str = ""                 # CSS selector, "" = no clip
@@ -158,6 +163,11 @@ class CaptureResult:
     #: "checkbox_click" / "owner_takeover"), "" when the
     #: page was simply open.
     wall_via: str = ""
+    #: The fingerprint that cleared, and every fingerprint
+    #: tried before it (the ladder journal).
+    presentation: str = ""
+    presentations_tried: list[str] = field(
+        default_factory=list)
 
 
 # ── request grammar ──────────────────────────────────────────
@@ -210,6 +220,8 @@ def parse_shot_tail(tail: str, *, reply_url: str = ""
         if low in _MODIFIERS:
             field_name, value = _MODIFIERS[low]
             setattr(opts, field_name, value)
+            if field_name == "device":
+                opts.device_chosen = True
             i += 1
             continue
         if _looks_like_url(token):
@@ -421,9 +433,10 @@ def nav_renderer(url: str, opts: ShotOptions, *,
     is a plain rung failure — the seeds may still try."""
     from . import webnav
 
-    profile = DEVICE_PROFILES[opts.device]
+    ladder = webnav.presentation_ladder(
+        opts.device if opts.device_chosen else None)
     session, nav = webnav.navigate(
-        url, device=profile, scheme=opts.scheme,
+        url, ladder=ladder, scheme=opts.scheme,
         profile_dir=profile_dir, takeover_hook=takeover_hook,
         on_step=on_step)
     try:
@@ -447,7 +460,9 @@ def nav_renderer(url: str, opts: ShotOptions, *,
         data=data, title=nav.title, final_url=nav.final_url,
         rung="playwright", pdf=opts.pdf,
         gates_cleared=[g.kind for g in nav.gates],
-        wall_via=nav.wall or "")
+        wall_via=nav.wall or "",
+        presentation=nav.presentation,
+        presentations_tried=list(nav.presentations_tried))
 
 
 # ── rung 2: provider seeds (SourceHealth-gated) ──────────────
@@ -669,6 +684,9 @@ class RecOptions:
 
     seconds: float = REC_DEFAULT_S
     device: str = "desktop"
+    #: True only when the request NAMED the device (see
+    #: ShotOptions.device_chosen).
+    device_chosen: bool = False
     scheme: str = "light"
     #: "min" / "max" when the requested duration was
     #: clamped to the bounds — the reply reports it.
@@ -698,9 +716,11 @@ def parse_rec_tail(tail: str, *, reply_url: str = ""
             continue
         if low in ("phone", "mobile"):
             opts.device = "phone"
+            opts.device_chosen = True
             continue
         if low in ("tablet", "desktop"):
             opts.device = low
+            opts.device_chosen = True
             continue
         if low in ("dark", "light"):
             opts.scheme = low
@@ -747,10 +767,11 @@ def record_video(url: str, opts: RecOptions, *,
     raises ``webnav.NavError`` (typed) on honest failure."""
     from . import webnav
 
-    profile = DEVICE_PROFILES[opts.device]
+    ladder = webnav.presentation_ladder(
+        opts.device if opts.device_chosen else None)
     return webnav.record_page(
         url, seconds=opts.seconds, out_dir=out_dir,
-        device=profile, scheme=opts.scheme,
+        ladder=ladder, scheme=opts.scheme,
         profile_dir=profile_dir, takeover_hook=takeover_hook,
         on_step=on_step)
 

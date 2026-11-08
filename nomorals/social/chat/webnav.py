@@ -6,7 +6,11 @@ cookies and gate clearances survive across captures) →
 settle → run the interstitial pass (cookie banners, consent
 walls, age gates) → work the bot check (managed wait-out,
 checkbox click, owner takeover for hard walls) → capture
-or record.  A page that refuses to clear is reported
+or record.  The session's presentation is a ladder of
+coherent device fingerprints (mobile first): a wall or a
+gate that refuses one fingerprint rotates to the next,
+and owner takeover is the last rung, not the first
+response.  A page that refuses to clear is reported
 honestly — the gate or the challenge page is never handed
 back as if it were the result.
 
@@ -35,6 +39,8 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 __all__ = [
+    "DEFAULT_PRESENTATION",
+    "PRESENTATIONS",
     "GateAction",
     "GateBlocked",
     "GateCandidate",
@@ -50,8 +56,11 @@ __all__ = [
     "TakeoverHook",
     "WallBlocked",
     "classify_wall",
+    "context_kwargs",
     "detect_gates",
     "navigate",
+    "open_with_ladder",
+    "presentation_ladder",
     "record_page",
     "run_interstitial_pass",
     "run_wall_pass",
@@ -113,6 +122,12 @@ class GateCandidate:
     label: str               # the control's visible text
     selector: str = ""       # css hint, when the page gives one
     host: str = ""
+    #: The control sits in the layer that is actually
+    #: BLOCKING the page (a modal / overlay / dialog),
+    #: not in an inline banner or a footer — the pass
+    #: works the blocking layer's control first, because
+    #: a covered control cannot be clicked at all.
+    blocking: bool = False
 
 
 # Age-confirmation wording (matched case-insensitively).
@@ -165,9 +180,47 @@ _COOKIE_LABELS = (
 )
 
 
+_VOID_TAGS = frozenset({
+    "area", "base", "br", "col", "embed", "hr", "img",
+    "input", "link", "meta", "source", "track", "wbr",
+})
+_LAYER_TOKENS = frozenset({
+    "modal", "overlay", "dialog", "popup", "lightbox",
+    "interstitial", "wall", "gate", "fullscreen", "agegate",
+})
+
+
+def _is_layer(a: dict[str, str]) -> bool:
+    """True when an element presents as the layer BLOCKING
+    the page: a dialog/modal by role, by class/id shape,
+    or a fixed/absolute full-viewport box by style.  An
+    inline banner (a bar across one edge) is not a layer —
+    the content behind it is reachable."""
+    if (a.get("role") or "").lower() == "dialog":
+        return True
+    if (a.get("aria-modal") or "").lower() == "true":
+        return True
+    ident = f"{a.get('class', '')} {a.get('id', '')}".lower()
+    tokens = [t for t in re.split(r"[^a-z0-9]+", ident) if t]
+    if any(t in _LAYER_TOKENS or "modal" in t
+           or "overlay" in t for t in tokens):
+        return True
+    style = (a.get("style") or "").lower().replace(" ", "")
+    return (
+        ("position:fixed" in style
+         or "position:absolute" in style)
+        and ("inset:0" in style or (
+            "top:0" in style and "left:0" in style
+            and "bottom:0" in style)))
+
+
 class _ClickScanner(HTMLParser):
     """Collects clickable controls (buttons, links, inputs)
-    with their text, classes and ids."""
+    with their text, classes and ids — and whether each
+    sits inside the blocking layer (see :func:`_is_layer`),
+    so the pass can aim at the control that actually
+    covers the page instead of the first gate-shaped
+    button in DOM order."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -175,11 +228,13 @@ class _ClickScanner(HTMLParser):
         self.forms_with_dob = False
         self._open: dict[str, str] | None = None
         self._text: list[str] = []
+        self._stack: list[tuple[str, bool]] = []
 
     def handle_starttag(self, tag: str,
                         attrs: list[tuple[str, str | None]]
                         ) -> None:
         a = {k: (v or "") for k, v in attrs}
+        layer = _is_layer(a)
         if tag in ("button", "a") or (
                 tag == "input"
                 and a.get("type", "").lower()
@@ -191,10 +246,14 @@ class _ClickScanner(HTMLParser):
                 "role": a.get("role", ""),
                 "value": a.get("value", ""),
                 "text": "",
+                "blocking": "1" if layer or any(
+                    up for _, up in self._stack) else "",
             }
             self._text = []
             if tag == "input" and a.get("value"):
                 self._finish()
+        if tag not in _VOID_TAGS:
+            self._stack.append((tag, layer))
         if tag == "input":
             hint = " ".join((a.get("name", ""), a.get("id", ""),
                              a.get("placeholder", ""))).lower()
@@ -212,6 +271,12 @@ class _ClickScanner(HTMLParser):
         if self._open is not None and \
                 tag == self._open["tag"]:
             self._finish()
+        # Pop the element stack up to the matching open
+        # tag (tolerant of the mis-nesting real pages ship).
+        for i in range(len(self._stack) - 1, -1, -1):
+            if self._stack[i][0] == tag:
+                del self._stack[i:]
+                break
 
     def _finish(self) -> None:
         assert self._open is not None
@@ -240,8 +305,11 @@ def _host_of(url: str) -> str:
 def detect_gates(html: str, url: str = "") -> list[GateCandidate]:
     """Detect interstitial gates on a page.  Pure: the same
     HTML always gives the same candidates.  Order matters:
-    age before consent before cookie (a page can stack
-    them; the pass works them in this order)."""
+    the BLOCKING layer's control first (a covered control
+    cannot be clicked at all), and within a tier the
+    age-gate confirm outranks generic consent/cookie
+    controls — a page can stack them, and the pass works
+    them in this order."""
     text = str(html or "")
     low = text.lower()
     host = _host_of(url)
@@ -252,22 +320,35 @@ def detect_gates(html: str, url: str = "") -> list[GateCandidate]:
     controls = scanner.controls
 
     def norm(s: str) -> str:
-        return " ".join(str(s).lower().split())
+        # Fold typographic quotes/dashes: real gate buttons
+        # ship "I’m 18 or older" with a curly apostrophe,
+        # which must still read as the age confirm it is.
+        s = str(s).lower()
+        for fancy, plain in (("’", "'"), ("‘", "'"),
+                             ("“", '"'), ("”", '"'),
+                             ("–", "-"), ("—", "-")):
+            s = s.replace(fancy, plain)
+        return " ".join(s.split())
 
     labels = [(c, norm(c["text"] or c["value"]))
               for c in controls]
 
-    found: list[GateCandidate] = []
-    seen: set[str] = set()
+    by_kind: dict[str, GateCandidate] = {}
 
     def add(kind: str, control: dict[str, str],
             label: str) -> None:
-        if kind in seen:
-            return
-        seen.add(kind)
-        found.append(GateCandidate(
+        cand = GateCandidate(
             kind=kind, label=label,
-            selector=_selector_for(control), host=host))
+            selector=_selector_for(control), host=host,
+            blocking=bool(control.get("blocking")))
+        old = by_kind.get(kind)
+        # One candidate per kind; the blocking layer's
+        # control replaces a same-kind control that merely
+        # sits on the page (a footer age link is not the
+        # age gate when a modal is standing).
+        if old is None or (cand.blocking
+                           and not old.blocking):
+            by_kind[kind] = cand
 
     # ── age gates ──
     age_context = any(m in low for m in _AGE_MARKERS)
@@ -276,20 +357,16 @@ def detect_gates(html: str, url: str = "") -> list[GateCandidate]:
         if not label:
             continue
         if label in _AGE_LABELS or label in site_labels or \
-                any(a in label for a in _AGE_LABELS):
+                any(a in label for a in _AGE_LABELS) or (
+                age_context and label in _AGE_BARE_LABELS):
             add("age", control, label)
-            break
-        if age_context and label in _AGE_BARE_LABELS:
-            add("age", control, label)
-            break
-    if "age" not in seen and age_context and \
+    if "age" not in by_kind and age_context and \
             scanner.forms_with_dob:
         # A date-of-birth form is an age gate Devon will not
         # invent an answer for.
-        found.append(GateCandidate(
+        by_kind["age_dob"] = GateCandidate(
             kind="age_dob", label="date-of-birth form",
-            host=host))
-        seen.add("age_dob")
+            host=host)
 
     # ── consent walls ──
     consent_context = any(m in low for m in _CONSENT_MARKERS)
@@ -298,18 +375,19 @@ def detect_gates(html: str, url: str = "") -> list[GateCandidate]:
             if label in _CONSENT_LABELS or \
                     label.startswith("accept"):
                 add("consent", control, label)
-                break
 
     # ── cookie banners ──
     cookie_context = any(m in low for m in _COOKIE_MARKERS)
-    if cookie_context and "consent" not in seen:
+    if cookie_context and "consent" not in by_kind:
         for control, label in labels:
             if label in _COOKIE_LABELS:
                 add("cookie", control, label)
-                break
 
     order = {"age": 0, "age_dob": 0, "consent": 1, "cookie": 2}
-    found.sort(key=lambda g: order.get(g.kind, 3))
+    found = sorted(
+        by_kind.values(),
+        key=lambda g: (not g.blocking,
+                       order.get(g.kind, 3)))
     return found
 
 
@@ -422,10 +500,17 @@ def run_interstitial_pass(
         on_step: StepHook | None = None,
         rounds: int = 3) -> list[GateAction]:
     """Clear cookie/consent/age gates, then VERIFY none is
-    still standing.  Raises GateBlocked honestly when a
-    gate won't clear — including date-of-birth forms, which
-    Devon does not invent an answer for."""
+    still standing.  A click counts as handled only when
+    the gate verifiably clears; a click that refuses or
+    doesn't clear is a failed attempt on THAT control, and
+    the pass moves to the next candidate (the blocking
+    layer's control) instead of dying on — or retrying —
+    a covered, unrelated button.  Raises GateBlocked
+    honestly when no candidate clears — including
+    date-of-birth forms, which Devon does not invent an
+    answer for."""
     actions: list[GateAction] = []
+    failed: dict[tuple[str, str], str] = {}
     for _round in range(max(1, rounds)):
         gates = detect_gates(probe.html(), probe.url())
         if not gates:
@@ -442,33 +527,47 @@ def run_interstitial_pass(
                     gate.host or _host_of(probe.url()),
                     gate.kind):
                 continue
+            key = (gate.kind, gate.label)
+            if key in failed:
+                continue
             _emit(on_step, f"clearing a {gate.kind} gate")
-            if probe.click_gate(gate):
-                action = GateAction(
-                    kind=gate.kind, label=gate.label,
-                    host=gate.host or _host_of(probe.url()))
-                actions.append(action)
-                if memory is not None:
-                    memory.remember(action)
-                progressed = True
-                probe.wait(0.6)
-            else:
-                raise GateBlocked(
+            if not probe.click_gate(gate):
+                failed[key] = (
                     f"the {gate.kind} gate "
-                    f"({gate.label!r}) would not click — "
-                    "the capture would be a photo of the "
-                    "gate, so nothing was shot",
-                    gates=gates)
+                    f"({gate.label!r}) would not click")
+                continue
+            probe.wait(0.6)
+            if any(g.kind == gate.kind for g in
+                   detect_gates(probe.html(), probe.url())):
+                failed[key] = (
+                    f"the {gate.kind} gate "
+                    f"({gate.label!r}) was clicked but "
+                    "stayed up")
+                continue
+            action = GateAction(
+                kind=gate.kind, label=gate.label,
+                host=gate.host or _host_of(probe.url()))
+            actions.append(action)
+            if memory is not None:
+                memory.remember(action)
+            progressed = True
         if not progressed:
             break
     remaining = detect_gates(probe.html(), probe.url())
     if remaining:
         kinds = ", ".join(g.kind for g in remaining)
-        raise GateBlocked(
+        message = (
             f"gate(s) still standing after the pass: "
             f"{kinds} — the capture would be a photo of "
-            "the gate, so nothing was shot",
-            gates=remaining)
+            "the gate, so nothing was shot")
+        if failed:
+            message = (
+                f"gate(s) still standing after the pass: "
+                f"{kinds} — tried: "
+                f"{'; '.join(failed.values())} — the "
+                "capture would be a photo of the gate, so "
+                "nothing was shot")
+        raise GateBlocked(message, gates=remaining)
     return actions
 
 
@@ -812,6 +911,205 @@ class _PlaywrightProbe:
         return False
 
 
+# ── presentations: the fingerprint ladder ─────────────────
+#
+# A capture session's presentation is a LADDER of coherent
+# device fingerprints, not one fixed shape: the desktop /
+# headless-default presentation is what bot walls are tuned
+# to catch, while a phone-shaped presentation passes the
+# common walls — so the ladder starts mobile and rotates
+# (Android phone → iOS phone → tablet → coherent desktop)
+# only when a wall or a gate refuses the current rung.
+# Owner takeover is the LAST rung, after the ladder is
+# exhausted.  Every rung is internally consistent: its UA,
+# client hints, viewport, touch and scale all describe the
+# same device — a fingerprint and a form factor never
+# disagree.
+
+_CHROME_HINTS_VERSION = "141"
+
+
+def _chrome_hints(*, platform: str, model: str,
+                  mobile: bool) -> dict[str, Any]:
+    """Sec-CH-UA metadata (the CDP userAgentMetadata
+    payload) coherent with a Chrome UA on ``platform``."""
+    return {
+        "brands": [
+            {"brand": "Chromium",
+             "version": _CHROME_HINTS_VERSION},
+            {"brand": "Google Chrome",
+             "version": _CHROME_HINTS_VERSION},
+            {"brand": "Not?A_Brand", "version": "99"},
+        ],
+        "fullVersionList": [
+            {"brand": "Chromium",
+             "version": f"{_CHROME_HINTS_VERSION}.0.0.0"},
+            {"brand": "Google Chrome",
+             "version": f"{_CHROME_HINTS_VERSION}.0.0.0"},
+            {"brand": "Not?A_Brand", "version": "99.0.0.0"},
+        ],
+        "platform": platform,
+        "model": model,
+        "mobile": mobile,
+        "architecture": "",
+        "bitness": "",
+        "platformVersion": "",
+    }
+
+
+def _safari_hints(*, model: str,
+                  mobile: bool) -> dict[str, Any]:
+    """Client-hint metadata for the WebKit rungs: Safari
+    sends no brand list, so the coherent metadata carries
+    the device facts without Chromium brands."""
+    return {
+        "brands": [],
+        "fullVersionList": [],
+        "platform": "iOS",
+        "model": model,
+        "mobile": mobile,
+        "architecture": "",
+        "bitness": "",
+        "platformVersion": "",
+    }
+
+
+#: The named presentations.  Keys beyond the geometry the
+#: session has always carried (width/height/scale/mobile):
+#: ``name``, ``user_agent``, ``client_hints``.
+PRESENTATIONS: dict[str, dict[str, Any]] = {
+    "android-phone": {
+        "name": "android-phone",
+        "width": 390, "height": 844, "scale": 2,
+        "mobile": True,
+        "user_agent": (
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            f"Chrome/{_CHROME_HINTS_VERSION}.0.0.0 "
+            "Mobile Safari/537.36"),
+        "client_hints": _chrome_hints(
+            platform="Android", model="Pixel 8",
+            mobile=True),
+    },
+    "ios-phone": {
+        "name": "ios-phone",
+        "width": 390, "height": 844, "scale": 3,
+        "mobile": True,
+        "user_agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 "
+            "like Mac OS X) AppleWebKit/605.1.15 (KHTML, "
+            "like Gecko) Version/18.1 Mobile/15E148 "
+            "Safari/604.1"),
+        "client_hints": _safari_hints(
+            model="iPhone", mobile=True),
+    },
+    "ipad": {
+        "name": "ipad",
+        "width": 768, "height": 1024, "scale": 2,
+        "mobile": True,
+        "user_agent": (
+            "Mozilla/5.0 (iPad; CPU OS 18_1 like Mac OS "
+            "X) AppleWebKit/605.1.15 (KHTML, like Gecko) "
+            "Version/18.1 Mobile/15E148 Safari/604.1"),
+        "client_hints": _safari_hints(
+            model="iPad", mobile=True),
+    },
+    "android-tablet": {
+        "name": "android-tablet",
+        "width": 800, "height": 1280, "scale": 2,
+        "mobile": True,
+        "user_agent": (
+            "Mozilla/5.0 (Linux; Android 14; SM-X710) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            f"Chrome/{_CHROME_HINTS_VERSION}.0.0.0 "
+            "Safari/537.36"),
+        "client_hints": _chrome_hints(
+            platform="Android", model="SM-X710",
+            mobile=True),
+    },
+    "desktop-windows": {
+        "name": "desktop-windows",
+        "width": 1440, "height": 900, "scale": 1,
+        "mobile": False,
+        "user_agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            f"Chrome/{_CHROME_HINTS_VERSION}.0.0.0 "
+            "Safari/537.36"),
+        "client_hints": _chrome_hints(
+            platform="Windows", model="", mobile=False),
+    },
+    "desktop-macos": {
+        "name": "desktop-macos",
+        "width": 1440, "height": 900, "scale": 1,
+        "mobile": False,
+        "user_agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X "
+            "10_15_7) AppleWebKit/537.36 (KHTML, like "
+            f"Gecko) Chrome/{_CHROME_HINTS_VERSION}.0.0.0 "
+            "Safari/537.36"),
+        "client_hints": _chrome_hints(
+            platform="macOS", model="", mobile=False),
+    },
+}
+
+#: The default presentation: the first rung of the
+#: default ladder (mobile — his steer).
+DEFAULT_PRESENTATION = "android-phone"
+
+#: Ladders by requested variant.  A variant's ladder
+#: stays inside its form factor (a phone request never
+#: rotates onto a desktop viewport); the no-variant
+#: ladder walks phone → tablet → desktop.
+_PRESENTATION_LADDERS: dict[str, tuple[str, ...]] = {
+    "default": ("android-phone", "ios-phone", "ipad",
+                "desktop-windows"),
+    "phone": ("android-phone", "ios-phone"),
+    "tablet": ("ipad", "android-tablet"),
+    "desktop": ("desktop-windows", "desktop-macos"),
+}
+
+
+def presentation_ladder(
+        variant: str | None = None,
+        ) -> list[dict[str, Any]]:
+    """The ordered fingerprint ladder for a variant
+    (``phone`` / ``tablet`` / ``desktop``), or the default
+    ladder when no variant was chosen.  Fresh dicts —
+    callers may annotate them."""
+    names = _PRESENTATION_LADDERS.get(
+        str(variant or "default").lower(),
+        _PRESENTATION_LADDERS["default"])
+    return [dict(PRESENTATIONS[name]) for name in names]
+
+
+def context_kwargs(device: dict[str, Any], *,
+                   scheme: str = "light",
+                   record_dir: Path | None = None,
+                   ) -> dict[str, Any]:
+    """The context facts the pipeline REQUESTS from the
+    driver for one presentation — pure, so the seam tests
+    pin exactly what a session asks for: viewport, scale,
+    mobile/touch flags and the user agent, all from the
+    same device dict (one coherent fingerprint)."""
+    viewport = {"width": int(device["width"]),
+                "height": int(device["height"])}
+    kwargs: dict[str, Any] = {
+        "viewport": viewport,
+        "color_scheme": scheme,
+        "device_scale_factor": float(device.get("scale", 1)),
+        "is_mobile": bool(device.get("mobile", False)),
+        "has_touch": bool(device.get("mobile", False)),
+    }
+    ua = str(device.get("user_agent") or "")
+    if ua:
+        kwargs["user_agent"] = ua
+    if record_dir is not None:
+        kwargs["record_video_dir"] = str(record_dir)
+        kwargs["record_video_size"] = dict(viewport)
+    return kwargs
+
+
 # ── the session ───────────────────────────────────────────
 
 _PROFILE_LOCKS: dict[str, threading.Lock] = {}
@@ -834,6 +1132,12 @@ class NavOutcome:
     gates: list[GateAction] = field(default_factory=list)
     wall: str | None = None
     steps: list[str] = field(default_factory=list)
+    #: The fingerprint that cleared (presentation name),
+    #: and every presentation tried before it, in order —
+    #: the journal of the ladder walk.
+    presentation: str = ""
+    presentations_tried: list[str] = field(
+        default_factory=list)
 
     @property
     def touched(self) -> bool:
@@ -851,9 +1155,8 @@ class NavSession:
                  scheme: str = "light",
                  record_dir: Path | None = None) -> None:
         self._profile_dir = profile_dir
-        self._device = dict(device or {
-            "width": 1440, "height": 900, "scale": 1,
-            "mobile": False})
+        self._device = dict(
+            device or PRESENTATIONS[DEFAULT_PRESENTATION])
         self._scheme = scheme
         self._record_dir = record_dir
         self._pw: Any = None
@@ -881,22 +1184,9 @@ class NavSession:
             self._lock = lock
         try:
             self._pw = sync_playwright().start()
-            viewport = {"width": int(self._device["width"]),
-                        "height": int(self._device["height"])}
-            kwargs: dict[str, Any] = {
-                "viewport": viewport,
-                "color_scheme": self._scheme,
-                "device_scale_factor": float(
-                    self._device.get("scale", 1)),
-                "is_mobile": bool(self._device.get(
-                    "mobile", False)),
-                "has_touch": bool(self._device.get(
-                    "mobile", False)),
-            }
-            if self._record_dir is not None:
-                kwargs["record_video_dir"] = str(
-                    self._record_dir)
-                kwargs["record_video_size"] = dict(viewport)
+            kwargs = context_kwargs(
+                self._device, scheme=self._scheme,
+                record_dir=self._record_dir)
             if self._profile_dir is not None:
                 self._profile_dir.mkdir(parents=True,
                                         exist_ok=True)
@@ -913,6 +1203,7 @@ class NavSession:
                 self._context = self._browser.new_context(
                     **kwargs)
                 self._page = self._context.new_page()
+            self._apply_client_hints()
         except NavError:
             self._teardown()
             raise
@@ -924,6 +1215,25 @@ class NavSession:
         self._started_at = time.monotonic()
         self.probe = _PlaywrightProbe(self._page)
         return self
+
+    def _apply_client_hints(self) -> None:
+        """Carry the presentation's client hints (Sec-CH-UA
+        metadata) on the live context, where the driver
+        exposes a CDP session: UA and hints must describe
+        the same device, or the pair is itself a bot tell.
+        Best-effort in the file's idiom — the user agent
+        itself rides the context kwargs, never this call."""
+        hints = self._device.get("client_hints")
+        if not hints or self._context is None \
+                or self._page is None:
+            return
+        with suppress(Exception):
+            cdp = self._context.new_cdp_session(self._page)
+            cdp.send(
+                "Emulation.setUserAgentOverride",
+                {"userAgent": str(
+                    self._device.get("user_agent") or ""),
+                 "userAgentMetadata": dict(hints)})
 
     def _teardown(self) -> None:
         if self._context is not None:
@@ -949,6 +1259,11 @@ class NavSession:
         if self._page is None:
             raise NavError("the session is not open")
         return self._page
+
+    @property
+    def device(self) -> dict[str, Any]:
+        """The presentation this session is running."""
+        return dict(self._device)
 
     @property
     def started_at(self) -> float | None:
@@ -1102,7 +1417,72 @@ class NavSession:
 # ── entry points ──────────────────────────────────────────
 
 
+def open_with_ladder(
+        url: str,
+        presentations: list[dict[str, Any]],
+        open_one: Callable[
+            [dict[str, Any], TakeoverHook | None],
+            tuple[Any, NavOutcome]],
+        *, takeover_hook: TakeoverHook | None = None,
+        on_step: StepHook | None = None,
+        ) -> tuple[Any, NavOutcome]:
+    """Walk the fingerprint ladder for one navigation.
+
+    ``open_one(presentation, hook)`` opens one session
+    under one presentation and runs the pipeline, raising
+    GateBlocked/WallBlocked when that presentation is
+    refused (having cleaned up its own session).  A hard
+    wall or an unclearable gate under one fingerprint is
+    a fact about THAT fingerprint, so the walk rotates to
+    the next rung and re-runs the pass there — the
+    owner's takeover hook is attached ONLY on the last
+    rung.  A date-of-birth refusal never rotates: the
+    page's demand, not the fingerprint, is the refusal.
+    The outcome journals every presentation tried and
+    names the one that cleared."""
+    tried: list[str] = []
+    last_error: NavError | None = None
+    last_idx = len(presentations) - 1
+    for idx, pres in enumerate(presentations):
+        name = str(pres.get("name")
+                   or f"presentation-{idx + 1}")
+        hook = takeover_hook if idx == last_idx else None
+        try:
+            session, outcome = open_one(pres, hook)
+        except (GateBlocked, WallBlocked) as exc:
+            if isinstance(exc, GateBlocked) and any(
+                    g.kind == "age_dob" for g in exc.gates):
+                raise
+            tried.append(name)
+            last_error = exc
+            if idx < last_idx:
+                _emit(
+                    on_step,
+                    f"the {name} fingerprint was refused "
+                    "— rotating to the next")
+            continue
+        outcome.presentations_tried = [*tried, name]
+        outcome.presentation = name
+        return session, outcome
+    names = ", ".join(tried)
+    if isinstance(last_error, WallBlocked):
+        raise WallBlocked(
+            f"{last_error} — fingerprints tried: {names}; "
+            "none cleared",
+            wall=last_error.wall,
+            attempts=[*last_error.attempts,
+                      *(f"fingerprint {t}" for t in tried)])
+    if isinstance(last_error, GateBlocked):
+        raise GateBlocked(
+            f"{last_error} — fingerprints tried: {names}; "
+            "none cleared",
+            gates=last_error.gates)
+    raise NavError(
+        "no presentation could open the page")
+
+
 def navigate(url: str, *, device: dict[str, Any] | None = None,
+             ladder: list[dict[str, Any]] | None = None,
              scheme: str = "light",
              profile_dir: Path | None = None,
              takeover_hook: TakeoverHook | None = None,
@@ -1111,21 +1491,36 @@ def navigate(url: str, *, device: dict[str, Any] | None = None,
              managed_budget_s: float = MANAGED_BUDGET_S,
              takeover_budget_s: float = TAKEOVER_BUDGET_S
              ) -> tuple[NavSession, NavOutcome]:
-    """Open a session and run the pipeline.  The CALLER
-    owns the returned session (capture from it, then close
-    it — it is a context manager)."""
-    session = NavSession(profile_dir=profile_dir,
-                         device=device, scheme=scheme)
-    try:
-        session.__enter__()
-        outcome = session.open(
-            url, takeover_hook=takeover_hook, memory=memory,
-            on_step=on_step, managed_budget_s=managed_budget_s,
-            takeover_budget_s=takeover_budget_s)
-    except BaseException:
-        session.__exit__()
-        raise
-    return session, outcome
+    """Open a session and run the pipeline, walking the
+    fingerprint ladder when one is given (a wall or gate
+    that refuses one presentation rotates to the next;
+    takeover is the last rung).  The CALLER owns the
+    returned session (capture from it, then close it — it
+    is a context manager)."""
+    presentations = [dict(p) for p in ladder] if ladder \
+        else [dict(device or PRESENTATIONS[
+            DEFAULT_PRESENTATION])]
+
+    def open_one(pres: dict[str, Any],
+                 hook: TakeoverHook | None,
+                 ) -> tuple[NavSession, NavOutcome]:
+        session = NavSession(profile_dir=profile_dir,
+                             device=pres, scheme=scheme)
+        try:
+            session.__enter__()
+            outcome = session.open(
+                url, takeover_hook=hook, memory=memory,
+                on_step=on_step,
+                managed_budget_s=managed_budget_s,
+                takeover_budget_s=takeover_budget_s)
+        except BaseException:
+            session.__exit__()
+            raise
+        return session, outcome
+
+    return open_with_ladder(
+        url, presentations, open_one,
+        takeover_hook=takeover_hook, on_step=on_step)
 
 
 @dataclass
@@ -1178,6 +1573,7 @@ def _convert_to_mp4(webm: Path) -> Path | None:
 def record_page(url: str, *, seconds: float,
                 out_dir: Path,
                 device: dict[str, Any] | None = None,
+                ladder: list[dict[str, Any]] | None = None,
                 scheme: str = "light",
                 profile_dir: Path | None = None,
                 takeover_hook: TakeoverHook | None = None,
@@ -1186,20 +1582,23 @@ def record_page(url: str, *, seconds: float,
                 takeover_budget_s: float = TAKEOVER_BUDGET_S
                 ) -> RecordOutcome:
     """Record a page: warm-up pass first (gates/walls
-    cleared into the persistent profile, unrecorded), then
+    cleared into the persistent profile, unrecorded —
+    walking the fingerprint ladder, so the recording runs
+    under the presentation that actually cleared), then
     the recording pass — eased scroll for the requested
     duration → mp4 when ffmpeg allows, webm otherwise."""
     seconds = max(REC_MIN_S, min(REC_MAX_S, float(seconds)))
-    device = dict(device or {"width": 1440, "height": 900,
-                             "scale": 1, "mobile": False})
     memory = GateMemory()
-    # Phase 1 — warm-up: clear whatever stands in the way.
-    with NavSession(profile_dir=profile_dir, device=device,
-                    scheme=scheme) as warm:
-        warm.open(url, takeover_hook=takeover_hook,
-                  memory=memory, on_step=on_step,
-                  managed_budget_s=managed_budget_s,
-                  takeover_budget_s=takeover_budget_s)
+    # Phase 1 — warm-up: clear whatever stands in the way,
+    # and learn which fingerprint clears it.
+    warm_session, warm_nav = navigate(
+        url, device=device, ladder=ladder, scheme=scheme,
+        profile_dir=profile_dir, takeover_hook=takeover_hook,
+        memory=memory, on_step=on_step,
+        managed_budget_s=managed_budget_s,
+        takeover_budget_s=takeover_budget_s)
+    device = dict(warm_session.device)
+    warm_session.__exit__()
     # Phase 2 — record.
     out_dir.mkdir(parents=True, exist_ok=True)
     includes_clearing = False
@@ -1218,6 +1617,11 @@ def record_page(url: str, *, seconds: float,
                 on_step=on_step,
                 managed_budget_s=managed_budget_s,
                 takeover_budget_s=takeover_budget_s)
+            # The recording ran under the warm-up's winning
+            # fingerprint; the journal says so.
+            nav.presentation = warm_nav.presentation
+            nav.presentations_tried = list(
+                warm_nav.presentations_tried)
             if nav.touched and attempt == 0:
                 # The opening frames would show the clearing:
                 # discard and re-record on the warm profile.

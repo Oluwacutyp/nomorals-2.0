@@ -2,8 +2,11 @@
 
 The seam suite (test_webnav.py) pins the logic; this suite
 proves the same code drives a real browser: fixture pages
-behind (a) a cookie banner, (b) an age-gate dialog shaped
-like the real class, (c) a checkbox challenge, (d) a hard
+behind (a) a cookie banner, (b) an age-gate dialog in the
+real Pornhub shape (the "I'm 18 or older" overlay — no
+'ok' gate), (b2) the age overlay standing over a cookie
+bar whose button reads 'OK' (the age control must clear
+first), (c) a checkbox challenge, (d) a hard
 image-grid wall (unclearable → takeover requested, honest
 failure; clearable-by-owner → takeover resumes), and (e) a
 long scrollable page for /webrec (duration probed from the
@@ -42,20 +45,48 @@ document.getElementById('cookie-banner').remove();"
 >Accept all cookies</button></div>
 </body></html>"""
 
-AGE_PAGE = f"""<html><head><title>Adult Site</title></head>
-<body><div id="content" style="display:none">
-{CONTENT_BODY}</div>
-<div class="age-gate-modal" role="dialog"
-style="position:fixed;inset:0;background:#111;color:#eee">
+# The real Pornhub shape (owner evidence, 2026-11-08):
+# the gate is the age-verification overlay's "I'm 18 or
+# older" enter button.  There is NO 'ok' gate on the
+# page — an earlier fixture invented one, and the pass
+# dutifully aimed at it while the age modal stood.
+_AGE_OVERLAY = """
+<div id="age-verification" class="modal age-gate"
+role="dialog" aria-modal="true"
+style="position:fixed;inset:0;background:#111;color:#eee;
+z-index:1000">
 <h2>This is an adult website</h2>
 <p>You must be 18 or older to enter. This site contains
 sexually explicit material.</p>
 <button id="age-enter" onclick="
-this.parentElement.remove();
+document.getElementById('age-verification').remove();
 document.getElementById('content').style.display='block';
 document.title='Real Page';
-">I'm 18 or Older - Enter</button>
-<button>Exit</button></div>
+">I'm 18 or older</button>
+<button>Exit</button></div>"""
+
+AGE_PAGE = f"""<html><head><title>Adult Site</title></head>
+<body><div id="content" style="display:none">
+{CONTENT_BODY}</div>{_AGE_OVERLAY}
+</body></html>"""
+
+# Both gates at once: a cookie bar whose button reads
+# 'OK' (not blocking — a bar along the bottom edge) and
+# the age overlay standing over the whole page.  The
+# pass must work the age control FIRST: the 'OK' is
+# covered by the overlay and cannot be clicked at all
+# until the modal clears.
+AGE_OVER_COOKIE_PAGE = f"""<html><head><title>Adult Site</title>
+</head>
+<body><div id="content" style="display:none">
+{CONTENT_BODY}</div>
+<div id="cookie-banner" style="position:fixed;left:0;
+right:0;bottom:0;background:#ffe;
+border-top:2px solid #333;z-index:10">
+<p>We use cookies to improve your experience.</p>
+<button id="cookie-ok" onclick="
+document.getElementById('cookie-banner').remove();"
+>OK</button></div>{_AGE_OVERLAY}
 </body></html>"""
 
 # The detector keys on the widget's own markup (the
@@ -143,6 +174,7 @@ if (!document.cookie.includes('consent=yes')) {
 PAGES = {
     "/cookie": COOKIE_PAGE,
     "/age": AGE_PAGE,
+    "/age-cookie": AGE_OVER_COOKIE_PAGE,
     "/checkbox": CHECKBOX_PAGE,
     "/wall": WALL_PAGE,
     "/long": LONG_PAGE,
@@ -221,6 +253,18 @@ def test_age_gate_cleared_and_content_shot(base_url,
     assert result.gates_cleared == ["age"]
     # The fixture flips its title only when the gate's own
     # button is clicked and the content is revealed.
+    assert result.title == "Real Page"
+
+
+def test_age_gate_outranks_the_cookie_ok(base_url,
+                                         tmp_path):
+    # The page carries a cookie 'OK' AND the blocking age
+    # overlay.  The pass must clear the age gate first
+    # (the 'OK' sits under the overlay), then the cookie.
+    result = webshot.capture(
+        f"{base_url}/age-cookie", ShotOptions(),
+        profile_dir=tmp_path / "profile")
+    assert result.gates_cleared == ["age", "cookie"]
     assert result.title == "Real Page"
 
 

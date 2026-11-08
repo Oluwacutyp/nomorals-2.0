@@ -20,6 +20,16 @@ behind /webshot and /webrec, pinned at the probe seam.
 - /webrec's handler delivers an inline video (kind=
   "video", clean name), journals, and answers honestly
   on failure; /webshot's reply names the gates cleared.
+- gate targeting aims at the BLOCKING layer's control:
+  age confirms (incl. the real Pornhub shape, curly
+  apostrophe and all) outrank a stray consent 'ok', and
+  a click that refuses or doesn't clear is a failed
+  attempt the pass moves on from — never a dead end.
+- presentation is a ladder of coherent fingerprints
+  (mobile first): a hard wall or an unclearable gate
+  rotates to the next fingerprint, owner takeover is
+  the last rung, and the outcome journals every
+  fingerprint tried and the one that cleared.
 """
 from __future__ import annotations
 
@@ -562,6 +572,324 @@ def test_webrec_handler_messageless_line():
     rig = RuntimeGroupMixin()
     out = rig._control_webrec("https://x.example/", None)
     assert out.startswith("webrec answers with a video")
+
+
+# ── gate targeting: the blocking layer's control ────────
+
+# The real Pornhub shape (owner evidence, 2026-11-08):
+# the gate is the age modal's "I'm 18 or older" button —
+# served with a curly apostrophe — and there is NO 'ok'
+# gate; the only 'ok' on the page is a cookie chip that
+# is not what blocks the content.
+PORNHUB_CURLY_PAGE = """<html><head><title>Adult Site</title></head>
+<body><div class="age-modal" role="dialog"
+style="position:fixed;inset:0">
+<h2>This is an adult website</h2>
+<p>You must be 18 or older to enter.</p>
+<button id="age-enter">I’m 18 or older</button>
+<button>Exit</button></div>
+<div id="cookie-note"><p>We use cookies.</p>
+<button id="cookie-ok">OK</button></div></body></html>"""
+
+# What the age click lands on: the content, with the
+# cookie chip still sitting on it (it was never the
+# blocker, and clearing the gate doesn't clear it).
+CONTENT_WITH_COOKIE_PAGE = """<html><head><title>Real Page</title></head>
+<body><h1>The actual content</h1>
+<div id="cookie-note"><p>We use cookies.</p>
+<button id="cookie-ok">OK</button></div></body></html>"""
+
+# A blocking consent wall + an age link that merely sits
+# in the footer: the wall is what covers the page.
+STACKED_LAYER_PAGE = """<html><head><title>Real Page</title></head>
+<body><h1>The actual content</h1>
+<div class="modal" role="dialog"><p>We value your
+privacy. GDPR applies to you.</p>
+<button id="consent-accept">Accept all</button></div>
+<footer><a href="/age-check">18 or older - enter</a>
+</footer></body></html>"""
+
+# Both splash gates on one page: a consent wall in a
+# modal layer and an age confirm beside it.
+CONSENT_AND_AGE_PAGE = """<html><head><title>Splash</title></head>
+<body><div class="modal" role="dialog"><p>We value your
+privacy. GDPR applies to you.</p>
+<button id="consent-accept">Accept all</button></div>
+<div class="age-box"><h2>This is an adult website</h2>
+<p>You must be 18 or older to enter.</p>
+<button id="age-enter">I'm 18 or older</button></div>
+</body></html>"""
+
+
+class KindProbe(FakeProbe):
+    """FakeProbe with per-kind click physics: kinds in
+    ``refuse`` won't click; kinds in ``land`` land on the
+    given page when clicked."""
+
+    def __init__(self, html, *, refuse=(), land=None,
+                 **kw):
+        super().__init__(html, **kw)
+        self._refuse = set(refuse)
+        self._land = dict(land or {})
+
+    def click_gate(self, gate):
+        self.gate_clicks.append(gate.kind)
+        if gate.kind in self._refuse:
+            return False
+        if gate.kind in self._land:
+            self._html = self._land[gate.kind]
+        return True
+
+
+def test_detect_pornhub_curly_age_beats_stray_ok():
+    gates = detect_gates(
+        PORNHUB_CURLY_PAGE,
+        "https://www.pornhub.com/view_video.php?viewkey=x")
+    assert gates[0].kind == "age"
+    assert gates[0].blocking is True
+    assert "18 or older" in gates[0].label
+    assert [g.kind for g in gates] == ["age", "cookie"]
+
+
+def test_detect_blocking_layer_outranks_kind_order():
+    gates = detect_gates(STACKED_LAYER_PAGE,
+                         "https://x.example/")
+    assert gates[0].kind == "consent"
+    assert gates[0].blocking is True
+    assert gates[1].kind == "age"
+    assert gates[1].blocking is False
+
+
+def test_pass_clicks_age_not_the_stray_ok():
+    probe = KindProbe(
+        PORNHUB_CURLY_PAGE,
+        url="https://www.pornhub.com/view_video.php?viewkey=x",
+        land={"age": CONTENT_WITH_COOKIE_PAGE,
+              "cookie": CONTENT_PAGE})
+    actions = webnav.run_interstitial_pass(probe)
+    # The age control is worked FIRST (it is the blocking
+    # layer); the stray 'ok' is just the cookie chip the
+    # pass tidies afterwards.
+    assert [a.kind for a in actions] == ["age", "cookie"]
+    assert probe.gate_clicks == ["age", "cookie"]
+
+
+def test_pass_moves_on_from_a_refused_control():
+    probe = KindProbe(
+        CONSENT_AND_AGE_PAGE, refuse={"consent"},
+        land={"age": CONTENT_PAGE})
+    actions = webnav.run_interstitial_pass(probe)
+    assert [a.kind for a in actions] == ["age"]
+    # The refused consent control was tried ONCE, then
+    # the pass moved to the next candidate.
+    assert probe.gate_clicks == ["consent", "age"]
+
+
+def test_pass_journals_failed_attempts_when_blocked():
+    probe = KindProbe(
+        CONSENT_AND_AGE_PAGE, refuse={"consent"},
+        land={"age": CONSENT_AND_AGE_PAGE})
+    with pytest.raises(GateBlocked) as err:
+        webnav.run_interstitial_pass(probe)
+    # Each control was attempted exactly once — no
+    # retrying a control that already failed.
+    assert probe.gate_clicks == ["consent", "age"]
+    assert "would not click" in str(err.value)
+    assert "stayed up" in str(err.value)
+
+
+# ── the fingerprint ladder ────────────────────────────────
+
+
+def _ladder_opener(pages, record, holder=None):
+    """An open_one for open_with_ladder: runs the REAL
+    passes against the page scripted for each
+    presentation, the way NavSession.open does."""
+
+    def open_one(pres, hook):
+        record.append((pres["name"], hook is not None))
+        probe = pages[pres["name"]]
+        if holder is not None:
+            holder["probe"] = probe
+        gates = webnav.run_interstitial_pass(probe)
+        wall = run_wall_pass(probe, url="https://x.example/",
+                             takeover_hook=hook)
+        return probe, webnav.NavOutcome(
+            final_url="https://x.example/",
+            title=probe.title(), gates=gates, wall=wall,
+            steps=[])
+
+    return open_one
+
+
+def _grid_pages(ladder, *, clear=()):
+    pages = {}
+    for pres in ladder:
+        if pres["name"] in clear:
+            pages[pres["name"]] = FakeProbe(CONTENT_PAGE)
+        else:
+            pages[pres["name"]] = FakeProbe(
+                GRID_PAGE, title="Security Check")
+    return pages
+
+
+def test_ladder_rotates_to_next_fingerprint_on_hard_wall():
+    ladder = webnav.presentation_ladder(None)
+    pages = _grid_pages(ladder, clear={"ios-phone", "ipad",
+                                       "desktop-windows"})
+    record = []
+    hook_calls = []
+
+    def hook(ask):
+        hook_calls.append(ask)
+        return True
+
+    _session, outcome = webnav.open_with_ladder(
+        "https://x.example/", ladder,
+        _ladder_opener(pages, record), takeover_hook=hook)
+    assert outcome.presentation == "ios-phone"
+    assert outcome.presentations_tried == [
+        "android-phone", "ios-phone"]
+    # The takeover hook rides ONLY the last rung — it was
+    # attached on neither attempt, and never fired.
+    assert record == [("android-phone", False),
+                      ("ios-phone", False)]
+    assert hook_calls == []
+
+
+def test_ladder_takeover_is_the_last_rung():
+    ladder = webnav.presentation_ladder(None)
+    pages = _grid_pages(ladder)
+    record = []
+    holder = {}
+    hook_calls = []
+
+    def hook(ask):
+        hook_calls.append(ask)
+        holder["probe"]._html = CONTENT_PAGE
+        holder["probe"]._title = "Real Page"
+        return True
+
+    _session, outcome = webnav.open_with_ladder(
+        "https://x.example/", ladder,
+        _ladder_opener(pages, record, holder),
+        takeover_hook=hook)
+    assert outcome.wall == "owner_takeover"
+    assert outcome.presentation == "desktop-windows"
+    assert outcome.presentations_tried == [
+        p["name"] for p in ladder]
+    assert [name for name, hooked in record
+            if hooked] == ["desktop-windows"]
+    assert len(hook_calls) == 1
+
+
+def test_ladder_exhausted_journals_every_fingerprint():
+    ladder = webnav.presentation_ladder(None)
+    pages = _grid_pages(ladder)
+    record = []
+    with pytest.raises(WallBlocked) as err:
+        webnav.open_with_ladder(
+            "https://x.example/", ladder,
+            _ladder_opener(pages, record),
+            takeover_hook=lambda ask: False)
+    assert "android-phone" in str(err.value)
+    assert "desktop-windows" in str(err.value)
+    assert "none cleared" in str(err.value)
+    assert "fingerprint ios-phone" in err.value.attempts
+
+
+def test_ladder_rotates_when_the_gate_pass_cannot_clear():
+    ladder = webnav.presentation_ladder(None)
+    pages = _grid_pages(ladder, clear={"ios-phone", "ipad",
+                                       "desktop-windows"})
+    pages["android-phone"] = FakeProbe(
+        COOKIE_PAGE, click_works=False)
+    record = []
+    _session, outcome = webnav.open_with_ladder(
+        "https://x.example/", ladder,
+        _ladder_opener(pages, record),
+        takeover_hook=lambda ask: True)
+    assert outcome.presentation == "ios-phone"
+    assert outcome.presentations_tried == [
+        "android-phone", "ios-phone"]
+
+
+def test_ladder_dob_refusal_never_rotates():
+    ladder = webnav.presentation_ladder(None)
+    pages = _grid_pages(ladder, clear={"ios-phone", "ipad",
+                                       "desktop-windows"})
+    pages["android-phone"] = FakeProbe(DOB_PAGE)
+    record = []
+    with pytest.raises(GateBlocked) as err:
+        webnav.open_with_ladder(
+            "https://x.example/", ladder,
+            _ladder_opener(pages, record),
+            takeover_hook=lambda ask: True)
+    assert "date of birth" in str(err.value)
+    assert record == [("android-phone", False)]
+
+
+def test_presentation_ladders_are_coherent():
+    for variant in (None, "phone", "tablet", "desktop"):
+        ladder = webnav.presentation_ladder(variant)
+        assert ladder, variant
+        for pres in ladder:
+            ua = pres["user_agent"]
+            assert ua
+            hints = pres["client_hints"]
+            assert hints["mobile"] == pres["mobile"]
+            kwargs = webnav.context_kwargs(pres)
+            assert kwargs["user_agent"] == ua
+            assert kwargs["viewport"] == {
+                "width": pres["width"],
+                "height": pres["height"]}
+            assert kwargs["is_mobile"] == pres["mobile"]
+            assert kwargs["has_touch"] == pres["mobile"]
+            if pres["mobile"]:
+                # A mobile platform family in the UA
+                # (Android tablets legitimately omit the
+                # "Mobile" token — the family must agree,
+                # not one token).
+                assert "Android" in ua or "iPhone" in ua \
+                    or "iPad" in ua
+            else:
+                assert "Mobile" not in ua
+                assert "Android" not in ua
+    default = webnav.presentation_ladder(None)
+    # Mobile first; a coherent desktop is the last rung.
+    assert default[0]["name"] == "android-phone"
+    assert default[0]["mobile"] is True
+    assert default[-1]["mobile"] is False
+    # A phone variant never wears a desktop viewport.
+    phone = webnav.presentation_ladder("phone")
+    assert all(p["mobile"] and p["width"] <= 430
+               for p in phone)
+    desktop = webnav.presentation_ladder("desktop")
+    assert all(not p["mobile"] for p in desktop)
+
+
+def test_session_default_presentation_is_mobile():
+    session = webnav.NavSession()
+    assert session.device["name"] == "android-phone"
+    assert session.device["mobile"] is True
+    assert "Android" in session.device["user_agent"]
+
+
+def test_device_variants_are_chosen_not_defaulted():
+    _url, opts = webshot.parse_shot_tail(
+        "https://x.example/")
+    assert opts.device_chosen is False
+    _url, opts = webshot.parse_shot_tail(
+        "phone https://x.example/")
+    assert opts.device == "phone"
+    assert opts.device_chosen is True
+    _url, opts = webshot.parse_rec_tail(
+        "https://x.example/")
+    assert opts.device_chosen is False
+    _url, opts = webshot.parse_rec_tail(
+        "desktop https://x.example/")
+    assert opts.device == "desktop"
+    assert opts.device_chosen is True
 
 
 def test_webshot_reply_names_gates_and_wall(

@@ -4528,7 +4528,8 @@ class RuntimeGroupMixin:
         scope = key or str(message.chat.key or "")
         options_line = (
             f"{'full' if opts.full_page else 'viewport'} · "
-            f"{opts.device} · {opts.scheme}"
+            f"{opts.device if opts.device_chosen else 'auto'}"
+            f" · {opts.scheme}"
             + (f" · clip {opts.clip}" if opts.clip else "")
             + (" · pdf" if opts.pdf else ""))
         db = getattr(getattr(self, "context", None), "db", None)
@@ -4551,7 +4552,9 @@ class RuntimeGroupMixin:
                     size=len(result.data), width=result.width,
                     height=result.height, pdf=result.pdf,
                     scope=scope, requester=requester,
-                    options=options_line)
+                    options=options_line + (
+                        f" · {result.presentation}"
+                        if result.presentation else ""))
         # §19's media mark, from the one presentation home:
         # the destination group's settings in a group, the
         # house defaults + the owner's mark in DM.
@@ -4593,6 +4596,10 @@ class RuntimeGroupMixin:
         if result.wall_via:
             reply += (f"\n🧱 bot check passed via "
                       f"{result.wall_via}")
+        if len(result.presentations_tried) > 1:
+            reply += ("\n🧭 fingerprint ladder: "
+                      + " → ".join(
+                          result.presentations_tried))
         finish(f"📸 {title}")
         if opts.annotate and not result.pdf:
             try:
@@ -4666,8 +4673,9 @@ class RuntimeGroupMixin:
             return str(exc)
         scope = key or str(message.chat.key or "")
         options_line = (
-            f"webrec · {opts.seconds:.0f}s · {opts.device} · "
-            f"{opts.scheme}")
+            f"webrec · {opts.seconds:.0f}s · "
+            f"{opts.device if opts.device_chosen else 'auto'}"
+            f" · {opts.scheme}")
         on_step, finish = self._nav_progress(message,
                                              "🎬 recording")
         out_dir = Path(book.root) / "webrec_out"
@@ -4690,7 +4698,10 @@ class RuntimeGroupMixin:
         book.record(url=url, ok=True, rung="webrec",
                     size=size, scope=scope,
                     requester=requester,
-                    options=options_line)
+                    options=options_line + (
+                        f" · {outcome.nav.presentation}"
+                        if outcome.nav
+                        and outcome.nav.presentation else ""))
         settings = surface.store.settings(key) if key else None
         registry = self._owner_registry()
         mark = resolve_media_mark(settings, "announcement",
@@ -4726,6 +4737,11 @@ class RuntimeGroupMixin:
         if outcome.nav and outcome.nav.wall:
             reply += (f"\n🧱 bot check passed via "
                       f"{outcome.nav.wall}")
+        if outcome.nav and \
+                len(outcome.nav.presentations_tried) > 1:
+            reply += ("\n🧭 fingerprint ladder: "
+                      + " → ".join(
+                          outcome.nav.presentations_tried))
         if outcome.plan is not None and \
                 not outcome.plan.reached_bottom:
             reply += ("\n📜 the page is longer than the "
