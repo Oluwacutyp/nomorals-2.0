@@ -996,6 +996,34 @@ class PersonalSurfaces:
         _append_jsonl(self.vault.journal_path, entry)
         return entry
 
+    def note_message_acted(self, platform: str, *,
+                           kind: str,
+                           account_id: str = "",
+                           chat_id: str = "",
+                           source_id: str = "",
+                           dest_id: str = "",
+                           note: str = "",
+                           ts: float = 0.0) -> dict[str, Any]:
+        """Journal one message-level act the OWNER took through
+        Devon on a personal surface (/react, /forward — parity
+        G1): his own acts on his account are part of the
+        personal record like everything the surface does — an
+        unjournaled act would be a silent one.  Returns the
+        journal entry written."""
+        rec = self.resolve_event_account(platform, account_id)
+        entry = {
+            "ts": float(ts or self._clock()),
+            "kind": str(kind or ""), "account": rec.id,
+            "platform": platform, "counterpart_id": chat_id,
+            "poster_name": "", "media_kind": "",
+            "source_id": str(source_id or ""), "path": "",
+            "bytes": 0, "text": "",
+            "note": str(note or "")[:200]}
+        if dest_id:
+            entry["dest_id"] = str(dest_id)
+        _append_jsonl(self.vault.journal_path, entry)
+        return entry
+
     def cycle_stories(self, platform: str = "telegram",
                       account_id: str = "") -> list[dict[str, Any]]:
         """One story sweep: ask the fetcher for the account's

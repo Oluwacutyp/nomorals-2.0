@@ -49,6 +49,7 @@ __all__ = [
 CHATOPS_COMMANDS = frozenset({
     "archive", "unarchive", "mutechat", "unmutechat",
     "readchat", "unreadchat", "star", "unstar",
+    "forward",
     "unsend", "edit", "editmsg", "antiedit", "poststatus",
     "chanstory",
     "block", "unblock", "anticall", "disappear",

@@ -6449,6 +6449,7 @@ class PartnerRuntime(
         if kind in {
                 "archive", "unarchive", "mutechat", "unmutechat",
                 "readchat", "unreadchat", "star", "unstar",
+                "forward",
                 "unsend", "edit", "editmsg", "antiedit",
                 "block", "unblock", "anticall", "disappear",
                 "statusreact", "poststatus", "chanstory",

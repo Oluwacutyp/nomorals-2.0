@@ -1927,6 +1927,56 @@ class WhatsAppAdapter(ChatAdapter):
             "chat": self._jid(chat), "message_id": message_id,
             "star": bool(star)}, timeout=15)
 
+    def react_message(self, chat: ChatRef, message_id: str,
+                      emoji: str = "") -> dict[str, Any]:
+        """React to one CHAT message as the owner (bridges'
+        ``react``; parity G1 — the message-level sibling of
+        react_status).  The reaction key is built from bridge
+        memory on both engines — a message neither bridge has
+        seen is an honest refusal.  An empty emoji REMOVES the
+        owner's reaction (the shape the phone itself sends)."""
+        message_id = str(message_id or "").strip()
+        if not message_id:
+            return {"ok": False,
+                    "error": "react needs a message_id"}
+        return self._admin_cmd("react", {
+            "chat": self._jid(chat), "message_id": message_id,
+            "emoji": str(emoji or "")}, timeout=15)
+
+    def forward_message(self, chat: ChatRef, message_id: str,
+                        dest: ChatRef) -> dict[str, Any]:
+        """Forward one message into another chat as the owner
+        (bridges' ``forward``; parity G1).  Both engines re-send
+        the ORIGINAL message out of bridge memory with the
+        forwarded mark — never a retyped copy; a message the
+        bridge never saw, and view-once wraps, refuse honestly.
+        One call is one forward: this verb never retries, so a
+        command can never double-send by accident."""
+        message_id = str(message_id or "").strip()
+        if not message_id:
+            return {"ok": False,
+                    "error": "forward needs a message_id"}
+        return self._admin_cmd("forward", {
+            "chat": self._jid(chat), "message_id": message_id,
+            "dest": self._jid(dest)}, timeout=30)
+
+    def react(self, chat: ChatRef, message_id: str,
+              emoji: str) -> SendResult:
+        """The §22 base reaction verb, carried on WhatsApp by
+        the bridges' ``react`` (parity G1): before this, the
+        adapter inherited the base class's honest "reactions
+        not supported" — the verb simply didn't exist on either
+        engine.  An empty emoji removes the reaction."""
+        verdict = self.react_message(chat, message_id, emoji)
+        if isinstance(verdict, dict) and verdict.get("ok"):
+            return SendResult(ok=True, platform=self.name,
+                              message_id=str(message_id or ""))
+        error = ""
+        if isinstance(verdict, dict):
+            error = str(verdict.get("error") or "")
+        return SendResult(ok=False, platform=self.name,
+                          error=error or "the bridge refused")
+
     def react_status(self, poster_id: str, message_id: str,
                      emoji: str) -> dict[str, Any]:
         """React to one contact status post as the owner (the

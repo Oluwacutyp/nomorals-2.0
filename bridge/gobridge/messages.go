@@ -110,6 +110,10 @@ func (b *bridge) handleCommand(cc *clientConn, req request) {
 		b.cmdStatusSend(ctx, cc, id, req)
 	case "status_react":
 		b.cmdStatusReact(ctx, cc, id, req)
+	case "react":
+		b.cmdReact(ctx, cc, id, req)
+	case "forward":
+		b.cmdForward(ctx, cc, id, req)
 	case "chat_modify":
 		b.cmdChatModify(ctx, cc, id, req)
 	case "message_star":
@@ -721,6 +725,10 @@ func (b *bridge) cmdSend(ctx context.Context, cc *clientConn, id string, req req
 			rec.senderJID = b.cli.Store.ID.ToNonAD()
 		}
 		b.remember(chat, rec)
+		// Cache the payload too: forwarding (cmdForward) needs
+		// the original message, and the owner's own sends are
+		// exactly the messages he forwards most.
+		b.cacheMessage(string(resp.ID), msg, rec.senderJID)
 		return resp.ID, nil
 	}
 
@@ -995,6 +1003,12 @@ func (b *bridge) cmdSendMedia(ctx context.Context, cc *clientConn, id string, re
 	if err != nil {
 		b.fail(cc, id, err)
 		return
+	}
+	// Cache the payload like cmdSend does — the owner's own
+	// media sends are forwardable material (cmdForward).
+	if b.cli.Store != nil && b.cli.Store.ID != nil {
+		b.cacheMessage(string(resp.ID), msg,
+			b.cli.Store.ID.ToNonAD())
 	}
 	b.reply(cc, id, map[string]any{"ok": true, "message_id": string(resp.ID)})
 }
@@ -1364,6 +1378,181 @@ func (b *bridge) cmdStatusReact(ctx context.Context, cc *clientConn, id string, 
 		return
 	}
 	b.reply(cc, id, map[string]any{"ok": true})
+}
+
+// cmdReact reacts to one CHAT message as the owner (parity G1):
+// whatsmeow BuildReaction against the message's key — chat +
+// author + id.  The author comes from the bridge's own memory
+// (the whole-message cache, then the chat's remembered ring —
+// the same sources message_star reads); a message it never saw
+// is an honest refusal, never a guessed key.  An empty emoji
+// REMOVES the owner's reaction — the shape the phone itself
+// sends.  DM and group targets both ride it, and the author
+// may be addressed by phone JID or by LID: BuildMessageKey
+// folds either form into the right key.
+func (b *bridge) cmdReact(ctx context.Context, cc *clientConn, id string, req request) {
+	chat, err := parseJID(req.str("chat"))
+	if err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	mid := strings.TrimSpace(req.str("message_id"))
+	if mid == "" {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "react needs a message_id"})
+		return
+	}
+	emoji := strings.TrimSpace(req.str("emoji"))
+	sender := b.cachedSender(mid)
+	if sender.IsEmpty() {
+		b.memMu.Lock()
+		for _, rec := range b.recent[chat.String()] {
+			if rec != nil && string(rec.id) == mid {
+				sender = rec.senderJID
+				break
+			}
+		}
+		b.memMu.Unlock()
+	}
+	if sender.IsEmpty() {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "message not in bridge memory — its author " +
+				"is unknown, so its reaction key cannot be built"})
+		return
+	}
+	msg := b.cli.BuildReaction(chat, sender,
+		types.MessageID(mid), emoji)
+	if _, err := b.cli.SendMessage(ctx, chat, msg); err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	b.reply(cc, id, map[string]any{"ok": true})
+}
+
+// cmdForward forwards one message to another chat as the owner
+// (parity G1).  WhatsApp has no forward RPC: a forward is the
+// original message re-sent with its context marked forwarded
+// (isForwarded + a forwarding score one past the original's) —
+// the shape the phone itself sends.  The ORIGINAL payload must
+// come from the bridge's own message memory (incoming messages
+// are cached whole; this bridge's own sends are cached as they
+// land) — a message it never saw is an honest refusal, never a
+// retyped copy.  The quote linkage is stripped: a forward is
+// not a reply.  Media rides its original upload — the keys
+// travel with the message, as they do in the phone's forwards.
+func (b *bridge) cmdForward(ctx context.Context, cc *clientConn, id string, req request) {
+	if _, err := parseJID(req.str("chat")); err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	dest, err := parseJID(req.str("dest"))
+	if err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	mid := strings.TrimSpace(req.str("message_id"))
+	if mid == "" {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "forward needs a message_id"})
+		return
+	}
+	b.memMu.Lock()
+	cached := b.msgCache[mid]
+	b.memMu.Unlock()
+	if cached == nil || cached.msg == nil {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "message not in bridge memory — forwarding " +
+				"needs the original message, and this bridge " +
+				"never saw it"})
+		return
+	}
+	msg, ferr := forwardCopy(cached.msg)
+	if ferr != "" {
+		b.reply(cc, id, map[string]any{"ok": false, "error": ferr})
+		return
+	}
+	resp, err := b.cli.SendMessage(ctx, dest, msg)
+	if err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	b.reply(cc, id, map[string]any{"ok": true,
+		"message_id": string(resp.ID)})
+}
+
+// forwardCopy clones one cached message into its forward form.
+// The second return is the honest refusal for shapes that have
+// no forward: view-once wraps (forwarding one would break the
+// promise the format makes) and non-content kinds (reactions,
+// protocol, calls, polls, interactive forms).
+func forwardCopy(src *waE2E.Message) (*waE2E.Message, string) {
+	if src.GetViewOnceMessage() != nil ||
+		src.GetViewOnceMessageV2() != nil ||
+		src.GetViewOnceMessageV2Extension() != nil {
+		return nil, "view-once messages can't be forwarded — " +
+			"that is the promise the format makes"
+	}
+	inner := src
+	if dsm := src.GetDeviceSentMessage(); dsm != nil &&
+		dsm.GetMessage() != nil {
+		inner = dsm.GetMessage()
+	} else if eph := src.GetEphemeralMessage(); eph != nil &&
+		eph.GetMessage() != nil {
+		inner = eph.GetMessage()
+	}
+	out, ok := proto.Clone(inner).(*waE2E.Message)
+	if !ok || out == nil {
+		return nil, "the cached message could not be copied"
+	}
+	mark := func(ci *waE2E.ContextInfo) *waE2E.ContextInfo {
+		if ci == nil {
+			ci = &waE2E.ContextInfo{}
+		}
+		ci.IsForwarded = proto.Bool(true)
+		ci.ForwardingScore = proto.Uint32(
+			ci.GetForwardingScore() + 1)
+		// a forward is not a reply, and the source chat's
+		// disappearing-message state is not the destination's
+		ci.StanzaID = nil
+		ci.Participant = nil
+		ci.QuotedMessage = nil
+		ci.RemoteJID = nil
+		ci.Expiration = nil
+		ci.EphemeralSettingTimestamp = nil
+		ci.EphemeralSharedSecret = nil
+		ci.DisappearingMode = nil
+		return ci
+	}
+	switch {
+	case out.Conversation != nil:
+		text := out.GetConversation()
+		out.Conversation = nil
+		out.ExtendedTextMessage = &waE2E.ExtendedTextMessage{
+			Text: proto.String(text), ContextInfo: mark(nil)}
+	case out.ExtendedTextMessage != nil:
+		out.ExtendedTextMessage.ContextInfo = mark(
+			out.ExtendedTextMessage.ContextInfo)
+	case out.ImageMessage != nil:
+		out.ImageMessage.ContextInfo = mark(
+			out.ImageMessage.ContextInfo)
+	case out.VideoMessage != nil:
+		out.VideoMessage.ContextInfo = mark(
+			out.VideoMessage.ContextInfo)
+	case out.AudioMessage != nil:
+		out.AudioMessage.ContextInfo = mark(
+			out.AudioMessage.ContextInfo)
+	case out.DocumentMessage != nil:
+		out.DocumentMessage.ContextInfo = mark(
+			out.DocumentMessage.ContextInfo)
+	case out.StickerMessage != nil:
+		out.StickerMessage.ContextInfo = mark(
+			out.StickerMessage.ContextInfo)
+	default:
+		return nil, "this message kind has no forward shape " +
+			"(reactions, calls, polls and interactive forms " +
+			"can't be forwarded)"
+	}
+	return out, ""
 }
 
 // cmdRejectCall rejects one ringing call (the anticall toggle's

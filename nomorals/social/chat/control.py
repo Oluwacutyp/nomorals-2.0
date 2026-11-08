@@ -536,6 +536,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "unreadchat": (0, None),  # /unreadchat [chat name] — mark unread
     "star": (0, 0),           # /star as a reply — star that message
     "unstar": (0, 0),         # /unstar as a reply
+    "forward": (1, None),     # /forward <chat> as a reply — forward that message there
     "unsend": (0, 0),         # /unsend as a reply — delete own for all
     "edit": (1, None),        # /edit <new text> as a reply (alias)
     "editmsg": (1, None),     # /editmsg <new text> as a reply
@@ -2449,10 +2450,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                     "usage": "/customemoji list · add <name> <emoji> · ref <name> <platform> <ref> · show <name> · remove <name>",
                     "example": "/customemoji add devon 🥷",
                     "related": "/emoji · /sticker"},
-    "react": {"what": "Devon reacts to the message you reply to — name an emoji or let her pick from the moment. Telegram bots use the standard reaction set; userbot/WhatsApp/Discord paths take any emoji where the platform path carries a reaction verb at all (the WhatsApp bridge doesn't yet — she'll say so).",
+    "react": {"what": "Devon reacts to the message you reply to — name an emoji or let her pick from the moment. Telegram bots use the standard reaction set; the userbot takes any emoji; on WhatsApp both bridge engines carry the verb (the reaction key is built from the bridge's own memory — a message it never saw refuses honestly), the act is Devon's on your personal account there: your standing stop halts it, and it lands in the personal journal. Reacting again with the same emoji removes it — WhatsApp's own toggle.",
               "usage": "/react [emoji] (as a reply)",
               "example": "/react 🔥",
-              "related": "/emoji · /gif"},
+              "related": "/emoji · /gif · /forward · /statusreact"},
     "joke": {"what": "a joke, fetched fresh from her joke sources (JokeAPI in safe mode, then the official-joke-api — health-checked like every source; a two-parter lands in one message, punchline on its own line). All sources down earns one honest line, never an invented joke passed off as fetched.",
               "usage": "/joke",
               "example": "/joke",
@@ -2645,6 +2646,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/unstar (as a reply to a message)",
               "example": "/unstar",
               "related": "/star"},
+    "forward": {"what": "forward the message you reply to into another chat, as you: the destination is named the way you name chats (a name, a number, or a full key) and must be on the same platform — a forward stays on its own platform. Both WhatsApp bridge engines re-send the ORIGINAL message out of bridge memory with the forwarded mark, never a retyped copy; a message the bridge never saw, and view-once messages, refuse honestly. One command is exactly one forward — the verb never retries. Telegram surfaces ride their native forward, attribution included. Owner only; your standing stop halts it; the act lands in the personal journal.",
+              "usage": "/forward <chat name or number> (as a reply to the message)",
+              "example": "/forward Gold Signals",
+              "related": "/react · /poststatus · /chanstory"},
     "unsend": {"what": "delete YOUR OWN message for everyone, as a reply to it. WhatsApp enforces its ~60-hour window server-side and the refusal names it; editing or deleting other people's messages is never claimed.",
               "usage": "/unsend (as a reply to your message)",
               "example": "/unsend",
@@ -4351,6 +4356,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("chat & privacy — your chats · your accounts",
      ["archive", "unarchive", "mutechat", "unmutechat",
       "readchat", "unreadchat", "star", "unstar",
+      "forward",
       "unsend", "edit", "editmsg", "antiedit",
       "block", "unblock", "anticall", "disappear",
       "statusreact", "poststatus", "chanstory", "banchecker", "gcstatus", "statusinfo",
@@ -4593,6 +4599,7 @@ LIST_ONELINERS: dict[str, str] = {
     "unreadchat": "mark a chat unread (WhatsApp; Telegram can't) — /unreadchat",
     "star": "star the replied message (WhatsApp) — /star as a reply",
     "unstar": "unstar the replied message — /unstar as a reply",
+    "forward": "forward the replied message to another chat — /forward <chat> as a reply",
     "unsend": "delete your own message for everyone — /unsend as a reply",
     "edit": "alias of /editmsg — /edit <new text> as a reply",
     "editmsg": "edit your own message — /editmsg <new text> as a reply",

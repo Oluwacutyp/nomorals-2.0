@@ -1512,7 +1512,8 @@ class RuntimeProvisionMixin:
             lines.append(
                 "personal surfaces on these accounts: "
                 "/statusreact [on|off|emoji] sets the status "
-                "reaction · /viewonce (or /vv) shows a captured "
+                "reaction · /react and /forward act on messages "
+                "as you · /viewonce (or /vv) shows a captured "
                 "view-once · /poststatus posts as you · "
                 "/chanstory posts to a channel you admin · "
                 "/pair saved and /pair recovered list what the "

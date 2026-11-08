@@ -1255,6 +1255,54 @@ async function handleCommand(sock, req) {
         });
         return reply(sock, id, { ok: true });
       }
+      case 'react': {
+        // React to one CHAT message as the owner (parity G1):
+        // Baileys sendMessage with a react payload keyed on the
+        // target.  The key comes from the bridge's own message
+        // cache — the same memory message_star reads — so its
+        // fromMe/participant are the message's real ones; a
+        // message it never saw is an honest refusal, never a
+        // guessed key.  An empty emoji removes the reaction.
+        const jid = jidNormalizedUser(req.chat || '');
+        const mid = String(req.message_id || '').trim();
+        if (!mid) return reply(sock, id, { ok: false, error: 'react needs a message_id' });
+        const cached = msgCache.get(mid);
+        if (!cached || !cached.key) {
+          return reply(sock, id, { ok: false, error: 'message not in bridge memory — its reaction key cannot be built' });
+        }
+        await wa.sendMessage(jid, {
+          react: { text: String(req.emoji || ''), key: cached.key },
+        });
+        return reply(sock, id, { ok: true });
+      }
+      case 'forward': {
+        // Forward one message to another chat as the owner
+        // (parity G1): Baileys' forward form re-sends the
+        // original out of the bridge's own message memory —
+        // the same cache message_delete reads — with the
+        // forwarded mark applied (force).  A message it never
+        // saw is an honest refusal, never a retyped copy.
+        // View-once wraps refuse, like the Go engine: Baileys
+        // would silently unwrap one, and breaking the format's
+        // promise is not a forward.
+        const dest = jidNormalizedUser(req.dest || '');
+        const mid = String(req.message_id || '').trim();
+        if (!mid) return reply(sock, id, { ok: false, error: 'forward needs a message_id' });
+        if (!dest) return reply(sock, id, { ok: false, error: 'forward needs a destination chat' });
+        const cached = msgCache.get(mid);
+        if (!cached || !cached.key || !cached.message) {
+          return reply(sock, id, { ok: false, error: 'message not in bridge memory — forwarding needs the original message, and this bridge never saw it' });
+        }
+        const body = cached.message || {};
+        if (body.viewOnceMessage || body.viewOnceMessageV2
+          || body.viewOnceMessageV2Extension) {
+          return reply(sock, id, { ok: false, error: 'view-once messages can\'t be forwarded — that is the promise the format makes' });
+        }
+        const sent = await wa.sendMessage(dest, {
+          forward: cached, force: true,
+        });
+        return reply(sock, id, { ok: true, message_id: sent?.key?.id || '' });
+      }
       case 'reject_call': {
         if (!req.id || !req.from) {
           return reply(sock, id, { ok: false, error: 'reject_call needs the call id and the caller jid' });

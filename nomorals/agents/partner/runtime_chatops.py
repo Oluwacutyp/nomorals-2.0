@@ -5,9 +5,9 @@ The last FEI wave: the FEI XMD menu's chat & privacy verbs,
 built on Devon's PERSONAL-account surfaces and blended into
 the presence/pair organs — chat-state ops (archive, mute,
 read/unread, star, disappearing timers), message ops (unsend,
-edit, antiedit), privacy (block, anticall), status reactions,
-ban checking, group info, poll results, and the tagging trio
-(tagall / hidetag / antitag).
+edit, antiedit, forward), privacy (block, anticall),
+status reactions, ban checking, group info, poll results,
+and the tagging trio (tagall / hidetag / antitag).
 
 The laws this mixin is built under:
 
@@ -182,6 +182,8 @@ class RuntimeChatOpsMixin:
                 return self._chatops_disappear(tail, message)
             if kind in ("star", "unstar"):
                 return self._chatops_star(kind, message)
+            if kind == "forward":
+                return self._chatops_forward(tail, message)
             if kind == "unsend":
                 return self._chatops_unsend(message)
             if kind in ("edit", "editmsg"):
@@ -351,6 +353,104 @@ class RuntimeChatOpsMixin:
                                      kind == "star")
         done = "starred ⭐" if kind == "star" else "unstarred."
         return self._chatops_verdict(verdict, done)
+
+    def _chatops_gated_account(self, platform: str,
+                               kind: str) -> tuple[Any, Any, str]:
+        """The personal-surface gate /poststatus and /chanstory
+        stand behind, shared by the message acts (parity G1):
+        a paired account must exist and no standing owner stop
+        may cover the platform.  Returns (svc, rec, error) —
+        error is the one plain line to answer with."""
+        svc, rec = self._chatops_personal_account(platform)
+        if rec is None:
+            return None, None, (
+                f"no paired {platform} account — /pair one "
+                f"first; /{kind} acts from the personal "
+                f"account.")
+        if svc["registry"].owner_stopped(platform):
+            return None, None, (
+                f"{platform} is under your standing stop — "
+                f"it stays halted until you start it again; "
+                f"nothing was done.")
+        return svc, rec, ""
+
+    def _chatops_forward(self, tail: str, message: Any) -> str:
+        """/forward — forward the replied message into another
+        chat AS the owner (parity G1: no forward verb existed
+        anywhere on WhatsApp; Telegram's surfaces already
+        carried forward_post).  The destination is named the
+        way humans name chats (chat_targets grammar — a name,
+        a number, or a full key) and must live on the SAME
+        platform: a WhatsApp forward is a WhatsApp act, it is
+        not a cross-platform repost.  Both engines re-send the
+        ORIGINAL out of bridge memory with the forwarded mark
+        — never a retyped copy — and one command is exactly
+        one forward: the verb never retries, so nothing
+        double-sends by accident.  Owner-only; a standing
+        owner stop halts it; a landed forward is journaled."""
+        mid = self._chatops_reply_target(message)
+        if not mid:
+            return ("reply to the message with /forward "
+                    "<chat name or number> — it lands there "
+                    "as a forward, from you.")
+        if not tail:
+            return ("usage: /forward <chat name or number> "
+                    "(as a reply to the message) — where should "
+                    "it land?")
+        chat = message.chat
+        platform = str(getattr(chat, "platform", "") or "")
+        if platform not in ("whatsapp", "telegram"):
+            return (f"{platform} has no message-forward verb "
+                    f"on this surface.")
+        dest, _dest_adapter, error = self._chatops_target(
+            message, tail)
+        if error:
+            return error
+        dest_platform = str(getattr(dest, "platform", "") or "")
+        if dest_platform != platform:
+            return (f"that destination is on {dest_platform} — "
+                    f"a forward stays on its own platform. "
+                    f"(Cross-posting it there is a repost, not "
+                    f"a forward.)")
+        svc, rec, error = self._chatops_gated_account(
+            platform, "forward")
+        if error:
+            return error
+        adapter = self._adapter_for(platform)
+        if adapter is None:
+            return f"no live {platform} surface here."
+        personal = svc["personal"]
+        dest_name = str(getattr(dest, "title", "")
+                        or getattr(dest, "chat_id", "") or "")
+        chat_id = str(getattr(chat, "chat_id", "") or "")
+        dest_id = str(getattr(dest, "chat_id", "") or "")
+        if platform == "whatsapp":
+            fn = getattr(adapter, "forward_message", None)
+            if not callable(fn):
+                return ("this WhatsApp surface has no forward "
+                        "verb wired.")
+            verdict = self._chatops_call(fn, chat, mid, dest)
+            if isinstance(verdict, dict) and verdict.get("ok"):
+                personal.note_message_acted(
+                    platform, kind="message_forwarded",
+                    account_id=rec.id, chat_id=chat_id,
+                    source_id=mid, dest_id=dest_id,
+                    note="forwarded as the owner via /forward")
+                return f"forwarded to {dest_name}."
+            return self._chatops_verdict(verdict, "")
+        fn = getattr(adapter, "forward_post", None)
+        if not callable(fn):
+            return self._chatops_bot_absence("forward")
+        landed = self._chatops_call(fn, chat, mid, dest)
+        if landed is True or bool(getattr(landed, "ok", False)):
+            personal.note_message_acted(
+                platform, kind="message_forwarded",
+                account_id=rec.id, chat_id=chat_id,
+                source_id=mid, dest_id=dest_id,
+                note="forwarded as the owner via /forward")
+            return f"forwarded to {dest_name}."
+        error = str(getattr(landed, "error", "") or "")
+        return f"couldn't do it — {error or 'the surface refused'}"
 
     def _chatops_unsend(self, message: Any) -> str:
         mid = self._chatops_reply_target(message)

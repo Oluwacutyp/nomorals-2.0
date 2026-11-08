@@ -1196,8 +1196,27 @@ class RuntimeExpressionMixin:
         fn = getattr(adapter, "react", None) if adapter else None
         if fn is None:
             return ("this platform path carries no reaction verb "
-                    "— on WhatsApp the bridge has no react command "
-                    "yet, so I won't pretend I reacted.")
+                    "— so I won't pretend I reacted.")
+        # WhatsApp reactions are acts AS THE OWNER on his
+        # personal account (the verb is parity G1's): a standing
+        # owner stop halts them like every other personal-
+        # surface act, and a landed one is journaled in the
+        # personal vault — an unjournaled act would be a silent
+        # one.  (Other platforms' reactions are the bot's own
+        # expression, unchanged.)
+        wa_svc = None
+        wa_rec = None
+        if platform == "whatsapp":
+            try:
+                wa_svc, wa_rec = self._chatops_personal_account(
+                    "whatsapp")
+            except Exception:  # noqa: BLE001 - the gate is a guard
+                wa_svc, wa_rec = None, None
+            if wa_rec is not None and \
+                    wa_svc["registry"].owner_stopped("whatsapp"):
+                return ("WhatsApp is under your standing stop "
+                        "— it stays halted until you start it "
+                        "again; nothing was reacted to.")
         if not self._group_gate(message, "reaction"):
             return ("this room isn't claimed for my bot systems "
                     "(§33) — I don't react as the bot here.")
@@ -1207,6 +1226,18 @@ class RuntimeExpressionMixin:
             return "nothing to react to here."
         result = fn(message.chat, target, emoji)
         if getattr(result, "ok", False):
+            if platform == "whatsapp" and wa_rec is not None:
+                try:
+                    wa_svc["personal"].note_message_acted(
+                        "whatsapp", kind="message_reacted",
+                        account_id=wa_rec.id,
+                        chat_id=str(message.chat.chat_id or ""),
+                        source_id=target,
+                        note=f"reacted {emoji} as the owner "
+                             f"via /react")
+                except Exception:  # noqa: BLE001 - journal is a record
+                    _log.debug("react journal failed",
+                               exc_info=True)
             return ""
         return (f"couldn't react here: "
                 f"{getattr(result, 'error', '')}")
