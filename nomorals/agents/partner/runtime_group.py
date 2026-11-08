@@ -4311,6 +4311,105 @@ class RuntimeGroupMixin:
             "Describe this web page screenshot: what is here, "
             "and what looks broken, changed or notable?") or "")
 
+    def _webshot_profile_dir(self, book):  # type: ignore[no-untyped-def]
+        """Devon's persistent browser profile for the
+        navigation pipeline: beside the webshot book, so
+        cookies and gate clearances survive across captures
+        (a gate cleared once stays cleared)."""
+        from pathlib import Path
+
+        root = getattr(book, "root", None)
+        if root is None:
+            return None
+        return Path(root) / "browser_profile"
+
+    def _webshot_takeover_hook(self, message):  # type: ignore[no-untyped-def]
+        """The takeover route for a hard bot wall: ONE
+        message into the originating chat saying the page
+        needs the owner's hand, what was tried, and that
+        the session is holding.  Returns True when the
+        notice landed — the pipeline holds only on a
+        delivered notice.  (No live-view link exists for
+        the ephemeral capture context; stitching the
+        browser daemon's TakeoverManager view into this
+        pipeline is a named remainder.)"""
+        gateway = getattr(self, "gateway", None)
+        send = getattr(gateway, "send", None)
+        if send is None or message is None:
+            return None
+
+        def hook(ask):  # type: ignore[no-untyped-def]
+            tried = "; ".join(ask.attempts) or \
+                "the standard passes"
+            text = (
+                f"🧱 bot wall ({ask.wall}) at {ask.url} — "
+                "this page needs your hand in the live "
+                f"session. Already tried: {tried}. The "
+                f"capture session is holding for "
+                f"{ask.hold_s:.0f}s; clear the check in "
+                "your browser and the shot resumes on its "
+                "own.")
+            try:
+                sent = send(message.chat.platform,
+                            str(message.chat.key), text)
+            except Exception:  # noqa: BLE001 - a failed
+                # notice is a fact the pipeline needs
+                _log.debug("webshot takeover notice failed",
+                           exc_info=True)
+                return False
+            return bool(getattr(sent, "ok", True))
+
+        return hook
+
+    def _nav_progress(self, message, label):  # type: ignore[no-untyped-def]
+        """Live progress for a navigation job (the proxy-lab
+        pattern): a lazily-opened progress message edited at
+        REAL pipeline milestones.  Best-effort throughout —
+        a chat that cannot carry progress simply gets the
+        final reply.  Returns (on_step, finish)."""
+        from contextlib import suppress
+
+        state: dict = {"reporter": None, "tried": False}
+
+        def _ensure():  # type: ignore[no-untyped-def]
+            if state["tried"]:
+                return state["reporter"]
+            state["tried"] = True
+            try:
+                from ...social.chat.progress import ProgressReporter
+
+                chat = self._ref_from_key(str(message.chat.key))
+                sent = self.gateway.send(
+                    chat.platform, chat, f"{label} — working…")
+                message_id = getattr(sent, "message_id", None)
+                if not message_id:
+                    return None
+                adapter = self.gateway._adapter_for(chat.platform)
+
+                def _emit(text, _a=adapter, _c=chat,
+                          _m=message_id):  # type: ignore[no-untyped-def]
+                    _a.edit_progress(_c, _m, text)
+
+                state["reporter"] = ProgressReporter(_emit)
+            except Exception:  # noqa: BLE001 - progress never
+                _log.debug("nav progress unavailable",
+                           exc_info=True)
+            return state["reporter"]
+
+        def on_step(text):  # type: ignore[no-untyped-def]
+            reporter = _ensure()
+            if reporter is not None:
+                with suppress(Exception):
+                    reporter.milestone(f"{label} — {text}")
+
+        def finish(text):  # type: ignore[no-untyped-def]
+            reporter = state["reporter"]
+            if reporter is not None:
+                with suppress(Exception):
+                    reporter.finish(text)
+
+        return on_step, finish
+
     def _webshot_deliver(self, message, data: bytes, *,
                          caption: str, pdf: bool) -> str:
         """Write the shot beside the social data and send it
@@ -4404,12 +4503,19 @@ class RuntimeGroupMixin:
             + (f" · clip {opts.clip}" if opts.clip else "")
             + (" · pdf" if opts.pdf else ""))
         db = getattr(getattr(self, "context", None), "db", None)
+        on_step, finish = self._nav_progress(message, "📸 shot")
         try:
-            result = shot_organ.capture(url, opts, db=db)
+            result = shot_organ.capture(
+                url, opts, db=db,
+                takeover_hook=self._webshot_takeover_hook(
+                    message),
+                profile_dir=self._webshot_profile_dir(book),
+                on_step=on_step)
         except shot_organ.WebshotUnavailable as exc:
             book.record(url=url, ok=False, error=str(exc),
                         scope=scope, requester=requester,
                         options=options_line)
+            finish(f"📸 couldn't shoot {url}")
             return (f"📸 couldn't shoot {url} — every rung "
                     f"failed: {exc}")
         book.record(url=url, ok=True, rung=result.rung,
@@ -4452,6 +4558,13 @@ class RuntimeGroupMixin:
                  if not result.pdf else
                  f"📄 {title} — print PDF of the page")
         reply += f" · {options_line} · via {result.rung}"
+        if result.gates_cleared:
+            reply += ("\n🚪 cleared on the way in: "
+                      + ", ".join(result.gates_cleared))
+        if result.wall_via:
+            reply += (f"\n🧱 bot check passed via "
+                      f"{result.wall_via}")
+        finish(f"📸 {title}")
         if opts.annotate and not result.pdf:
             try:
                 note = self._webshot_vision(data)
@@ -4461,6 +4574,134 @@ class RuntimeGroupMixin:
                           f"this host ({type(exc).__name__})")
             if note:
                 reply += f"\n👁 {note}"
+        return reply
+
+    def _webrec_deliver(self, message, path, *, caption: str,  # type: ignore[no-untyped-def]
+                        name: str):
+        """Send a recording as a native inline video (the
+        gateway's video kind rides the platform's inline
+        player) with a clean presented name."""
+        self.gateway.send_file(
+            message.chat.platform, str(message.chat.key),
+            str(path), caption=caption, kind="video",
+            name=name)
+        return str(path)
+
+    def _control_webrec(self, tail, message):  # type: ignore[no-untyped-def]
+        """/webrec (§18/§20 god-tier): record a page as an
+        inline video.  The navigation pipeline clears the
+        gates and works the bot checks FIRST — the recording
+        opens on the real page and scrolls it, eased, for
+        the requested duration (5s floor, 60s ceiling, the
+        clamp reported).  In a group this is system output —
+        §33's claim gates it exactly like /webshot."""
+        from contextlib import suppress
+        from pathlib import Path
+
+        from ...social.chat import webnav as nav_organ
+        from ...social.chat import webshot as shot_organ
+        from ...social.chat.typography import resolve_media_mark
+
+        if message is None:
+            return ("webrec answers with a video in a live "
+                    "chat — this dispatch arrived without one, "
+                    "so nothing was recorded.")
+        text = str(tail or "").strip()
+        key = self._group_key_or_none(message)
+        surface = self._group_surface() if key else None
+        requester = str(message.sender_id or message.sender
+                        or "")
+        book = self._webshot_book()
+
+        reply_url = ""
+        meta = message.meta or {}
+        if meta.get("reply_to_text"):
+            reply_url = shot_organ.extract_url(
+                str(meta.get("reply_to_text") or ""))
+        try:
+            url, opts = shot_organ.parse_rec_tail(
+                text, reply_url=reply_url)
+        except shot_organ.ShotUsageError as exc:
+            return str(exc)
+        if key is not None and not self._system_send_ok(
+                surface, key, message, "webrec"):
+            return ("webrec posts are system output — they "
+                    "land only in claimed rooms, and this room "
+                    "isn't claimed (my bot must be an admin "
+                    "here, or the owner designates it).")
+        try:
+            url = shot_organ.validate_url(
+                url,
+                allow_private=self._operator_or_false(message))
+        except shot_organ.ShotUsageError as exc:
+            return str(exc)
+        scope = key or str(message.chat.key or "")
+        options_line = (
+            f"webrec · {opts.seconds:.0f}s · {opts.device} · "
+            f"{opts.scheme}")
+        on_step, finish = self._nav_progress(message,
+                                             "🎬 recording")
+        out_dir = Path(book.root) / "webrec_out"
+        try:
+            outcome = shot_organ.record_video(
+                url, opts, out_dir=out_dir,
+                profile_dir=self._webshot_profile_dir(book),
+                takeover_hook=self._webshot_takeover_hook(
+                    message),
+                on_step=on_step)
+        except nav_organ.NavError as exc:
+            book.record(url=url, ok=False, error=str(exc),
+                        scope=scope, requester=requester,
+                        options=options_line)
+            finish(f"🎬 couldn't record {url}")
+            return f"🎬 couldn't record {url} — {exc}"
+        size = 0
+        with suppress(OSError):
+            size = outcome.path.stat().st_size
+        book.record(url=url, ok=True, rung="webrec",
+                    size=size, scope=scope,
+                    requester=requester,
+                    options=options_line)
+        settings = surface.store.settings(key) if key else None
+        registry = self._owner_registry()
+        mark = resolve_media_mark(settings, "announcement",
+                                  mark_text=registry.mark_text())
+        title = (outcome.nav.title if outcome.nav else "") \
+            or url
+        caption = f"🎬 {title}\n{url}"
+        if outcome.includes_clearing:
+            caption += ("\n🚪 the opening frames include the "
+                        "gate clearing")
+        if mark.text:
+            caption += f"\n{mark.text}"
+        from urllib.parse import urlsplit
+
+        host = urlsplit(url).hostname or "page"
+        try:
+            self._webrec_deliver(
+                message, outcome.path, caption=caption,
+                name=f"webrec-{host}.{outcome.fmt}")
+        except Exception as exc:  # noqa: BLE001 - recorded
+            return (f"🎬 recorded {url} ({size} bytes, "
+                    f"{outcome.fmt}) but the send failed: "
+                    f"{exc}")
+        reply = (f"🎬 {title} — {outcome.duration_s:.0f}s "
+                 f"{outcome.fmt} · {options_line}")
+        if opts.clamped:
+            reply += (f"\n⏱ duration clamped to the "
+                      f"{'5s minimum' if opts.clamped == 'min' else '60s maximum'}")
+        if outcome.nav and outcome.nav.gates:
+            reply += ("\n🚪 cleared on the way in: "
+                      + ", ".join(
+                          g.kind for g in outcome.nav.gates))
+        if outcome.nav and outcome.nav.wall:
+            reply += (f"\n🧱 bot check passed via "
+                      f"{outcome.nav.wall}")
+        if outcome.plan is not None and \
+                not outcome.plan.reached_bottom:
+            reply += ("\n📜 the page is longer than the "
+                      "recording — the scroll ends mid-page")
+        finish(f"🎬 {title}")
         return reply
 
     def _webshot_watch(self, words, message, *, book, key,  # type: ignore[no-untyped-def]

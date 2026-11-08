@@ -5269,6 +5269,9 @@ class PartnerRuntime(
         if kind == "webshot":
             return self._control_webshot(command.tail, message)
 
+        if kind == "webrec":
+            return self._control_webrec(command.tail, message)
+
         if kind == "audit":
             return self._control_audit(command.tail, message)
 

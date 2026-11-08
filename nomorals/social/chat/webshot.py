@@ -7,12 +7,22 @@ Chromium — but that path carries no variant space (no device
 profiles, no dark mode, no element clip, no PDF-for-a-URL).
 This organ is the full class over the same engine:
 
-- **Rung 1 — local headless Chromium** (Playwright, the repo's
-  own browser stack): fresh context per shot with the device
-  profile, color scheme, wait discipline, full-page / viewport
-  / single-element clip, and ``page.pdf`` for the print rung.
-  Fails fast and honestly when Playwright/Chromium is absent —
-  never a fake or empty image (the browser service's own law).
+- **Rung 1 — the navigation pipeline** (``webnav``): the URL
+  opens in Devon's real browser session (a persistent
+  profile beside the book, so cookies and gate clearances
+  survive across captures), settles, runs the interstitial
+  pass (cookie banners, consent walls, age gates) and the
+  bot-check pass (managed wait-out, checkbox click, owner
+  takeover for hard puzzle walls) — and only then shoots:
+  full-page / viewport / single-element clip, and
+  ``page.pdf`` for the print rung.  A gate or wall that
+  refuses to clear is FINAL: no seed may shoot over a
+  refused page, and the refusal is the answer.  Fails fast
+  and honestly when Playwright/Chromium is absent — never
+  a fake or empty image (the browser service's own law).
+  ``/webrec`` records through the same pipeline (the
+  warm-up pass clears first; the recording opens on the
+  real page).
 - **Rung 2 — provider seeds** behind the agency SourceHealth
   breaker (the translate build's pattern): microlink and
   thum.io, both key-less seeds.  The open-sources law applies:
@@ -55,9 +65,11 @@ __all__ = [
     "ShotOptions", "CaptureResult", "ShotUsageError",
     "WebshotUnavailable", "WebshotStoreError",
     "DEVICE_PROFILES", "parse_shot_tail", "validate_url",
-    "capture", "playwright_renderer", "provider_specs",
+    "capture", "playwright_renderer", "nav_renderer",
+    "provider_specs",
     "WebshotBook", "change_ratio", "image_dimensions",
     "CHANGE_THRESHOLD", "WATCH_MIN_INTERVAL_S",
+    "RecOptions", "parse_rec_tail", "record_video",
 ]
 
 #: Device profiles: name → Playwright context facts.  The
@@ -139,6 +151,13 @@ class CaptureResult:
     pdf: bool = False
     width: int = 0
     height: int = 0
+    #: Interstitial gates the navigation pass cleared on the
+    #: way in (kinds, in order) — the reply names them.
+    gates_cleared: list[str] = field(default_factory=list)
+    #: How a bot check cleared ("managed_wait" /
+    #: "checkbox_click" / "owner_takeover"), "" when the
+    #: page was simply open.
+    wall_via: str = ""
 
 
 # ── request grammar ──────────────────────────────────────────
@@ -390,6 +409,47 @@ def playwright_renderer(url: str, opts: ShotOptions
             f"chromium shot failed: {exc}") from exc
 
 
+def nav_renderer(url: str, opts: ShotOptions, *,
+                 takeover_hook: Any = None,
+                 profile_dir: Path | None = None,
+                 on_step: Any = None) -> CaptureResult:
+    """Rung 1: one shot through the navigation pipeline
+    (``webnav``) — the page BEHIND its gates and bot
+    checks, in Devon's persistent browser profile.
+    GateBlocked / WallBlocked propagate typed: the ladder
+    treats a refusal as final.  NavUnavailable (no engine)
+    is a plain rung failure — the seeds may still try."""
+    from . import webnav
+
+    profile = DEVICE_PROFILES[opts.device]
+    session, nav = webnav.navigate(
+        url, device=profile, scheme=opts.scheme,
+        profile_dir=profile_dir, takeover_hook=takeover_hook,
+        on_step=on_step)
+    try:
+        if opts.pdf:
+            data = session.capture_still(pdf=True)
+        elif opts.clip:
+            page = session.page
+            loc = page.locator(opts.clip).first
+            try:
+                data = bytes(loc.screenshot(timeout=10_000))
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f"no element matched {opts.clip!r} on "
+                    f"the page ({exc})") from exc
+        else:
+            data = session.capture_still(
+                full_page=opts.full_page)
+    finally:
+        session.__exit__()
+    return CaptureResult(
+        data=data, title=nav.title, final_url=nav.final_url,
+        rung="playwright", pdf=opts.pdf,
+        gates_cleared=[g.kind for g in nav.gates],
+        wall_via=nav.wall or "")
+
+
 # ── rung 2: provider seeds (SourceHealth-gated) ──────────────
 
 def _fetch(url: str, *, cap: int = _FETCH_CAP,
@@ -506,16 +566,33 @@ def capture(url: str, opts: ShotOptions, *,
             db: Any = None,
             local_renderer: Renderer | None = None,
             fetcher: Callable[..., tuple[int, bytes, str]] | None
-            = None) -> CaptureResult:
+            = None,
+            takeover_hook: Any = None,
+            profile_dir: Path | None = None,
+            on_step: Any = None) -> CaptureResult:
     """Shoot ``url`` down the ladder.  ``local_renderer`` /
     ``fetcher`` are injectable (tests, alternate engines);
     production callers pass only ``db`` (for the breaker).
     Raises :class:`WebshotUnavailable` with every rung's
-    reason when nothing could honor the request."""
+    reason when nothing could honor the request.
+
+    Ladder discipline: rung 1 is the navigation pipeline.
+    A gate/wall REFUSAL from it is final — the seeds are
+    never allowed to shoot over a page that refused Devon
+    (their shot would be the gate itself, or a cached
+    rendering that pretends the wall isn't there).  An
+    unavailable engine or an ordinary rung failure still
+    falls through to the seeds, as before."""
+    from . import webnav
+
     reasons: list[str] = []
-    renderer = local_renderer or playwright_renderer
     try:
-        result = renderer(url, opts)
+        if local_renderer is not None:
+            result = local_renderer(url, opts)
+        else:
+            result = nav_renderer(
+                url, opts, takeover_hook=takeover_hook,
+                profile_dir=profile_dir, on_step=on_step)
         result.rung = result.rung or "playwright"
         if not result.data:
             raise RuntimeError("the renderer returned no bytes")
@@ -527,6 +604,8 @@ def capture(url: str, opts: ShotOptions, *,
                     "the renderer returned bytes that are not "
                     "a readable image")
         return result
+    except (webnav.GateBlocked, webnav.WallBlocked) as exc:
+        raise WebshotUnavailable(url, [str(exc)]) from exc
     except Exception as exc:  # noqa: BLE001 - next rung
         reasons.append(f"local chromium: {exc}")
 
@@ -570,6 +649,110 @@ def capture(url: str, opts: ShotOptions, *,
             _note(health, spec, ok=False, error=str(exc))
             reasons.append(f"{name}: {exc}")
     raise WebshotUnavailable(url, reasons)
+
+
+# ── /webrec: the recording grammar + entry ───────────────────
+
+#: Recording bounds: 5s is the floor the owner set; 60s is
+#: the ceiling a chat video can stay watchable (and the
+#: file shippable) at.  The default sits between.
+REC_MIN_S = 5.0
+REC_MAX_S = 60.0
+REC_DEFAULT_S = 10.0
+
+_REC_SECONDS = None  # compiled lazily in parse_rec_tail
+
+
+@dataclass
+class RecOptions:
+    """One /webrec request."""
+
+    seconds: float = REC_DEFAULT_S
+    device: str = "desktop"
+    scheme: str = "light"
+    #: "min" / "max" when the requested duration was
+    #: clamped to the bounds — the reply reports it.
+    clamped: str = ""
+
+
+def parse_rec_tail(tail: str, *, reply_url: str = ""
+                   ) -> tuple[str, RecOptions]:
+    """Parse ``/webrec``'s tail: ``[12s|12] [phone|tablet|
+    desktop] [dark|light] <url>`` in any order, or no URL
+    when the replied message supplies one.  Duration is
+    clamped to [5s, 60s] and the clamp is RECORDED on the
+    result, never silent."""
+    global _REC_SECONDS
+    if _REC_SECONDS is None:
+        import re
+
+        _REC_SECONDS = re.compile(r"^(\d+(?:\.\d+)?)s?$")
+    opts = RecOptions()
+    tokens = str(tail or "").split()
+    url = ""
+    for token in tokens:
+        low = token.lower()
+        match = _REC_SECONDS.match(low)
+        if match and not _looks_like_url(token):
+            opts.seconds = float(match.group(1))
+            continue
+        if low in ("phone", "mobile"):
+            opts.device = "phone"
+            continue
+        if low in ("tablet", "desktop"):
+            opts.device = low
+            continue
+        if low in ("dark", "light"):
+            opts.scheme = low
+            continue
+        if _looks_like_url(token):
+            if url:
+                raise ShotUsageError(
+                    "one URL per recording — drop the extra "
+                    "link")
+            url = token
+            continue
+        raise ShotUsageError(
+            f"I don't know the webrec option {token!r} — "
+            "options: [seconds, 5–60] [phone|tablet|desktop] "
+            "[dark|light], then the URL")
+    if not url:
+        url = str(reply_url or "").strip()
+    if not url:
+        raise ShotUsageError(
+            "give me a URL, or reply to a message that has "
+            "one: /webrec [12s] [phone] [dark] <url>")
+    if not url.lower().startswith(("http://", "https://",
+                                   "data:")):
+        url = "https://" + url
+    if opts.seconds < REC_MIN_S:
+        opts.seconds = REC_MIN_S
+        opts.clamped = "min"
+    elif opts.seconds > REC_MAX_S:
+        opts.seconds = REC_MAX_S
+        opts.clamped = "max"
+    return url, opts
+
+
+def record_video(url: str, opts: RecOptions, *,
+                 out_dir: Path,
+                 profile_dir: Path | None = None,
+                 takeover_hook: Any = None,
+                 on_step: Any = None) -> Any:
+    """Record ``url`` through the navigation pipeline
+    (``webnav.record_page``): the interstitial + bot-check
+    passes run BEFORE the recording starts, so the video
+    opens on the real page and scrolls it, eased, for the
+    requested duration.  Returns a ``webnav.RecordOutcome``;
+    raises ``webnav.NavError`` (typed) on honest failure."""
+    from . import webnav
+
+    profile = DEVICE_PROFILES[opts.device]
+    return webnav.record_page(
+        url, seconds=opts.seconds, out_dir=out_dir,
+        device=profile, scheme=opts.scheme,
+        profile_dir=profile_dir, takeover_hook=takeover_hook,
+        on_step=on_step)
 
 
 # ── the book: journal + watches ──────────────────────────────

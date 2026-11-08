@@ -229,7 +229,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "gear", "heist", "shoot", "kill", "assassinate", "sabotage",
     "gang", "war", "police", "bounty", "claimdrop",
     "poll", "vote", "milestones", "contributions", "boards",
-    "webshot",
+    "webshot", "webrec",
     "anime", "manga", "anichar", "charpic", "staff", "studio",
     "episodes", "animechars", "trailer", "streaming", "animereview",
     "genres", "genre", "topanime", "topmanga", "popular", "trending",
@@ -702,6 +702,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "contributions": (0, None),  # /contributions [top|appeal N] — §26 transparency + the reviewed ranker
     "boards": (0, None),         # /boards [name] — the §14 board organ: scopes × metrics, movement vs the last publish
     "webshot": (0, None),        # /webshot [full] [phone|tablet|desktop] [dark] [idle] [pdf] [annotate] [clip <sel>] <url> — render a page, return the shot (§18/§20); watch rides it
+    "webrec": (0, None),         # /webrec [12s] [phone|tablet|desktop] [dark] <url> — record a page as an inline video through the navigation pipeline (§18/§20 god-tier)
     "owner": (0, None),          # /owner [status|audit|bind|unbind|sudo|deputy|mark|rebind] — the §19 owner system in DM (owner only; the record is never editable from a group)
     "sudo": (0, None),           # /sudo [add|remove] — the §19 sudo rung in plain words (owner only; edits delegate to the owner grammar)
     "coinflip": (0, 2),       # /coinflip 10 heads — casino sink at 1.9×
@@ -3370,10 +3371,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/boards · /boards <name> — sparks, global:sparks, platform:telegram-bot:messages, game:chess:elo, games:xp",
             "example": "/boards global:sparks",
             "related": "/top /contributions /milestones"},
-    "webshot": {"what": "render a web page and return the screenshot as a photo, captioned with the page title + URL (§18, expanded §20): one command carries the whole variant space — full-page or viewport, phone/tablet/desktop profiles, dark mode, wait-for-idle, a single-element clip, the print/PDF rung, and annotate (the vision organ reads the shot and answers with it). Reply to a message holding a link to shoot that link. In groups it is a safe-preview: the shot posts only in claimed rooms (§33). Page-watch turns it into a surveillance utility: a watched URL is re-shot on the cycle and posts only when the page actually changes. Shots are taken by her own headless Chromium first, with health-gated provider seeds behind it; when no rung can honor the request, the failure names every rung's reason — never a fake image. Generated shots carry the group's watermark mode (§19).",
+    "webshot": {"what": "render a web page and return the screenshot as a photo, captioned with the page title + URL (§18, expanded §20): one command carries the whole variant space — full-page or viewport, phone/tablet/desktop profiles, dark mode, wait-for-idle, a single-element clip, the print/PDF rung, and annotate (the vision organ reads the shot and answers with it). The shot is taken by the navigation pipeline in her own persistent browser session: the page settles, cookie banners, consent walls and age gates are cleared by the interstitial pass, and bot checks are worked honestly (managed challenges waited out, checkbox checks ticked, hard puzzle walls escalated to the owner's hand) — the photo is of the page BEHIND the gates, and a gate or wall that will not clear is named as the failure, never photographed as if it were the page. Reply to a message holding a link to shoot that link. In groups it is a safe-preview: the shot posts only in claimed rooms (§33). Page-watch turns it into a surveillance utility: a watched URL is re-shot on the cycle and posts only when the page actually changes. Behind the pipeline sit health-gated provider seeds; when no rung can honor the request, the failure names every rung's reason — never a fake image. Generated shots carry the group's watermark mode (§19).",
             "usage": "/webshot [full] [phone|tablet|desktop] [dark] [idle] [pdf] [annotate] [clip <css selector>] <url> · /webshot watch <url> [every 2h] · /webshot watch list · /webshot watch remove <id>",
             "example": "/webshot full phone https://example.com",
-            "related": "/look /browser /owner"},
+            "related": "/webrec /look /browser /owner"},
+    "webrec": {"what": "record a web page as an inline playable video (§18/§20 god-tier): the same navigation pipeline as /webshot runs first — cookie banners, consent walls and age gates cleared, bot checks worked — so the recording opens on the real page, then scrolls it smoothly (eased, paced to the duration; short pages loop-pan, long pages end mid-page and say so). Duration is yours to set: 5s minimum, 60s maximum, 10s by default, and a clamped request is reported as clamped. Delivered as a native inline video (mp4 when the host can convert, webm otherwise), never a raw file. Reply to a message holding a link to record that link. In groups it is system output: the recording posts only in claimed rooms (§33).",
+            "usage": "/webrec [seconds] [phone|tablet|desktop] [dark|light] <url>",
+            "example": "/webrec 12s phone https://example.com",
+            "related": "/webshot /look /browser"},
     "coinflip": {"what": "flip a coin against the house at 1.9×: call heads or tails. Losses feed the treasury and the jackpot pot.",
             "usage": "/coinflip <bet> heads|tails",
             "example": "/coinflip 10 heads",
@@ -4139,6 +4144,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "police", "bounty", "claimdrop",
                             "poll", "vote", "milestones",
                             "contributions", "boards", "webshot",
+                            "webrec",
                             "mute", "unmute", "ban", "unban", "kick",
                             "warn", "pin", "unpin", "purge", "report",
                             "cleanup", "rmdeleted", "rminactive",
@@ -4448,7 +4454,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "gear", "heist", "shoot", "kill", "assassinate", "sabotage",
       "gang", "war", "police", "bounty", "claimdrop",
       "poll", "vote", "milestones", "contributions", "boards",
-      "webshot",
+      "webshot", "webrec",
       "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
       "unpin", "purge", "report",
       "cleanup", "rmdeleted", "rminactive",
