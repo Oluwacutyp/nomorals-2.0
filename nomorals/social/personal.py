@@ -390,6 +390,16 @@ class PersonalSurfaces:
         self._viewed_status: set[tuple[str, str]] = set()
         self._viewed_stories: set[tuple[str, str]] = set()
         self._reacted_status: set[tuple[str, str]] = set()
+        # Refused-verb journaling guards (truth pass, 2026-11-07):
+        # a bridge verdict of not-ok used to vanish — the post
+        # simply "stayed unviewed" and no record anywhere said the
+        # verb had been tried and refused, which is how a dead
+        # status surface read as "audited intact".  One journal
+        # row per post per process keeps the refusal visible in
+        # the vault without a row per redelivery.
+        self._view_failed_status: set[tuple[str, str]] = set()
+        self._react_failed_status: set[tuple[str, str]] = set()
+        self._story_view_failed: set[tuple[str, str, int]] = set()
         #: Mass-tag DM flags: (account, chat_key) → last delivered
         #: flag ts, and the count suppressed since (carried into
         #: the next delivered flag so he sees the volume, once).
@@ -645,9 +655,27 @@ class PersonalSurfaces:
                         "poster_name": poster_name,
                         "source_id": str(source_id), "ts": ts}))
                 except Exception:  # noqa: BLE001 - the wired seam
-                    viewed = False     # records its own failures;
-                if viewed:             # a miss just stays unviewed
+                    viewed = False     # records its own failures
+                if viewed:
                     self._viewed_status.add(vkey)
+                elif vkey not in self._view_failed_status:
+                    # A refused view is a FACT about the surface,
+                    # not a miss: journal it (once per post per
+                    # process) so "off" and "broken" can never
+                    # read the same again.  The post itself stays
+                    # unviewed and a redelivery retries the verb.
+                    self._view_failed_status.add(vkey)
+                    _append_jsonl(self.vault.journal_path, {
+                        "ts": ts, "kind": "status_view_failed",
+                        "account": rec.id, "platform": platform,
+                        "counterpart_id": poster_id,
+                        "poster_name": poster_name,
+                        "media_kind": "", "source_id": str(source_id),
+                        "path": "", "bytes": 0,
+                        "note": "status_view verb did not land — "
+                                "the bridge refused it or is "
+                                "unreachable; the post stays "
+                                "unviewed"})
         if source_id and rec.toggle("status_react") \
                 and self.status_reactor is not None \
                 and not self.registry.owner_stopped(platform):
@@ -677,8 +705,25 @@ class PersonalSurfaces:
                         "source_id": str(source_id),
                         "emoji": emoji, "ts": ts}))
                 except Exception:  # noqa: BLE001 - the wired seam
-                    reacted = False    # records its own failures;
-                if reacted:            # a miss just stays unreacted
+                    reacted = False    # records its own failures
+                if not reacted and rkey not in \
+                        self._react_failed_status:
+                    # Same law as the view: a refused reaction is
+                    # journaled once per post per process instead
+                    # of vanishing into "stays unreacted".
+                    self._react_failed_status.add(rkey)
+                    _append_jsonl(self.vault.journal_path, {
+                        "ts": ts, "kind": "status_react_failed",
+                        "account": rec.id, "platform": platform,
+                        "counterpart_id": poster_id,
+                        "poster_name": poster_name,
+                        "media_kind": "", "source_id": str(source_id),
+                        "path": "", "bytes": 0,
+                        "note": "status_react verb did not land — "
+                                "the bridge refused it or is "
+                                "unreachable; no reaction was "
+                                "placed"})
+                if reacted:
                     self._reacted_status.add(rkey)
                     if rec.status_react_rotate:
                         rec.status_react_cursor = new_cursor
@@ -839,6 +884,27 @@ class PersonalSurfaces:
                 if viewed:
                     for sid in sids:
                         self._viewed_stories.add((rec.id, sid))
+                else:
+                    # A refused story view journals like a refused
+                    # status view (truth pass): once per peer per
+                    # newest-id per process — visible, not a silent
+                    # "stays unviewed" on every sweep.
+                    fkey = (rec.id, poster, max_id)
+                    if fkey not in self._story_view_failed:
+                        self._story_view_failed.add(fkey)
+                        _append_jsonl(self.vault.journal_path, {
+                            "ts": float(self._clock()),
+                            "kind": "story_view_failed",
+                            "account": rec.id, "platform": platform,
+                            "counterpart_id": poster,
+                            "poster_name": "",
+                            "media_kind": "",
+                            "source_id": str(max_id),
+                            "path": "", "bytes": 0,
+                            "note": "story view verb did not land "
+                                    "— the surface refused it or "
+                                    "is unreachable; the stories "
+                                    "stay unviewed"})
         return out
 
     # ── calls & mass tags (chat & privacy wave) ─────────────────

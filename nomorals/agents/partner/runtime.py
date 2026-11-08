@@ -1710,11 +1710,31 @@ class PartnerRuntime(
                 _log.info("public-bot gate: blocked /%s from %s in %s",
                           command.kind, message.sender or "?",
                           message.chat.key)
+                # The gate itself stands (owner ruling,
+                # 2026-10-20: no operator power on the public
+                # bot, the owner included) — but when the caller
+                # IS verifiably the owner (sender-id allowlist,
+                # an identity check only; it grants nothing here),
+                # the stranger text ("try /game list") reads as
+                # "that command doesn't exist", which is how
+                # /statusreact reported dead (truth pass,
+                # 2026-11-07).  He gets told where the command
+                # actually lives instead.
+                refusal = _PUBLIC_BOT_NOT_AVAILABLE
+                if str(getattr(message, "sender_id", "") or "") \
+                        in getattr(self, "_owner_sender_ids", set()):
+                    refusal = (
+                        f"that one's yours, but it doesn't run "
+                        f"here — this is my public bot, and "
+                        f"personal controls stay off it. "
+                        f"/{command.kind} answers in my private "
+                        f"chats with you: your personal bot chat, "
+                        f"your userbot DM, or your WhatsApp "
+                        f"self-chat.")
                 try:
-                    self._typing_for(message.chat,
-                                     _PUBLIC_BOT_NOT_AVAILABLE)
+                    self._typing_for(message.chat, refusal)
                     self.gateway.send(message.chat.platform, message.chat,
-                                      _PUBLIC_BOT_NOT_AVAILABLE)
+                                      refusal)
                 except Exception:  # noqa: BLE001
                     _log.warning("public-bot gate reply failed")
                 return
@@ -6434,7 +6454,7 @@ class PartnerRuntime(
                 "statusreact", "poststatus", "banchecker",
                 "gcstatus",
                 "statusinfo", "pollres", "tagall", "hidetag",
-                "antitag"}:
+                "antitag", "viewonce", "vv"}:
             # The chat & privacy set (FEI gap wave F): the set
             # is spelled out so the catalog's handler-path scan
             # sees every kind; social/chat/chatops.py's

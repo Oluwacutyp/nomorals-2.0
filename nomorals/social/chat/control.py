@@ -545,6 +545,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "anticall": (0, 1),       # /anticall [on|off] — reject WA calls
     "disappear": (1, None),   # /disappear <off|24h|7d|90d> [chat]
     "statusreact": (0, None),  # /statusreact [on|off|emoji <e>]
+    "viewonce": (0, None),     # /viewonce [n] — reveal a captured view-once
+    "vv": (0, None),           # /vv — short form of /viewonce
     "poststatus": (0, None),   # /poststatus [text] — post a status as the owner
     "banchecker": (0, None),  # /banchecker [number] — honest signals
     "gcstatus": (0, 0),       # /gcstatus — this group's real stats
@@ -2678,6 +2680,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/statusreact [on|off] · /statusreact emoji <emoji>",
               "example": "/statusreact emoji 🔥",
               "related": "/anticall · /pair"},
+    "viewonce": {"what": "see a view-once someone sent you. While the view_once toggle is on, every view-once photo/video that reaches your personal account is kept in your private vault before it can vanish; /viewonce sends the newest capture back into this chat as a normal photo/video you can actually open. Name a number to open an older one, or reply to the original message with it to open exactly that one. Owner only — the captures are yours alone.",
+              "usage": "/viewonce · /viewonce <n> · /viewonce (as a reply to the view-once message) · /viewonce list",
+              "example": "/viewonce",
+              "related": "/vv · /pair saved · /pair toggle"},
+    "vv": {"what": "short form of /viewonce — reveal a view-once capture from your private vault.",
+              "usage": "/vv · /vv <n> · /vv (as a reply)",
+              "example": "/vv",
+              "related": "/viewonce · /pair saved"},
     "poststatus": {"what": "post a status as you, from your personal surface: on WhatsApp a text status, or an image/video status when the command rides a photo/video (as its caption, or as a reply to one); on Telegram a story from a photo/video the same way (stories are media posts — there is no text story). The post lands in the personal journal like every act taken as you. Owner only; your standing stop halts it.",
               "usage": "/poststatus [text] · send a photo/video with /poststatus [caption] as its caption · reply to a photo/video with /poststatus [caption]",
               "example": "/poststatus building while others flex",
@@ -4339,7 +4349,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "unsend", "edit", "editmsg", "antiedit",
       "block", "unblock", "anticall", "disappear",
       "statusreact", "poststatus", "banchecker", "gcstatus", "statusinfo",
-      "pollres", "tagall", "hidetag", "antitag"]),
+      "pollres", "tagall", "hidetag", "antitag", "viewonce", "vv"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
@@ -4587,6 +4597,8 @@ LIST_ONELINERS: dict[str, str] = {
     "anticall": "reject incoming WhatsApp calls as you — /anticall [on|off]",
     "disappear": "a chat's disappearing-messages timer — /disappear 7d",
     "statusreact": "react to contacts' statuses as you — /statusreact [on|off]",
+    "viewonce": "see a view-once sent to you — it was kept in your vault; /viewonce [n]",
+    "vv": "short form of /viewonce — /vv [n]",
     "poststatus": "post a status/story as you — /poststatus [text]",
     "banchecker": "honest ban signals: your accounts, or a number's registration — /banchecker [number]",
     "gcstatus": "this group's real stats, sources labeled — /gcstatus",

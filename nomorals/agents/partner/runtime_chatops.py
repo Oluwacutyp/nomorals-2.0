@@ -196,6 +196,8 @@ class RuntimeChatOpsMixin:
                     "anticall", tail, message)
             if kind == "statusreact":
                 return self._chatops_statusreact(tail, message)
+            if kind in ("viewonce", "vv"):
+                return self._chatops_viewonce(kind, tail, message)
             if kind == "poststatus":
                 return self._chatops_poststatus(tail, message)
             if kind == "antitag":
@@ -628,6 +630,129 @@ class RuntimeChatOpsMixin:
                 + self._chatops_toggle_note(
                     "status_react", "whatsapp",
                     rec.toggle("status_react")))
+
+    def _chatops_viewonce(self, kind: str, tail: str,
+                          message: Any) -> str:
+        """/viewonce · /vv — REVEAL a captured view-once (truth
+        pass, 2026-11-07: the capture half shipped with the
+        presence pack — the personal organ keeps view-once media
+        in the vault before it vanishes — but no command ever
+        showed it back; the owner typed /viewonce and /vv and
+        got conversation filler, because neither kind existed.
+        This is the reveal half: the newest capture (or the one
+        named, or the one replied to) is sent back into THIS
+        chat as a normal media message the owner can open.
+
+        Forms: bare → the newest capture + the recent list;
+        ``<n>`` → the nth newest; ``list`` → the list only;
+        as a reply → the capture whose source message is the
+        replied-to one.  Owner-only by the control gate like
+        every chatop; reading his own vault back to his own
+        chat is not an act on the account, so no surface stop
+        applies — but an empty vault answers honestly, naming
+        whether capture is even on."""
+        from datetime import datetime
+        from pathlib import Path
+
+        svc = self._pairing_personal()
+        vault = svc["personal"].vault
+        entries = [r for r in vault.saved_entries()
+                   if r.get("kind") == "view_once"]
+        entries.reverse()          # journal is oldest-first
+
+        def _when(row: dict) -> str:
+            try:
+                return datetime.fromtimestamp(
+                    float(row.get("ts") or 0)).strftime("%d %b %H:%M")
+            except (TypeError, ValueError, OSError):
+                return "earlier"
+
+        def _line(i: int, row: dict) -> str:
+            who = str(row.get("poster_name") or "someone")
+            mk = str(row.get("media_kind") or "media")
+            return f"  {i}. {_when(row)} · {who} · {mk}"
+
+        if not entries:
+            states = []
+            for rec in svc["registry"].all():
+                if rec.platform in ("whatsapp", "telegram"):
+                    states.append(
+                        f"{rec.id}: capture "
+                        f"{'ON' if rec.toggle('view_once') else 'OFF'}")
+            state = ("; ".join(states) if states else
+                     "no paired personal account")
+            return ("no view-once captures yet — when the "
+                    "view_once toggle is on, view-once media "
+                    "sent to your personal accounts is kept in "
+                    "your vault before it vanishes, and /viewonce "
+                    f"shows it back. Right now: {state}. "
+                    "Turn it on with /pair toggle ACCOUNT "
+                    "view_once on.")
+        listing = "\n".join(
+            _line(i + 1, r) for i, r in enumerate(entries[:10]))
+        more = (f"\n  …and {len(entries) - 10} older (in "
+                f"/pair saved)" if len(entries) > 10 else "")
+
+        target = None
+        note = ""
+        reply_to = str(getattr(message, "reply_to", "") or "")
+        if reply_to:
+            for row in entries:
+                if str(row.get("source_id") or "") == reply_to:
+                    target = row
+                    break
+            if target is None:
+                return ("that message has no view-once capture "
+                        "in the vault — capture was off when it "
+                        "arrived, or it never reached the "
+                        f"surface. Captures I do hold:\n{listing}"
+                        f"{more}")
+        elif tail.lower() == "list":
+            return (f"👁️ view-once captures (newest first) — "
+                    f"/viewonce N opens one:\n{listing}{more}")
+        elif tail:
+            try:
+                idx = int(tail.split()[0])
+            except (ValueError, IndexError):
+                return ("usage: /viewonce · /viewonce N · "
+                        "/viewonce list · or reply to the "
+                        "view-once message with /viewonce")
+            if not 1 <= idx <= len(entries):
+                return (f"there are {len(entries)} capture"
+                        f"{'s' if len(entries) != 1 else ''} — "
+                        f"pick 1–{len(entries)}:\n{listing}{more}")
+            target = entries[idx - 1]
+        else:
+            target = entries[0]
+            if len(entries) > 1:
+                note = (f"\nthe rest:\n{listing}{more}\n"
+                        f"/viewonce N opens another.")
+        path = str(target.get("path") or "")
+        who = str(target.get("poster_name") or "someone")
+        if not path or not Path(path).exists():
+            return (f"the capture from {who} ({_when(target)}) "
+                    f"is in the record but its file is gone from "
+                    f"the vault — nothing left to show. "
+                    f"/pair saved holds the record.")
+        gateway = getattr(self, "gateway", None)
+        send_file = getattr(gateway, "send_file", None)
+        if gateway is None or send_file is None:
+            return (f"the capture from {who} is safe in the "
+                    f"vault, but this surface can't carry media "
+                    f"back — ask again from a chat that can.")
+        result = send_file(
+            str(getattr(message.chat, "platform", "") or ""),
+            message.chat, path,
+            caption=(f"👁️ view-once from {who} · "
+                     f"{_when(target)} — kept in your vault "
+                     f"before it could vanish"))
+        if not getattr(result, "ok", False):
+            return (f"the capture from {who} is in the vault "
+                    f"but sending it back failed: "
+                    f"{getattr(result, 'error', '') or 'send refused'}")
+        return (f"👁️ that's the view-once from {who} "
+                f"({_when(target)}), straight from your vault."
+                f"{note}")
 
     def _chatops_poststatus(self, tail: str,
                             message: Any) -> str:

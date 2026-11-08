@@ -53,6 +53,7 @@ CHATOPS_COMMANDS = frozenset({
     "block", "unblock", "anticall", "disappear",
     "statusreact", "banchecker", "gcstatus", "statusinfo",
     "pollres", "tagall", "hidetag", "antitag",
+    "viewonce", "vv",
 })
 
 #: Tagall pacing law: one message carries at most this many

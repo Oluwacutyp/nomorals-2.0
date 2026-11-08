@@ -590,6 +590,16 @@ class RuntimeProvisionMixin:
                     "runtime_provision.presence_setter", exc)
                 return False
             if isinstance(res, dict):
+                if not res.get("ok"):
+                    # A refused verb used to collapse to a bare
+                    # False and vanish (truth pass, 2026-11-07):
+                    # the bridge's own reason goes to the failure
+                    # ledger so a broken surface is diagnosable.
+                    record_failure(
+                        "runtime_provision.presence_setter",
+                        RuntimeError(str(
+                            res.get("error")
+                            or "presence verb refused")))
                 return bool(res.get("ok"))
             return bool(res)
 
@@ -609,6 +619,12 @@ class RuntimeProvisionMixin:
                     "runtime_provision.status_viewer", exc)
                 return False
             if isinstance(res, dict):
+                if not res.get("ok"):
+                    record_failure(
+                        "runtime_provision.status_viewer",
+                        RuntimeError(str(
+                            res.get("error")
+                            or "status_view verb refused")))
                 return bool(res.get("ok"))
             return bool(res)
 
@@ -648,6 +664,12 @@ class RuntimeProvisionMixin:
                     "runtime_provision.status_reactor", exc)
                 return False
             if isinstance(res, dict):
+                if not res.get("ok"):
+                    record_failure(
+                        "runtime_provision.status_reactor",
+                        RuntimeError(str(
+                            res.get("error")
+                            or "status_react verb refused")))
                 return bool(res.get("ok"))
             return bool(res)
 
@@ -685,6 +707,12 @@ class RuntimeProvisionMixin:
                     "runtime_provision.call_rejector", exc)
                 return False
             if isinstance(res, dict):
+                if not res.get("ok"):
+                    record_failure(
+                        "runtime_provision.call_rejector",
+                        RuntimeError(str(
+                            res.get("error")
+                            or "reject_call verb refused")))
                 return bool(res.get("ok"))
             return bool(res)
 
@@ -1422,6 +1450,15 @@ class RuntimeProvisionMixin:
                     "have no live chat surface until it's enabled.")
             lines.append("pair one: /pair whatsapp <number> [label] "
                          "· /pair telegram <number> [label]")
+            lines.append(
+                "personal surfaces on these accounts: "
+                "/statusreact [on|off|emoji] sets the status "
+                "reaction · /viewonce (or /vv) shows a captured "
+                "view-once · /poststatus posts as you · "
+                "/pair saved and /pair recovered list what the "
+                "surfaces kept — all of them answer in your "
+                "private chats (personal bot, userbot DM, "
+                "WhatsApp self-chat), never on the public bot.")
             return "\n".join(lines)
         sub = parts[0].lower()
         if sub == "whatsapp":
@@ -1669,9 +1706,19 @@ class RuntimeProvisionMixin:
             return "\n".join(lines)
         if sub == "toggle":
             if len(parts) < 4:
-                return ("usage: /pair toggle <id> <status_saving|"
-                        "view_once|antidelete|always_online|"
-                        "status_viewing> <on|off>")
+                # All nine toggles named, bracket-free: the
+                # WhatsApp presentation strips tag-shaped text,
+                # so a <a|b|c> list would reach the owner's
+                # phone with the names eaten (truth pass,
+                # 2026-11-07 — the old line also named only
+                # five of the nine, hiding status_react,
+                # anticall, antitag and antiedit outright).
+                return ("usage: /pair toggle ACCOUNT TOGGLE "
+                        "on|off — TOGGLE is one of: "
+                        "status_saving, view_once, antidelete, "
+                        "always_online, status_viewing, "
+                        "status_react, anticall, antitag, "
+                        "antiedit")
             name = parts[2].lower()
             on = parts[3].lower() in ("on", "true", "yes", "1")
             try:

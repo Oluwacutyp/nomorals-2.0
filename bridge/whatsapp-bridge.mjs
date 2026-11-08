@@ -784,12 +784,26 @@ async function connect() {
   });
 
   wa.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
     for (const m of messages) {
       try {
         if (!m.message) continue;
         const jid = jidNormalizedUser(m.key.remoteJid || '');
         if (!jid) continue;
+        // Non-'notify' upserts ('append': history sync and
+        // reconnect catch-up) are NOT conversation — flooding
+        // the runtime with backlog is exactly what this filter
+        // exists to prevent.  But status posts ride the same
+        // backlog: a status posted while the bridge was down
+        // arrives ONLY as 'append', and dropping it whole left
+        // the status family (viewing / saving / reacting) dead
+        // for every post the live 'notify' path missed (truth
+        // pass, 2026-11-07).  Status posts — and only status
+        // posts — proceed from a non-notify upsert; the status
+        // branch below handles them and `continue`s, so nothing
+        // else in the backlog can leak through this door.
+        if (type !== 'notify' && jid !== 'status@broadcast') {
+          continue;
+        }
         const actorId = m.key.participant
           ? jidNormalizedUser(m.key.participant) : jid;
         const tsMs = Number(m.messageTimestamp || Date.now() / 1000) * 1000;
