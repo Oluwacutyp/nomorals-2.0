@@ -85,6 +85,8 @@ __all__ = [
     "SLOTS_PAIR_PAYS",
     "EARN_CAPS", "MINING_BASE_RATE", "MINING_DECAY", "MINING_CLAIM_COOLDOWN_S",
     "LedgerEntry", "GroupEconomy", "GroupEconomyError", "PrizePool",
+    "EconomyPersistenceError", "BankBlacklistedError",
+    "HEIST_RULES_VERSION", "BLACKLIST_FIRST_H", "BLACKLIST_REPEAT_H",
     "season_key", "current_season",
     "format_statement",
 ]
@@ -242,6 +244,41 @@ class EconomyPersistenceError(GroupEconomyError):
     finding B). The operation that raised it did NOT commit: the
     pre-operation file is intact because every save is a
     write-temp-then-replace."""
+
+
+class BankBlacklistedError(GroupEconomyError):
+    """A credit into a blacklisted member's bank vault, refused
+    AT the bank operation (doc 4 §C).
+
+    The blacklist binds the vault, not the chat command: every
+    route that can land sparks in a member's vault funnels
+    through the paired-move machinery, and the machinery itself
+    raises this. Carries the case reference and the lift time
+    so the surface can state the terms instead of mumbling
+    "deposit failed"."""
+
+    def __init__(self, member: str, case_id: str,
+                 until: float) -> None:
+        super().__init__(
+            f"bank deposits for {member} are blacklisted under "
+            f"case {case_id} until {until}")
+        self.member = member
+        self.case_id = case_id
+        self.until = float(until)
+
+
+#: The consequence rules a heist case is settled under, stamped
+#: on the case at open (doc 4 §A: group + RULES VERSION ride the
+#: record). A later rules change never rewrites what an old
+#: case says it was settled by.
+HEIST_RULES_VERSION = "heist-rules-1"
+
+#: Bank-deposit blacklist windows (owner's ruling on doc 4,
+#: 2026-11-08): 48h from the bust for a first conviction, 96h
+#: on a repeat bust — then the blacklist lifts on its own.
+#: No fee, no pardon step, no permanent list.
+BLACKLIST_FIRST_H = 48
+BLACKLIST_REPEAT_H = 96
 
 
 # ── cross-process writer lock (finding C) ─────────────────────────
@@ -505,6 +542,53 @@ class GroupEconomy:
                 f"{expected_legs} legs) — refusing to repeat or "
                 "complete it silently; reconcile the ledger first")
         return found
+
+    def _resolve_op_id(self, group_id: str, op_id: str,
+                       shape: list[tuple[str, str, int, str]],
+                       expected_legs: int) -> str:
+        """Resolve a caller-supplied operation identity against
+        the ledger (finding D, completed for platform-shaped
+        identities).
+
+        ``shape`` is the (member, kind, amount, ref) legs the
+        operation is about to append. Three verdicts:
+
+        - the id is unused → it stands;
+        - the id's recorded legs MATCH the shape → a retry of
+          the same operation: the id stands, and the caller's
+          receipt check answers it without moving money again;
+        - the id's recorded legs DIFFER → the identity was
+          reused for a different operation. Platform message ids
+          make this real, not theoretical: every button tap on
+          one card shares the card's message id, and an edited
+          message keeps its id under new text. Answering with
+          the old receipt would report money that never moved
+          (a false success); refusing would break a legitimate
+          second tap. The operation takes the first free
+          suffixed id (``<id>#2``, ``<id>#3``, …), executes
+          honestly, and its own retries dedupe against the
+          suffix.
+
+        A PARTIAL recorded set under any candidate raises, as
+        :meth:`_receipt` does: half an operation is reconciled
+        by a human, never routed around. Callers hold the group
+        writer lock, so resolve → receipt → append is one
+        atomic decision."""
+        if not op_id:
+            return ""
+        candidate = op_id
+        suffix = 1
+        while True:
+            found = self._receipt(group_id, candidate,
+                                  expected_legs)
+            if not found:
+                return candidate
+            have = [(e.member, e.kind, e.amount, e.ref)
+                    for e in found]
+            if have == list(shape):
+                return candidate
+            suffix += 1
+            candidate = f"{op_id}#{suffix}"
 
     def _post_commit(self, fn: Any, *args: Any) -> None:
         """Run post-commit bookkeeping (abuse checks).
@@ -865,8 +949,15 @@ class GroupEconomy:
         if amount <= 0 or sender == recipient or not sender or not recipient:
             return False
         with self._locked(group_id):
-            if op_id and self._receipt(group_id, op_id, 2):
-                return True
+            if op_id:
+                op_id = self._resolve_op_id(
+                    group_id, op_id,
+                    [(sender, "transfer_out", -amount,
+                      f"to:{recipient}"),
+                     (recipient, "transfer_in", amount,
+                      f"from:{sender}")], 2)
+                if self._receipt(group_id, op_id, 2):
+                    return True
             if self.balance(group_id, sender) < amount:
                 return False
             self._append_many(group_id, [
@@ -905,8 +996,21 @@ class GroupEconomy:
         net = gross - fee
         legs = 4 if fee else 2
         with self._locked(group_id):
-            if op_id and self._receipt(group_id, op_id, legs):
-                return True
+            if op_id:
+                shape: list[tuple[str, str, int, str]] = []
+                if fee:
+                    shape += [
+                        (sender, "treasury_in", -fee, "treasury"),
+                        ("", "treasury_in", fee, f"from:{sender}")]
+                shape += [
+                    (sender, "transfer_out", -net,
+                     f"to:{recipient}"),
+                    (recipient, "transfer_in", net,
+                     f"from:{sender}")]
+                op_id = self._resolve_op_id(group_id, op_id,
+                                            shape, legs)
+                if self._receipt(group_id, op_id, legs):
+                    return True
             if self.balance(group_id, sender) < gross:
                 return False
             entries: list[LedgerEntry] = []
@@ -1019,8 +1123,36 @@ class GroupEconomy:
         if amount <= 0 or src == dst:
             return False
         with self._locked(group_id):
-            if op_id and self._receipt(group_id, op_id, 2):
-                return True
+            if op_id:
+                op_id = self._resolve_op_id(
+                    group_id, op_id,
+                    [(src, kind, -amount, f"to:{dst}"),
+                     (dst, kind, amount, f"from:{src}")], 2)
+                if self._receipt(group_id, op_id, 2):
+                    return True
+            if dst.startswith(BANK_PREFIX):
+                # THE bank-deposit blacklist binds here, at the
+                # operation itself (doc 4 §C) — not in any chat
+                # command. A credit whose destination is a
+                # member's bank vault IS a deposit, whoever
+                # sends it: the member, another member paying
+                # into their vault, or any helper moving sparks
+                # vault-ward. While the member's conviction
+                # stands, the move is refused and nothing moves.
+                # Debits OUT of a vault (withdrawals, mortgage
+                # instalments, fines, vault raids) are not
+                # deposits and are never touched by this check;
+                # credits to a WALLET are not deposits either —
+                # the blacklist binds the vault, not the purse.
+                vault_owner = dst[len(BANK_PREFIX):]
+                if vault_owner and not self.is_pseudo_member(
+                        vault_owner):
+                    active = self.bank_blacklist(
+                        group_id, vault_owner, now=now)
+                    if active is not None:
+                        raise BankBlacklistedError(
+                            vault_owner, active["case_id"],
+                            active["until"])
             if self.balance(group_id, src) < amount:
                 return False
             self._append_many(group_id, [
@@ -1048,6 +1180,193 @@ class GroupEconomy:
         return self._move(group_id, self.bank_member(member), member,
                           amount, "bank_withdraw",
                           "withdrew from bank vault", now, op_id=op_id)
+
+    # ── heist case book + the bank-deposit blacklist ──────────
+    # Doc 4 §A/§C/§E: a resolved bank-heist bust opens ONE
+    # durable case in the bank's own book (cases.json, beside
+    # the ledger, under the same writer lock and the same
+    # raise-never-swallow persistence discipline). The case is
+    # the conviction: it carries the offenders + roles, the
+    # evidence, each offender's blacklist window (fixed at
+    # open: 48h, 96h on a repeat), the arrest record and the
+    # seizure manifest as settlement records them, and an
+    # explicit settlement state — pending → committed, or
+    # recovery_required when a step is still owed. The
+    # blacklist is DERIVED from the book: there is no second
+    # list to drift out of sync with the cases.
+
+    def _load_cases(self, group_id: str) -> dict[str, Any]:
+        # The case book is a conviction record: an existing-but-
+        # unreadable book RAISES (the ledger's discipline) — a
+        # blacklist must never evaporate because a file failed
+        # to parse. A missing file is a group with no cases.
+        path = self._path(group_id, "cases")
+        if path.exists():
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise GroupEconomyError(
+                    f"heist case book for {group_id} is unreadable "
+                    f"({type(exc).__name__}: {exc}) — refusing to "
+                    f"treat it as empty") from exc
+            if not isinstance(raw, dict) \
+                    or not isinstance(raw.get("cases"), dict):
+                raise GroupEconomyError(
+                    f"heist case book for {group_id} is malformed "
+                    f"— refusing to treat it as empty")
+            return raw
+        return {"cases": {}}
+
+    def _save_cases(self, group_id: str,
+                    book: dict[str, Any]) -> None:
+        self._save_json(group_id, "cases", book)
+
+    def open_heist_case(self, group_id: str, *, heist_id: str,
+                        target: dict[str, Any], crew: list[str],
+                        leader: str, evidence: dict[str, Any],
+                        now: float | None = None
+                        ) -> tuple[dict[str, Any], bool]:
+        """Open the case for one resolved bust — idempotently.
+
+        The case id derives from the heist identity, so opening
+        the same bust twice (a retried settlement, a restarted
+        process) returns the SAME case instead of convicting
+        twice. Each offender's blacklist window is fixed here,
+        at open: 48h for a first conviction, 96h when any prior
+        case in this group already names them. Returns
+        (case, created)."""
+        now = now if now is not None else time.time()
+        case_id = f"case-{heist_id}"
+        with self._locked(group_id):
+            book = self._load_cases(group_id)
+            existing = book["cases"].get(case_id)
+            if existing is not None:
+                return existing, False
+            prior_offenders = {
+                member
+                for other in book["cases"].values()
+                for member in (other.get("offenders") or {})}
+            offenders: dict[str, Any] = {}
+            for member in crew:
+                repeat = member in prior_offenders
+                hours = BLACKLIST_REPEAT_H if repeat \
+                    else BLACKLIST_FIRST_H
+                offenders[member] = {
+                    "role": "leader" if member == leader
+                            else "crew",
+                    "jailed_until": 0.0,
+                    "blacklist_hours": hours,
+                    "repeat": repeat,
+                    "blacklist_until": now + hours * 3600.0,
+                    "seized": [],
+                    "seizure_done": False,
+                }
+            case = {
+                "id": case_id,
+                "group_id": group_id,
+                "heist_id": str(heist_id),
+                "rules_version": HEIST_RULES_VERSION,
+                "target": {"kind": str(target.get("kind") or ""),
+                           "id": str(target.get("id") or "")},
+                "outcome": "bust",
+                "evidence": {
+                    "odds": evidence.get("odds"),
+                    "offense": evidence.get("offense"),
+                    "defense": evidence.get("defense"),
+                    "notes": list(evidence.get("notes") or []),
+                    "take": int(evidence.get("take") or 0),
+                },
+                "opened_at": now,
+                "state": "pending",
+                "offenders": offenders,
+                "settled_at": 0.0,
+            }
+            book["cases"][case_id] = case
+            self._save_cases(group_id, book)
+            return case, True
+
+    def heist_case(self, group_id: str,
+                   case_id: str) -> dict[str, Any] | None:
+        with self._locked(group_id):
+            return self._load_cases(group_id)["cases"].get(
+                case_id)
+
+    def case_for_heist(self, group_id: str,
+                       heist_id: str) -> dict[str, Any] | None:
+        with self._locked(group_id):
+            for case in self._load_cases(group_id)[
+                    "cases"].values():
+                if case.get("heist_id") == str(heist_id):
+                    return case
+            return None
+
+    def update_heist_case(self, group_id: str, case_id: str,
+                          mutator: Any) -> dict[str, Any] | None:
+        """One locked read-modify-write of a case record — the
+        settlement's step ledger. The mutator edits the case
+        dict in place; the whole book is re-saved under the
+        group writer lock, so a crash lands either the step or
+        none of it, and a retry re-reads what actually
+        committed."""
+        with self._locked(group_id):
+            book = self._load_cases(group_id)
+            case = book["cases"].get(case_id)
+            if case is None:
+                return None
+            mutator(case)
+            self._save_cases(group_id, book)
+            return case
+
+    def bank_blacklist(self, group_id: str, member: str, *,
+                       now: float | None = None
+                       ) -> dict[str, Any] | None:
+        """The member's ACTIVE deposit blacklist, derived from
+        the case book: the unexpired window with the latest
+        lift time, or None. Expiry is automatic — a window in
+        the past is not a blacklist, it is history (see
+        :meth:`bank_blacklist_lifted`)."""
+        now = now if now is not None else time.time()
+        best: dict[str, Any] | None = None
+        with self._locked(group_id):
+            cases = self._load_cases(group_id)["cases"].values()
+            for case in cases:
+                slot = (case.get("offenders") or {}).get(member)
+                if not slot:
+                    continue
+                until = float(slot.get("blacklist_until") or 0)
+                if until > now and (best is None
+                                    or until > best["until"]):
+                    best = {"case_id": str(case["id"]),
+                            "until": until,
+                            "hours": int(
+                                slot.get("blacklist_hours") or 0),
+                            "repeat": bool(slot.get("repeat"))}
+        return best
+
+    def bank_blacklist_lifted(self, group_id: str, member: str, *,
+                              now: float | None = None
+                              ) -> dict[str, Any] | None:
+        """The member's most recent LIFTED blacklist (window in
+        the past), or None — bank status states the lift and
+        its case reference instead of going silent the moment
+        the window closes."""
+        now = now if now is not None else time.time()
+        best: dict[str, Any] | None = None
+        with self._locked(group_id):
+            cases = self._load_cases(group_id)["cases"].values()
+            for case in cases:
+                slot = (case.get("offenders") or {}).get(member)
+                if not slot:
+                    continue
+                until = float(slot.get("blacklist_until") or 0)
+                if 0 < until <= now and (best is None
+                                         or until > best["until"]):
+                    best = {"case_id": str(case["id"]),
+                            "until": until,
+                            "hours": int(
+                                slot.get("blacklist_hours") or 0),
+                            "repeat": bool(slot.get("repeat"))}
+        return best
 
     def jackpot_balance(self, group_id: str) -> int:
         return self.balance(group_id, JACKPOT_MEMBER)

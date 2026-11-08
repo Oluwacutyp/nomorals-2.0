@@ -3591,9 +3591,15 @@ class GroupSurface:
 
     def deposit(self, group_key: str, user_id: str,
                 amount: int | None, *,
-                now: float | None = None) -> dict[str, Any]:
+                now: float | None = None,
+                op_id: str = "") -> dict[str, Any]:
         """/deposit: wallet → the member's bank vault (amount
-        None = everything).  Banked sparks can't be robbed."""
+        None = everything).  Banked sparks can't be robbed.
+
+        A member under a heist-case blacklist is refused by the
+        bank operation itself (the economy raises); the refusal
+        surfaces here with its case reference and lift time so
+        the reply can state the terms, not just fail."""
         now = now if now is not None else time.time()
         if not self.economy_on(group_key):
             return {"ok": False, "reason": "off"}
@@ -3602,8 +3608,15 @@ class GroupSurface:
         amount = wallet if amount is None else int(amount)
         if amount <= 0:
             return {"ok": False, "reason": "empty"}
-        if not econ.bank_deposit(group_key, user_id, amount,
-                                 now=now):
+        from ...community.group_economy import BankBlacklistedError
+
+        try:
+            moved = econ.bank_deposit(group_key, user_id, amount,
+                                      now=now, op_id=op_id)
+        except BankBlacklistedError as exc:
+            return {"ok": False, "reason": "blacklisted",
+                    "case_id": exc.case_id, "until": exc.until}
+        if not moved:
             return {"ok": False, "reason": "funds"}
         return {"ok": True, "amount": amount,
                 "wallet": econ.balance(group_key, user_id),
@@ -3611,7 +3624,8 @@ class GroupSurface:
 
     def withdraw(self, group_key: str, user_id: str,
                  amount: int | None, *,
-                 now: float | None = None) -> dict[str, Any]:
+                 now: float | None = None,
+                 op_id: str = "") -> dict[str, Any]:
         now = now if now is not None else time.time()
         if not self.economy_on(group_key):
             return {"ok": False, "reason": "off"}
@@ -3621,7 +3635,7 @@ class GroupSurface:
         if amount <= 0:
             return {"ok": False, "reason": "empty"}
         if not econ.bank_withdraw(group_key, user_id, amount,
-                                  now=now):
+                                  now=now, op_id=op_id):
             return {"ok": False, "reason": "funds"}
         return {"ok": True, "amount": amount,
                 "wallet": econ.balance(group_key, user_id),
@@ -3819,8 +3833,13 @@ class GroupSurface:
                 "bail": bail, "until": now + 1800}
 
     def bail(self, group_key: str, user_id: str, *,
-             now: float | None = None) -> dict[str, Any]:
-        """/bail: pay the treasury to walk out of jail now."""
+             now: float | None = None,
+             op_id: str = "") -> dict[str, Any]:
+        """/bail: pay the treasury to walk out of jail now.
+
+        Bail changes CUSTODY only (doc 4 §B): it never touches
+        a heist case — the deposit blacklist and any seizure
+        stand exactly as the case left them."""
         now = now if now is not None else time.time()
         if not self.economy_on(group_key):
             return {"ok": False, "reason": "off"}
@@ -3838,7 +3857,7 @@ class GroupSurface:
                         "hospital": ward}
             if not self.economy._move(
                     group_key, user_id, "", bill, "fine",
-                    "hospital bill paid", now):
+                    "hospital bill paid", now, op_id=op_id):
                 return {"ok": False, "reason": "funds",
                         "cost": bill}
             self.hospital_clear(group_key, user_id)
@@ -3851,7 +3870,8 @@ class GroupSurface:
         cost = int(record.get("bail") or 10)
         econ = self.economy
         if not econ._move(group_key, user_id, "", cost, "fine",
-                          "bail paid to treasury", now):
+                          "bail paid to treasury", now,
+                          op_id=op_id):
             return {"ok": False, "reason": "funds", "cost": cost}
         jail = self._extras(group_key).setdefault("jail", {})
         jail.pop(user_id, None)
@@ -5009,11 +5029,194 @@ class GroupSurface:
                 self.jail_member(group_key, member, 45,
                                  reason="heist bust", now=now)
             out["jailed"] = list(out.get("crew") or [])
+        if out.get("outcome") == "bust" and str(
+                (out.get("target") or {}).get("kind") or "") in (
+                "bank", "treasury"):
+            # A resolved BANK bust is a conviction (doc 4): the
+            # durable case + blacklist + confiscation bundle
+            # settles here. A member-vault bust stays the street
+            # crime it always was — jail above, no case. A
+            # settlement failure never fakes completion: the
+            # case rides the result as recovery_required and
+            # heist_case_settle finishes it later, idempotently.
+            from ...community.group_economy import GroupEconomyError
+
+            try:
+                out["case"] = self.settle_heist_bust(
+                    group_key, heist_id=str(lobby["id"]),
+                    leader=leader, out=out, now=now)
+            except (GroupEconomyError, GroupRealEstateError) \
+                    as exc:
+                record_failure("group_surface.heist_case", exc)
+                out["case"] = {
+                    "id": f"case-{lobby['id']}",
+                    "state": "recovery_required"}
+                self._audit(group_key, "heist_case_recovery",
+                            user_id=leader,
+                            case=str(out["case"]["id"]))
         self._audit(group_key, "heist_done", user_id=leader,
                     outcome=out.get("outcome"),
                     take=int(out.get("take") or 0))
         self.store.save()
         return out
+
+    # ── heist consequences: the case + its settlement (§doc4) ──
+
+    def settle_heist_bust(self, group_key: str, *,
+                          heist_id: str, leader: str,
+                          out: dict[str, Any],
+                          now: float | None = None
+                          ) -> dict[str, Any]:
+        """Open the durable case for one resolved bank/treasury
+        bust and run its settlement to a verdict. Opening is
+        idempotent on the heist identity (the economy derives
+        the case id from it), so calling this again for the
+        same bust resumes the same case — it never convicts
+        twice."""
+        now = now if now is not None else time.time()
+        case, _created = self.economy.open_heist_case(
+            group_key, heist_id=heist_id,
+            target=out.get("target") or {},
+            crew=list(out.get("crew") or []), leader=leader,
+            evidence={"odds": out.get("odds"),
+                      "offense": out.get("offense"),
+                      "defense": out.get("defense"),
+                      "notes": out.get("notes") or [],
+                      "take": int(out.get("take") or 0)},
+            now=now)
+        return self._run_case_settlement(
+            group_key, str(case["id"]), now=now)
+
+    def heist_case_settle(self, group_key: str, case_id: str, *,
+                          now: float | None = None
+                          ) -> dict[str, Any] | None:
+        """Finish (or re-verify) one case's settlement — the
+        recovery verb. Every step is recorded on the case as it
+        commits and already-done steps are skipped, so this is
+        safe to call any number of times: it never re-jails,
+        never extends a blacklist, never seizes twice."""
+        now = now if now is not None else time.time()
+        return self._run_case_settlement(group_key, case_id,
+                                         now=now)
+
+    def _run_case_settlement(self, group_key: str, case_id: str,
+                             *, now: float) -> dict[str, Any]:
+        """The settlement state machine, per offender:
+
+        1. ARREST — the existing jail. heist_go already jailed
+           the crew before this runs; the step records that
+           record's release time on the case. On a cold retry
+           (no live record — the process died between the
+           resolve and the jail) the step jails from here.
+        2. SEIZURE — the estate organ moves every property the
+           offender owns into the bank recovery estate under
+           this case; the manifest is recorded on the case.
+
+        The BLACKLIST needs no step: it is fixed on the case at
+        open and the bank enforces it from the case book. A
+        step that fails leaves the case recovery_required with
+        the finished steps recorded — never announced whole."""
+        from ...community.group_economy import GroupEconomyError
+
+        econ = self.economy
+        case = econ.heist_case(group_key, case_id)
+        if case is None or case.get("state") == "committed":
+            return case
+        failed = False
+        for member, slot in (case.get("offenders")
+                             or {}).items():
+            if not float(slot.get("jailed_until") or 0):
+                record = self.jail_state(group_key, member,
+                                         now=now)
+                if record is None:
+                    record = self.jail_member(
+                        group_key, member, 45,
+                        reason=f"heist bust ({case_id})", now=now)
+                until = float(record.get("until") or 0)
+                econ.update_heist_case(
+                    group_key, case_id,
+                    lambda c, m=member, u=until:
+                    c["offenders"][m].__setitem__(
+                        "jailed_until", u))
+            if not slot.get("seizure_done"):
+                if self.estate_frozen(group_key) is not None:
+                    failed = True
+                    continue
+                try:
+                    manifest = self.estate.seize_member_property(
+                        group_key, member, case_id=case_id,
+                        now=now)
+                except (GroupRealEstateError,
+                        GroupEconomyError):
+                    failed = True
+                    continue
+
+                def _record(c: dict[str, Any], m: str = member,
+                            mf: list[dict[str, Any]] = manifest
+                            ) -> None:
+                    c["offenders"][m]["seized"] = mf
+                    c["offenders"][m]["seizure_done"] = True
+
+                econ.update_heist_case(group_key, case_id,
+                                       _record)
+
+        def _finish(c: dict[str, Any], f: bool = failed,
+                    n: float = now) -> None:
+            c["state"] = "recovery_required" if f else "committed"
+            if not f:
+                c["settled_at"] = n
+
+        econ.update_heist_case(group_key, case_id, _finish)
+        if not failed:
+            self._audit(group_key, "heist_case_settled",
+                        case=case_id)
+        return econ.heist_case(group_key, case_id)
+
+    def heist_case(self, group_key: str, case_id: str, *,
+                   now: float | None = None
+                   ) -> dict[str, Any] | None:
+        """The case file view: the durable record, with each
+        offender's LIVE custody standing read from the jail
+        itself (a served or bailed sentence says so — the case
+        records the arrest, the jail owns the present)."""
+        now = now if now is not None else time.time()
+        case = self.economy.heist_case(group_key, case_id)
+        if case is None:
+            return None
+        view = dict(case)
+        offenders: dict[str, Any] = {}
+        for member, slot in (case.get("offenders")
+                             or {}).items():
+            jail = self.jail_state(group_key, member, now=now)
+            offenders[member] = {
+                **slot,
+                "jailed_now": bool(jail),
+                "jail_until": float(jail["until"]) if jail
+                else 0.0,
+                "blacklisted_now": bool(self.economy
+                                        .bank_blacklist(
+                                            group_key, member,
+                                            now=now)),
+            }
+        view["offenders"] = offenders
+        return view
+
+    def bank_status(self, group_key: str, user_id: str, *,
+                    now: float | None = None) -> dict[str, Any]:
+        """The member's bank standing: purse, vault, and the
+        blacklist truth in both tenses — the active window
+        (case reference + lift time + terms) or the most recent
+        lift, stated, never silent."""
+        now = now if now is not None else time.time()
+        econ = self.economy
+        return {
+            "wallet": econ.balance(group_key, user_id),
+            "bank": econ.bank_balance(group_key, user_id),
+            "blacklist": econ.bank_blacklist(group_key, user_id,
+                                             now=now),
+            "lifted": econ.bank_blacklist_lifted(
+                group_key, user_id, now=now),
+        }
 
     def heist_open(self, group_key: str) -> dict[str, Any] | None:
         state = self.conflict._load_state(group_key)

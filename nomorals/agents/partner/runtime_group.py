@@ -10888,6 +10888,24 @@ class RuntimeGroupMixin:
             ("Jackpot pot",
              sparks(surface.economy.jackpot_balance(key)), True),
         ], title="The group")
+        # Bank standing (doc 4 §C): a deposit blacklist is
+        # stated on the bank's own card — case reference and
+        # reinstatement terms while it runs, the lift once it
+        # has passed. Never just a failed deposit.
+        standing = surface.bank_status(key, user_id)
+        if standing["blacklist"]:
+            bl = standing["blacklist"]
+            card.line(
+                f"🚫 **bank deposits blacklisted** — case "
+                f"{bl['case_id']} (busted bank heist, "
+                f"{bl['hours']}h). It lifts on its own at "
+                f"{self._until_text(bl['until'])}; withdrawals "
+                f"still work.")
+        elif standing["lifted"]:
+            card.line(
+                f"✅ the deposit blacklist from case "
+                f"{standing['lifted']['case_id']} has lifted — "
+                f"the bank takes your deposits again.")
         if bank:
             card.note("banked sparks are safe from robbery")
         disclaimer = str(stmt.get("disclaimer") or "")
@@ -10983,7 +11001,9 @@ class RuntimeGroupMixin:
         if not recipient:
             return miss
         sender = str(message.sender_id or message.sender or "")
-        result = surface.pay(key, sender, recipient, amount)
+        result = surface.pay(
+            key, sender, recipient, amount,
+            op_id=self._msg_op_id(message, key, "pay"))
         if not result["ok"]:
             if result["reason"] == "funds":
                 return "not enough sparks for that."
@@ -11435,6 +11455,30 @@ class RuntimeGroupMixin:
         digits = text.split()[0]
         return int(digits) if digits.isdigit() else -1
 
+    @staticmethod
+    def _msg_op_id(message, key, verb):  # type: ignore[no-untyped-def]
+        """Batch B remainder: the platform message id is the
+        operation identity for the money commands. A platform
+        retry re-delivers the same message; carrying its id
+        down as the ledger op_id makes the retry resolve to
+        the original receipt instead of moving the money twice.
+        The economy resolves id + leg shape: a tap on the same
+        card for a different amount is a DIFFERENT operation
+        (every tap on one card shares its message id) and takes
+        a suffixed identity rather than answering with the old
+        receipt — see GroupEconomy._resolve_op_id. No message
+        id (some transports) = no identity = the legacy
+        behavior, stated not faked."""
+        mid = str(getattr(message, "message_id", "") or "")
+        if not mid:
+            return ""
+        return f"msg:{key}:{mid}:{verb}"
+
+    @staticmethod
+    def _until_text(ts) -> str:  # type: ignore[no-untyped-def]
+        return time.strftime("%d %b %H:%M UTC",
+                             time.gmtime(float(ts)))
+
     def _control_deposit(self, tail, message):  # type: ignore[no-untyped-def]
         key, err = self._economy_gate(message)
         if err:
@@ -11445,8 +11489,19 @@ class RuntimeGroupMixin:
             tail, surface.economy.balance(key, user_id))
         if amount is not None and amount < 0:
             return "usage: /deposit 50 — or /deposit all"
-        result = surface.deposit(key, user_id, amount)
+        result = surface.deposit(
+            key, user_id, amount,
+            op_id=self._msg_op_id(message, key, "deposit"))
         if not result["ok"]:
+            if result["reason"] == "blacklisted":
+                return (
+                    f"🚫 the bank won't take your deposits — "
+                    f"you're blacklisted under case "
+                    f"{result['case_id']} after the busted "
+                    f"heist. It lifts on its own at "
+                    f"{self._until_text(result['until'])}; "
+                    f"withdrawing what's already banked and "
+                    f"spending your wallet still work.")
             if result["reason"] == "empty":
                 return "your wallet is empty — nothing to deposit."
             return "that deposit doesn't work as written."
@@ -11473,7 +11528,9 @@ class RuntimeGroupMixin:
             tail, surface.economy.bank_balance(key, user_id))
         if amount is not None and amount < 0:
             return "usage: /withdraw 50 — or /withdraw all"
-        result = surface.withdraw(key, user_id, amount)
+        result = surface.withdraw(
+            key, user_id, amount,
+            op_id=self._msg_op_id(message, key, "withdraw"))
         if not result["ok"]:
             if result["reason"] == "empty":
                 return "your bank vault is empty."
@@ -11816,7 +11873,9 @@ class RuntimeGroupMixin:
             return err
         surface = self._group_surface()
         user_id = str(message.sender_id or message.sender or "")
-        result = surface.bail(key, user_id)
+        result = surface.bail(
+            key, user_id,
+            op_id=self._msg_op_id(message, key, "bail"))
         if not result["ok"]:
             if result["reason"] == "free":
                 return "you're not in jail."
@@ -12220,6 +12279,18 @@ class RuntimeGroupMixin:
                             "/heist join brings riders.")
                 return self._conflict_refusal(surface, key, out)
             return self._heist_result(surface, key, message, out)
+        if head == "case" and len(words) >= 2:
+            case = surface.heist_case(key, words[1])
+            if case is None:
+                return "no case by that reference in this group."
+            if case.get("state") != "committed":
+                # Opening the file finishes an owed settlement
+                # first — the recovery route rides the same
+                # verb, and every step is idempotent.
+                surface.heist_case_settle(key, words[1])
+                case = surface.heist_case(key, words[1])
+            return self._heist_case_card(surface, key, message,
+                                         case)
         lobby = surface.heist_open(key)
         if lobby is None:
             return ("no heist is forming. Start one: /heist "
@@ -12306,6 +12377,88 @@ class RuntimeGroupMixin:
             card.line(f"⚡ {note}")
         buttons = [[("🔓 Pay bail", "bail")]] \
             if outcome == "bust" else None
+        case = out.get("case") or {}
+        if case:
+            # The consequence bundle, stated once, from the
+            # case itself (doc 4 §F) — same numbers on both
+            # platforms because both render this one record.
+            seized_total = sum(
+                len(slot.get("seized") or [])
+                for slot in (case.get("offenders") or {})
+                .values())
+            card.line(
+                f"⚖️ case **{case.get('id')}** — the bust is "
+                f"on the books, the whole crew on it.")
+            card.line(
+                "🏦 crew bank deposits are blacklisted: 48h "
+                "from the bust (96h on a repeat), then it "
+                "lifts on its own.")
+            if seized_total:
+                card.line(
+                    f"🏠 {seized_total} "
+                    f"propert{'y' if seized_total == 1 else 'ies'}"
+                    f" seized into the bank recovery estate — "
+                    f"the case file lists them.")
+            if case.get("state") != "committed":
+                card.line(
+                    "⚠️ the settlement isn't finished — open "
+                    "the case file to complete it; a retry "
+                    "never double-counts.")
+            buttons = [
+                [("🔓 Pay bail", "bail"),
+                 ("📁 Case file", f"heist case {case.get('id')}")],
+                [("🏦 Bank status", "balance")]]
+        return self._card(message, card, buttons)
+
+    def _heist_case_card(self, surface, key, message, case):  # type: ignore[no-untyped-def]
+        """The case file (doc 4 §F): one durable record, read
+        the same on both platforms — offenders + roles, the
+        arrest as the jail states it NOW, the blacklist window
+        and its terms, and the seized property in the bank
+        recovery estate's custody."""
+        from ...community.group_real_estate import DISTRICTS, TIERS
+        from ...social.chat.typography import Card
+
+        target = case.get("target") or {}
+        where = {"treasury": "the group treasury",
+                 "bank": "the bank"}.get(
+                     str(target.get("kind") or ""),
+                     str(target.get("kind") or ""))
+        card = Card("economy", title=f"Case {case.get('id')}",
+                    icon="⚖️")
+        card.line(f"busted bank heist — {where}. Settlement: "
+                  f"**{case.get('state')}**.")
+        for member, slot in (case.get("offenders")
+                             or {}).items():
+            label = self._estate_member_label(surface, key,
+                                              member)
+            if slot.get("jailed_now"):
+                custody = (f"in jail until "
+                           f"{self._until_text(slot['jail_until'])}")
+            elif slot.get("jailed_until"):
+                custody = "custody served / bailed"
+            else:
+                custody = "arrest not recorded"
+            if slot.get("blacklisted_now"):
+                banking = (f"deposits blacklisted until "
+                           f"{self._until_text(slot['blacklist_until'])} "
+                           f"({slot['blacklist_hours']}h"
+                           f"{', repeat' if slot.get('repeat') else ''})")
+            else:
+                banking = "deposit blacklist lifted"
+            card.line(f"• **{label}** ({slot.get('role')}): "
+                      f"{custody}; {banking}.")
+            for seized in slot.get("seized") or []:
+                tier = TIERS.get(str(seized.get("tier")), {})
+                district = DISTRICTS.get(
+                    str(seized.get("district")), {})
+                card.line(
+                    f"   🏠 seized: {tier.get('icon', '')} "
+                    f"{tier.get('name', seized.get('tier'))} in "
+                    f"{district.get('name', seized.get('district'))}"
+                    f" — bank recovery estate")
+        buttons = [[("🔓 Pay bail", "bail"),
+                    ("🏦 Bank status", "balance")]]
         return self._card(message, card, buttons)
 
     def _control_gang(self, tail, message):  # type: ignore[no-untyped-def]

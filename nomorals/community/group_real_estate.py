@@ -83,11 +83,25 @@ __all__ = [
     "DISTRICTS", "TIERS", "PREMIUM_SHELF", "MANAGER_LEVELS",
     "ESTATE_DEFAULTS", "GEM_SOURCES", "SEASON_GEM_REWARDS",
     "RENT_PERIOD_S", "INDEX_BASE", "PUBLIC_OWNER",
+    "RECOVERY_PREFIX", "recovery_owner",
 ]
 
 #: The treasury's own holdings (public property) sit under the
 #: economy ledger's treasury member: "".
 PUBLIC_OWNER = ""
+
+#: Custody owner for confiscated property (doc 4 §D): seized
+#: assets sit in the BANK RECOVERY ESTATE under their case —
+#: ``recovery:<case_id>``. Not public stock (the estate is a
+#: custodian, not an owner who can sell or collect), never a
+#: member: the asset keeps its identity, history and attached
+#: state, and the case file names exactly what it holds.
+RECOVERY_PREFIX = "recovery:"
+
+
+def recovery_owner(case_id: str) -> str:
+    """The custody owner string holding one case's seizures."""
+    return RECOVERY_PREFIX + str(case_id)
 
 #: Rent clock: one period is one day (§17's 24h collection
 #: cooldown, as accrual — rent builds up per full period).
@@ -528,6 +542,104 @@ class GroupRealEstate:
                         "rent_periods": due[0],
                         "rent_gems": due[1]})
         return sorted(out, key=lambda p: str(p["bought_at"]))
+
+    def seize_member_property(self, group_id: str, member: str,
+                              *, case_id: str,
+                              now: float | None = None
+                              ) -> list[dict[str, Any]]:
+        """Confiscate EVERY property ``member`` owns into the
+        bank recovery estate under ``case_id`` (doc 4 §D) and
+        return the seizure manifest — a snapshot of each asset
+        as it stood at seizure.
+
+        The scope is exact: this member's estate properties,
+        whole (this organ knows no fractional shares), with
+        their attached state (insurance, repair debt, mortgage
+        link) riding along. Wallet sparks, bank balances, gems
+        and equipment are NOT property and are never touched
+        here; gang-held and public property is not the
+        offender's and never moves; an uninvolved co-member's
+        assets are untouched by construction (ownership here is
+        a single member id, matched exactly).
+
+        Market state settles at the seizure line: an open
+        listing is cancelled (seized property is not quietly
+        still for sale); an open auction is cancelled and the
+        standing bid refunded from escrow in full. A mortgage
+        stays attached and recorded — the debt is the
+        offender's own obligation and its schedule keeps
+        debiting their bank vault; the property carries the
+        encumbrance in custody. Rent entitlement follows
+        ownership: from the seizure, the offender's portfolio
+        (and rent collection) no longer includes these assets,
+        and their accrued standing stays with the asset.
+
+        Idempotent: seized properties are owned by the custody
+        owner, not the member, so a retried seizure finds
+        nothing of theirs left to take and returns an empty
+        manifest — it can never confiscate twice, and property
+        the member acquires AFTER the snapshot is not reached
+        for."""
+        now = now if now is not None else time.time()
+        state = self._load_state(group_id)
+        custody = recovery_owner(case_id)
+        econ = self.economy
+        manifest: list[dict[str, Any]] = []
+        for prop in (state.get("properties") or {}).values():
+            if prop.get("owner") != member:
+                continue
+            snapshot = {
+                "id": str(prop["id"]),
+                "district": str(prop.get("district") or ""),
+                "tier": str(prop.get("tier") or ""),
+                "currency": str(prop.get("currency") or ""),
+                "paid": int(prop.get("paid") or 0),
+                "bought_at": float(prop.get("bought_at") or 0),
+                "mortgage": str(prop.get("mortgage") or ""),
+                "insured_until": float(
+                    prop.get("insured_until") or 0),
+                "repair_debt": int(prop.get("repair_debt") or 0),
+            }
+            lid = str(prop.get("listed") or "")
+            if lid:
+                listing = (state.get("listings") or {}).get(lid)
+                if listing:
+                    listing["open"] = False
+                prop["listed"] = ""
+                self._journal(state, "seizure_delist", now,
+                              member=member, property=prop["id"],
+                              listing=lid, case=case_id)
+            aid = str(prop.get("auction") or "")
+            if aid:
+                auction = (state.get("auctions") or {}).get(aid)
+                if auction and auction.get("open"):
+                    high = int(auction.get("high") or 0)
+                    bidder = str(auction.get("high_bidder")
+                                 or "")
+                    if bidder and high:
+                        econ._move(
+                            group_id, PUBLIC_OWNER, bidder, high,
+                            "estate_refund",
+                            f"auction {aid} cancelled by "
+                            f"seizure ({case_id})", now)
+                    auction["open"] = False
+                    auction["cancelled"] = "seized"
+                prop["auction"] = ""
+                self._journal(state, "seizure_auction_cancel",
+                              now, member=member,
+                              property=prop["id"], auction=aid,
+                              case=case_id)
+            prop["owner"] = custody
+            prop["seized"] = {"case": case_id, "from": member,
+                              "at": now}
+            self._journal(state, "seizure", now, member=member,
+                          property=prop["id"], case=case_id,
+                          district=prop.get("district"),
+                          tier=prop.get("tier"))
+            manifest.append({**snapshot, "seized_at": now})
+        if manifest:
+            self._save_state(group_id, state)
+        return manifest
 
     def buy(self, group_id: str, member: str, district: str,
             tier: str, *, cfg: dict[str, Any] | None = None,
