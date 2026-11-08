@@ -567,6 +567,87 @@ func (b *bridge) handleGroupAdminCommand(ctx context.Context, cc *clientConn, id
 		ok(map[string]any{"invite": link})
 		return true
 
+	// Join a group through its invite link (parity G2): the
+	// resolve-first state machine. The preview read comes
+	// first so a dead link fails BEFORE any join attempt —
+	// whatsmeow wraps the dead-link errors
+	// (ErrInviteLinkRevoked / ErrInviteLinkInvalid), and they
+	// map to distinct reply lines: a revoked link and a
+	// malformed one are different facts for the owner. The
+	// preview's partial roster proves membership when it can;
+	// when it can't (the roster is capped), one full member
+	// read decides already_member authoritatively instead of
+	// guessed. JoinGroupWithLink returns the same JID for a
+	// real join and for a filed membership-approval request,
+	// so after the accept the membership is RE-READ: present
+	// is joined, absent is approval_pending — neither is ever
+	// reported as the other.
+	case "group_join_link":
+		code := strings.TrimSpace(req.str("code"))
+		if code == "" {
+			bad(errors.New("missing code: pass the group invite code"))
+			return true
+		}
+		me := []types.JID{}
+		if b.cli.Store.ID != nil {
+			me = append(me, *b.cli.Store.ID)
+		}
+		if lid := b.cli.Store.GetLID(); !lid.IsEmpty() {
+			me = append(me, lid)
+		}
+		isMember := func(meta *types.GroupInfo) bool {
+			for _, p := range meta.Participants {
+				for _, own := range me {
+					if p.JID.ToNonAD() == own.ToNonAD() ||
+						p.PhoneNumber.ToNonAD() == own.ToNonAD() ||
+						p.LID.ToNonAD() == own.ToNonAD() {
+						return true
+					}
+				}
+			}
+			return false
+		}
+		inviteFail := func(err error) {
+			switch {
+			case errors.Is(err, whatsmeow.ErrInviteLinkRevoked):
+				b.reply(cc, id, map[string]any{"ok": false,
+					"error": "that invite link has been revoked"})
+			case errors.Is(err, whatsmeow.ErrInviteLinkInvalid):
+				b.reply(cc, id, map[string]any{"ok": false,
+					"error": "that invite link is not valid"})
+			default:
+				fail(err)
+			}
+		}
+		info, err := b.cli.GetGroupInfoFromLink(ctx, code)
+		if err != nil {
+			inviteFail(err)
+			return true
+		}
+		if isMember(info) {
+			ok(map[string]any{"state": "already_member",
+				"chat": info.JID.String(), "subject": info.Name})
+			return true
+		}
+		if full, ferr := b.cli.GetGroupInfo(ctx, info.JID); ferr == nil && isMember(full) {
+			ok(map[string]any{"state": "already_member",
+				"chat": info.JID.String(), "subject": info.Name})
+			return true
+		}
+		jid, err := b.cli.JoinGroupWithLink(ctx, code)
+		if err != nil {
+			inviteFail(err)
+			return true
+		}
+		if full, ferr := b.cli.GetGroupInfo(ctx, jid); ferr == nil && isMember(full) {
+			ok(map[string]any{"state": "joined",
+				"chat": jid.String(), "subject": info.Name})
+			return true
+		}
+		ok(map[string]any{"state": "approval_pending",
+			"chat": jid.String(), "subject": info.Name})
+		return true
+
 	case "group_join_approval":
 		jid, err := groupJID(req.str("chat"))
 		if err != nil {

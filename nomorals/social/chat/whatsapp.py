@@ -2260,6 +2260,34 @@ class WhatsAppAdapter(ChatAdapter):
         """Leave a group."""
         return self._admin_cmd("group_leave", {"chat": self._group_jid(chat)})
 
+    def group_join_link(self, link: str) -> dict[str, Any]:
+        """Join a group through its invite link (parity G2).
+
+        Accepts the full ``chat.whatsapp.com/<code>`` URL or
+        the bare code — the normalization happens here so both
+        bridge engines only ever see a code.  An empty argument
+        refuses before any bridge traffic.  The verdict is the
+        bridge's own state machine: ``state`` is one of
+        ``joined`` (the accept landed and the membership
+        re-read finds the account inside), ``already_member``
+        (no act was needed or taken), or ``approval_pending``
+        (the group files join requests for admin approval —
+        the request is in, the account is NOT a member yet);
+        a dead link is an ok:False whose error says revoked
+        vs not-valid distinctly.  Nothing here re-labels one
+        state as another."""
+        raw = str(link or "").strip()
+        code = raw
+        if "chat.whatsapp.com/" in code:
+            code = code.split("chat.whatsapp.com/")[-1]
+        code = code.strip().strip("/").split("/")[0].split("?")[0].strip()
+        if not code:
+            return {"ok": False,
+                    "error": "missing invite link: pass the "
+                             "chat.whatsapp.com link or its code"}
+        return self._admin_cmd("group_join_link", {"code": code},
+                               timeout=45)
+
     def group_set_settings(self, chat: ChatRef | str, *,
                            announce: bool | None = None,
                            restrict: bool | None = None) -> dict[str, Any]:

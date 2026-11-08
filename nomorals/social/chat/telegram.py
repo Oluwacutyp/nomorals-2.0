@@ -2620,6 +2620,155 @@ class TelegramAdapter(ChatAdapter):
                               error=str(exc),
                               seconds=time.perf_counter() - started)
 
+    # ── create + leave (parity G2, census bundle #3) ─────────
+    # The account could join chats (join_channel) but never
+    # CREATE one or LEAVE one — no CreateChatRequest /
+    # CreateChannelRequest / LeaveChannelRequest existed
+    # anywhere in the repo.  These are the missing verbs, in
+    # the dict-verdict shape send_channel_story set: the
+    # refusal's own words are the useful part (CHANNELS_TOO_MUCH
+    # and friends come back verbatim), and the create verdict
+    # carries the new chat's id in this repo's peer form
+    # (get_peer_id: -100… for channels, -… for basic groups).
+
+    def create_chat(self, title: str) -> dict[str, Any]:
+        """Create a basic group chat as the account owner.
+
+        ``CreateChatRequest`` with an empty user list: the
+        group starts with the owner alone (members are added
+        through the existing member verbs).  Not connected or
+        an empty title refuses BEFORE any traffic."""
+        client = self._client
+        if client is None or self._loop is None:
+            return {"ok": False,
+                    "error": "telegram userbot not connected"}
+        title = str(title or "").strip()
+        if not title:
+            return {"ok": False,
+                    "error": "create_chat needs a title"}
+
+        async def _do() -> dict[str, Any]:
+            from telethon.tl.functions.messages import CreateChatRequest
+            from telethon.utils import get_peer_id
+
+            result = await client(CreateChatRequest(
+                users=[], title=title))
+            chats = getattr(result, "chats", None) or []
+            if not chats:
+                return {"ok": False,
+                        "error": "telegram did not return the "
+                                 "new group"}
+            entity = chats[0]
+            return {"ok": True,
+                    "chat_id": str(get_peer_id(entity)),
+                    "title": str(getattr(entity, "title", "")
+                                 or title)}
+
+        try:
+            return dict(self._run_on_loop(_do(), timeout=60.0))
+        except Exception as exc:  # noqa: BLE001 - Telegram's
+            # own words are the answer
+            return {"ok": False, "error": str(exc)[:300]}
+
+    def create_channel(self, title: str) -> dict[str, Any]:
+        """Create a channel as the account owner.
+
+        ``CreateChannelRequest`` with ``megagroup=False`` and
+        ``broadcast=True``: a channel, not a supergroup.  A
+        refusal (CHANNELS_TOO_MUCH when the account is at
+        Telegram's channel cap) returns verbatim in the
+        verdict.  Not connected or an empty title refuses
+        BEFORE any traffic."""
+        client = self._client
+        if client is None or self._loop is None:
+            return {"ok": False,
+                    "error": "telegram userbot not connected"}
+        title = str(title or "").strip()
+        if not title:
+            return {"ok": False,
+                    "error": "create_channel needs a title"}
+
+        async def _do() -> dict[str, Any]:
+            from telethon.tl.functions.channels import CreateChannelRequest
+            from telethon.utils import get_peer_id
+
+            result = await client(CreateChannelRequest(
+                title=title, about="", broadcast=True,
+                megagroup=False))
+            chats = getattr(result, "chats", None) or []
+            if not chats:
+                return {"ok": False,
+                        "error": "telegram did not return the "
+                                 "new channel"}
+            entity = chats[0]
+            return {"ok": True,
+                    "chat_id": str(get_peer_id(entity)),
+                    "title": str(getattr(entity, "title", "")
+                                 or title)}
+
+        try:
+            return dict(self._run_on_loop(_do(), timeout=60.0))
+        except Exception as exc:  # noqa: BLE001 - Telegram's
+            # own words are the answer
+            return {"ok": False, "error": str(exc)[:300]}
+
+    def leave_chat(self, chat: ChatRef) -> dict[str, Any]:
+        """Leave a group or channel as the account owner.
+
+        Two Telethon shapes, routed by the resolved entity's
+        type: a channel/supergroup (``types.Channel``) leaves
+        via ``LeaveChannelRequest``; a basic group
+        (``types.Chat``) leaves by removing "me" via
+        ``DeleteChatUserRequest``.  When no typed entity
+        resolves (the raw-id fallback ``_resolve`` ends at),
+        the marked id decides: ``-100…`` goes through
+        ``get_input_entity(PeerChannel(...))`` into the same
+        LeaveChannelRequest, a plain negative id is the basic
+        group's raw positive chat_id in the same
+        DeleteChatUserRequest.  A DM is not leavable — the
+        command layer says so before this is ever called, and
+        a positive id here gets the same honest answer."""
+        client = self._client
+        if client is None or self._loop is None:
+            return {"ok": False,
+                    "error": "telegram userbot not connected"}
+        raw = str(chat.chat_id or "").strip()
+        if not raw.startswith("-"):
+            return {"ok": False,
+                    "error": "a DM is not leavable — leave "
+                             "applies to groups and channels"}
+
+        async def _do() -> dict[str, Any]:
+            from telethon.tl.functions.channels import LeaveChannelRequest
+            from telethon.tl.functions.messages import DeleteChatUserRequest
+            from telethon.tl.types import Channel, Chat, PeerChannel
+
+            entity = self._input_entity_cache.get(raw)
+            if entity is None:
+                entity = await self._resolve(chat)
+            if isinstance(entity, Channel):
+                await client(LeaveChannelRequest(
+                    channel=entity))
+                return {"ok": True, "chat_id": raw}
+            if isinstance(entity, Chat):
+                await client(DeleteChatUserRequest(
+                    chat_id=int(entity.id), user_id="me"))
+                return {"ok": True, "chat_id": raw}
+            if raw.startswith("-100"):
+                peer = await client.get_input_entity(
+                    PeerChannel(int(raw[4:])))
+                await client(LeaveChannelRequest(channel=peer))
+                return {"ok": True, "chat_id": raw}
+            await client(DeleteChatUserRequest(
+                chat_id=abs(int(raw)), user_id="me"))
+            return {"ok": True, "chat_id": raw}
+
+        try:
+            return dict(self._run_on_loop(_do(), timeout=60.0))
+        except Exception as exc:  # noqa: BLE001 - Telegram's
+            # own words are the answer
+            return {"ok": False, "error": str(exc)[:300]}
+
     def typing(self, chat: ChatRef, seconds: float = 3.0,
              action: str = "typing") -> bool:
         """Chat action indicator: "typing" or "recording" (voice).

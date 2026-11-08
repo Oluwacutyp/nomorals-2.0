@@ -204,6 +204,12 @@ class RuntimeChatOpsMixin:
                 return self._chatops_poststatus(tail, message)
             if kind == "chanstory":
                 return self._chatops_chanstory(tail, message)
+            if kind == "joinlink":
+                return self._chatops_joinlink(tail, message)
+            if kind in ("newgroup", "newchannel"):
+                return self._chatops_newchat(kind, tail, message)
+            if kind == "leave":
+                return self._chatops_leave(tail, message)
             if kind == "antitag":
                 return self._chatops_toggle_command(
                     "antitag", tail, message)
@@ -1128,6 +1134,171 @@ class RuntimeChatOpsMixin:
             return (str(verdict.get("chat") or ""),
                     str(verdict.get("name") or ""), "")
         return "", "", self._chatops_verdict(verdict, "")
+
+    # ── join + create + leave (parity G2) ────────────────────
+
+    def _chatops_joinlink(self, tail: str, message: Any) -> str:
+        """/joinlink — join a WhatsApp group through its invite
+        link AS the owner (parity G2, census bundle #4: Devon
+        could issue and revoke invite links but never accept
+        one — no join verb existed on either bridge engine).
+        The bridge resolves the link BEFORE any join attempt,
+        so a dead link fails as itself — revoked and malformed
+        are different lines — and the landed state is read back
+        from membership, never assumed from the accept: joined,
+        already_member (no act taken, nothing journaled), and
+        approval_pending (the request is filed; the owner is
+        NOT a member yet) are three different answers.
+        Owner-only; the paired-account + owner-stop gate is the
+        /poststatus family gate; a landed join or filed request
+        journals in the personal vault."""
+        if not tail:
+            return ("usage: /joinlink link or code — the "
+                    "chat.whatsapp.com link to the group, or "
+                    "just its code.")
+        svc, rec, error = self._chatops_gated_account(
+            "whatsapp", "joinlink")
+        if error:
+            return error
+        adapter = self._adapter_for("whatsapp")
+        if adapter is None:
+            return "no live whatsapp surface here."
+        fn = getattr(adapter, "group_join_link", None)
+        if not callable(fn):
+            return ("this WhatsApp surface has no group-join "
+                    "verb wired.")
+        verdict = self._chatops_call(fn, tail)
+        if not (isinstance(verdict, dict) and verdict.get("ok")):
+            return self._chatops_verdict(verdict, "")
+        state = str(verdict.get("state") or "")
+        subject = str(verdict.get("subject") or "")
+        jid = str(verdict.get("chat") or "")
+        name = f"“{subject}”" if subject else "the group"
+        if state == "already_member":
+            return (f"you're already a member of {name} — "
+                    f"nothing to join.")
+        personal = svc["personal"]
+        if state == "approval_pending":
+            personal.note_message_acted(
+                "whatsapp", kind="group_join_requested",
+                account_id=rec.id, chat_id=jid,
+                note="join requested as the owner via /joinlink")
+            return (f"{name} files joins for admin approval — "
+                    f"your request is in. You're not a member "
+                    f"yet; an admin there has to approve it.")
+        personal.note_message_acted(
+            "whatsapp", kind="group_joined",
+            account_id=rec.id, chat_id=jid,
+            note="joined as the owner via /joinlink")
+        return f"joined {name}."
+
+    def _chatops_newchat(self, kind: str, tail: str,
+                         message: Any) -> str:
+        """/newgroup · /newchannel — create a Telegram group or
+        channel AS the owner (parity G2, census bundle #3: the
+        userbot could join chats but never create one — no
+        CreateChatRequest / CreateChannelRequest existed
+        anywhere in the repo).  The verbs live on the personal
+        Telegram surface only: the account that creates is the
+        paired userbot, so on any other surface the answer
+        names where the command lives rather than creating
+        from the wrong hat.  Telegram's refusals (at the
+        channel cap, CHANNELS_TOO_MUCH) come back in its own
+        words via the adapter verdict.  Owner-only behind the
+        family gate; a landed creation journals chat_created."""
+        platform = str(getattr(message.chat, "platform", "")
+                       or "")
+        if platform != "telegram":
+            return (f"/{kind} lives on your personal Telegram "
+                    f"— run it from there (it creates as your "
+                    f"userbot account).")
+        if not tail:
+            return f"usage: /{kind} title — the new chat's name."
+        svc, rec, error = self._chatops_gated_account(
+            "telegram", kind)
+        if error:
+            return error
+        adapter = self._adapter_for("telegram")
+        fn = getattr(
+            adapter,
+            "create_chat" if kind == "newgroup"
+            else "create_channel", None)
+        if not callable(fn):
+            return ("this Telegram surface has no chat-create "
+                    "verb wired — /newgroup and /newchannel "
+                    "live on your personal (userbot) surface.")
+        verdict = self._chatops_call(fn, tail)
+        if not (isinstance(verdict, dict) and verdict.get("ok")):
+            return self._chatops_verdict(verdict, "")
+        new_id = str(verdict.get("chat_id") or "")
+        svc["personal"].note_message_acted(
+            "telegram", kind="chat_created",
+            account_id=rec.id, chat_id=new_id,
+            note=f"created as the owner via /{kind}")
+        what = "group" if kind == "newgroup" else "channel"
+        return f"created your Telegram {what} “{tail}”."
+
+    def _chatops_leave(self, tail: str, message: Any) -> str:
+        """/leave — leave a group or channel AS the owner
+        (parity G2: census bundle #3's leave half, plus the
+        WhatsApp ride): the target follows the chatops grammar
+        (the chat it was sent in, or another named the way
+        chats are named).  WhatsApp rides the bridge's
+        group_leave; Telegram rides the userbot's leave_chat,
+        with the bot adapter's admin_leave as the bot-hat ride
+        when the surface at hand is the bot.  A DM is not
+        leavable on either platform and answers as exactly
+        that — never a fake leave.  Owner-only behind the
+        family gate; a landed leave journals chat_left."""
+        ref, adapter, error = self._chatops_target(message, tail)
+        if error:
+            return error
+        platform = str(getattr(ref, "platform", "") or "")
+        chat_kind = str(getattr(ref, "kind", "") or "")
+        name = str(getattr(ref, "title", "")
+                   or getattr(ref, "chat_id", "") or "that chat")
+        if platform not in ("whatsapp", "telegram"):
+            return (f"/leave has no ride on {platform} — it "
+                    f"leaves WhatsApp and Telegram chats.")
+        if chat_kind == "dm":
+            return (f"{name} is a DM — a one-to-one chat "
+                    f"isn't leavable. /leave applies to groups "
+                    f"and channels.")
+        svc, rec, error = self._chatops_gated_account(
+            platform, "leave")
+        if error:
+            return error
+        if adapter is None:
+            return f"no live {platform} surface here."
+        if platform == "whatsapp":
+            if chat_kind != "group":
+                return (f"{name} isn't a WhatsApp group — "
+                        f"/leave on WhatsApp leaves groups.")
+            fn = getattr(adapter, "group_leave", None)
+            if not callable(fn):
+                return ("this WhatsApp surface has no "
+                        "group-leave verb wired.")
+            verdict = self._chatops_call(fn, ref)
+            if not (isinstance(verdict, dict)
+                    and verdict.get("ok")):
+                return self._chatops_verdict(verdict, "")
+        else:
+            fn = getattr(adapter, "leave_chat", None)
+            if not callable(fn):
+                fn = getattr(adapter, "admin_leave", None)
+            if not callable(fn):
+                return ("this Telegram surface has no leave "
+                        "verb wired.")
+            verdict = self._chatops_call(fn, ref)
+            if not (isinstance(verdict, dict)
+                    and verdict.get("ok")):
+                return self._chatops_verdict(verdict, "")
+        svc["personal"].note_message_acted(
+            platform, kind="chat_left",
+            account_id=rec.id,
+            chat_id=str(getattr(ref, "chat_id", "") or ""),
+            note="left as the owner via /leave")
+        return f"left {name}."
 
     # ── privacy: block / unblock ─────────────────────────────
 

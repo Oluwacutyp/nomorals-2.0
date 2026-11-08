@@ -550,6 +550,10 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "vv": (0, None),           # /vv — short form of /viewonce
     "poststatus": (0, None),   # /poststatus [text] — post a status as the owner
     "chanstory": (1, None),    # /chanstory <channel> [text] — post to a channel as the owner
+    "joinlink": (1, None),     # /joinlink <link or code> — join a WhatsApp group via its invite link
+    "newgroup": (1, None),     # /newgroup <title> — create a Telegram group as the owner
+    "newchannel": (1, None),   # /newchannel <title> — create a Telegram channel as the owner
+    "leave": (0, None),        # /leave [chat name] — leave a group or channel as the owner
     "banchecker": (0, None),  # /banchecker [number] — honest signals
     "gcstatus": (0, 0),       # /gcstatus — this group's real stats
     "statusinfo": (0, 0),     # /statusinfo — alias of /gcstatus
@@ -2702,6 +2706,22 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/chanstory channel [text] · send a photo/video with /chanstory channel [caption] as its caption · reply to a photo/video with /chanstory channel [caption] — the channel as its link, JID, invite code or name on WhatsApp, its @name or id on Telegram",
               "example": "/chanstory Gold Signals building while others flex",
               "related": "/poststatus · /pair saved · /pair"},
+    "joinlink": {"what": "join a WhatsApp group through its invite link, as you, from a personal surface: the bridge resolves the link first, so a dead link fails before any join attempt — a revoked link and a malformed one answer as the different facts they are. If the group files joins for admin approval, the reply says the request is in — it never claims you are a member before you are; the already-in case answers as itself and takes no action at all. A landed join (or filed request) lands in the personal journal like every act taken as you. Owner only; your standing stop halts it.",
+              "usage": "/joinlink chat.whatsapp.com link or its code",
+              "example": "/joinlink https://chat.whatsapp.com/AbC123xYz",
+              "related": "/leave · /pair"},
+    "newgroup": {"what": "create a Telegram group as you, from your personal Telegram surface (the userbot account — the bot surfaces answer where it lives). The group starts with you alone in it; add members with the member verbs afterwards. Telegram's own refusals come back in its words. The creation lands in the personal journal like every act taken as you. Owner only; your standing stop halts it. (WhatsApp group creation already lives in the whatsapp_group_create tool — this verb is the Telegram one.)",
+              "usage": "/newgroup title",
+              "example": "/newgroup Think Creativity Think Peace",
+              "related": "/newchannel · /leave · /pair"},
+    "newchannel": {"what": "create a Telegram channel as you, from your personal Telegram surface (the userbot account — the bot surfaces answer where it lives). Telegram caps how many channels one account may create; at the cap its refusal (CHANNELS_TOO_MUCH) comes back in its own words, never swallowed. The creation lands in the personal journal like every act taken as you. Owner only; your standing stop halts it.",
+              "usage": "/newchannel title",
+              "example": "/newchannel Devon Builds",
+              "related": "/newgroup · /chanstory · /leave · /pair"},
+    "leave": {"what": "leave a group or channel as you: run it inside the chat to leave that one, or name another chat the way you name chats (a name, a number, or a full key). WhatsApp groups ride the bridge's group_leave; Telegram groups and channels ride the userbot (the bot hat leaves through its own leaveChat when the target is a bot chat). A DM is not leavable and answers as exactly that. The leave lands in the personal journal like every act taken as you. Owner only; your standing stop halts it.",
+              "usage": "/leave [chat name]",
+              "example": "/leave",
+              "related": "/joinlink · /newgroup · /newchannel · /pair"},
     "banchecker": {"what": "the honest ban check. With no argument: your own paired accounts' status and recorded bridge errors (a WhatsApp temporary ban shows up as a connection error there). With a number: whether it's on WhatsApp at all — the only signal WhatsApp publishes for other numbers; it publishes no ban state and this never pretends otherwise.",
               "usage": "/banchecker [phone number]",
               "example": "/banchecker +2348012345678",
@@ -4360,7 +4380,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "unsend", "edit", "editmsg", "antiedit",
       "block", "unblock", "anticall", "disappear",
       "statusreact", "poststatus", "chanstory", "banchecker", "gcstatus", "statusinfo",
-      "pollres", "tagall", "hidetag", "antitag", "viewonce", "vv"]),
+      "pollres", "tagall", "hidetag", "antitag", "viewonce", "vv",
+      "joinlink", "newgroup", "newchannel", "leave"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
@@ -4613,6 +4634,10 @@ LIST_ONELINERS: dict[str, str] = {
     "vv": "short form of /viewonce — /vv [n]",
     "poststatus": "post a status/story as you — /poststatus [text]",
     "chanstory": "post to a channel you admin, as you — /chanstory channel [text]",
+    "joinlink": "join a WhatsApp group through its invite link, as you — /joinlink link or code",
+    "newgroup": "create a Telegram group as you — /newgroup title",
+    "newchannel": "create a Telegram channel as you — /newchannel title",
+    "leave": "leave a group or channel as you — /leave [chat name]",
     "banchecker": "honest ban signals: your accounts, or a number's registration — /banchecker [number]",
     "gcstatus": "this group's real stats, sources labeled — /gcstatus",
     "statusinfo": "alias of /gcstatus",

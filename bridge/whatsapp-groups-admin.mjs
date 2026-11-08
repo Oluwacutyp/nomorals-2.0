@@ -20,6 +20,7 @@
  *     {"id":"<req>","cmd":"group_set_description","chat":"<@g.us>","description":"..."}
  *     {"id":"<req>","cmd":"group_set_picture","chat":"<@g.us>","path":"<local image path>"}
  *     {"id":"<req>","cmd":"group_leave","chat":"<@g.us>"}
+ *     {"id":"<req>","cmd":"group_join_link","code":"<invite code>"}
  *     {"id":"<req>","cmd":"group_set_settings","chat":"<@g.us>","announce":bool,"restrict":bool}
  *     {"id":"<req>","cmd":"group_revoke_invite","chat":"<@g.us>"}
  *     {"id":"<req>","cmd":"group_join_approval","chat":"<@g.us>","mode":"on|off"}
@@ -181,6 +182,54 @@ export function registerGroupAdminCommands(ctx) {
       const jid = groupJid(req.chat);
       await sock().groupLeave(jid);
       return { ok: true };
+    },
+
+    group_join_link: async (req) => {
+      // Join a group through its invite link (parity G2).
+      // Resolve-first: groupGetInviteInfo reads the group
+      // behind the code BEFORE any join attempt, so a dead
+      // link fails distinctly — 410 means the link was
+      // revoked, 401/404 mean it is not a live link at all.
+      // groupAcceptInvite returns the group JID only for a
+      // REAL join; for an approval-mode group it files the
+      // request and returns nothing — so the landed state
+      // hinges on a membership re-read (groupMetadata),
+      // never on the accept's return value alone, and a
+      // failed re-read after a landed accept reports the
+      // conservative approval_pending rather than claiming
+      // joined.
+      const code = String(req.code || '').trim();
+      if (!code) throw new Error('missing code: pass the group invite code');
+      const wa = sock();
+      const me = wa.user && wa.user.id ? jidNormalizedUser(wa.user.id) : '';
+      let info;
+      try {
+        info = await wa.groupGetInviteInfo(code);
+      } catch (e) {
+        const status = e && e.output && e.output.statusCode;
+        if (status === 410) throw new Error('that invite link has been revoked');
+        if (status === 401 || status === 404) throw new Error('that invite link is not valid');
+        throw e;
+      }
+      const jid = info && info.id;
+      if (!isGroupJid(jid)) throw new Error('that invite link did not resolve to a group');
+      const subject = info.subject || '';
+      const memberOf = (meta) => !!me && !!meta && Array.isArray(meta.participants)
+        && meta.participants.some((p) => jidNormalizedUser(p.id || p.jid || '') === me);
+      if (memberOf(info)) {
+        return { ok: true, state: 'already_member', chat: jid, subject };
+      }
+      await wa.groupAcceptInvite(code);
+      let meta = null;
+      try {
+        meta = await wa.groupMetadata(jid);
+      } catch {
+        meta = null;
+      }
+      if (memberOf(meta)) {
+        return { ok: true, state: 'joined', chat: jid, subject };
+      }
+      return { ok: true, state: 'approval_pending', chat: jid, subject };
     },
 
     group_set_settings: async (req) => {
