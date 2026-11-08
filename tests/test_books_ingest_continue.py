@@ -279,8 +279,16 @@ class TestSlugResolution(_ReaderCase):
 
 
 class TestChatFollowReply(unittest.TestCase):
-    """The /novel follow reply states ingestion honestly and the
-    background ingest actually completes the library."""
+    """The /novel follow reply states the reading honestly and the
+    reading engine actually completes the library AND the reading.
+
+    (Novel pass, 2026-11-07: the old shape hand-rolled a background
+    INGEST thread here — library download only, and ingestion is not
+    reading; the brain-tool follow path triggered nothing at all.
+    Now follow() itself publishes story.followed and the standing
+    reading engine fetches + digests.  These pins follow that
+    contract: honest NOW-state in the reply, then the library fills
+    and the bible's digested watermark reaches the end.)"""
 
     def setUp(self) -> None:
         from nomorals.agents import partner_runtime as facade
@@ -330,26 +338,41 @@ class TestChatFollowReply(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_follow_reply_reports_ingestion_and_it_completes(self) -> None:
+        from nomorals.books.bible import BibleBuilder
+
         reply = self.runtime.handle_control(
             "/novel follow https://fake/novel/my-vampire-system",
             "local:console")
-        # honest NOW-state: nothing ingested yet, background job running
-        self.assertIn("Ingesting the whole story", reply)
-        self.assertIn("0 of 10", reply)
+        # honest NOW-state: the engine is on it, counts as they stand
+        # (the exact in-library count races the worker by design —
+        # the reply's own wording is the contract, not a frozen 0)
+        self.assertIn("reading it now", reply)
+        self.assertIn("are in its library so far", reply)
+        self.assertIn("of 10", reply)
         self.assertIn("my-vampire-system-freewebnovel", reply)
         reader = StoryReader(self.context)
         deadline = time.time() + 30
         state = reader.ingest_state("my-vampire-system-freewebnovel")
-        while not state["complete"] and time.time() < deadline:
+        digested = 0
+        while time.time() < deadline:
+            state = reader.ingest_state(
+                "my-vampire-system-freewebnovel")
+            bible = BibleBuilder(self.context).load(
+                "my-vampire-system-freewebnovel")
+            digested = int(bible.chapters_digested or 0) if bible else 0
+            if state["complete"] and digested >= 10:
+                break
             time.sleep(0.25)
-            state = reader.ingest_state("my-vampire-system-freewebnovel")
         self.assertTrue(state["complete"], f"ingest never finished: {state}")
         self.assertEqual(state["ingested"], 10)
-        # a second follow tells the truth: the library is already whole
+        # …and she has actually READ it through (the owner's defect:
+        # follows used to fill a library nobody read)
+        self.assertEqual(digested, 10)
+        # a second follow tells the truth: library whole, read through
         reply2 = self.runtime.handle_control(
             "/novel follow https://fake/novel/my-vampire-system",
             "local:console")
-        self.assertIn("already in its library", reply2)
+        self.assertIn("read it through", reply2)
 
 
 if __name__ == "__main__":

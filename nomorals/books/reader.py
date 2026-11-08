@@ -14,6 +14,17 @@ pulls every chapter from 1 to the source's current end into the
 story's own library (resumable, progress persisted on the record,
 reading position untouched), so continuation can anchor at the
 story's true end instead of wherever the owner stopped reading.
+
+Following is also a TRIGGER, not just a record: :meth:`follow`
+publishes ``story.followed`` on the shared event bus, and the story
+reading engine (:mod:`nomorals.books.reading_engine`) consumes it
+immediately — she fetches the story and works through its chapters
+herself (library + bible digestion) without anyone asking again.
+Before that wiring existed, follow() recorded the story and stopped:
+the one chat surface that wanted ingestion hand-rolled its own
+background thread (library only, never a read), the tool path did
+nothing at all, and no consumer anywhere turned a follow — or a
+new chapter — into reading.
 """
 
 from __future__ import annotations
@@ -296,8 +307,16 @@ class StoryReader:
                           source_registry=reg)
 
     def follow(self, url_or_query: str, *,
-               source: str = "") -> FollowedStory:
-        """Follow a story by URL — or by title (searches verified sources)."""
+               source: str = "", chat_key: str = "") -> FollowedStory:
+        """Follow a story by URL — or by title (searches verified sources).
+
+        Recording the follow publishes ``story.followed`` on the
+        shared event bus (async; the reading engine's worker does
+        the fetching and reading, never this caller).  ``chat_key``
+        names the chat that asked, when a surface knows it, so the
+        engine's completion ping lands where the follow was made;
+        empty means the ping goes to the owner's channels instead.
+        A bus failure never breaks the follow itself."""
         target = (url_or_query or "").strip()
         if not target:
             raise ReaderError("follow needs a URL or a story title")
@@ -333,6 +352,22 @@ class StoryReader:
                 cover_url=meta.cover_url, followed_at=_now())
         self._save(story)
         _log.info("following story %s (%s)", slug, adapter.name)
+        # The trigger (see the module docstring): every follow path —
+        # chat command, brain tool, CLI — lands here, so the event is
+        # published HERE, once, at the organ.  Async delivery: the
+        # reading engine's consumer runs the read on its own worker;
+        # this call stays a metadata fetch.
+        try:
+            from ..core.events import Event, global_bus
+
+            global_bus.publish(Event(
+                topic="story.followed",
+                data={"slug": slug, "title": story.title,
+                      "source": adapter.name,
+                      "chat_key": str(chat_key or "")},
+                source=__name__))
+        except Exception as exc:  # noqa: BLE001 - a bus failure never
+            record_failure("reader.follow.publish", exc)  # breaks a follow
         return story
 
     def unfollow(self, slug: str, *, keep_cache: bool = True) -> dict[str, Any]:

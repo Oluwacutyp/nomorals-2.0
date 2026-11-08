@@ -6,6 +6,83 @@ import threading
 import time
 from .failures import record_failure
 
+#: Chars of chapter text per reading-pager page (the menu session's
+#: 3200-char page budget, minus headroom for the header/footer and
+#: the send funnel's stamp).
+READING_PAGE_CHARS = 3000
+
+
+def _reading_pager_ok(chat_key: str) -> bool:
+    """True when this chat's surface can hold the live reading pager:
+    buttons AND text edit, per the platform limits — and never
+    WhatsApp (its edit verb is text-only, so its keyboard cannot
+    follow the page; the menu session sets the same precedent).
+    Everywhere else, reading falls back to the chunked send — the
+    honest buttonless/no-edit degradation, never a fake pager."""
+    platform = (chat_key or "").partition(":")[0].strip().lower()
+    if platform in ("whatsapp", "wa"):
+        return False
+    try:
+        from ...social.chat.platform_limits import for_platform
+
+        limits = for_platform(platform)
+    except Exception:  # noqa: BLE001 - unknown platform: no pager
+        return False
+    return bool(limits is not None and limits.supports_buttons
+                and limits.supports_text_edit)
+
+
+def _page_ref(kind: str, slug: str) -> str:
+    """The story reference a pager callback can carry: the full slug
+    when ``<kind> page <slug> 888 888`` fits Telegram's 47-byte
+    callback budget, else a 24-char prefix — which
+    :meth:`StoryReader.resolve_slug` resolves as a unique prefix,
+    exactly like a typed reference."""
+    if len(f"{kind} page {slug} 888 888".encode()) <= 47:
+        return slug
+    return slug[:24]
+
+
+def _chapter_actionable(*, kind: str, slug: str, title: str,
+                        chapter: int, chapter_title: str, text: str,
+                        page: int, total_chapters: int,
+                        has_next: bool, session: str, edit: bool):
+    """One page of a chapter as a live-session render (the paging
+    law: ONE message, Next/Prev buttons, edited in place — never an
+    (n/m) chunk dump).  Buttons ride the control grammar of the
+    owning command (``<kind> page …`` / ``<kind> read …``), so a tap
+    re-enters the same handler that authored the page."""
+    from ...social.chat.chunking import chunk_message
+    from ...social.chat.tgbot_buttons import actionable
+
+    pages = chunk_message(text or "", max_text=READING_PAGE_CHARS) or [""]
+    page = min(max(1, int(page or 1)), len(pages))
+    ref = _page_ref(kind, slug)
+    head = f"📖 {title} — chapter {chapter}"
+    if chapter_title and chapter_title != f"Chapter {chapter}":
+        head += f" · {chapter_title}"
+    foot = (f"— page {page} of {len(pages)} · chapter {chapter} "
+            f"of {total_chapters or '?'} —")
+    rows: list = []
+    nav: list = []
+    if page > 1:
+        nav.append(("◀ Prev", f"{kind} page {ref} {chapter} {page - 1}"))
+    if page < len(pages):
+        nav.append(("Next ▶", f"{kind} page {ref} {chapter} {page + 1}"))
+    if nav:
+        rows.append(nav)
+    chrow: list = []
+    if chapter > 1:
+        chrow.append((f"⏮ ch {chapter - 1}",
+                      f"{kind} read {ref} {chapter - 1}"))
+    if has_next:
+        chrow.append((f"ch {chapter + 1} ⏭",
+                      f"{kind} read {ref} {chapter + 1}"))
+    if chrow:
+        rows.append(chrow)
+    return actionable(f"{head}\n\n{pages[page - 1]}\n\n{foot}", rows,
+                      session=session, session_edit=edit)
+
 class RuntimeSearchMixin:
     """RuntimeSearchMixin for :class:`PartnerRuntime`."""
 
@@ -196,6 +273,9 @@ class RuntimeSearchMixin:
             if verb == "read":
                 # /books read <url|slug> [n] — follow a URL, or read a
                 # followed story. Chapter 0 = resume where you left off.
+                # The chapter presents through the live reading pager
+                # where the surface holds it (full text, paged in one
+                # message); elsewhere the plain send below.
                 from ...books.reader import StoryReader
                 if len(parts) < 2:
                     return "usage: /books read <url|slug> [chapter] — 0 = resume"
@@ -204,10 +284,16 @@ class RuntimeSearchMixin:
                 reader = StoryReader(self.context)
                 try:
                     if target.startswith("http"):
-                        followed = reader.follow(target)
+                        self._ensure_story_engine()
+                        followed = reader.follow(target,
+                                                 chat_key=chat_key)
                         slug = followed.slug
                     else:
                         slug = target
+                    if _reading_pager_ok(chat_key):
+                        return self._novel_chapter_reply(
+                            reader, slug, chapter, chat_key,
+                            kind="books", session="books")
                     result = reader.read(slug, chapter=chapter)
                 except Exception as exc:  # noqa: BLE001 - chat surface
                     return f"read failed: {exc}"
@@ -217,6 +303,22 @@ class RuntimeSearchMixin:
                     slug, int(result.get("chapter", chapter or 1)) + 1) if len(text) > 3500 else ""
                 return (f"📖 {result.get('title', slug)} — chapter "
                         f"{result.get('chapter', chapter)}\n\n{shown}{suffix}")
+
+            if verb == "page":
+                # Pager continuation for /books read renders:
+                # books page <ref> <chapter> <page>.
+                from ...books.reader import StoryReader
+                if len(parts) < 4 or not parts[2].isdigit() \
+                        or not parts[3].isdigit():
+                    return "usage: /books page <slug> <chapter> <page>"
+                reader = StoryReader(self.context)
+                try:
+                    return self._novel_chapter_reply(
+                        reader, parts[1], int(parts[2]), chat_key,
+                        page=int(parts[3]), edit=True,
+                        kind="books", session="books")
+                except Exception as exc:  # noqa: BLE001 - chat surface
+                    return f"read failed: {exc}"
 
             if verb == "continue":
                 # /books continue <slug> [n] — continue past the ending
@@ -325,15 +427,76 @@ class RuntimeSearchMixin:
         except Exception as exc:  # noqa: BLE001
             return f"book failed: {exc}"
 
+    def _story_chat_notify(self, chat_key: str, text: str) -> None:
+        """The reading engine's chat delivery: a ping lands in the
+        chat that triggered the read.  Best-effort, never raises."""
+        try:
+            chat = self._ref_from_key(chat_key)
+            self._notify(chat, text)
+        except Exception as exc:  # noqa: BLE001
+            record_failure("runtime_search._story_chat_notify", exc)
+
+    def _ensure_story_engine(self) -> None:
+        """Stand the story reading engine up on this runtime's
+        context (idempotent — boot wires it first; a handler calling
+        this on an unbooted runtime still gets a live consumer)."""
+        try:
+            from ...books.reading_engine import ensure_reading_engine
+
+            ensure_reading_engine(
+                self.context, chat_notify=self._story_chat_notify)
+        except Exception as exc:  # noqa: BLE001 - the reply still goes out
+            record_failure("runtime_search._ensure_story_engine", exc)
+
+    def _novel_chapter_reply(self, reader, slug: str, chapter: int,
+                             chat_key: str, *, page: int = 1,
+                             edit: bool = False, kind: str = "novel",
+                             session: str = "novel"):
+        """Render one chapter of a followed story: through the live
+        reading pager where the surface holds it (one message,
+        Next/Prev, edited in place), else the chunked send — the
+        honest degradation.  Reading updates the owner's progress
+        (reader.read), and the pager body is the chapter's FULL
+        text (chapter_text), not read()'s 12000-char preview."""
+        from ...books.reader import ReaderError
+
+        data = reader.read(slug, chapter)
+        slug = data["slug"]
+        if not _reading_pager_ok(chat_key):
+            chat = self._ref_from_key(chat_key)
+            return self._send_long_checked(
+                chat.platform, chat,
+                f"📖 {data.get('title', slug)} — chapter "
+                f"{data.get('chapter', chapter)}\n\n"
+                f"{data.get('text', '')}")
+        try:
+            full = reader.chapter_text(slug, int(data["chapter"]))
+        except ReaderError:
+            full = data.get("text", "")
+        if full.startswith("# "):
+            full = full.split("\n", 1)[1].lstrip("\n")
+        story = reader._load(slug)
+        return _chapter_actionable(
+            kind=kind, slug=slug, title=data.get("title", slug),
+            chapter=int(data["chapter"]),
+            chapter_title=data.get("chapter_title", ""),
+            text=full, page=page,
+            total_chapters=int(story.total_chapters or 0),
+            has_next=bool(data.get("next")), session=session,
+            edit=edit)
+
     def _control_novel(self, tail: str, chat_key: str) -> str:
         """``/novel`` — story reader + continuer.
 
         follow <url|title> | list | sources | read <slug> [chapter] |
         next <slug> | sync <slug> | continue <slug> [n]
 
-        Following ingests the WHOLE story into its own library in the
-        background (resumable); continue writes from the story's true
-        final chapter, never from the reading position.
+        Following is a trigger: the reading engine fetches the whole
+        story and reads it herself (library + bible digestion) in the
+        background; new chapters are read on discovery.  Reading a
+        chapter presents through the live pager where the surface
+        holds it.  Continue writes from the story's true final
+        chapter, never from the reading position.
         """
         from ...books.reader import StoryReader, ReaderError
         from ...books.continuation import StoryContinuer
@@ -362,6 +525,21 @@ class RuntimeSearchMixin:
                             "(corrupt story.json)")
                 return ("no stories followed yet. /novel follow <url or title> — "
                         "e.g. /novel follow my vampire system")
+            # Her reading progress rides the list (the bible's
+            # digested watermark per story) — the owner can SEE that
+            # following leads to reading, and how far she has got.
+            digested_by_slug: dict[str, int] = {}
+            try:
+                from ...books.bible import BibleBuilder
+
+                bibles = BibleBuilder(self.context)
+                for s in stories:
+                    bible = bibles.load(s["slug"])
+                    if bible is not None:
+                        digested_by_slug[s["slug"]] = int(
+                            bible.chapters_digested or 0)
+            except Exception as exc:  # noqa: BLE001 - list still renders
+                record_failure("runtime_search._control_novel.list", exc)
             lines = ["followed stories:"]
             for s in stories:
                 line = (
@@ -372,6 +550,9 @@ class RuntimeSearchMixin:
                     line += (f" · library {s.get('ingested', 0)}/"
                              f"{s['ingest_total']}"
                              + (" ✓" if s.get("library_complete") else ""))
+                if digested_by_slug.get(s["slug"]):
+                    line += (f" · she's read through "
+                             f"{digested_by_slug[s['slug']]}")
                 lines.append(line)
             if unreadable:
                 lines.append(f"  ({unreadable} story(ies) on disk unreadable"
@@ -381,114 +562,75 @@ class RuntimeSearchMixin:
         if verb == "follow":
             if not rest:
                 return "usage: /novel follow <url or story title>"
+            self._ensure_story_engine()
             try:
-                story = reader.follow(rest)
+                story = reader.follow(rest, chat_key=chat_key)
             except ReaderError as exc:
                 return f"follow failed: {exc}"
             except Exception as exc:  # noqa: BLE001
                 return f"follow failed: {type(exc).__name__}: {exc}"
-            # following = owning: ingest the WHOLE story into its own
-            # library, in the background (same pattern as continue) —
-            # the reply reports the library state as it stands NOW and
-            # never claims chapters that are not here yet.
+            # Following is a trigger, not a download: follow() has
+            # published story.followed, and the reading engine is
+            # already fetching the story and reading it herself
+            # (library + bible).  The reply reports the state as it
+            # stands NOW and never claims chapters not yet read.
             state = reader.ingest_state(story.slug)
-            if state["complete"]:
+            digested = 0
+            try:
+                from ...books.bible import BibleBuilder
+
+                bible = BibleBuilder(self.context).load(story.slug)
+                digested = int(bible.chapters_digested or 0) if bible else 0
+            except Exception as exc:  # noqa: BLE001 - reply still goes out
+                record_failure("runtime_search._control_novel.follow", exc)
+            if state["complete"] and digested >= int(state["total"] or 0) \
+                    and state["total"]:
                 return (f"📖 following “{story.title}” [{story.source}] — "
-                        f"{state['total']} chapters, and the whole story "
-                        f"is already in its library "
-                        f"({state['ingested']} of {state['total']}). "
+                        f"{state['total']} chapters, the whole story is "
+                        f"in its library and she's read it through. "
                         f"/novel read {story.slug} · "
                         f"/novel continue {story.slug} writes from the "
                         f"true ending.")
-            chat = self._ref_from_key(chat_key)
-            slug = story.slug
-            title = story.title
-
-            def _wingest() -> None:
-                try:
-                    bg = StoryReader(self.context)
-                    report = bg.ingest(slug)
-                    if report["complete"]:
-                        self._notify(
-                            chat,
-                            f"📚 library complete for “{title}” — all "
-                            f"{report['total']} chapters ingested. "
-                            f"/novel continue {slug} now writes from "
-                            f"the story's true ending.")
-                    else:
-                        self._notify(
-                            chat,
-                            f"⚠️ ingestion of “{title}” stopped at "
-                            f"{report['ingested']} of {report['total']} "
-                            f"chapters — /novel sync {slug} resumes it "
-                            f"where it left off.")
-                except Exception as exc:  # noqa: BLE001
-                    self._notify(chat, f"⚠️ ingestion of “{title}” "
-                                       f"failed: {exc}")
-                finally:
-                    self._release_db_thread()
-
-            import threading
-            threading.Thread(target=_wingest, name=f"novel-ingest-{slug}",
-                             daemon=True).start()
             return (f"📖 following “{story.title}” [{story.source}] — "
-                    f"{story.total_chapters or '?'} chapters. Ingesting "
-                    f"the whole story into its own library in the "
-                    f"background — {state['ingested']} of "
+                    f"{story.total_chapters or '?'} chapters. She's "
+                    f"reading it now — fetching the chapters and "
+                    f"working through them herself; "
+                    f"{state['ingested']} of "
                     f"{state['total'] or story.total_chapters or '?'} "
-                    f"chapters are in so far; I'll ping when the library "
-                    f"is complete. /novel read {story.slug} works "
+                    f"are in its library so far, and she's read "
+                    f"through {digested}. I'll ping here when she's "
+                    f"through them. /novel read {story.slug} works "
                     f"meanwhile.")
 
         if verb in ("sync", "ingest"):
             if not rest:
-                return ("usage: /novel sync <slug> — finish ingesting "
-                        "the story's whole library (resumes where it "
-                        "left off)")
+                return ("usage: /novel sync <slug> — she fetches and "
+                        "reads the rest of the story (resumes where "
+                        "she left off)")
             try:
                 slug = reader.resolve_slug(rest.split()[0])
             except ReaderError as exc:
                 return f"sync failed: {exc}"
-            chat = self._ref_from_key(chat_key)
+            # The same trigger the follow fires, asked for by hand:
+            # the reading engine runs the read (fetch + digest) and
+            # pings the outcome here.  No private thread — the work
+            # rides the standing consumer, so a sync, a follow and a
+            # discovery can never double-read the same story.
+            self._ensure_story_engine()
             try:
-                self.gateway.send(chat.platform, chat,
-                                  "📚 ingesting the whole story into "
-                                  "its library — resuming where it "
-                                  "left off…")
+                from ...books.reading_engine import TOPIC_READ_REQUESTED
+                from ...core.events import Event, global_bus
+
+                global_bus.publish(Event(
+                    topic=TOPIC_READ_REQUESTED,
+                    data={"slug": slug, "chat_key": chat_key},
+                    source=__name__))
             except Exception as exc:  # noqa: BLE001
-                record_failure("runtime_search._control_novel:434", exc)
-
-            def _wsync() -> None:
-                try:
-                    bg = StoryReader(self.context)
-                    report = bg.ingest(slug)
-                    if report["complete"]:
-                        self._notify(
-                            chat,
-                            f"📚 “{report['title']}” library complete — "
-                            f"all {report['total']} chapters ingested.")
-                    else:
-                        detail = ""
-                        if report.get("failed"):
-                            first = report["failed"][0]
-                            detail = (f" (first failure at chapter "
-                                      f"{first['number']}: "
-                                      f"{first['reason']})")
-                        self._notify(
-                            chat,
-                            f"⚠️ “{report['title']}” ingestion stopped "
-                            f"at {report['ingested']} of "
-                            f"{report['total']} chapters{detail} — "
-                            f"/novel sync {slug} resumes it.")
-                except Exception as exc:  # noqa: BLE001
-                    self._notify(chat, f"⚠️ sync failed: {exc}")
-                finally:
-                    self._release_db_thread()
-
-            import threading
-            threading.Thread(target=_wsync, name=f"novel-sync-{slug}",
-                             daemon=True).start()
-            return ""
+                record_failure("runtime_search._control_novel.sync", exc)
+                return f"sync failed: {type(exc).__name__}: {exc}"
+            return ("📚 she's on it — fetching and reading the rest "
+                    "of the story, resuming where she left off. "
+                    "I'll ping here when she's through.")
 
         if verb in ("read", "next"):
             if not rest:
@@ -496,17 +638,32 @@ class RuntimeSearchMixin:
             bits = rest.split()
             slug, ch = bits[0], int(bits[1]) if len(bits) > 1 and bits[1].isdigit() else 0
             try:
-                data = reader.next(slug) if verb == "next" else reader.read(slug, ch)
+                if verb == "next":
+                    story = reader._load(slug)
+                    ch = (story.current_chapter or 0) + 1
+                return self._novel_chapter_reply(reader, slug, ch,
+                                                  chat_key)
             except ReaderError as exc:
                 return f"read failed: {exc}"
             except Exception as exc:  # noqa: BLE001
                 return f"read failed: {type(exc).__name__}: {exc}"
-            text = data.get("text") or data.get("chapter_text") or ""
-            title = data.get("title") or f"chapter {data.get('number', '?')}"
-            chat = self._ref_from_key(chat_key)
-            return self._send_long_checked(
-                chat.platform, chat,
-                f"📖 {title}\n\n{text[:5500]}")
+
+        if verb == "page":
+            # Pager continuation: novel page <ref> <chapter> <page> —
+            # a button tap (or the typed equivalent) re-renders the
+            # live reading message at the asked page, in place.
+            bits = rest.split()
+            if len(bits) < 3 or not bits[1].isdigit() \
+                    or not bits[2].isdigit():
+                return "usage: /novel page <story> <chapter> <page>"
+            try:
+                return self._novel_chapter_reply(
+                    reader, bits[0], int(bits[1]), chat_key,
+                    page=int(bits[2]), edit=True)
+            except ReaderError as exc:
+                return f"read failed: {exc}"
+            except Exception as exc:  # noqa: BLE001
+                return f"read failed: {type(exc).__name__}: {exc}"
 
         if verb == "continue":
             if not rest:

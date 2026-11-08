@@ -294,6 +294,7 @@ class RuntimeLiveMixin:
         /pulse config [slot]  → times / enabled / voice
         /pulse run [slot|all] → deliver the briefing now
         /pulse catchup [slot] → run undelivered slots
+        /pulse stories [batch] [page] → page a delivered story list
         Slots: morning · afternoon · evening · midnight.
         """
         try:
@@ -378,7 +379,32 @@ class RuntimeLiveMixin:
                     return f"catch-up: {check_all_catchup(self.context)}"
                 return (f"unknown slot {slot!r} — "
                         f"slots: {', '.join(BRIEFING_SLOTS)}")
-            return ("usage: /pulse [status|config|run|catchup] "
+            if verb == "stories":
+                # The delivered story list's pager: /pulse stories
+                # [batch] [page] — the buttons on the delivered list
+                # ride exactly this grammar, and the render edits
+                # the ONE live message in place (session
+                # "pulse-stories").  No batch = the latest list.
+                from ...social.chat.tgbot_buttons import actionable
+                from ..morning_pulse import story_page_render
+
+                batch = "latest"
+                page = 1
+                for tok in parts[1:]:
+                    if tok.isdigit():
+                        page = int(tok)
+                    elif tok != "stories":
+                        batch = tok
+                render = story_page_render(self.context, batch, page)
+                if render is None:
+                    return ("no pageable story list — either none was "
+                            "delivered in the last week, or that list "
+                            "has expired. The next briefing brings a "
+                            "fresh one.")
+                return actionable(render["text"], render["buttons"],
+                                  session="pulse-stories",
+                                  session_edit=True)
+            return ("usage: /pulse [status|config|run|catchup|stories] "
                     "[morning|afternoon|evening|midnight|all]")
         except Exception as exc:  # noqa: BLE001 — command never raises
             return f"pulse error: {exc}"

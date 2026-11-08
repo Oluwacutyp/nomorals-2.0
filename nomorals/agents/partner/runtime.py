@@ -2778,6 +2778,17 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("download source health job not "
                                  "registered: %s", exc)
+                # Story chapter discovery: one routine sweep job
+                # (every 30m; 1h on termux) that only ASKS whether
+                # followed stories gained chapters — the reading
+                # engine below does the reading itself, immediately
+                # on the discovery event.  Idempotent by name.
+                try:
+                    from ...books.jobs import ensure_story_jobs
+                    ensure_story_jobs(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("story discovery job not "
+                                 "registered: %s", exc)
                 # Autonomous nervous system (nomorals/autonomy): the organs
                 # work without commands. Idle monitor watches for quiet
                 # periods; presence heartbeat notices/prepares every 30m.
@@ -2997,6 +3008,22 @@ class PartnerRuntime(
             except Exception as exc:  # noqa: BLE001 - scheduler is optional
                 _log.warning("scheduler failed to start: %s", exc)
                 self._scheduler = None
+        # Story reading engine: the standing consumer that turns a
+        # follow (story.followed) and a chapter discovery
+        # (story.chapters_discovered) into her actually reading the
+        # story — fetch + bible digestion on its own worker, pinging
+        # the chat that asked.  Independent of the scheduler (its
+        # triggers are events, not ticks); the boot catch-up reads
+        # whatever a follow left undigested while no engine ran.
+        if not self.dry_run:
+            try:
+                from ...books.reading_engine import ensure_reading_engine
+
+                _story_engine = ensure_reading_engine(
+                    self.context, chat_notify=self._story_chat_notify)
+                _story_engine.catch_up_all()
+            except Exception as exc:  # noqa: BLE001 - optional
+                _log.warning("story reading engine not started: %s", exc)
         # Supervision: watched threads get restarted on death, with incident
         # recording and restart budgets. The supervisor watches; components
         # keep owning their threads (no invasive lifecycle rewrites).

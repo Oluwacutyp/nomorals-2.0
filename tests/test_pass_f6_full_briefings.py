@@ -9,15 +9,22 @@ parallel seen-marker that drifted from the news delivery ledger.
 These tests pin the F6 contract:
 - every slot sources from NewsAgent's delivery ledger (undelivered),
   uncapped — 40 stories in, 40 stories out;
-- a story is marked delivered ONLY when its segment's publish
-  confirms — a failed segment's stories stay undelivered and arrive
-  next pulse, with nothing before them repeated;
+- a story is marked delivered ONLY when its publish confirms — a
+  failed publish's stories stay undelivered and arrive whole next
+  pulse;
 - morning-delivered stories never reappear in the afternoon;
 - the retired seen-marker is folded into the ledger ONCE at cutover
   (no re-flood) and never consulted again;
-- segments carry "(i/n)" continuation labels, and a story with a
-  summary renders it in an expandable blockquote;
+- a story with a summary renders it in an expandable blockquote;
 - the ledger is the single truth: no pulse_seen.json is written.
+
+PAGER UPDATE (novel pass, 2026-11-07 — the owner's live-display
+law: nothing splits into (1/2), (2/2) dumps anymore): the story
+list now arrives as ONE paged live message — page 1 with Next/Prev
+buttons, no "(i/n)" labels anywhere, and every story reachable
+exactly once across the pages (morning_pulse.story_page_render).
+The confirmed-marking contract stands in the paged shape: the one
+publish confirms → all of the list's URLs mark; it fails → none do.
 """
 from __future__ import annotations
 
@@ -108,6 +115,20 @@ def sent_text(gateway):
     return "\n".join(t for _, _, t in gateway.sent)
 
 
+def pager_texts(ctx):
+    """Every page of the latest delivered story list (the pager)."""
+    out, page = [], 1
+    while True:
+        render = mp.story_page_render(ctx, "latest", page)
+        if render is None:
+            break
+        out.append(render["text"])
+        if page >= render["pages"]:
+            break
+        page += 1
+    return out
+
+
 def undelivered_urls(ctx):
     return {str(r.get("url")) for r in NewsAgent(ctx).undelivered()}
 
@@ -125,18 +146,25 @@ class FullDeliveryTests(unittest.TestCase):
         self.assertTrue(r["ok"])
         self.assertEqual(r["stories_delivered"], 40)
         self.assertEqual(r["stories_pending"], 0)
+        # ONE paged story-list message went out — not a (i/n) dump
         text = sent_text(gw)
+        self.assertIn(mp.STORY_LIST_TITLE, text)
+        self.assertNotIn("(1/", text)
+        self.assertIn("— page 1 of", text)
+        story_sends = [t for _, _, t in gw.sent
+                       if mp.STORY_LIST_TITLE in t]
+        self.assertEqual(len(story_sends), 1)
+        # every story's FULL block (headline + URL) is reachable
+        # exactly once across the pager's pages
+        pages = pager_texts(ctx)
+        self.assertGreater(len(pages), 1)
         for i in range(40):
-            self.assertIn(f"Story {i} headline", text,
-                          f"story {i} missing from the afternoon delivery")
-            # the URL rides only the story BLOCK (the head text carries
-            # bare headlines) — its presence proves the full block went
-            self.assertIn(f"https://news.test/s{i}/full", text)
+            hits = [p for p in pages if f"Story {i} headline" in p]
+            self.assertEqual(len(hits), 1,
+                             f"story {i} not paged exactly once")
+            self.assertIn(f"https://news.test/s{i}/full", hits[0])
         # everything marked in the ledger; nothing left undelivered
         self.assertEqual(undelivered_urls(ctx), set())
-        # segment continuation labels present on a multi-segment send
-        self.assertIn("(1/", text)
-        self.assertIn(mp.STORY_LIST_TITLE, text)
 
     def test_morning_pulse_delivers_all_40(self):
         gw = FakeGateway()
@@ -148,7 +176,12 @@ class FullDeliveryTests(unittest.TestCase):
              patch.object(mp, "_synthesize", return_value=""):
             r = mp.run_pulse(ctx)
         self.assertEqual(r["stories_delivered"], 40)
+        # no summaries → the whole list packs into ONE page, so it
+        # publishes as a single message exactly as it always did
+        # (no stash, no buttons) — every headline in the sent text,
+        # and still no (i/n) labelling anywhere
         text = sent_text(gw)
+        self.assertNotIn("(1/", text)
         for i in range(40):
             self.assertIn(f"Story {i} headline", text)
         self.assertEqual(undelivered_urls(ctx), set())
@@ -227,51 +260,37 @@ class CrossSlotDedupeTests(unittest.TestCase):
         self.assertNotIn("Story 0 headline", sent_text(gw))
 
 
-class FailedSegmentTests(unittest.TestCase):
-    """Per-confirmed-chunk marking: a failed segment loses nothing and
-    repeats nothing."""
+class FailedPublishTests(unittest.TestCase):
+    """Confirmed marking in the paged shape: the list is ONE publish,
+    so marking is per-list — a failed publish loses nothing (the
+    whole list stays pending and arrives next pulse) and a confirmed
+    one is never repeated."""
 
-    def test_failed_segment_stays_undelivered_and_resumes(self):
-        # long summaries → several segments; gateway calls:
-        # 1 = head text, 2 = segment 1, 3 = segment 2 (FAILS)
-        gw = FakeGateway(fail_on={3})
+    def test_failed_publish_stays_undelivered_and_resumes_whole(self):
+        # every gateway call fails on the first run — head text AND
+        # the story-list publish
+        gw = FakeGateway(fail_on=set(range(1, 13)))
         ctx, _ = make_ctx(self, gw)
         urls = seed_stories(ctx, 24, summary_words=6)
         with patch.object(NewsAgent, "poll", lambda self: {"ok": True}), \
              patch.object(mp, "_afternoon_markets", return_value=("", [])):
             r = mp.run_slot(ctx, "afternoon")
-        first_delivered = r["stories_delivered"]
-        self.assertGreater(first_delivered, 0)
-        self.assertLess(first_delivered, 24)
-        self.assertEqual(r["stories_pending"], 24 - first_delivered)
-        # exactly the undelivered remainder is still in the ledger
-        remaining = undelivered_urls(ctx)
-        self.assertEqual(len(remaining), 24 - first_delivered)
-        delivered_first_run = set(urls) - remaining
-        # URLs ride only the story blocks: the confirmed segment's
-        # stories are in the sent text, the failed segment's are NOT
-        # (their headlines appear in the head text — their blocks
-        # never went out, so nothing about them was marked)
-        text1 = sent_text(gw)
-        for u in delivered_first_run:
-            self.assertIn(u, text1)
-        for u in remaining:
-            self.assertNotIn(u, text1,
-                             "unconfirmed story's block was sent")
-        # next pulse with a healthy gateway: the remainder arrives,
-        # and NONE of the first run's blocks repeat
+        self.assertEqual(r["stories_delivered"], 0)
+        self.assertEqual(r["stories_pending"], 24)
+        self.assertEqual(undelivered_urls(ctx), set(urls))
+        # next pulse with a healthy gateway: the whole list arrives
+        # through the pager, every story exactly once
         gw2 = FakeGateway()
         ctx.gateway = gw2
         with patch.object(NewsAgent, "poll", lambda self: {"ok": True}), \
              patch.object(mp, "_afternoon_markets", return_value=("", [])):
             r2 = mp.run_slot(ctx, "afternoon")
-        self.assertEqual(r2["stories_delivered"], 24 - first_delivered)
-        text2 = sent_text(gw2)
-        for u in delivered_first_run:
-            self.assertNotIn(u, text2,
-                             "confirmed story repeated after resume")
-        for u in remaining:
-            self.assertIn(u, text2)
+        self.assertEqual(r2["stories_delivered"], 24)
+        pages = pager_texts(ctx)
+        for u in urls:
+            hits = [p for p in pages if u in p]
+            self.assertEqual(len(hits), 1,
+                             "story missing or repeated after resume")
         self.assertEqual(undelivered_urls(ctx), set())
 
     def test_total_delivery_failure_marks_nothing(self):

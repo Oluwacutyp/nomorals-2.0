@@ -78,6 +78,30 @@ def _scheduled_buttons(payload: dict[str, Any] | None) -> Keyboard | None:
     return wide_layout([row] if row else None)
 
 
+def _pulse_stories_buttons(payload: dict[str, Any] | None) -> Keyboard | None:
+    """Pager buttons for a briefing's story list (the paging law):
+    Next/Prev over the delivered list's pages, riding the routable
+    ``pulse stories <batch> <n>`` command — derived from THIS
+    delivery's batch, never inherited from an earlier output."""
+    if not isinstance(payload, dict):
+        return None
+    batch = str(payload.get("batch") or "").strip()
+    try:
+        page = int(payload.get("page") or 1)
+        pages = int(payload.get("pages") or 1)
+    except (TypeError, ValueError):
+        return None
+    if not batch or pages <= 1:
+        return None
+    pairs: list[tuple[str, str]] = []
+    if page > 1:
+        pairs.append(("◀ Prev", f"pulse stories {batch} {page - 1}"))
+    if page < pages:
+        pairs.append(("Next ▶", f"pulse stories {batch} {page + 1}"))
+    row = _row(*pairs)
+    return wide_layout([row] if row else None)
+
+
 def _search_buttons(payload: dict[str, Any] | None) -> Keyboard | None:
     """Buttons for a search result: save / deepen / re-run THAT query."""
     query = ""
@@ -170,6 +194,8 @@ def adaptive_buttons_for(
     text happens to mention a game gets job buttons, not game buttons.
     """
     kind = (output_kind or "").strip().lower()
+    if kind == "pulse_stories":
+        return _pulse_stories_buttons(payload)
     if kind == "scheduled":
         return _scheduled_buttons(payload)
     if kind == "search":

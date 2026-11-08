@@ -1196,15 +1196,80 @@ def _mark_stories_delivered(context: Any, keys: list[str],
         _log.debug("pulse: ledger mark failed", exc_info=True)
 
 
+#: How long a delivered story list stays pageable (the pager stash
+#: in the KV store).  A week covers a missed weekend; the list is a
+#: reading surface, not an archive — the news ledger keeps the truth.
+STORY_PAGES_TTL_S = 7 * 24 * 3600
+
+
+def _story_pages_kv(context: Any) -> Any:
+    """The KV namespace holding delivered story-list pages."""
+    from ..storage.kv import KVStore
+
+    return KVStore(context.db).namespaced("pulse_stories")
+
+
+def _story_page_footer(page: int, total: int) -> str:
+    """The pager's own chrome line — the position lives HERE, in the
+    live message, never as an (i/n) label on a split dump."""
+    return f"— page {page} of {total} —"
+
+
+def story_page_render(context: Any, batch: str, page: int,
+                      ) -> dict[str, Any] | None:
+    """Render one page of a delivered story list, with its pager
+    buttons — the render the ``/pulse stories`` control verb (and
+    its button taps) serve.  ``batch`` is the id _deliver_stories
+    minted, or "latest".  Returns None when the batch is unknown
+    (expired stash, mistyped id) — the caller answers honestly."""
+    try:
+        kv = _story_pages_kv(context)
+        if (batch or "").strip().lower() in ("", "latest"):
+            batch = str(kv.get("latest", "") or "")
+        stash = kv.get(batch, None) if batch else None
+    except Exception as exc:  # noqa: BLE001 - a broken stash reads empty
+        record_failure("morning_pulse.story_page_render", exc)
+        return None
+    if not isinstance(stash, dict) or not stash.get("pages"):
+        return None
+    pages = stash["pages"]
+    total = len(pages)
+    page = min(max(1, int(page or 1)), total)
+    text = str(pages[page - 1].get("text") or "")
+    if total > 1:
+        text += f"\n\n{_story_page_footer(page, total)}"
+    buttons: list = []
+    nav: list = []
+    if page > 1:
+        nav.append(("◀ Prev", f"pulse stories {batch} {page - 1}"))
+    if page < total:
+        nav.append(("Next ▶", f"pulse stories {batch} {page + 1}"))
+    if nav:
+        buttons.append(nav)
+    return {"text": text, "buttons": buttons, "page": page,
+            "pages": total, "batch": batch,
+            "slot": str(stash.get("slot") or "")}
+
+
 def _deliver_stories(context: Any, slot: str,
                      items: list[dict[str, Any]]) -> list[str]:
-    """Deliver the full story list; mark only confirmed segments.
+    """Deliver the full story list as ONE paged message; mark on
+    confirmed delivery.
 
-    Each segment is its own Notifier publish.  A segment whose publish
-    doesn't confirm delivery stops the run: its stories — and every
-    later segment's — stay undelivered in the ledger and resume at
-    the next pulse, in order, with nothing repeated before them.
-    Returns the ledger keys marked delivered.  Never raises.
+    The paging-law shape (2026-11-07) over the F6 contract (full
+    list, uncapped; a story is marked only when its delivery
+    confirms; nothing is ever repeated): the packed segments become
+    the PAGES of one live message.  Page 1 is the publish; the
+    remaining pages are stashed (KV, a week) and served by
+    :func:`story_page_render` through the pager's Next/Prev buttons
+    (``pulse stories <batch> <n>``) — no (i/n)-labelled segment
+    dump ever goes out.  When the publish confirms, the whole list
+    has been delivered — presented in full via the pager, nothing
+    held back — so every story marks.  When it does not confirm,
+    nothing marks and the whole list resumes next pulse, in order.
+    A one-page list publishes exactly as it always did (no stash,
+    no buttons).  Returns the ledger keys marked delivered.
+    Never raises.
     """
     if not items:
         return []
@@ -1217,25 +1282,65 @@ def _deliver_stories(context: Any, slot: str,
         return []
     segments = _pack_story_segments(items)
     total = len(segments)
-    marked: list[str] = []
-    for i, (text, keys) in enumerate(segments, 1):
-        label = f" ({i}/{total})" if total > 1 else ""
+    all_keys = [k for _t, ks in segments for k in ks]
+    if total == 1:
+        text, keys = segments[0]
         try:
-            res = notifier.publish("pulse", STORY_LIST_TITLE + label,
-                                   text, force=True)
+            res = notifier.publish("pulse", STORY_LIST_TITLE, text,
+                                   force=True)
         except Exception as exc:  # noqa: BLE001
-            _log.warning("pulse/%s: story segment %d/%d failed: %s",
-                         slot, i, total, exc)
-            break
+            _log.warning("pulse/%s: story list failed: %s", slot, exc)
+            return []
         if not res.get("delivered"):
-            _log.warning("pulse/%s: story segment %d/%d not delivered "
-                         "— %d stor%s stay undelivered for next pulse",
-                         slot, i, total, len(keys),
+            _log.warning("pulse/%s: story list not delivered — %d "
+                         "stor%s stay undelivered for next pulse",
+                         slot, len(keys),
                          "y" if len(keys) == 1 else "ies")
-            break
+            return []
         _mark_stories_delivered(context, keys, channel=f"pulse-{slot}")
-        marked.extend(keys)
-    return marked
+        return list(keys)
+    # Multi-page: stash the pages first (a confirmed publish must
+    # never point at pages that do not exist), then publish page 1
+    # with the pager's buttons (the Notifier attaches them from the
+    # output kind, derived from THIS output — never inherited).
+    from datetime import datetime
+
+    batch = f"{slot}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    try:
+        kv = _story_pages_kv(context)
+        kv.set(batch, {
+            "slot": slot, "ts": time.time(),
+            "pages": [{"text": t, "keys": list(ks)}
+                      for t, ks in segments],
+        }, ttl=STORY_PAGES_TTL_S)
+        kv.set("latest", batch, ttl=STORY_PAGES_TTL_S)
+    except Exception as exc:  # noqa: BLE001 - no stash, no pager:
+        record_failure("morning_pulse._deliver_stories.stash", exc)
+        # fall back to delivering page 1 alone rather than a labelled
+        # dump; the rest stays undelivered for the next pulse.
+        segments = segments[:1]
+        total = 1
+        all_keys = list(segments[0][1])
+    text = segments[0][0]
+    if total > 1:
+        text += f"\n\n{_story_page_footer(1, total)}"
+    try:
+        res = notifier.publish(
+            "pulse", STORY_LIST_TITLE, text, force=True,
+            output_kind="pulse_stories" if total > 1 else None,
+            output_meta={"batch": batch, "page": 1, "pages": total}
+            if total > 1 else None)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("pulse/%s: story list failed: %s", slot, exc)
+        return []
+    if not res.get("delivered"):
+        _log.warning("pulse/%s: story list not delivered — %d stor%s "
+                     "stay undelivered for next pulse",
+                     slot, len(all_keys),
+                     "y" if len(all_keys) == 1 else "ies")
+        return []
+    _mark_stories_delivered(context, all_keys, channel=f"pulse-{slot}")
+    return list(all_keys)
 
 
 # ── afternoon content: markets + fresh news + today's remainder ─────

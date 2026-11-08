@@ -290,8 +290,12 @@ def register(registry: Any) -> None:
         "story_follow",
         description=(
             "Follow a webnovel: give its archive URL (or just the title — "
-            "Devon searches the verified archives). Fetches metadata; "
-            "use story_ingest to pull the whole story into its library."
+            "Devon searches the verified archives). Following is a "
+            "trigger: she immediately starts reading it herself — "
+            "fetching every chapter into its library and digesting "
+            "them into the story bible (the reading engine consumes "
+            "the follow event); new chapters are read on discovery "
+            "from then on. No second step is needed."
         ),
         capability=Capability.NET_OUT,
         parameters={
@@ -300,6 +304,12 @@ def register(registry: Any) -> None:
         },
     )
     def story_follow(url_or_title: str, *, source: str = "") -> dict[str, Any]:
+        # The consumer must stand before the trigger fires: in the
+        # long-lived runtime this is a no-op (boot started it); in a
+        # fresh process it starts the engine so THIS follow is read.
+        from .reading_engine import ensure_reading_engine
+
+        ensure_reading_engine(context)
         story = _reader().follow(url_or_title, source=source)
         return {"followed": story.to_dict()}
 
@@ -1466,6 +1476,40 @@ def register(registry: Any) -> None:
     )
     def reader_updates(slug: str = "") -> dict[str, Any]:
         return _reader().check_updates(slug)
+
+    @registry.register(
+        "story_discovery_sweep",
+        description=(
+            "Discovery sweep over followed stories: compare each "
+            "story's live chapter list with its library and publish "
+            "story.chapters_discovered for the ones holding new "
+            "chapters — the reading engine then reads them "
+            "immediately. The sweep itself fetches no chapters and "
+            "reads nothing; it only asks 'did anything new arrive?' "
+            "(a source has no push channel). Run by the durable "
+            "'story chapter discovery' job; also safe to call by hand."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={"slug": "str (optional) — one story, or all"},
+    )
+    def story_discovery_sweep(slug: str = "") -> dict[str, Any]:
+        from ..core.events import Event, global_bus
+        from .reading_engine import TOPIC_DISCOVERED, discover_new_chapters
+
+        rows = discover_new_chapters(_reader(), slug)
+        discovered: list[dict[str, Any]] = []
+        for row in rows:
+            if not row.get("ok") or not row.get("new_count"):
+                continue
+            entry = {"slug": row.get("slug", ""),
+                     "title": row.get("title", ""),
+                     "new_chapters": list(row.get("new_chapters") or []),
+                     "new_count": int(row.get("new_count") or 0)}
+            discovered.append(entry)
+            global_bus.publish(Event(
+                topic=TOPIC_DISCOVERED, data=dict(entry),
+                source=__name__))
+        return {"checked": len(rows), "discovered": discovered}
 
     @registry.register(
         "reader_highlight",
