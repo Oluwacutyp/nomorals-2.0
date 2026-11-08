@@ -613,14 +613,31 @@ function mediaKindOf(m) {
 // extraction sees the payload, and report the flag — the personal
 // surface (§15) preserves view-once media before it vanishes, and
 // it can only preserve what the bridge admits it saw.
+//
+// Disappearing-message chats wrap EVERY payload in
+// ephemeralMessage — view-once media included.  The old unwrap
+// looked only at the top level, so a view-once photo sent in an
+// ephemeral chat classified viewOnce:false AND its media never
+// downloaded (mediaKindOf saw no top-level media either): the
+// arrival was invisible to the capture surface.  The ephemeral
+// container is therefore descended first — but it only changes
+// the result when it leads to a view-once shape; an ordinary
+// ephemeral message returns the original object untouched, so
+// no other extraction behavior moves.
 function unwrapViewOnce(m) {
-  const msg = m.message || {};
+  const raw = m.message || {};
+  let msg = raw;
+  while (msg.ephemeralMessage?.message) {
+    msg = msg.ephemeralMessage.message;
+  }
   const inner = msg.viewOnceMessage?.message
     || msg.viewOnceMessageV2?.message
     || msg.viewOnceMessageV2Extension?.message;
   if (inner) return { msg: { ...m, message: inner }, viewOnce: true };
   const media = msg.imageMessage || msg.videoMessage;
-  if (media && media.viewOnce) return { msg: m, viewOnce: true };
+  if (media && media.viewOnce) {
+    return { msg: { ...m, message: msg }, viewOnce: true };
+  }
   return { msg: m, viewOnce: false };
 }
 

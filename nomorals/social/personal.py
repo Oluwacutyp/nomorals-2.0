@@ -731,6 +731,24 @@ class PersonalSurfaces:
                 for m in media:
                     path = str(m.get("path") or "")
                     if not path:
+                        # Media arrived but no local file backs
+                        # it (the bridge's download produced
+                        # nothing usable): a miss with a reason —
+                        # never a silent skip the trace then
+                        # misreports as outcome "no_media".
+                        missed_any = True
+                        _append_jsonl(self.vault.journal_path, {
+                            "ts": ts, "kind": "view_once_missed",
+                            "account": rec.id, "platform": platform,
+                            "counterpart_id": counterpart_id
+                            or sender_id,
+                            "poster_name": sender_name,
+                            "media_kind": str(m.get("kind") or ""),
+                            "source_id": message_id, "path": "",
+                            "bytes": 0,
+                            "note": "media arrived without a "
+                                    "local file — nothing to "
+                                    "preserve"})
                         continue
                     try:
                         out.append(self.vault.save_media(
@@ -755,6 +773,26 @@ class PersonalSurfaces:
                             "bytes": 0,
                             "note": "media was gone before it "
                                     "could be preserved"})
+                    except Exception as exc:  # noqa: BLE001 - journaled
+                        # A capture that fails to WRITE (disk
+                        # full, permissions, a dying store) is a
+                        # miss with the reason named.  Letting it
+                        # propagate — the old shape — also skipped
+                        # the arrival trace below: a failed
+                        # capture left exactly the zero-row
+                        # silence this surface exists to end.
+                        missed_any = True
+                        _append_jsonl(self.vault.journal_path, {
+                            "ts": ts, "kind": "view_once_missed",
+                            "account": rec.id, "platform": platform,
+                            "counterpart_id": counterpart_id
+                            or sender_id,
+                            "poster_name": sender_name,
+                            "media_kind": str(m.get("kind") or ""),
+                            "source_id": message_id, "path": "",
+                            "bytes": 0,
+                            "note": "capture write failed: "
+                                    f"{type(exc).__name__}: {exc}"})
             if media_missing and not media and vo_toggle:
                 # The adapter saw the ephemeral message but its
                 # media never made it to disk (expired file

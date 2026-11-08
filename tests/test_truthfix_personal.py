@@ -525,6 +525,58 @@ def test_view_once_media_missing_traced_as_missed(tmp_path):
     assert traces[0]["outcome"] == "missed"
 
 
+def test_view_once_write_failure_traced_as_missed(
+        tmp_path, monkeypatch):
+    """A capture whose WRITE fails (disk full, permissions)
+    is a miss with the reason named — the old code caught
+    only FileNotFoundError, so an OSError propagated out of
+    observe_message and skipped the arrival trace too: the
+    failed capture left zero rows, the exact silence the
+    journal exists to end."""
+    surface = _FakeSurfaceAdapter()
+    rt, svc, rec = _runtime(tmp_path, surface, view_once=True)
+    personal = svc["personal"]
+
+    def _boom(*args, **kwargs):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(personal.vault, "save_media", _boom)
+    wa, _ = _wa_adapter()
+    src = _media_file(tmp_path)
+    _feed_dm(rt, wa, _vo_wire("vo5", [
+        {"path": src, "mime": "image/jpeg", "kind": "image"}]))
+    assert [r for r in personal.vault.saved_entries(rec.id)
+            if r.get("kind") == "view_once"] == []
+    missed = _rows(personal, "view_once_missed")
+    assert len(missed) == 1
+    assert "capture write failed" in missed[0]["note"]
+    assert "OSError" in missed[0]["note"]
+    traces = _rows(personal, "view_once_trace")
+    assert len(traces) == 1
+    assert traces[0]["outcome"] == "missed"
+
+
+def test_view_once_pathless_media_entry_is_a_miss(tmp_path):
+    """Media that reaches the organ with no local file (a
+    caller that hands entries over unfiltered — the Telegram
+    rung builds them itself) is a miss, not a silent skip the
+    trace misreports as outcome "no_media"."""
+    surface = _FakeSurfaceAdapter()
+    rt, svc, rec = _runtime(tmp_path, surface, view_once=True)
+    personal = svc["personal"]
+    personal.observe_message(
+        "whatsapp", chat_key=f"whatsapp:{TARGET_JID}",
+        counterpart_id=TARGET_JID, sender_id=TARGET_JID,
+        sender_name="Ada", message_id="vo6",
+        media=[{"path": "", "kind": "image"}],
+        view_once=True, ts=time.time())
+    assert len(_rows(personal, "view_once_missed")) == 1
+    traces = _rows(personal, "view_once_trace")
+    assert len(traces) == 1
+    assert traces[0]["media_present"] is True
+    assert traces[0]["outcome"] == "missed"
+
+
 def test_view_once_redelivery_writes_one_trace(tmp_path):
     surface = _FakeSurfaceAdapter()
     rt, svc, rec = _runtime(tmp_path, surface, view_once=True)
@@ -654,9 +706,17 @@ def test_verdict_evidence_pure_shapes():
     base = dict(stopped=False, running=True, attached=True,
                 connected=True)
     # no activity map (a caller that cannot see the journal):
-    # the historic naked verdict, unchanged
+    # an evidence-bearing toggle may NOT borrow the checkmark
+    # from set-state + connection — that borrowed verdict read
+    # "✓ live" over a vault that had never held a capture.
     assert toggle_live_verdicts(
-        rec, **base)["view_once"] == "✓ live"
+        rec, **base)["view_once"] == \
+        "on · unproven — no journal evidence in reach"
+    # a NON-evidence toggle keeps the plain verdict: its
+    # "live" is the attachment fact, not an organ output
+    plain = _verdict_rec(antidelete=True)
+    assert toggle_live_verdicts(
+        plain, **base)["antidelete"] == "✓ live"
     # activity present: the fact rides the verdict
     when = 1794100000.0
     out = toggle_live_verdicts(
@@ -665,11 +725,12 @@ def test_verdict_evidence_pure_shapes():
     assert out["view_once"].startswith("✓ live · last capture ")
     assert out["status_react"].startswith(
         "✓ live · last reaction ")
-    # zero lifetime activity SAYS so, in words
+    # zero lifetime activity: on, and unproven — the checkmark
+    # is earned by a landed capture, never printed ahead of it
     assert out["status_viewing"] == \
-        "✓ live · NO view ever landed"
+        "on · NO view ever landed — unproven"
     assert out["status_saving"] == \
-        "✓ live · nothing ever saved"
+        "on · nothing ever saved — unproven"
 
 
 def test_pair_toggle_live_carries_landed_view_evidence(
@@ -692,6 +753,6 @@ def test_pair_toggle_live_names_zero_activity(tmp_path):
         tmp_path, surface, status_viewing=True, view_once=True)
     verdicts = rt._pair_toggle_live(rec, svc=svc)
     assert verdicts["status_viewing"] == \
-        "✓ live · NO view ever landed"
+        "on · NO view ever landed — unproven"
     assert verdicts["view_once"] == \
-        "✓ live · NO capture ever recorded"
+        "on · NO capture ever recorded — unproven"

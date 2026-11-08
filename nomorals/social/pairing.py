@@ -851,18 +851,30 @@ _ACTIVITY_LABELS: dict[str, tuple[str, str]] = {
 
 def _live_with_evidence(name: str,
                         activity: dict[str, float] | None) -> str:
-    """The plain-live verdict for *name*, decorated with its
-    journal evidence when the caller supplied the activity
-    map.  No map (a caller that cannot see the journal) →
-    the historic verdict, unchanged."""
-    if activity is None or name not in _ACTIVITY_LABELS:
+    """The verdict for *name* on the evidence-bearing toggles.
+
+    "✓ live" is EARNED: it prints only with a landed-activity
+    timestamp behind it ("✓ live · last capture 08 Nov 12:23").
+    A toggle whose organ has never produced anything — or a
+    caller that cannot see the journal at all — reads as what
+    it is: on, and unproven.  The previous form led with the
+    checkmark and trailed the confession ("✓ live · NO capture
+    ever recorded"), so a dead organ and a working one opened
+    with the same words; for view-once that borrowed verdict
+    sat over a vault that had never held a single capture.
+    Non-evidence toggles keep the plain verdict: for them
+    "live" is the attachment fact the caller already proved,
+    not an organ output."""
+    if name not in _ACTIVITY_LABELS:
         return "✓ live"
     label, none_words = _ACTIVITY_LABELS[name]
+    if activity is None:
+        return "on · unproven — no journal evidence in reach"
     ts = float(activity.get(name) or 0.0)
     if ts:
         when = time.strftime("%d %b %H:%M", time.localtime(ts))
         return f"✓ live · {label} {when}"
-    return f"✓ live · {none_words}"
+    return f"on · {none_words} — unproven"
 
 
 def toggle_live_verdicts(rec: AccountRecord, *, stopped: bool,
@@ -905,14 +917,17 @@ def toggle_live_verdicts(rec: AccountRecord, *, stopped: bool,
       toggle, read from the personal vault's journal by the
       caller (``PersonalSurfaces.toggle_activity``).  For the
       evidence-bearing toggles (view_once / status_saving /
-      status_viewing / status_react) a plain-live verdict
-      carries the fact — "✓ live · last capture 07 Nov
-      19:55" — and a toggle with NO recorded activity says
-      so in words ("✓ live · NO capture ever recorded")
-      instead of printing the naked check over an organ that
-      has never produced anything (the 2026-11-08 empty-vault
-      trap).  ``None`` = the caller cannot see the journal;
-      the historic verdict stands.
+      status_viewing / status_react) the checkmark is earned:
+      landed activity carries the fact — "✓ live · last
+      capture 07 Nov 19:55" — and a toggle with NO recorded
+      activity reads "on · NO capture ever recorded —
+      unproven", never a check over an organ that has never
+      produced anything (the 2026-11-08 empty-vault trap,
+      whose first fix still led with "✓ live" and trailed
+      the confession).  ``None`` = the caller cannot see the
+      journal; an evidence-bearing toggle then reads
+      "on · unproven — no journal evidence in reach" rather
+      than borrowing the check from set-state + connection.
 
     Returns {toggle: verdict} for ON toggles only.  A live verdict
     starts "✓ live"; anything else names the reason in plain

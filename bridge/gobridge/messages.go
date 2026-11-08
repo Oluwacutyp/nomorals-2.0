@@ -274,10 +274,68 @@ func mediaKindOf(m *waE2E.Message) string {
 
 var unsafeIDChars = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
 
+// unwrapInbound resolves the message an inbound event actually
+// carries, and whether it is view-once in ANY real shape.
+//
+// whatsmeow's dispatch runs events.Message.UnwrapRaw before
+// handlers see the event, so on the standard path v.Message is
+// already the inner message and v.IsViewOnce names the wrapper
+// shapes (ViewOnceMessage / V2 / V2Extension, ephemeral-wrapped
+// included).  Two real shapes survive that unwrap, and both
+// were invisible to this bridge for the feature's whole life —
+// the owner's journal held zero view-once rows of any kind
+// while his capture toggle sat ON:
+//
+//   - the FLAG form: a bare ImageMessage / VideoMessage /
+//     AudioMessage carrying ViewOnce=true, no wrapper at all.
+//     UnwrapRaw never folds the media flag into IsViewOnce, so
+//     the arrival stamped view_once:false and read as an
+//     ordinary photo — no capture attempted, nothing journaled.
+//   - an event that reaches this handler STILL wrapped (any
+//     dispatch path that skipped UnwrapRaw): the media sits
+//     inside the wrapper where mediaKindOf cannot see it, so
+//     nothing downloads either.
+//
+// Classification therefore happens here, once, over every
+// container and the flag, and the returned message — wrappers
+// resolved — is what text/media/context extraction reads.
+func unwrapInbound(v *events.Message) (*waE2E.Message, bool) {
+	msg := v.Message
+	viewOnce := v.IsViewOnce
+	for depth := 0; depth < 4 && msg != nil; depth++ {
+		inner := msg
+		switch {
+		case msg.GetDeviceSentMessage().GetMessage() != nil:
+			inner = msg.GetDeviceSentMessage().GetMessage()
+		case msg.GetEphemeralMessage().GetMessage() != nil:
+			inner = msg.GetEphemeralMessage().GetMessage()
+		case msg.GetViewOnceMessage().GetMessage() != nil:
+			inner = msg.GetViewOnceMessage().GetMessage()
+			viewOnce = true
+		case msg.GetViewOnceMessageV2().GetMessage() != nil:
+			inner = msg.GetViewOnceMessageV2().GetMessage()
+			viewOnce = true
+		case msg.GetViewOnceMessageV2Extension().GetMessage() != nil:
+			inner = msg.GetViewOnceMessageV2Extension().GetMessage()
+			viewOnce = true
+		}
+		if inner == msg {
+			break
+		}
+		msg = inner
+	}
+	if msg != nil && (msg.GetImageMessage().GetViewOnce() ||
+		msg.GetVideoMessage().GetViewOnce() ||
+		msg.GetAudioMessage().GetViewOnce()) {
+		viewOnce = true
+	}
+	return msg, viewOnce
+}
+
 // downloadInbound fetches a message's media into the media dir and
 // returns its wire row {path, mime, kind}, or nil.
-func (b *bridge) downloadInbound(ctx context.Context, v *events.Message) map[string]any {
-	return b.downloadMediaOf(ctx, v.Message, string(v.Info.ID))
+func (b *bridge) downloadInbound(ctx context.Context, msg *waE2E.Message, idStr string) map[string]any {
+	return b.downloadMediaOf(ctx, msg, idStr)
 }
 
 // mediaPartsOf extracts the downloadable media one message proto
@@ -533,6 +591,14 @@ func (b *bridge) onMessage(v *events.Message) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	// Classify once, here: the message this event actually
+	// carries (wrappers resolved) and whether it is view-once
+	// in any real shape.  Everything below — text, media
+	// download, context, the view_once stamp — reads these,
+	// never the raw event fields, so a shape the upstream
+	// unwrap missed cannot slip past as an ordinary message.
+	msg, isViewOnce := unwrapInbound(v)
+
 	// Poll memory (parity G3): creations teach the bridge a
 	// poll's option names; votes arrive encrypted and are
 	// tallied as they decrypt.  Neither is conversation — the
@@ -545,15 +611,15 @@ func (b *bridge) onMessage(v *events.Message) {
 			return
 		}
 		var media []map[string]any
-		if m := b.downloadInbound(ctx, v); m != nil {
+		if m := b.downloadInbound(ctx, msg, string(v.Info.ID)); m != nil {
 			media = []map[string]any{m}
 		}
 		b.broadcast(map[string]any{
 			"type": "status_post", "id": string(v.Info.ID),
 			"from":      fromOf(v),
-			"text":      textOf(v.Message),
+			"text":      textOf(msg),
 			"media":     media,
-			"view_once": v.IsViewOnce,
+			"view_once": isViewOnce,
 			"ts":        tsMs,
 		})
 		return
@@ -562,7 +628,7 @@ func (b *bridge) onMessage(v *events.Message) {
 	kind := kindOf(chat)
 	if v.Info.IsFromMe {
 		ownReplyTo := ""
-		if ci := contextInfoOf(v.Message); ci != nil {
+		if ci := contextInfoOf(msg); ci != nil {
 			ownReplyTo = ci.GetStanzaID()
 		}
 		ownName := v.Info.PushName
@@ -580,12 +646,12 @@ func (b *bridge) onMessage(v *events.Message) {
 			// and downstream identity resolution degrades to a
 			// placeholder (register #29).
 			"from":      map[string]any{"id": sender.String(), "name": ownName},
-			"text":      textOf(v.Message),
+			"text":      textOf(msg),
 			"reply_to":  ownReplyTo,
-			"view_once": v.IsViewOnce,
+			"view_once": isViewOnce,
 			"ts":        tsMs,
 		}
-		b.stampQuoted(ctx, out, v.Message)
+		b.stampQuoted(ctx, out, msg)
 		b.remember(chat, &remembered{
 			incoming: false, text: out["text"].(string),
 			id: v.Info.ID, chatJID: chat, senderJID: sender, tsMs: tsMs,
@@ -596,12 +662,12 @@ func (b *bridge) onMessage(v *events.Message) {
 
 	title := b.titleFor(ctx, chat, kind, v.Info.PushName, sender)
 	var media []map[string]any
-	if m := b.downloadInbound(ctx, v); m != nil {
+	if m := b.downloadInbound(ctx, msg, string(v.Info.ID)); m != nil {
 		media = []map[string]any{m}
 	}
 	mentioned := false
 	mentionList := []string{}
-	if ci := contextInfoOf(v.Message); ci != nil {
+	if ci := contextInfoOf(msg); ci != nil {
 		for _, mj := range ci.GetMentionedJID() {
 			mentionList = append(mentionList, mj)
 			parsed, err := types.ParseJID(mj)
@@ -614,7 +680,7 @@ func (b *bridge) onMessage(v *events.Message) {
 		}
 	}
 	replyTo := ""
-	if ci := contextInfoOf(v.Message); ci != nil {
+	if ci := contextInfoOf(msg); ci != nil {
 		replyTo = ci.GetStanzaID()
 	}
 	from := fromOf(v)
@@ -622,7 +688,7 @@ func (b *bridge) onMessage(v *events.Message) {
 		"type": "message", "id": string(v.Info.ID),
 		"chat":      map[string]any{"id": chat.String(), "kind": kind, "title": title},
 		"from":      from,
-		"text":      textOf(v.Message),
+		"text":      textOf(msg),
 		"media":     media,
 		"reply_to":  replyTo,
 		"mentioned": mentioned,
@@ -630,12 +696,12 @@ func (b *bridge) onMessage(v *events.Message) {
 		// antitag sensor counts it; the Python envelope already
 		// reads a "mentions" list when a bridge sends one).
 		"mentions":  mentionList,
-		"view_once": v.IsViewOnce,
+		"view_once": isViewOnce,
 		"ts":        tsMs,
 	}
-	b.stampQuoted(ctx, out, v.Message)
+	b.stampQuoted(ctx, out, msg)
 	if v.Info.ID != "" {
-		b.cacheMessage(string(v.Info.ID), v.Message, sender)
+		b.cacheMessage(string(v.Info.ID), msg, sender)
 	}
 	b.remember(chat, &remembered{
 		incoming: true, text: out["text"].(string), sender: v.Info.PushName,
