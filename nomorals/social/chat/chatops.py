@@ -50,6 +50,7 @@ CHATOPS_COMMANDS = frozenset({
     "archive", "unarchive", "mutechat", "unmutechat",
     "readchat", "unreadchat", "star", "unstar",
     "unsend", "edit", "editmsg", "antiedit", "poststatus",
+    "chanstory",
     "block", "unblock", "anticall", "disappear",
     "statusreact", "banchecker", "gcstatus", "statusinfo",
     "pollres", "tagall", "hidetag", "antitag",

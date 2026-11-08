@@ -67,6 +67,7 @@ the adapter degrades gracefully (``mark_read``/``chats`` return False/[]).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random as _random
@@ -2710,6 +2711,149 @@ class WhatsAppAdapter(ChatAdapter):
         result = self.send(chat_ref, text)
         return {"ok": result.ok, "message_id": result.message_id,
                 "error": result.error or ""}
+
+    #: The exactly-once window for channel posts: a post's
+    #: deterministic stanza id derives from (channel, content,
+    #: this window), so an accidental double-fire of the same
+    #: post inside the window collapses onto ONE wire id (the
+    #: bridges use a caller-supplied id verbatim), while a
+    #: deliberate repost of the same words later gets a fresh
+    #: id and posts again.
+    _CHANNEL_POST_WINDOW = 600.0
+
+    def _channel_post_id(self, jid: str, text: str,
+                         media_path: str) -> str:
+        """The deterministic stanza id for one channel post."""
+        material = str(media_path or "")
+        if media_path:
+            try:
+                st = os.stat(media_path)
+                material = f"{media_path}:{st.st_size}:{st.st_mtime_ns}"
+            except OSError:
+                material = str(media_path)
+        window = int(time.time() // self._CHANNEL_POST_WINDOW)
+        digest = hashlib.sha256(
+            f"{jid}\n{text}\n{material}\n{window}".encode()
+        ).hexdigest()
+        return digest[:24].upper()
+
+    def channel_send(self, chat: ChatRef | str, text: str = "", *,
+                     media_path: str = "",
+                     caption: str = "") -> dict[str, Any]:
+        """Post to a channel as the owner (channel stories
+        build — the /chanstory send half): the bridges'
+        ``channel_send`` verb.  On WhatsApp a channel "story"
+        IS a channel post — neither bridge library exposes a
+        separate story verb for newsletters, and this is the
+        real capability under that name.  Text, or an image /
+        video already on disk with an optional caption.  The
+        verdict carries the stanza ``message_id`` and, on the
+        Go engine, the post's ``server_id`` — its public
+        identity (the number in its link); Baileys' send result
+        exposes none, so the field is simply absent there,
+        never invented.  Posting requires channel admin on the
+        account; WhatsApp refuses a non-admin server-side and
+        that refusal comes back in the verdict verbatim."""
+        jid = self._newsletter_jid(chat)
+        if not jid.endswith("@newsletter"):
+            return {"ok": False,
+                    "error": f"not a channel JID: {jid or '(empty)'} "
+                             f"(channels end in @newsletter)"}
+        text = str(text or "").strip()
+        media_path = str(media_path or "").strip()
+        if not text and not media_path:
+            return {"ok": False,
+                    "error": "channel_send needs text or a media path"}
+        payload: dict[str, Any] = {
+            "chat": jid, "text": text, "path": media_path,
+            "caption": str(caption or ""),
+            "message_id": self._channel_post_id(jid, text, media_path),
+        }
+        return self._admin_cmd("channel_send", payload, timeout=45)
+
+    def channel_view_posts(self, chat: ChatRef | str,
+                           server_ids: list[str]) -> dict[str, Any]:
+        """Mark channel posts viewed as the owner (channel
+        stories build — the view half): the bridges'
+        ``channel_view`` verb.  On the Go engine that is
+        whatsmeow's NewsletterMarkViewed, the view receipt
+        that moves a post's view counter; the Baileys rung has
+        no mark-viewed verb in its library and answers an
+        honest ok:false naming the gap — the caller surfaces
+        whichever truth came back, never a fake view."""
+        jid = self._newsletter_jid(chat)
+        ids = [str(s or "").strip() for s in (server_ids or [])]
+        ids = [s for s in ids if s]
+        if not ids:
+            return {"ok": False,
+                    "error": "channel_view needs at least one "
+                             "server_id (the number at the end of "
+                             "the channel post link)"}
+        return self._admin_cmd("channel_view", {
+            "chat": jid, "server_ids": ids}, timeout=20)
+
+    def fetch_channel_posts(self, channels: Any = None, *,
+                            count: int = 10) -> list[dict[str, Any]]:
+        """Recent posts from channels this account follows —
+        the feed the personal surface's channel cycle saves
+        and views (channel stories build).  Row shape (both
+        engines): ``{poster_id, poster_name, story_id, text,
+        path, kind, media_missing, views, ts}`` where story_id
+        is the post's server_id — the view/react key.
+
+        Enumeration: the Go engine's verb enumerates the
+        followed channels itself (GetSubscribedNewsletters);
+        the Baileys library has no enumeration verb, so when
+        its no-chat call refuses, the channels this surface
+        already knows (its recent channel chats) are fetched
+        one by one.  *channels* pins the list explicitly on
+        either engine.  Any failure reads as an empty feed —
+        absence, never invented posts."""
+        count = max(1, min(50, int(count or 10)))
+        jids: list[str] = []
+        for c in (channels or []):
+            jid = self._newsletter_jid(c)
+            if jid.endswith("@newsletter") and jid not in jids:
+                jids.append(jid)
+        if not jids:
+            res = self._admin_cmd("channel_fetch", {"count": count},
+                                  timeout=45)
+            if res.get("ok"):
+                return self._channel_post_rows(res)
+            # No enumeration on this engine: fall back to the
+            # channel chats this surface already knows.
+            for row in self.chats(limit=500):
+                if str(row.get("kind") or "") == "channel":
+                    jid = str(row.get("id") or "")
+                    if jid.endswith("@newsletter") \
+                            and jid not in jids:
+                        jids.append(jid)
+        out: list[dict[str, Any]] = []
+        for jid in jids:
+            res = self._admin_cmd("channel_fetch", {
+                "chat": jid, "count": count}, timeout=45)
+            if res.get("ok"):
+                out.extend(self._channel_post_rows(res))
+        return out
+
+    @staticmethod
+    def _channel_post_rows(res: dict[str, Any]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for row in (res.get("posts") or []):
+            if not isinstance(row, dict):
+                continue
+            out.append({
+                "poster_id": str(row.get("chat") or ""),
+                "poster_name": str(row.get("name") or ""),
+                "story_id": str(row.get("server_id") or ""),
+                "text": str(row.get("text") or ""),
+                "path": str(row.get("path") or ""),
+                "kind": str(row.get("kind") or ""),
+                "media_missing": bool(row.get("media_missing")),
+                "views": int(row.get("views") or 0),
+                "ts": float(row.get("ts") or 0) / 1000.0,
+            })
+        return out
 
     def channel_info(self, chat: ChatRef | str) -> dict[str, Any]:
         """Read a channel's newsletter metadata through the

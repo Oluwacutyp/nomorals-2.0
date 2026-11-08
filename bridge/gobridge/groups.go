@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -959,6 +960,237 @@ func (b *bridge) handleGroupAdminCommand(ctx context.Context, cc *clientConn, id
 			return true
 		}
 		ok(nil)
+		return true
+
+	case "channel_send":
+		// Post to a channel the account admins (channel stories
+		// build, 2026-11-07): a channel "story" on WhatsApp IS a
+		// channel post — whatsmeow exposes no separate story
+		// verb for newsletters, and SendMessage routes a
+		// newsletter JID to sendNewsletter (send.go).  Text rides
+		// a plain conversation message; media uploads through
+		// UploadNewsletter (the newsletter media host — the
+		// regular upload path produces chat-media URLs the
+		// newsletter path rejects).  The reply carries BOTH ids:
+		// the stanza id and the server_id — the post's public
+		// identity (the number in its link, the key the view and
+		// react verbs take).  A caller-supplied message_id is
+		// used verbatim as the stanza id: the Python side derives
+		// it deterministically from (channel, content, time
+		// window), so an accidental double-fire of the same post
+		// collapses onto one wire id instead of posting twice.
+		jid, err := newsletterJID(req.str("chat"))
+		if err != nil {
+			bad(err)
+			return true
+		}
+		text := strings.TrimSpace(req.str("text"))
+		path := strings.TrimSpace(req.str("path"))
+		caption := req.str("caption")
+		if text == "" && path == "" {
+			bad(errors.New("channel_send needs text or a media path"))
+			return true
+		}
+		var msg *waE2E.Message
+		if path != "" {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				b.reply(cc, id, map[string]any{"ok": false,
+					"error": "media file not found: " + path})
+				return true
+			}
+			ext := strings.ToLower(filepath.Ext(path))
+			var mediaType whatsmeow.MediaType
+			switch ext {
+			case ".jpg", ".jpeg", ".png", ".webp":
+				mediaType = whatsmeow.MediaImage
+			case ".mp4", ".mov", ".gif":
+				mediaType = whatsmeow.MediaVideo
+			default:
+				b.reply(cc, id, map[string]any{"ok": false,
+					"error": "channel media must be an image or a " +
+						"video: " + path})
+				return true
+			}
+			up, err := b.cli.UploadNewsletter(ctx, data, mediaType)
+			if err != nil {
+				fail(err)
+				return true
+			}
+			mime := extMIME[ext]
+			if caption == "" {
+				caption = text
+			}
+			if mediaType == whatsmeow.MediaImage {
+				msg = &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+					URL:        proto.String(up.URL),
+					DirectPath: proto.String(up.DirectPath),
+					MediaKey:   up.MediaKey, Mimetype: proto.String(mime),
+					Caption:       proto.String(caption),
+					FileSHA256:    up.FileSHA256,
+					FileEncSHA256: up.FileEncSHA256,
+					FileLength:    proto.Uint64(up.FileLength),
+				}}
+			} else {
+				msg = &waE2E.Message{VideoMessage: &waE2E.VideoMessage{
+					URL:        proto.String(up.URL),
+					DirectPath: proto.String(up.DirectPath),
+					MediaKey:   up.MediaKey, Mimetype: proto.String(mime),
+					Caption:       proto.String(caption),
+					FileSHA256:    up.FileSHA256,
+					FileEncSHA256: up.FileEncSHA256,
+					FileLength:    proto.Uint64(up.FileLength),
+				}}
+			}
+		} else {
+			msg = &waE2E.Message{Conversation: proto.String(text)}
+		}
+		extra := whatsmeow.SendRequestExtra{}
+		if mid := strings.TrimSpace(req.str("message_id")); mid != "" {
+			extra.ID = types.MessageID(mid)
+		}
+		resp, err := b.cli.SendMessage(ctx, jid, msg, extra)
+		if err != nil {
+			fail(err)
+			return true
+		}
+		ok(map[string]any{
+			"message_id": string(resp.ID),
+			"server_id":  strconv.Itoa(resp.ServerID),
+		})
+		return true
+
+	case "channel_view":
+		// Mark channel posts viewed as the owner (channel
+		// stories build): whatsmeow's NewsletterMarkViewed — a
+		// "view" receipt naming the posts' server ids; this is
+		// the verb that moves a channel post's view counter, the
+		// channel counterpart of status_view's read receipt.
+		jid, err := newsletterJID(req.str("chat"))
+		if err != nil {
+			bad(err)
+			return true
+		}
+		var serverIDs []types.MessageServerID
+		if raw, ok := req["server_ids"].([]any); ok {
+			for _, v := range raw {
+				s, _ := v.(string)
+				if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
+					serverIDs = append(serverIDs,
+						types.MessageServerID(n))
+				}
+			}
+		}
+		if len(serverIDs) == 0 {
+			if s := strings.TrimSpace(req.str("server_id")); s != "" {
+				n, err := strconv.Atoi(s)
+				if err != nil {
+					bad(errors.New("bad server_id: " + s))
+					return true
+				}
+				serverIDs = append(serverIDs,
+					types.MessageServerID(n))
+			}
+		}
+		if len(serverIDs) == 0 {
+			bad(errors.New("missing server_id: the number at the end of the channel post link"))
+			return true
+		}
+		if err := b.cli.NewsletterMarkViewed(ctx, jid, serverIDs); err != nil {
+			fail(err)
+			return true
+		}
+		ok(nil)
+		return true
+
+	case "channel_fetch":
+		// The channel-post feed the personal surface's cycle
+		// saves/views from (channel stories build): recent posts
+		// of one channel (``chat`` given) or of EVERY channel the
+		// account follows (no ``chat`` — whatsmeow's
+		// GetSubscribedNewsletters enumerates them; the Baileys
+		// rung has no enumeration verb and answers for one
+		// channel at a time).  Rows carry the server_id (the
+		// view/react key), the text, the timestamp, the view
+		// count the server reports, and the media downloaded to
+		// the media dir in the same {path, kind} shape status
+		// posts arrive in — a post whose media could not be
+		// downloaded says so (media_missing) instead of looking
+		// text-only.
+		count := int(req.num("count", 10))
+		if count < 1 {
+			count = 1
+		}
+		if count > 50 {
+			count = 50
+		}
+		var chans []types.JID
+		names := map[string]string{}
+		if raw := strings.TrimSpace(req.str("chat")); raw != "" {
+			jid, err := newsletterJID(raw)
+			if err != nil {
+				bad(err)
+				return true
+			}
+			chans = []types.JID{jid}
+		} else {
+			subs, err := b.cli.GetSubscribedNewsletters(ctx)
+			if err != nil {
+				fail(err)
+				return true
+			}
+			for _, meta := range subs {
+				if meta == nil {
+					continue
+				}
+				chans = append(chans, meta.ID)
+				names[meta.ID.String()] = meta.ThreadMeta.Name.Text
+			}
+		}
+		posts := make([]map[string]any, 0)
+		for _, jid := range chans {
+			msgs, err := b.cli.GetNewsletterMessages(ctx, jid,
+				&whatsmeow.GetNewsletterMessagesParams{Count: count})
+			if err != nil {
+				// One dead channel must not sink the sweep:
+				// the remaining channels still report.
+				logf("channel_fetch %s: %v", jid, err)
+				continue
+			}
+			for _, nm := range msgs {
+				if nm == nil {
+					continue
+				}
+				row := map[string]any{
+					"chat":          jid.String(),
+					"name":          names[jid.String()],
+					"server_id":     strconv.Itoa(nm.MessageServerID),
+					"message_id":    string(nm.MessageID),
+					"text":          "",
+					"kind":          "",
+					"path":          "",
+					"media_missing": false,
+					"views":         nm.ViewsCount,
+					"ts":            nm.Timestamp.UnixMilli(),
+				}
+				if nm.Message != nil {
+					row["text"] = textOf(nm.Message)
+					if m := b.downloadMediaOf(ctx, nm.Message,
+						string(nm.MessageID)); m != nil {
+						row["kind"] = m["kind"]
+						row["path"] = m["path"]
+						if m["path"] == "" {
+							row["media_missing"] = true
+						}
+					} else if mediaKindOf(nm.Message) != "" {
+						row["kind"] = mediaKindOf(nm.Message)
+						row["media_missing"] = true
+					}
+				}
+				posts = append(posts, row)
+			}
+		}
+		ok(map[string]any{"posts": posts})
 		return true
 
 	case "channel_set_name":

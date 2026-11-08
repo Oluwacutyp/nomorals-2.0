@@ -43,6 +43,9 @@
  *     {"id":"<req>","cmd":"channel_unfollow","chat":"<@newsletter>"}
  *     {"id":"<req>","cmd":"channel_resolve","invite":"<channel invite code>"}
  *     {"id":"<req>","cmd":"channel_react","chat":"<@newsletter>","server_id":"<post id>","emoji":"🔥"}
+ *     {"id":"<req>","cmd":"channel_send","chat":"<@newsletter>","text":"...","path":"<media file>","caption":"...","message_id":"<optional stanza id>"}
+ *     {"id":"<req>","cmd":"channel_fetch","chat":"<@newsletter>","count":10}
+ *     {"id":"<req>","cmd":"channel_view","chat":"<@newsletter>","server_id":"<post id>"}   (honest refusal — no Baileys verb)
  *     {"id":"<req>","cmd":"channel_set_name","chat":"<@newsletter>","name":"..."}
  *     {"id":"<req>","cmd":"channel_set_description","chat":"<@newsletter>","description":"..."}
  *
@@ -68,7 +71,7 @@
  */
 
 import fs from 'node:fs';
-import { jidNormalizedUser } from '@whiskeysockets/baileys';
+import { jidNormalizedUser, proto } from '@whiskeysockets/baileys';
 
 const isGroupJid = (jid) => typeof jid === 'string' && jid.endsWith('@g.us');
 const isNewsletterJid = (jid) => typeof jid === 'string' && jid.endsWith('@newsletter');
@@ -402,6 +405,138 @@ export function registerGroupAdminCommands(ctx) {
       }
       await sock().newsletterReactMessage(jid, serverId, String(req.emoji || ''));
       return { ok: true };
+    },
+
+    channel_send: async (req) => {
+      // Post to a channel the account admins (channel stories
+      // build, 2026-11-07): on WhatsApp a channel "story" IS a
+      // channel post — Baileys has no separate story verb for
+      // newsletters; sendMessage to the newsletter JID is the
+      // post.  Media rides as a buffer (image/video only — the
+      // shapes channels carry).  The reply carries the stanza
+      // id; Baileys' send result exposes no server_id, so none
+      // is reported (absence, never an invented one).  A
+      // caller-supplied message_id is passed through as the
+      // message key id — the Python side derives it
+      // deterministically so an accidental double-fire of the
+      // same post collapses onto one wire id.
+      const jid = newsletterJid(req.chat);
+      const text = String(req.text || '').trim();
+      const path = String(req.path || '').trim();
+      const caption = String(req.caption || '');
+      if (!text && !path) throw new Error('channel_send needs text or a media path');
+      let content;
+      if (path) {
+        if (!fs.existsSync(path)) throw new Error(`media file not found: ${path}`);
+        const lower = path.toLowerCase();
+        const buf = fs.readFileSync(path);
+        const cap = caption || text || undefined;
+        if (/\.(jpg|jpeg|png|webp)$/.test(lower)) {
+          content = { image: buf, caption: cap };
+        } else if (/\.(mp4|mov|gif)$/.test(lower)) {
+          content = { video: buf, caption: cap, gifPlayback: lower.endsWith('.gif') };
+        } else {
+          throw new Error(`channel media must be an image or a video: ${path}`);
+        }
+      } else {
+        content = { text };
+      }
+      const opts = {};
+      const mid = String(req.message_id || '').trim();
+      if (mid) opts.messageId = mid;
+      const sent = await sock().sendMessage(jid, content, opts);
+      return { ok: true, message_id: (sent && sent.key && sent.key.id) || '' };
+    },
+
+    channel_fetch: async (req) => {
+      // The channel-post feed the personal surface's cycle
+      // saves from (channel stories build): Baileys'
+      // newsletterFetchMessages returns the RAW iq node; the
+      // rows are walked here into the same shape the Go rung
+      // emits ({chat, server_id, text, kind, path, ts, views}).
+      // Two honest limits of this rung: it has NO subscribed-
+      // channel enumeration verb, so a channel JID is required
+      // (the Python side enumerates from its known channel
+      // chats); and media bytes are not downloaded here — a
+      // media post reports its kind with media_missing set
+      // rather than pretending to be text.
+      const jid = newsletterJid(req.chat);
+      if (typeof sock().newsletterFetchMessages !== 'function') {
+        throw new Error('this Baileys build has no newsletterFetchMessages verb — channel posts cannot be fetched');
+      }
+      const count = Math.max(1, Math.min(50, parseInt(req.count || '10', 10) || 10));
+      const result = await sock().newsletterFetchMessages(jid, count);
+      const posts = [];
+      const container = (result && Array.isArray(result.content))
+        ? result.content.find((n) => n && n.tag === 'messages')
+        : null;
+      const children = (container && Array.isArray(container.content))
+        ? container.content : [];
+      const textOfDecoded = (msg) => {
+        if (!msg) return { text: '', kind: '' };
+        if (typeof msg.conversation === 'string' && msg.conversation) {
+          return { text: msg.conversation, kind: '' };
+        }
+        if (msg.extendedTextMessage && msg.extendedTextMessage.text) {
+          return { text: String(msg.extendedTextMessage.text), kind: '' };
+        }
+        if (msg.imageMessage) {
+          return { text: String(msg.imageMessage.caption || ''), kind: 'image' };
+        }
+        if (msg.videoMessage) {
+          return { text: String(msg.videoMessage.caption || ''), kind: 'video' };
+        }
+        if (msg.audioMessage) return { text: '', kind: 'audio' };
+        if (msg.stickerMessage) return { text: '', kind: 'sticker' };
+        if (msg.documentMessage) return { text: '', kind: 'file' };
+        return { text: '', kind: '' };
+      };
+      for (const node of children) {
+        if (!node || node.tag !== 'message') continue;
+        const attrs = node.attrs || {};
+        let text = '';
+        let kind = '';
+        let mediaMissing = false;
+        let views = 0;
+        for (const sub of (Array.isArray(node.content) ? node.content : [])) {
+          if (!sub) continue;
+          if (sub.tag === 'plaintext' && sub.content) {
+            try {
+              const decoded = proto.Message.decode(
+                Buffer.isBuffer(sub.content) ? sub.content : Buffer.from(sub.content));
+              const got = textOfDecoded(decoded);
+              text = got.text;
+              kind = got.kind;
+              if (kind) mediaMissing = true;
+            } catch { /* an undecodable post still reports its id */ }
+          } else if (sub.tag === 'views_count') {
+            views = parseInt((sub.attrs || {}).count || '0', 10) || 0;
+          }
+        }
+        posts.push({
+          chat: jid, name: '',
+          server_id: String(attrs.server_id || ''),
+          message_id: String(attrs.id || ''),
+          text, kind, path: '', media_missing: mediaMissing,
+          views, ts: (parseInt(attrs.t || '0', 10) || 0) * 1000,
+        });
+      }
+      return { ok: true, posts };
+    },
+
+    channel_view: async () => {
+      // The wall, named (channel stories build): marking a
+      // channel post viewed is a "view" receipt keyed on
+      // server ids — whatsmeow's NewsletterMarkViewed.  Baileys
+      // 6.7.24's newsletter socket (verified against
+      // lib/Socket/newsletter.d.ts) exposes create/update/
+      // follow/react/fetch verbs and NO mark-viewed equivalent,
+      // so this rung cannot move a post's view counter.  An
+      // honest ok:false, never a fake success.
+      return { ok: false,
+               error: 'this Baileys build has no newsletter mark-viewed verb — ' +
+                      'channel view receipts are unavailable on this engine ' +
+                      '(the Go engine carries them)' };
     },
 
     channel_set_name: async (req) => {

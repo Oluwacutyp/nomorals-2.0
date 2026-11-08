@@ -903,62 +903,124 @@ class TelegramAdapter(ChatAdapter):
             return []                      # best-effort by contract
 
     async def _fetch_stories_async(self, client: Any) -> list[dict[str, Any]]:
-        from telethon.tl.functions.stories import GetAllStoriesRequest
+        from telethon.tl.functions.stories import (
+            GetAllStoriesRequest,
+            GetPeerStoriesRequest,
+        )
         from telethon.utils import get_peer_id
+
+        out: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+
+        async def _harvest(peer_stories_list: Any, users: dict,
+                           chats: dict) -> None:
+            for peer_stories in (peer_stories_list or []):
+                peer = getattr(peer_stories, "peer", None)
+                try:
+                    poster_id = str(get_peer_id(peer))
+                except Exception:  # noqa: BLE001 - unresolvable
+                    continue                   # peer → skip it
+                poster_key = (int(poster_id) if poster_id.lstrip("-")
+                              .isdigit() else 0)
+                poster_name = ""
+                user = users.get(poster_key)
+                if user is not None:
+                    poster_name = str(
+                        getattr(user, "username", None)
+                        or getattr(user, "first_name", None) or "")
+                if not poster_name:
+                    chat = chats.get(poster_key)
+                    if chat is not None:
+                        poster_name = str(
+                            getattr(chat, "title", None) or "")
+                for story in (getattr(peer_stories, "stories", None)
+                              or []):
+                    media = getattr(story, "media", None)
+                    if media is None:
+                        continue  # text-only story: nothing to save
+                    story_id = str(getattr(story, "id", "") or "")
+                    if not story_id:
+                        continue
+                    if (poster_id, story_id) in seen:
+                        continue
+                    seen.add((poster_id, story_id))
+                    try:
+                        fname = f"story-{poster_id}-{story_id}"
+                        path = await client.download_media(
+                            media,
+                            file=os.path.join(self.media_dir, fname))
+                    except Exception as exc:  # noqa: BLE001
+                        _log.debug("telegram: story media download "
+                                   "failed: %s", exc)
+                        continue
+                    if not path:
+                        continue
+                    date = getattr(story, "date", None)
+                    ts = (date.timestamp() if date is not None
+                          else time.time())
+                    mime = _mime_for_download(
+                        str(path), str(getattr(
+                            getattr(media, "document", None),
+                            "mime_type", "") or ""))
+                    out.append({
+                        "poster_id": poster_id,
+                        "poster_name": poster_name,
+                        "story_id": story_id,
+                        "path": str(path),
+                        "kind": _kind_for_mime(mime),
+                        "ts": ts,
+                    })
 
         result = await client(GetAllStoriesRequest(
             next=False, hidden=False))
-        out: list[dict[str, Any]] = []
         users = {int(getattr(u, "id", 0) or 0): u
                  for u in (getattr(result, "users", None) or [])}
-        for peer_stories in (getattr(result, "peer_stories", None)
-                             or []):
-            peer = getattr(peer_stories, "peer", None)
+        chats = {}
+        for c in (getattr(result, "chats", None) or []):
             try:
-                poster_id = str(get_peer_id(peer))
-            except Exception:  # noqa: BLE001 - unresolvable peer
-                continue                       # → skip its stories
-            user = users.get(int(poster_id) if poster_id.lstrip("-")
-                             .isdigit() else 0)
-            poster_name = ""
-            if user is not None:
-                poster_name = str(
-                    getattr(user, "username", None)
-                    or getattr(user, "first_name", None) or "")
-            for story in (getattr(peer_stories, "stories", None)
-                          or []):
-                media = getattr(story, "media", None)
-                if media is None:
-                    continue  # text-only story: nothing to save
-                story_id = str(getattr(story, "id", "") or "")
-                if not story_id:
-                    continue
+                chats[int(get_peer_id(c))] = c
+            except Exception:  # noqa: BLE001 - unresolvable chat
+                continue
+        await _harvest(getattr(result, "peer_stories", None),
+                       users, chats)
+        # Channel stories (channel stories build, 2026-11-07):
+        # GetAllStories is the contacts-shaped feed — channels
+        # the account follows are not guaranteed a place in it,
+        # so the sweep also asks each followed channel directly
+        # (GetPeerStories per channel dialog, capped).  The
+        # dedupe in _harvest keeps a channel that DID ride the
+        # first feed from saving twice.  A Telethon build or an
+        # account state without dialogs simply skips this half.
+        try:
+            dialogs = await client.get_dialogs()
+        except Exception as exc:  # noqa: BLE001 - best-effort half
+            _log.debug("telegram: channel story sweep skipped: %s",
+                       exc)
+            dialogs = []
+        channel_dialogs = [
+            d for d in (dialogs or [])
+            if getattr(d, "is_channel", False)
+            and getattr(d, "input_entity", None) is not None]
+        for dialog in channel_dialogs[:25]:
+            try:
+                peer_result = await client(GetPeerStoriesRequest(
+                    peer=dialog.input_entity))
+            except Exception as exc:  # noqa: BLE001 - one dead
+                _log.debug("telegram: channel stories fetch "  # channel
+                           "failed: %s", exc)                  # ≠ sweep
+                continue
+            p_users = {int(getattr(u, "id", 0) or 0): u
+                       for u in (getattr(peer_result, "users", None)
+                                 or [])}
+            p_chats = {}
+            for c in (getattr(peer_result, "chats", None) or []):
                 try:
-                    fname = f"story-{poster_id}-{story_id}"
-                    path = await client.download_media(
-                        media,
-                        file=os.path.join(self.media_dir, fname))
-                except Exception as exc:  # noqa: BLE001
-                    _log.debug("telegram: story media download "
-                               "failed: %s", exc)
+                    p_chats[int(get_peer_id(c))] = c
+                except Exception:  # noqa: BLE001
                     continue
-                if not path:
-                    continue
-                date = getattr(story, "date", None)
-                ts = (date.timestamp() if date is not None
-                      else time.time())
-                mime = _mime_for_download(
-                    str(path), str(getattr(
-                        getattr(media, "document", None),
-                        "mime_type", "") or ""))
-                out.append({
-                    "poster_id": poster_id,
-                    "poster_name": poster_name,
-                    "story_id": story_id,
-                    "path": str(path),
-                    "kind": _kind_for_mime(mime),
-                    "ts": ts,
-                })
+            stories = getattr(peer_result, "stories", None)
+            await _harvest([stories] if stories is not None else [],
+                           p_users, p_chats)
         return out
 
     # ── presence + story viewing (§15 presence pack) ───────────────
@@ -1042,7 +1104,8 @@ class TelegramAdapter(ChatAdapter):
             return False
 
     async def _send_story_async(self, client: Any, path: str,
-                                caption: str) -> bool:
+                                caption: str,
+                                peer_ref: Any = "me") -> bool:
         import mimetypes
         import random
 
@@ -1063,13 +1126,62 @@ class TelegramAdapter(ChatAdapter):
                     duration=0, w=0, h=0)])
         else:
             media = InputMediaUploadedPhoto(file=uploaded)
-        peer = await client.get_input_entity("me")
+        peer = await client.get_input_entity(peer_ref)
         await client(SendStoryRequest(
             peer=peer, media=media,
             privacy_rules=[InputPrivacyValueAllowAll()],
             caption=caption or None,
             random_id=random.getrandbits(63)))
         return True
+
+    def send_channel_story(self, channel_ref: str, media_path: str,
+                           caption: str = "") -> dict[str, Any]:
+        """Post a story to a Telegram CHANNEL as the account
+        owner (channel stories build, 2026-11-07): the same
+        ``stories.SendStoryRequest`` as :meth:`send_story`, with
+        the channel as the story's peer instead of "me".
+
+        Platform truths, surfaced not hidden: the account must
+        ADMIN the channel, and Telegram gates channel stories
+        behind the channel's boost level — a refusal comes back
+        as ``{"ok": False, "error": <Telegram's own words>}``
+        (boost errors name themselves), never a fake success.
+        Media only, exactly like own stories — Telegram has no
+        text story.  The verdict is a dict (not send_story's
+        bool) because the refusal's REASON is the useful part
+        here: "not an admin" and "needs more boosts" ask
+        different things of the owner."""
+        client = self._client
+        if client is None or self._loop is None:
+            return {"ok": False,
+                    "error": "telegram userbot not connected"}
+        ref = str(channel_ref or "").strip()
+        if not ref:
+            return {"ok": False,
+                    "error": "send_channel_story needs a channel "
+                             "(@name or id)"}
+        path = str(media_path or "").strip()
+        if not path or not os.path.exists(path):
+            return {"ok": False,
+                    "error": "send_channel_story needs a media "
+                             "file that exists"}
+        try:
+            peer_ref: Any = int(ref)
+        except (TypeError, ValueError):
+            peer_ref = ref
+        try:
+            landed = self._run_on_loop(
+                self._send_story_async(client, path,
+                                       str(caption or ""),
+                                       peer_ref=peer_ref),
+                timeout=60.0)
+        except Exception as exc:  # noqa: BLE001 - the refusal's
+            # own words are the answer (boosts, admin rights)
+            return {"ok": False, "error": str(exc)[:300]}
+        if landed:
+            return {"ok": True}
+        return {"ok": False,
+                "error": "the story post did not land"}
 
         raise ValueError(f"cannot resolve chat_id={chat_id!r}")
 

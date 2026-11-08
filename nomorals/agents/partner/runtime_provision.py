@@ -643,6 +643,55 @@ class RuntimeProvisionMixin:
                     "runtime_provision.story_viewer", exc)
                 return False
 
+        def _channel_fetcher(rec: Any) -> list[dict[str, Any]]:
+            """The followed channels' recent posts for one
+            WhatsApp account (channel stories build): the
+            adapter's fetch_channel_posts (bridge channel_fetch
+            — the Go engine enumerates the followed channels
+            itself; the Baileys rung fetches the channels this
+            surface knows).  No verb / a refused verdict reads
+            as an empty feed — absence, never invented posts."""
+            adapter = self._adapter_for("whatsapp")
+            fn = getattr(adapter, "fetch_channel_posts", None)
+            if not callable(fn):
+                return []
+            try:
+                return list(fn() or [])
+            except Exception as exc:  # noqa: BLE001
+                record_failure(
+                    "runtime_provision.channel_fetcher", exc)
+                return []
+
+        def _channel_viewer(rec: Any, item: dict[str, Any]) -> bool:
+            """Mark one channel post viewed as the owner (channel
+            stories build): the WhatsApp adapter's
+            channel_view_posts (bridge channel_view — whatsmeow
+            NewsletterMarkViewed on the Go engine; the Baileys
+            rung's library has no mark-viewed verb and its
+            honest ok:false lands here as not-landed, with the
+            bridge's own reason recorded — never a bare False
+            that reads like "toggle off", truth-pass law)."""
+            adapter = self._adapter_for("whatsapp")
+            fn = getattr(adapter, "channel_view_posts", None)
+            if not callable(fn):
+                return False
+            try:
+                res = fn(str(item.get("poster_id") or ""),
+                         [str(item.get("source_id") or "")])
+            except Exception as exc:  # noqa: BLE001
+                record_failure(
+                    "runtime_provision.channel_viewer", exc)
+                return False
+            if isinstance(res, dict):
+                if not res.get("ok"):
+                    record_failure(
+                        "runtime_provision.channel_viewer",
+                        RuntimeError(str(
+                            res.get("error")
+                            or "channel_view verb refused")))
+                return bool(res.get("ok"))
+            return bool(res)
+
         def _status_reactor(rec: Any, item: dict[str, Any]) -> bool:
             """React to one contact's status post as the owner
             (chat & privacy wave — the status_react toggle's
@@ -723,6 +772,8 @@ class RuntimeProvisionMixin:
             presence_setter=_presence_setter,
             status_viewer=_status_viewer,
             story_viewer=_story_viewer,
+            channel_fetcher=_channel_fetcher,
+            channel_viewer=_channel_viewer,
             status_reactor=_status_reactor,
             call_rejector=_call_rejector,
             status_react_pool=_status_react_pool)
@@ -1071,6 +1122,14 @@ class RuntimeProvisionMixin:
         except Exception as e:  # noqa: BLE001
             record_failure(
                 "runtime_provision.story_cycle", e)
+        # Same beat: the WhatsApp channel sweep (channel
+        # stories build) — followed channels' new posts saved /
+        # marked viewed per the account's status toggles.
+        try:
+            svc["personal"].cycle_channel_posts("whatsapp")
+        except Exception as e:  # noqa: BLE001
+            record_failure(
+                "runtime_provision.channel_cycle", e)
         # Same beat: always-online keepalive (§15 presence pack) —
         # re-asserts presence for the accounts the owner flagged,
         # releases it where the flag/stop/liveness says otherwise.
@@ -1455,6 +1514,7 @@ class RuntimeProvisionMixin:
                 "/statusreact [on|off|emoji] sets the status "
                 "reaction · /viewonce (or /vv) shows a captured "
                 "view-once · /poststatus posts as you · "
+                "/chanstory posts to a channel you admin · "
                 "/pair saved and /pair recovered list what the "
                 "surfaces kept — all of them answer in your "
                 "private chats (personal bot, userbot DM, "

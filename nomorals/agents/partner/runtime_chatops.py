@@ -200,6 +200,8 @@ class RuntimeChatOpsMixin:
                 return self._chatops_viewonce(kind, tail, message)
             if kind == "poststatus":
                 return self._chatops_poststatus(tail, message)
+            if kind == "chanstory":
+                return self._chatops_chanstory(tail, message)
             if kind == "antitag":
                 return self._chatops_toggle_command(
                     "antitag", tail, message)
@@ -843,6 +845,189 @@ class RuntimeChatOpsMixin:
             return self._chatops_verdict(landed, "")
         return ("couldn't do it — the story post did not land "
                 "(not connected, or Telegram refused it).")
+
+    def _chatops_chanstory(self, tail: str,
+                           message: Any) -> str:
+        """/chanstory — post to a CHANNEL as the owner, on his
+        personal surface (channel stories build, 2026-11-07).
+        WhatsApp channels and Telegram channels both carry
+        stories now; on WhatsApp the channel post IS the
+        channel's story format (neither bridge library has a
+        separate story verb for newsletters), on Telegram it is
+        a real stories.SendStory with the channel as peer.
+        The channel is named first: a WhatsApp channel link or
+        JID or invite code or the channel's name, a Telegram
+        @name or channel id.  Media comes from the command
+        message itself or the message it replies to, exactly
+        like /poststatus.  Owner-only by the control gate; a
+        standing owner stop halts it like every other
+        personal-surface act; a landed post is journaled in the
+        personal vault, never a silent act as him."""
+        platform = str(getattr(message.chat, "platform", "")
+                       or "")
+        if platform not in ("whatsapp", "telegram"):
+            return ("/chanstory lives on your personal "
+                    "WhatsApp or Telegram — run it from there.")
+        svc, rec = self._chatops_personal_account(platform)
+        if rec is None:
+            return (f"no paired {platform} account — /pair one "
+                    f"first; /chanstory posts from the personal "
+                    f"account.")
+        if svc["registry"].owner_stopped(platform):
+            return (f"{platform} is under your standing stop — "
+                    f"it stays halted until you start it again; "
+                    f"nothing was posted.")
+        adapter = self._adapter_for(platform)
+        if adapter is None:
+            return f"no live {platform} surface here to post from."
+        usage = ("usage: /chanstory channel text — on WhatsApp "
+                 "the channel as its link, JID, invite code or "
+                 "name; on Telegram its @name or id. Or send a "
+                 "photo/video with /chanstory channel caption "
+                 "as its caption, or reply to one with it.")
+        if not tail:
+            return usage
+        parts = tail.split(None, 1)
+        target = parts[0].strip()
+        text = parts[1].strip() if len(parts) > 1 else ""
+        media_path = ""
+        media_kind = ""
+        for m in (getattr(message, "media", None) or []):
+            p = str(getattr(m, "path", "") or "")
+            if p:
+                media_path = p
+                media_kind = str(getattr(m, "kind", "") or "")
+                break
+        if not media_path:
+            meta = getattr(message, "meta", None) or {}
+            quoted = meta.get("replied_media_local") or {}
+            if isinstance(quoted, dict) and quoted.get("path"):
+                media_path = str(quoted["path"])
+                media_kind = str(quoted.get("kind") or "")
+        personal = svc["personal"]
+        if platform == "whatsapp":
+            jid, name, text, error = self._chanstory_wa_channel(
+                adapter, tail)
+            if error:
+                return error
+            fn = getattr(adapter, "channel_send", None)
+            if not callable(fn):
+                return ("this WhatsApp surface has no "
+                        "channel-post verb wired.")
+            if not text and not media_path:
+                return usage
+            verdict = self._chatops_call(
+                fn, jid, text, media_path=media_path,
+                caption=text if media_path else "")
+            if isinstance(verdict, dict) and verdict.get("ok"):
+                personal.note_channel_posted(
+                    platform, account_id=rec.id, channel_id=jid,
+                    channel_name=name, text=text,
+                    media_kind=media_kind,
+                    source_id=str(verdict.get("server_id") or ""))
+                where = f"“{name}”" if name else "your channel"
+                return f"posted to {where} on WhatsApp."
+            return self._chatops_verdict(verdict, "")
+        # Telegram: a channel story is a media post, and the
+        # channel must be one this account admins — Telegram
+        # itself refuses otherwise (boost level included), and
+        # its refusal comes back in the verdict's own words.
+        fn = getattr(adapter, "send_channel_story", None)
+        if not callable(fn):
+            return ("this Telegram surface has no channel-story "
+                    "verb wired.")
+        if not media_path:
+            return ("Telegram channel stories are media posts "
+                    "— send a photo or video with /chanstory "
+                    "channel caption as its caption. (Text "
+                    "channel posts are a WhatsApp shape; nothing "
+                    "was posted.)")
+        ref = target
+        if "t.me/" in ref:
+            ref = "@" + ref.split("t.me/")[-1].strip("/")
+        verdict = self._chatops_call(fn, ref, media_path, text)
+        if isinstance(verdict, dict) and verdict.get("ok"):
+            personal.note_channel_posted(
+                platform, account_id=rec.id, channel_id=ref,
+                text=text, media_kind=media_kind)
+            return "posted to the channel's story on Telegram."
+        return self._chatops_verdict(verdict, "")
+
+    def _chanstory_wa_channel(self, adapter: Any, tail: str
+                              ) -> tuple[str, str, str, str]:
+        """Resolve the WhatsApp channel a /chanstory tail names:
+        (jid, name, rest_text, error) — exactly one of jid /
+        error is set, and rest_text is what follows the channel
+        reference (the post's text).  Accepted forms, in order:
+        the channel JID itself; a whatsapp.com/channel link
+        (its invite code resolves through the bridge); the
+        channel's NAME among the channels this surface already
+        knows — the longest word-prefix of the tail that
+        uniquely matches a known channel title, so multi-word
+        names work (a guess between two channels is a mispost
+        waiting to happen, so ambiguity is an error, never a
+        pick); a bare invite code."""
+        tail = tail.strip()
+        tokens = tail.split()
+        if not tokens:
+            return "", "", "", "usage: /chanstory channel text"
+        first = tokens[0]
+        if first.endswith("@newsletter"):
+            return first, "", tail[len(first):].strip(), ""
+        if "whatsapp.com/channel/" in first:
+            code = first.split("whatsapp.com/channel/")[-1]
+            code = code.strip("/").split("/")[0].strip()
+            jid, name, error = self._chanstory_resolve_code(
+                adapter, code)
+            return jid, name, tail[len(first):].strip(), error
+        rows: list[dict[str, Any]] = []
+        chats = getattr(adapter, "chats", None)
+        if callable(chats):
+            try:
+                rows = [r for r in (chats(limit=500) or [])
+                        if str(r.get("kind") or "") == "channel"]
+            except Exception as exc:  # noqa: BLE001
+                record_failure("runtime_chatops.chanstory_chats",
+                               exc)
+                rows = []
+        for k in range(len(tokens), 0, -1):
+            cand = " ".join(tokens[:k]).lower()
+            matches = [r for r in rows
+                       if str(r.get("title") or "").lower() == cand]
+            if len(matches) == 1:
+                return (str(matches[0].get("id") or ""),
+                        str(matches[0].get("title") or ""),
+                        " ".join(tokens[k:]), "")
+            if len(matches) > 1:
+                return "", "", "", (
+                    f"more than one channel named "
+                    f"“{' '.join(tokens[:k])}” here — use its "
+                    f"link or JID so the post lands on the "
+                    f"right one.")
+        if "@" not in first and "." not in first:
+            jid, name, error = self._chanstory_resolve_code(
+                adapter, first)
+            if not error:
+                return jid, name, tail[len(first):].strip(), ""
+            return "", "", "", error
+        return "", "", "", (
+            f"no channel here answers to “{first}” — pass its "
+            f"link, its invite code, its name, or its JID (it "
+            f"ends in @newsletter).")
+
+    def _chanstory_resolve_code(self, adapter: Any, code: str
+                                ) -> tuple[str, str, str]:
+        """(jid, name, error) for one channel invite code."""
+        fn = getattr(adapter, "channel_resolve_invite", None)
+        if not callable(fn):
+            return "", "", ("this WhatsApp surface cannot "
+                            "resolve channel links — pass the "
+                            "channel JID (it ends in @newsletter).")
+        verdict = self._chatops_call(fn, code)
+        if isinstance(verdict, dict) and verdict.get("ok"):
+            return (str(verdict.get("chat") or ""),
+                    str(verdict.get("name") or ""), "")
+        return "", "", self._chatops_verdict(verdict, "")
 
     # ── privacy: block / unblock ─────────────────────────────
 

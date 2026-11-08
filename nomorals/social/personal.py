@@ -241,7 +241,8 @@ class PersonalVault:
 
     def saved_entries(self, account_id: str = "") -> list[dict[str, Any]]:
         return [r for r in self.journal(account_id)
-                if r.get("kind") in ("status", "story", "view_once")]
+                if r.get("kind") in ("status", "story", "view_once",
+                                     "channel_post")]
 
     # ── recoveries ──────────────────────────────────────────────────
     def add_recovery(self, entry: dict[str, Any]) -> dict[str, Any]:
@@ -353,6 +354,12 @@ class PersonalSurfaces:
                  status_reactor: Callable[[AccountRecord,
                                            dict[str, Any]], bool] | None
                  = None,
+                 channel_fetcher: Callable[[AccountRecord],
+                                           list[dict[str, Any]]] | None
+                 = None,
+                 channel_viewer: Callable[[AccountRecord,
+                                           dict[str, Any]], bool] | None
+                 = None,
                  call_rejector: Callable[[AccountRecord,
                                           dict[str, Any]], bool] | None
                  = None,
@@ -377,6 +384,14 @@ class PersonalSurfaces:
         #: owner's sticky stop — a stopped platform never acts.
         self.status_reactor = status_reactor
         self.call_rejector = call_rejector
+        #: The channel-stories seams (2026-11-07), same contract
+        #: as the story seams: the fetcher returns the followed
+        #: channels' recent posts (WhatsApp newsletters), the
+        #: viewer marks one post viewed as the owner.  None =
+        #: the surface has no channel feed wired, reported as
+        #: absence, never as success.
+        self.channel_fetcher = channel_fetcher
+        self.channel_viewer = channel_viewer
         #: The rotation's custom half: her /customemoji set's
         #: unicode faces for this account, supplied by the
         #: runtime (the expression library lives a layer away;
@@ -386,6 +401,10 @@ class PersonalSurfaces:
         self._clock = clock
         self._seen_status: set[tuple[str, str]] = set()
         self._missed_status: set[tuple[str, str]] = set()
+        self._seen_channel_posts: set[tuple[str, str]] = set()
+        self._missed_channel_posts: set[tuple[str, str]] = set()
+        self._viewed_channel_posts: set[tuple[str, str]] = set()
+        self._view_failed_channel_posts: set[tuple[str, str]] = set()
         self._seen_stories: set[tuple[str, str]] = set()
         self._viewed_status: set[tuple[str, str]] = set()
         self._viewed_stories: set[tuple[str, str]] = set()
@@ -419,6 +438,12 @@ class PersonalSurfaces:
             if sid and row.get("kind") == "story":
                 self._seen_stories.add((str(row.get("account") or ""),
                                         sid))
+            if sid and row.get("kind") == "channel_post":
+                self._seen_channel_posts.add(
+                    (str(row.get("account") or ""), sid))
+            if sid and row.get("kind") == "channel_post_missed":
+                self._missed_channel_posts.add(
+                    (str(row.get("account") or ""), sid))
 
     # ── account resolution ──────────────────────────────────────────
     def account_for(self, platform: str,
@@ -806,6 +831,168 @@ class PersonalSurfaces:
             "bytes": 0,
             "text": str(text or "")[:200],
             "note": "posted as the owner via /poststatus"}
+        _append_jsonl(self.vault.journal_path, entry)
+        return entry
+
+    # ── channel posts (channel stories build, 2026-11-07) ──────
+
+    def observe_channel_post(self, platform: str, *, channel_id: str,
+                             channel_name: str = "", text: str = "",
+                             media: list[dict[str, Any]] | None = None,
+                             source_id: str = "",
+                             media_missing: bool = False,
+                             account_id: str = "",
+                             ts: float = 0.0) -> list[dict[str, Any]]:
+        """One post from a channel the account follows (WhatsApp
+        newsletters — a WhatsApp channel's "stories" ARE its
+        posts; there is no separate story object on the
+        platform).  The status family's posture, mirrored
+        exactly: saved when the account's status-saving toggle
+        is on (the same post never saves twice, across restarts
+        too — the seen set is journal-seeded), marked viewed as
+        the owner when the status-viewing toggle is on (at most
+        once per post per process), and a media post whose bytes
+        could not be fetched is journaled
+        (``channel_post_missed``, once) instead of vanishing.
+        A refused view verb journals ``channel_view_failed``
+        once per post per process, with the seam's own failure
+        record carrying the bridge's reason — "off" and
+        "broken" never read the same (truth-pass law)."""
+        rec = self.resolve_event_account(platform, account_id)
+        out: list[dict[str, Any]] = []
+        ts = float(ts or self._clock())
+        if source_id and rec.toggle("status_viewing") \
+                and self.channel_viewer is not None:
+            vkey = (rec.id, str(source_id))
+            if vkey not in self._viewed_channel_posts:
+                try:
+                    viewed = bool(self.channel_viewer(rec, {
+                        "poster_id": channel_id,
+                        "poster_name": channel_name,
+                        "source_id": str(source_id), "ts": ts}))
+                except Exception:  # noqa: BLE001 - the wired seam
+                    viewed = False     # records its own failures
+                if viewed:
+                    self._viewed_channel_posts.add(vkey)
+                elif vkey not in self._view_failed_channel_posts:
+                    self._view_failed_channel_posts.add(vkey)
+                    _append_jsonl(self.vault.journal_path, {
+                        "ts": ts, "kind": "channel_view_failed",
+                        "account": rec.id, "platform": platform,
+                        "counterpart_id": channel_id,
+                        "poster_name": channel_name,
+                        "media_kind": "", "source_id": str(source_id),
+                        "path": "", "bytes": 0,
+                        "note": "channel_view verb did not land — "
+                                "the bridge refused it or is "
+                                "unreachable; the post stays "
+                                "unviewed"})
+        if media_missing and rec.toggle("status_saving"):
+            mkey = (rec.id, str(source_id or ""))
+            if not (source_id and mkey in self._missed_channel_posts):
+                if source_id:
+                    self._missed_channel_posts.add(mkey)
+                entry = {
+                    "ts": ts, "kind": "channel_post_missed",
+                    "account": rec.id, "platform": platform,
+                    "counterpart_id": channel_id,
+                    "poster_name": channel_name, "media_kind": "",
+                    "source_id": str(source_id or ""), "path": "",
+                    "bytes": 0,
+                    "note": "channel post media could not be "
+                            "downloaded"}
+                _append_jsonl(self.vault.journal_path, entry)
+                out.append(entry)
+        if not rec.toggle("status_saving"):
+            return out
+        dedupe_key = (rec.id, str(source_id or ""))
+        if source_id and dedupe_key in self._seen_channel_posts:
+            return out
+        media = media or []
+        if media:
+            for m in media:
+                path = str(m.get("path") or "")
+                if not path:
+                    continue
+                try:
+                    out.append(self.vault.save_media(
+                        rec.id, "channel_post", path,
+                        platform=platform, counterpart_id=channel_id,
+                        poster_name=channel_name,
+                        media_kind=str(m.get("kind") or ""),
+                        source_id=source_id, ts=ts))
+                except FileNotFoundError:
+                    continue
+        elif text:
+            out.append(self.vault.save_text(
+                rec.id, "channel_post", text, platform=platform,
+                counterpart_id=channel_id,
+                poster_name=channel_name, source_id=source_id,
+                ts=ts))
+        if source_id and out:
+            self._seen_channel_posts.add(dedupe_key)
+        return out
+
+    def cycle_channel_posts(self, platform: str = "whatsapp",
+                            account_id: str = ""
+                            ) -> list[dict[str, Any]]:
+        """One channel sweep: ask the fetcher for the followed
+        channels' recent posts and observe each (save + view
+        per the account's toggles — see observe_channel_post).
+        The fetcher runs only when at least one of the two
+        toggles could act; no fetcher wired (the surface has no
+        channel feed) → nothing happens and the caller can say
+        exactly that."""
+        if self.channel_fetcher is None:
+            return []
+        rec = self.resolve_event_account(platform, account_id)
+        if not (rec.toggle("status_saving")
+                or (rec.toggle("status_viewing")
+                    and self.channel_viewer is not None)):
+            return []
+        out: list[dict[str, Any]] = []
+        try:
+            posts = self.channel_fetcher(rec) or []
+        except Exception:  # noqa: BLE001 - the wired seam
+            return []                  # records its own failures
+        for post in posts:
+            media: list[dict[str, Any]] = []
+            path = str(post.get("path") or "")
+            if path:
+                media.append({"path": path,
+                              "kind": str(post.get("kind") or "")})
+            out.extend(self.observe_channel_post(
+                platform,
+                channel_id=str(post.get("poster_id") or ""),
+                channel_name=str(post.get("poster_name") or ""),
+                text=str(post.get("text") or ""),
+                media=media,
+                source_id=str(post.get("story_id") or ""),
+                media_missing=bool(post.get("media_missing")),
+                account_id=rec.id,
+                ts=float(post.get("ts") or 0.0)))
+        return out
+
+    def note_channel_posted(self, platform: str, *,
+                            account_id: str = "", channel_id: str = "",
+                            channel_name: str = "", text: str = "",
+                            media_kind: str = "",
+                            source_id: str = "",
+                            ts: float = 0.0) -> dict[str, Any]:
+        """Journal one channel post the OWNER published through
+        Devon (/chanstory): his own acts on his account are
+        part of the personal record like everything the surface
+        does — an unjournaled act would be a silent one.
+        Returns the journal entry written."""
+        rec = self.resolve_event_account(platform, account_id)
+        entry = {
+            "ts": float(ts or self._clock()),
+            "kind": "channel_posted", "account": rec.id,
+            "platform": platform, "counterpart_id": channel_id,
+            "poster_name": channel_name, "media_kind": media_kind,
+            "source_id": str(source_id or ""), "path": "",
+            "bytes": 0, "text": str(text or "")[:200],
+            "note": "posted as the owner via /chanstory"}
         _append_jsonl(self.vault.journal_path, entry)
         return entry
 
