@@ -6263,7 +6263,8 @@ class PartnerRuntime(
         if kind == "decode":
             return self._control_decode(command.tail or arg, chat_key=chat_key)
         if kind == "cookies":
-            return self._control_cookies(command.tail or arg)
+            return self._control_cookies(command.tail or arg,
+                                         message=message)
         if kind == "cookielab":
             return self._control_cookielab(command.tail or arg)
         if kind == "structure":

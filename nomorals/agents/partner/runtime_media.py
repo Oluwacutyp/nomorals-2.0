@@ -3282,7 +3282,23 @@ class RuntimeMediaMixin:
         store = load_taste(getattr(self, "context", None))
         return store.record_feedback(False, tail or "not feeling it")
 
-    def _control_cookies(self, tail: str) -> str:
+    def _control_cookies(self, tail: str,
+                         message: Any = None) -> str:
+        """/cookies — cookie state in two families.  The
+        bundle family (import|status|clear) moves the
+        owner's logged-in sessions into Devon's own
+        browser profile; everything else is the YouTube
+        cookie file status this command has always shown.
+        Owner-only like /pair: control dispatch never
+        reaches non-operators."""
+        words = (tail or "").split()
+        sub = words[0].lower() if words else ""
+        if sub in ("import", "status", "clear"):
+            return self._control_cookies_bundle(
+                sub, words[1:], message)
+        return self._control_cookies_youtube(tail)
+
+    def _control_cookies_youtube(self, tail: str) -> str:
         """/cookies [check] — YouTube cookie file status and setup help."""
         from ...media.cookies import BOT_COOKIE_HELP, cookies_status
         st = cookies_status()
@@ -3337,6 +3353,102 @@ class RuntimeMediaMixin:
             lines.append("")
             lines.append("Checked: " + ", ".join(st.get("checked", [])))
         return "\n".join(lines)
+
+    def _control_cookies_bundle(self, sub: str,
+                                rest: list[str],
+                                message: Any = None) -> str:
+        """/cookies import|status|clear — the owner's
+        session bundles for Devon's browser profile.  The
+        organ (social.chat.cookie_bundle) owns parsing,
+        merging, journaling and rendering; this handler
+        only resolves where things live and where the
+        bundle file is."""
+        from pathlib import Path
+
+        from ...social.chat import cookie_bundle
+
+        profile_dir = self._webshot_profile_dir(
+            self._webshot_book())
+        if profile_dir is None:
+            return ("🍪 my browser profile isn't set up on "
+                    "this host, so there is nowhere for a "
+                    "cookie bundle to land.")
+        context = getattr(self, "context", None)
+        settings = getattr(context, "settings", None)
+        ws_dir = getattr(settings, "workspace_dir", ".")
+        journal_path = (Path(ws_dir) / "data" / "social"
+                        / "personal" / "journal.jsonl")
+        if sub == "status":
+            return cookie_bundle.render_status(profile_dir)
+        if sub == "clear":
+            target = (rest[0] if rest else "").strip()
+            if not target:
+                return ("🍪 name what to clear: /cookies "
+                        "clear <domain> for one site, or "
+                        "/cookies clear all for everything "
+                        "imported.")
+            return cookie_bundle.clear_imported(
+                profile_dir, target,
+                journal_path=journal_path)
+        src = self._cookie_bundle_source(message)
+        if src is None:
+            return ("🍪 attach the cookie bundle file to "
+                    "the command, or reply to the message "
+                    "holding it with /cookies import — I "
+                    "take cookies.txt and JSON exports.")
+        outcome = cookie_bundle.import_bundle_file(
+            src, profile_dir, journal_path=journal_path)
+        return cookie_bundle.render_import_reply(outcome)
+
+    def _cookie_bundle_source(self, message: Any):  # type: ignore[no-untyped-def]
+        """The bundle file for /cookies import, resolved
+        the way file-consuming commands resolve media in
+        this codebase: the command message's own attachment
+        (a document first), then the replied message's
+        already-downloaded bytes, then the replied
+        message's platform handle downloaded on demand.
+        Returns a Path or None."""
+        from pathlib import Path
+
+        if message is None:
+            return None
+        media_rows = list(
+            getattr(message, "media", None) or [])
+        for want_document in (True, False):
+            for media in media_rows:
+                path = str(getattr(media, "path", "") or "")
+                if not path:
+                    continue
+                if want_document and str(
+                        getattr(media, "kind", "")
+                        or "") != "document":
+                    continue
+                return Path(path)
+        meta = getattr(message, "meta", None) or {}
+        local = meta.get("replied_media_local") or {}
+        if isinstance(local, dict) and local.get("path"):
+            return Path(str(local["path"]))
+        replied = meta.get("replied_media") or {}
+        if isinstance(replied, dict) and replied.get("file_id"):
+            platform = str(getattr(
+                getattr(message, "chat", None), "platform",
+                "") or "")
+            adapter = self._adapter_for(platform) \
+                if platform else None
+            download = getattr(adapter, "download_file",
+                               None)
+            if callable(download):
+                try:
+                    path = download(
+                        str(replied["file_id"]),
+                        str(replied.get("name")
+                            or "cookies-bundle.txt"))
+                except Exception:  # noqa: BLE001 - a
+                    path = ""          # failed download is
+                    # no bundle, not a crash in chat
+                if path:
+                    return Path(str(path))
+        return None
 
     def _control_sham(self, tail: str, chat_key: str = "",
                       message: Any = None) -> str:

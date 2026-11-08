@@ -825,7 +825,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "produce": (0, None),   # /produce [spotify-url|vibe words…] — compose original music (taste-aware)
     "like": (0, None),       # /like [notes…] — last production was good
     "dislike": (0, None),    # /dislike [notes…] — last production missed
-    "cookies": (0, 1),       # /cookies [check] — YouTube cookie file status/setup
+    "cookies": (0, None),    # /cookies [check] | import|status|clear … — YouTube cookie file status + browser session bundles (owner only)
     "sham": (0, 0),          # /sham — reply to audio/voice note to identify the song
     "musicnote": (1, 1),     # /musicnote find|create — answer the music voice-note ask (owner-only)
     # anime organ (FEI gap wave B): AniList-first records with a
@@ -4057,10 +4057,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/dislike [notes…]",
                 "example": "/dislike too slow",
                 "related": "/like · /produce"},
-    "cookies": {"what": "YouTube cookie file status — needed when YouTube blocks downloads.",
-                "usage": "/cookies [check]",
-                "example": "/cookies",
-                "related": "/play"},
+    "cookies": {"what": "Cookie state in both families: the YouTube cookie file that unblocks downloads, and session bundles for Devon's own browser — import a cookies.txt or JSON export of your logged-in sessions and her captures (webshot, webrec, browse) start signed-in as you. Bundle values are never printed, logged or journaled, and the file you send is deleted after import. Owner only.",
+                "usage": "/cookies [check] · /cookies import (attach the bundle file, or reply to the message holding it) · /cookies status · /cookies clear <domain|all>",
+                "example": "/cookies import",
+                "related": "/webshot · /play"},
     "sham": {"what": "Identify the song in a voice note or audio — reply to it with /sham, or send audio with /sham as the caption.",
                 "usage": "/sham",
                 "example": "/sham (reply to a voice note)",
@@ -4546,7 +4546,7 @@ LIST_ONELINERS: dict[str, str] = {
     "books": "story reader + continuer: /books read <url|slug> | continue <slug> [n] | sources",
     "decode": "identify + decode anything: /decode <data|file|hash>",
     "investigate": "one-pass investigation: decode → crack → OSINT → knowledge graph",
-    "cookies": "YouTube cookie file status — needed when YouTube blocks downloads",
+    "cookies": "cookie state: YouTube download cookies + browser session bundles (/cookies import|status|clear)",
     "cookielab": "CookieLab: analyze & handle cookie headers",
     "cipher": "real crypto: AES-256 sealed blobs + classic ciphers + vault",
     "monitor": "watch a target on a cadence, alert on change",

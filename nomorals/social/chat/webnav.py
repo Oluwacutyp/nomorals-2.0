@@ -26,6 +26,7 @@ package — no new layering pairs.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -59,13 +60,18 @@ __all__ = [
     "TakeoverHook",
     "format_takeover_message",
     "WallBlocked",
+    "apply_cookies_to_live",
     "classify_wall",
+    "clear_cookies_from_live",
     "context_kwargs",
     "detect_gates",
+    "imported_cookies_path",
     "max_nav_sessions",
     "navigate",
     "open_with_ladder",
     "presentation_ladder",
+    "playwright_cookie_payload",
+    "read_imported_cookie_records",
     "record_page",
     "run_interstitial_pass",
     "run_wall_pass",
@@ -1150,6 +1156,144 @@ def _profile_lock(profile_dir: Path) -> threading.Lock:
             key, threading.Lock())
 
 
+# ── imported cookies (owner cookie bundles, /cookies) ────
+#
+# The owner hands Devon his logged-in sessions as a cookie
+# bundle (cookies.txt / JSON export — Android Chrome cannot
+# export, so the bundle is how a phone's sessions reach her).
+# The imported set is kept as a sidecar of normalized cookie
+# records INSIDE the profile dir: every NavSession over the
+# profile applies it at start (so captures begin signed-in),
+# and an import that lands while a session is live applies
+# to that session's context too.  The write side (parsing,
+# merging, clearing, journaling) lives in cookie_bundle.py;
+# this seam owns only the profile-side mechanics.  Cookie
+# VALUES are credentials: nothing in this seam logs, prints
+# or journals them — records move as data, never as text.
+
+#: Sidecar filename inside the browser profile dir.
+IMPORTED_COOKIES_FILENAME = "imported_cookies.json"
+
+
+def imported_cookies_path(profile_dir: Path) -> Path:
+    return Path(profile_dir) / IMPORTED_COOKIES_FILENAME
+
+
+def read_imported_cookie_records(
+        profile_dir: Path) -> list[dict[str, Any]]:
+    """The stored imported-cookie records for a profile
+    (normalized dicts: name/value/domain/path/expires/
+    httpOnly/secure/sameSite).  A missing or unreadable
+    sidecar reads as no imports — the profile simply starts
+    without them.  Never raises."""
+    try:
+        raw = json.loads(imported_cookies_path(
+            profile_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    rows = raw.get("cookies") if isinstance(raw, dict) \
+        else raw
+    if not isinstance(rows, list):
+        return []
+    return [dict(r) for r in rows if isinstance(r, dict)
+            and r.get("name") and r.get("domain")]
+
+
+def playwright_cookie_payload(
+        records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Stored records → ``add_cookies`` arguments.  Session
+    cookies (expires <= 0) go out with no expires key at
+    all — the driver's word for a session cookie is the
+    absence of one."""
+    out: list[dict[str, Any]] = []
+    for rec in records:
+        item: dict[str, Any] = {
+            "name": str(rec.get("name") or ""),
+            "value": str(rec.get("value") or ""),
+            "domain": str(rec.get("domain") or ""),
+            "path": str(rec.get("path") or "/"),
+            "httpOnly": bool(rec.get("httpOnly")),
+            "secure": bool(rec.get("secure")),
+        }
+        expires = float(rec.get("expires") or 0)
+        if expires > 0:
+            item["expires"] = expires
+        same = str(rec.get("sameSite") or "")
+        if same in ("Strict", "Lax", "None"):
+            item["sameSite"] = same
+        if item["name"] and item["domain"]:
+            out.append(item)
+    return out
+
+
+_LIVE_CONTEXTS: dict[str, set[Any]] = {}
+_LIVE_CONTEXTS_GUARD = threading.Lock()
+
+
+def _register_live_context(profile_dir: Path,
+                           context: Any) -> None:
+    with _LIVE_CONTEXTS_GUARD:
+        _LIVE_CONTEXTS.setdefault(
+            str(profile_dir), set()).add(context)
+
+
+def _unregister_live_context(profile_dir: Path,
+                             context: Any) -> None:
+    with _LIVE_CONTEXTS_GUARD:
+        live = _LIVE_CONTEXTS.get(str(profile_dir))
+        if live is not None:
+            live.discard(context)
+            if not live:
+                del _LIVE_CONTEXTS[str(profile_dir)]
+
+
+def _live_contexts(profile_dir: Path) -> list[Any]:
+    with _LIVE_CONTEXTS_GUARD:
+        return list(_LIVE_CONTEXTS.get(
+            str(profile_dir), ()))
+
+
+def apply_cookies_to_live(
+        profile_dir: Path,
+        records: list[dict[str, Any]]) -> int:
+    """Add cookie records to every live session context
+    over this profile (a capture running right now picks
+    the import up without waiting for its next start).
+    Returns how many contexts took them.  A context that
+    refuses (closing, driver drift) is skipped, never an
+    import failure — the sidecar still lands the cookies
+    at the next session start."""
+    payload = playwright_cookie_payload(records)
+    if not payload:
+        return 0
+    applied = 0
+    for context in _live_contexts(profile_dir):
+        with suppress(Exception):
+            context.add_cookies(payload)
+            applied += 1
+    return applied
+
+
+def clear_cookies_from_live(
+        profile_dir: Path,
+        domains: list[str]) -> int:
+    """Best-effort removal of cookies for *domains* from
+    live session contexts (the durable removal is the
+    sidecar — this only shortens the tail on sessions
+    already running).  Returns how many contexts were
+    asked.  Never raises."""
+    asked = 0
+    for context in _live_contexts(profile_dir):
+        clear = getattr(context, "clear_cookies", None)
+        if not callable(clear):
+            continue
+        asked += 1
+        for domain in domains:
+            with suppress(Exception):
+                clear(domain=domain)
+    return asked
+
+
 @dataclass
 class NavOutcome:
     """The open page, after the passes."""
@@ -1307,6 +1451,11 @@ class NavSession:
                 self._context = self._browser.new_context(
                     **kwargs)
                 self._page = self._context.new_page()
+            if self._profile_dir is not None \
+                    and self._context is not None:
+                _register_live_context(self._profile_dir,
+                                       self._context)
+                self._apply_imported_cookies()
             self._apply_client_hints()
         except NavError:
             self._teardown()
@@ -1339,7 +1488,30 @@ class NavSession:
                     self._device.get("user_agent") or ""),
                  "userAgentMetadata": dict(hints)})
 
+    def _apply_imported_cookies(self) -> None:
+        """Start this session signed-in: the profile's
+        imported cookie records (owner cookie bundles) go
+        onto the fresh context before the first navigation,
+        so a gate cleared by identity stays cleared and a
+        signed-in page renders as the owner's view.
+        Best-effort in the file's idiom — a context that
+        refuses the records leaves the session working
+        logged-out, and the profile keeps them for the
+        next start."""
+        if self._profile_dir is None \
+                or self._context is None:
+            return
+        payload = playwright_cookie_payload(
+            read_imported_cookie_records(self._profile_dir))
+        if payload:
+            with suppress(Exception):
+                self._context.add_cookies(payload)
+
     def _teardown(self) -> None:
+        if self._profile_dir is not None \
+                and self._context is not None:
+            _unregister_live_context(self._profile_dir,
+                                     self._context)
         if self._context is not None:
             with suppress(Exception):
                 self._context.close()
