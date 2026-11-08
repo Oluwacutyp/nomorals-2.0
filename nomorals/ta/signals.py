@@ -14,6 +14,9 @@ from __future__ import annotations
 
 
 from .math import effective_n, softmax
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
 
 
 # ── lazy optional deps ──────────────────────────────────────────────────
@@ -312,7 +315,8 @@ def fuse_stacked(frames: dict, close: _pd.Series, horizon: int = 5,
         proba = _np.full(len(idx), 0.5)
         proba[order[cut:]] = clf.predict_proba(X[order[cut:]])[:, 1]
         proba[:order[cut][0] if len(order[cut]) else 0] = 0.5
-    except Exception:
+    except Exception as exc:
+        _log.debug("signals.fuse_stacked failed", exc_info=True)
         return fuse_weighted(frames, kind_weights, lookup)
     vote = _pd.Series(2.0 * proba - 1.0, index=idx, name="vote")
     base = fuse_weighted(frames, kind_weights, lookup)

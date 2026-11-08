@@ -49,6 +49,7 @@ from typing import Any, Callable
 
 from ...core.logging_setup import get_logger
 from ...media_edit.videos import MediaEditError, run_ffmpeg
+from .failures import record_failure
 
 _log = get_logger("nomorals.social.media_convert")
 
@@ -121,8 +122,8 @@ def _discard(dest: Path) -> None:
     try:
         if dest.exists():
             dest.unlink()
-    except OSError:
-        pass
+    except OSError as exc:
+        record_failure("media_convert._discard", exc)
 
 
 def _run(runner: Runner | None, args: list[str], src: Path,

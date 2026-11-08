@@ -2182,7 +2182,11 @@ def navigate(url: str, *, device: dict[str, Any] | None = None,
                 on_step=on_step,
                 managed_budget_s=managed_budget_s,
                 takeover_budget_s=takeover_budget_s)
-        except BaseException:
+        except BaseException:  # noqa: BLE001 — cleanup, then re-raise
+            # Deliberate catch-all: a session that fails to open — on any
+            # interruption, including KeyboardInterrupt/SystemExit — must
+            # release its browser profile before the failure propagates,
+            # or the profile lock strands every later capture.
             session.__exit__()
             raise
         return session, outcome

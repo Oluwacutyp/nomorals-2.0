@@ -1419,8 +1419,8 @@ class HAWebSocket:
             task.cancel()
             try:
                 await task
-            except asyncio.CancelledError:
-                pass
+            except asyncio.CancelledError as exc:
+                _log.debug("smarthome_integration.stop failed", exc_info=True)
             except Exception:  # noqa: BLE001 - stop must not raise
                 _log.exception("HA websocket task teardown failed")
         try:
@@ -1484,8 +1484,13 @@ class HAWebSocket:
                     try:
                         await self._read_task
                     except (asyncio.CancelledError, _WSClosed,
-                            HAWebSocketError):
-                        pass
+                            HAWebSocketError) as exc:
+                        # Expected teardown outcomes of the cancel
+                        # above — recorded, then the finally proceeds.
+                        _log.debug(
+                            "smarthome_integration.listen teardown: "
+                            "read task ended via %s",
+                            type(exc).__name__, exc_info=True)
                 self._read_task = None
         finally:
             await self._close()

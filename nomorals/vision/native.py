@@ -247,8 +247,8 @@ def header_metadata(data: bytes) -> dict[str, Any]:
 def _rational_to_float(value: Any) -> float | None:
     try:
         return float(value)
-    except (TypeError, ValueError):
-        pass
+    except (TypeError, ValueError) as exc:
+        _log.debug("native._rational_to_float failed", exc_info=True)
     # (num, den) tuples from Pillow's EXIF reader
     try:
         num, den = value

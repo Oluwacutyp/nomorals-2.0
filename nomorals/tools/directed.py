@@ -9,6 +9,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 
 def register(registry: Any) -> None:
     from ..core.policy import Capability
@@ -25,7 +29,8 @@ def register(registry: Any) -> None:
                 SamplingParams(temperature=0.7, max_tokens=2500),
                 task_kind="creative")
             return (resp.text or "").strip()
-        except Exception:
+        except Exception as exc:
+            _log.debug("directed._suggest failed", exc_info=True)
             return ""
 
     @registry.register(
@@ -44,9 +49,8 @@ def register(registry: Any) -> None:
                       duration_s: float = 4.0,
                       workdir: str | None = None) -> dict[str, Any]:
         try:
+            from ..media.directed.animator import ModelUnavailable, direct_animate
             from ..media.directed.motion_score import generate_track
-            from ..media.directed.animator import (direct_animate,
-                                                   ModelUnavailable)
         except ImportError as exc:
             return {"ok": False,
                     "error": f"directed animation unavailable: {exc}"}
@@ -65,8 +69,7 @@ def register(registry: Any) -> None:
             note += " | direction notes: " + "; ".join(meta["notes"][:3])
         if camera:
             try:
-                from ..media.directed.camera import (camera_look_video,
-                                                     LOOKS)
+                from ..media.directed.camera import LOOKS, camera_look_video
             except ImportError as exc:
                 return {"ok": False,
                         "error": f"camera looks unavailable: {exc}"}
@@ -96,7 +99,7 @@ def register(registry: Any) -> None:
     def camera_look(video: str, look: str, *,
                     out_path: str = "") -> dict[str, Any]:
         try:
-            from ..media.directed.camera import camera_look_video, LOOKS
+            from ..media.directed.camera import LOOKS, camera_look_video
         except ImportError as exc:
             return {"ok": False,
                     "error": f"camera looks unavailable: {exc}"}
@@ -174,6 +177,7 @@ def register(registry: Any) -> None:
                    width: int = 0, height: int = 0) -> dict[str, Any]:
         try:
             from PIL import Image as _I
+
             from ..media.directed import ai_edit as _ae
             img = _I.open(image).convert("RGB")
             mask = _I.open(mask_path).convert("L") if mask_path else None
@@ -221,8 +225,8 @@ def register(registry: Any) -> None:
             else:
                 return {"ok": False, "error":
                         f"unknown op {op!r}"}
-            from pathlib import Path as _P
             import tempfile as _t
+            from pathlib import Path as _P
             out_path = str(_P(_t.mkdtemp(prefix="edit_")) / f"{o}.png")
             out.save(out_path)
         except Exception as exc:  # noqa: BLE001 - includes ImportError
@@ -275,7 +279,7 @@ def register(registry: Any) -> None:
     def direct_to_timeline(shot_path: str, timeline_path: str, *,
                            at: int = -1) -> dict[str, Any]:
         try:
-            from ..media.genedit import shot_to_timeline, GenShot
+            from ..media.genedit import GenShot, shot_to_timeline
             shot = GenShot(path=shot_path, mode="directed",
                            backend="directed")
             path = shot_to_timeline(shot, timeline_path, at=at)
@@ -302,8 +306,8 @@ def register(registry: Any) -> None:
                  face_box: list[float] | None = None,
                  prefer: str = "auto") -> dict[str, Any]:
         try:
-            from ..media.directed.lipsync import (
-                lip_sync as _ls, ModelUnavailable)
+            from ..media.directed.lipsync import ModelUnavailable
+            from ..media.directed.lipsync import lip_sync as _ls
             res = _ls(video, audio,
                       face_box=tuple(face_box) if face_box else None,
                       prefer=prefer)
@@ -351,8 +355,7 @@ def register(registry: Any) -> None:
     )
     def talk_photo(image: str, audio: str) -> dict[str, Any]:
         try:
-            from ..media.directed.lipsync import (
-                sadtaker_animate, ModelUnavailable)
+            from ..media.directed.lipsync import ModelUnavailable, sadtaker_animate
             res = sadtaker_animate(image, audio)
         except Exception as exc:  # noqa: BLE001 - includes ImportError
             # and ModelUnavailable (both surface as an honest error)
@@ -374,8 +377,8 @@ def register(registry: Any) -> None:
                   face_box: list[float] | None = None,
                   prefer: str = "auto") -> dict[str, Any]:
         try:
-            from ..media.directed.lipsync import (
-                dub_video as _dub, ModelUnavailable)
+            from ..media.directed.lipsync import ModelUnavailable
+            from ..media.directed.lipsync import dub_video as _dub
             res = _dub(video, translated_text, voice,
                        face_box=tuple(face_box) if face_box else None,
                        prefer=prefer)

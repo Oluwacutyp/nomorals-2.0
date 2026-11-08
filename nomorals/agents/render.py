@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Sequence
 
+from .failures import record_failure
+
 __all__ = [
     "ICONS", "banner", "section", "kv", "table", "status_line", "bar",
     "numbered", "bullets", "truncate",
@@ -47,7 +49,8 @@ def truncate(text: str, limit: int = 200) -> str:
     """Cut text to ``limit`` chars with an ellipsis marker. Never raises."""
     try:
         text = str(text or "")
-    except Exception:
+    except Exception as exc:
+        record_failure("render.truncate", exc)
         return ""
     if len(text) <= limit:
         return text

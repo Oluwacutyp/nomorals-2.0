@@ -21,6 +21,10 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from ...core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 CONSISTENCY_TARGET = 0.85
 #: Below this a segment is flagged for re-render.
 DRIFT_THRESHOLD = 0.70
@@ -138,8 +142,8 @@ def drift_report(bible: SceneBible, frame_a: Any, frame_b: Any, *,
         if isinstance(frame_b, _Img.Image):
             from .conditioning import _extract_palette
             drift = palette_drift(bible.palette, _extract_palette(frame_b))
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.debug("bible.drift_report failed", exc_info=True)
     overall = 0.6 * sim + 0.4 * (1.0 - drift)
     notes = []
     if sim >= 0.99:

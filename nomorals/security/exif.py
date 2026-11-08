@@ -41,6 +41,10 @@ import struct
 from pathlib import Path
 from typing import Union
 
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 __all__ = [
     "scan_metadata",
     "exif_summary",
@@ -451,8 +455,8 @@ def scan_metadata(data: bytes) -> dict:
             out["has_xmp"] = b"xmp " in low
             out["has_icc"] = b"iccp" in low
             out["has_c2pa"] = b"jumb" in low
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.debug("exif.scan_metadata failed", exc_info=True)
     blob_text = data[:1_000_000].decode("latin1", "replace")
     out["ai_signals"] = _ai_signals(data, blob_text + str(out["png_text"]))
     if out["has_c2pa"] and not any("C2PA" in s for s in out["ai_signals"]):

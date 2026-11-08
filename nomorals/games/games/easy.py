@@ -13,9 +13,12 @@ import random
 import re
 from typing import Any
 
+from ...core.logging_setup import get_logger
 from ..ai import GameMind
 from ..players import Player
 from .base import MultiGame, Room
+
+_log = get_logger(__name__)
 
 __all__ = ["EASY_GAMES"]
 
@@ -1367,7 +1370,8 @@ class TriviaRoyaleGame(MultiGame):
         if trivia_forge is not None:
             try:
                 qs = trivia_forge.deal(count=8, difficulty="normal")
-            except Exception:
+            except Exception as exc:
+                _log.debug("easy.new_state failed", exc_info=True)
                 qs = rng.sample(list(TRIVIA), 8)
         else:
             qs = rng.sample(list(TRIVIA), 8)

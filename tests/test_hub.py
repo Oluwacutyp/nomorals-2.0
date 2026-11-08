@@ -404,8 +404,12 @@ class ControlHubTests(unittest.TestCase):
         rt = _runtime(self._tmp.name, _FakeGateway())
         self.assertTrue(rt._control_toolhub("help", "tg:1").startswith(HUB_HEADER))
         self.assertTrue(rt._control_toolhub("bin", "tg:1").startswith(BIN_HEADER))
+        # The unknown-proxy screen is an ActionableMessage (text +
+        # keyboard) by design since register #27 — assert on its
+        # text, the way the reply pipeline unwraps it.
+        unknown = rt._control_toolhub("proxy frobnicate", "tg:1")
         self.assertIn("unknown proxy action",
-                      rt._control_toolhub("proxy frobnicate", "tg:1"))
+                      getattr(unknown, "text", unknown))
         self.assertIn("usage: /toolhub",
                       rt._control_toolhub("frobnicate", "tg:1"))
 

@@ -51,6 +51,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 from .errors import NoMoralsError
+from .failures import record_failure
 
 __all__ = [
     "BusOverloaded",
@@ -484,8 +485,8 @@ class EventBus:
             try:
                 self._queue.put((sub, event), timeout=self._publish_timeout)
                 return
-            except queue.Full:
-                pass  # fall through to drop accounting
+            except queue.Full as exc:
+                record_failure("events._enqueue", exc)
         elif self._on_full == "raise":
             try:
                 self._queue.put_nowait((sub, event))
@@ -725,8 +726,8 @@ class EventBus:
                     rotated = self._journal_path + ".1"
                     try:
                         os.replace(self._journal_path, rotated)
-                    except OSError:
-                        pass
+                    except OSError as exc:
+                        record_failure("events._journal_write", exc)
                     self._journal = open(self._journal_path, "ab")
             self._journal.write(data)
             self._journal.flush()

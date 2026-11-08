@@ -45,6 +45,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .failures import record_failure
+
 __all__ = [
     "OwnerRegistry", "OwnerStoreError", "OwnerAuthorityError",
     "canon_platform", "same_person", "apply_media_watermark",
@@ -141,8 +143,8 @@ class OwnerRegistry:
                 f".corrupt-{int(time.time())}")
             try:
                 self.path.replace(quarantine)
-            except OSError:
-                pass
+            except OSError as _exc:
+                record_failure("owner_system.load", _exc)
             raise OwnerStoreError(
                 f"owner record at {self.path} is unreadable "
                 f"({type(exc).__name__}: {exc}); quarantined "

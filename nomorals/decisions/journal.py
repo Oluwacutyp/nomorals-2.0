@@ -50,10 +50,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "Decision",
@@ -192,8 +195,8 @@ class DecisionJournal:
                                    for d in self.decisions.values()]},
                     fh, ensure_ascii=False)
             os.replace(tmp, self.path)
-        except OSError:
-            pass
+        except OSError as exc:
+            _log.debug("journal._save failed", exc_info=True)
 
     # ── intake ───────────────────────────────────────────────────
     def record(self, *, decision: str, context: str = "",

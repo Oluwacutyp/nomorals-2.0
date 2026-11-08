@@ -22,6 +22,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .failures import record_failure
+
 #: Collab is the DEFAULT mode, not an option.  Sessions and the
 #: fiction writer run in collab mode unless explicitly opted out.
 DEFAULT_MODE = "collab"
@@ -356,7 +358,8 @@ class CriticAgent:
         try:
             raw = suggest(prompt, max_tokens=800)
             return self._parse_critique(raw)
-        except Exception:
+        except Exception as exc:
+            record_failure("collab.review", exc)
             return self._heuristic_review(text, brief, bible, persona,
                                           style_report, continuity)
 
@@ -429,8 +432,8 @@ class CriticAgent:
         score = 0.7
         try:
             score = float(lines.get("SCORE", "70")) / 100.0
-        except ValueError:
-            pass
+        except ValueError as exc:
+            record_failure("collab._parse_critique", exc)
         verdict = lines.get("VERDICT", "revise").lower()
         if verdict not in ("ship", "revise", "rewrite"):
             verdict = "revise"

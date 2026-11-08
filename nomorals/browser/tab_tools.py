@@ -30,6 +30,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .failures import record_failure
+
 __all__ = ["docs_for_tab", "docs_for_tab_checked", "click_px",
            "type_answer", "press_key"]
 
@@ -134,8 +136,8 @@ def type_answer(tab: Any, selector: str, text: str) -> bool:
         try:
             type_text(selector, text)
             return True
-        except TypeError:
-            pass  # single-arg (focused) type_text — use the fallback
+        except TypeError as exc:
+            record_failure("tab_tools.type_answer", exc)
         except Exception:  # noqa: BLE001 - typing failed; try fallback
             pass
     box_fn = getattr(tab, "element_box", None)

@@ -72,8 +72,50 @@ all = ["nomorals[fast,media,media-edit,train,finetune,hub,ta,datasci,docs,voice,
 nm = "nomorals.cli:main"
 nmctl = "nomorals.cli:main"
 
+[tool.setuptools]
+# Runtime data assets ship with the code that loads them by __file__-
+# relative paths. include-package-data + MANIFEST.in give the sdist the
+# same inventory; the explicit package-data table below pins the wheel.
+# Deliberately EXCLUDED: nomorals/games/data/tournaments/t*.json — those
+# are runtime-written tournament state (Tournament.save() writes
+# t<epoch-millis>.json next to the code), not seed assets; an installed
+# package must not ship another machine's game state.
+include-package-data = true
+
 [tool.setuptools.packages.find]
 include = ["nomorals*"]
+
+[tool.setuptools.package-data]
+"nomorals.i18n" = ["catalogs/*.tsv"]
+"nomorals.media_edit" = ["workflows/*.json"]
+"nomorals.assets" = ["library.json"]
+"nomorals.commitments" = ["library.json"]
+"nomorals.decisions" = ["library.json"]
+"nomorals.focus" = ["library.json"]
+"nomorals.household" = ["library.json"]
+"nomorals.identity" = ["library.json"]
+"nomorals.legacy" = ["library.json"]
+"nomorals.life" = ["library.json"]
+"nomorals.meta" = ["library.json"]
+"nomorals.people" = ["library.json"]
+"nomorals.preferences" = ["library.json"]
+"nomorals.publicface" = ["library.json"]
+"nomorals.pulses" = ["library.json"]
+"nomorals.retrieval" = ["library.json"]
+"nomorals.reviews" = ["library.json"]
+"nomorals.scam" = ["library.json"]
+"nomorals.shows" = ["library.json"]
+"nomorals.sources" = ["library.json"]
+"nomorals.media.upgrade" = ["library.json"]
+# Builder templates are copied wholesale by scaffold.copytree, so the
+# whole tree ships (code files, READMEs, requirements, data) — two depth
+# patterns cover the tree's actual depth; MANIFEST.in mirrors it.
+"nomorals.builders" = ["templates/*/*", "templates/*/*/*"]
+"nomorals.wisdom" = ["data/*.json", "sessions/*.json"]
+"nomorals.agents.braineval" = ["data/*.json", "data/cases/*.jsonl"]
+"nomorals.games" = ["data/words.txt"]
+"nomorals.training" = ["seeds/*.jsonl"]
+"nomorals.agents.reverse" = ["pins/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

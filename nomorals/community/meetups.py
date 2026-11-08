@@ -39,6 +39,7 @@ from typing import Any
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
 from .events import EventStore
+from .failures import record_failure
 
 _log = get_logger("nomorals.community.meetups")
 
@@ -557,8 +558,8 @@ def _control(tail: str, context, chat, sender: str, sender_id: str) -> str:
             if low.startswith("hours:"):
                 try:
                     hours = float(low[6:])
-                except ValueError:
-                    pass
+                except ValueError as exc:
+                    record_failure("meetups._control", exc)
                 continue
             opts.append(s)
         poll = store.venue_poll(segs[0], opts, multi="multi" in flags,

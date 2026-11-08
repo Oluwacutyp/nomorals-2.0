@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import ImgGenError
+from .failures import record_failure
 from .masks import mask_status
 
 __all__ = [
@@ -143,7 +144,11 @@ def _download_file(url: str, dest: Path) -> dict[str, Any]:
                 f"download of {url} was truncated: "
                 f"{size} of {expected} bytes landed"])
         os.replace(part, dest)
-    except BaseException:
+    except BaseException:  # noqa: BLE001 — cleanup, then re-raise
+        # Deliberate catch-all: whatever interrupted the download
+        # (error, KeyboardInterrupt, SystemExit), the partial file
+        # must not survive it — and the interruption itself always
+        # propagates unchanged.
         part.unlink(missing_ok=True)
         raise
     return {"path": str(dest), "bytes": size,
@@ -281,12 +286,12 @@ class MaskProvisionFlow:
             tmp.write_text(json.dumps(record, indent=1),
                            encoding="utf-8")
             os.replace(tmp, self._state_path)
-        except OSError:
+        except OSError as exc:
             # The flow's answer stands even when the record
             # cannot be kept (read-only home); only persistence
             # of the owner's refusal is lost, never the truth of
-            # this call.
-            pass
+            # this call — but the loss itself is recorded.
+            record_failure("mask_provision._persist", exc)
         return record
 
     def _saved(self) -> dict | None:
@@ -438,8 +443,10 @@ class MaskProvisionFlow:
         record and assess fresh."""
         try:
             self._state_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as exc:
+            # Reopening still assesses fresh; a state file that
+            # refuses to clear is recorded, not silently kept.
+            record_failure("mask_provision.reopen", exc)
         return self.assess()
 
 

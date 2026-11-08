@@ -40,6 +40,7 @@ from ..core.profile import (
     detect_profile,
     resolve_profile,
 )
+from .failures import record_failure
 
 __all__ = [
     "SHED_LEVELS",
@@ -124,8 +125,8 @@ def free_memory_mb() -> int:
             if free:
                 return free
             return total
-    except (OSError, ValueError, IndexError):
-        pass
+    except (OSError, ValueError, IndexError) as exc:
+        record_failure("runtime_profile.free_memory_mb", exc)
     try:
         from ..core.profile import memory_mb
 

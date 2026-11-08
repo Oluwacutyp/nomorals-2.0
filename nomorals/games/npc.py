@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -307,8 +308,8 @@ class NPCStore:
                     except Exception:  # noqa: BLE001 - skip bad profiles
                         _log.debug("skipping malformed npc profile",
                                    exc_info=True)
-            except FileNotFoundError:
-                pass
+            except FileNotFoundError as exc:
+                record_failure("npc._load_game", exc)
             except Exception:  # noqa: BLE001 - corrupt file → empty cast
                 _log.warning("corrupt npc store %s; loading empty", path)
             self._cache[game_id] = cast

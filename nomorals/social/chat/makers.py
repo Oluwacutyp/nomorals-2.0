@@ -69,6 +69,7 @@ from pathlib import Path
 from typing import Any
 
 from .expression import ProviderHealth
+from .failures import record_failure
 from .fun import _sniff_image, _trim_caption
 
 __all__ = [
@@ -1401,8 +1402,8 @@ class MakerService:
             if with_buttons and buttons:
                 try:
                     return send(ref, caption, buttons=buttons)
-                except TypeError:
-                    pass  # a send with no buttons verb: photo goes plain
+                except TypeError as exc:
+                    record_failure("makers._one", exc)
             return send(ref, caption)
 
         try:

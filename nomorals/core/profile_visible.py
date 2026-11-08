@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .failures import record_failure
 from .profile import EnvironmentProfile, detect_profile, resolve_profile
 
 __all__ = [
@@ -50,8 +51,8 @@ def free_memory_mb() -> int:
             if free:
                 return free
             return total
-    except (OSError, ValueError, IndexError):
-        pass
+    except (OSError, ValueError, IndexError) as exc:
+        record_failure("profile_visible.free_memory_mb", exc)
     try:
         from .profile import memory_mb
 

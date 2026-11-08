@@ -1,0 +1,33 @@
+# Sdist inventory for runtime data assets — mirrors the
+# [tool.setuptools.package-data] table in pyproject.toml so an sdist
+# install behaves identically to a wheel install. The tournaments
+# directory is runtime-written game state and is pruned on purpose.
+recursive-include nomorals/i18n/catalogs *.tsv
+recursive-include nomorals/media_edit/workflows *.json
+recursive-include nomorals/assets library.json
+recursive-include nomorals/commitments library.json
+recursive-include nomorals/decisions library.json
+recursive-include nomorals/focus library.json
+recursive-include nomorals/household library.json
+recursive-include nomorals/identity library.json
+recursive-include nomorals/legacy library.json
+recursive-include nomorals/life library.json
+recursive-include nomorals/meta library.json
+recursive-include nomorals/people library.json
+recursive-include nomorals/preferences library.json
+recursive-include nomorals/publicface library.json
+recursive-include nomorals/pulses library.json
+recursive-include nomorals/retrieval library.json
+recursive-include nomorals/reviews library.json
+recursive-include nomorals/scam library.json
+recursive-include nomorals/shows library.json
+recursive-include nomorals/sources library.json
+recursive-include nomorals/media/upgrade library.json
+recursive-include nomorals/builders/templates *
+recursive-include nomorals/wisdom/data *.json
+recursive-include nomorals/wisdom/sessions *.json
+recursive-include nomorals/agents/braineval/data *.json *.jsonl
+recursive-include nomorals/games/data words.txt
+recursive-include nomorals/training/seeds *.jsonl
+recursive-include nomorals/agents/reverse/pins *.txt
+prune nomorals/games/data/tournaments

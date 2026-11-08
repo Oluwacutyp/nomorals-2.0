@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 __all__ = [
     "BrowserProfile",
@@ -199,8 +200,8 @@ class BrowserProfile:
                 try:
                     if float(expires) < now:
                         continue
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError) as exc:
+                    record_failure("profiles.cookie_header_for", exc)
             parts.append(f"{cookie.get('name')}={cookie.get('value')}")
         return "; ".join(parts)
 

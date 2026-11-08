@@ -234,14 +234,14 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_relay(response.status, response.headers, response.body)
         except EgressDenied as exc:
             self._send_text(403, f"egress denied: {exc}\n")
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        except (BrokenPipeError, ConnectionResetError) as _exc:
+            _log.debug("sandbox_l2._handle_proxy_request#2 failed", exc_info=True)
         except Exception as exc:  # noqa: BLE001 - the proxy never crashes a client
             _log.debug("egress proxy error: %s", exc, exc_info=True)
             try:
                 self._send_text(502, f"egress proxy error: {exc}\n")
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+            except (BrokenPipeError, ConnectionResetError) as _exc:
+                _log.debug("sandbox_l2._handle_proxy_request failed", exc_info=True)
 
     def _read_body(self) -> bytes:
         length = self.headers.get("Content-Length")
@@ -356,24 +356,24 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                 for sock in (client_sock, upstream):
                     try:
                         sock.setblocking(True)
-                    except OSError:
-                        pass
+                    except OSError as _exc:
+                        _log.debug("sandbox_l2.do_CONNECT#5 failed", exc_info=True)
                 try:
                     upstream.close()
-                except OSError:
-                    pass
+                except OSError as _exc:
+                    _log.debug("sandbox_l2.do_CONNECT#4 failed", exc_info=True)
         except EgressDenied as exc:
             try:
                 self._send_text(403, f"egress denied: {exc}\n")
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+            except (BrokenPipeError, ConnectionResetError) as _exc:
+                _log.debug("sandbox_l2.do_CONNECT#3 failed", exc_info=True)
+        except (BrokenPipeError, ConnectionResetError) as _exc:
+            _log.debug("sandbox_l2.do_CONNECT#2 failed", exc_info=True)
         except Exception as exc:  # noqa: BLE001 - the proxy never crashes a client
             try:
                 self._send_text(502, f"egress proxy error: {exc}\n")
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+            except (BrokenPipeError, ConnectionResetError) as _exc:
+                _log.debug("sandbox_l2.do_CONNECT failed", exc_info=True)
 
     def _send_connect_ok(self) -> None:
         self.wfile.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")

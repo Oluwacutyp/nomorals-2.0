@@ -88,8 +88,8 @@ class BudgetStore:
                     for m, cats in data.items()
                     if isinstance(cats, dict)
                 }
-        except (OSError, ValueError, TypeError, AttributeError):
-            pass
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            _log.debug("budgets._load failed", exc_info=True)
         return {}
 
     def _save(self, data: dict[str, dict[str, int]]) -> None:

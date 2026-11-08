@@ -18,7 +18,7 @@ class GoodAdapter(ChatAdapter):
 
     def send(self, chat: ChatRef, text: str, *, reply_to: str = "",
              buttons: Any = None, reply_keyboard: Any = None,
-             parse_mode: str = "") -> SendResult:
+             parse_mode: str = "", fresh: bool = False) -> SendResult:
         return SendResult(ok=True, platform=self.name, message_id="m1")
 
 

@@ -5,6 +5,9 @@ from __future__ import annotations
 import argparse
 from typing import Any
 from ..emit import _emit
+from ...core.logging_setup import get_logger
+
+_log = get_logger(__name__)
 
 
 def _get_vault(context: Any):
@@ -12,7 +15,8 @@ def _get_vault(context: Any):
         from ...accounts.vault import open_vault
         return open_vault(getattr(context, "db", None), context=context,
                           actor="finance-cli")
-    except Exception:
+    except Exception as exc:
+        _log.debug("finance._get_vault failed", exc_info=True)
         return None
 
 

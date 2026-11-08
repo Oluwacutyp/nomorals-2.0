@@ -39,10 +39,13 @@ scheduler / pulse runners own firing.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as _time, timedelta, timezone, tzinfo
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "OWNER_TZ_DEFAULT",
@@ -177,8 +180,8 @@ def _coerce_date(on_date: date | str | None,
     if isinstance(on_date, str) and on_date.strip():
         try:
             return date.fromisoformat(on_date.strip()[:10])
-        except ValueError:
-            pass
+        except ValueError as exc:
+            _log.debug("timezone._coerce_date failed", exc_info=True)
     return datetime.now(tz).date()
 
 

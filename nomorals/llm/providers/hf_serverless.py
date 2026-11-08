@@ -39,6 +39,9 @@ from ..base import (
     split_reasoning,
     validate_messages,
 )
+from ...core.logging_setup import get_logger
+
+_log = get_logger(__name__)
 
 
 # Curated fallback models for the intelligent router
@@ -163,7 +166,8 @@ class HFServerlessProvider(LLMProvider):
                 {"id": m, "provider": "hf_serverless", "capabilities": ["chat", "complete"]}
                 for m in ROUTER_FALLBACK_MODELS
             ]
-        except Exception:
+        except Exception as exc:
+            _log.debug("hf_serverless.fetch_catalog failed", exc_info=True)
             # Network failure, fall back to curated list
             return [
                 {"id": m, "provider": "hf_serverless", "capabilities": ["chat", "complete"]}

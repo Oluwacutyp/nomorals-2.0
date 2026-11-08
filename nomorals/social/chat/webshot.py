@@ -48,7 +48,6 @@ aim Devon's browser at the LAN she sits on.
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import ipaddress
 import json
@@ -57,9 +56,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 __all__ = [
     "ShotOptions", "CaptureResult", "ShotUsageError",
@@ -380,11 +381,11 @@ def playwright_renderer(url: str, opts: ShotOptions
                 page.goto(url, timeout=30_000,
                           wait_until="load")
                 if opts.wait == "idle":
-                    try:
+                    # Best effort: a page that never goes idle is
+                    # still shot, per the capture contract.
+                    with suppress(Exception):
                         page.wait_for_load_state(
                             "networkidle", timeout=5_000)
-                    except Exception:  # noqa: BLE001 - shot
-                        pass           # anyway, per docstring
                 title = ""
                 try:
                     title = page.title() or ""
@@ -566,12 +567,12 @@ def _note(health: Any, spec: Any, *, ok: bool,
           error: str = "") -> None:
     if health is None:
         return
-    try:
+    # Health reporting is advisory: it must never break the shot it
+    # describes, so its failures are suppressed by shape.
+    with suppress(Exception):
         health.note_result(spec, ok=ok, error=error,
                            items=1 if ok else 0,
                            http=200 if ok else 0)
-    except Exception:  # noqa: BLE001 - health never breaks
-        pass
 
 
 # ── the ladder ───────────────────────────────────────────────
@@ -797,7 +798,7 @@ class WebshotBook:
     def path(self) -> Path:
         return self.root / "webshots.json"
 
-    def load(self) -> "WebshotBook":
+    def load(self) -> WebshotBook:
         if not self.path.exists():
             self.data = {"journal": [], "watches": [],
                          "watch_seq": 0}
@@ -813,12 +814,12 @@ class WebshotBook:
                 f".corrupt-{int(time.time())}")
             try:
                 self.path.replace(quarantine)
+                fate = f"quarantined to {quarantine}"
             except OSError:
-                pass
+                fate = "quarantine rename failed too"
             raise WebshotStoreError(
                 f"webshot store at {self.path} is unreadable "
-                f"({type(exc).__name__}: {exc}); quarantined "
-                f"to {quarantine}") from exc
+                f"({type(exc).__name__}: {exc}); {fate}") from exc
         raw.setdefault("journal", [])
         raw.setdefault("watches", [])
         raw.setdefault("watch_seq", 0)
@@ -886,10 +887,11 @@ class WebshotBook:
             return False
         self.data["watches"] = kept
         baseline = self._baseline_path(watch_id)
-        try:
+        # Best-effort teardown: the watch row is already removed; a
+        # baseline file that refuses to unlink is a stray on disk,
+        # never a reason to keep the watch.
+        with suppress(OSError):
             baseline.unlink()
-        except OSError:
-            pass
         self.save()
         return True
 

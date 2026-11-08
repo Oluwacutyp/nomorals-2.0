@@ -245,10 +245,10 @@ def load() -> ctypes.CDLL | None:
     lib.nm_vecsim_version.restype = ctypes.c_char_p
     try:
         lib.nm_vecsim_simd_level.restype = ctypes.c_char_p
-    except AttributeError:
+    except AttributeError as exc:
         # v1 .so predates the dispatch reporting; simd_level() falls back
         # to "unknown" for it.  Rebuild with `nm native --build`.
-        pass
+        _log.debug("__init__.load failed", exc_info=True)
     lib.nm_vecsim_dot.restype = ctypes.c_float
     lib.nm_vecsim_dot.argtypes = [ctypes.POINTER(ctypes.c_float),
                                   ctypes.POINTER(ctypes.c_float),

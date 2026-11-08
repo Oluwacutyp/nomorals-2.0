@@ -64,6 +64,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ...core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger("nomorals.social.expression")
 
@@ -792,8 +793,8 @@ class ExpressionLibrary:
                 f".corrupt-{int(time.time())}")
             try:
                 self.path.replace(quarantine)
-            except OSError:
-                pass
+            except OSError as _exc:
+                record_failure("expression.load", _exc)
             _log.warning(
                 "expression library at %s unreadable (%s); "
                 "quarantined to %s — starting empty",

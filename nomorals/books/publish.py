@@ -21,6 +21,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .failures import record_failure
+
 
 def _books_root() -> Path:
     """The FictionWriter story root — where real stories actually live.
@@ -175,7 +177,8 @@ class SerialPublication:
             return None
         try:
             return json.loads(self._pub_file.read_text())
-        except Exception:
+        except Exception as exc:
+            record_failure("publish._load", exc)
             return None
 
     def _save(self, pub: dict[str, Any]) -> None:

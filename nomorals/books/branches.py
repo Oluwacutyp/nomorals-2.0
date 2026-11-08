@@ -19,6 +19,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .failures import record_failure
+
 
 def _books_root() -> Path:
     """The FictionWriter story root — where real stories actually live.
@@ -252,8 +254,8 @@ class StoryBranch:
                 branch_text = (self._dir /
                                f"chapter_{c['n']:03d}.md").read_text(
                                    encoding="utf-8")
-            except OSError:
-                pass
+            except OSError as exc:
+                record_failure("branches.diff", exc)
             canon_text = canon_texts.get(canon_n, "")
             diverged = cw is None
             if not diverged and branch_text and canon_text:
@@ -304,7 +306,8 @@ def list_branches(story_slug: str, context: Any = None) -> list[dict[str, Any]]:
                     "choices": len(m.get("choices", [])),
                     "status": m["status"],
                 })
-            except Exception:
+            except Exception as exc:
+                record_failure("branches.list_branches", exc)
                 continue
     return out
 

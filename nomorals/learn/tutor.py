@@ -861,8 +861,8 @@ class TutorSession:
         try:
             weak = self.mastery.weakest()
             lines.append(f"• weakest skill: {weak} — that's where we focus next")
-        except ValueError:
-            pass
+        except ValueError as exc:
+            _log.debug("tutor.report failed", exc_info=True)
         if self.notebook is not None:
             try:
                 stats = self.notebook.stats()

@@ -54,6 +54,7 @@ from typing import Any
 
 from .cassette import GenericCassetteStore, canonical_key
 from .errors import NoMoralsError
+from .failures import record_failure
 from .logging_setup import get_logger
 from .policy import Policy, TimedGrant
 
@@ -107,8 +108,8 @@ def is_ip_literal(host: str) -> bool:
     try:
         ipaddress.ip_address(host)
         return True
-    except ValueError:
-        pass
+    except ValueError as exc:
+        record_failure("egress.is_ip_literal", exc)
     try:
         socket.inet_aton(host)
         return True
@@ -456,12 +457,12 @@ class EgressController:
         for sock in sockets:
             try:
                 sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
+            except OSError as exc:
+                record_failure("egress.kill_all#2", exc)
             try:
                 sock.close()
-            except OSError:
-                pass
+            except OSError as exc:
+                record_failure("egress.kill_all", exc)
         _log.warning("egress kill_all: %d in flight, %d sockets closed",
                      len(flights), len(sockets))
         return report

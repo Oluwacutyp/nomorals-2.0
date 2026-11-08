@@ -178,8 +178,8 @@ def _assemble(video: str | os.PathLike[str],
     for p in parts:  # tidy intermediate trims
         try:
             Path(p).unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as exc:
+            _log.debug("transcript_edit._assemble failed", exc_info=True)
     return {"input": str(video), "output": res["output"],
             "segments": len(parts), "mode": "trim+concat"}
 

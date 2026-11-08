@@ -16,6 +16,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 __all__ = ["EnergyLedger", "BASE_WATTS", "WATTS_PER_MEM_MB"]
 
 # Heuristic draw for a busy worker slot on a typical laptop-class machine.
@@ -47,8 +51,8 @@ class EnergyLedger:
             st["count"] += 1.0
             st["total_s"] += d
             st["total_mem_mb"] += m
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as exc:
+            _log.debug("energy.record failed", exc_info=True)
 
     def avg_duration_s(self, task_type: str) -> float | None:
         st = self._stats.get(str(task_type))

@@ -24,8 +24,11 @@ import sqlite3
 import struct
 from typing import Any, Iterable
 
+from ..core.logging_setup import get_logger
 from .embeddings import EmbeddingBackend, embed_texts
 from .errors import VectorStoreError
+
+_log = get_logger(__name__)
 
 _META_SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)
@@ -76,7 +79,8 @@ def _try_load_vec0(con: sqlite3.Connection) -> bool:
     forbids extension loading. Never raises."""
     try:
         import sqlite_vec
-    except Exception:
+    except Exception as exc:
+        _log.debug("vectorstore._try_load_vec0#3 failed", exc_info=True)
         return False
     if not hasattr(con, "enable_load_extension"):
         return False
@@ -84,14 +88,16 @@ def _try_load_vec0(con: sqlite3.Connection) -> bool:
         con.enable_load_extension(True)
         sqlite_vec.load(con)
         con.enable_load_extension(False)
-    except Exception:
+    except Exception as exc:
+        _log.debug("vectorstore._try_load_vec0#2 failed", exc_info=True)
         return False
     # Prove the virtual-table module actually registered.
     try:
         con.execute("CREATE VIRTUAL TABLE IF NOT EXISTS _vec0_probe "
                     "USING vec0(embedding float[2])")
         con.execute("DROP TABLE _vec0_probe")
-    except Exception:
+    except Exception as exc:
+        _log.debug("vectorstore._try_load_vec0 failed", exc_info=True)
         return False
     return True
 

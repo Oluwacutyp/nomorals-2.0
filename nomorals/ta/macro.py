@@ -15,6 +15,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 
 class TAError(Exception):
     """Raised when a TA operation cannot be completed."""
@@ -166,8 +170,8 @@ class TrinityBias:
                 if hasattr(df.columns, "get_level_values"):
                     try:
                         df.columns = df.columns.get_level_values(0)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        _log.debug("macro._fetch#2 failed", exc_info=True)
                 cols = {str(c).lower(): c for c in df.columns}
                 if "close" not in cols:
                     return
@@ -179,5 +183,5 @@ class TrinityBias:
                 bias["_ts"] = time.time()
                 with self._lock:
                     self._cache = bias
-        except Exception:
-            pass  # background fetch never raises
+        except Exception as exc:
+            _log.debug("macro._fetch failed", exc_info=True)

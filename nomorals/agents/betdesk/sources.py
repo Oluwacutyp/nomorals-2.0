@@ -418,8 +418,10 @@ def _click_free_plan_start(tab: Any) -> bool:
         try:
             if evaluate(js):
                 return True
-        except Exception:  # noqa: BLE001 - try the label click
-            pass
+        except Exception as exc:  # noqa: BLE001 - try the label click
+            # The JS rung failed; the label click below still gets
+            # its chance — but the failure is on the desk's record.
+            record_failure("sources._click_free_plan_start", exc)
     try:
         _click_text(tab, "START")
         return True
@@ -457,8 +459,8 @@ def _subscribe_get_access(tab: Any) -> bool:
         _click_text(tab, "Subscribe", "Get Access", "Continue",
                     "Submit", "Sign Up")
         return True
-    except FlowStepError:
-        pass
+    except FlowStepError as exc:
+        record_failure("sources._subscribe_get_access", exc)
     for label in ("Subscribe", "Get Access"):
         try:
             tab.click(label)

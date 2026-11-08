@@ -19,6 +19,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 __all__ = [
     "TASK_SYSTEM_PROMPTS",
     "PromptLibrary",
@@ -197,7 +201,8 @@ class PromptLibrary:
             data = json.loads(self._path.read_text(encoding="utf-8"))
         except (FileNotFoundError, ValueError):
             return
-        except Exception:
+        except Exception as exc:
+            _log.debug("prompts._load failed", exc_info=True)
             return
         if isinstance(data, dict):
             with self._lock:
@@ -214,8 +219,8 @@ class PromptLibrary:
                 snapshot = {k: list(v) for k, v in self._prompts.items()}
             self._path.write_text(json.dumps(snapshot, indent=2),
                                   encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.debug("prompts._save failed", exc_info=True)
 
     # ── registry ─────────────────────────────────────────────────────────
     def register(self, name: str, template: str, *,

@@ -352,8 +352,8 @@ class GroupStore:
                 f".corrupt-{int(time.time())}")
             try:
                 self.path.replace(quarantine)
-            except OSError:
-                pass
+            except OSError as _exc:
+                record_failure("group_surface.load", _exc)
             raise GroupStoreError(
                 f"group store at {self.path} is unreadable "
                 f"({type(exc).__name__}: {exc}); quarantined to "
@@ -3800,8 +3800,8 @@ class GroupSurface:
                     shielded=self._shielded(group_key, target,
                                             now=now),
                     now=now)
-            except GroupConflictError:
-                pass  # a frozen conflict organ never blocks rob;
+            except GroupConflictError as exc:
+                record_failure("group_surface.rob", exc)
                 # the freeze itself surfaces on conflict paths
         if out.get("success"):
             self.store.save()
@@ -5038,8 +5038,8 @@ class GroupSurface:
             try:
                 self.war_book.register_gang(
                     group_key, str(self.store.path), out["gang"])
-            except GroupConflictError:
-                pass  # index is a directory, not the gang —
+            except GroupConflictError as exc:
+                record_failure("group_surface.gang_create", exc)
                 # a broken book never blocks the street forming
             # §36: every gang is born into the global registry
             # (a record with one chapter); a globally held name
@@ -5111,8 +5111,8 @@ class GroupSurface:
                     try:
                         self.war_book.unregister_gang(
                             group_key, str(gang.get("id") or ""))
-                    except GroupConflictError:
-                        pass
+                    except GroupConflictError as exc:
+                        record_failure("group_surface.gang_leave#2", exc)
                 self.store.save()
                 return {"ok": True, "dissolved": bool(
                     out.get("dissolved")), "gang": gang}
@@ -5125,8 +5125,8 @@ class GroupSurface:
                     self.war_book.unregister_gang(
                         group_key, str(out["gang"].get("id")
                                        or ""))
-                except GroupConflictError:
-                    pass
+                except GroupConflictError as exc:
+                    record_failure("group_surface.gang_leave", exc)
             self.store.save()
         return out
 
@@ -5538,8 +5538,8 @@ class GroupSurface:
                                     str(rec_mine["id"]),
                                     str(rec_theirs["id"]),
                                     now=now)
-            except GangRegistryError:
-                pass
+            except GangRegistryError as exc:
+                record_failure("group_surface.war_declare_inter", exc)
         self._audit(group_key, "war_inter_declare",
                     user_id=user_id,
                     target=str(theirs.get("name") or ""))
@@ -5667,8 +5667,8 @@ class GroupSurface:
                 gangs.note_inter_war_win(
                     str(war["id"]), str(gang["global"]),
                     now=now, cfg=cfg)
-        except (GangRegistryError, GroupConflictError):
-            pass  # prestige is garnish on a settled war; the
+        except (GangRegistryError, GroupConflictError) as exc:
+            record_failure("group_surface._gangs_note_settled", exc)
             # settlement itself already landed
 
     def war_raid_hq(self, group_key: str, user_id: str,
@@ -5783,8 +5783,8 @@ class GroupSurface:
                 self.gangs.note_war(str(war["id"]),
                                     str(rec_mine["id"]),
                                     str(record["id"]), now=now)
-            except GangRegistryError:
-                pass
+            except GangRegistryError as exc:
+                record_failure("group_surface.war_raid_hq", exc)
         self._audit(group_key, "hq_raid_declare",
                     user_id=user_id,
                     target=str(record["name"]))
@@ -5818,8 +5818,8 @@ class GroupSurface:
                 self.war_book.register_gang(
                     group_key, str(self.store.path),
                     out["chapter"])
-            except GroupConflictError:
-                pass
+            except GroupConflictError as exc:
+                record_failure("group_surface.gang_found_chapter", exc)
             self._audit(group_key, "gang_chapter_founded",
                         user_id=user_id,
                         gang=str(record["name"]))
@@ -6925,7 +6925,8 @@ class GroupSurface:
         earners: dict[str, int] = {}
         try:
             ledger = econ._ledger(group_key)
-        except Exception:
+        except Exception as exc:
+            record_failure("group_surface.compose_briefing", exc)
             ledger = []  # a frozen ledger reads as no movement,
             # never as invented movement (the freeze itself is
             # surfaced by the economy's own paths)
@@ -6995,7 +6996,8 @@ class GroupSurface:
             return []
         try:
             state = self.conflict._load_state(group_key)
-        except Exception:
+        except Exception as exc:
+            record_failure("group_surface._briefing_territory", exc)
             return []
         gangs = state.get("gangs") or {}
         current: dict[str, str] = {}
@@ -7301,7 +7303,8 @@ class GroupSurface:
         econ = self.economy
         try:
             balances = econ.balances(group_key)
-        except Exception:
+        except Exception as exc:
+            record_failure("group_surface._milestone_truths#2", exc)
             balances = {}
         best_uid, best_total = "", 0
         for uid, wallet in balances.items():
@@ -7325,7 +7328,8 @@ class GroupSurface:
         if self._conflict_mode(group_key) != "off":
             try:
                 state = self.conflict._load_state(group_key)
-            except Exception:
+            except Exception as exc:
+                record_failure("group_surface._milestone_truths", exc)
                 state = {}
             if state.get("gangs"):
                 out.append({

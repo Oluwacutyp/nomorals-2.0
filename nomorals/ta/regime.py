@@ -11,6 +11,9 @@ from __future__ import annotations
 
 
 from .math import atr, ensure_ohlcv, rolling_quantile
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
 
 
 # ── lazy optional deps ──────────────────────────────────────────────────
@@ -356,7 +359,8 @@ class HMMRegimeDetector:
                 n_components=self.n_states, covariance_type="diag",
                 n_iter=self.n_iter, random_state=self.random_state)
             states = self.model.fit_predict(X)
-        except Exception:
+        except Exception as exc:
+            _log.debug("regime.fit failed", exc_info=True)
             frame = RegimeDetector().fit(df)
             frame["method"] = "rule"
             return frame[["label", "method"]]

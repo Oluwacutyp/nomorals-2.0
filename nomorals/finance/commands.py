@@ -10,6 +10,9 @@ from typing import Any
 from .budgets import (BudgetStore, budget_status, finance_paths, month_key,
                       render_budget_grid)
 from .ledger import Ledger, format_naira, parse_amount
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
 
 # /spend 5k on transport for lunch  → amount, category, note
 _RE_SPEND_ON = re.compile(
@@ -238,7 +241,8 @@ def _vault_from_context(context: Any) -> Any | None:
         from ..accounts.vault import open_vault
         return open_vault(getattr(context, "db", None), context=context,
                           actor="finance")
-    except Exception:
+    except Exception as exc:
+        _log.debug("commands._vault_from_context failed", exc_info=True)
         return None
 
 

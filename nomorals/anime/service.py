@@ -10,6 +10,7 @@ failure says which sources were tried and why they failed.
 
 from __future__ import annotations
 
+import logging
 import random
 import re
 import time
@@ -35,6 +36,8 @@ from .sources import (
     SourceFailure,
     TraceMoeClient,
 )
+
+_log = logging.getLogger(__name__)
 
 __all__ = ["AnimeService", "Outcome", "ResultCache", "WAT"]
 
@@ -197,8 +200,8 @@ class AnimeService:
                     if want & names and hit.mal_score is not None:
                         rec.mal_score = hit.mal_score
                         break
-            except (SourceFailure, ShapeError):
-                pass  # the cross-check is garnish, never a blocker
+            except (SourceFailure, ShapeError) as exc:
+                _log.debug("service._detail failed", exc_info=True)
         return rec, note
 
     # ── title lookup: /anime /manga ───────────────────────────────

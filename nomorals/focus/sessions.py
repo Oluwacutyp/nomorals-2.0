@@ -44,10 +44,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "FocusSession",
@@ -230,8 +233,8 @@ class FocusTimer:
                                        for s in self.sessions.values()]},
                           fh, ensure_ascii=False)
             os.replace(tmp, self.path)
-        except OSError:
-            pass
+        except OSError as exc:
+            _log.debug("sessions._save failed", exc_info=True)
 
     # ── lifecycle ────────────────────────────────────────────────
     def active(self) -> FocusSession | None:

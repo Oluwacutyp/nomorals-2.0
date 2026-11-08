@@ -47,6 +47,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .failures import record_failure
+
 __all__ = [
     "BOARD_LIMIT",
     "SNAPSHOTS_KEPT",
@@ -261,8 +263,8 @@ class BoardBook:
                 bad = self.path.with_suffix(
                     self.path.suffix + ".corrupt")
                 self.path.replace(bad)
-            except OSError:
-                pass
+            except OSError as exc:
+                record_failure("group_boards._load", exc)
             self.data = {"boards": {}}
 
     def save(self) -> None:

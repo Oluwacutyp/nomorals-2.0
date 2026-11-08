@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger("nomorals.community.parties_quick")
 
@@ -157,8 +158,8 @@ class PartyQuick:
     def _say(self, text: str) -> None:
         try:
             self._say_fn(text)
-        except Exception:
-            pass
+        except Exception as exc:
+            record_failure("parties_quick._say", exc)
 
     def _credit(self, party: QuickParty, member: str, amount: int, reason: str) -> None:
         if party.rehearsal or self._economy is None:

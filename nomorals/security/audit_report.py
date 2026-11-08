@@ -29,7 +29,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from ..core.logging_setup import get_logger
 from .audit_evidence import pack_for_storage
+
+_log = get_logger(__name__)
 
 __all__ = [
     "SEVERITY_ORDER", "grade_finding", "grade_findings",
@@ -343,8 +346,8 @@ def discover_contacts_repo(root: Path, url: str = "") -> list[str]:
             text = author if isinstance(author, str) else \
                 json.dumps(author or {})
             contacts += _emails(text)
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            _log.debug("audit_report.discover_contacts_repo failed", exc_info=True)
     if not contacts and url:
         m = re.search(r"github\.com[:/]([^/]+)/([^/.]+)", url)
         if m:
@@ -437,8 +440,8 @@ class AuditBook:
                 f".corrupt-{int(time.time())}")
             try:
                 self.path.replace(quarantine)
-            except OSError:
-                pass
+            except OSError as _exc:
+                _log.debug("audit_report.load failed", exc_info=True)
             raise AuditStoreError(
                 f"secaudit store at {self.path} is unreadable "
                 f"({type(exc).__name__}: {exc}); quarantined to "

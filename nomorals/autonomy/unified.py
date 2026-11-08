@@ -62,6 +62,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 from .preemption import PriorityLadder
 
 _log = get_logger(__name__)
@@ -115,16 +116,16 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
         try:
             if tmp.exists():
                 tmp.unlink()
-        except OSError:
-            pass
+        except OSError as exc:
+            record_failure("unified.atomic_write_json#2", exc)
     try:
         dir_fd = os.open(str(target.parent), os.O_RDONLY)
         try:
             os.fsync(dir_fd)
         finally:
             os.close(dir_fd)
-    except OSError:
-        pass  # directory fsync is best-effort on some filesystems
+    except OSError as exc:
+        record_failure("unified.atomic_write_json", exc)
 
 
 def normalize_mission(mission: Any, *, now: float | None = None) -> dict[str, Any]:

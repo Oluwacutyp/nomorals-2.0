@@ -52,12 +52,15 @@ engine; the rest of the scheduler package is L4.
 
 from __future__ import annotations
 
+import logging
 import calendar as _calendar
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone as _dt_timezone
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "CronSpec",
@@ -1324,8 +1327,8 @@ def parse_natural_datetime(text: str, *,
     # ISO first ("2026-10-15", "2026-10-15 14:30")
     try:
         return aware(datetime.fromisoformat(raw))
-    except ValueError:
-        pass
+    except ValueError as exc:
+        _log.debug("recurrence.parse_natural_datetime failed", exc_info=True)
 
     # "in N <unit>" / "in a minute"
     m = re.fullmatch(

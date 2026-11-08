@@ -200,8 +200,8 @@ def ipv6_egress() -> dict[str, Any]:
     try:
         if socket.has_ipv6:
             out["supported"] = True
-    except AttributeError:
-        pass
+    except AttributeError as _exc:
+        _log.debug("netleak.ipv6_egress failed", exc_info=True)
     try:
         ip = _http_text("https://api64.ipify.org", timeout=10)
         if ":" in ip:

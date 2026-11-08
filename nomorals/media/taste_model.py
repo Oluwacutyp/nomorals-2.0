@@ -25,6 +25,8 @@ import os
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from .failures import record_failure
+
 __all__ = ["TasteModel", "candidate_features", "register"]
 
 _DEFAULT_PATH = os.path.expanduser("~/.nomorals/media/taste_model.json")
@@ -61,12 +63,12 @@ def candidate_features(spec: dict[str, Any]) -> list[str]:
     bpm = spec.get("bpm", spec.get("tempo", 0)) or 0
     try:
         feats.append(_bpm_band(float(bpm)))
-    except (TypeError, ValueError):
-        pass
+    except (TypeError, ValueError) as exc:
+        record_failure("taste_model.candidate_features#2", exc)
     try:
         feats.append(_energy_band(float(spec.get("energy", 0.5))))
-    except (TypeError, ValueError):
-        pass
+    except (TypeError, ValueError) as exc:
+        record_failure("taste_model.candidate_features", exc)
     key = str(spec.get("key", "") or "").upper()
     if key:
         feats.append(f"key:{key}")

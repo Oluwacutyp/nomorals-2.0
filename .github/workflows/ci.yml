@@ -4,8 +4,11 @@
 #   - lint: the repo's own linter (ruff, per [tool.ruff] in pyproject.toml).
 #   - layering: tests/test_layering.py — the architecture contract.
 #   - error_scan: nomorals.tools.error_scan over the package.
-#   - offline unit suite: `python3 -m unittest discover -s tests` with
-#     NM_RUN_INTEGRATION unset, so only the offline tiers run.
+#   - offline unit suite: ONE canonical runner — `pytest` over tests/,
+#     sharded deterministically by file — with NM_RUN_INTEGRATION unset,
+#     so only the offline tiers run. (Until Batch A this step executed
+#     `unittest discover`, which silently never ran the ~15k collected
+#     plain-function tests; pytest executes both populations.)
 #
 # Gates (block): the ruff lint-debt RATCHET (ruff-ratchet.json — per-code
 # ceilings that may only decrease) and the committed-secret scan
@@ -32,13 +35,16 @@ on:
 
 jobs:
   ci:
-    name: "CI (py${{ matrix.python-version }})"
+    name: "CI (py${{ matrix.python-version }}, shard ${{ matrix.shard }})"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         # NOTE: pyproject.toml sets requires-python >= 3.11, so 3.10 is out.
         python-version: ["3.11", "3.12"]
+        # Deterministic file-level shards of the one pytest population
+        # (see the suite step): shard N takes every 2nd collected file.
+        shard: [0, 1]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -91,35 +97,101 @@ jobs:
         run: python3 -m nomorals.tools.ruff_ratchet
 
       - name: Layering contract
-        run: python3 -m unittest tests.test_layering
+        run: python3 -m pytest tests/test_layering.py
 
       - name: Error scan
         run: python3 -m nomorals.tools.error_scan nomorals/
 
       - name: Collection gate (a broken test import must fail CI)
         run: |
-          # Under `unittest discover` a broken test import degrades to one
-          # error and the rest of the suite still runs — which is how the
-          # stale `_confidence` import hid for days. This gate fails fast:
-          # any collection error makes CI red before the suite runs.
+          # A broken test import must fail fast, before the suite runs —
+          # the stale `_confidence` import once hid for days behind a
+          # runner that degraded import errors to a single failure line.
+          # The gate collects with the same runner that executes.
           python3 -m pytest tests --collect-only -q
 
-      - name: Offline unit suite (NM_RUN_INTEGRATION unset)
-        # Enforced budget: measured ~59 min on 2026-10-14 (docs/SUITE_RUNTIME.md).
+      - name: Offline unit suite (NM_RUN_INTEGRATION unset, shard ${{ matrix.shard }})
+        # Budget: the full pytest population (TestCase classes AND plain
+        # functions) across 2 deterministic shards; re-measure on the
+        # first runs and record in docs/SUITE_RUNTIME.md.
         timeout-minutes: 90
         run: |
           if [ -n "${NM_RUN_INTEGRATION:-}" ]; then
             echo "NM_RUN_INTEGRATION is set on the runner; refusing to run the offline suite with it" >&2
             exit 1
           fi
-          # NB: GitHub runs this under `bash -e`; capture the exit code with
-          # `||` so a failing suite doesn't skip the failure report below.
-          python3 -m unittest discover -s tests > /tmp/suite.log 2>&1 || CODE=$?
-          echo "=== SUITE SUMMARY ==="
-          grep -E "^(Ran|OK|FAILED)" /tmp/suite.log || true
+          # Deterministic shard selection: sort the collected test files
+          # and take every 2nd one (NR is 1-based; shard 0 takes even
+          # lines, shard 1 odd). Fall back to the plain file listing if
+          # the collect output shape ever changes under us.
+          python3 -m pytest tests --collect-only -q 2>/dev/null \
+            | grep -oE '^tests/[^:]+\.py' | sort -u > /tmp/all_files.txt || true
+          if [ ! -s /tmp/all_files.txt ]; then
+            ls tests/test_*.py | sort > /tmp/all_files.txt
+          fi
+          awk -v s=${{ matrix.shard }} 'NR % 2 == s' /tmp/all_files.txt \
+            > /tmp/shard_files.txt
+          echo "shard ${{ matrix.shard }}: $(wc -l < /tmp/shard_files.txt) of $(wc -l < /tmp/all_files.txt) files"
+          # Collected identity count for THIS shard, recorded so the
+          # executed-vs-collected drift is visible in every run's log.
+          # pytest's quiet collect output has three shapes (per-file
+          # counts, a summary line, or bare nodeids); accept all three.
+          python3 -m pytest $(cat /tmp/shard_files.txt) \
+            --collect-only -q 2>/dev/null > /tmp/collected.txt || true
+          COLLECTED=$(grep -oE ': [0-9]+$' /tmp/collected.txt \
+            | grep -oE '[0-9]+' | awk '{n += $1} END {print n + 0}')
+          if [ -z "$COLLECTED" ] || [ "$COLLECTED" = "0" ]; then
+            COLLECTED=$(grep -oE '^[0-9]+ tests? collected' \
+              /tmp/collected.txt | grep -oE '^[0-9]+' | tail -1)
+          fi
+          if [ -z "$COLLECTED" ] || [ "$COLLECTED" = "0" ]; then
+            COLLECTED=$(grep -c '::' /tmp/collected.txt || true)
+          fi
+          echo "collected (shard): $COLLECTED"
+          # NB: GitHub runs this under `bash -e`; capture the exit code
+          # with `||` so a failing suite doesn't skip the report below.
+          python3 -m pytest $(cat /tmp/shard_files.txt) \
+            --junitxml=/tmp/junit.xml > /tmp/suite.log 2>&1 || CODE=$?
+          echo "=== SUITE SUMMARY (shard ${{ matrix.shard }}) ==="
+          tail -2 /tmp/suite.log || true
+          python3 - "$COLLECTED" <<'PYEOF'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          collected = sys.argv[1] or "?"
+          try:
+              suite = ET.parse("/tmp/junit.xml").getroot()
+              if suite.tag == "testsuites":
+                  suite = suite.find("testsuite")
+              g = lambda k: int(suite.get(k, 0))  # noqa: E731
+              executed, failures = g("tests"), g("failures")
+              errors, skipped = g("errors"), g("skipped")
+              print(f"EXECUTED_VS_COLLECTED collected={collected} "
+                    f"executed={executed} passed={executed - failures - errors - skipped} "
+                    f"failed={failures} errors={errors} skipped={skipped}")
+              if str(executed) != str(collected):
+                  # Visible, not fatal: module-level skips legitimately
+                  # compress several collected items into one report.
+                  print(f"NOTE: executed != collected (delta "
+                        f"{executed - int(collected) if collected.isdigit() else '?'}); "
+                        "inspect for deselection drift")
+          except Exception as exc:  # noqa: BLE001 - report, never mask the suite result
+              print(f"EXECUTED_VS_COLLECTED collected={collected} "
+                    f"executed=UNPARSED ({type(exc).__name__}: {exc})")
+          PYEOF
           echo "=== FAILURES (first 30) ==="
-          grep -E "^(FAIL|ERROR):" /tmp/suite.log | head -30 || true
+          grep -E "^FAILED" /tmp/suite.log | head -30 || true
           exit ${CODE:-0}
+
+      - name: Upload suite report (shard ${{ matrix.shard }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: suite-py${{ matrix.python-version }}-shard${{ matrix.shard }}
+          path: |
+            /tmp/junit.xml
+            /tmp/suite.log
+          if-no-files-found: ignore
 
   # ── Committed-secret GATE (Wave 8): runs the repo's own secret-pattern
   # battery (nomorals.security.audit_patterns) over every tracked file and

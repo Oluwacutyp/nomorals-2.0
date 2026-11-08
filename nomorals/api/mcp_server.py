@@ -439,15 +439,15 @@ class MCPServer:
                 if previous_principal is None:
                     try:
                         del self._principal_tls.principal
-                    except AttributeError:
-                        pass
+                    except AttributeError as exc:
+                        _log.debug("mcp_server.dispatch#2 failed", exc_info=True)
                 else:
                     self._principal_tls.principal = previous_principal
             if previous is None:
                 try:
                     del self._emit_tls.emit
-                except AttributeError:
-                    pass
+                except AttributeError as exc:
+                    _log.debug("mcp_server.dispatch failed", exc_info=True)
             else:
                 self._emit_tls.emit = previous
 

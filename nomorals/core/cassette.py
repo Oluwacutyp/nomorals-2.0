@@ -31,6 +31,8 @@ import threading
 from pathlib import Path
 from typing import Any, Iterator
 
+from .failures import record_failure
+
 __all__ = [
     "GenericCassetteStore",
     "canonical_json",
@@ -84,8 +86,8 @@ class GenericCassetteStore:
                         # First-write-wins: a duplicate key never
                         # overwrites the original recording.
                         index.setdefault(record.get("key", ""), record)
-        except OSError:
-            pass
+        except OSError as exc:
+            record_failure("cassette._load_index", exc)
         self._index = index
         return index
 

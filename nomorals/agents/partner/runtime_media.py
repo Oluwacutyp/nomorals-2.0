@@ -2411,8 +2411,13 @@ class RuntimeMediaMixin:
                         audio["comment"] = [comment]
                 audio.save()
                 return True
-        except ImportError:
-            pass
+        except ImportError as exc:
+            # mutagen absent on this host: tags via mutagen are
+            # unavailable (the ffmpeg rung below still runs) — record
+            # the degradation instead of letting it look like success.
+            record_failure(
+                "runtime_media.RuntimeMediaMixin._write_tags.mutagen_import",
+                exc)
         except Exception as e:  # noqa: BLE001 - fall to the ffmpeg rung
             record_failure(
                 "runtime_media.RuntimeMediaMixin._write_tags.mutagen", e)

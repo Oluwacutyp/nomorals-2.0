@@ -23,7 +23,10 @@ import shutil
 import socket
 from typing import Any
 
+from ...core.logging_setup import get_logger
 from ..emit import _emit
+
+_log = get_logger(__name__)
 
 #: Static capability matrix — read off the adapter implementations in
 #: nomorals/social/chat/. Keep this in sync when an adapter gains one.
@@ -168,8 +171,8 @@ def _doctor(settings: Any) -> list[dict[str, Any]]:
             sock = socket.create_connection((host, port), timeout=2)
             sock.close()
             reachable = True
-        except OSError:
-            pass
+        except OSError as exc:
+            _log.debug("chat._doctor failed", exc_info=True)
         detail = (f"go_bridge={'yes' if go_bridge else 'NO'}, "
                   f"node={'yes' if node else 'NO'}, "
                   f"node_bridge={'yes' if node_bridge else 'NO'}, "

@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from .failures import record_failure
 from .tgbot_buttons import Keyboard, nav_row
 
 __all__ = [
@@ -249,8 +250,8 @@ class CooldownStore:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.write_text(json.dumps(self._data, indent=1),
                                  encoding="utf-8")
-        except OSError:
-            pass  # cooldowns are best-effort; a failed save never blocks a tool
+        except OSError as exc:
+            record_failure("hub._save", exc)
 
     def remaining(self, user_key: str, tool: str, cooldown_s: float,
                   *, now: float | None = None) -> float:

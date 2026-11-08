@@ -29,6 +29,7 @@ from typing import Any, Callable, Iterable
 
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 __all__ = ["Blackboard", "BlackboardEntry", "Subscription"]
 
@@ -464,8 +465,8 @@ class Blackboard:
         try:
             json.dumps(value)
             return value
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as exc:
+            record_failure("blackboard._json_safe", exc)
         if isinstance(value, dict):
             return {str(k): Blackboard._json_safe(v) for k, v in value.items()}
         if isinstance(value, (list, tuple)):

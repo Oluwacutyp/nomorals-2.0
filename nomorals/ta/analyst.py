@@ -243,8 +243,8 @@ class Analyst:
                     reasons.append(
                         f"TP1 snapped to {key} {lv[key]['mid']:.5f} "
                         f"(strength {lv[key]['strength']})")
-            except Exception:
-                pass
+            except Exception as _exc:
+                _log.debug("analyst.analyze failed", exc_info=True)
 
         return TradeIdea(
             symbol=symbol, side=side,
@@ -314,6 +314,6 @@ def executor_check(idea: TradeIdea) -> dict:
                     f"{lesson['evidence']}"
                 ),
             }
-    except Exception:
-        pass  # lesson gate is advisory, never a crash vector
+    except Exception as exc:
+        _log.debug("analyst.executor_check failed", exc_info=True)
     return {"ok": True, "reason": "idea well-formed"}

@@ -97,8 +97,8 @@ class SandboxLimits:
             os.setsid()  # own process group, so the whole tree can be signalled
         except OSError:  # pragma: no cover - already a leader  # noqa: E103 - already documented
             pass
-        except AttributeError:  # pragma: no cover - no setsid on Windows
-            pass
+        except AttributeError as exc:  # pragma: no cover - no setsid on Windows
+            _log.debug("shell.preexec failed", exc_info=True)
 
 
 def _set(which: int, soft: int, hard: int) -> None:

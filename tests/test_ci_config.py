@@ -55,8 +55,15 @@ class CiConfigTests(unittest.TestCase):
         self.assertIn("test_layering", text)
         # (c) the error scanner over the package
         self.assertIn("error_scan", text)
-        # (d) the offline unit suite, NM_RUN_INTEGRATION unset
-        self.assertIn("unittest discover", text)
+        # (d) the offline unit suite, NM_RUN_INTEGRATION unset.
+        # Batch A (F04): ONE canonical runner — pytest collects AND
+        # executes, so plain test functions run alongside unittest
+        # classes. The old pin demanded the literal "unittest
+        # discover" stage, which is precisely the split-runner
+        # defect F04 removed (~15k collected functions never ran).
+        self.assertIn("pytest", text)
+        self.assertIn("EXECUTED_VS_COLLECTED", text)
+        self.assertNotIn("unittest discover", text)
         self.assertIn("NM_RUN_INTEGRATION", text)
 
     def test_secret_scan_is_a_real_gate(self) -> None:

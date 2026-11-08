@@ -124,8 +124,8 @@ def _ensure_schema(db: Database) -> None:
         try:
             db.execute(f'ALTER TABLE "{_META_TABLE}" ADD COLUMN '
                        '"format" TEXT NOT NULL DEFAULT \'\'')
-        except StorageError:
-            pass  # raced with another _ensure_schema; column is there now
+        except StorageError as exc:
+            _log.debug("index._ensure_schema failed", exc_info=True)
     db.execute(
         f'CREATE TABLE IF NOT EXISTS "{_VERSION_TABLE}" ('
         '"key" TEXT PRIMARY KEY, '

@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -59,6 +60,8 @@ import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "Commitment",
@@ -820,8 +823,8 @@ class CommitmentLedger:
                 json.dump({"entries": [e.to_dict() for e in self.entries]},
                           fh, ensure_ascii=False)
             os.replace(tmp, self.path)
-        except OSError:
-            pass  # fail-open: the in-memory ledger is still the truth
+        except OSError as exc:
+            _log.debug("ledger._save failed", exc_info=True)
 
     # ── append-only core ─────────────────────────────────────────
     def _append(self, kind: str, commitment_id: str, detail: str = "",

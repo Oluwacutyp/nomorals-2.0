@@ -157,7 +157,8 @@ class WebhookAdapter(ChatAdapter):
              reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
              reply_keyboard: list[list[str]] | None = None,
-             parse_mode: str = "") -> SendResult:
+             parse_mode: str = "",
+             fresh: bool = False) -> SendResult:
         started = time.perf_counter()
         payload = {"chat": chat.key, "chat_id": chat.chat_id,
                    "text": text, "reply_to": reply_to}

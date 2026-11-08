@@ -149,8 +149,8 @@ def _fee_kobo(text: str, keywords: list[str], base_kobo: int) -> tuple[int, bool
             if pm and base_kobo > 0:
                 try:
                     return int(base_kobo * float(pm.group(1)) / 100), True
-                except ValueError:
-                    pass
+                except ValueError as exc:
+                    record_failure("passport._fee_kobo#2", exc)
             # …or tight before it ("10% agency fee") — 12 chars only, so a
             # percentage belonging to another fee can't leak in.
             before = t[max(0, m.start() - 12):m.start()]
@@ -158,8 +158,8 @@ def _fee_kobo(text: str, keywords: list[str], base_kobo: int) -> tuple[int, bool
             if pm and base_kobo > 0:
                 try:
                     return int(base_kobo * float(pm.group(1)) / 100), True
-                except ValueError:
-                    pass
+                except ValueError as exc:
+                    record_failure("passport._fee_kobo", exc)
             amt = _parse_kobo(after)
             if amt > 0:
                 return amt, True

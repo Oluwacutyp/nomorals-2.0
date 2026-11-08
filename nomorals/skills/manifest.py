@@ -69,6 +69,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.errors import ValidationError
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
 
 __all__ = [
     "SkillManifest",
@@ -318,8 +321,8 @@ def _coerce_value(type_name: str, value: Any) -> tuple[Any, bool]:
             parsed = json.loads(value)
             if _type_matches(type_name, parsed):
                 return parsed, True
-    except (ValueError, TypeError):
-        pass
+    except (ValueError, TypeError) as exc:
+        _log.debug("manifest._coerce_value failed", exc_info=True)
     return value, False
 
 

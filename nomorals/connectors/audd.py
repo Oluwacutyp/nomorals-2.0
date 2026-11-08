@@ -322,7 +322,8 @@ class AudDConnector(Connector):
             _log.debug("audd audio prep failed", exc_info=True)
             try:
                 return Path(audio_path) if Path(audio_path).is_file() else None
-            except Exception:
+            except Exception as exc:
+                _log.debug("audd._prepare_audio failed", exc_info=True)
                 return None
 
     # ── HTTP ─────────────────────────────────────────────────────

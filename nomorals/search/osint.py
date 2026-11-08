@@ -85,8 +85,8 @@ def _parse_ts(value: Any) -> float | None:
         return None
     try:
         return float(text)
-    except ValueError:
-        pass
+    except ValueError as exc:
+        _log.debug("osint._parse_ts failed", exc_info=True)
     try:
         from datetime import datetime, timezone
 
@@ -221,8 +221,8 @@ def _looks_like_ip(q: str) -> str | None:
         socket.inet_aton(q)
         if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", q):
             return q
-    except OSError:
-        pass
+    except OSError as exc:
+        _log.debug("osint._looks_like_ip failed", exc_info=True)
     return None
 
 

@@ -35,6 +35,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -535,7 +536,8 @@ def describe_fields(page: Any) -> list[dict[str, Any]]:
         return []
     try:
         raw = evaluate(_DESCRIBE_JS)
-    except Exception:
+    except Exception as exc:
+        record_failure("forms.describe_fields", exc)
         return []
     return [dict(item) for item in (raw or []) if isinstance(item, dict)]
 
@@ -555,7 +557,8 @@ def describe_forms(page: Any) -> list[dict[str, Any]]:
         return []
     try:
         raw = evaluate(_DESCRIBE_FORMS_JS)
-    except Exception:
+    except Exception as exc:
+        record_failure("forms.describe_forms", exc)
         return []
     return [dict(item) for item in (raw or []) if isinstance(item, dict)]
 

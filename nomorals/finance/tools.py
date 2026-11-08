@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..core.logging_setup import get_logger
 from .budgets import (
     BudgetStore,
     budget_status,
@@ -12,6 +13,8 @@ from .budgets import (
     weekly_digest,
 )
 from .ledger import Ledger, format_naira, parse_amount
+
+_log = get_logger(__name__)
 
 
 def _ledger_budgets(context: Any) -> tuple[Ledger, BudgetStore]:
@@ -194,10 +197,10 @@ def register(registry: Any) -> None:
     )
     def finance_recurring(context: Any, action: str = "list",
                           days: int = 14) -> dict[str, Any]:
-        from .insights import (detect_recurring, render_recurring,
-                               upcoming_bills)
-        from .ledger import Ledger as _L
         import time as _t
+
+        from .insights import detect_recurring, render_recurring, upcoming_bills
+        from .ledger import Ledger as _L
         ledger, _ = _ledger_budgets(context)
         now = _t.time()
         action = (action or "list").lower()
@@ -303,8 +306,7 @@ def register(registry: Any) -> None:
         },
     )
     def finance_balances(context: Any, rails: str = "") -> dict[str, Any]:
-        from .overview import (BalanceCache, collect_balances, render_overview,
-                               snapshot_net_worth)
+        from .overview import BalanceCache, collect_balances, render_overview, snapshot_net_worth
         try:
             from ..accounts.vault import open_vault
             vault = open_vault(getattr(context, "db", None),
@@ -317,8 +319,8 @@ def register(registry: Any) -> None:
             cache = BalanceCache()
             try:
                 context._finance_balance_cache = cache
-            except Exception:
-                pass
+            except Exception as _exc:
+                _log.debug("tools.finance_balances failed", exc_info=True)
         ov = cache.get(vault, rails=wanted)
         snapshot_net_worth(ov)
         return {
@@ -362,8 +364,7 @@ def register(registry: Any) -> None:
         target: str = "", threshold: float = 0.0, market: str = "crypto",
         alert_id: str = "", snooze_days: float = 7.0, deliver: bool = False,
     ) -> dict[str, Any]:
-        from .alerts import (AlertStore, add_alert, evaluate_alerts,
-                             render_alerts, sync_bill_alerts)
+        from .alerts import AlertStore, add_alert, evaluate_alerts, render_alerts, sync_bill_alerts
         action = (action or "list").lower()
         store = AlertStore()
         if action == "add":
@@ -394,8 +395,8 @@ def register(registry: Any) -> None:
                         from ..agents.notifier import Notifier
                         Notifier(context).publish(
                             "price_alert", title, body)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        _log.debug("tools._notify failed", exc_info=True)
 
             result = evaluate_alerts(notify=_notify)
             return {"ok": True, "delivered": bool(deliver),
@@ -422,8 +423,7 @@ def register(registry: Any) -> None:
         parameters={"days": "int — analysis window in days (default 30)"},
     )
     def finance_insights(context: Any, days: int = 30) -> dict[str, Any]:
-        from .insights import (compute_insights, render_insights,
-                               safe_to_spend)
+        from .insights import compute_insights, render_insights, safe_to_spend
         ledger, _ = _ledger_budgets(context)
         days = max(7, min(365, int(days or 30)))
         ins = compute_insights(ledger, window_days=days)
@@ -472,8 +472,7 @@ def register(registry: Any) -> None:
         amount: Any = "", deadline: str = "", goal_type: str = "target",
         goal_id: str = "", snooze_days: float = 30.0,
     ) -> dict[str, Any]:
-        from .goals import (GoalStore, create_goal, goal_progress,
-                            render_goals)
+        from .goals import GoalStore, create_goal, goal_progress, render_goals
         ledger, _ = _ledger_budgets(context)
         store = GoalStore()
         action = (action or "list").lower()
@@ -550,7 +549,7 @@ def register(registry: Any) -> None:
         per_month: Any = "", ttl_days: float = 30.0,
         mandate_id: str = "",
     ) -> dict[str, Any]:
-        from .mandate import (MandateStore, issue_mandate, mandate_remaining)
+        from .mandate import MandateStore, issue_mandate, mandate_remaining
 
         def _kobo(v: Any) -> int | None:
             if v == "" or v is None:
@@ -635,8 +634,8 @@ def register(registry: Any) -> None:
         connector = getattr(context, "exness", None)
         if connector is None:
             try:
-                from ..connectors.exness import ExnessConnector
                 from ..accounts.vault import open_vault
+                from ..connectors.exness import ExnessConnector
                 vault = open_vault(getattr(context, "db", None),
                                    context=context, actor="finance")
                 connector = ExnessConnector(vault=vault)

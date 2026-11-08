@@ -24,7 +24,10 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from ..core.logging_setup import get_logger
 from .model import Document, Section, Table
+
+_log = get_logger(__name__)
 
 __all__ = ["fixture_document", "measure_all", "render_parity_md",
            "find_embedded_font", "ocr_gate_state"]
@@ -209,8 +212,8 @@ def find_embedded_font() -> str | None:
                 capture_output=True, text=True, timeout=10)
             if out.returncode == 0 and Path(out.stdout.strip()).is_file():
                 return out.stdout.strip()
-        except (OSError, subprocess.SubprocessError):
-            pass
+        except (OSError, subprocess.SubprocessError) as exc:
+            _log.debug("corpus.find_embedded_font failed", exc_info=True)
     for candidate in _FONT_CANDIDATES:
         if Path(candidate).is_file():
             return candidate
@@ -235,8 +238,7 @@ def ocr_gate_state() -> dict[str, Any]:
 
 def measure_all() -> dict[str, Any]:
     """Run every round-trip and return the raw measurements."""
-    from .convert import (to_docx, to_epub, to_markdown, to_pdf,
-                          to_pdf_embedded, to_pptx, to_xlsx)
+    from .convert import to_docx, to_epub, to_markdown, to_pdf, to_pdf_embedded, to_pptx, to_xlsx
     from .parsers import parse_bytes
 
     doc = fixture_document()
@@ -281,8 +283,9 @@ def measure_all() -> dict[str, Any]:
         full = _TtfFont(Path(font).read_bytes())
         embedded["font_glyphs"] = full.num_glyphs
         # subset glyph count, read back out of the produced PDF
-        from ..core.pdf import _parse_objects, _stream_bytes
         import zlib as _zlib
+
+        from ..core.pdf import _parse_objects, _stream_bytes
         for body in _parse_objects(blob).values():
             if b"Length1" in body:
                 raw = _zlib.decompress(_stream_bytes(body) or b"")

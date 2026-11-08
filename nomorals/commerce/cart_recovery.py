@@ -232,8 +232,8 @@ class CartRecovery:
             try:
                 self._db.execute(
                     f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
-            except sqlite3.OperationalError:
-                pass  # column already there
+            except sqlite3.OperationalError as exc:
+                _log.debug("cart_recovery._init_schema failed", exc_info=True)
         self._db.commit()
 
     # ── intake ──────────────────────────────────────────────────────────

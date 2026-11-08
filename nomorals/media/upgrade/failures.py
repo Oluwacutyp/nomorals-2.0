@@ -14,6 +14,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ...core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 FAILURE_MODES = {
     "hands": {"detector": "edge-density anomaly in hand regions",
               "remedy": "regional inpaint hands with prompt 'anatomically correct hands, five fingers'"},
@@ -87,8 +91,8 @@ def detect_failures(image: Any, *, text_zones: list[dict[str, Any]] | None = Non
                         mode="symmetry", confidence=round(1.0 - max(0.0, corr), 2),
                         evidence=f"face-half correlation {corr:.2f} below 0.55",
                         remedy=remedy_for("symmetry")))
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.debug("failures.detect_failures failed", exc_info=True)
     for mode in ("hands", "eyes", "teeth", "extra_limbs", "jewelry", "reflections"):
         if mode in mentions or (mode == "hands" and "person" in mentions):
             findings.append(FailureFinding(

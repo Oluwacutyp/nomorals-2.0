@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from .failures import record_failure
+
 __all__ = ["AdequacyVerdict", "assess_gap_adequacy", "should_reopen"]
 
 #: Independent-confirmation floor: one domain is never enough.
@@ -64,7 +66,8 @@ def _subquestions(gap: Any) -> list[str]:
     ctx = gap.get("context", "") if isinstance(gap, dict) else ""
     try:
         parsed = json.loads(ctx or "{}")
-    except Exception:
+    except Exception as exc:
+        record_failure("adequacy._subquestions", exc)
         return []
     sq = parsed.get("subquestions") or []
     return [str(s) for s in sq]

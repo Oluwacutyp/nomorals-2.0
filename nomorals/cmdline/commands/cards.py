@@ -5,6 +5,9 @@ from __future__ import annotations
 import argparse
 from typing import Any
 from ..emit import _emit
+from ...core.logging_setup import get_logger
+
+_log = get_logger(__name__)
 
 
 def _cmd_cards(args: argparse.Namespace, context: Any) -> int:
@@ -20,8 +23,8 @@ def _cmd_cards(args: argparse.Namespace, context: Any) -> int:
     try:
         from ...accounts.vault import open_vault
         vault = open_vault(db, context=context, actor="cards-cli")
-    except Exception:
-        pass
+    except Exception as _exc:
+        _log.debug("cards._cmd_cards failed", exc_info=True)
 
     connector = VirtualCardsConnector(
         vault=vault,  # type: ignore[arg-type]

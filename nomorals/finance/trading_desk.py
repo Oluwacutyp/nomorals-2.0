@@ -558,8 +558,8 @@ class TradingDesk:
         contract_value = 0.0
         try:
             contract_value = self._contract_value(instrument)
-        except DeskError:
-            pass  # paper can still track in price terms
+        except DeskError as exc:
+            _log.debug("trading_desk.paper_open failed", exc_info=True)
         risk_amount = 0.0
         if stop_loss is not None:
             stop_dist = abs(float(entry) - float(stop_loss))

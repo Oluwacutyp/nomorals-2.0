@@ -18,6 +18,7 @@ from typing import Any
 
 from ..core.ids import ulid_now
 from ..storage.db import Database
+from ..storage.failures import record_failure
 
 __all__ = ["STAGES", "Relationship", "STAGE_ORDER", "ARC_AXES", "DEFAULT_AXES"]
 
@@ -330,8 +331,12 @@ class Relationship:
                 if a in raw_axes:
                     try:
                         axes[a] = max(0, min(100, int(raw_axes[a])))
-                    except (TypeError, ValueError):
-                        pass
+                    except (TypeError, ValueError) as exc:
+                        # A stored axis value that no longer parses
+                        # keeps its default — but the corruption is
+                        # recorded, not silently absorbed.
+                        record_failure(
+                            "partner.relationship.axis_parse", exc)
         return cls(
             id=row["id"],
             stage=row.get("stage", "getting_to_know") or "getting_to_know",

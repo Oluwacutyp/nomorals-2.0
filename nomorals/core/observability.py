@@ -36,6 +36,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Deque, Iterator
 
+from .failures import record_failure
+
 __all__ = [
     "HealthCheck",
     "HealthChecker",
@@ -831,7 +833,8 @@ class HealthChecker:
             import resource
 
             return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
-        except Exception:  # pragma: no cover - non-POSIX
+        except Exception as exc:  # pragma: no cover - non-POSIX
+            record_failure("observability._rss_mb", exc)
             return 0.0
 
     def run(self, *, kinds: tuple[str, ...] = ("liveness", "readiness")) -> HealthReport:

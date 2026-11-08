@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .failures import record_failure
 from .models import TriggerError
 
 #: single-brace blueprint placeholders — the lookarounds keep
@@ -169,6 +170,6 @@ def render_template(name: str, params: dict[str, Any] | None = None
         if key in spec and isinstance(spec[key], str):
             try:
                 spec[key] = float(spec[key])
-            except ValueError:
-                pass
+            except ValueError as exc:
+                record_failure("templates.render_template", exc)
     return spec

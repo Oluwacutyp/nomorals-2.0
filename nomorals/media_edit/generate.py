@@ -1101,13 +1101,15 @@ class NativeBackend(GenerativeBackend):
         try:
             from ..media.imggen import TORCH_AVAILABLE
             from ..media.imggen.registry import list_models
-        except Exception:
+        except Exception as exc:
+            _log.debug("generate.available#2 failed", exc_info=True)
             return False
         if not TORCH_AVAILABLE:
             return False
         try:
             return any(e["loadable"] for e in list_models())
-        except Exception:
+        except Exception as exc:
+            _log.debug("generate.available failed", exc_info=True)
             return False
 
     @staticmethod
@@ -1137,7 +1139,8 @@ class NativeBackend(GenerativeBackend):
                         load_clip_tokenizer)
 
                     tok = load_clip_tokenizer(first["path"])
-                except Exception:
+                except Exception as _exc:
+                    _log.debug("generate.readiness failed", exc_info=True)
                     tok = None
                 msg += ("; tokenizer: CLIP BPE" if tok is not None
                         else "; tokenizer: hashing fallback (reduced "

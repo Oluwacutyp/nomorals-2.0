@@ -8,6 +8,10 @@ import json as _json
 import sys
 from typing import Any
 
+from ...core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 
 def _vault(context: Any):
     """The accounts credential vault, unlocked by any owner credential.
@@ -198,7 +202,8 @@ def _cmd_account(args: argparse.Namespace, context: Any) -> int:
             svc = BrowserService()
             try:
                 return svc.open_rendered_tab(args.service)
-            except Exception:
+            except Exception as exc:
+                _log.debug("account._open_tab#2 failed", exc_info=True)
                 # rendered tabs need playwright+chromium; fall back to the
                 # plain-HTTP tab (works for simple login forms).
                 handle = svc.open_session(args.service)
@@ -356,7 +361,8 @@ def _cmd_account(args: argparse.Namespace, context: Any) -> int:
                 svc = BrowserService()
                 try:
                     return svc.open_rendered_tab(args.service)
-                except Exception:
+                except Exception as exc:
+                    _log.debug("account._open_tab failed", exc_info=True)
                     handle = svc.open_session(args.service)
                     return handle.open_tab()
 

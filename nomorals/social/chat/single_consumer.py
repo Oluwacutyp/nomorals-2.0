@@ -25,6 +25,8 @@ import time
 from pathlib import Path
 from types import TracebackType
 
+from .failures import record_failure
+
 __all__ = ["SingleConsumerLock", "ConsumerAlreadyRunning"]
 
 
@@ -122,8 +124,8 @@ class SingleConsumerLock:
             except OSError:
                 try:
                     os.close(fd)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    record_failure("single_consumer.acquire", exc)
                 return False
             self._fd = fd
             self._owner_pid = os.getpid()
@@ -136,8 +138,8 @@ class SingleConsumerLock:
             return
         try:
             os.close(self._fd)
-        except OSError:
-            pass
+        except OSError as exc:
+            record_failure("single_consumer.release#2", exc)
         self._fd = None
         # Remove only our own lockfile: if another process reclaimed it
         # after we died (it can't — we're alive), this guard still holds.
@@ -145,8 +147,8 @@ class SingleConsumerLock:
             info = self.holder()
             if info is not None and int(info.get("pid") or 0) == (self._owner_pid or -1):
                 self.path.unlink()
-        except OSError:
-            pass
+        except OSError as exc:
+            record_failure("single_consumer.release", exc)
         self._owner_pid = None
 
     # -- context manager ---------------------------------------------------

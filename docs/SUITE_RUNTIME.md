@@ -1,5 +1,15 @@
 # Suite runtime (measured, not guessed)
 
+## Runner change (Reliability Batch A)
+
+The canonical runner is now **pytest** over `tests/`, sharded
+deterministically by file in CI (2 shards). `unittest discover` only
+executed `TestCase` classes and silently never ran ~15k collected
+plain-function tests; pytest executes both populations, and each CI
+shard records its executed-vs-collected counts. The 59-minute figure
+below is the unittest-era measurement (17k of 32k collected cases) and
+must be re-measured for the full pytest population on the first runs.
+
 ## Latest measured run
 
 - **Date:** 2026-10-14

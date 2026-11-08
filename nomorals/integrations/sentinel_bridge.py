@@ -406,8 +406,8 @@ def _bar_lists(bars: Any) -> tuple[list[float], list[float], list[float],
                              ("close", c)):
                 dst.extend(float(x) for x in bars[col].tolist())
             return ts, o, h, l, c
-    except ImportError:
-        pass
+    except ImportError as exc:
+        _log.debug("sentinel_bridge._bar_lists failed", exc_info=True)
     for i, row in enumerate(bars or []):
         if isinstance(row, dict):
             ts.append(float(row.get("timestamp", row.get("ts", i))))

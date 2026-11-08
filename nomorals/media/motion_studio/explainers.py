@@ -142,8 +142,8 @@ def _hex(value: Any, what: str) -> tuple[int, int, int]:
     if len(s) == 7 and s.startswith("#"):
         try:
             return (int(s[1:3], 16), int(s[3:5], 16), int(s[5:7], 16))
-        except ValueError:
-            pass
+        except ValueError as exc:
+            _log.debug("explainers._hex failed", exc_info=True)
     raise MotionStudioError(f"{what}: bad color {value!r} — use #RRGGBB")
 
 

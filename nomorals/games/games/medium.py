@@ -1402,7 +1402,8 @@ class QuizDuelGame(MultiGame):
         if trivia_forge is not None:
             try:
                 qs = trivia_forge.deal(count=20, difficulty=difficulty)
-            except Exception:
+            except Exception as exc:
+                _log.debug("medium.new_state failed", exc_info=True)
                 qs = rng.sample(list(TRIVIA), 20)
         else:
             qs = rng.sample(list(TRIVIA), 20)

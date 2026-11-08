@@ -35,6 +35,7 @@ import json
 import os
 from typing import Any, Iterable
 
+from ...core.logging_setup import get_logger
 from .capabilities import (
     LTX_MIN_VRAM_GB,
     WAN_MIN_VRAM_GB,
@@ -42,6 +43,8 @@ from .capabilities import (
 )
 from .ltx_backend import BASE_MODEL_ID, DISTILLED_MODEL_ID
 from .wan_backend import MODEL_ID as WAN_MODEL_ID
+
+_log = get_logger(__name__)
 
 __all__ = [
     "models_root",
@@ -302,8 +305,8 @@ def _split_weight(text: str) -> tuple[str, float]:
     if sep and head:
         try:
             return head, float(tail)
-        except ValueError:
-            pass
+        except ValueError as exc:
+            _log.debug("registry._split_weight failed", exc_info=True)
     return text, 1.0
 
 

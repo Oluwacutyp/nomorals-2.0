@@ -18,7 +18,10 @@ from __future__ import annotations
 import io
 from typing import Any
 
+from ..core.logging_setup import get_logger
 from .errors import PlotError
+
+_log = get_logger(__name__)
 
 __all__ = ["PLOT_KINDS", "THEMES", "render_plot"]
 
@@ -97,6 +100,22 @@ def _mpl():
     return plt
 
 
+def _boxplot_labels_kwarg() -> str:
+    """The boxplot category-label kwarg the installed matplotlib takes.
+
+    matplotlib 3.10 removed ``labels=`` (deprecated in 3.8) in favour
+    of ``tick_labels=``; versions before that only know ``labels=``.
+    Feature-detect on the real signature so every version inside the
+    declared range (matplotlib>=3.7) renders a box plot.
+    """
+    import inspect
+
+    import matplotlib.axes
+
+    params = inspect.signature(matplotlib.axes.Axes.boxplot).parameters
+    return "tick_labels" if "tick_labels" in params else "labels"
+
+
 def _np():
     try:
         import numpy as np
@@ -119,8 +138,8 @@ def _cat_label(value: Any) -> str:
         import pandas as pd
         if bool(pd.isna(value)):
             return "∅"
-    except (ValueError, TypeError):
-        pass
+    except (ValueError, TypeError) as exc:
+        _log.debug("plots._cat_label failed", exc_info=True)
     return str(value)
 
 
@@ -184,8 +203,8 @@ def _render_hist(ax, frame, x, bins):
     vals = frame[x].dropna()
     try:
         vals = vals.astype(float)
-    except (ValueError, TypeError):
-        pass
+    except (ValueError, TypeError) as exc:
+        _log.debug("plots._render_hist failed", exc_info=True)
     ax.hist(vals, bins=bins, edgecolor="black", linewidth=0.5)
 
 
@@ -232,7 +251,8 @@ def _render_group(ax, frame, kind, x, y, top_n):
         if not data:
             raise PlotError(f"no plottable groups for x={x!r}, y={y!r}")
     if kind == "box":
-        ax.boxplot(data, labels=labels, patch_artist=True)
+        ax.boxplot(data, patch_artist=True,
+                   **{_boxplot_labels_kwarg(): labels})
     else:
         parts = ax.violinplot(data, showmeans=True)
         for body in parts["bodies"]:

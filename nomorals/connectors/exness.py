@@ -678,8 +678,8 @@ class ExnessConnector(Connector):
         try:
             cond = self.get_instrument_condition(instrument)
             digits = int(cond.get("point_digits") or 2)
-        except ExnessError:
-            pass  # fall back to 2dp rather than refusing the trade
+        except ExnessError as exc:
+            _log.debug("exness._format_prices failed", exc_info=True)
         out: dict[str, str] = {}
         for name, value in prices.items():
             if value is not None:

@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import unittest
+import unittest.mock
 import zipfile
 
 from nomorals.documents import (
@@ -326,9 +328,14 @@ class TestParserUpgrades(unittest.TestCase):
         self.assertEqual(doc.metadata.get("language"), "fr")
 
     def test_xls_missing_hint(self) -> None:
-        with self.assertRaises(DocumentError) as ctx:
-            parse_bytes(b"\xd0\xcf\x11\xe0" + b"\x00" * 100,
-                        filename="x.xls")
+        # Simulate xlrd's absence instead of assuming it: where xlrd
+        # IS installed, these bytes reach the real parser and fail as
+        # an invalid workbook — the missing-dependency hint is only
+        # the contract when the package is genuinely absent.
+        with unittest.mock.patch.dict(sys.modules, {"xlrd": None}):
+            with self.assertRaises(DocumentError) as ctx:
+                parse_bytes(b"\xd0\xcf\x11\xe0" + b"\x00" * 100,
+                            filename="x.xls")
         self.assertIn("xlrd", str(ctx.exception))
 
     def test_ole_without_extension_helpful(self) -> None:

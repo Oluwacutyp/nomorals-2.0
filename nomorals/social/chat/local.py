@@ -79,7 +79,8 @@ class LocalAdapter(ChatAdapter):
              reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
              reply_keyboard: list[list[str]] | None = None,
-             parse_mode: str = "") -> SendResult:
+             parse_mode: str = "",
+             fresh: bool = False) -> SendResult:
         label = ""
         if self.mood_label_provider is not None:
             try:

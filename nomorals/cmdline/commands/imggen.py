@@ -24,6 +24,10 @@ import argparse
 import json
 import sys
 
+from ...core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 
 def _err(msg: str) -> int:
     print(f"imggen: {msg}", file=sys.stderr)
@@ -119,11 +123,9 @@ def _cmd_imggen_upscale(args: argparse.Namespace, context) -> int:
 def _cmd_imggen_train(args: argparse.Namespace, context) -> int:
     try:
         from ...media.imggen import TORCH_AVAILABLE
-        from ...media.imggen.data import (ImageFolderDataset,
-                                          build_dataset_manifest)
+        from ...media.imggen.data import ImageFolderDataset, build_dataset_manifest
         from ...media.imggen.pipeline import TextEncoder
-        from ...media.imggen.train import (TrainConfig,
-                                           train_text_conditional)
+        from ...media.imggen.train import TrainConfig, train_text_conditional
         from ...media.imggen.unet import UNet, count_parameters
     except Exception as exc:  # noqa: BLE001 - missing torch
         return _err(str(exc))
@@ -153,7 +155,8 @@ def _cmd_imggen_train(args: argparse.Namespace, context) -> int:
             from ...core.profiles import get_profile_kind
 
             profile = get_profile_kind()
-        except Exception:
+        except Exception as _exc:
+            _log.debug("imggen._cmd_imggen_train failed", exc_info=True)
             profile = "laptop"
         if profile == "termux":
             base_ch, depth, temb = 32, 2, 128
@@ -190,7 +193,7 @@ def _cmd_imggen_lora_train(args: argparse.Namespace, context) -> int:
         from ...media.imggen.data import ImageFolderDataset
         from ...media.imggen.lora import inject_lora
         from ...media.imggen.pipeline import load_native_checkpoint
-        from ...media.imggen.train import (TrainConfig, train)
+        from ...media.imggen.train import TrainConfig, train
     except Exception as exc:  # noqa: BLE001
         return _err(str(exc))
     if not TORCH_AVAILABLE:
@@ -202,8 +205,8 @@ def _cmd_imggen_lora_train(args: argparse.Namespace, context) -> int:
             if get_profile_kind() == "termux":
                 return _err("LoRA training needs at least a laptop "
                             "profile (termux can't hold the gradients)")
-        except Exception:
-            pass
+        except Exception as _exc:
+            _log.debug("imggen._cmd_imggen_lora_train failed", exc_info=True)
         from torch.utils.data import DataLoader
 
         pipe = load_native_checkpoint(args.base)

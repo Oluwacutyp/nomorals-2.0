@@ -37,6 +37,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from .failures import record_failure
+
 
 class StudioColorError(RuntimeError):
     """A named color-engine failure (bad LUT, bad CDL, missing rung)."""
@@ -777,8 +779,8 @@ def _grab_frame(src: str, at: float = 1.0) -> tuple[Any, str | None]:
     finally:
         try:
             os.unlink(frame)
-        except OSError:
-            pass
+        except OSError as exc:
+            record_failure("studio_color._grab_frame", exc)
 
 
 def scopes_for_media(src: str | os.PathLike[str], *,
@@ -795,8 +797,8 @@ def scopes_for_media(src: str | os.PathLike[str], *,
         from PIL import Image
         with Image.open(str(src)) as im:  # still image fast path
             return scopes(im.convert("RGB"))
-    except Exception:
-        pass  # not a still (or unreadable): try the ffmpeg frame path
+    except Exception as _exc:
+        record_failure("studio_color.scopes_for_media", _exc)
     arr, reason = _grab_frame(str(src), at)
     if arr is None:
         return {"ok": False, "reason": reason}

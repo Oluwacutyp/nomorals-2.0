@@ -295,8 +295,8 @@ def describe_screen(screenshot_hash: str,
                 try:
                     item["bbox"] = {k: float(bbox[k])
                                     for k in ("x", "y", "w", "h")}
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError) as exc:
+                    _log.debug("critique_bridge.describe_screen failed", exc_info=True)
             for key in ("state", "role", "name", "href"):
                 if el.get(key) is not None:
                     item[key] = str(el.get(key))[:300]

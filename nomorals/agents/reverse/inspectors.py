@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..apkforge.dissect import elf_info
+from .failures import record_failure
 
 __all__ = [
     "PROVIDER_ID", "PROVIDER_NAME", "PROVIDER_VERSION",
@@ -347,8 +348,8 @@ def _inspect_elf(data: bytes) -> Inspection:
                 name = _cstr(blob, sv[0])
                 if name and len(static_symbols) < 200:
                     static_symbols.append(name)
-    except struct.error:
-        pass
+    except struct.error as exc:
+        record_failure("inspectors._inspect_elf", exc)
     ext["static_symbols"] = static_symbols
     ext["static_symbol_count"] = static_count
     if static_count > len(static_symbols):

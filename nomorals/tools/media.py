@@ -451,8 +451,8 @@ def _download_direct(
             and not _looks_like_media(head)):
         try:
             target.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as exc:
+            _log.debug("media._download_direct failed", exc_info=True)
         raise MediaError(
             f"direct download from {url} returned an HTML page, "
             "not media (soft-404 or interstitial)")

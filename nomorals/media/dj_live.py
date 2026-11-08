@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -609,8 +610,8 @@ class LiveSet:
                 cmd = self._cmd.get(timeout=2.0)
                 if cmd == "stop":
                     return
-            except queue.Empty:
-                pass
+            except queue.Empty as exc:
+                record_failure("dj_live._wait_track", exc)
             # dead-room early pivot: don't let silence sit
             if (self.sensor.dead_signals() >= 3
                     and time.time() > end - 30):

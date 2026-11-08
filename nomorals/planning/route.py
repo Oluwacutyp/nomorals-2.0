@@ -983,8 +983,8 @@ def control_route(tail: str, context: Any = None, chat: Any = None,
                     la, lo = bits[1].split(",", 1)
                     lat, lng = float(la), float(lo)
                     label = bits[0]
-                except ValueError:
-                    pass
+                except ValueError as exc:
+                    record_failure("route.control_route", exc)
             stop = p.add_stop(label, lat=lat, lng=lng)
             if stop is None:
                 return "couldn't save that stop."

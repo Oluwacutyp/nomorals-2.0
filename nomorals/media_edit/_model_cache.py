@@ -117,8 +117,8 @@ def _download(url: str, path: Path, *, size_mb: float = 0.0,
     finally:
         try:
             os.rmdir(lock)
-        except OSError:
-            pass
+        except OSError as exc:
+            _log.debug("_model_cache._download failed", exc_info=True)
 
 
 def _fetch_with_progress(url: str, dest: Path) -> None:

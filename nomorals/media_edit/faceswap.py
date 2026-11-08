@@ -66,8 +66,8 @@ def _analyzer() -> Any:
             "onnxruntime") from exc
     try:
         import torch  # noqa: F401
-    except ImportError:
-        pass  # insightface works CPU-only via onnxruntime
+    except ImportError as _exc:
+        _log.debug("faceswap._analyzer failed", exc_info=True)
     _gate_profile()
     _log.info("loading insightface buffalo_l analyzer")
     try:

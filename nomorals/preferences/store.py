@@ -24,11 +24,14 @@ Only the standard library is imported.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import threading
 import time
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "DOMAIN_DESCRIPTORS",
@@ -237,8 +240,8 @@ class PreferenceStore:
                            "signals": self._signals}, fh,
                           ensure_ascii=False)
             os.replace(tmp, str(self.path))
-        except OSError:
-            pass
+        except OSError as exc:
+            _log.debug("store._save_json failed", exc_info=True)
 
     # ── descriptors ──────────────────────────────────────────────
     def describe(self, domain: str) -> dict[str, Any] | None:

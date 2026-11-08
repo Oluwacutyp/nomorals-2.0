@@ -235,8 +235,8 @@ class BackupCoordinator:
                     created = float(json.loads(
                         manifest_file.read_text(encoding="utf-8")
                     ).get("created_at", created))
-                except (ValueError, OSError):
-                    pass
+                except (ValueError, OSError) as _exc:
+                    _log.debug("coordinator._prune_local failed", exc_info=True)
             entries.append({"backup_id": child.name, "created_at": created,
                             "staging_dir": str(child)})
         # A generation still queued in the outbox has NOT shipped —

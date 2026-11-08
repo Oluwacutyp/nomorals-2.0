@@ -317,8 +317,8 @@ class SourceYieldTracker:
             self.path.write_text(
                 json.dumps(self._data, indent=1, sort_keys=True),
                 encoding="utf-8")
-        except OSError:
-            pass
+        except OSError as exc:
+            _log.debug("proxy_sources._save failed", exc_info=True)
 
     def _entry(self, name: str) -> dict[str, Any]:
         entry = self._data.get(name)

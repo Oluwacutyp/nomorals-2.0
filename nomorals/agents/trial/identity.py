@@ -42,6 +42,7 @@ import time
 from typing import Any
 
 from ...core.logging_setup import get_logger
+from .failures import record_failure
 from .vault import TrialVault
 
 __all__ = ["TrialIdentityBinder", "generate_trial_identity",
@@ -146,8 +147,8 @@ class TrialIdentityBinder:
             raise ValueError("bind needs a service name")
         try:
             return self.identity_for(service)
-        except KeyError:
-            pass
+        except KeyError as exc:
+            record_failure("identity.bind", exc)
         identity = generate_trial_identity(service, rng=rng)
         handle = f"trial-{service}-{secrets.token_hex(4)}"
         self.vault.store(service, handle, json.dumps(identity),

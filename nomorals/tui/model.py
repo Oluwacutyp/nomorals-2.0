@@ -24,6 +24,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 __all__ = [
     "Panel", "Line", "KeyAction", "TuiState", "render",
     "KEY_HELP", "SLASH_HELP", "SLASH_COMMANDS", "help_overlay",
@@ -473,8 +477,8 @@ class TuiState:
             with open(target, "w", encoding="utf-8") as handle:
                 for entry in self.history[-self.max_history :]:
                     handle.write(entry.replace("\n", " ") + "\n")
-        except OSError:
-            pass
+        except OSError as exc:
+            _log.debug("model.save_history failed", exc_info=True)
 
     def load_history(self, path: str | None = None) -> None:
         target = path or self.history_path

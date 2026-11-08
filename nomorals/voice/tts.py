@@ -1762,7 +1762,11 @@ class PiperBackend:
         try:
             phonemes = [p for sentence in pv.phonemize(text)
                         for p in sentence]
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - audio stands alone
+            # Alignment is garnish on real audio: a phonemizer failure
+            # returns the audio unaligned, but the failure is recorded
+            # — an always-empty alignment track must be diagnosable.
+            record_failure("tts.synthesize_aligned.phonemize", exc)
             return audio, []
         # per-phoneme (start, end) spans across all chunks; any
         # chunk that populates neither route voids the whole

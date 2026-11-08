@@ -28,6 +28,9 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Iterator
 
 from ..core.ids import ulid_now
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
 
 __all__ = ["Document", "Section", "Table", "full_text", "new_document",
            "SECTION_KINDS"]
@@ -204,8 +207,8 @@ class Table:
                 try:
                     float(cell.replace(",", "").replace("%", ""))
                     numeric += 1
-                except ValueError:
-                    pass
+                except ValueError as exc:
+                    _log.debug("model.stats failed", exc_info=True)
             out[header] = {
                 "cells": len(cells),
                 "filled": len(filled),

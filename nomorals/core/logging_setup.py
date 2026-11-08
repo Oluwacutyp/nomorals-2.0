@@ -140,7 +140,7 @@ _FINGERPRINT_KEYS = frozenset({"session_id", "sessionid", "email", "refresh_toke
 def _fingerprint(value: Any) -> str:
     try:
         digest = hashlib.sha256(str(value).encode("utf-8", "replace")).hexdigest()
-    except Exception:  # pragma: no cover - defensive
+    except Exception:  # pragma: no cover - defensive; noqa: E104 — redaction fail-safe: any error must return [REDACTED], and the logging machinery cannot log its own failure
         return "[REDACTED]"
     return f"sha256:{digest[:16]}"
 
@@ -412,7 +412,7 @@ class JsonFormatter(logging.Formatter):
                 try:
                     json.dumps(value, default=str)
                     payload[key] = value
-                except Exception:  # pragma: no cover - defensive
+                except Exception:  # pragma: no cover - defensive; noqa: E104 — formatter fail-safe: an unserializable attr degrades to str(value); logging from inside format() would recurse
                     payload[key] = str(value)
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
@@ -542,7 +542,7 @@ def shutdown_logging() -> None:
         for listener in _LISTENERS:
             try:
                 listener.stop()
-            except Exception:  # pragma: no cover - defensive
+            except Exception:  # pragma: no cover - defensive; noqa: E103 — shutdown teardown: a stuck listener must not block shutdown, and nothing may log while logging is torn down
                 pass
         _LISTENERS.clear()
         _CONFIGURED = False

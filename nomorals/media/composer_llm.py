@@ -24,6 +24,7 @@ from typing import Any
 
 from ..core.logging_setup import get_logger
 from .songspec import GrooveSpec, SectionSpec, SongSpec, SONGSPEC_JSON_SCHEMA
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -104,8 +105,8 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     text = re.sub(r"\s*```$", "", text)
     try:
         return json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        pass
+    except (json.JSONDecodeError, ValueError) as exc:
+        record_failure("composer_llm._extract_json", exc)
     m = _JSON_BLOCK.search(text)
     if m:
         try:

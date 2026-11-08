@@ -57,7 +57,8 @@ class WebAdapter(ChatAdapter):
              reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
              reply_keyboard: list[list[str]] | None = None,
-             parse_mode: str = "") -> SendResult:
+             parse_mode: str = "",
+             fresh: bool = False) -> SendResult:
         with self._lock:
             self._parts.setdefault(chat.key, []).append(text)
             self._last_send[chat.key] = time.time()

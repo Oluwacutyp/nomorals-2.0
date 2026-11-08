@@ -250,7 +250,9 @@ def _cmd_mesh_serve(context: Any, words: list[str]) -> int:
     except ValueError as exc:
         print(f"mesh serve: {exc}", file=sys.stderr)
         return 2
-    except KeyboardInterrupt:
+    except KeyboardInterrupt:  # noqa: E106 — deliberate top-level hook
+        # This IS the serve entrypoint: Ctrl-C is the operator's stop
+        # verb, answered with a clean sentence and exit 0.
         print("\nstopped")
         return 0
     finally:

@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from .failures import record_failure
 from .logging_setup import get_logger, redact
 
 __all__ = ["LiveVerifier", "VerificationResult", "VerificationCheck",
@@ -641,8 +642,8 @@ def check_tls(host: str, port: int = 443, *, timeout: float = 8.0,
             try:
                 expires = datetime.strptime(val, "%b %d %H:%M:%S %Y %Z")
                 expires = expires.replace(tzinfo=timezone.utc)
-            except ValueError:
-                pass
+            except ValueError as _exc:
+                record_failure("verify.check_tls", _exc)
     details: dict[str, Any] = {"host": host, "port": port,
                                "subject": cert.get("subject"),
                                "issuer": cert.get("issuer")}

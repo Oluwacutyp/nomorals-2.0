@@ -112,7 +112,11 @@ class DomainConcurrency:
             if not global_ok:
                 raise ConcurrencyError(
                     f"timed out waiting for a global slot (cap {self.global_cap})")
-        except BaseException:
+        except BaseException:  # noqa: BLE001 — release, then re-raise
+            # Deliberate catch-all: the domain slot is already held
+            # here, so ANY failure to take the global slot — error or
+            # interrupt — must hand the domain slot back before the
+            # failure propagates, or the domain leaks a permit.
             sem.release()
             raise
         with self._lock:

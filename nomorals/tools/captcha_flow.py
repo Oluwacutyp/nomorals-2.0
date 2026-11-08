@@ -408,8 +408,8 @@ def _local_asr(audio: Any, language: str = "en") -> str:
         if tmp:
             try:
                 os.unlink(tmp)
-            except OSError:
-                pass
+            except OSError as _exc:
+                _log.debug("captcha_flow._local_asr failed", exc_info=True)
 
 
 def solve_audio_local_first(audio: Any, *,

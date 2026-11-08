@@ -349,8 +349,8 @@ class Judge:
                 w = int(data.get("winner", 1)) - 1
                 if 0 <= w < n:
                     winner = w
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as exc:
+                _log.debug("adjudicate._parse#2 failed", exc_info=True)
             raw_rank = data.get("ranking") or []
             seen: list[int] = []
             for item in raw_rank:
@@ -383,8 +383,8 @@ class Judge:
                             scores[idx] = clean
             try:
                 confidence = max(0.0, min(1.0, float(data.get("confidence", 0.8))))
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as exc:
+                _log.debug("adjudicate._parse failed", exc_info=True)
         return Judgment(
             winner=winner, ranking=ranking, rationale=rationale,
             judge_model=getattr(resp, "model", "") or "",

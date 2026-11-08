@@ -658,8 +658,8 @@ class ACPServer:
                 if previous_principal is None:
                     try:
                         del self._principal_tls.principal
-                    except AttributeError:
-                        pass
+                    except AttributeError as exc:
+                        _log.debug("acp.dispatch failed", exc_info=True)
                 else:
                     self._principal_tls.principal = previous_principal
 
@@ -883,8 +883,8 @@ def serve_acp_sse(handler: Any, api_server: Any, acp: ACPServer,
         for frame in acp.iter_sse(body, principal=principal):
             handler.wfile.write(frame.encode("utf-8"))
             handler.wfile.flush()
-    except (BrokenPipeError, ConnectionResetError):
-        pass
+    except (BrokenPipeError, ConnectionResetError) as exc:
+        _log.debug("acp.serve_acp_sse failed", exc_info=True)
 
 
 def _wants_sse(handler: Any) -> bool:

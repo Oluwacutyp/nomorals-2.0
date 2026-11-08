@@ -2474,8 +2474,8 @@ def _signal_tree(pid: int, sig_name: str) -> bool:
     try:
         os.killpg(os.getpgid(pid), sig)
         return True
-    except (ProcessLookupError, PermissionError, OSError, AttributeError):
-        pass
+    except (ProcessLookupError, PermissionError, OSError, AttributeError) as exc:
+        _log.debug("app_builder._signal_tree failed", exc_info=True)
     try:
         os.kill(pid, sig)
         return True

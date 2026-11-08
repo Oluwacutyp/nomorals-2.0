@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -462,7 +463,10 @@ def test_learn_imports_without_finance_first():
     code = ("import sys; sys.path.insert(0, '.');"
             "import nomorals.learn as L;"
             "print(L.EkitiTutor, L.ExamSim, L.FSRS)")
-    r = subprocess.run([sys.executable, "-c", code], cwd="/home/hatch/workspace/devon",
+    # The checkout root is this test file's grandparent — never a
+    # developer machine's absolute path.
+    repo_root = Path(__file__).resolve().parent.parent
+    r = subprocess.run([sys.executable, "-c", code], cwd=str(repo_root),
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
 

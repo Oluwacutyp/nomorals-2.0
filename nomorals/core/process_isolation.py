@@ -28,6 +28,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from .failures import record_failure
+
 __all__ = ["IsolatedResult", "run_isolated", "fork_supported"]
 
 
@@ -79,8 +81,8 @@ def run_isolated(fn: Callable[..., Any], *args: Any,
             # producing side effects) after a "known dead" verdict.
             try:
                 os.setsid()
-            except OSError:
-                pass
+            except OSError as _exc:
+                record_failure("process_isolation.run_isolated#2", _exc)
             os.close(read_fd)
             try:
                 result = fn(*args, **kwargs)
@@ -119,8 +121,8 @@ def run_isolated(fn: Callable[..., Any], *args: Any,
                 except (ProcessLookupError, PermissionError, OSError):
                     try:
                         os.kill(pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+                    except ProcessLookupError as _exc:
+                        record_failure("process_isolation.run_isolated", _exc)
                 killed = True
                 break
             import select

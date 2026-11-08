@@ -67,6 +67,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from .failures import record_failure
 from .pairing import PERSONAL_TOGGLES, AccountRecord, PairingRegistry, resolve_account
 
 #: Bounds (constructor-overridable; the values are the shipped caps).
@@ -303,8 +304,8 @@ class PersonalVault:
             total -= int(victim.get("bytes") or 0)
             try:
                 Path(str(victim["path"])).unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as exc:
+                record_failure("personal._prune_account", exc)
             _append_jsonl(self.journal_path, {
                 "ts": time.time(), "kind": "pruned",
                 "account": account_id,

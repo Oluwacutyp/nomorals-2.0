@@ -161,8 +161,8 @@ def parse_junit_xml(path: str | Path) -> dict[str, Any]:
     for suite in suites:
         try:
             duration += float(suite.get("time", 0) or 0)
-        except ValueError:
-            pass
+        except ValueError as exc:
+            _log.debug("run.parse_junit_xml failed", exc_info=True)
         for case in suite.iter("testcase"):
             tests += 1
             classname = case.get("classname", "")

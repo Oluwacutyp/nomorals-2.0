@@ -1019,7 +1019,8 @@ class PaymentIntegration:
                     f"could not track {cur} tx {txid}: {exc}") from exc
             try:
                 receipt = w3.eth.get_transaction_receipt(txid)
-            except Exception:
+            except Exception as _exc:
+                _log.debug("payment_integration.track_tx failed", exc_info=True)
                 receipt = None
             if receipt is None:
                 return {"txid": txid, "currency": cur, "status": "pending",
@@ -1090,13 +1091,13 @@ class PaymentIntegration:
                                              delete=False) as f:
                 img.save(f.name)
                 return f"![receive QR]({f.name})\n`{address}`"
-        except ImportError:
-            pass
+        except ImportError as exc:
+            _log.debug("payment_integration.receive_qr#2 failed", exc_info=True)
         # ASCII fallback — display only
         try:
             import qrcode  # noqa: F401  (unreachable, keeps linters calm)
-        except ImportError:
-            pass
+        except ImportError as exc:
+            _log.debug("payment_integration.receive_qr failed", exc_info=True)
         return self._ascii_qr(address) + f"\n`{address}`"
 
     @staticmethod

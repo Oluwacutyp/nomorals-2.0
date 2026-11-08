@@ -413,8 +413,8 @@ def cache_clear() -> int:
         try:
             os.remove(os.path.join(d, f))
             n += 1
-        except OSError:
-            pass
+        except OSError as exc:
+            _log.debug("feeds.cache_clear failed", exc_info=True)
     return n
 
 

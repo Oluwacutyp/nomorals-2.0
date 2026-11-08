@@ -21,6 +21,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from .failures import record_failure
+
 __all__ = [
     "DISCLAIMER",
     "CONTRACT_TYPES",
@@ -172,7 +174,8 @@ def extract_clauses(doc_text: str) -> list[Clause]:
     """
     try:
         lines = (doc_text or "").splitlines()
-    except Exception:
+    except Exception as exc:
+        record_failure("contracts.extract_clauses", exc)
         return [Clause(heading="", body="")]
     clauses: list[Clause] = []
     cur_heading = ""

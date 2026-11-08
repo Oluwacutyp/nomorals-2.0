@@ -1155,8 +1155,8 @@ class RuntimeExpressionMixin:
         if resolved is not None and resolved[0]:
             try:
                 return Path(str(resolved[0])).read_bytes()
-            except OSError:
-                pass
+            except OSError as exc:
+                record_failure("expression.emojiart.local_read", exc)
         for word in str(tail or "").split():
             if word.startswith(("http://", "https://")):
                 try:

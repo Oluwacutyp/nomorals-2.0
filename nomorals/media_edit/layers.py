@@ -551,8 +551,8 @@ class LayerStack:
         if dx or dy:
             try:
                 self.nudge(dup.id, dx, dy)
-            except MediaEditError:
-                pass  # anchored layers stay anchored
+            except MediaEditError as exc:
+                _log.debug("layers.duplicate failed", exc_info=True)
         return dup.id
 
     def remove(self, lid: str) -> dict[str, Any]:

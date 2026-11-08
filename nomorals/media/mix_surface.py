@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -442,8 +443,8 @@ def render_mix(
                 ),
                 encoding="utf-8",
             )
-        except OSError:
-            pass
+        except OSError as exc:
+            record_failure("mix_surface.render_mix", exc)
     if missing:
         return RenderedMix(
             descriptor=descriptor,

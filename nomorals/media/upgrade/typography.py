@@ -14,6 +14,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ...core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 POSITIONS = ("top", "center", "bottom", "top-left", "top-right",
              "bottom-left", "bottom-right")
 
@@ -69,7 +73,8 @@ def composite_text(image: Any, layers: list[TextComposite] | TextComposite) -> A
         try:
             font = (ImageFont.truetype(layer.font_path, layer.size)
                     if layer.font_path else ImageFont.load_default(size=layer.size))
-        except Exception:
+        except Exception as _exc:
+            _log.debug("typography.composite_text failed", exc_info=True)
             font = ImageFont.load_default()
         bbox = draw.textbbox((0, 0), layer.text, font=font, stroke_width=layer.stroke)
         tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]

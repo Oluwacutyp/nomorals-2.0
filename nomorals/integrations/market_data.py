@@ -1225,8 +1225,8 @@ def _open_er_api_quote(sym: dict[str, str]) -> dict[str, Any]:
         updated = float((d or {}).get("time_last_update_unix") or 0)
         if updated:
             out["quote_ts"] = updated
-    except (TypeError, ValueError):
-        pass
+    except (TypeError, ValueError) as _exc:
+        record_failure("market_data._open_er_api_quote", _exc)
     return out
 
 

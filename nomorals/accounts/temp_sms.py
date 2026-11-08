@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -322,8 +323,8 @@ class SevenSimProvider(TempSmsProvider):
                         # itself, which get_messages can never poll
                         if candidate.startswith("/"):
                             link = self._BASE + candidate
-                    except IndexError:
-                        pass
+                    except IndexError as exc:
+                        record_failure("temp_sms.list_numbers", exc)
                     out.append(TempNumber(
                         number=f"+{digits}",
                         masked=f"+{digits[:6]}****",

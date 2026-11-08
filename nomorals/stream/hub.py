@@ -112,8 +112,8 @@ class Subscription:
                 # count it so the client can be told to re-sync.
                 try:
                     self._queue.get_nowait()
-                except queue.Empty:
-                    pass
+                except queue.Empty as exc:
+                    _log.debug("hub.offer failed", exc_info=True)
                 self.dropped += 1
                 try:
                     self._queue.put_nowait(item)
@@ -147,12 +147,12 @@ class Subscription:
             except queue.Full:
                 try:
                     self._queue.get_nowait()
-                except queue.Empty:
-                    pass
+                except queue.Empty as exc:
+                    _log.debug("hub.close_sentinel#2 failed", exc_info=True)
                 try:
                     self._queue.put_nowait(_CLOSED)
-                except queue.Full:  # pragma: no cover
-                    pass
+                except queue.Full as exc:  # pragma: no cover
+                    _log.debug("hub.close_sentinel failed", exc_info=True)
 
     # -- consumer side (connection thread) -----------------------------
     def get(self, timeout: float | None = None) -> tuple[int, dict[str, Any]]:

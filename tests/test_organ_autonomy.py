@@ -223,11 +223,16 @@ def test_tick_paragraph_alone_keeps_gap_open(monkeypatch):
 # ── wisdom organ ─────────────────────────────────────────────────────
 
 class _FakePassage:
-    def __init__(self, work, section, snippet, url=""):
+    def __init__(self, work, section, snippet, url="", slug=None):
         self.work = work
         self.section = section
         self.snippet = snippet
         self.url = url
+        # Real passages carry their work's manifest slug and
+        # digest_work filters on it; default to the [slug] prefix of
+        # the work label, as the corpus stamps it.
+        self.slug = slug if slug is not None else (
+            work[1:].split("]", 1)[0] if work.startswith("[") else "")
 
 
 class _FakeAnswer:

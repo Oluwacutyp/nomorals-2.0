@@ -523,9 +523,16 @@ def test_cards_compose_from_seeded_state(tmp_path):
 class _Gateway:
     def __init__(self):
         self.files = []
+        self.file_kinds = []
 
-    def send_file(self, platform, chat_key, path, caption=""):
+    def send_file(self, platform, chat_key, path, caption="",
+                  max_send_mb=0.0, durable=None, durable_kind="media",
+                  kind="", name="", buttons=None):
+        # Mirrors Gateway.send_file's real signature — the truth build's
+        # media-kind fix passes kind= ("photo"/"video") on delivery, and
+        # a fake that rejects it hides the delivery path entirely.
         self.files.append((platform, chat_key, path, caption))
+        self.file_kinds.append(kind)
         return SimpleNamespace(ok=True)
 
 

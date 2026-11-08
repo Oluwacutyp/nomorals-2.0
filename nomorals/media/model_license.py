@@ -49,6 +49,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any
 
+from .failures import record_failure
+
 __all__ = [
     "ModelLicense",
     "MODEL_LICENSES",
@@ -283,8 +285,8 @@ def matchering_master(target_path: str, reference_path: str,
         if os.path.exists(out_path):
             try:
                 os.remove(out_path)
-            except OSError:
-                pass
+            except OSError as _exc:
+                record_failure("model_license.matchering_master", _exc)
         raise MatcheringUnavailable(f"matchering failed: {exc}")
     if not os.path.exists(out_path):
         raise MatcheringUnavailable("matchering produced no output")

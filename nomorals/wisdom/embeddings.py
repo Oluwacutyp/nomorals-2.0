@@ -45,6 +45,9 @@ from abc import ABC, abstractmethod
 from typing import Any, Iterable
 
 from .errors import EmbeddingError
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
 
 
 # ── base ──────────────────────────────────────────────────────────────
@@ -146,7 +149,8 @@ class FastEmbedBackend(EmbeddingBackend):
         try:
             import fastembed  # noqa: F401
             import onnxruntime  # noqa: F401
-        except Exception:
+        except Exception as exc:
+            _log.debug("embeddings.available#3 failed", exc_info=True)
             return False
         return True
 
@@ -219,7 +223,8 @@ class SentenceTransformersBackend(EmbeddingBackend):
     def available(cls) -> bool:
         try:
             import sentence_transformers  # noqa: F401
-        except Exception:
+        except Exception as exc:
+            _log.debug("embeddings.available#2 failed", exc_info=True)
             return False
         return True
 
@@ -264,7 +269,8 @@ class SentenceTransformersBackend(EmbeddingBackend):
         if m is not None:
             try:
                 return int(m.get_sentence_embedding_dimension())
-            except Exception:
+            except Exception as exc:
+                _log.debug("embeddings.dim failed", exc_info=True)
                 return None
         return {"sentence-transformers/all-MiniLM-L6-v2": 384,
                 "intfloat/multilingual-e5-small": 384,
@@ -305,7 +311,8 @@ class OllamaBackend(EmbeddingBackend):
                 payload = json.loads(resp.read().decode("utf-8"))
             names = {m.get("name", "") for m in payload.get("models", [])}
             return any("embed" in n.lower() for n in names) or bool(names)
-        except Exception:
+        except Exception as exc:
+            _log.debug("embeddings.available failed", exc_info=True)
             return False
 
     def embed(self, texts: list[str]) -> list[list[float]]:

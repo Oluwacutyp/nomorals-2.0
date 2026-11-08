@@ -15,31 +15,40 @@ help: ## Show this help
 
 # ── verification ──────────────────────────────────────────────────────────────
 
-test: ## Run the full suite (offline; budget 90 min, measured ~59 min — see docs/SUITE_RUNTIME.md)
-	@$(PYTHON) -u -m unittest discover -s tests -t .
+test: ## Run the full suite under pytest (offline; the canonical runner — executes plain functions AND unittest classes)
+	@$(PYTHON) -u -m pytest tests
 
 test-verbose: ## Run the full suite, naming each test
-	@$(PYTHON) -u -m unittest discover -s tests -t . -v 2>&1 | tail -40
+	@$(PYTHON) -u -m pytest tests -v 2>&1 | tail -40
 
-test-one: ## Run one module: make test-one M=tests.test_agents
-	@$(PYTHON) -u -m unittest $(M) -v
+test-one: ## Run one module: make test-one M=tests/test_agents.py
+	@$(PYTHON) -u -m pytest $(M) -v
 
-lint: ## Ruff, if installed (optional dependency)
-	@$(PYTHON) -c "import ruff" 2>/dev/null && $(PYTHON) -m ruff check $(PKG) tests \
-		|| echo "ruff not installed — pip install ruff (optional)"
+lint: ## Ruff check (absent tool = honest skip; installed tool's findings FAIL)
+	@if ! $(PYTHON) -c "import ruff" 2>/dev/null; then \
+		echo "ruff not installed — pip install ruff (optional); lint skipped"; \
+	else \
+		$(PYTHON) -m ruff check $(PKG) tests; \
+	fi
 
 gates: ## The gates CI enforces: ruff ratchet + committed-secret scan + personal-surface laws (docs/CI_GATES.md)
 	@$(PYTHON) -m nomorals.tools.ruff_ratchet
 	@$(PYTHON) -m nomorals.tools.secret_scan
 	@$(PYTHON) -m unittest tests.test_surface_laws
 
-typecheck: ## mypy, if installed (optional dependency)
-	@command -v mypy >/dev/null 2>&1 && mypy $(PKG) \
-		|| echo "mypy not installed — pip install mypy (optional)"
+typecheck: ## mypy check (absent tool = honest skip; installed tool's findings FAIL)
+	@if ! command -v mypy >/dev/null 2>&1; then \
+		echo "mypy not installed — pip install mypy (optional); typecheck skipped"; \
+	else \
+		mypy $(PKG); \
+	fi
 
-fmt: ## Format with ruff, if installed
-	@$(PYTHON) -c "import ruff" 2>/dev/null && $(PYTHON) -m ruff format $(PKG) tests \
-		|| echo "ruff not installed — pip install ruff (optional)"
+fmt: ## Format with ruff (absent tool = honest skip; a format error FAILS)
+	@if ! $(PYTHON) -c "import ruff" 2>/dev/null; then \
+		echo "ruff not installed — pip install ruff (optional); fmt skipped"; \
+	else \
+		$(PYTHON) -m ruff format $(PKG) tests; \
+	fi
 
 # ── inspection ────────────────────────────────────────────────────────────────
 

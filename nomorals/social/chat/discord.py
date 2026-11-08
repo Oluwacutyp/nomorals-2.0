@@ -502,7 +502,8 @@ class DiscordAdapter(ChatAdapter):
              reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
              reply_keyboard: list[list[str]] | None = None,
-             parse_mode: str = "") -> SendResult:
+             parse_mode: str = "",
+             fresh: bool = False) -> SendResult:
         started = time.perf_counter()
         dc = self._dc()
         if dc is None:

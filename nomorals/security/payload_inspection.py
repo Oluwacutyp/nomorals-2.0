@@ -32,6 +32,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 # ── thresholds (named constants — data, calibratable) ──────────
 # Each feature ramps 0 → 1 between its soft (flag) and hard
 # (quarantine) line.  A single class at 1.0 quarantines alone:
@@ -474,8 +478,8 @@ class SignatureStore:
             try:
                 self.path.replace(
                     self.path.with_suffix(f".corrupt-{stamp}"))
-            except OSError:
-                pass
+            except OSError as exc:
+                _log.debug("payload_inspection.load failed", exc_info=True)
             self.data = {}
             self.quarantined = True
 

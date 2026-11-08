@@ -151,8 +151,8 @@ def _locking_backend_available() -> bool:
     try:
         import fcntl  # noqa: F401
         return True
-    except ImportError:
-        pass
+    except ImportError as exc:
+        _log.debug("snapshots._locking_backend_available failed", exc_info=True)
     try:
         import msvcrt  # noqa: F401
         return True

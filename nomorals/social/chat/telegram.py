@@ -78,8 +78,8 @@ def _flood_wait_seconds(exc: BaseException) -> int:
         seconds = int(getattr(exc, "seconds", 0) or 0)
         if seconds > 0 and "flood" in type(exc).__name__.lower():
             return seconds
-    except (TypeError, ValueError):
-        pass
+    except (TypeError, ValueError) as _exc:
+        record_failure("telegram._flood_wait_seconds", _exc)
     try:
         status = int(getattr(exc, "status", 0) or 0)
         if status == 429:
@@ -2546,7 +2546,8 @@ class TelegramAdapter(ChatAdapter):
              reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
              reply_keyboard: list[list[str]] | None = None,
-             parse_mode: str = "") -> SendResult:
+             parse_mode: str = "",
+             fresh: bool = False) -> SendResult:
         client = self._client
         if client is None:
             return SendResult(ok=False, platform=self.name, error="not connected")
@@ -5912,8 +5913,8 @@ class TelegramBotAdapter(ChatAdapter):
         finally:
             try:
                 tmp.unlink()
-            except OSError:
-                pass
+            except OSError as exc:
+                record_failure("telegram.send_long", exc)
 
     def edit_progress(self, chat: ChatRef, message_id: str, new_text: str) -> dict[str, Any] | None:
         """Edit a progress message in place — throttled (~1/3s, on change).
@@ -5988,7 +5989,8 @@ class TelegramBotAdapter(ChatAdapter):
     def send(self, chat: ChatRef, text: str, *, reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
              reply_keyboard: list[list[str]] | None = None,
-             parse_mode: str = "") -> SendResult:
+             parse_mode: str = "",
+             fresh: bool = False) -> SendResult:
         from .adaptive_buttons import adaptive_buttons_for
         from .progress_throttle import LongOutput
         from .tgbot_buttons import personal_buttons_for

@@ -460,7 +460,8 @@ class SMSAdapter(ChatAdapter):
              reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
              reply_keyboard: list[list[str]] | None = None,
-             parse_mode: str = "") -> SendResult:
+             parse_mode: str = "",
+             fresh: bool = False) -> SendResult:
         started = time.perf_counter()
         # SMS is text-only: buttons and parse modes are dropped, not faked.
         if self._twilio is None:

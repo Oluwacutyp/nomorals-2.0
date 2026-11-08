@@ -863,8 +863,8 @@ class ItineraryBuilder:
             from pypdf import PdfReader
             reader = PdfReader(pdf_path)
             return "\n".join(p.extract_text() or "" for p in reader.pages)
-        except ImportError:
-            pass
+        except ImportError as exc:
+            _log.debug("itinerary._pdf_text failed", exc_info=True)
         except Exception:  # noqa: BLE001
             _log.debug("pypdf read failed", exc_info=True)
         # pdftotext fallback

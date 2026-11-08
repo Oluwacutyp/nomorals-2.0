@@ -64,6 +64,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -386,9 +387,13 @@ class UnifiedScheduler:
                     os.fsync(dfd)
                 finally:
                     os.close(dfd)
-            except OSError:  # pragma: no cover - platform without dir fsync
-                pass
-        except BaseException:
+            except OSError as exc:  # pragma: no cover - platform without dir fsync
+                record_failure("unified_scheduler.save", exc)
+        except BaseException:  # noqa: BLE001 — cleanup, then re-raise
+            # Deliberate catch-all: the store write is atomic via
+            # tmp+rename; any failure or interrupt before the rename
+            # must remove the temp file before propagating, or every
+            # interrupted save litters the store directory.
             with __import__("contextlib").suppress(OSError):
                 os.unlink(tmp)
             raise

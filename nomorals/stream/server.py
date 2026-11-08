@@ -233,8 +233,8 @@ def emit_sse(
                         data=json.dumps({"reason": "server stopping"}),
                         retry=retry_ms,
                     ).encode())
-                except OSError:
-                    pass
+                except OSError as _exc:
+                    _log.debug("server.emit_sse#2 failed", exc_info=True)
                 break
             frame = ServerSentEvent(
                 event="timeline",
@@ -262,8 +262,8 @@ def emit_sse(
         if connection is not None:
             try:
                 connection.settimeout(prev_timeout)
-            except OSError:  # pragma: no cover - socket already gone
-                pass
+            except OSError as _exc:  # pragma: no cover - socket already gone
+                _log.debug("server.emit_sse failed", exc_info=True)
         sub.close()
         if own_hub:
             hub.stop()

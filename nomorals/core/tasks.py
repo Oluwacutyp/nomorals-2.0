@@ -32,6 +32,7 @@ from typing import Any
 
 from ..core.errors import ValidationError
 from ..core.ids import new_id
+from .failures import record_failure
 
 __all__ = [
     "AcceptanceCriterion",
@@ -81,8 +82,8 @@ class RetryPolicy:
             if hinted:
                 try:
                     return min(max(0.0, float(hinted)), self.max_delay)
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError) as exc:
+                    record_failure("tasks.delay_for", exc)
         delay = self.base_delay * (self.factor ** max(0, attempt - 1))
         delay = min(delay, self.max_delay)
         if self.jitter:

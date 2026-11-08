@@ -253,8 +253,8 @@ def _run_latentsync(video: Path, audio: Path, out: Path) -> Path:
         if abs(out_dur - aud_dur) > max(2.0, aud_dur * 0.2):
             _log.warning("avatar: output duration %.1fs vs audio %.1fs — "
                          "lip-sync may be partial", out_dur, aud_dur)
-    except AvatarError:
-        pass  # duration check is advisory, not fatal
+    except AvatarError as _exc:
+        _log.debug("avatar._run_latentsync failed", exc_info=True)
     return out
 
 

@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Sequence
 
+from .failures import record_failure
+
 __all__ = [
     "fingerprint_audio",
     "identify_audio",
@@ -189,8 +191,8 @@ def _effective_cutoff(character: Any, spoiler_level: int | None) -> int:
     if spoiler_level is not None:
         try:
             cap = min(cap, max(1, int(spoiler_level)))
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as exc:
+            record_failure("expose._effective_cutoff", exc)
     return max(1, cap)
 
 

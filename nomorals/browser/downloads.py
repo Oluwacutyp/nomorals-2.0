@@ -32,6 +32,7 @@ from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
 from ..core.ids import ulid_now
+from .failures import record_failure
 
 __all__ = [
     "DownloadError",
@@ -284,16 +285,16 @@ class DownloadQueue:
             try:
                 dest.write_bytes(partial)
                 meta_path.write_text(json.dumps(validators), encoding="utf-8")
-            except OSError:
-                pass
+            except OSError as _exc:
+                record_failure("downloads._run_fallback#2", _exc)
             return {"ok": False, "error": f"fetch failed: {exc}",
                     "backend": BACKEND_FALLBACK}
         data = partial + (chunk or b"")
         dest.write_bytes(data)
         try:
             meta_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as _exc:
+            record_failure("downloads._run_fallback", _exc)
         return {"ok": True, "path": str(dest), "size_bytes": len(data),
                 "sha256": hashlib.sha256(data).hexdigest(),
                 "resumed": start > 0 and not restarted,

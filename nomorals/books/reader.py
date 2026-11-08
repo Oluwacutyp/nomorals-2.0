@@ -574,8 +574,8 @@ class StoryReader:
                 meta = adapter.novel(story.url)
                 if meta.total_chapters:
                     story.total_chapters = meta.total_chapters
-            except SourceError:
-                pass
+            except SourceError as _exc:
+                record_failure("reader.sync", _exc)
             self._save(story)
             report.append({"slug": story.slug, "title": story.title,
                            "fetched": fetched,

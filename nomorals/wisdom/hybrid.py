@@ -14,6 +14,10 @@ from __future__ import annotations
 
 from typing import Any, Callable, Hashable
 
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 
 def reciprocal_rank_fusion(rankings: list[list[Hashable]],
                            k: int = 60) -> dict[Hashable, float]:
@@ -93,7 +97,7 @@ def fuse_hits(keyword_hits: list[Any], semantic_hits: list[Any], *,
             hit.rrf_score = scores[key]
             hit.keyword_rank = rank_kw.get(key)
             hit.semantic_rank = rank_sem.get(key)
-        except AttributeError:
-            pass  # exotic hit objects stay untouched
+        except AttributeError as exc:
+            _log.debug("hybrid.fuse_hits failed", exc_info=True)
         out.append(hit)
     return out

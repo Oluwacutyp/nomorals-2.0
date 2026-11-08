@@ -31,6 +31,8 @@ import random
 from dataclasses import dataclass, field
 from typing import Any
 
+from .failures import record_failure
+
 __all__ = [
     "AffixDesc",
     "SkillDesc",
@@ -192,8 +194,8 @@ def solve(pool: list[Any], count: int, *, rng: random.Random | None = None,
             try:
                 if not allows(level=level, slot=slot):
                     return False
-            except TypeError:
-                pass
+            except TypeError as exc:
+                record_failure("declarative._eligible", exc)
         return True
 
     fresh = [d for d in pool if _eligible(d)]

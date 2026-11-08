@@ -20,6 +20,9 @@ from .reading import (PAGE_CHARS, SEEDS, TRADITION_INFO, dehyphenate,
                       normalize_tradition, paginate_text, sentence_passage,
                       tradition_description, tradition_label,
                       trim_to_sentences)
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
 
 # Canon statuses recognized by the manifest validator.
 CANON_STATUSES = frozenset({
@@ -420,8 +423,8 @@ class CanonCorpus:
             for item in raw.get("entries", []):
                 if isinstance(item, dict) and item.get("slug"):
                     slugs.add(str(item["slug"]))
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            _log.debug("corpus._packaged_slugs failed", exc_info=True)
         self.__dict__["_packaged_slugs_cache"] = slugs
         return slugs
 
@@ -851,7 +854,8 @@ class CanonCorpus:
         }
         try:
             hits = self.library.search(query, top=5)
-        except Exception:
+        except Exception as exc:
+            _log.debug("corpus._expand_query failed", exc_info=True)
             return query
         have = set(_re.findall(r"[a-z]{3,}", query.lower()))
         counts: Counter[str] = Counter()
@@ -1066,7 +1070,8 @@ class CanonCorpus:
                     "SELECT slug, title FROM books").fetchall()
             finally:
                 con.close()
-        except Exception:
+        except Exception as exc:
+            _log.debug("corpus._index_metadata failed", exc_info=True)
             return meta
         for book_slug, title in books:
             corpus_slug = ""
@@ -1158,7 +1163,8 @@ class CanonCorpus:
                 "SELECT key, value FROM meta").fetchall())
             count = con.execute(
                 "SELECT COUNT(*) FROM vectors").fetchone()[0]
-        except Exception:
+        except Exception as exc:
+            _log.debug("corpus.semantic_index_status failed", exc_info=True)
             return status
         finally:
             con.close()

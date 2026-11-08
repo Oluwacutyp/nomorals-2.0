@@ -15,9 +15,11 @@ import json
 import re
 from typing import Any
 
-from ...core.logging_setup import scrub_secrets
+from ...core.logging_setup import get_logger, scrub_secrets
 from ...core.policy import CapabilitySet
 from ...core.result import Outcome
+
+_log = get_logger(__name__)
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _STOP_TOKENS = frozenset(
@@ -196,7 +198,8 @@ class ToolAdapter:
     def _schemas(self) -> list[dict[str, Any]]:
         try:
             schemas = self.registry.schemas(capabilities=self.capabilities)
-        except Exception:
+        except Exception as exc:
+            _log.debug("tools._schemas failed", exc_info=True)
             schemas = []
         return [s for s in schemas if isinstance(s, dict) and s.get("name")]
 

@@ -168,10 +168,10 @@ class OSKernel:
         try:
             signal.signal(signal.SIGTERM, _handler)
             signal.signal(signal.SIGINT, _handler)
-        except (ValueError, OSError, RuntimeError):
+        except (ValueError, OSError, RuntimeError) as exc:
             # Not the main thread (or no signal support): atexit still covers
             # normal interpreter shutdown.
-            pass
+            _log.debug("kernel.arm_signals failed", exc_info=True)
         return self
 
     def _atexit_stop(self) -> None:

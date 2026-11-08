@@ -49,6 +49,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -346,8 +347,8 @@ def _filter_hit(filters: list[str], text: str) -> str | None:
                 if re.search(entry[1:-1], text, re.I):
                     return entry
                 continue
-            except re.error:
-                pass  # fall through to a literal match
+            except re.error as exc:
+                record_failure("welcome_moderation._filter_hit", exc)
         if entry.lower() in lowered:
             return entry
     return None

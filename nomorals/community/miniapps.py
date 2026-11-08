@@ -977,8 +977,8 @@ def control_miniapp(
             elif low.startswith("closes:"):
                 try:
                     flags["closes_at"] = time.time() + float(low[7:]) * 3600.0
-                except ValueError:
-                    pass
+                except ValueError as _exc:
+                    record_failure("miniapps.control_miniapp", _exc)
             else:
                 opts.append(tok)
         try:

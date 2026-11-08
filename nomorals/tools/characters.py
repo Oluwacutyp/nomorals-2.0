@@ -10,6 +10,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 
 def _store() -> Any:
     from ..characters.store import CharacterStore
@@ -17,15 +21,16 @@ def _store() -> Any:
 
 
 def _graph(store: Any) -> Any:
-    from ..characters.relationships import RelationshipGraph
     import json
+
+    from ..characters.relationships import RelationshipGraph
     g = RelationshipGraph()
     p = store.dir / "_relationships.json"
     if p.exists():
         try:
             g = RelationshipGraph.from_dict(json.loads(p.read_text("utf-8")))
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.debug("characters._graph failed", exc_info=True)
     return g
 
 
@@ -34,8 +39,8 @@ def _save_graph(store: Any, graph: Any) -> None:
     try:
         (store.dir / "_relationships.json").write_text(
             json.dumps(graph.to_dict(), indent=1), encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.debug("characters._save_graph failed", exc_info=True)
 
 
 def _suggest(registry: Any) -> Any:
@@ -73,10 +78,10 @@ def register(registry: Any) -> None:
     def characters(action: str = "list", target: str = "",
                    text: str = "", n: int = 1) -> str:
         from ..characters import Character
-        from ..characters.casting import cast_for, cast_preset, ROLE_PRESETS
-        from ..characters.dialogue import converse
-        from ..characters.ensemble import run_scene, podcast_episode
         from ..characters.arcs import arc_summary
+        from ..characters.casting import ROLE_PRESETS, cast_for, cast_preset
+        from ..characters.dialogue import converse
+        from ..characters.ensemble import podcast_episode, run_scene
 
         store = _store()
         graph = _graph(store)
@@ -247,8 +252,8 @@ def register(registry: Any) -> None:
                     c.secrets = [str(x) for x in data.get("secrets", [])]
                     c.spine = float(data.get("spine", 0.6))
                     c.expression = dict(data.get("expression", {}))
-                except Exception:
-                    pass  # keep the shell; owner shapes them later
+                except Exception as exc:
+                    _log.debug("characters.characters failed", exc_info=True)
             if not c.persona:
                 c.persona = {"curious": 0.7, "warm": 0.6}
             store.save(c)

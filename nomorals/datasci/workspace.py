@@ -182,8 +182,8 @@ def _cat_label(value: Any) -> str:
         import pandas as _pd_mod
         if bool(_pd_mod.isna(value)):
             return "∅"
-    except (ValueError, TypeError):
-        pass
+    except (ValueError, TypeError) as exc:
+        _log.debug("workspace._cat_label failed", exc_info=True)
     return str(value)
 
 

@@ -33,6 +33,7 @@ files, like one SQLite connection owns its database.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -41,6 +42,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .tier0_rollback import record_promotion
+
+_log = logging.getLogger(__name__)
 
 __all__ = ["PersistedBus", "register_promotion", "promotion_active"]
 
@@ -129,8 +132,8 @@ class PersistedBus:
                 state.setdefault("consumed", [])
                 state.setdefault("attempts", {})
                 return state
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            _log.debug("organs_bus._load_state failed", exc_info=True)
         return {"consumed": [], "attempts": {}}
 
     def _save_state(self, state: dict[str, Any]) -> None:
@@ -156,8 +159,8 @@ class PersistedBus:
                         continue  # a torn line is skipped, never fatal
                     if isinstance(row, dict) and row.get("id") is not None:
                         events.append(row)
-        except OSError:
-            pass
+        except OSError as exc:
+            _log.debug("organs_bus._read_log failed", exc_info=True)
         return events
 
     def _pending(
@@ -290,8 +293,8 @@ class PersistedBus:
                         continue
                     if isinstance(row, dict):
                         out.append(row)
-        except OSError:
-            pass
+        except OSError as exc:
+            _log.debug("organs_bus._read_dead failed", exc_info=True)
         return out
 
     def dead_letter_review(self) -> list[dict[str, Any]]:

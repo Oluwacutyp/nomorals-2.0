@@ -498,7 +498,7 @@ class RuntimeSystemMixin:
                 "bind|lookup|release|list | rotate on [strategy] | schedule "
                 "on [min] | ssh start <name> <host> <user>")
 
-    def _control_toolhub(self, tail: str, chat_key: str = "") -> str:
+    def _control_toolhub(self, tail: str, chat_key: str = "") -> Any:
         """Tool hub: /toolhub | /toolhub proxy [run] | /toolhub bin [digits] | /toolhub help.
 
         (Named toolhub because /hub is already the media hub — see

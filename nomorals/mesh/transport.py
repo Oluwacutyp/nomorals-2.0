@@ -10,10 +10,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
+from ..core.logging_setup import get_logger
 from ..storage.db import Database
 from .errors import TaskNotFound
 from .node import MeshNode, NodeRegistry
 from .tasks import MeshTask, MeshTasks
+
+_log = get_logger(__name__)
 
 __all__ = ["Transport", "LocalTransport"]
 
@@ -164,11 +167,11 @@ class LocalTransport(Transport):
     def fail(self, job_id: str, error: str = "", *, retry: bool = True) -> None:
         try:
             self.tasks.fail(job_id, error=error, retry=retry)
-        except TaskNotFound:
+        except TaskNotFound as exc:
             # Historical behavior: failing an unknown job id was a silent
             # no-op at the queue layer. Keep it lenient here so remote and
             # local transports agree.
-            pass
+            _log.debug("transport.fail failed", exc_info=True)
 
     def cancel(self, job_id: str) -> bool:
         return self.tasks.cancel(job_id)

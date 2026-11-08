@@ -199,15 +199,15 @@ def _split_sections(diff_text: str) -> list[_FileSection]:
             try:
                 cur_similarity = int(
                     line[len("similarity index "):].strip().rstrip("%"))
-            except ValueError:
-                pass
+            except ValueError as exc:
+                _log.debug("patch._split_sections#2 failed", exc_info=True)
             _open(i)
         elif line.startswith("dissimilarity index "):
             try:
                 cur_similarity = 100 - int(
                     line[len("dissimilarity index "):].strip().rstrip("%"))
-            except ValueError:
-                pass
+            except ValueError as exc:
+                _log.debug("patch._split_sections failed", exc_info=True)
             _open(i)
         elif (line.startswith("GIT binary patch")
               or line.startswith("Binary files ")):

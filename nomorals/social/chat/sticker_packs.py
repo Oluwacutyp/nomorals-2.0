@@ -47,6 +47,7 @@ from typing import Any
 
 from ...core.ids import new_short_id
 from ...core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger("nomorals.social.sticker_packs")
 
@@ -106,8 +107,8 @@ class StickerPackStore:
                 f".corrupt-{int(time.time())}")
             try:
                 self.path.replace(quarantine)
-            except OSError:
-                pass
+            except OSError as _exc:
+                record_failure("sticker_packs.load", _exc)
             _log.warning(
                 "sticker packs at %s unreadable (%s); "
                 "quarantined to %s — starting empty",

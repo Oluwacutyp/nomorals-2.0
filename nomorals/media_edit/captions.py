@@ -103,8 +103,8 @@ def transcribe_words(video_path: str | os.PathLike[str], *,
     finally:
         try:
             wav.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as _exc:
+            _log.debug("captions.transcribe_words failed", exc_info=True)
 
 
 def _extract_wav(video: Path) -> Path:

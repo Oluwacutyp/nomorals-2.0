@@ -33,6 +33,7 @@ from collections import deque
 from math import inf
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
@@ -467,8 +468,8 @@ def roommate_match(
                     in_free.discard(z)
                     try:
                         free.remove(z)
-                    except ValueError:
-                        pass
+                    except ValueError as exc:
+                        record_failure("stable.roommate_match", exc)
         if any(not lists[p] for p in folks):
             return fail()
 
