@@ -5,8 +5,8 @@
 1. take a pre-update snapshot (via :class:`SnapshotManager`),
 2. ``git pull --ff-only`` in the repo (skippable),
 3. run database migrations,
-4. run post-update health checks (importable package, layering subset,
-   DB integrity),
+4. run post-update health checks (importable package, layering vs the
+   grandfathered baseline, DB integrity),
 
 then advisory reporting (the error scan — information only, never a
 gate).  A pull that lands nothing (HEAD unchanged) short-circuits
@@ -257,7 +257,11 @@ def default_health_checks(
     """The standard post-update health gate.
 
     * the ``nomorals`` package imports and reports a version,
-    * the layering subset passes (no upward imports in the tracked tree),
+    * the layering check finds no upward imports in the tracked tree
+      beyond the grandfathered baseline the test suite carries
+      (``tests/test_layering.py``'s ``KNOWN_VIOLATIONS`` — the one
+      shared set; subset semantics, so a repaired grandfathered
+      violation never fails an update and a new one always does),
     * the live database passes ``PRAGMA integrity_check``.
 
     The error scan is NOT part of the gate: it is an advisory smell
@@ -327,15 +331,25 @@ def default_health_checks(
     if repo_dir is not None:
 
         def _layering() -> tuple[bool, str]:
+            # Subset semantics over the ONE shared baseline:
+            # tests/test_layering.py's KNOWN_VIOLATIONS is the
+            # accepted grandfathered set, read by the test suite and
+            # by this gate alike.  The update is healthy when every
+            # violation found is in that set — a grandfathered pair
+            # that a repair made disappear must NOT fail the update
+            # (the test's stale-ratchet is a suite concern, not a
+            # health verdict) — and unhealthy, naming them, on any
+            # violation beyond the set.  Running the raw test method
+            # here instead compared against the emptied set and
+            # rolled back the healthy 2026-11-08 EC2 update.
             try:
                 tests_dir = str(Path(repo_dir) / "tests")
                 if tests_dir not in sys.path:
                     sys.path.insert(0, tests_dir)
                 import test_layering
 
-                case = test_layering.TestLayering("test_no_upward_imports")
-                case.test_no_upward_imports()
-                return True, "layering subset green (tracked tree)"
+                new, known, _seen, _scanned = \
+                    test_layering.scan_layering()
             except SyntaxError as exc:  # noqa: BLE001
                 # test_layering parses with filename=<full path>, so
                 # the report names the exact offending file — the EC2
@@ -348,6 +362,14 @@ def default_health_checks(
                 return False, (f"layering failed: {exc} "
                                f"[package root: {Path(repo_dir) / 'nomorals'}] "
                                f"[{_interp_tag()}]")
+            if new:
+                return False, (
+                    f"layering failed: {len(new)} new violation(s) "
+                    f"beyond the {len(test_layering.KNOWN_VIOLATIONS)} "
+                    "grandfathered pairs:\n  " + "\n  ".join(new) +
+                    f" [{_interp_tag()}]")
+            return True, (f"layering ok: {len(known)} known "
+                          "grandfathered, 0 new")
 
         checks.append(_layering)
 

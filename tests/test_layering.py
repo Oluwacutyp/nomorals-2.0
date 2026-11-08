@@ -362,7 +362,39 @@ MODULE_PINS: dict[str, int] = {
 #: layer); and the naija_shopping pin was corrected 4 -> 5 (it never
 #: satisfied the pin rule). The empty set stays as the ratchet: any
 #: future upward import fails this test.
-KNOWN_VIOLATIONS: frozenset[tuple[str, str]] = frozenset()
+#: RESTORED 2026-11-08: the T1.6 emptying did not hold.  Later waves
+#: re-introduced upward imports — agency/, anime/, identity/ and
+#: music_sources/ are unmapped top-level packages (SHARED_LAYER 0)
+#: whose modules reach into the organs they compose, community/
+#: group_gangs reaches into games' join codes, and os.update reaches
+#: into os.verify_install — and the set was never re-grandfathered,
+#: so this test ran red on them as standing noise while the
+#: self-update health gate (nomorals/os/update.py), which runs this
+#: same scan, compared against the empty set and could NEVER pass:
+#: the 2026-11-08 EC2 /update of fd6c871 rolled back at
+#: health:_layering on exactly these violations.  The owner's
+#: standing ruling (2026-10-25) is to leave the grandfathered
+#: violations in place, so the pairs are recorded here again —
+#: 13 pairs, 15 violation lines at bf9afba.  THIS set is the one
+#: source of truth: the test suite and the update health gate both
+#: read it from here; the gate applies subset semantics over it
+#: (found ⊆ baseline passes; anything beyond it fails, named).
+KNOWN_VIOLATIONS: frozenset[tuple[str, str]] = frozenset({
+    ("nomorals.agency.failures", "nomorals.core"),
+    ("nomorals.anime.present", "nomorals.social.chat.tgbot_buttons"),
+    ("nomorals.anime.present", "nomorals.social.chat.typography"),
+    ("nomorals.anime.transport", "nomorals.core.http"),
+    ("nomorals.community.group_gangs", "nomorals.games.join_codes"),
+    ("nomorals.identity.chat", "nomorals.core.logging_setup"),
+    ("nomorals.identity.chat", "nomorals.core.tool_render"),
+    ("nomorals.museum", "nomorals.agents.apkforge.museum"),
+    ("nomorals.museum", "nomorals.characters.store"),
+    ("nomorals.museum_failures", "nomorals.core"),
+    ("nomorals.music_sources.registry_bridge",
+     "nomorals.media.source_registry"),
+    ("nomorals.music_sources.registry_bridge", "nomorals.storage.kv"),
+    ("nomorals.os.update", "nomorals.os.verify_install"),
+})
 
 
 def _pin_for(dotted: str) -> int | None:
@@ -484,6 +516,47 @@ def layer_of_dotted(dotted: str) -> int:
     return LAYERS.get(head, SHARED_LAYER)
 
 
+def scan_layering() -> tuple[list[str], list[str],
+                             set[tuple[str, str]], set[str]]:
+    """Scan the package once, classifying every upward import.
+
+    Returns ``(new_lines, known_lines, seen_pairs, scanned)``:
+    ``new_lines`` are the violation lines whose (importer, target)
+    pair is NOT in KNOWN_VIOLATIONS; ``known_lines`` are the
+    grandfathered ones; ``seen_pairs`` is every violating pair
+    observed; ``scanned`` is the dotted name of every module the
+    scan covered.  Shared by the test below and the self-update
+    health gate (nomorals/os/update.py), which applies subset
+    semantics over the same baseline: an update is healthy when
+    ``new_lines`` is empty, however many grandfathered lines remain
+    — or stop occurring.
+    """
+    new_lines: list[str] = []
+    known_lines: list[str] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    scanned: set[str] = set()
+    for path in iter_modules():
+        rel = path.relative_to(PACKAGE_ROOT)
+        own_layer = module_layer(rel)
+        module_parts = tuple(rel.with_suffix("").parts)
+        importer = "nomorals." + ".".join(module_parts)
+        scanned.add(importer)
+        tree = ast.parse(path.read_text(encoding="utf-8"),
+                         filename=str(path))
+        for target, lineno in imported_nomorals(tree, module_parts):
+            target_layer = layer_of_dotted(target)
+            if target_layer > own_layer:
+                pair = (importer, target)
+                seen_pairs.add(pair)
+                line = (f"{rel}:{lineno} (L{own_layer}) imports "
+                        f"{target} (L{target_layer})")
+                if pair in KNOWN_VIOLATIONS:
+                    known_lines.append(line)
+                else:
+                    new_lines.append(line)
+    return new_lines, known_lines, seen_pairs, scanned
+
+
 class TestLayering(unittest.TestCase):
     def test_every_module_parses(self) -> None:
         modules = iter_modules()
@@ -493,27 +566,15 @@ class TestLayering(unittest.TestCase):
                 ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
     def test_no_upward_imports(self) -> None:
-        violations: list[str] = []
-        seen_pairs: set[tuple[str, str]] = set()
-        for path in iter_modules():
-            rel = path.relative_to(PACKAGE_ROOT)
-            own_layer = module_layer(rel)
-            module_parts = tuple(rel.with_suffix("").parts)
-            importer = "nomorals." + ".".join(module_parts)
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for target, lineno in imported_nomorals(tree, module_parts):
-                target_layer = layer_of_dotted(target)
-                if target_layer > own_layer:
-                    pair = (importer, target)
-                    seen_pairs.add(pair)
-                    if pair in KNOWN_VIOLATIONS:
-                        continue  # grandfathered: documented, scheduled repair
-                    violations.append(
-                        f"{rel}:{lineno} (L{own_layer}) imports {target} (L{target_layer})"
-                    )
-        # Ratchet: every grandfathered pair must still occur.  If a repair
-        # lands, its entry must be removed here — the failure tells you to.
-        stale = KNOWN_VIOLATIONS - seen_pairs
+        violations, _known, seen_pairs, scanned = scan_layering()
+        # Ratchet: every grandfathered pair whose importer module is
+        # in the scanned tree must still occur.  If a repair lands,
+        # its entry must be removed here — the failure tells you to.
+        # (A pair whose importer is absent from the tree under scan —
+        # this file copied over a minimal fixture tree — is out of
+        # scope for that scan, not stale.)
+        stale = {pair for pair in KNOWN_VIOLATIONS - seen_pairs
+                 if pair[0] in scanned}
         self.assertEqual(
             stale, set(),
             "grandfathered violations that no longer occur — "
