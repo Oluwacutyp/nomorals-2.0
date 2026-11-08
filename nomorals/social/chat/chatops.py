@@ -44,6 +44,9 @@ __all__ = [
     "PRIVACY_VALUE_WORDS",
     "privacy_pair_error",
     "format_privacy_settings",
+    "TG_PRIVACY_CATEGORIES",
+    "tg_privacy_pair_error",
+    "format_tg_privacy_settings",
     "parse_makepoll_args",
     "compose_group_status",
     "kind_for_chat_key",
@@ -62,7 +65,7 @@ CHATOPS_COMMANDS = frozenset({
     "pollres", "tagall", "hidetag", "antitag",
     "viewonce", "vv",
     "joinlink", "newgroup", "newchannel", "leave",
-    "myprofile", "privacy", "makepoll", "vcf",
+    "myprofile", "privacy", "makepoll", "vcf", "addcontact",
 })
 
 #: Tagall pacing law: one message carries at most this many
@@ -237,6 +240,78 @@ def format_privacy_settings(settings: Any,
             word = PRIVACY_VALUE_WORDS.get(str(value),
                                            str(value))
             lines.append(f"• {category}: {word} ({value})")
+    lines.append("Change one: /privacy lastseen contacts")
+    return "\n".join(lines)
+
+
+# -- own identity on Telegram (parity G5, census bundle #8) --
+
+#: The Telegram privacy vocabulary for /privacy on the
+#: personal (userbot) surface: the same command grammar as
+#: WhatsApp's table above, over Telegram's own privacy keys.
+#: Category names overlap WhatsApp's wherever the MEANING is
+#: the same (lastseen = status timestamp, profile = who sees
+#: the profile photo, groupadd = who can add the account to
+#: chats); the rest are Telegram's own keys in plain names.
+#: Values are the shared plain-words set (all / contacts /
+#: none — everyone / my contacts / nobody): those are the
+#: three rule shapes a bare word can honestly name on
+#: Telegram (InputPrivacyValueAllowAll / AllowContacts /
+#: DisallowAll).  Finer Telegram rules (specific people,
+#: close friends, premium, chat-member lists) READ BACK as
+#: named labels — see the Telegram adapter's rule mapping —
+#: never squeezed into a word they are not.
+TG_PRIVACY_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "lastseen": ("all", "contacts", "none"),
+    "profile": ("all", "contacts", "none"),
+    "about": ("all", "contacts", "none"),
+    "phone": ("all", "contacts", "none"),
+    "groupadd": ("all", "contacts", "none"),
+    "calls": ("all", "contacts", "none"),
+    "p2p": ("all", "contacts", "none"),
+    "forwards": ("all", "contacts", "none"),
+    "voice": ("all", "contacts", "none"),
+    "birthday": ("all", "contacts", "none"),
+}
+
+
+def tg_privacy_pair_error(category: str, value: str) -> str:
+    """'' when (category, value) is a settable Telegram
+    privacy pair, else the refusal in words — the Telegram
+    twin of privacy_pair_error, over TG_PRIVACY_CATEGORIES."""
+    category = str(category or "").strip().lower()
+    value = str(value or "").strip().lower()
+    if category not in TG_PRIVACY_CATEGORIES:
+        return ("Telegram privacy categories are: " +
+                ", ".join(sorted(TG_PRIVACY_CATEGORIES)))
+    values = TG_PRIVACY_CATEGORIES[category]
+    if value not in values:
+        return f"{category} can be: " + ", ".join(values)
+    return ""
+
+
+def format_tg_privacy_settings(settings: Any,
+                               *, header: str = "") -> str:
+    """The /privacy read on Telegram: one line per category
+    the surface could actually read.  A value in the shared
+    vocabulary prints as plain words with the token beside
+    it; a value that is a named label (a Telegram rule shape
+    with no shared word — close friends, specific people…)
+    prints as the label itself, so it is NAMED, never dressed
+    as a vocabulary value it is not.  A category missing from
+    the map was NOT read — listed as not readable, the
+    WhatsApp read's same honesty."""
+    settings = settings if isinstance(settings, dict) else {}
+    lines = [header or "🔒 Your Telegram privacy:"]
+    for category in sorted(TG_PRIVACY_CATEGORIES):
+        value = settings.get(category)
+        if value in (None, ""):
+            lines.append(f"• {category}: couldn't read")
+        elif str(value) in PRIVACY_VALUE_WORDS:
+            word = PRIVACY_VALUE_WORDS[str(value)]
+            lines.append(f"• {category}: {word} ({value})")
+        else:
+            lines.append(f"• {category}: {value}")
     lines.append("Change one: /privacy lastseen contacts")
     return "\n".join(lines)
 

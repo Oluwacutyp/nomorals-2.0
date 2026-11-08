@@ -230,6 +230,8 @@ class RuntimeChatOpsMixin:
                 return self._chatops_makepoll(tail, message)
             if kind == "vcf":
                 return self._chatops_vcf(tail, message)
+            if kind == "addcontact":
+                return self._chatops_addcontact(tail, message)
             if kind in ("tagall", "hidetag"):
                 return self._chatops_tagall(kind, tail, message)
         except Exception as exc:  # noqa: BLE001 - a command answers
@@ -1583,42 +1585,54 @@ class RuntimeChatOpsMixin:
         return "", ""
 
     def _chatops_identity_home(self, message: Any, kind: str
-                               ) -> tuple[Any, Any, Any, str]:
-        """The shared gate for the /myprofile + /privacy family:
-        (svc, rec, adapter, error) — WhatsApp-personal only, a
-        paired account must exist, and a live adapter must be
-        attached.  Setters additionally honor the owner's
-        standing stop (checked by the caller, since reads are
-        not acts as him)."""
+                               ) -> tuple[Any, Any, Any, str, str]:
+        """The shared gate for the /myprofile + /privacy
+        family: (svc, rec, adapter, platform, error) — the
+        WhatsApp personal surface (G3) and the Telegram
+        personal (userbot) surface (G5) are the two homes; a
+        paired account must exist for the surface the command
+        was run on, and a live adapter must be attached.
+        Setters additionally honor the owner's standing stop
+        (checked by the caller, since reads are not acts as
+        him)."""
         platform = str(getattr(message.chat, "platform", "")
                        or "")
-        if platform != "whatsapp":
-            return None, None, None, (
-                f"/{kind} shapes your personal WhatsApp "
-                f"identity — run it from your WhatsApp.")
+        if platform not in ("whatsapp", "telegram"):
+            return None, None, None, "", (
+                f"/{kind} shapes your personal WhatsApp or "
+                f"Telegram identity — run it from your "
+                f"WhatsApp or your personal Telegram.")
+        label = ("WhatsApp" if platform == "whatsapp"
+                 else "Telegram")
         svc, rec = self._chatops_personal_account(platform)
         if rec is None:
-            return None, None, None, (
-                "no paired WhatsApp account — /pair one first; "
-                f"/{kind} acts on the personal account.")
+            return None, None, None, "", (
+                f"no paired {label} account — /pair one "
+                f"first; /{kind} acts on the personal account.")
         adapter = self._adapter_for(platform)
         if adapter is None:
-            return None, None, None, (
-                "no live WhatsApp surface here to act from.")
-        return svc, rec, adapter, ""
+            return None, None, None, "", (
+                f"no live {label} surface here to act from.")
+        return svc, rec, adapter, platform, ""
 
     def _chatops_myprofile(self, tail: str, message: Any) -> str:
-        """/myprofile — read and set the paired WhatsApp
-        account's own identity (parity G3, census bundle #5):
-        the name people see, the About text, the profile photo.
-        Before this build Devon could only READ a push name off
-        inbound messages; nothing on the account could change.
-        Setters are acts as the owner: the standing stop gates
-        them and every landed change journals."""
-        svc, rec, adapter, error = self._chatops_identity_home(
-            message, "myprofile")
+        """/myprofile — read and set the paired personal
+        account's own identity: WhatsApp (parity G3, census
+        bundle #5) and the Telegram userbot (parity G5, bundle
+        #8) under ONE grammar — the name people see, the About
+        text, the profile photo, and on Telegram the username
+        (WhatsApp accounts have none; asked there, the command
+        says exactly that).  Before G3/G5 Devon could only
+        READ a push name off inbound messages; nothing on
+        either account could change.  Setters are acts as the
+        owner: the standing stop gates them and every landed
+        change journals."""
+        svc, rec, adapter, platform, error = \
+            self._chatops_identity_home(message, "myprofile")
         if error:
             return error
+        label = ("WhatsApp" if platform == "whatsapp"
+                 else "Telegram")
         personal = svc["personal"]
         parts = tail.split(None, 1)
         head = parts[0].lower() if parts else ""
@@ -1628,7 +1642,7 @@ class RuntimeChatOpsMixin:
             if not (isinstance(verdict, dict)
                     and verdict.get("ok")):
                 return self._chatops_verdict(verdict, "")
-            lines = ["👤 Your WhatsApp identity:"]
+            lines = [f"👤 Your {label} identity:"]
             lines.append(f"• name: {verdict.get('name') or '—'}")
             if "about" in verdict:
                 lines.append(
@@ -1638,27 +1652,76 @@ class RuntimeChatOpsMixin:
                     "• about: couldn't read it just now"
                     + (f" ({verdict.get('info_error')})"
                        if verdict.get("info_error") else ""))
+            if "username" in verdict:
+                handle = str(verdict.get("username") or "")
+                lines.append("• username: "
+                             + (f"@{handle}" if handle
+                                else "none"))
             lines.append("• photo: "
                          + ("set" if verdict.get("has_photo")
                             else "none"))
-            lines.append("Change it: /myprofile name New Name · "
-                         "/myprofile about some text · "
-                         "/myprofile photo (reply to a picture)")
+            if platform == "telegram":
+                lines.append(
+                    "Change it: /myprofile name First Last · "
+                    "/myprofile about some text · "
+                    "/myprofile username newhandle · "
+                    "/myprofile photo (reply to a picture)")
+            else:
+                lines.append(
+                    "Change it: /myprofile name New Name · "
+                    "/myprofile about some text · "
+                    "/myprofile photo (reply to a picture)")
             return "\n".join(lines)
-        if svc["registry"].owner_stopped("whatsapp"):
-            return ("WhatsApp is under your standing stop — "
+        if svc["registry"].owner_stopped(platform):
+            return (f"{label} is under your standing stop — "
                     "it stays halted until you start it again; "
                     "nothing was changed.")
         if head == "name":
             if not rest:
                 return ("usage: /myprofile name Your New Name")
-            verdict = self._chatops_call(
-                adapter.set_profile_name, rest)
+            if platform == "telegram":
+                # Telegram names are first + last: the typed
+                # words split on the first space, and a single
+                # word clears the last name — the name becomes
+                # exactly what was typed, as on WhatsApp.
+                words = rest.split(None, 1)
+                verdict = self._chatops_call(
+                    adapter.set_profile_name, words[0],
+                    words[1] if len(words) > 1 else "")
+            else:
+                verdict = self._chatops_call(
+                    adapter.set_profile_name, rest)
             if isinstance(verdict, dict) and verdict.get("ok"):
                 personal.note_profile_changed(
-                    "whatsapp", account_id=rec.id,
+                    platform, account_id=rec.id,
                     field="name", value=rest)
-                return f"done — your WhatsApp name is now “{rest}”."
+                return (f"done — your {label} name is now "
+                        f"“{rest}”.")
+            return self._chatops_verdict(verdict, "")
+        if head == "username":
+            if platform != "telegram":
+                return ("usernames are a Telegram thing — "
+                        "WhatsApp accounts don't have one to "
+                        "set. Run /myprofile username … from "
+                        "your Telegram.")
+            clearing = rest.lower() == "clear"
+            handle = ("" if clearing
+                      else rest.lstrip("@").strip())
+            if not handle and not clearing:
+                return ("usage: /myprofile username newhandle "
+                        "— or /myprofile username clear to "
+                        "remove it")
+            verdict = self._chatops_call(
+                adapter.set_username, handle)
+            if isinstance(verdict, dict) and verdict.get("ok"):
+                personal.note_profile_changed(
+                    platform, account_id=rec.id,
+                    field="username", value=handle)
+                if handle:
+                    return (f"done — your Telegram username "
+                            f"is now @{handle}.")
+                return ("done — your Telegram username is "
+                        "removed.")
             return self._chatops_verdict(verdict, "")
         if head == "about":
             if rest.lower() == "clear":
@@ -1666,7 +1729,7 @@ class RuntimeChatOpsMixin:
             verdict = self._chatops_call(adapter.set_about, rest)
             if isinstance(verdict, dict) and verdict.get("ok"):
                 personal.note_profile_changed(
-                    "whatsapp", account_id=rec.id,
+                    platform, account_id=rec.id,
                     field="about", value=rest)
                 if rest:
                     return f"done — your About now reads “{rest}”."
@@ -1678,12 +1741,18 @@ class RuntimeChatOpsMixin:
                     adapter.set_profile_photo, remove=True)
                 if isinstance(verdict, dict) and verdict.get("ok"):
                     personal.note_profile_changed(
-                        "whatsapp", account_id=rec.id,
+                        platform, account_id=rec.id,
                         field="photo", value="removed")
                     return "done — your profile photo is removed."
                 return self._chatops_verdict(verdict, "")
             path, _kind = self._chatops_media_of(message)
             if not path:
+                if platform == "telegram":
+                    return (
+                        "reply to a picture with /myprofile photo "
+                        "(or send the picture with /myprofile photo "
+                        "as its caption) — Telegram needs the "
+                        "image itself.")
                 return ("reply to a picture with /myprofile photo "
                         "(or send the picture with /myprofile photo "
                         "as its caption) — WhatsApp needs the "
@@ -1693,37 +1762,53 @@ class RuntimeChatOpsMixin:
                 adapter.set_profile_photo, path)
             if isinstance(verdict, dict) and verdict.get("ok"):
                 personal.note_profile_changed(
-                    "whatsapp", account_id=rec.id, field="photo",
+                    platform, account_id=rec.id, field="photo",
                     value=str(verdict.get("picture_id") or "set"))
                 return "done — your new profile photo is up."
             return self._chatops_verdict(verdict, "")
+        if platform == "telegram":
+            return ("usage: /myprofile — or /myprofile name …, "
+                    "/myprofile about …, /myprofile username …, "
+                    "/myprofile photo")
         return ("usage: /myprofile — or /myprofile name …, "
                 "/myprofile about …, /myprofile photo")
 
     def _chatops_privacy(self, tail: str, message: Any) -> str:
-        """/privacy — read and set the paired WhatsApp
-        account's privacy settings (parity G3, census bundle
-        #5): who sees the last-seen, the photo, the status, and
-        the rest of the protocol's categories.  Values are the
-        protocol's own vocabulary, validated before traffic;
-        a category an engine has no setter for answers
-        unsupported on that rung, in the verdict's own words."""
+        """/privacy — read and set the paired personal
+        account's privacy settings: WhatsApp (parity G3,
+        census bundle #5) and the Telegram userbot (parity
+        G5, bundle #8) under one grammar — each platform's
+        own categories, the values validated against that
+        platform's vocabulary before traffic.  On Telegram
+        the settable words are the three rule shapes a bare
+        word can honestly name (all / contacts / none);
+        finer Telegram rules read back as named labels,
+        never squeezed into a word they are not.  A category
+        an engine has no setter for answers unsupported on
+        that rung, in the verdict's own words."""
         from ...social.chat.chatops import (
             PRIVACY_VALUE_WORDS,
             format_privacy_settings,
+            format_tg_privacy_settings,
             privacy_pair_error,
+            tg_privacy_pair_error,
         )
 
-        svc, rec, adapter, error = self._chatops_identity_home(
-            message, "privacy")
+        svc, rec, adapter, platform, error = \
+            self._chatops_identity_home(message, "privacy")
         if error:
             return error
+        label = ("WhatsApp" if platform == "whatsapp"
+                 else "Telegram")
         parts = tail.split()
         if not parts:
             verdict = self._chatops_call(adapter.get_privacy)
             if not (isinstance(verdict, dict)
                     and verdict.get("ok")):
                 return self._chatops_verdict(verdict, "")
+            if platform == "telegram":
+                return format_tg_privacy_settings(
+                    verdict.get("settings"))
             return format_privacy_settings(
                 verdict.get("settings"))
         if len(parts) != 2:
@@ -1731,11 +1816,13 @@ class RuntimeChatOpsMixin:
                     "/privacy lastseen contacts; bare /privacy "
                     "lists what each category is set to.")
         category, value = parts[0].lower(), parts[1].lower()
-        problem = privacy_pair_error(category, value)
+        problem = (tg_privacy_pair_error(category, value)
+                   if platform == "telegram"
+                   else privacy_pair_error(category, value))
         if problem:
             return f"couldn't do it — {problem}"
-        if svc["registry"].owner_stopped("whatsapp"):
-            return ("WhatsApp is under your standing stop — "
+        if svc["registry"].owner_stopped(platform):
+            return (f"{label} is under your standing stop — "
                     "it stays halted until you start it again; "
                     "nothing was changed.")
         verdict = self._chatops_call(
@@ -1743,15 +1830,60 @@ class RuntimeChatOpsMixin:
         if not (isinstance(verdict, dict) and verdict.get("ok")):
             return self._chatops_verdict(verdict, "")
         svc["personal"].note_profile_changed(
-            "whatsapp", account_id=rec.id,
+            platform, account_id=rec.id,
             field=f"privacy:{category}", value=value)
         word = PRIVACY_VALUE_WORDS.get(value, value)
         line = f"done — {category} is now {word}."
         back = (verdict.get("settings") or {}).get(category)
         if back and back != value:
-            line += (f" It reads back as {back} — WhatsApp "
+            line += (f" It reads back as {back} — {label} "
                      f"kept its own value.")
         return line
+
+    def _chatops_addcontact(self, tail: str, message: Any) -> str:
+        """/addcontact Name | +number — add a person to the
+        paired Telegram account's contacts (parity G5, census
+        bundle #8).  Telegram-personal only: WhatsApp contacts
+        live in the phone's own address book and neither
+        bridge carries an add-contact verb, so asked on
+        WhatsApp the command answers exactly that instead of
+        faking one.  An act as the owner — the standing stop
+        gates it and a landed add journals contact_added."""
+        platform = str(getattr(message.chat, "platform", "")
+                       or "")
+        if platform == "whatsapp":
+            return ("adding a contact is a Telegram-surface "
+                    "act here — on WhatsApp your contacts live "
+                    "in the phone's address book and the "
+                    "bridges have no verb for them. Run "
+                    "/addcontact from your Telegram.")
+        svc, rec, adapter, _platform, error = \
+            self._chatops_identity_home(message, "addcontact")
+        if error:
+            return error
+        name_part, sep, phone_part = tail.partition("|")
+        name = name_part.strip()
+        phone = phone_part.strip()
+        if not sep or not name or not phone:
+            return ("usage: /addcontact Name | +number — "
+                    "e.g. /addcontact Ada Lovelace | "
+                    "+2348000000000")
+        if svc["registry"].owner_stopped("telegram"):
+            return ("Telegram is under your standing stop — "
+                    "it stays halted until you start it again; "
+                    "nothing was changed.")
+        words = name.split(None, 1)
+        verdict = self._chatops_call(
+            adapter.add_contact, words[0], phone,
+            words[1] if len(words) > 1 else "")
+        if not (isinstance(verdict, dict)
+                and verdict.get("ok")):
+            return self._chatops_verdict(verdict, "")
+        svc["personal"].note_contact_added(
+            "telegram", account_id=rec.id,
+            counterpart_id=str(verdict.get("user_id") or ""),
+            name=name, phone=phone)
+        return f"done — {name} is in your Telegram contacts."
 
     def _chatops_makepoll(self, tail: str, message: Any) -> str:
         """/makepoll — post a native poll in THIS WhatsApp chat

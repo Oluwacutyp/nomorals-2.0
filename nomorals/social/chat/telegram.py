@@ -488,6 +488,77 @@ def _user_status_fields(user: Any) -> dict[str, Any]:
     return {"status_kind": kind, "was_online": was_online}
 
 
+#: /privacy on the personal Telegram surface (parity G5,
+#: census bundle #8): the owner-facing category names —
+#: chatops.TG_PRIVACY_CATEGORIES carries the same keys, and a
+#: pin holds the two sets equal — mapped to the Telethon
+#: InputPrivacyKey class names that carry them on the wire.
+#: Resolved by name at call time so this module keeps its
+#: lazy-Telethon discipline (no import at module load).
+TG_PRIVACY_KEY_NAMES: dict[str, str] = {
+    "lastseen": "InputPrivacyKeyStatusTimestamp",
+    "profile": "InputPrivacyKeyProfilePhoto",
+    "about": "InputPrivacyKeyAbout",
+    "phone": "InputPrivacyKeyPhoneNumber",
+    "groupadd": "InputPrivacyKeyChatInvite",
+    "calls": "InputPrivacyKeyPhoneCall",
+    "p2p": "InputPrivacyKeyPhoneP2P",
+    "forwards": "InputPrivacyKeyForwards",
+    "voice": "InputPrivacyKeyVoiceMessages",
+    "birthday": "InputPrivacyKeyBirthday",
+}
+
+
+def _tg_privacy_word(rule_names: list[str]) -> str:
+    """One privacy category's landed rule list, in words.
+
+    The shared vocabulary (chatops.PRIVACY_VALUE_WORDS) where
+    the rule list honestly IS one of its words — all /
+    contacts / none / contact_blacklist / contact_allowlist.
+    Telegram rule shapes with no shared word (close friends,
+    premium, chat-member lists, per-person exceptions beyond
+    the contacts-except shape) come back as NAMED labels
+    instead: the read names what the account actually has,
+    never squeezes it into a word it is not."""
+    names = [str(n or "") for n in rule_names]
+    if not names:
+        return "not set — Telegram's default applies"
+    if "PrivacyValueAllowCloseFriends" in names:
+        return ("close friends only (a Telegram-only rule — "
+                "no shared word for it)")
+    if "PrivacyValueAllowPremium" in names:
+        return ("premium users (a Telegram-only rule — "
+                "no shared word for it)")
+    if any("ChatParticipants" in n for n in names):
+        return ("members of specific chats (a Telegram-only "
+                "rule — no shared word for it)")
+    present = set(names)
+    if present == {"PrivacyValueAllowAll"}:
+        return "all"
+    if present == {"PrivacyValueAllowContacts"}:
+        return "contacts"
+    if present == {"PrivacyValueDisallowAll"}:
+        return "none"
+    if present == {"PrivacyValueAllowContacts",
+                   "PrivacyValueDisallowUsers"}:
+        return "contact_blacklist"
+    if present == {"PrivacyValueAllowUsers"}:
+        return "contact_allowlist"
+    if present == {"PrivacyValueAllowAll",
+                   "PrivacyValueDisallowUsers"}:
+        return ("everyone except specific people "
+                "(a Telegram-only rule — no shared word for it)")
+    if "PrivacyValueDisallowContacts" in present:
+        return ("everyone except contacts (a Telegram-only "
+                "rule — no shared word for it)")
+    if any(n.endswith("AllowBots") or n.endswith("DisallowBots")
+           for n in names):
+        return ("a rule list shaped around bots "
+                "(a Telegram-only shape — no shared word for it)")
+    return ("a custom rule list (a Telegram shape with no "
+            "shared word for it)")
+
+
 class TelegramAdapter(ChatAdapter):
     """A Telethon userbot: full account control over MTProto."""
 
@@ -1048,6 +1119,317 @@ class TelegramAdapter(ChatAdapter):
 
         await client(UpdateStatusRequest(offline=not online))
         return True
+
+    # ── own identity (parity G5, census bundle #8) ─────────
+    # The account self-management family, beside presence:
+    # until this build the userbot could be READ (its name and
+    # handle ride every inbound message) but nothing on the
+    # account could be CHANGED from Devon — the WhatsApp
+    # surface gained exactly this family in G3.  These are its
+    # Telethon verbs (account.UpdateProfile / UpdateUsername,
+    # photos.UploadProfilePhoto / DeletePhotos, account.Get/
+    # SetPrivacy, contacts.AddContact), in the WhatsApp
+    # family's verdict shape ({"ok", ...} / {"ok": False,
+    # "error"}) so ONE command layer drives both surfaces.
+    # A server refusal (a taken username, a rejected privacy
+    # rule, a flood wait) surfaces in the verdict's error
+    # VERBATIM — never retried, never dressed as success.
+
+    def _identity_call(self, make_coro: Any, *,
+                       timeout: float = 30.0) -> dict[str, Any]:
+        """Run one identity coroutine on the connection's loop
+        and shape the outcome as a verdict dict."""
+        client = self._client
+        if client is None or self._loop is None:
+            return {"ok": False, "error": (
+                "the Telegram personal surface is not "
+                "connected — /pair telegram first")}
+        try:
+            return dict(self._run_on_loop(
+                make_coro(client), timeout=timeout))
+        except Exception as exc:  # noqa: BLE001 - refusal IS the answer
+            record_failure("telegram.identity_call", exc)
+            return {"ok": False,
+                    "error": str(exc) or type(exc).__name__}
+
+    def get_profile(self) -> dict[str, Any]:
+        """The account's current identity: {"ok", "name",
+        "first_name", "last_name", "about", "username",
+        "has_photo"}.  The About rides a full-user read; when
+        that read fails the key is ABSENT and "info_error"
+        says why — named, never invented (the WhatsApp
+        read's contract)."""
+        return self._identity_call(self._get_profile_async)
+
+    async def _get_profile_async(self, client: Any
+                                 ) -> dict[str, Any]:
+        from telethon.tl.functions.users import GetFullUserRequest
+
+        me = await client.get_me()
+        first = str(getattr(me, "first_name", "") or "")
+        last = str(getattr(me, "last_name", "") or "")
+        out: dict[str, Any] = {
+            "ok": True,
+            "name": " ".join(p for p in (first, last) if p),
+            "first_name": first,
+            "last_name": last,
+            "username": str(getattr(me, "username", "") or ""),
+            "has_photo": getattr(me, "photo", None) is not None,
+        }
+        try:
+            full = await client(GetFullUserRequest("me"))
+            out["about"] = str(getattr(
+                getattr(full, "full_user", None), "about", "")
+                or "")
+        except Exception as exc:  # noqa: BLE001 - named, not faked
+            out["info_error"] = str(exc) or type(exc).__name__
+        return out
+
+    def set_profile_name(self, first_name: str,
+                         last_name: str = "") -> dict[str, Any]:
+        """Set the account's profile name (Telethon
+        account.UpdateProfileRequest).  Telegram names are
+        first + last: the pair lands exactly as given — a
+        one-word name clears the last name, it does not leave
+        a stale one behind."""
+        first = str(first_name or "").strip()
+        if not first:
+            return {"ok": False,
+                    "error": "a profile name cannot be empty"}
+        last = str(last_name or "").strip()
+        return self._identity_call(
+            lambda client: self._set_profile_name_async(
+                client, first, last))
+
+    async def _set_profile_name_async(self, client: Any,
+                                      first: str, last: str
+                                      ) -> dict[str, Any]:
+        from telethon.tl.functions.account import UpdateProfileRequest
+
+        user = await client(UpdateProfileRequest(
+            first_name=first, last_name=last))
+        self._me_first_name = str(
+            getattr(user, "first_name", "") or first)
+        return {"ok": True,
+                "name": " ".join(p for p in (first, last) if p),
+                "first_name": first, "last_name": last}
+
+    def set_about(self, text: str) -> dict[str, Any]:
+        """Set the account's About text (UpdateProfileRequest's
+        about field).  An empty text clears it."""
+        return self._identity_call(
+            lambda client: self._set_about_async(
+                client, str(text or "")))
+
+    async def _set_about_async(self, client: Any, text: str
+                               ) -> dict[str, Any]:
+        from telethon.tl.functions.account import UpdateProfileRequest
+
+        await client(UpdateProfileRequest(about=text))
+        return {"ok": True, "about": text}
+
+    def set_username(self, username: str) -> dict[str, Any]:
+        """Set (or, with an empty handle, remove) the
+        account's username (account.UpdateUsernameRequest).
+        Telegram's availability verdict — USERNAME_OCCUPIED
+        and friends — surfaces verbatim in the error."""
+        handle = str(username or "").strip().lstrip("@")
+        return self._identity_call(
+            lambda client: self._set_username_async(
+                client, handle))
+
+    async def _set_username_async(self, client: Any, handle: str
+                                  ) -> dict[str, Any]:
+        from telethon.tl.functions.account import UpdateUsernameRequest
+
+        user = await client(UpdateUsernameRequest(handle))
+        landed = str(getattr(user, "username", "") or handle)
+        self._me_username = landed
+        return {"ok": True, "username": landed}
+
+    def set_profile_photo(self, path: str = "", *,
+                          remove: bool = False) -> dict[str, Any]:
+        """Set (or remove) the account's profile photo from a
+        local image file — the WhatsApp verb's shape, so the
+        command layer stays uniform across surfaces."""
+        if remove:
+            return self.remove_profile_photo()
+        path = str(path or "").strip()
+        if not path:
+            return {"ok": False, "error": (
+                "profile photo needs an image path "
+                "(or remove=True)")}
+        if not os.path.exists(path):
+            return {"ok": False, "error": (
+                f"that image is gone — no file at {path}")}
+        return self._identity_call(
+            lambda client: self._set_profile_photo_async(
+                client, path), timeout=60.0)
+
+    async def _set_profile_photo_async(self, client: Any,
+                                       path: str
+                                       ) -> dict[str, Any]:
+        from telethon.tl.functions.photos import UploadProfilePhotoRequest
+
+        uploaded = await client.upload_file(path)
+        result = await client(
+            UploadProfilePhotoRequest(file=uploaded))
+        photo = getattr(result, "photo", None)
+        return {"ok": True, "picture_id": str(
+            getattr(photo, "id", "") or "")}
+
+    def remove_profile_photo(self) -> dict[str, Any]:
+        """Remove the account's current profile photo
+        (photos.DeletePhotosRequest over the newest photo the
+        account carries).  No photo set = a refusal in words,
+        not a fake removal."""
+        return self._identity_call(
+            self._remove_profile_photo_async, timeout=60.0)
+
+    async def _remove_profile_photo_async(self, client: Any
+                                          ) -> dict[str, Any]:
+        from telethon.tl.functions.photos import DeletePhotosRequest, GetUserPhotosRequest
+        from telethon.tl.types import InputPhoto
+
+        me = await client.get_input_entity("me")
+        photos = await client(GetUserPhotosRequest(
+            user_id=me, offset=0, max_id=0, limit=1))
+        rows = list(getattr(photos, "photos", None) or [])
+        if not rows:
+            return {"ok": False, "error": (
+                "no profile photo to remove — the account "
+                "has none set")}
+        current = rows[0]
+        await client(DeletePhotosRequest(id=[InputPhoto(
+            id=int(getattr(current, "id", 0) or 0),
+            access_hash=int(
+                getattr(current, "access_hash", 0) or 0),
+            file_reference=bytes(
+                getattr(current, "file_reference", b"")
+                or b""))]))
+        return {"ok": True}
+
+    def get_privacy(self) -> dict[str, Any]:
+        """The account's privacy settings as Telegram reads
+        them back: {"ok", "settings": {category: word}} —
+        each category read with its own GetPrivacyRequest; a
+        category whose read fails is ABSENT from the map,
+        never reported with a guessed value."""
+        return self._identity_call(self._get_privacy_async)
+
+    async def _get_privacy_async(self, client: Any
+                                 ) -> dict[str, Any]:
+        from telethon.tl import types as tl_types
+        from telethon.tl.functions.account import GetPrivacyRequest
+
+        settings: dict[str, str] = {}
+        first_error = ""
+        for category, key_name in \
+                TG_PRIVACY_KEY_NAMES.items():
+            key_cls = getattr(tl_types, key_name, None)
+            if key_cls is None:
+                continue
+            try:
+                res = await client(
+                    GetPrivacyRequest(key=key_cls()))
+            except Exception as exc:  # noqa: BLE001 - one key
+                if not first_error:  # failing ≠ a dead read
+                    first_error = (str(exc)
+                                   or type(exc).__name__)
+                continue
+            settings[category] = _tg_privacy_word([
+                type(rule).__name__ for rule in
+                (getattr(res, "rules", None) or [])])
+        if not settings:
+            return {"ok": False, "error": (
+                first_error or
+                "Telegram returned no privacy rules")}
+        return {"ok": True, "settings": settings}
+
+    def set_privacy(self, category: str, value: str
+                    ) -> dict[str, Any]:
+        """Set one privacy category (account.SetPrivacy
+        Request).  The settable words are the shared
+        vocabulary's three rule shapes — all / contacts /
+        none — validated here, before traffic, exactly as
+        the command layer validates them (the WhatsApp
+        family's two-layer law)."""
+        category = str(category or "").strip().lower()
+        value = str(value or "").strip().lower()
+        if category not in TG_PRIVACY_KEY_NAMES:
+            return {"ok": False, "error": (
+                f"unknown Telegram privacy category "
+                f"{category!r}")}
+        if value not in ("all", "contacts", "none"):
+            return {"ok": False, "error": (
+                "Telegram privacy here takes all, contacts "
+                f"or none — not {value!r}")}
+        return self._identity_call(
+            lambda client: self._set_privacy_async(
+                client, category, value))
+
+    async def _set_privacy_async(self, client: Any,
+                                 category: str, value: str
+                                 ) -> dict[str, Any]:
+        from telethon.tl import types as tl_types
+        from telethon.tl.functions.account import SetPrivacyRequest
+
+        key_cls = getattr(
+            tl_types, TG_PRIVACY_KEY_NAMES[category])
+        rule_cls = {
+            "all": tl_types.InputPrivacyValueAllowAll,
+            "contacts": tl_types.InputPrivacyValueAllowContacts,
+            "none": tl_types.InputPrivacyValueDisallowAll,
+        }[value]
+        res = await client(SetPrivacyRequest(
+            key=key_cls(), rules=[rule_cls()]))
+        landed = _tg_privacy_word([
+            type(rule).__name__ for rule in
+            (getattr(res, "rules", None) or [])])
+        return {"ok": True, "settings": {category: landed}}
+
+    def add_contact(self, first_name: str, phone: str,
+                    last_name: str = "") -> dict[str, Any]:
+        """Add a person to the account's Telegram contacts by
+        phone number (contacts.ResolvePhoneRequest to find
+        the account, then contacts.AddContactRequest).  A
+        number Telegram cannot resolve — not on Telegram, or
+        hidden from phone lookup by its owner's privacy —
+        refuses in words; nothing is half-added."""
+        first = str(first_name or "").strip()
+        number = str(phone or "").strip()
+        if not first:
+            return {"ok": False,
+                    "error": "a contact needs a name"}
+        if not number:
+            return {"ok": False,
+                    "error": "a contact needs a phone number"}
+        last = str(last_name or "").strip()
+        return self._identity_call(
+            lambda client: self._add_contact_async(
+                client, first, number, last))
+
+    async def _add_contact_async(self, client: Any, first: str,
+                                 phone: str, last: str
+                                 ) -> dict[str, Any]:
+        from telethon.tl.functions.contacts import AddContactRequest, ResolvePhoneRequest
+
+        resolved = await client(ResolvePhoneRequest(phone))
+        users = list(getattr(resolved, "users", None) or [])
+        if not users:
+            return {"ok": False, "error": (
+                f"no Telegram account answers to {phone} — "
+                "the number may not be on Telegram, or its "
+                "owner hides it from phone lookup")}
+        user = users[0]
+        target = await client.get_input_entity(user)
+        await client(AddContactRequest(
+            id=target, first_name=first, last_name=last,
+            phone=phone))
+        return {"ok": True,
+                "user_id": str(getattr(user, "id", "") or ""),
+                "name": " ".join(
+                    p for p in (first, last) if p)}
 
     def view_stories(self, poster_id: str, max_story_id: int) -> bool:
         """Mark a peer's stories as viewed by this account

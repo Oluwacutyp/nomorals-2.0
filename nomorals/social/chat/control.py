@@ -558,10 +558,11 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "gcstatus": (0, 0),       # /gcstatus — this group's real stats
     "statusinfo": (0, 0),     # /statusinfo — alias of /gcstatus
     "pollres": (0, 0),        # /pollres as a reply to a poll
-    "myprofile": (0, None),   # /myprofile [name|about|photo] … — the WhatsApp account's identity
+    "myprofile": (0, None),   # /myprofile [name|about|photo|username] … — the personal account's identity (WhatsApp + Telegram)
     "privacy": (0, 2),        # /privacy [category value] — the account's privacy settings
     "makepoll": (1, None),    # /makepoll Question | Opt | Opt — a native poll in this chat
     "vcf": (0, None),         # /vcf — this group's people as a contacts (.vcf) file
+    "addcontact": (0, None),  # /addcontact Name | +number — add to the Telegram account's contacts
     "tagall": (0, None),      # /tagall [text] — mention all (capped)
     "hidetag": (0, None),     # /hidetag [text] — mention all, hidden
     "antitag": (0, 1),        # /antitag [on|off] — mass-tag DM flags
@@ -2742,14 +2743,18 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/pollres (as a reply to a poll)",
               "example": "/pollres",
               "related": "/makepoll · /poll · /gcstatus"},
-    "myprofile": {"what": "your personal WhatsApp account's own identity — the name people see, the About text, the profile photo — read it bare, change it by naming the part. Before this, Devon could only read a push name off inbound messages; nothing on the account could change. WhatsApp may rate-limit profile changes: a refusal comes back in its own words, never retried in a loop. Every landed change lands in the personal journal like every act taken as you. Owner only; your standing stop halts the setters.",
-              "usage": "/myprofile · /myprofile name New Name · /myprofile about some text (or: about clear) · /myprofile photo (as a reply to a picture, or its caption) · /myprofile photo remove",
+    "myprofile": {"what": "your personal account's own identity — the name people see, the About text, the profile photo — on WhatsApp and on Telegram, under one grammar: read it bare, change it by naming the part. Telegram adds the username (WhatsApp accounts have none; asked there, the command says so). Before this, Devon could only read a push name off inbound messages; nothing on either account could change. A platform may rate-limit profile changes or refuse a taken username: the refusal comes back in its own words, never retried in a loop. Every landed change lands in the personal journal like every act taken as you. Owner only; your standing stop halts the setters.",
+              "usage": "/myprofile · /myprofile name New Name · /myprofile about some text (or: about clear) · /myprofile photo (as a reply to a picture, or its caption) · /myprofile photo remove · Telegram: /myprofile username newhandle (or: username clear)",
               "example": "/myprofile name Devon Owner",
-              "related": "/privacy · /pair"},
-    "privacy": {"what": "your personal WhatsApp account's privacy settings — who sees your last seen, profile photo, About-side profile info, status and receipts, who can add you to groups or call you. Read them bare; set one category with its protocol value (the values are WhatsApp's own vocabulary, and an out-of-vocabulary pair refuses in words before anything is sent). Two categories (defense, stickers) can be set on the Go bridge but not read back there, and the Baileys bridge has no updater for them — those limits answer in the reply, never as a fake success. Every landed change lands in the personal journal. Owner only; your standing stop halts it.",
-              "usage": "/privacy · /privacy lastseen contacts — categories: groupadd, lastseen, status, profile, readreceipts, online, calladd, messages, defense, stickers",
+              "related": "/privacy · /addcontact · /pair"},
+    "privacy": {"what": "your personal account's privacy settings — who sees your last seen, profile photo, About, status and receipts, who can add you to groups or call you — on WhatsApp and on Telegram, under one grammar. Read them bare; set one category with its value (each platform's own vocabulary, and an out-of-vocabulary pair refuses in words before anything is sent). On WhatsApp, two categories (defense, stickers) can be set on the Go bridge but not read back there, and the Baileys bridge has no updater for them. On Telegram, the settable words are the three rule shapes a bare word can honestly name (all / contacts / none); finer Telegram rules — specific people, close friends, premium — read back as named labels, never squeezed into a word they are not. Those limits answer in the reply, never as a fake success. Every landed change lands in the personal journal. Owner only; your standing stop halts it.",
+              "usage": "/privacy · /privacy lastseen contacts — WhatsApp categories: groupadd, lastseen, status, profile, readreceipts, online, calladd, messages, defense, stickers · Telegram categories: lastseen, profile, about, phone, groupadd, calls, p2p, forwards, voice, birthday",
               "example": "/privacy readreceipts none",
               "related": "/myprofile · /pair"},
+    "addcontact": {"what": "add a person to your Telegram account's contacts by phone number — she resolves the number to its Telegram account and saves it under the name you give. A number Telegram cannot resolve (not on Telegram, or hidden from phone lookup by its owner's privacy) refuses in words; nothing is half-added. Telegram-personal only: on WhatsApp your contacts live in the phone's address book and the bridges have no verb for them, so asked there the command says exactly that. Every landed add lands in the personal journal. Owner only; your standing stop halts it.",
+              "usage": "/addcontact Name | +number",
+              "example": "/addcontact Ada Lovelace | +2348000000000",
+              "related": "/myprofile · /vcf · /pair"},
     "makepoll": {"what": "post a native poll in this WhatsApp chat, as you, from your personal surface: a question and 2–12 options separated by | — add a leading 'multi |' segment to let people pick several. WhatsApp polls have no quiz mode and are never anonymous (voters are visible by design); a quiz-shaped ask refuses in words rather than posting a different instrument. Read the count back by replying to the poll with /pollres. (The /poll command is the group-economy poll — treasury governance, a different instrument.) A landed poll lands in the personal journal like every act taken as you. Owner only; your standing stop halts it.",
               "usage": "/makepoll Question | Option | Option · /makepoll multi | Question | Option | Option",
               "example": "/makepoll Lunch today? | Pizza | Sushi",
@@ -4402,7 +4407,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "statusreact", "poststatus", "chanstory", "banchecker", "gcstatus", "statusinfo",
       "pollres", "tagall", "hidetag", "antitag", "viewonce", "vv",
       "joinlink", "newgroup", "newchannel", "leave",
-      "myprofile", "privacy", "makepoll", "vcf"]),
+      "myprofile", "privacy", "makepoll", "vcf", "addcontact"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
@@ -4663,8 +4668,9 @@ LIST_ONELINERS: dict[str, str] = {
     "gcstatus": "this group's real stats, sources labeled — /gcstatus",
     "statusinfo": "alias of /gcstatus",
     "pollres": "a poll's current results, from the message — /pollres as a reply",
-    "myprofile": "your WhatsApp name, about and photo — read or set them — /myprofile [name|about|photo] …",
-    "privacy": "your WhatsApp privacy settings — read or set one — /privacy [category value]",
+    "myprofile": "your WhatsApp or Telegram name, about and photo (Telegram: username too) — read or set them — /myprofile [name|about|photo|username] …",
+    "privacy": "your WhatsApp or Telegram privacy settings — read or set one — /privacy [category value]",
+    "addcontact": "add a person to your Telegram contacts by number — /addcontact Name | +number",
     "makepoll": "post a native WhatsApp poll in this chat — /makepoll Question | Option | Option",
     "vcf": "export this group's people as a contacts file, each number with its name — /vcf",
     "tagall": "mention every member (chunked, capped at 100) — /tagall [text]",

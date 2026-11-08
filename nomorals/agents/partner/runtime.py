@@ -6489,7 +6489,8 @@ class PartnerRuntime(
                 "statusinfo", "pollres", "tagall", "hidetag",
                 "antitag", "viewonce", "vv",
                 "joinlink", "newgroup", "newchannel", "leave",
-                "myprofile", "privacy", "makepoll", "vcf"}:
+                "myprofile", "privacy", "makepoll", "vcf",
+                "addcontact"}:
             # The chat & privacy set (FEI gap wave F): the set
             # is spelled out so the catalog's handler-path scan
             # sees every kind; social/chat/chatops.py's

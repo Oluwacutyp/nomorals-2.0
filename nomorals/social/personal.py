@@ -1107,6 +1107,32 @@ class PersonalSurfaces:
         _append_jsonl(self.vault.journal_path, entry)
         return entry
 
+    def note_contact_added(self, platform: str, *,
+                           account_id: str = "",
+                           counterpart_id: str = "",
+                           name: str = "", phone: str = "",
+                           ts: float = 0.0) -> dict[str, Any]:
+        """Journal one contact added AS the owner (parity G5,
+        /addcontact): kind ``contact_added``, the added
+        account's id in counterpart_id and the name + number
+        the contact was saved under as the text — the act
+        changes the owner's own address book on his account,
+        so it belongs in the personal record like every act
+        taken as him."""
+        rec = self.resolve_event_account(platform, account_id)
+        entry = {
+            "ts": float(ts or self._clock()),
+            "kind": "contact_added", "account": rec.id,
+            "platform": platform,
+            "counterpart_id": str(counterpart_id or ""),
+            "poster_name": "", "media_kind": "",
+            "source_id": "", "path": "", "bytes": 0,
+            "text": (f"{str(name or '')} · "
+                     f"{str(phone or '')}")[:200],
+            "note": "contact added as the owner via /addcontact"}
+        _append_jsonl(self.vault.journal_path, entry)
+        return entry
+
     def note_poll_posted(self, platform: str, *,
                          account_id: str = "",
                          counterpart_id: str = "",
