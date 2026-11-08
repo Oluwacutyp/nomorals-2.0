@@ -1278,13 +1278,43 @@ func (b *bridge) handleGroupAdminCommand(ctx context.Context, cc *clientConn, id
 		return true
 
 	case "channel_set_name":
-		// No newsletter-rename verb in this whatsmeow pin.
-		b.reply(cc, id, map[string]any{"ok": false, "error": "this bridge's whatsmeow build has no newsletter rename verb — channel rename is unavailable"})
+		// The update rides whatsmeow's Mex mutation through
+		// DangerousInternals().SendMexIQ (newsletter.go) —
+		// the library has no public UpdateNewsletter method,
+		// but it carries the mutation's query ID and the
+		// transport itself.  Same request grammar as the
+		// Node rung: name trimmed, empty refuses.
+		jid, err := newsletterJID(req.str("chat"))
+		if err != nil {
+			bad(err)
+			return true
+		}
+		name := strings.TrimSpace(req.str("name"))
+		if name == "" {
+			bad(errors.New("missing name"))
+			return true
+		}
+		if err := setNewsletterName(ctx,
+			b.cli.DangerousInternals(), jid, name); err != nil {
+			fail(err)
+			return true
+		}
+		ok(nil)
 		return true
 
 	case "channel_set_description":
-		// No newsletter-description verb in this whatsmeow pin.
-		b.reply(cc, id, map[string]any{"ok": false, "error": "this bridge's whatsmeow build has no newsletter description verb — channel description change is unavailable"})
+		jid, err := newsletterJID(req.str("chat"))
+		if err != nil {
+			bad(err)
+			return true
+		}
+		if err := setNewsletterDescription(ctx,
+			b.cli.DangerousInternals(), jid,
+			req.str("description")); err != nil {
+			fail(err)
+			return true
+		}
+		ok(nil)
 		return true
 	}
 	return false

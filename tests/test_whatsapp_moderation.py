@@ -68,8 +68,8 @@ class FakeBridge:
             if self.message_ok:
                 return {"ok": True}
             return {"ok": False,
-                    "error": "unsupported: this Baileys build has "
-                             "no message-pin verb"}
+                    "error": "unsupported: the bridge refused "
+                             "the message verb"}
         return {"ok": False, "error": f"unknown cmd {name}"}
 
     def by_cmd(self, name: str) -> list[dict]:

@@ -1490,19 +1490,27 @@ async function handleCommand(sock, req) {
         return reply(sock, id, { ok: true });
       }
       case 'chat_disappear': {
-        // Disappearing-messages timer: Baileys carries the verb
-        // for GROUPS only (groupToggleEphemeral).  DM timers
-        // ride the Go bridge engine — this rung refuses
-        // honestly instead of pretending.
+        // Disappearing-messages timer, both scopes.  Groups
+        // ride the groupToggleEphemeral IQ.  A DM has no group
+        // IQ — its timer is an EPHEMERAL_SETTING protocol
+        // message, which is exactly what Baileys' sendMessage
+        // builds for {disappearingMessagesInChat} on a
+        // non-group chat (lib/Utils/messages.js,
+        // prepareDisappearingMessageSettingContent;
+        // lib/Socket/messages-send.js routes only groups to
+        // the IQ shortcut and lets every other chat take the
+        // message path).  Same end state as the Go bridge's
+        // SetDisappearingTimer, which covers both scopes too.
         const jid = jidNormalizedUser(req.chat || '');
         const secs = Number(req.seconds);
         if (!Number.isFinite(secs) || secs < 0) {
           return reply(sock, id, { ok: false, error: 'chat_disappear needs seconds >= 0 (0 turns disappearing messages off)' });
         }
-        if (!jid.endsWith('@g.us')) {
-          return reply(sock, id, { ok: false, error: 'this Baileys build can only set disappearing timers in groups — DM timers ride the Go bridge engine' });
+        if (jid.endsWith('@g.us')) {
+          await wa.groupToggleEphemeral(jid, secs);
+        } else {
+          await wa.sendMessage(jid, { disappearingMessagesInChat: secs });
         }
-        await wa.groupToggleEphemeral(jid, secs);
         return reply(sock, id, { ok: true });
       }
       case 'check_number': {

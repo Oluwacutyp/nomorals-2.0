@@ -2201,10 +2201,12 @@ class WhatsAppAdapter(ChatAdapter):
     def set_disappearing(self, chat: ChatRef,
                          seconds: int) -> dict[str, Any]:
         """Set one chat's disappearing-messages timer (bridges'
-        ``chat_disappear``; 0 = off).  The Go engine sets it for
-        DMs and groups (whatsmeow SetDisappearingTimer); the
-        Baileys rung carries groups only and refuses DMs in its
-        verdict — the caller surfaces whichever truth came back."""
+        ``chat_disappear``; 0 = off).  Both engines set it for
+        DMs and groups: the Go engine via whatsmeow
+        SetDisappearingTimer; the Baileys engine via
+        groupToggleEphemeral for groups and the
+        ephemeral-setting protocol message (sendMessage with
+        disappearingMessagesInChat) for DMs."""
         return self._admin_cmd("chat_disappear", {
             "chat": self._jid(chat),
             "seconds": int(seconds)}, timeout=15)
@@ -2520,10 +2522,11 @@ class WhatsAppAdapter(ChatAdapter):
     #              bridges resolve the message author's key from
     #              their own message memory — an admin may revoke
     #              any member's message, the owner her own).
-    #   pin      → bridge message_pin (Go/whatsmeow engine: the
-    #              protocol's pin-in-chat message).  The Baileys
-    #              engine has no message-pin verb and answers an
-    #              honest unsupported — engine asymmetry, named.
+    #   pin      → bridge message_pin (BOTH engines: the
+    #              protocol's pin-in-chat message — whatsmeow
+    #              builds it directly; Baileys' sendMessage
+    #              {pin} builds the same message from the
+    #              bridge's cached key).
     #   restrict (mute) → UNSUPPORTED, honestly: WhatsApp has NO
     #              per-member mute.  The only silences are
     #              removing the member (a kick wearing a mute's
@@ -2699,10 +2702,12 @@ class WhatsAppAdapter(ChatAdapter):
 
     def admin_pin(self, chat: ChatRef, message_id: str,
                   silent: bool = True) -> dict[str, Any]:
-        """Pin a message in the group.  Real on the Go bridge
-        engine (protocol pin-in-chat); the Baileys engine has no
-        message-pin verb and the bridge answers an honest
-        unsupported, which passes through untouched."""
+        """Pin a message in the group.  Real on both bridge
+        engines — the protocol's pin-in-chat message: whatsmeow
+        builds it directly, and Baileys' sendMessage {pin}
+        builds the same message from the bridge's own cached
+        key (a message the bridge never saw refuses honestly
+        on either engine, since its key cannot be built)."""
         mid = str(message_id or "").strip()
         if not mid:
             return {"ok": False, "error": "no message id given"}
@@ -2716,7 +2721,7 @@ class WhatsAppAdapter(ChatAdapter):
         no 'unpin the pinned one' verb without its key), so the
         bare runtime call — which names no message — is an
         honest unsupported; with a message id the bridge
-        message_unpin verb does the real thing (Go engine)."""
+        message_unpin verb does the real thing (both engines)."""
         mid = str(message_id or "").strip()
         if not mid:
             return {"ok": False,

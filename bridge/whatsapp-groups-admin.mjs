@@ -27,8 +27,8 @@
  *     {"id":"<req>","cmd":"group_join_request_decide","chat":"<@g.us>","action":"approve|reject","participants":["<jid>",...]}
  *     {"id":"<req>","cmd":"group_member_add_mode","chat":"<@g.us>","mode":"admin|all"}
  *     {"id":"<req>","cmd":"message_delete","chat":"<@g.us>","message_id":"<stanza id>"}
- *     {"id":"<req>","cmd":"message_pin","chat":"<@g.us>","message_id":"<stanza id>"}   (unsupported on this engine — honest error)
- *     {"id":"<req>","cmd":"message_unpin","chat":"<@g.us>","message_id":"<stanza id>"} (unsupported on this engine — honest error)
+ *     {"id":"<req>","cmd":"message_pin","chat":"<@g.us>","message_id":"<stanza id>"}
+ *     {"id":"<req>","cmd":"message_unpin","chat":"<@g.us>","message_id":"<stanza id>"}
  *   Communities:
  *     {"id":"<req>","cmd":"community_create","subject":"...","description":"..."}
  *     {"id":"<req>","cmd":"community_leave","chat":"<@g.us>"}
@@ -58,6 +58,9 @@
  *                                groupRequestParticipantsUpdate,
  *                                groupMemberAddMode
  *   lib/Socket/chats.js       — updateProfilePicture (group JIDs too)
+ *   lib/Utils/messages.js     — pinInChatMessage, built by
+ *                                sendMessage from {pin: key, type}
+ *                                (1 = pin for all, 2 = unpin for all)
  *   lib/Socket/communities.js — communityCreate, communityLeave,
  *                                communityParticipantsUpdate,
  *                                communityUpdateSubject,
@@ -293,9 +296,13 @@ export function registerGroupAdminCommands(ctx) {
     // Delete-for-everyone is Baileys' sendMessage with a delete key;
     // the key (author, fromMe, participant) comes from the bridge's
     // own message memory — a message it never saw is an honest
-    // refusal, never a guessed key. Message PINNING has no Baileys
-    // verb in this build (the Go/whatsmeow engine carries it), so
-    // pin/unpin answer an honest unsupported instead of faking it.
+    // refusal, never a guessed key. Pinning rides the same memory:
+    // sendMessage with a pin key builds the protocol's
+    // pinInChatMessage (lib/Utils/messages.js: 'pin' in message →
+    // {key, type, senderTimestampMs}, relayed with the pin edit
+    // attribute by lib/Socket/messages-send.js) — type 1 pins for
+    // all, type 2 unpins for all, the same message the Go engine
+    // sends via whatsmeow's PinInChatMessage.
 
     message_delete: async (req) => {
       const jid = groupJid(req.chat);
@@ -310,12 +317,30 @@ export function registerGroupAdminCommands(ctx) {
       return { ok: true };
     },
 
-    message_pin: async () => {
-      throw new Error('unsupported: this Baileys build has no message-pin verb — message pinning is available on the Go bridge engine only');
+    message_pin: async (req) => {
+      const jid = groupJid(req.chat);
+      const mid = String(req.message_id || '').trim();
+      if (!mid) throw new Error('missing message_id');
+      const cached = typeof getCachedMessage === 'function'
+        ? getCachedMessage(mid) : null;
+      if (!cached || !cached.key) {
+        throw new Error('message not in bridge memory — its key cannot be built');
+      }
+      await sock().sendMessage(jid, { pin: cached.key, type: 1 });
+      return { ok: true };
     },
 
-    message_unpin: async () => {
-      throw new Error('unsupported: this Baileys build has no message-pin verb — message pinning is available on the Go bridge engine only');
+    message_unpin: async (req) => {
+      const jid = groupJid(req.chat);
+      const mid = String(req.message_id || '').trim();
+      if (!mid) throw new Error('missing message_id');
+      const cached = typeof getCachedMessage === 'function'
+        ? getCachedMessage(mid) : null;
+      if (!cached || !cached.key) {
+        throw new Error('message not in bridge memory — its key cannot be built');
+      }
+      await sock().sendMessage(jid, { pin: cached.key, type: 2 });
+      return { ok: true };
     },
 
     // ── communities ─────────────────────────────────────────────────
