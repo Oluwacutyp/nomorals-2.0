@@ -37,6 +37,10 @@ def present_outcome(outcome: Outcome) -> Any:
         card.note(outcome.note)
     text = card_text(card)
     if outcome.picks:
-        buttons = [[(label, command)] for label, command in outcome.picks]
+        # Picks pack two per row (the grid — the house standard
+        # for buttons, tgbot_buttons.grid_layout), not one tall
+        # single-button column.
+        buttons = [list(outcome.picks[i:i + 2])
+                   for i in range(0, len(outcome.picks), 2)]
         return actionable(text, buttons)
     return text

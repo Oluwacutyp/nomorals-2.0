@@ -202,13 +202,21 @@ def test_telegram_start_and_menu_unchanged(rig):
         assert TAP_A_BUTTON in out
 
 
-def test_whatsapp_dm_help_still_whatsapp_menu(rig):
+def test_whatsapp_dm_help_takes_the_session_render(rig):
+    # DELIBERATELY RE-PINNED (buttons completion, 2026-11-08):
+    # this test used to pin WhatsApp DM /help to the text-only
+    # whatsapp_menu() frame. The runtime's platform refusal is
+    # gone — a WhatsApp DM /help opens the live menu session
+    # render like every buttons+edit surface; the text frame
+    # remains the fallback for buttonless contexts.
     runtime, _sends = rig
     out = runtime.handle_control(
         "/help", "whatsapp:15551234567",
         message=_msg("/help", "whatsapp", ChatKind.DM, owner=True,
                      chat_id="15551234567"))
-    assert out == help_menu("whatsapp")
+    assert not isinstance(out, str)
+    assert out.session == "menu"
+    assert "command menu" in out.text
 
 
 # ── unit: the claim block inside _control_group_help ─────────

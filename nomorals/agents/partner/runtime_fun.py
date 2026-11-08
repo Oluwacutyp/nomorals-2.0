@@ -153,8 +153,8 @@ class RuntimeFunMixin:
             return str(out.get("reason") or "no riddle right now")
         return actionable(
             f"🧩 {out['question']}",
-            [[("💡 Reveal answer", "riddle answer")],
-             [("🔀 Another riddle", "riddle")]],
+            [[("💡 Reveal answer", "riddle answer"),
+              ("🔀 Another riddle", "riddle")]],
             session="riddle")
 
     # ---- /calc ------------------------------------------------------

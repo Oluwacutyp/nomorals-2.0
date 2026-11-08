@@ -4322,18 +4322,23 @@ class PartnerRuntime(
         law can hold: a real inbound message, a DM or a group (the
         2026-11-07 paging law moved groups onto the session too —
         the catalog pages inside the one live message there as
-        well), a platform whose limits support buttons AND text
-        edit, and never WhatsApp (its menu bytes are its own law).
-        Buttonless surfaces and internal (message=None) calls keep
-        the text path. An unknown topic also falls back — the
-        catalog's "no group" reply stays the answer. Channels never
-        reach dispatch at all.
+        well), and a platform whose limits support buttons AND
+        text edit. WhatsApp takes the session render too since
+        the buttons completion (2026-11-08): its catalog was
+        authored per-platform all along (menu_session_render
+        renders the whatsapp section tree), its keyboards ride
+        the bridges' interactive form (3 native + text-line
+        overflow), and its edits now carry keyboards — the
+        text-only whatsapp_menu() frame remains the fallback for
+        buttonless contexts below. Buttonless surfaces and
+        internal (message=None) calls keep the text path. An
+        unknown topic also falls back — the catalog's "no group"
+        reply stays the answer. Channels never reach dispatch at
+        all.
         """
         if message is None:
             return None
         platform = (chat_key or "").partition(":")[0].strip().lower()
-        if platform in ("whatsapp", "wa"):
-            return None
         chat = getattr(message, "chat", None)
         if chat is None or getattr(chat, "kind", None) not in (
                 ChatKind.DM, ChatKind.GROUP):
@@ -4376,13 +4381,16 @@ class PartnerRuntime(
         """The menu home's picture head (owner, 2026-11-07:
         "no pic no vid" — the working menu was media-dead):
         her banner, from her media library (rendered by her
-        own studio the first time, then shelved).  Only the
-        Telegram BOT surfaces take it — photo + caption +
-        keyboard is their native send; the MTProto and
-        WhatsApp menus keep the text head (capability-checked,
-        never faked).  None on any failure: the menu never
-        breaks for its picture."""
-        if platform not in ("telegram-bot", "telegram-personal"):
+        own studio the first time, then shelved).  The Telegram
+        surfaces take it natively; WhatsApp takes it since the
+        buttons completion (2026-11-08) — its media sends carry
+        the keyboard in the interactive header, so photo +
+        caption + buttons is a real form there too. The MTProto
+        menu keeps the text head (capability-checked, never
+        faked).  None on any failure: the menu never breaks for
+        its picture."""
+        if platform not in ("telegram-bot", "telegram-personal",
+                            "whatsapp"):
             return None
         try:
             item = self._expression_service().menu_banner_item()

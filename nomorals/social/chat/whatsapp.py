@@ -615,6 +615,123 @@ class WhatsAppAdapter(ChatAdapter):
         #: plausibly still in flight).
         self._unconfirmed: dict[tuple[str, str], float] = {}
         self._unconfirmed_lock = threading.Lock()
+        #: Button derivation parity with the Telegram bot adapter
+        #: (buttons completion, 2026-11-08): the freshest command
+        #: per chat and whether the most recent inbound there was a
+        #: command — a plain send with no declared buttons derives
+        #: its keyboard from them (personal_buttons_for /
+        #: adaptive_buttons_for), exactly like the bot adapter.
+        self._last_command: dict[str, str] = {}
+        self._last_inbound_was_command: dict[str, bool] = {}
+        #: The interactive form this account's button sends use:
+        #: "" = NativeFlow quick_reply (the default), "list" = a
+        #: ListMessage. The value is EVIDENCE, never a guess: it
+        #: flips to "list" when a send comes back
+        #: buttons_form=text (the bridge had to degrade the
+        #: quick_reply form) or when the owner pins it through
+        #: /pair buttons; the render probe reads it back.
+        self._buttons_form_pref: str = ""
+        #: The buttons_form the bridge reported for the most recent
+        #: button-carrying send ("" = none yet / not reported).
+        self._last_buttons_form: str = ""
+
+    # ── button derivation + form evidence ─────────────────────────
+    def _deliver(self, handler: Any, message: Any) -> None:
+        """Track the inbound turn for button derivation, then hand
+        it to the base delivery — every dispatch site in this
+        adapter funnels through here."""
+        self._track_inbound(message)
+        super()._deliver(handler, message)
+
+    def _track_inbound(self, message: Any) -> None:
+        """Remember the freshest command per chat (the derivation
+        origin state the Telegram bot adapter keeps): a turn whose
+        text is a command stamps the chat's origin; any other turn
+        clears the was-a-command flag so a stale origin never
+        lends buttons to an unrelated reply. Never raises."""
+        try:
+            chat_id = str(
+                getattr(getattr(message, "chat", None), "chat_id", "")
+                or "")
+            if not chat_id:
+                return
+            text = str(getattr(message, "text", "") or "").strip()
+            if text.startswith("/"):
+                self._last_inbound_was_command[chat_id] = True
+                self._last_command[chat_id] = text[1:].strip()
+            else:
+                self._last_inbound_was_command[chat_id] = False
+            if len(self._last_command) > 256:
+                self._last_command.pop(
+                    next(iter(self._last_command)), None)
+            if len(self._last_inbound_was_command) > 256:
+                self._last_inbound_was_command.pop(
+                    next(iter(self._last_inbound_was_command)), None)
+        except Exception as exc:  # noqa: BLE001
+            record_failure('whatsapp.WhatsAppAdapter._track_inbound', exc)
+
+    def _derive_buttons(self, chat: ChatRef, text: str) -> Any:
+        """The keyboard a plain send on this surface carries when
+        the caller declared none — the Telegram bot adapter's
+        derivation contract mirrored: this adapter IS the owner's
+        personal account surface, so the personal set is tried
+        first, then the adaptive set, both keyed on the chat's
+        freshest command. Never raises; None when nothing fits."""
+        try:
+            from .adaptive_buttons import adaptive_buttons_for
+            from .tgbot_buttons import personal_buttons_for
+
+            fresh_origin = ""
+            if self._last_inbound_was_command.get(chat.chat_id):
+                fresh_origin = self._last_command.get(chat.chat_id, "")
+            return (personal_buttons_for(text, fresh_origin)
+                    or adaptive_buttons_for(
+                        origin_command=fresh_origin, text=text))
+        except Exception as exc:  # noqa: BLE001
+            record_failure('whatsapp.WhatsAppAdapter._derive_buttons', exc)
+            return None
+
+    def _note_buttons_form(self, form: str, jid: str) -> None:
+        """Record what form a button-carrying send actually went
+        out in. A "text" report means the bridge had to degrade
+        the declared buttons to text action lines: the actions
+        still landed — as text — but a degraded form is a fact
+        the ledger must carry (the failure kind /pair journal
+        counts), and it is the EVIDENCE that flips this account's
+        form preference to the list form for later sends."""
+        form = str(form or "")
+        if form:
+            self._last_buttons_form = form
+        if form != "text":
+            return
+        record_failure(
+            "whatsapp.WhatsAppAdapter.send.buttons",
+            RuntimeError(
+                "buttons degraded to text action lines "
+                f"for {jid} — the bridge reported "
+                "buttons_form=text; the actions ride "
+                "the message body as “label — /command” "
+                "lines"))
+        if self._buttons_form_pref != "list":
+            self._buttons_form_pref = "list"
+            _log.info("whatsapp: buttons_form=text for %s — this "
+                      "account's sends now use the list form "
+                      "(evidence, /pair buttons can pin it back)",
+                      jid)
+
+    def buttons_form_state(self) -> dict[str, Any]:
+        """The account's button-form evidence, for /pair buttons:
+        the remembered preference and the last reported form."""
+        return {"preference": self._buttons_form_pref or "quick",
+                "last_form": self._last_buttons_form}
+
+    def set_buttons_form_preference(self, style: str) -> str:
+        """Pin the account's button form ("list" or "quick") —
+        the owner's explicit override of the evidence default,
+        via /pair buttons. Returns the preference now in force."""
+        style = str(style or "").strip().lower()
+        self._buttons_form_pref = "list" if style == "list" else ""
+        return self._buttons_form_pref or "quick"
 
     # ── delivery receipts ────────────────────────────────────────────────
     def delivery_status(self, message_id: str) -> dict[str, Any] | None:
@@ -872,8 +989,10 @@ class WhatsAppAdapter(ChatAdapter):
                 media = MediaRef(path=str(entry.get("path") or ""),
                                  kind=str(entry.get("media_kind") or "file"),
                                  name=str(entry.get("name") or ""))
-                result = self.send_media(chat, media,
-                                         caption=str(entry.get("caption") or ""))
+                result = self.send_media(
+                    chat, media,
+                    caption=str(entry.get("caption") or ""),
+                    buttons=entry.get("buttons") or None)
                 if result.ok or result.error != UNCONFIRMED_SEND_ERROR:
                     entry["_outcome_known"] = True
                 return bool(result.ok)
@@ -1568,30 +1687,28 @@ class WhatsAppAdapter(ChatAdapter):
             # The bridge renders what WhatsApp supports natively
             # and degrades the rest to text action lines — the
             # keyboard is never silently dropped (presentation
-            # contract, same as every other platform).
+            # contract, same as every other platform). When this
+            # account's evidence says the quick_reply form does
+            # not land, the bridges are asked for the LIST form
+            # instead (buttons_style) — same commands, other
+            # interactive shape.
             request["buttons"] = [
                 [[str(label), str(data)] for label, data in row]
                 for row in buttons if row]
+            if self._buttons_form_pref == "list":
+                request["buttons_style"] = "list"
         for attempt in (1, 2):
             response = self._send_cmd(request)
             if response.get("ok"):
                 self.stats["sent"] += 1
-                if buttons and str(
-                        response.get("buttons_form") or "") == "text":
-                    # The bridge had to degrade the declared
-                    # buttons to text action lines (WhatsApp
-                    # refused the interactive form).  The actions
-                    # still landed — as text — but a degraded form
-                    # is a fact the ledger must carry, never a
-                    # silent drop (presentation contract).
-                    record_failure(
-                        "whatsapp.WhatsAppAdapter.send.buttons",
-                        RuntimeError(
-                            "buttons degraded to text action lines "
-                            f"for {jid} — the bridge reported "
-                            "buttons_form=text; the actions ride "
-                            "the message body as “label — /command” "
-                            "lines"))
+                if buttons:
+                    # What form the keyboard actually went out in
+                    # (interactive / list / text-degraded) is
+                    # ledgered — and a text degradation is the
+                    # evidence that flips later sends to the list
+                    # form (see _note_buttons_form).
+                    self._note_buttons_form(
+                        str(response.get("buttons_form") or ""), jid)
                 # The bridge's reply id is OUR request id — the real
                 # WhatsApp message id rides in ``message_id`` (it is
                 # the key space delivery receipts use; the request id
@@ -1642,6 +1759,14 @@ class WhatsAppAdapter(ChatAdapter):
              mentions: list[str] | None = None,
              fresh: bool = False) -> SendResult:
         started = time.perf_counter()
+        if buttons is None:
+            # Derivation parity with the Telegram bot adapter: a
+            # caller that declared no keyboard gets the surface's
+            # derived one (explicit buttons — including an
+            # explicit empty list — always win). Derived before
+            # the connected check so a queued send carries the
+            # same keyboard the live path would have sent.
+            buttons = self._derive_buttons(chat, text)
         if not self.connected.is_set():
             return self._enqueue({
                 "kind": "text",
@@ -1726,17 +1851,32 @@ class WhatsAppAdapter(ChatAdapter):
         return response
 
     def send_media(self, chat: ChatRef, media: MediaRef, *,
-                   caption: str = "", parse_mode: str = "") -> SendResult:
+                   caption: str = "", parse_mode: str = "",
+                   buttons: list[list[tuple[str, str]]] | None = None
+                   ) -> SendResult:
         """Send a photo/video/audio/document via the bridge's send_media.
 
-        When the bridge is down the media is queued (path + caption) and
-        flushed on reconnect — same as text."""
+        ``buttons`` (buttons completion, 2026-11-08): the media
+        itself carries the keyboard — both bridges head an
+        InteractiveMessage with the uploaded media (image / video
+        / document; audio's actions ride as a follow-up text), the
+        same 3-native + text-line degradation contract as text
+        sends, and the reply's buttons_form is ledgered the same
+        way. This parameter existing is also what unblocks the
+        gateway's media path, which passes declared buttons only
+        to adapters whose send_media declares them.
+
+        When the bridge is down the media is queued (path + caption
+        + buttons) and flushed on reconnect — same as text."""
         started = time.perf_counter()
         path = (media.path or "").strip()
         if not path:
             return SendResult(ok=False, platform=self.name,
                               error="media has no path",
                               seconds=time.perf_counter() - started)
+        wire_buttons = (
+            [[[str(label), str(data)] for label, data in row]
+             for row in buttons if row] if buttons else None)
         if not self.connected.is_set():
             return self._enqueue({
                 "kind": "media",
@@ -1747,6 +1887,7 @@ class WhatsAppAdapter(ChatAdapter):
                 "media_kind": (media.kind or "").lower(),
                 "name": media.name or "",
                 "caption": caption,
+                "buttons": wire_buttons,
             })
         # Same send-once guard as text (see _send_text_outcome): a
         # media dispatch whose ack was lost is never re-dispatched.
@@ -1770,6 +1911,11 @@ class WhatsAppAdapter(ChatAdapter):
             # side of the contract — reported, not assumed.
             "media_kind": (media.kind or "").lower(),
         }
+        if wire_buttons:
+            # No buttons_style: a ListMessage cannot head media —
+            # the media form is the interactive header on both
+            # bridges regardless of the text-form preference.
+            cmd["buttons"] = wire_buttons
         kind = (media.kind or "").lower()
         if kind in ("voice", "ptt"):
             cmd["ptt"] = True  # voice-note bubble instead of an audio file
@@ -1777,6 +1923,10 @@ class WhatsAppAdapter(ChatAdapter):
         if response.get("ok"):
             self._clear_unconfirmed(media_key)
             self.stats["sent"] += 1
+            if wire_buttons:
+                self._note_buttons_form(
+                    str(response.get("buttons_form") or ""),
+                    self._jid(chat))
             self._note_sent_id(str(response.get("message_id") or ""))
             return SendResult(ok=True, platform=self.name,
                               message_id=str(response.get("message_id") or ""),
@@ -1887,7 +2037,9 @@ class WhatsAppAdapter(ChatAdapter):
     # (a rung that lacks the verb says so), never a fake success.
 
     def edit_message(self, chat: ChatRef, message_id: str,
-                     text: str) -> dict[str, Any]:
+                     text: str, *,
+                     buttons: list[list[tuple[str, str]]] | None = None
+                     ) -> dict[str, Any]:
         """Edit one of this account's OWN messages — the bridge's
         ``edit`` verb WITHOUT edit_progress's throttle (that one
         serves progressive display; this is the owner's /editmsg).
@@ -1895,6 +2047,21 @@ class WhatsAppAdapter(ChatAdapter):
         or isn't in their memory, and WhatsApp's ~15-minute edit
         window is enforced server-side — refusals come back in
         the verdict, verbatim.
+
+        ``buttons`` (buttons completion, 2026-11-08) is
+        presence-significant, mirroring the session layer's
+        contract: None leaves the call a text-only edit (the
+        bridges' original behavior); a list REPLACES the message
+        with that text + keyboard (both bridges rebuild the
+        interactive/list replacement inside the edit wrap); an
+        EMPTY list is a keyboard-CLEARING edit — the settled
+        render. When a bridge refuses a clearing edit outright
+        (window expired, target forgotten), the adapter falls
+        back to revoke + a fresh send of the settled render, so a
+        settled card never keeps live buttons: the verdict then
+        carries ``via: "revoke_resend"`` and the NEW message_id
+        (the session registry re-keys on the next render, its
+        standing self-heal).
 
         The text is converted to the WhatsApp dialect first (the
         one-formatting-system law): ``send`` and ``edit_progress``
@@ -1911,9 +2078,35 @@ class WhatsAppAdapter(ChatAdapter):
             wire = format_for_platform(wire, "whatsapp")
         except Exception as exc:  # noqa: BLE001 - raw beats no edit
             record_failure("whatsapp.WhatsAppAdapter.edit_message", exc)
-        return self._admin_cmd("edit", {
+        payload: dict[str, Any] = {
             "chat": self._jid(chat), "message_id": message_id,
-            "text": wire}, timeout=15)
+            "text": wire}
+        if buttons is not None:
+            payload["buttons"] = [
+                [[str(label), str(data)] for label, data in row]
+                for row in buttons if row]
+            if buttons and self._buttons_form_pref == "list":
+                payload["buttons_style"] = "list"
+        verdict = self._admin_cmd("edit", payload, timeout=15)
+        if verdict.get("ok") or buttons is None or len(buttons) > 0:
+            return verdict
+        # A keyboard-CLEARING edit the bridge refused: revoke the
+        # card and re-send the settled render without buttons, so
+        # the settled state is what the chat actually shows.
+        revoked = self._admin_cmd("message_delete", {
+            "chat": self._group_jid(chat), "message_id": message_id})
+        if not revoked.get("ok"):
+            return verdict
+        resent = self.send(chat, str(text or ""), buttons=[])
+        if not resent.ok:
+            return {"ok": False,
+                    "error": "edit refused ("
+                             + str(verdict.get("error") or "bridge error")
+                             + "); the card was revoked but the settled "
+                               "re-send failed: "
+                             + str(resent.error or "send failed")}
+        return {"ok": True, "message_id": resent.message_id,
+                "via": "revoke_resend"}
 
     def chat_modify(self, chat: ChatRef, *,
                     archive: bool | None = None,

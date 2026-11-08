@@ -701,6 +701,151 @@ func (b *bridge) quoteContext(replyTo string) *waE2E.ContextInfo {
 	}
 }
 
+// ── authored keyboards (buttons completion, 2026-11-08) ───────────
+// One keyboard contract serves text sends, media sends and edits,
+// on BOTH bridges (the Baileys bridge builds the same shapes):
+//
+//   * rows of (label, command) pairs flatten in authored order;
+//   * the quick_reply form is an InteractiveMessage carrying a
+//     NativeFlow button set — at most three native buttons, the
+//     overflow rendered as "• label — /cmd" body lines, so no
+//     authored action is ever silently dropped;
+//   * the list form (buttons_style == "list") is a ListMessage —
+//     sections of ten rows, row ids carrying the command, so taps
+//     return through the same ListResponseMessage mapping as
+//     everything else;
+//   * a refused interactive send degrades the WHOLE keyboard to
+//     text lines, and the reply's buttons_form names what actually
+//     went out ("interactive" / "list" / "text") so the Python
+//     side journals the degradation instead of passing in silence.
+
+type waButton struct{ label, cmd string }
+
+func parseButtons(req request) []waButton {
+	var flat []waButton
+	if rows, ok := req["buttons"].([]any); ok {
+		for _, rowAny := range rows {
+			row, _ := rowAny.([]any)
+			for _, bAny := range row {
+				pair, _ := bAny.([]any)
+				if len(pair) >= 2 {
+					label, _ := pair[0].(string)
+					cmd, _ := pair[1].(string)
+					flat = append(flat, waButton{label, cmd})
+				}
+			}
+		}
+	}
+	return flat
+}
+
+func buttonLines(items []waButton) string {
+	parts := make([]string, 0, len(items))
+	for _, it := range items {
+		parts = append(parts, "• "+it.label+" — /"+it.cmd)
+	}
+	return strings.Join(parts, "\n")
+}
+
+// splitNative caps the native button set at three (the quick_reply
+// ceiling current clients render) and folds the overflow into the
+// body as text lines.
+func splitNative(flat []waButton, body string) ([]waButton, string) {
+	if len(flat) <= 3 {
+		return flat, body
+	}
+	if body != "" {
+		body += "\n"
+	}
+	return flat[:3], body + buttonLines(flat[3:])
+}
+
+// interactiveMessage builds the NativeFlow quick_reply form. A
+// header (media sends) attaches the uploaded media so the photo /
+// video / document itself carries the buttons.
+func interactiveMessage(body string, native []waButton,
+	quote *waE2E.ContextInfo,
+	header *waE2E.InteractiveMessage_Header) *waE2E.Message {
+	flowButtons := make(
+		[]*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton,
+		0, len(native))
+	for _, it := range native {
+		label := it.label
+		if runes := []rune(label); len(runes) > 25 {
+			label = string(runes[:25])
+		}
+		params, _ := json.Marshal(map[string]string{
+			"id": it.cmd, "display_text": label})
+		flowButtons = append(flowButtons,
+			&waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+				Name:             proto.String("quick_reply"),
+				ButtonParamsJSON: proto.String(string(params)),
+			})
+	}
+	return &waE2E.Message{InteractiveMessage: &waE2E.InteractiveMessage{
+		Header: header,
+		Body: &waE2E.InteractiveMessage_Body{
+			Text: proto.String(body)},
+		InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
+			NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
+				Buttons:        flowButtons,
+				MessageVersion: proto.Int32(3),
+			},
+		},
+		ContextInfo: quote,
+	}}
+}
+
+// buildListMessage builds the LIST form of a keyboard: a
+// ListMessage whose rows carry the commands as row ids. Row
+// titles truncate at 24 runes (the client's row title budget);
+// the body text rides as the list description.
+func buildListMessage(body string, flat []waButton,
+	quote *waE2E.ContextInfo) *waE2E.Message {
+	var sections []*waE2E.ListMessage_Section
+	for start := 0; start < len(flat); start += 10 {
+		end := start + 10
+		if end > len(flat) {
+			end = len(flat)
+		}
+		rows := make([]*waE2E.ListMessage_Row, 0, end-start)
+		for _, it := range flat[start:end] {
+			title := it.label
+			if runes := []rune(title); len(runes) > 24 {
+				title = string(runes[:24])
+			}
+			rows = append(rows, &waE2E.ListMessage_Row{
+				RowID: proto.String(it.cmd),
+				Title: proto.String(title),
+			})
+		}
+		sections = append(sections, &waE2E.ListMessage_Section{
+			Title: proto.String("Actions"),
+			Rows:  rows,
+		})
+	}
+	return &waE2E.Message{ListMessage: &waE2E.ListMessage{
+		Title:       proto.String("Actions"),
+		Description: proto.String(body),
+		ButtonText:  proto.String("Choose"),
+		ListType:    waE2E.ListMessage_SINGLE_SELECT.Enum(),
+		Sections:    sections,
+		ContextInfo: quote,
+	}}
+}
+
+// buttonsFormName names the form a (style, keyboard) pair went out
+// in, for reply payloads.
+func buttonsFormName(style string, flat []waButton) string {
+	if len(flat) == 0 {
+		return ""
+	}
+	if style == "list" {
+		return "list"
+	}
+	return "interactive"
+}
+
 func (b *bridge) cmdSend(ctx context.Context, cc *clientConn, id string, req request) {
 	chat, err := parseJID(req.str("chat"))
 	if err != nil {
@@ -711,21 +856,7 @@ func (b *bridge) cmdSend(ctx context.Context, cc *clientConn, id string, req req
 	replyTo := req.str("reply_to")
 	quote := b.quoteContext(replyTo)
 
-	type btn struct{ label, cmd string }
-	var flat []btn
-	if rows, ok := req["buttons"].([]any); ok {
-		for _, rowAny := range rows {
-			row, _ := rowAny.([]any)
-			for _, bAny := range row {
-				pair, _ := bAny.([]any)
-				if len(pair) >= 2 {
-					label, _ := pair[0].(string)
-					cmd, _ := pair[1].(string)
-					flat = append(flat, btn{label, cmd})
-				}
-			}
-		}
-	}
+	flat := parseButtons(req)
 	send := func(msg *waE2E.Message) (types.MessageID, error) {
 		resp, err := b.cli.SendMessage(ctx, chat, msg)
 		if err != nil {
@@ -752,22 +883,6 @@ func (b *bridge) cmdSend(ctx context.Context, cc *clientConn, id string, req req
 	}
 
 	if len(flat) > 0 {
-		asLines := func(items []btn) string {
-			parts := make([]string, 0, len(items))
-			for _, it := range items {
-				parts = append(parts, "• "+it.label+" — /"+it.cmd)
-			}
-			return strings.Join(parts, "\n")
-		}
-		native := flat
-		body := text
-		if len(flat) > 3 {
-			native = flat[:3]
-			if body != "" {
-				body += "\n"
-			}
-			body += asLines(flat[3:])
-		}
 		// The legacy ButtonsMessage is dead on current WhatsApp
 		// clients for unofficial multi-device senders: WhatsApp
 		// deprecated the form and clients simply do not render it,
@@ -778,61 +893,47 @@ func (b *bridge) cmdSend(ctx context.Context, cc *clientConn, id string, req req
 		// button set; a tap returns as an
 		// InteractiveResponseMessage whose params JSON carries
 		// the button id — textOf already maps it back to "/<id>",
-		// so one authored keyboard works before and after.
-		flowButtons := make(
-			[]*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton,
-			0, len(native))
-		for _, it := range native {
-			label := it.label
-			if runes := []rune(label); len(runes) > 25 {
-				label = string(runes[:25])
+		// so one authored keyboard works before and after.  The
+		// adapter may ask for the LIST form instead
+		// (buttons_style == "list") when this account's probe /
+		// degradation evidence says quick_reply does not render
+		// on its client — same commands, ListMessage shape.
+		degrade := func() {
+			// Every action degrades to a text line; none are
+			// silently dropped, and the reply NAMES the degraded
+			// form so the Python side journals it.
+			full := text
+			if full != "" {
+				full += "\n"
 			}
-			params, _ := json.Marshal(map[string]string{
-				"id": it.cmd, "display_text": label})
-			flowButtons = append(flowButtons,
-				&waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
-					Name:             proto.String("quick_reply"),
-					ButtonParamsJSON: proto.String(string(params)),
-				})
+			full += buttonLines(flat)
+			mid, err := send(b.textMessage(full, quote))
+			if err != nil {
+				b.fail(cc, id, err)
+				return
+			}
+			b.reply(cc, id, map[string]any{
+				"ok": true, "message_id": string(mid),
+				"buttons_form": "text"})
 		}
-		msg := &waE2E.Message{InteractiveMessage:
-			&waE2E.InteractiveMessage{
-				Body: &waE2E.InteractiveMessage_Body{
-					Text: proto.String(body)},
-				InteractiveMessage:
-					&waE2E.InteractiveMessage_NativeFlowMessage_{
-						NativeFlowMessage:
-							&waE2E.InteractiveMessage_NativeFlowMessage{
-								Buttons:        flowButtons,
-								MessageVersion: proto.Int32(3),
-							},
-					},
-				ContextInfo: quote,
-			}}
-		if mid, err := send(msg); err == nil {
+		if req.str("buttons_style") == "list" {
+			if mid, err := send(buildListMessage(text, flat, quote)); err == nil {
+				b.reply(cc, id, map[string]any{
+					"ok": true, "message_id": string(mid),
+					"buttons_form": "list"})
+				return
+			}
+			degrade()
+			return
+		}
+		native, body := splitNative(flat, text)
+		if mid, err := send(interactiveMessage(body, native, quote, nil)); err == nil {
 			b.reply(cc, id, map[string]any{
 				"ok": true, "message_id": string(mid),
 				"buttons_form": "interactive"})
 			return
 		}
-		// WhatsApp refused the interactive message — every action
-		// degrades to a text line; none are silently dropped, and
-		// the reply NAMES the degraded form so the Python side
-		// journals it instead of letting it pass in silence.
-		lines := asLines(flat)
-		full := text
-		if full != "" {
-			full += "\n"
-		}
-		full += lines
-		mid, err := send(b.textMessage(full, quote))
-		if err != nil {
-			b.fail(cc, id, err)
-			return
-		}
-		b.reply(cc, id, map[string]any{
-			"ok": true, "message_id": string(mid),
-			"buttons_form": "text"})
+		degrade()
 		return
 	}
 
@@ -880,14 +981,22 @@ func (b *bridge) textMessage(text string, quote *waE2E.ContextInfo) *waE2E.Messa
 // cmdEdit edits one of this bridge's OWN already-sent text
 // messages in place (progressive display, register #31):
 // WhatsApp message edits are a protocol message wrapping the
-// replacement body (whatsmeow BuildEdit). The protocol only
-// allows editing your own messages, and only within WhatsApp's
-// edit window (~15 minutes) — both are enforced server-side and
-// any refusal comes back as the send error, surfaced verbatim.
-// The bridge additionally refuses a target it never sent (not in
-// its own remembered history for the chat), so a stale or
-// foreign id fails fast with a named reason instead of a
-// protocol round-trip.
+// replacement body (whatsmeow BuildEdit wraps ANY message body —
+// the wrap is content-agnostic, so since the buttons completion
+// the replacement may itself be an interactive/list message, or a
+// plain body when the keyboard is being CLEARED). The protocol
+// only allows editing your own messages, and only within
+// WhatsApp's edit window (~15 minutes) — both are enforced
+// server-side and any refusal comes back as the send error,
+// surfaced verbatim. The bridge additionally refuses a target it
+// never sent (not in its own remembered history for the chat), so
+// a stale or foreign id fails fast with a named reason instead of
+// a protocol round-trip.
+//
+// The buttons field is PRESENCE-significant: absent means the
+// original text-only edit; present (even as an empty list) means
+// "the settled render is this text with this keyboard" — an empty
+// list clears the keyboard the earlier render carried.
 func (b *bridge) cmdEdit(ctx context.Context, cc *clientConn, id string, req request) {
 	chat, err := parseJID(req.str("chat"))
 	if err != nil {
@@ -916,6 +1025,35 @@ func (b *bridge) cmdEdit(ctx context.Context, cc *clientConn, id string, req req
 			"error": "edit target " + mid + " is not one of this bridge's own " +
 				"messages in that chat (only own messages can be edited)",
 		})
+		return
+	}
+	if _, hasButtons := req["buttons"]; hasButtons {
+		flat := parseButtons(req)
+		style := req.str("buttons_style")
+		var content *waE2E.Message
+		switch {
+		case len(flat) == 0:
+			// Keyboard cleared: the settled render is plain text.
+			content = &waE2E.Message{Conversation: proto.String(text)}
+		case style == "list":
+			content = buildListMessage(text, flat, nil)
+		default:
+			native, body := splitNative(flat, text)
+			content = interactiveMessage(body, native, nil, nil)
+		}
+		edit := b.cli.BuildEdit(chat, types.MessageID(mid), content)
+		if _, err := b.cli.SendMessage(ctx, chat, edit); err != nil {
+			b.fail(cc, id, err)
+			return
+		}
+		b.memMu.Lock()
+		target.text = text
+		b.memMu.Unlock()
+		reply := map[string]any{"ok": true, "message_id": mid}
+		if form := buttonsFormName(style, flat); form != "" {
+			reply["buttons_form"] = form
+		}
+		b.reply(cc, id, reply)
 		return
 	}
 	edit := b.cli.BuildEdit(chat, types.MessageID(mid),
@@ -1018,16 +1156,97 @@ func (b *bridge) cmdSendMedia(ctx context.Context, cc *clientConn, id string, re
 			FileLength: proto.Uint64(up.FileLength),
 		}}
 	}
+	// Buttons (buttons completion, 2026-11-08): an image / video /
+	// document heads an InteractiveMessage whose Header carries
+	// the uploaded media — the photo itself gets the buttons, in
+	// the same NativeFlow form as text sends (3 native, overflow
+	// as caption lines). Audio has no interactive header form, so
+	// its actions ride as a follow-up text message and the form
+	// reports "text" — degraded, never dropped. A refused
+	// interactive send likewise falls back to the plain media with
+	// every action as a caption line, buttons_form "text".
+	flat := parseButtons(req)
+	rememberMedia := func(sent *waE2E.Message, mid types.MessageID) {
+		// Cache the payload like cmdSend does — the owner's own
+		// media sends are forwardable material (cmdForward).
+		if b.cli.Store != nil && b.cli.Store.ID != nil {
+			b.cacheMessage(string(mid), sent,
+				b.cli.Store.ID.ToNonAD())
+		}
+	}
+	if len(flat) > 0 && mediaType != whatsmeow.MediaAudio {
+		var header *waE2E.InteractiveMessage_Header
+		switch m := msg; {
+		case m.ImageMessage != nil:
+			header = &waE2E.InteractiveMessage_Header{
+				HasMediaAttachment: proto.Bool(true),
+				Media: &waE2E.InteractiveMessage_Header_ImageMessage{
+					ImageMessage: m.ImageMessage}}
+		case m.VideoMessage != nil:
+			header = &waE2E.InteractiveMessage_Header{
+				HasMediaAttachment: proto.Bool(true),
+				Media: &waE2E.InteractiveMessage_Header_VideoMessage{
+					VideoMessage: m.VideoMessage}}
+		case m.DocumentMessage != nil:
+			header = &waE2E.InteractiveMessage_Header{
+				HasMediaAttachment: proto.Bool(true),
+				Media: &waE2E.InteractiveMessage_Header_DocumentMessage{
+					DocumentMessage: m.DocumentMessage}}
+		}
+		if header != nil {
+			native, body := splitNative(flat, caption)
+			wrapped := interactiveMessage(body, native, nil, header)
+			if resp, err := b.cli.SendMessage(ctx, chat, wrapped); err == nil {
+				rememberMedia(wrapped, resp.ID)
+				b.reply(cc, id, map[string]any{
+					"ok": true, "message_id": string(resp.ID),
+					"buttons_form": "interactive"})
+				return
+			}
+			// Refused: plain media, actions as caption lines.
+			full := caption
+			if full != "" {
+				full += "\n"
+			}
+			full += buttonLines(flat)
+			switch m := msg; {
+			case m.ImageMessage != nil:
+				m.ImageMessage.Caption = proto.String(full)
+			case m.VideoMessage != nil:
+				m.VideoMessage.Caption = proto.String(full)
+			case m.DocumentMessage != nil:
+				m.DocumentMessage.Caption = proto.String(full)
+			}
+			resp, err := b.cli.SendMessage(ctx, chat, msg)
+			if err != nil {
+				b.fail(cc, id, err)
+				return
+			}
+			rememberMedia(msg, resp.ID)
+			b.reply(cc, id, map[string]any{
+				"ok": true, "message_id": string(resp.ID),
+				"buttons_form": "text"})
+			return
+		}
+	}
 	resp, err := b.cli.SendMessage(ctx, chat, msg)
 	if err != nil {
 		b.fail(cc, id, err)
 		return
 	}
-	// Cache the payload like cmdSend does — the owner's own
-	// media sends are forwardable material (cmdForward).
-	if b.cli.Store != nil && b.cli.Store.ID != nil {
-		b.cacheMessage(string(resp.ID), msg,
-			b.cli.Store.ID.ToNonAD())
+	rememberMedia(msg, resp.ID)
+	if len(flat) > 0 {
+		// Audio (or an unheaderable media kind): the media is out;
+		// its actions follow as text lines in the same command.
+		if _, err := b.cli.SendMessage(ctx, chat,
+			b.textMessage(buttonLines(flat), nil)); err != nil {
+			b.fail(cc, id, err)
+			return
+		}
+		b.reply(cc, id, map[string]any{
+			"ok": true, "message_id": string(resp.ID),
+			"buttons_form": "text"})
+		return
 	}
 	b.reply(cc, id, map[string]any{"ok": true, "message_id": string(resp.ID)})
 }

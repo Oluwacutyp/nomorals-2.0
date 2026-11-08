@@ -1015,8 +1015,8 @@ class RuntimeReachMixin:
 
             return actionable(
                 f"focus started{label}.",
-                [[("⏸️ Pause", "focus pause")],
-                 [("⏹️ Stop", "focus stop")]])
+                [[("⏸️ Pause", "focus pause"),
+                  ("⏹️ Stop", "focus stop")]])
         if verb == "pause":
             try:
                 s = timer.pause()

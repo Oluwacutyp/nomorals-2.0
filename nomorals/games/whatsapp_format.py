@@ -1,15 +1,26 @@
-"""WhatsApp-channel-friendly game rendering.
+"""WhatsApp-dialect game-state rendering.
 
-Game output is authored for Telegram (HTML sections, inline buttons) but
-WhatsApp channels render plain text — no HTML, no inline buttons, and
-long posts get visually truncated. This module renders the same game
-state (stats, battles, achievements, leaderboards, menus) in
-WhatsApp-native form:
+Game output is authored for Telegram (HTML sections, inline
+buttons). WhatsApp renders inline buttons for real (both bridges'
+NativeFlow contract, 2026-11-07 — buttons are NOT this module's
+concern: actions ride the reply's keyboard through the ordinary
+send path), but its text dialect differs — no HTML — and long
+posts get visually truncated. This module renders game STATE
+(stats, battles, achievements, leaderboards, menus) — data, not
+actions — in WhatsApp-native form:
 
 * ``*bold*`` / ``_italic_`` / `` ```mono``` `` — WhatsApp markdown
-* emoji headers and medal rows instead of inline buttons
+* emoji headers and medal rows for state display
 * progress bars from block characters (render everywhere)
 * chunked to channel-safe sizes (see :func:`wa_chunks`)
+
+Kept, not wired into a second rendering path, on purpose: text
+CONVERSION for WhatsApp is owned by
+``social.chat.platforms.format_for_platform`` at the adapter
+seam, which every game reply already crosses — a parallel
+per-game renderer would fork the one-formatting-system law.
+These renderers are the games family's dialect kit for callers
+that compose game state per-platform at the source.
 
 Platform detection: :func:`format_game_text` takes a ``chat_key``
 (``platform:chat_id``) or a platform name and converts any text —

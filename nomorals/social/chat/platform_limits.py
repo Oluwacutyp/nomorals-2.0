@@ -136,20 +136,30 @@ _LIMITS: dict[str, PlatformLimits] = {
         # lines and the bridge reports the form, which the adapter
         # journals.) The old False made the gateway strip every
         # authored button bundle in silence while reply copy still
-        # said "tap a button below".
+        # said "tap a button below". Buttons completion
+        # (2026-11-08): media sends carry the same keyboard (the
+        # media heads an InteractiveMessage), edits carry it too
+        # (see text_edit_scope), and an account whose quick_reply
+        # form degrades falls back to the ListMessage form on the
+        # bridge-reported evidence (the /pair buttons probe).
         supports_buttons=True, supports_html=False, supports_media_edit=False,
         rate_per_hour=0, cost_model="free",
         utf16_lengths=True,
-        # Progressive display (register #31): real, via the Go
-        # bridge's edit command (whatsmeow BuildEdit) behind the
-        # adapter's edit_progress. The scope names the edges.
+        # Progressive display (register #31): real, via BOTH
+        # bridges' edit commands behind the adapter's
+        # edit_progress / edit_message. The scope names the edges.
         supports_text_edit=True,
         text_edit_scope=(
             "own messages only, inside WhatsApp's ~15-minute edit "
-            "window, via the Go bridge's edit command; absent by "
-            "name: editing other people's messages (the protocol "
-            "cannot), media/caption edits, and any edit on the "
-            "Node/Baileys bridge rung (it has no edit command)"),
+            "window, via both bridges' edit commands (Go: whatsmeow "
+            "BuildEdit; Baileys: its MESSAGE_EDIT wrap) — and since "
+            "the buttons completion (2026-11-08) the replacement "
+            "carries the declared keyboard too: interactive/list "
+            "rebuilds, an empty keyboard clears, and a refused "
+            "clearing edit falls back at the adapter to revoke + a "
+            "fresh settled send. Absent by name: editing other "
+            "people's messages (the protocol cannot) and "
+            "media/caption edits"),
     ),
     # Discord: 2000-char hard cap, 25 MB free-tier upload cap.
     "discord": PlatformLimits(

@@ -613,6 +613,13 @@ class RuntimeProvisionMixin:
             return (f"  {when} · /viewonce attempt · {who} · "
                     f"outcome {row.get('outcome') or '?'}"
                     + (f" · via {form}" if form else ""))
+        if kind == "button_probe":
+            phase = str(row.get("phase") or "?")
+            form = str(row.get("form") or "unknown")
+            req = str(row.get("requested") or "")
+            return (f"  {when} · button probe · {phase} · "
+                    f"form {form}"
+                    + (f" · requested {req}" if req else ""))
         bits = [when, kind, str(who)]
         if row.get("media_kind"):
             bits.append(str(row["media_kind"]))
@@ -627,6 +634,158 @@ class RuntimeProvisionMixin:
                 text = text[:117] + "…"
             bits.append(f"“{text}”")
         return "  " + " · ".join(bits)
+
+    def _pair_buttons(self, args: list) -> str:
+        """/pair buttons — the render probe (buttons completion,
+        2026-11-08). The owner's standing complaint was that no
+        inline button had EVER rendered on his WhatsApp client;
+        this is the instrument that settles what his account's
+        client does with each form, through the REAL send path —
+        not a bridge fake:
+
+        * bare / "list" / "quick": send a 3-button probe to his
+          WhatsApp self-chat (the named form pins the account's
+          preference first). The journal gains a button_probe
+          "sent" row carrying the form the BRIDGE reported.
+        * a probe tap comes back as "/pair buttons tap <form>
+          <n>" through the ordinary command path: journaled as
+          phase "tap" — send form + returning tap is the closed
+          loop, the only honest proof of rendering there is.
+        * "prefer list|quick" pins the form the send path uses;
+          "status" reports the remembered preference, the last
+          reported form, and the degradation count.
+        """
+        adapter = self._adapter_for("whatsapp")
+        words = [str(a or "").strip().lower() for a in args]
+        svc = self._pairing_personal()
+        surfaces = svc["personal"]
+        account = ""
+        try:
+            sup = self._pairing_supervisor()
+            for row in sup.status_all():
+                if row.get("platform") == "whatsapp":
+                    account = str(row.get("id") or "")
+                    break
+        except Exception as exc:  # noqa: BLE001 - display only
+            record_failure("runtime_provision.pair_buttons", exc)
+        if words and words[0] == "tap":
+            form = words[1] if len(words) > 1 else ""
+            n = words[2] if len(words) > 2 else ""
+            surfaces.note_button_probe(
+                phase="tap", form=form, requested=f"button {n}",
+                account_id=account,
+                note=f"probe button {n} tapped — the tap came "
+                     f"back as a command; the loop is closed")
+            return (f"🔘 probe loop closed — button {n} came back "
+                    f"as a tap (form: {form or 'unknown'}). "
+                    f"Buttons render AND return on this account; "
+                    f"the journal has both halves (/pair journal "
+                    f"button_probe).")
+        if adapter is None:
+            return ("🔘 no WhatsApp adapter is attached right now "
+                    "— pair an account first (/pair whatsapp "
+                    "<number>), then /pair buttons.")
+        state = adapter.buttons_form_state()
+        if words and words[0] == "status":
+            degraded = "?"
+            try:
+                from ...social.chat.failures import recent_failures
+
+                degraded = str(sum(
+                    1 for f in recent_failures(5000)
+                    if getattr(f, "site", "")
+                    == "whatsapp.WhatsAppAdapter.send.buttons"))
+            except Exception as exc:  # noqa: BLE001
+                record_failure("runtime_provision.pair_buttons",
+                               exc)
+            return (f"🔘 button form evidence — preference: "
+                    f"{state.get('preference') or 'quick'} · last "
+                    f"reported form: "
+                    f"{state.get('last_form') or 'none yet'} · "
+                    f"sends degraded to text in the ledger: "
+                    f"{degraded}. /pair buttons sends a fresh "
+                    f"probe; a probe (or any send) that degrades "
+                    f"flips the preference to the list form on "
+                    f"its own evidence.")
+        if words and words[0] == "prefer":
+            style = words[1] if len(words) > 1 else ""
+            if style not in ("list", "quick"):
+                return ("usage: /pair buttons prefer list — or "
+                        "prefer quick.")
+            pref = adapter.set_buttons_form_preference(style)
+            surfaces.note_button_probe(
+                phase="prefer", form=pref, requested=style,
+                account_id=account,
+                note="owner pinned the account's button form")
+            return (f"🔘 button form pinned to {pref} — sends on "
+                    f"this account use it until evidence (a "
+                    f"degraded send) or another pin changes it.")
+        requested = words[0] if words and words[0] in (
+            "list", "quick") else ""
+        if requested:
+            adapter.set_buttons_form_preference(requested)
+            state = adapter.buttons_form_state()
+        form_word = requested or str(
+            state.get("preference") or "quick")
+        user_jid = str(getattr(adapter, "user_jid", "") or "")
+        if not user_jid:
+            surfaces.note_button_probe(
+                phase="refused", form="", requested=form_word,
+                account_id=account,
+                note="bridge not connected — no live send path")
+            return ("🔘 the WhatsApp bridge isn't connected, so "
+                    "there's no live send path to probe. /pair "
+                    "shows the pool state; run /pair buttons again "
+                    "once the account is attached.")
+        from ...social.chat.base import ChatKind, ChatRef
+
+        chat = ChatRef(platform="whatsapp", chat_id=user_jid,
+                       kind=ChatKind.DM)
+        probe_text = (
+            "🔘 button probe — three buttons ride this message. "
+            "If they show as buttons, tap any one: the tap comes "
+            "back as a command and closes the loop in the "
+            "journal. If this arrived as plain text lines, the "
+            f"buttons did NOT render in the {form_word} form.")
+        buttons = [[(f"✅ Probe {n}",
+                     f"pair buttons tap {form_word} {n}")
+                    for n in (1, 2, 3)]]
+        result = adapter.send(chat, probe_text, buttons=buttons)
+        if not result.ok:
+            error = str(result.error or "")
+            if "queued" in error.lower():
+                surfaces.note_button_probe(
+                    phase="queued", form="", requested=form_word,
+                    account_id=account, note=error[:160])
+                return ("🔘 the bridge dropped mid-send — the "
+                        "probe is queued for reconnect, so there's "
+                        "no form evidence yet. Run /pair buttons "
+                        "again once it's back.")
+            surfaces.note_button_probe(
+                phase="failed", form="", requested=form_word,
+                account_id=account, note=error[:160])
+            return f"🔘 the probe send failed: {error or result}"
+        form = str(adapter.buttons_form_state().get("last_form")
+                   or "")
+        surfaces.note_button_probe(
+            phase="sent", form=form or "unknown",
+            requested=form_word, account_id=account,
+            note="probe sent to the self-chat through the real "
+                 "send path")
+        if form == "text":
+            return ("🔘 probe sent — and the bridge reports it "
+                    "degraded to TEXT lines: the "
+                    f"{form_word} form did not render as buttons. "
+                    "This account's sends now use the LIST form "
+                    "on that evidence — run /pair buttons again "
+                    "to probe the list form, then tap a button "
+                    "there to close the loop.")
+        return (f"🔘 probe sent to your WhatsApp self-chat — the "
+                f"bridge reports form: {form or 'unknown'} "
+                f"(requested {form_word}). Look at the message: "
+                f"if three buttons show, tap one — the tap "
+                f"closes the loop here and in /pair journal "
+                f"button_probe.")
 
     @staticmethod
     def _pair_launch_note(sup: Any, rec: Any) -> str | None:
@@ -1638,6 +1797,17 @@ class RuntimeProvisionMixin:
         /pair journal [kind] [count]     the surfaces' journal —
                                            status views, reactions,
                                            refusals, newest first
+        /pair buttons [list|quick]       the button render probe:
+                                           a 3-button message to
+                                           your WhatsApp self-chat
+                                           through the real send
+                                           path; the journal records
+                                           the form it went out in,
+                                           and tapping one closes
+                                           the loop. "prefer
+                                           list|quick" pins the
+                                           form; "status" reports
+                                           the evidence so far
         /pair page                         the pairing page (same
                                            state, in a browser)
 
@@ -2129,7 +2299,32 @@ class RuntimeProvisionMixin:
             head = (f"📓 journal{f' — {rec.id}' if rec else ''}"
                     f"{f' · {kind}' if kind else ''} "
                     f"(latest {len(shown)} of {len(rows)}):")
+            if not kind or kind == "button_probe":
+                # The buttons degradation count rides the journal
+                # view (buttons completion, 2026-11-08): every
+                # WhatsApp send whose declared buttons degraded
+                # to text lines is in the failure ledger under
+                # this kind — the number the render probe and the
+                # list-form fallback answer to.
+                try:
+                    from ...social.chat.failures import recent_failures
+
+                    degraded = sum(
+                        1 for f in recent_failures(5000)
+                        if getattr(f, "site", "")
+                        == "whatsapp.WhatsAppAdapter.send.buttons")
+                    lines.append(
+                        f"  button sends degraded to text in the "
+                        f"failure ledger: {degraded} — /pair "
+                        f"buttons probes the render; a degraded "
+                        f"send flips this account to the list form")
+                except Exception as exc:  # noqa: BLE001
+                    record_failure(
+                        "runtime_provision.pair_journal_buttons",
+                        exc)
             return "\n".join([head] + lines)
+        if sub == "buttons":
+            return self._pair_buttons(parts[1:])
         if sub == "page":
             # The web rungs, best first: Devon's own pairing page
             # in PHP (served by Devon on loopback when a PHP

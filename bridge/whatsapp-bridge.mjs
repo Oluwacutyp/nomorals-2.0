@@ -73,6 +73,7 @@ import makeWASocket, {
   downloadMediaMessage,
   fetchLatestBaileysVersion,
   generateWAMessageFromContent,
+  prepareWAMessageMedia,
   proto,
   jidNormalizedUser,
   aesEncryptCTR,
@@ -1061,7 +1062,90 @@ function extOf(p) {
   return i >= 0 ? p.slice(i).toLowerCase() : '';
 }
 
-async function cmdSend({ chat, text, reply_to, buttons, mentions }) {
+// ── authored keyboards (buttons completion, 2026-11-08) ──────────
+// One keyboard contract serves text sends, media sends and edits,
+// on BOTH bridges (the Go bridge builds the same shapes): rows of
+// [label, command] flatten in authored order; the quick_reply form
+// is an InteractiveMessage carrying a NativeFlow button set — at
+// most three native buttons, the overflow rendered as
+// "• label — /cmd" body lines; the list form
+// (buttons_style === 'list') is a ListMessage whose rows carry
+// the commands as row ids, taps returning through the same
+// ListResponseMessage mapping as everything else. A refused
+// interactive send degrades the WHOLE keyboard to text lines and
+// the reply's buttons_form names what actually went out
+// ("interactive" / "list" / "text") — never a silent drop.
+function flattenButtons(buttons) {
+  const flat = [];
+  for (const row of buttons || []) {
+    for (const b of row || []) {
+      if (Array.isArray(b) && b.length >= 2) {
+        flat.push([String(b[0]), String(b[1])]);
+      }
+    }
+  }
+  return flat;
+}
+
+const buttonLines = (items) => items
+  .map(([label, id]) => `• ${label} — /${id}`).join('\n');
+
+// The NativeFlow quick_reply message for (body, flat). An
+// optional headerMedia ({imageMessage|videoMessage|
+// documentMessage}, from prepareWAMessageMedia) attaches the
+// uploaded media as the interactive header — media sends.
+function buildInteractive(body, flat, headerMedia) {
+  const IM = proto.Message.InteractiveMessage;
+  const native = flat.slice(0, 3);
+  let text = body || '';
+  if (flat.length > 3) {
+    text += (text ? '\n' : '') + buttonLines(flat.slice(3));
+  }
+  const flowButtons = native.map(([label, id]) =>
+    IM.NativeFlowMessage.NativeFlowButton.create({
+      name: 'quick_reply',
+      buttonParamsJson: JSON.stringify({
+        id, display_text: [...label].slice(0, 25).join(''),
+      }),
+    }));
+  const fields = {
+    body: IM.Body.create({ text }),
+    nativeFlowMessage: IM.NativeFlowMessage.create({
+      buttons: flowButtons, messageVersion: 3,
+    }),
+  };
+  if (headerMedia) {
+    fields.header = IM.Header.create({
+      hasMediaAttachment: true, ...headerMedia,
+    });
+  }
+  return IM.create(fields);
+}
+
+// The LIST form of a keyboard: sections of ten rows, row titles
+// truncated at 24 chars (the client's row title budget), the
+// body text as the list description.
+function buildListMessage(body, flat) {
+  const LM = proto.Message.ListMessage;
+  const sections = [];
+  for (let start = 0; start < flat.length; start += 10) {
+    sections.push({
+      title: 'Actions',
+      rows: flat.slice(start, start + 10).map(([label, id]) => ({
+        rowId: id, title: [...label].slice(0, 24).join(''),
+      })),
+    });
+  }
+  return LM.create({
+    title: 'Actions',
+    description: body || '',
+    buttonText: 'Choose',
+    listType: LM.ListType.SINGLE_SELECT,
+    sections,
+  });
+}
+
+async function cmdSend({ chat, text, reply_to, buttons, buttons_style, mentions }) {
   const opts = {};
   if (reply_to && msgCache.has(reply_to)) {
     opts.quoted = msgCache.get(reply_to); // raw WAMessage -> quoted reply
@@ -1080,46 +1164,25 @@ async function cmdSend({ chat, text, reply_to, buttons, mentions }) {
   // action lines in the same message. If the interactive send
   // fails, ALL actions degrade to text lines and the reply names
   // the degraded form (buttons_form) so the Python side journals
-  // it — actions are never silently dropped.
-  const flat = [];
-  for (const row of buttons || []) {
-    for (const b of row || []) {
-      if (Array.isArray(b) && b.length >= 2) {
-        flat.push([String(b[0]), String(b[1])]);
-      }
-    }
-  }
+  // it — actions are never silently dropped. The adapter may ask
+  // for the LIST form instead (buttons_style === 'list') when
+  // the account's probe / degradation evidence says quick_reply
+  // does not render on its client — same commands, ListMessage
+  // shape.
+  const flat = flattenButtons(buttons);
   if (flat.length) {
-    const asLines = (items) => items
-      .map(([label, id]) => `• ${label} — /${id}`).join('\n');
-    let body = text || '';
-    if (flat.length > 3) {
-      body += (body ? '\n' : '') + asLines(flat.slice(3));
-    }
     try {
-      const IM = proto.Message.InteractiveMessage;
-      const flowButtons = flat.slice(0, 3).map(([label, id]) =>
-        IM.NativeFlowMessage.NativeFlowButton.create({
-          name: 'quick_reply',
-          buttonParamsJson: JSON.stringify({
-            id, display_text: [...label].slice(0, 25).join(''),
-          }),
-        }));
-      const interactive = IM.create({
-        body: IM.Body.create({ text: body }),
-        nativeFlowMessage: IM.NativeFlowMessage.create({
-          buttons: flowButtons, messageVersion: 3,
-        }),
-      });
-      const waMsg = await generateWAMessageFromContent(
-        chat, { interactiveMessage: interactive }, opts);
+      const content = buttons_style === 'list'
+        ? { listMessage: buildListMessage(text || '', flat) }
+        : { interactiveMessage: buildInteractive(text || '', flat) };
+      const waMsg = await generateWAMessageFromContent(chat, content, opts);
       await wa.relayMessage(chat, waMsg.message, {
         messageId: waMsg.key.id,
       });
-      waMsg.buttonsForm = 'interactive';
+      waMsg.buttonsForm = buttons_style === 'list' ? 'list' : 'interactive';
       return waMsg;
     } catch {
-      const lines = asLines(flat);
+      const lines = buttonLines(flat);
       const sent = await wa.sendMessage(
         chat, { text: (text || '') + (text ? '\n' : '') + lines },
         opts);
@@ -1136,20 +1199,87 @@ async function cmdSend({ chat, text, reply_to, buttons, mentions }) {
   return wa.sendMessage(chat, payload, opts);
 }
 
-async function cmdSendMedia({ chat, path: p, caption, ptt }) {
+async function cmdSendMedia({ chat, path: p, caption, ptt, buttons }) {
   if (!p || !fs.existsSync(p)) throw new Error(`media file not found: ${p}`);
   const ext = extOf(p);
   const mime = EXT_MIME[ext];
   const name = path.basename(p);
   const cap = caption || '';
-  if (['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) {
+  // Buttons (buttons completion, 2026-11-08): an image / video /
+  // document heads an InteractiveMessage whose Header carries
+  // the uploaded media (prepareWAMessageMedia does the upload) —
+  // the photo itself gets the buttons, same NativeFlow form as
+  // text sends. Audio has no interactive header form, so its
+  // actions ride as a follow-up text message and the form
+  // reports 'text'. A refused interactive send falls back to the
+  // plain media with every action as a caption line. Either way
+  // the sent message's buttonsForm names the form that went out.
+  const flat = flattenButtons(buttons);
+  const isImage = ['.jpg', '.jpeg', '.png', '.webp'].includes(ext);
+  const isVideo = ['.mp4', '.mov', '.gif'].includes(ext);
+  const isAudio = ['.mp3', '.ogg', '.oga', '.wav', '.m4a'].includes(ext);
+  if (flat.length && (isImage || isVideo)) {
+    try {
+      const mediaKey = isImage ? 'image' : 'video';
+      const prepared = await prepareWAMessageMedia(
+        { [mediaKey]: { url: p } },
+        { upload: wa.waUploadToServer });
+      const headerMedia = isImage
+        ? { imageMessage: prepared.imageMessage }
+        : { videoMessage: prepared.videoMessage };
+      const waMsg = await generateWAMessageFromContent(
+        chat,
+        { interactiveMessage: buildInteractive(cap, flat, headerMedia) },
+        {});
+      await wa.relayMessage(chat, waMsg.message, {
+        messageId: waMsg.key.id,
+      });
+      waMsg.buttonsForm = 'interactive';
+      return waMsg;
+    } catch {
+      const full = cap + (cap ? '\n' : '') + buttonLines(flat);
+      const sent = isImage
+        ? await wa.sendMessage(chat, { image: { url: p }, caption: full, mimetype: mime })
+        : await wa.sendMessage(chat, { video: { url: p }, caption: full, mimetype: mime });
+      if (sent) sent.buttonsForm = 'text';
+      return sent;
+    }
+  }
+  if (flat.length && !isAudio) {
+    // Documents: the same header form, fileName riding along.
+    try {
+      const prepared = await prepareWAMessageMedia(
+        { document: { url: p }, mimetype: mime || 'application/octet-stream', fileName: name },
+        { upload: wa.waUploadToServer });
+      const waMsg = await generateWAMessageFromContent(
+        chat,
+        { interactiveMessage: buildInteractive(cap, flat, { documentMessage: prepared.documentMessage }) },
+        {});
+      await wa.relayMessage(chat, waMsg.message, {
+        messageId: waMsg.key.id,
+      });
+      waMsg.buttonsForm = 'interactive';
+      return waMsg;
+    } catch {
+      const full = cap + (cap ? '\n' : '') + buttonLines(flat);
+      const sent = await wa.sendMessage(chat, { document: { url: p }, mimetype: mime || 'application/octet-stream', fileName: name, caption: full });
+      if (sent) sent.buttonsForm = 'text';
+      return sent;
+    }
+  }
+  if (isImage) {
     return wa.sendMessage(chat, { image: { url: p }, caption: cap, mimetype: mime });
   }
-  if (['.mp4', '.mov', '.gif'].includes(ext)) {
+  if (isVideo) {
     return wa.sendMessage(chat, { video: { url: p }, caption: cap, mimetype: mime });
   }
-  if (['.mp3', '.ogg', '.oga', '.wav', '.m4a'].includes(ext)) {
-    return wa.sendMessage(chat, { audio: { url: p }, mimetype: mime || 'audio/ogg', ptt: !!ptt });
+  if (isAudio) {
+    const sent = await wa.sendMessage(chat, { audio: { url: p }, mimetype: mime || 'audio/ogg', ptt: !!ptt });
+    if (flat.length && sent) {
+      await wa.sendMessage(chat, { text: buttonLines(flat) });
+      sent.buttonsForm = 'text';
+    }
+    return sent;
   }
   return wa.sendMessage(chat, { document: { url: p }, mimetype: mime || 'application/octet-stream', fileName: name, caption: cap });
 }
@@ -1190,7 +1320,9 @@ async function handleCommand(sock, req) {
       }
       case 'send_media': {
         const sent = await cmdSendMedia(req);
-        return reply(sock, id, { ok: true, message_id: sent?.key?.id || '' });
+        const out = { ok: true, message_id: sent?.key?.id || '' };
+        if (sent?.buttonsForm) out.buttons_form = sent.buttonsForm;
+        return reply(sock, id, out);
       }
       case 'typing': {
         const secs = Math.max(1, Math.min(30, parseInt(req.seconds || '3', 10)));
@@ -1332,6 +1464,42 @@ async function handleCommand(sock, req) {
         }
         if (!cached.key.fromMe) {
           return reply(sock, id, { ok: false, error: 'only the account\'s own messages can be edited' });
+        }
+        if (Array.isArray(req.buttons)) {
+          // Keyboard-carrying edit (buttons completion,
+          // 2026-11-08): the buttons field is presence-
+          // significant — an empty list CLEARS the keyboard (it
+          // falls through to the plain text edit below: the
+          // replacement body simply has no keyboard). With
+          // buttons, the replacement is built exactly like a
+          // send and wrapped the way Baileys' own edit branch
+          // wraps it (generateWAMessageContent produces
+          // protocolMessage{key, editedMessage, MESSAGE_EDIT}
+          // for a text edit; the wrap is content-agnostic), then
+          // relayed via generateWAMessageFromContent — the same
+          // calls the plain interactive send path uses.
+          const flat = flattenButtons(req.buttons);
+          if (flat.length) {
+            const text = String(req.text || '');
+            const inner = req.buttons_style === 'list'
+              ? { listMessage: buildListMessage(text, flat) }
+              : { interactiveMessage: buildInteractive(text, flat) };
+            const protocolMessage = proto.Message.ProtocolMessage.create({
+              key: cached.key,
+              editedMessage: proto.Message.create(inner),
+              timestampMs: Date.now(),
+              type: proto.Message.ProtocolMessage.Type.MESSAGE_EDIT,
+            });
+            const waMsg = await generateWAMessageFromContent(
+              jid, { protocolMessage }, {});
+            await wa.relayMessage(jid, waMsg.message, {
+              messageId: waMsg.key.id,
+            });
+            return reply(sock, id, {
+              ok: true, message_id: mid,
+              buttons_form: req.buttons_style === 'list' ? 'list' : 'interactive',
+            });
+          }
         }
         await wa.sendMessage(jid, { text: String(req.text || ''), edit: cached.key });
         return reply(sock, id, { ok: true, message_id: mid });

@@ -125,22 +125,37 @@ def actionable(text: str, buttons: list, *, session: str = "",
                              media=media)
 
 
-def wide_layout(keyboard: Keyboard | None) -> Keyboard | None:
-    """Reflow a keyboard to the wide layout: one button per row.
+def grid_layout(keyboard: Keyboard | None) -> Keyboard | None:
+    """Reflow a keyboard to the GRID: two buttons per row.
 
-    The group surfaces' wide-aspect rows are the house standard
-    EVERYWHERE buttons appear, DMs included (owner law,
-    2026-11-05): a primary action takes its full row, so labels
-    never truncate and the tap target is the whole width.  Button
-    ORDER is preserved exactly.  Named exceptions stay authored,
-    not reflowed: confirm/cancel pairs (:func:`confirm_keyboard`),
-    pagination (:func:`paginate`), and the pick-list number
-    keypad — tight grids where the pairing IS the meaning.
+    THE house standard for buttons, stated once, here (owner
+    grid order, 2026-11-07 — it SUPERSEDES the 2026-11-05
+    one-per-row "wide layout" law, which this function used to
+    enforce by un-packing authored pairs back into single-button
+    rows): action buttons pack two per row, in authored order,
+    the same packing the menu grid uses
+    (:func:`...control._pack_menu_rows`). A lone trailing button
+    takes its own row. Named exceptions stay authored, not
+    reflowed: confirm/cancel pairs (:func:`confirm_keyboard`),
+    pagination (:func:`paginate`), ballots and the pick-list
+    number keypad — tight grids where the pairing IS the meaning.
     """
     if not keyboard:
         return None
-    rows = [[btn] for row in keyboard for btn in (row or ())]
-    return rows or None
+    flat = [btn for row in keyboard for btn in (row or ())]
+    if not flat:
+        return None
+    return [flat[i:i + 2] for i in range(0, len(flat), 2)]
+
+
+def wide_layout(keyboard: Keyboard | None) -> Keyboard | None:
+    """Back-compat alias for :func:`grid_layout`.
+
+    The name is a fossil of the retired 2026-11-05 one-per-row
+    law; the function it names has packed the 2026-11-07 grid
+    since the buttons completion. New code calls grid_layout.
+    """
+    return grid_layout(keyboard)
 
 
 def buttons_for_text(text: str) -> Keyboard | None:

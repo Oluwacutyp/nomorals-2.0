@@ -27,7 +27,7 @@ from typing import Any
 
 from .expression import button_label
 from .tgbot_buttons import (buttons_for_text, check_callback_data,
-                            wide_layout)
+                            grid_layout)
 from .failures import record_failure
 
 __all__ = ["adaptive_buttons_for"]
@@ -67,15 +67,15 @@ def _scheduled_buttons(payload: dict[str, Any] | None) -> Keyboard | None:
             _row((button_label("jobs", "Jobs"), "schedule list"),
                  (button_label("rerun", "Re-run"), "schedule run memory-consolidation")),
         ]
-        return wide_layout([r for r in rows if r])
+        return grid_layout([r for r in rows if r])
     if job:
         rows = [
             _row((button_label("jobs", "Jobs"), "schedule list"), (button_label("status", "Status"), "schedule status")),
             _row((button_label("rerun", "Re-run"), f"schedule run {job}")),
         ]
-        return wide_layout([r for r in rows if r])
+        return grid_layout([r for r in rows if r])
     row = _row((button_label("jobs", "Jobs"), "schedule list"), (button_label("status", "Status"), "schedule status"))
-    return wide_layout([row] if row else None)
+    return grid_layout([row] if row else None)
 
 
 def _pulse_stories_buttons(payload: dict[str, Any] | None) -> Keyboard | None:
@@ -99,7 +99,7 @@ def _pulse_stories_buttons(payload: dict[str, Any] | None) -> Keyboard | None:
     if page < pages:
         pairs.append(("Next ▶", f"pulse stories {batch} {page + 1}"))
     row = _row(*pairs)
-    return wide_layout([row] if row else None)
+    return grid_layout([row] if row else None)
 
 
 def _search_buttons(payload: dict[str, Any] | None) -> Keyboard | None:
@@ -114,7 +114,7 @@ def _search_buttons(payload: dict[str, Any] | None) -> Keyboard | None:
              (button_label("research", "Deep research"), f"searchdeep {query}")),
         _row((button_label("rerun", "Search again"), f"search {query}")),
     ]
-    return wide_layout([r for r in rows if r])
+    return grid_layout([r for r in rows if r])
 
 
 def _game_buttons(payload: dict[str, Any] | None) -> Keyboard | None:
@@ -132,7 +132,7 @@ def _game_buttons(payload: dict[str, Any] | None) -> Keyboard | None:
         _row((rematch, "game rematch"), (button_label("next", "Next"), "game list")),
         _row((button_label("leaderboard", "Leaderboard"), "game leaderboard")),
     ]
-    return wide_layout([r for r in rows if r])
+    return grid_layout([r for r in rows if r])
 
 
 def _music_ask_buttons() -> Keyboard | None:
@@ -145,7 +145,7 @@ def _music_ask_buttons() -> Keyboard | None:
     """
     row = _row((button_label("search", "Find this music"), "musicnote find"),
                (button_label("music", "Create a song"), "musicnote create"))
-    return wide_layout([row] if row else None)
+    return grid_layout([row] if row else None)
 
 
 def _memory_buttons() -> Keyboard | None:
@@ -155,7 +155,7 @@ def _memory_buttons() -> Keyboard | None:
     ``/recall`` / ``/memories`` / ``/forget``, never ``/memory``.
     """
     row = _row((button_label("recall", "Recall"), "recall"), (button_label("memories", "Memories"), "memories"))
-    return wide_layout([row] if row else None)
+    return grid_layout([row] if row else None)
 
 
 def _retry_only(origin_command: str) -> Keyboard | None:

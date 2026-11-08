@@ -147,39 +147,42 @@ def _row(*pairs: tuple[str, str]) -> list[tuple[str, str]]:
 
 
 def hub_keyboard() -> Keyboard:
-    """Hub card buttons: one tool per row (the wide layout — the
-    house standard everywhere buttons appear). Dynamic per
+    """Hub card buttons, packed two per row (the grid — THE house
+    standard for buttons since the owner's 2026-11-07 grid order,
+    stated once in tgbot_buttons.grid_layout). Dynamic per
     screen — this is the hub screen's set, not a global menu."""
     return [
-        _row(("🌐 Proxy", "toolhub proxy")),
-        _row(("💳 BIN lookup", "toolhub bin")),
+        _row(("🌐 Proxy", "toolhub proxy"),
+             ("💳 BIN lookup", "toolhub bin")),
         _row(("❓ Help", "toolhub help")),
     ]
 
 
 def proxy_keyboard() -> Keyboard:
-    """Proxy TOOL screen buttons: run the flow + Back to Hub."""
+    """Proxy TOOL screen buttons: run the flow + Back to Hub,
+    packed in one row."""
     return [
-        _row(("🔄 Refresh pool", "toolhub proxy run")),
-        _row(("« Back to Hub", "toolhub")),
+        _row(("🔄 Refresh pool", "toolhub proxy run"),
+             ("« Back to Hub", "toolhub")),
     ]
 
 
 def proxy_result_keyboard() -> Keyboard:
     """Proxy RESULT screen buttons: re-run + Back to Proxy (one
-    level up — the tool screen, not the hub)."""
+    level up — the tool screen, not the hub), packed in one row."""
     return [
-        _row(("🔄 Refresh pool", "toolhub proxy run")),
-        _row(("« Back to Proxy", "toolhub proxy")),
+        _row(("🔄 Refresh pool", "toolhub proxy run"),
+             ("« Back to Proxy", "toolhub proxy")),
     ]
 
 
 def proxy_cooldown_keyboard() -> Keyboard:
     """Cooldown notice buttons: re-check (real: the cooldown may
-    have expired) + Back to Proxy (one level up). No dead buttons."""
+    have expired) + Back to Proxy (one level up), packed in one
+    row. No dead buttons."""
     return [
-        _row(("🔄 Try again", "toolhub proxy run")),
-        _row(("« Back to Proxy", "toolhub proxy")),
+        _row(("🔄 Try again", "toolhub proxy run"),
+             ("« Back to Proxy", "toolhub proxy")),
     ]
 
 

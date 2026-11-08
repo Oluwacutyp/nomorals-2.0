@@ -1462,6 +1462,39 @@ class PersonalSurfaces:
         _append_jsonl(self.vault.journal_path, entry)
         return entry
 
+    def note_button_probe(self, *,
+                          phase: str,
+                          form: str = "",
+                          requested: str = "",
+                          account_id: str = "",
+                          note: str = "",
+                          ts: float = 0.0) -> dict[str, Any]:
+        """Journal one step of the /pair buttons render probe
+        (buttons completion, 2026-11-08): phase "sent" records
+        the form the bridge reported for the probe send
+        (interactive / list / text — a text form is the
+        degradation the owner's "no buttons on WhatsApp"
+        complaint is made of), phase "tap" records a probe
+        button coming back as a command — the loop closed.
+        The rows are the per-account evidence the send path's
+        form choice stands on (/pair journal button_probe)."""
+        entry = {
+            "ts": float(ts or self._clock()),
+            "kind": "button_probe",
+            "account": str(account_id or ""),
+            "platform": "whatsapp",
+            "counterpart_id": "",
+            "poster_name": "",
+            "media_kind": "",
+            "source_id": "",
+            "path": "", "bytes": 0,
+            "phase": str(phase or ""),
+            "form": str(form or ""),
+            "requested": str(requested or ""),
+            "note": str(note or "")[:200]}
+        _append_jsonl(self.vault.journal_path, entry)
+        return entry
+
     def note_disk_low(self, *, free_bytes: int, need_bytes: int,
                       store_count: int, store_bytes: int,
                       ts: float = 0.0) -> dict[str, Any]:

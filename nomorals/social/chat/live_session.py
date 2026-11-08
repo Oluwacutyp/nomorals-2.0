@@ -41,12 +41,15 @@ Surfaces degrade honestly, never fakely:
   a message the bridge no longer holds, Telegram's not-modified)
   falls back to a fresh send and the record moves to the new
   message. A failed edit is never reported as an edit.
-* WhatsApp's edit verb is TEXT-ONLY (the protocol swaps no
-  keyboard): the declared buttons of the edited render do not
-  replace the original message's buttons there. Session keyboards
-  are therefore authored state-invariant where the flow allows it
-  (the riddle's Reveal/Another pair is correct in every state);
-  Telegram's edit swaps the keyboard with the text.
+* WhatsApp's edit verb carries the keyboard since the buttons
+  completion (2026-11-08): both bridges rebuild the replacement
+  (interactive / list / plain) inside the protocol edit wrap, so
+  an edited render's declared buttons replace the original
+  message's buttons there exactly as Telegram's edit swaps the
+  keyboard with the text — and a settled render declared with
+  ``buttons=[]`` ends with NO live buttons on either platform
+  (a bridge that refuses the clearing edit is answered by the
+  adapter with revoke + a fresh settled send).
 
 This module never raises: a session failure degrades to the plain
 send path, which is always available.
@@ -173,10 +176,12 @@ def edit_session_message(adapter: Any, chat: Any, message_id: str,
     The verb shapes differ per surface and each is called in its
     own grammar: Telegram's adapters take the declared buttons
     (their edits swap the keyboard with the text); WhatsApp's
-    bridge edit is text-only, so no buttons are passed (the
-    original message keeps the keyboard it was sent with); the
-    Bot API adapter additionally takes the send's parse mode so
-    the edited render formats exactly like the send it replaces.
+    adapter takes them too since the buttons completion (its
+    bridges rebuild the replacement inside the edit wrap — the
+    parameter is passed because the verb declares it, detected
+    by signature like every other surface); the Bot API adapter
+    additionally takes the send's parse mode so the edited
+    render formats exactly like the send it replaces.
 
     A MEDIA live message (``media=True`` — it was sent as a
     photo with the render in its caption) edits through the

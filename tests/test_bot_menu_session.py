@@ -277,15 +277,24 @@ class BotDmMenuFlowTests(unittest.TestCase):
         self.assertEqual(out.session, "menu")
         self.assertIn("/wordchain", out.text)
 
-    def test_whatsapp_list_stays_the_text_catalog(self):
+    def test_whatsapp_list_takes_the_session_render(self):
+        # DELIBERATELY RE-PINNED (buttons completion, 2026-11-08):
+        # this test used to pin the runtime's platform refusal —
+        # WhatsApp /list kept the plain text catalog "by design".
+        # The owner's order removed the refusal: WhatsApp takes
+        # the same live session render as every buttons+edit
+        # surface (its keyboards ride the bridges' interactive
+        # form); the text catalog remains the fallback for
+        # buttonless contexts.
         rt, _adapter, _chat = _dm_runtime()
         wa = ChatRef(platform="whatsapp", chat_id="42",
                      kind=ChatKind.DM)
         rt._owner_chats.add(wa.key)  # the owner's own WhatsApp chat
         out = rt.handle_control("/list games", wa.key,
                                 message=_msg(wa, "/list games"))
-        self.assertIsInstance(out, str)
-        self.assertIn("/wordchain", out)
+        self.assertNotIsInstance(out, str)
+        self.assertEqual(out.session, "menu")
+        self.assertIn("/wordchain", out.text)
 
 
 # ── the adapter remove verb ──────────────────────────────────────

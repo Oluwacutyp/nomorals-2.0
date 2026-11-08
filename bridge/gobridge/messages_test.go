@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -207,5 +208,117 @@ func TestSendStatusReactionErrorPropagates(t *testing.T) {
 	if err := sendStatusReaction(context.Background(), cli,
 		pnPoster, types.MessageID("POST10"), "❤️"); err == nil {
 		t.Fatal("the send error vanished")
+	}
+}
+
+// ── authored keyboards (buttons completion, 2026-11-08) ─────
+
+func TestParseButtonsFlattensRowsInOrder(t *testing.T) {
+	req := request{"buttons": []any{
+		[]any{[]any{"A", "a"}, []any{"B", "b"}},
+		[]any{[]any{"C", "c"}},
+		[]any{"junk"},
+	}}
+	flat := parseButtons(req)
+	if len(flat) != 3 || flat[0].cmd != "a" || flat[1].cmd != "b" ||
+		flat[2].cmd != "c" {
+		t.Fatalf("parseButtons = %+v, want a,b,c in order", flat)
+	}
+	if got := parseButtons(request{}); len(got) != 0 {
+		t.Fatalf("parseButtons(no buttons) = %+v, want empty", got)
+	}
+}
+
+func TestSplitNativeCapsAtThreeAndLinesTheOverflow(t *testing.T) {
+	flat := []waButton{{"1", "a"}, {"2", "b"}, {"3", "c"}, {"4", "d"}}
+	native, body := splitNative(flat, "pick")
+	if len(native) != 3 {
+		t.Fatalf("native = %d, want 3", len(native))
+	}
+	if body != "pick\n• 4 — /d" {
+		t.Fatalf("body = %q, want the overflow as a text line", body)
+	}
+	native, body = splitNative(flat[:2], "pick")
+	if len(native) != 2 || body != "pick" {
+		t.Fatalf("small keyboard changed: %v %q", native, body)
+	}
+}
+
+func TestInteractiveMessageShape(t *testing.T) {
+	long := "abcdefghijklmnopqrstuvwxyz0123456789" // 36 runes
+	msg := interactiveMessage("body", []waButton{
+		{long, "cmd1"}, {"B", "cmd2"}}, nil, nil)
+	im := msg.GetInteractiveMessage()
+	if im == nil || im.GetBody().GetText() != "body" {
+		t.Fatalf("interactive body wrong: %+v", im)
+	}
+	nf := im.GetNativeFlowMessage()
+	if nf == nil || nf.GetMessageVersion() != 3 ||
+		len(nf.GetButtons()) != 2 {
+		t.Fatalf("native flow wrong: %+v", nf)
+	}
+	first := nf.GetButtons()[0]
+	if first.GetName() != "quick_reply" {
+		t.Fatalf("button name = %q, want quick_reply", first.GetName())
+	}
+	var params map[string]string
+	if err := json.Unmarshal([]byte(first.GetButtonParamsJSON()),
+		&params); err != nil {
+		t.Fatalf("button params not JSON: %v", err)
+	}
+	if params["id"] != "cmd1" ||
+		len([]rune(params["display_text"])) != 25 {
+		t.Fatalf("params = %+v, want id cmd1 + label cut at 25 runes",
+			params)
+	}
+}
+
+func TestInteractiveMessageMediaHeader(t *testing.T) {
+	img := &waE2E.ImageMessage{URL: proto.String("https://x")}
+	header := &waE2E.InteractiveMessage_Header{
+		HasMediaAttachment: proto.Bool(true),
+		Media: &waE2E.InteractiveMessage_Header_ImageMessage{
+			ImageMessage: img}}
+	msg := interactiveMessage("cap", []waButton{{"A", "a"}},
+		nil, header)
+	h := msg.GetInteractiveMessage().GetHeader()
+	if h == nil || !h.GetHasMediaAttachment() ||
+		h.GetImageMessage() != img {
+		t.Fatalf("media header wrong: %+v", h)
+	}
+}
+
+func TestBuildListMessageShape(t *testing.T) {
+	var flat []waButton
+	for i := 0; i < 12; i++ {
+		flat = append(flat, waButton{"L", "cmd"})
+	}
+	msg := buildListMessage("pick one", flat, nil)
+	lm := msg.GetListMessage()
+	if lm == nil || lm.GetListType() !=
+		waE2E.ListMessage_SINGLE_SELECT {
+		t.Fatalf("list type wrong: %+v", lm)
+	}
+	if lm.GetDescription() != "pick one" ||
+		lm.GetButtonText() != "Choose" {
+		t.Fatalf("list body wrong: %q / %q",
+			lm.GetDescription(), lm.GetButtonText())
+	}
+	if len(lm.GetSections()) != 2 ||
+		len(lm.GetSections()[0].GetRows()) != 10 ||
+		len(lm.GetSections()[1].GetRows()) != 2 {
+		t.Fatalf("sections = %+v, want 10 + 2 rows", lm.GetSections())
+	}
+	if lm.GetSections()[0].GetRows()[0].GetRowID() != "cmd" {
+		t.Fatalf("row id must carry the command")
+	}
+}
+
+func TestButtonsFormName(t *testing.T) {
+	flat := []waButton{{"A", "a"}}
+	if buttonsFormName("", flat) != "interactive" ||
+		buttonsFormName("list", flat) != "list" ||
+		buttonsFormName("list", nil) != "" {
+		t.Fatal("form names wrong")
 	}
 }

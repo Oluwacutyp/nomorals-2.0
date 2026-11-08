@@ -387,14 +387,19 @@ class RuntimeBootfixTests(unittest.TestCase):
         # The incident's second half: /help after the menu was
         # already sent once in the session must STILL answer —
         # exactly one reply per ask.
+        # The reply's CONTENT is re-pinned (buttons completion,
+        # 2026-11-08): a WhatsApp /help now sends the live menu
+        # session render, not the retired text frame — the
+        # incident law this test exists for is unchanged: one
+        # answer per ask, every ask answered.
         self.runtime._process(_self_chat_msg("/help", mid="wa-h1"))
         wa_sends = [t for p, t in self.gateway.sent if p == "whatsapp"]
         self.assertEqual(len(wa_sends), 1)
-        self.assertIn("what I can do", wa_sends[0])
+        self.assertIn("command menu", wa_sends[0])
         self.runtime._process(_self_chat_msg("/help", mid="wa-h2"))
         wa_sends = [t for p, t in self.gateway.sent if p == "whatsapp"]
         self.assertEqual(len(wa_sends), 2)
-        self.assertIn("what I can do", wa_sends[1])
+        self.assertIn("command menu", wa_sends[1])
 
     def test_stale_help_is_observed_never_answered(self) -> None:
         # The boot flood itself: attach delivers the offline /help —

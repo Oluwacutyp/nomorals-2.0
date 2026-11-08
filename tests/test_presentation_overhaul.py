@@ -204,17 +204,29 @@ def test_job_report_docs_carry_the_stamp():
     assert (doc.footer or "") == DEFAULT_STAMP_TEXT
 
 
-# ── wide buttons ─────────────────────────────────────────────────────
+# ── grid buttons ─────────────────────────────────────────────────────
 
 
 def test_wide_layout_one_button_per_row():
-    from nomorals.social.chat.tgbot_buttons import wide_layout
+    # DELIBERATELY RE-PINNED (buttons completion, 2026-11-08): this
+    # test used to pin the 2026-11-05 one-per-row "wide layout"
+    # law. The owner's 2026-11-07 grid order superseded it — the
+    # reflow now PACKS two per row (grid_layout; wide_layout is
+    # its back-compat alias), so authored pairs are no longer
+    # un-packed into a single-button column.
+    from nomorals.social.chat.tgbot_buttons import grid_layout, wide_layout
 
     kb = [[("A", "a"), ("B", "b")], [("C", "c")]]
-    assert wide_layout(kb) == [[("A", "a")], [("B", "b")], [("C", "c")]]
+    assert grid_layout(kb) == [[("A", "a"), ("B", "b")], [("C", "c")]]
+    assert wide_layout(kb) == grid_layout(kb)
+    kb5 = [[("A", "a")], [("B", "b")], [("C", "c")], [("D", "d")],
+           [("E", "e")]]
+    assert grid_layout(kb5) == [[("A", "a"), ("B", "b")],
+                                [("C", "c"), ("D", "d")],
+                                [("E", "e")]]
     # Empty/absent stays absent (adapters read None as "no buttons").
-    assert wide_layout([]) is None
-    assert wide_layout(None) is None
+    assert grid_layout([]) is None
+    assert grid_layout(None) is None
 
 
 # ── right artifact, honestly labeled ─────────────────────────────────

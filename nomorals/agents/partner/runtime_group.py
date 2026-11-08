@@ -5306,6 +5306,12 @@ class RuntimeGroupMixin:
         self._console_session_map()[skey] = {
             "groups": groups, "channels": channels,
             "at": time.time()}
+        # The pick-list packs two per row (the grid — the house
+        # standard for buttons, tgbot_buttons.grid_layout), not
+        # one tall single-button column.
+        flat_buttons = [row[0] for row in buttons if row]
+        buttons = [flat_buttons[i:i + 2]
+                   for i in range(0, len(flat_buttons), 2)]
         card = Card("settings", title="Devon console", icon="🛠️")
         if note:
             card.line(note)
@@ -7905,6 +7911,17 @@ class RuntimeGroupMixin:
         if err:
             return err
         surface = self._group_surface()
+        settled = self._settled_ask_tap(
+            surface, key, message,
+            f"flag {str(tail or '').strip()}")
+        if settled is not None:
+            # A late tap on the SETTLED category card: answer as
+            # settled — never stage a fresh flag off a dead
+            # keyboard.
+            return ("that question already settled — "
+                    + str(settled.get("text") or "done")
+                    + ". Its buttons are closed; run /flag "
+                      "again for a fresh one.")
         text = str(tail or "").strip()
         parts = text.split()
         low = [p.lower() for p in parts]
@@ -8012,6 +8029,8 @@ class RuntimeGroupMixin:
                 "user_id": str(res.member.user_id),
                 "label": res.member.label,
                 "named_token": token,
+                "payloads": [f"flag {token} {cat}"
+                             for cat in CATEGORIES],
                 "by": by, "at": time.time()})
             buttons: list = []
             row: list = []
@@ -8025,20 +8044,41 @@ class RuntimeGroupMixin:
                 buttons.append(row)
             return actionable(
                 f"which kind of flag for {res.member.label}? "
-                f"Tap one — or just reply with it.", buttons)
+                f"Tap one — or just reply with it.", buttons,
+                session="modask")
         category = rest[0].lower()
         note = rest[1] if len(rest) > 1 else ""
         person = surface.reputation_person(
             key, res.member.user_id,
             username=res.member.username, name=res.member.name)
+        # An execution answers any pending category ask for this
+        # member (read BEFORE the clear): its card settles —
+        # keyboard cleared + tombstoned — once the flag stages.
+        pending_ask = self._pending_ask_for(
+            surface, key, res.member.user_id)
+        if pending_ask:
+            self._clear_pending_ask(
+                surface, key, user_id=str(res.member.user_id))
         prop = surface.stage_flag(
             key, user_id=res.member.user_id, person=person,
             category=category, note=note, by=by,
             by_label=by_label, direct=True, source="command")
         if prop.get("duplicate"):
+            if pending_ask:
+                self._settle_ask_card(
+                    surface, key, message, pending_ask,
+                    f"✅ settled — a {category} flag for "
+                    f"{res.member.label} was already waiting in "
+                    f"the queue")
             return (f"already waiting: a {category} flag for "
                     f"{res.member.label} is in the queue — "
                     f"/flag reviews it.")
+        if pending_ask:
+            self._settle_ask_card(
+                surface, key, message, pending_ask,
+                f"✅ settled — a {category} flag for "
+                f"{res.member.label} is staged; it brands nobody "
+                f"until confirmed")
         return self._flag_proposal_card(
             surface, key, message, prop, res.member.label)
 
@@ -9769,12 +9809,113 @@ class RuntimeGroupMixin:
             extras["pending_ask"] = {}
             surface.store.save()
 
+    def _ask_session_registry(self):  # type: ignore[no-untyped-def]
+        """The runtime's live-session registry, resolved
+        defensively: the composed PartnerRuntime provides it;
+        a bare-mixin context gets an empty one (every lookup
+        misses, settles degrade to no-ops) instead of an error."""
+        fn = getattr(self, "_live_session_registry", None)
+        if callable(fn):
+            return fn()
+        from ...social.chat.live_session import LiveSessionRegistry
+
+        return LiveSessionRegistry()
+
+    def _pending_ask_for(self, surface, key, user_id):  # type: ignore[no-untyped-def]
+        """The pending choice ask for one member, or {} — read
+        BEFORE an execution clears it, so the resolver can settle
+        the ask's card (see _settle_ask_card)."""
+        ask = surface._extras(key).get("pending_ask") or {}
+        if ask and str(ask.get("user_id") or "") == str(user_id):
+            return dict(ask)
+        return {}
+
+    def _settle_ask_card(self, surface, key, message, ask,  # type: ignore[no-untyped-def]
+                         settled_text) -> None:
+        """Settle a resolved choice ask (buttons completion,
+        2026-11-08): the ask's ONE live message edits to the
+        settled render with NO buttons — on Telegram and, via the
+        keyboard-carrying edit, on WhatsApp too — and the ask's
+        message id is tombstoned in the group extras with the
+        exact payloads it offered. A later tap on that card
+        re-enters the command with one of those payloads;
+        _settled_ask_tap recognises it and answers as settled
+        instead of executing a fresh action. Best-effort: a
+        surface that cannot edit keeps its pre-existing behavior
+        (the funnel's numbered fallback world), never an error."""
+        try:
+            chat_key = str(message.chat.key or "")
+            registry = self._ask_session_registry()
+            mid = registry.lookup(chat_key, "modask")
+            platform = chat_key.partition(":")[0]
+            adapter = self._group_adapter(platform)
+            if mid and adapter is not None:
+                from ...social.chat.live_session import edit_session_message
+
+                edit_session_message(
+                    adapter, message.chat, mid, settled_text,
+                    buttons=[])
+                extras = surface._extras(key)
+                tomb = dict(extras.get("settled_ask_msgs") or {})
+                tomb[str(mid)] = {
+                    "at": time.time(),
+                    "payloads": list(ask.get("payloads") or []),
+                    "text": settled_text}
+                if len(tomb) > 8:
+                    for old in sorted(
+                            tomb,
+                            key=lambda m: tomb[m].get("at") or 0,
+                    )[:len(tomb) - 8]:
+                        tomb.pop(old, None)
+                extras["settled_ask_msgs"] = tomb
+                surface.store.save()
+                registry.forget(chat_key, "modask")
+        except Exception as exc:  # noqa: BLE001
+            from ...social.chat.failures import record_failure
+
+            record_failure("runtime_group._settle_ask_card", exc)
+
+    def _settled_ask_tap(self, surface, key, message,  # type: ignore[no-untyped-def]
+                         command_text):
+        """The tombstone entry when this turn is a tap on a
+        SETTLED ask card re-offering one of its exact payloads —
+        else None. The tap is recognised by the message it landed
+        on (the adapters' tapped stamp; WhatsApp surfaces it as
+        reply_to) matched against the group's settled-ask
+        tombstones, AND the re-offered command being byte-equal
+        to one the card offered: a fresh typed command that
+        merely resembles one does not match (it does not ride
+        the settled card)."""
+        try:
+            from ...social.chat.live_session import tapped_message_id
+
+            tapped = tapped_message_id(message)
+            if not tapped:
+                tapped = str(getattr(message, "reply_to", "")
+                             or "")
+            if not tapped:
+                return None
+            tomb = surface._extras(key).get(
+                "settled_ask_msgs") or {}
+            entry = tomb.get(str(tapped))
+            if not entry:
+                return None
+            if command_text in (entry.get("payloads") or []):
+                return entry
+        except Exception as exc:  # noqa: BLE001
+            from ...social.chat.failures import record_failure
+
+            record_failure("runtime_group._settled_ask_tap", exc)
+        return None
+
     def _mute_duration_ask(self, surface, key, message, res, label):  # type: ignore[no-untyped-def]
         """The mute-length question: the target is resolved and
         the only missing piece is the length — buttons for the
         standard lengths plus the standing-default star, and the
         pending-ask record so a text reply ("2h") completes it
-        identically."""
+        identically. The ask renders as a live session
+        (session="modask") so its resolution can edit the card
+        settled with its keyboard cleared."""
         from ...social.chat.tgbot_buttons import actionable
 
         token = str(res.named_token or res.member.user_id)
@@ -9782,6 +9923,9 @@ class RuntimeGroupMixin:
             "kind": "mute_duration",
             "user_id": str(res.member.user_id),
             "label": label, "named_token": token,
+            "payloads": [f"mute {token} 10m", f"mute {token} 2h",
+                         f"mute {token} 1d",
+                         f"mute {token} 2h +default"],
             "by": str(message.sender_id or message.sender or ""),
             "at": time.time()})
         return actionable(
@@ -9791,7 +9935,8 @@ class RuntimeGroupMixin:
               ("2h", f"mute {token} 2h"),
               ("1d", f"mute {token} 1d")],
              [("⭐ 2h as default + mute",
-               f"mute {token} 2h +default")]])
+               f"mute {token} 2h +default")]],
+            session="modask")
 
     def _resolve_pending_ask(self, surface, key, message):  # type: ignore[no-untyped-def]
         """A plain-text answer to a pending choice question:
@@ -9801,7 +9946,11 @@ class RuntimeGroupMixin:
         the ask is one-shot and dies after 15 minutes. The
         resolution re-enters the SAME command handler with the
         answer folded into its tail, so the execution path —
-        gates, audits, confirmations — is the command's own."""
+        gates, audits, confirmations — is the command's own.
+        The ask is NOT cleared here: the handler owns the clear
+        (and, since the buttons completion, the ask card's
+        settle) so a text answer and a button tap resolve
+        identically, card included."""
         extras = surface._extras(key)
         ask = extras.get("pending_ask") or {}
         if not ask:
@@ -9825,14 +9974,12 @@ class RuntimeGroupMixin:
             seconds, rest = _parse_duration(text)
             if seconds is None or rest:
                 return None
-            self._clear_pending_ask(surface, key)
             return self._control_mute(f"{token} {text}", message)
         if kind == "flag_category":
             from ...social.chat.group_reputation import CATEGORIES
 
             if text.lower() not in CATEGORIES:
                 return None
-            self._clear_pending_ask(surface, key)
             return self._control_flag(
                 f"{token} {text.lower()}", message)
         return None
@@ -9842,6 +9989,17 @@ class RuntimeGroupMixin:
         if err:
             return err
         surface = self._group_surface()
+        settled = self._settled_ask_tap(
+            surface, key, message,
+            f"mute {str(tail or '').strip()}")
+        if settled is not None:
+            # A late tap on the SETTLED length card: answer as
+            # settled — never execute a fresh mute off a dead
+            # keyboard.
+            return ("that question already settled — "
+                    + str(settled.get("text") or "done")
+                    + ". Its buttons are closed; run /mute "
+                      "again for a fresh one.")
         res = self._mod_target(surface, key, tail, message)
         if not res.found:
             note = self._mod_no_target(res, "mute")
@@ -9874,7 +10032,10 @@ class RuntimeGroupMixin:
                     surface, key, message, res, label)
         # An execution answers any pending length ask for this
         # member — the button tap and the typed command converge
-        # here, and the ask must not linger past its answer.
+        # here, and the ask must not linger past its answer. The
+        # ask is read BEFORE the clear so its card can be settled
+        # (keyboard cleared + tombstoned) once the mute lands.
+        pending_ask = self._pending_ask_for(surface, key, user_id)
         self._clear_pending_ask(surface, key,
                                 user_id=str(user_id))
         ok = self._mod_run(
@@ -9884,6 +10045,10 @@ class RuntimeGroupMixin:
             return "the mute didn't go through — the platform refused it (it's in /glog)."
         span = "indefinitely" if seconds == 0 else \
             f"for {_duration_text(seconds)}"
+        if pending_ask:
+            self._settle_ask_card(
+                surface, key, message, pending_ask,
+                f"✅ settled — {label} muted {span}")
         return f"🔇 {label} muted {span}" + \
             (f" — {reason}" if reason else "")
 
@@ -10864,7 +11029,8 @@ class RuntimeGroupMixin:
                 message, card,
                 [[(f"🎁 Claim {drop['per_claim']} sparks", "claim"),
                   ("🪙 My balance", "balance")],
-                 [("↩️ Cancel drop", f"undonotice {nid}")]])
+                 [("↩️ Cancel drop", f"undonotice {nid}")]],
+                session=f"dropcard:{drop['id']}")
         result = surface.open_drop(key, funder, numbers[0],
                                    numbers[1])
         if not result["ok"]:
@@ -10889,7 +11055,8 @@ class RuntimeGroupMixin:
             message, card,
             [[(f"🎁 Claim {drop['per_claim']} sparks", "claim"),
               ("🪙 My balance", "balance")],
-             [("↩️ Cancel drop", f"undonotice {nid}")]])
+             [("↩️ Cancel drop", f"undonotice {nid}")]],
+            session=f"dropcard:{drop['id']}")
 
     def _record_drop_notice(self, surface, key, message, drop,  # type: ignore[no-untyped-def]
                             *, treasury: bool) -> str:
@@ -10936,6 +11103,13 @@ class RuntimeGroupMixin:
         from ...social.chat.typography import Card, sparks
 
         if result.get("closed"):
+            # The announcement card settles in place (buttons
+            # completion, 2026-11-08): its Claim button must not
+            # stay live on a dead pool — the card edits to the
+            # done render with no buttons, on both platforms.
+            self._settle_drop_card(
+                surface, key, message, result.get("drop_id"),
+                result.get("drop_total"))
             # The drop's closing record (§31): the pool is done,
             # said once, in the group where it ran.
             if self._system_send_ok(surface, key, message,
@@ -13323,6 +13497,52 @@ class RuntimeGroupMixin:
             return ""
         return ("❌ proposal denied — nothing moved.")
 
+    def _settle_drop_card(self, surface, key, message,  # type: ignore[no-untyped-def]
+                          drop_id, total) -> bool:
+        """Edit a closed drop's announcement card to its done
+        render with NO buttons (buttons completion, 2026-11-08 —
+        the same settle the proposal announcements already had):
+        a Claim button must not stay live on a dead pool. The
+        card's id comes from the extras the governance announce
+        recorded, or the live-session registry the /drop reply
+        declared (session "dropcard:<id>"). False when there is
+        nothing editable — the §31 closing record the caller
+        sends stands either way."""
+        try:
+            if not drop_id:
+                return False
+            extras = surface._extras(key)
+            mid = str((extras.get("drop_msgs") or {}).get(
+                str(drop_id)) or "")
+            chat_key = str(message.chat.key or "")
+            registry = self._ask_session_registry()
+            if not mid:
+                mid = registry.lookup(
+                    chat_key, f"dropcard:{drop_id}")
+            if not mid:
+                return False
+            from ...social.chat.live_session import edit_session_message
+            from ...social.chat.typography import Card, sparks
+
+            card = Card("announcement", title="Drop", icon="🎁")
+            card.line(f"the drop is done — "
+                      f"**{sparks(total or 0)}** claimed in full.")
+            rendered = self._card(message, card)
+            text = rendered.text if hasattr(rendered, "text") \
+                else str(rendered)
+            adapter = self._group_adapter(message.chat.platform)
+            ok = edit_session_message(adapter, message.chat, mid,
+                                      text, buttons=[])
+            if ok:
+                msgs = dict(extras.get("drop_msgs") or {})
+                msgs.pop(str(drop_id), None)
+                extras["drop_msgs"] = msgs
+                surface.store.save()
+                registry.forget(chat_key, f"dropcard:{drop_id}")
+            return ok
+        except Exception:  # noqa: BLE001 - cosmetic; the close
+            return False  # already happened
+
     def _settle_proposal_announcement(self, surface, key, message,  # type: ignore[no-untyped-def]
                                       pid, outcome) -> bool:
         """Edit the proposal's posted announcement in place to
@@ -13382,11 +13602,21 @@ class RuntimeGroupMixin:
               ("🪙 My balance", "balance")],
              [("↩️ Cancel drop", f"undonotice {nid}")]])
         if self._system_send_ok(surface, key, message, "drop"):
-            self._send_best_effort(
+            sent = self._send_best_effort(
                 message.chat, rendered.text,
                 buttons=rendered.buttons,
                 parse_mode=self._rendered_mode(message,
                                                rendered.text))
+            mid = str(getattr(sent, "message_id", "") or "")
+            if mid:
+                # The announcement's id is recorded against the
+                # drop so its closing claim can settle THIS card
+                # (keyboard cleared) — see _settle_drop_card.
+                extras = surface._extras(key)
+                msgs = dict(extras.get("drop_msgs") or {})
+                msgs[str(drop["id"])] = mid
+                extras["drop_msgs"] = msgs
+                surface.store.save()
 
     # ── real estate (§17 slice 2 / §20: the whole class) ──────
     def _estate_gate(self, message):  # type: ignore[no-untyped-def]
