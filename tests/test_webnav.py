@@ -26,14 +26,18 @@ behind /webshot and /webrec, pinned at the probe seam.
   a click that refuses or doesn't clear is a failed
   attempt the pass moves on from — never a dead end.
 - presentation is a ladder of coherent fingerprints
-  (mobile first): a hard wall or an unclearable gate
-  rotates to the next fingerprint, owner takeover is
-  the last rung, and the outcome journals every
-  fingerprint tried and the one that cleared.
+  (mobile first) RACED in parallel (owner directive
+  2026-11-08): every fingerprint opens concurrently in
+  its own session, the first to clear wins, losers
+  close immediately, owner takeover stays the last
+  resort (last rung, armed only when every other rung
+  has failed), and the outcome journals every rung's
+  verdict and the one that cleared.
 """
 from __future__ import annotations
 
 import io
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -733,10 +737,12 @@ def _grid_pages(ladder, *, clear=()):
     return pages
 
 
-def test_ladder_rotates_to_next_fingerprint_on_hard_wall():
+def test_ladder_races_and_the_clearer_wins():
+    # The ladder RACES (owner directive 2026-11-08):
+    # every fingerprint runs concurrently in its own
+    # session; the clearer wins; every rung is journaled.
     ladder = webnav.presentation_ladder(None)
-    pages = _grid_pages(ladder, clear={"ios-phone", "ipad",
-                                       "desktop-windows"})
+    pages = _grid_pages(ladder, clear={"ios-phone"})
     record = []
     hook_calls = []
 
@@ -749,11 +755,21 @@ def test_ladder_rotates_to_next_fingerprint_on_hard_wall():
         _ladder_opener(pages, record), takeover_hook=hook)
     assert outcome.presentation == "ios-phone"
     assert outcome.presentations_tried == [
-        "android-phone", "ios-phone"]
-    # The takeover hook rides ONLY the last rung — it was
-    # attached on neither attempt, and never fired.
-    assert record == [("android-phone", False),
-                      ("ios-phone", False)]
+        p["name"] for p in ladder]
+    assert outcome.rung_outcomes["ios-phone"] == "cleared"
+    assert outcome.rung_outcomes["android-phone"] == \
+        "wall_blocked"
+    # The takeover hook rides ONLY the last rung — and
+    # the race's gate kept it from firing at all: a
+    # clearer had already won.
+    deadline = time.time() + 5
+    while len(record) < len(ladder) \
+            and time.time() < deadline:
+        time.sleep(0.02)
+    assert {name for name, _h in record} == {
+        p["name"] for p in ladder}
+    assert [name for name, hooked in record
+            if hooked] == ["desktop-windows"]
     assert hook_calls == []
 
 
@@ -766,8 +782,11 @@ def test_ladder_takeover_is_the_last_rung():
 
     def hook(ask):
         hook_calls.append(ask)
-        holder["probe"]._html = CONTENT_PAGE
-        holder["probe"]._title = "Real Page"
+        # The hook rides the desktop rung: clear THAT
+        # rung's page (under the race, holder["probe"]
+        # would be whichever thread wrote last).
+        pages["desktop-windows"]._html = CONTENT_PAGE
+        pages["desktop-windows"]._title = "Real Page"
         return True
 
     _session, outcome = webnav.open_with_ladder(
@@ -798,10 +817,9 @@ def test_ladder_exhausted_journals_every_fingerprint():
     assert "fingerprint ios-phone" in err.value.attempts
 
 
-def test_ladder_rotates_when_the_gate_pass_cannot_clear():
+def test_ladder_race_when_the_gate_pass_cannot_clear():
     ladder = webnav.presentation_ladder(None)
-    pages = _grid_pages(ladder, clear={"ios-phone", "ipad",
-                                       "desktop-windows"})
+    pages = _grid_pages(ladder, clear={"ios-phone"})
     pages["android-phone"] = FakeProbe(
         COOKIE_PAGE, click_works=False)
     record = []
@@ -811,22 +829,46 @@ def test_ladder_rotates_when_the_gate_pass_cannot_clear():
         takeover_hook=lambda ask: True)
     assert outcome.presentation == "ios-phone"
     assert outcome.presentations_tried == [
-        "android-phone", "ios-phone"]
+        p["name"] for p in ladder]
+    assert outcome.rung_outcomes["android-phone"] == \
+        "gate_blocked"
 
 
-def test_ladder_dob_refusal_never_rotates():
+def test_ladder_dob_refusal_is_the_verdict_when_nothing_clears():
+    # A date-of-birth form is never answered on ANY
+    # rung.  When no fingerprint clears, the DOB refusal
+    # is the verdict that surfaces — the page's demand,
+    # not a fingerprint's, is the refusal.
     ladder = webnav.presentation_ladder(None)
-    pages = _grid_pages(ladder, clear={"ios-phone", "ipad",
-                                       "desktop-windows"})
+    pages = _grid_pages(ladder)  # all walled
     pages["android-phone"] = FakeProbe(DOB_PAGE)
     record = []
     with pytest.raises(GateBlocked) as err:
         webnav.open_with_ladder(
             "https://x.example/", ladder,
             _ladder_opener(pages, record),
-            takeover_hook=lambda ask: True)
+            takeover_hook=lambda ask: False)
     assert "date of birth" in str(err.value)
-    assert record == [("android-phone", False)]
+    assert {name for name, _h in record} == {
+        p["name"] for p in ladder}
+
+
+def test_ladder_dob_rung_never_answered_clearer_wins():
+    # Racing does not dodge the rule — no rung answers
+    # the form — but a fingerprint the site lets through
+    # without demanding a birth date still wins the
+    # race, and the DOB rung's refusal is journaled.
+    ladder = webnav.presentation_ladder(None)
+    pages = _grid_pages(ladder, clear={"ios-phone"})
+    pages["android-phone"] = FakeProbe(DOB_PAGE)
+    record = []
+    _session, outcome = webnav.open_with_ladder(
+        "https://x.example/", ladder,
+        _ladder_opener(pages, record),
+        takeover_hook=lambda ask: True)
+    assert outcome.presentation == "ios-phone"
+    assert outcome.rung_outcomes["android-phone"] == \
+        "dob_refused"
 
 
 def test_presentation_ladders_are_coherent():

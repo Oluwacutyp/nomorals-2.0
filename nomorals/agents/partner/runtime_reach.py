@@ -336,7 +336,10 @@ class RuntimeReachMixin:
             return "give a full URL starting with http:// or https://"
         from ...tools.browser import BrowserSession
         try:
-            sess = BrowserSession()
+            # A command argument is the owner directing the
+            # open himself — robots.txt governs autonomous
+            # crawling, never this.
+            sess = BrowserSession(origin="owner")
             opened = sess.open(url)
             if verb == "links":
                 res = sess.links()

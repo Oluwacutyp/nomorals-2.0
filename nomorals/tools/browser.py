@@ -254,6 +254,7 @@ class BrowserSession:
         timeout: float = 30.0,
         proxy_url: str = "",
         respect_robots: bool = True,
+        origin: str = "autonomous",
         name: str = "default",
         session_dir: str = "",
         retries: int = 2,
@@ -263,6 +264,17 @@ class BrowserSession:
         self.user_agent = user_agent
         self.timeout = timeout
         self.respect_robots = respect_robots
+        #: Who asked for this session's fetches. ``"owner"`` = the
+        #: owner directed the open (a URL he handed Devon, a command
+        #: argument, a fallback rung of an owner-directed read):
+        #: robots.txt etiquette governs autonomous discovery, never
+        #: a page the owner explicitly asked to open, so the robots
+        #: gate does not apply. Anything else (the default) is an
+        #: autonomous fetch and keeps full robots politeness. The
+        #: origin is a property of the request's origin, set by the
+        #: caller that knows who asked — never inferred from the URL.
+        self.origin = "owner" if str(origin).strip().lower() == "owner" \
+            else "autonomous"
         #: wave 86: transient failures (timeout, 5xx, reset) are retried
         #: with backoff before they become errors.
         self.retries = max(0, int(retries))
@@ -325,6 +337,18 @@ class BrowserSession:
         return {"session": self.name,
                 "proxy": self.proxy_url or "direct"}
 
+    def _robots_blocked(self, url: str) -> bool:
+        """The robots.txt gate, scoped by origin.
+
+        Autonomous fetches honour robots.txt (and the
+        ``respect_robots`` setting). An owner-directed session
+        (``origin == "owner"``) is not crawling — the owner
+        handed Devon this page to open — so the gate never
+        refuses it."""
+        if self.origin == "owner" or not self.respect_robots:
+            return False
+        return not _robots_allowed(url, self.user_agent)
+
     # -- low-level fetch ------------------------------------------------------
     def _fetch(self, url: str, *, method: str = "GET",
                form: dict[str, str] | None = None, extra_headers: dict[str, str] | None = None,
@@ -341,7 +365,7 @@ class BrowserSession:
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme not in {"http", "https"}:
             raise ToolError(f"unsupported URL scheme: {parsed.scheme or '(none)'}")
-        if self.respect_robots and not _robots_allowed(url, self.user_agent):
+        if self._robots_blocked(url):
             raise ToolError(f"robots.txt disallows {url}")
 
         data = None
@@ -425,7 +449,7 @@ class BrowserSession:
         parsed = urllib.parse.urlparse(url or "")
         if parsed.scheme not in {"http", "https"}:
             raise ToolError(f"unsupported URL scheme: {parsed.scheme or '(none)'}")
-        if self.respect_robots and not _robots_allowed(url, self.user_agent):
+        if self._robots_blocked(url):
             raise ToolError(f"robots.txt disallows {url}")
         dest = _Path(dest_path)
         dest.parent.mkdir(parents=True, exist_ok=True)

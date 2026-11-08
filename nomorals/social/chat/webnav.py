@@ -26,6 +26,7 @@ package — no new layering pairs.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import threading
@@ -48,16 +49,20 @@ __all__ = [
     "NavError",
     "NavOutcome",
     "NavSession",
+    "NavTabAdapter",
     "NavUnavailable",
     "PageProbe",
     "RecordOutcome",
     "ScrollPlan",
     "TakeoverAsk",
+    "TakeoverBridge",
     "TakeoverHook",
+    "format_takeover_message",
     "WallBlocked",
     "classify_wall",
     "context_kwargs",
     "detect_gates",
+    "max_nav_sessions",
     "navigate",
     "open_with_ladder",
     "presentation_ladder",
@@ -603,6 +608,7 @@ def run_wall_pass(
         probe: PageProbe, *,
         url: str,
         takeover_hook: TakeoverHook | None = None,
+        takeover_done: Callable[[], bool] | None = None,
         on_step: StepHook | None = None,
         managed_budget_s: float = MANAGED_BUDGET_S,
         takeover_budget_s: float = TAKEOVER_BUDGET_S,
@@ -611,7 +617,15 @@ def run_wall_pass(
     """Work a bot check.  Returns how it cleared
     ('managed_wait' | 'checkbox_click' | 'owner_takeover')
     or None when the page is open.  Raises WallBlocked —
-    a challenge page is never the result."""
+    a challenge page is never the result.
+
+    During the takeover hold, ``takeover_done`` (when given)
+    is consulted every poll: the owner's explicit hand-back
+    ends the hold — the pass re-reads the page state and
+    resumes as 'owner_takeover' when the wall is actually
+    gone, and raises the wall honestly when it is still
+    up — instead of holding the session hostage until the
+    budget dies."""
     wall, signal = _wall_now(probe)
     if not wall:
         return None
@@ -674,6 +688,19 @@ def run_wall_pass(
                 wall=wall, attempts=attempts)
         deadline = clock() + max(1.0, takeover_budget_s)
         while clock() < deadline:
+            if takeover_done is not None and takeover_done():
+                # Hand-back: re-read the page state before
+                # resuming.  Done alone is not a clear — if
+                # the wall is still up, the honest verdict
+                # is the wall, never a blind continue.
+                wall, _sig = _wall_now(probe)
+                if not wall:
+                    return "owner_takeover"
+                raise WallBlocked(
+                    f"bot wall ({wall}) at {url}: the owner "
+                    "handed the session back with the wall "
+                    "still up — nothing was captured",
+                    wall=wall, attempts=attempts)
             probe.wait(2.0)
             wall, _sig = _wall_now(probe)
             if not wall:
@@ -1138,11 +1165,65 @@ class NavOutcome:
     presentation: str = ""
     presentations_tried: list[str] = field(
         default_factory=list)
+    #: Per-rung verdicts of the ladder race (name →
+    #: cleared | gate_blocked | wall_blocked | dob_refused
+    #: | error | superseded): every rung's outcome is
+    #: journaled, never just the winner's — a job that
+    #: loses every rung reports every rung it tried.
+    rung_outcomes: dict[str, str] = field(
+        default_factory=dict)
 
     @property
     def touched(self) -> bool:
         """The pass had to clear something to get in."""
         return bool(self.gates or self.wall)
+
+
+# ── the session bound ─────────────────────────────────────
+#
+# Live Chromium sessions are the browser organ's scarce
+# resource: concurrent captures race their ladders in
+# parallel, so the bound is on SESSIONS, not jobs — one
+# job's wall or takeover hold occupies only its own
+# session's slot while other jobs proceed on theirs.
+
+#: Default live-session bound (a 2-vCPU / 2 GB host runs
+#: ~3 headless Chromiums comfortably); the profile
+#: runtime lowers it on small devices, and
+#: NM_WEBNAV_MAX_SESSIONS overrides it outright.
+_MAX_SESSIONS_DEFAULT = 3
+_MAX_SESSIONS_BY_PROFILE = {"termux": 2}
+_SLOT_ACQUIRE_TIMEOUT_S = 180.0
+
+_nav_slot_semaphores: dict[int, threading.BoundedSemaphore] \
+    = {}
+_nav_slot_lock = threading.Lock()
+
+
+def max_nav_sessions() -> int:
+    """The live-session bound: env override, else the
+    profile runtime's word, else the default."""
+    raw = os.environ.get("NM_WEBNAV_MAX_SESSIONS", "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    kind = ""
+    try:
+        from ...core.profiles import get_profile_kind
+        kind = (get_profile_kind() or "").strip().lower()
+    except Exception:  # noqa: BLE001 - profile lookup
+        kind = ""              # never blocks a capture
+    return _MAX_SESSIONS_BY_PROFILE.get(
+        kind, _MAX_SESSIONS_DEFAULT)
+
+
+def _nav_slot_semaphore() -> threading.BoundedSemaphore:
+    size = max_nav_sessions()
+    with _nav_slot_lock:
+        sem = _nav_slot_semaphores.get(size)
+        if sem is None:
+            sem = threading.BoundedSemaphore(size)
+            _nav_slot_semaphores[size] = sem
+        return sem
 
 
 class NavSession:
@@ -1165,13 +1246,36 @@ class NavSession:
         self._page: Any = None
         self._lock: threading.Lock | None = None
         self._started_at: float | None = None
+        self._slot_held = False
         self.probe: _PlaywrightProbe | None = None
 
     # -- lifecycle --
+    def _acquire_slot(self) -> None:
+        """Take one live-session slot (bounded across the
+        whole organ: raced rungs and concurrent jobs all
+        draw from the same bound).  A held session — even
+        one parked on an owner takeover — holds only its
+        own slot; the rest keep serving other jobs."""
+        sem = _nav_slot_semaphore()
+        if not sem.acquire(timeout=_SLOT_ACQUIRE_TIMEOUT_S):
+            raise NavUnavailable(
+                "the browser organ is at its session bound "
+                f"({max_nav_sessions()} live sessions) — "
+                "every slot is busy")
+        self._slot_held = True
+
+    def _release_slot(self) -> None:
+        if self._slot_held:
+            self._slot_held = False
+            with suppress(Exception):
+                _nav_slot_semaphore().release()
+
     def __enter__(self) -> NavSession:
+        self._acquire_slot()
         try:
             from playwright.sync_api import sync_playwright
         except Exception as exc:  # noqa: BLE001
+            self._release_slot()
             raise NavUnavailable(
                 "no browser engine on this host "
                 f"(playwright import failed: {exc})") from exc
@@ -1250,6 +1354,7 @@ class NavSession:
             with suppress(RuntimeError):
                 self._lock.release()
             self._lock = None
+        self._release_slot()
 
     def __exit__(self, *exc: Any) -> None:
         self._teardown()
@@ -1298,6 +1403,7 @@ class NavSession:
 
     def open(self, url: str, *,
              takeover_hook: TakeoverHook | None = None,
+             takeover_bridge: "TakeoverBridge | None" = None,
              memory: GateMemory | None = None,
              on_step: StepHook | None = None,
              managed_budget_s: float = MANAGED_BUDGET_S,
@@ -1305,7 +1411,14 @@ class NavSession:
              ) -> NavOutcome:
         """goto → settle → interstitial pass → bot-check
         pass → interstitial pass once more (sites gate
-        behind the check)."""
+        behind the check).
+
+        ``takeover_bridge`` (a :class:`TakeoverBridge` bound
+        to THIS session) takes precedence over the plain
+        ``takeover_hook``: its grant registers the live
+        session with the takeover manager, so the owner's
+        hand-back ends the hold and the pipeline re-reads
+        the page from where it stopped."""
         assert self.probe is not None
         probe = self.probe
         steps: list[str] = []
@@ -1322,7 +1435,13 @@ class NavSession:
             steps.extend(g.kind for g in gates)
             self.settle()
         wall = run_wall_pass(
-            probe, url=url, takeover_hook=takeover_hook,
+            probe, url=url,
+            takeover_hook=(takeover_bridge.hook
+                           if takeover_bridge is not None
+                           else takeover_hook),
+            takeover_done=(takeover_bridge.done
+                           if takeover_bridge is not None
+                           else None),
             on_step=on_step, managed_budget_s=managed_budget_s,
             takeover_budget_s=takeover_budget_s)
         if wall:
@@ -1414,7 +1533,237 @@ class NavSession:
         return path
 
 
+# ── owner takeover: the handoff link ──────────────────────
+
+
+class NavTabAdapter:
+    """The takeover surface for one live NavSession — the
+    ``TakeoverTabAdapter`` protocol (browser/takeover.py)
+    over this session's real Playwright page.  Frames and
+    inputs act on the SAME page the pipeline is driving:
+    same cookies, same login, same wall."""
+
+    def __init__(self, session: NavSession) -> None:
+        self._session = session
+
+    @property
+    def _probe(self) -> PageProbe:
+        probe = self._session.probe
+        if probe is None:
+            raise NavError("the session is not open")
+        return probe
+
+    @property
+    def url(self) -> str:
+        return self._probe.url()
+
+    @property
+    def title(self) -> str:
+        return self._probe.title()
+
+    def html(self) -> str:
+        return self._probe.html()
+
+    def reload(self) -> None:
+        self._probe.reload()
+
+    def screenshot_png(self) -> bytes:
+        return self._session.capture_still()
+
+    def click_norm(self, x: float, y: float) -> None:
+        """Click at normalized (0..1) viewport coordinates —
+        the live view's tap, landed on the real page."""
+        page = self._session.page
+        size = page.evaluate(
+            "() => ({w: window.innerWidth,"
+            " h: window.innerHeight})")
+        page.mouse.click(
+            int(float(size["w"]) * max(0.0, min(1.0, float(x)))),
+            int(float(size["h"]) * max(0.0, min(1.0, float(y)))))
+
+    def type_text(self, text: str) -> None:
+        self._session.page.keyboard.type(text or "")
+
+    def press_key(self, key: str) -> None:
+        self._session.page.keyboard.press(key or "")
+
+    def scroll_norm(self, dx: float, dy: float) -> None:
+        self._session.page.mouse.wheel(float(dx or 0.0),
+                                       float(dy or 0.0))
+
+
+def format_takeover_message(ask: TakeoverAsk, grant: Any) -> str:
+    """The plain-language takeover message: what wall, on
+    what site, and the handoff link — the link IS the
+    feature; without it there is nothing the owner can
+    open.  ``grant`` is a browser/takeover TakeoverGrant
+    (duck-typed: ``url`` + ``needs_public_base``)."""
+    host = _host_of(ask.url) or ask.url
+    tried = "; ".join(ask.attempts) or "the standard passes"
+    text = (
+        f"I hit a wall on {host} ({ask.wall}) and I can't "
+        "clear it myself — open this link to take over my "
+        "browser and clear it; hand it back when you're "
+        f"done:\n{grant.url}\n"
+        f"Already tried: {tried}. The session stays live "
+        "while you work; when you hand it back I re-read "
+        "the page and carry on from there.")
+    if getattr(grant, "needs_public_base", False):
+        text += (
+            "\n\n⚠️ No public takeover URL is configured "
+            "(NM_TAKEOVER_BASE_URL) — this link works on "
+            "the host network only until a tunnel / "
+            "port-forward is set up.")
+    return text
+
+
+class TakeoverBridge:
+    """Binds the browser organ's TakeoverManager to one
+    live NavSession for one wall.
+
+    ``hook`` is the webnav takeover hook: on a hard wall it
+    registers THIS session with the manager (a one-time,
+    expiring, token-gated grant whose tab adapter drives
+    the real page) and delivers the plain-language message
+    carrying the handoff link through ``notify`` (returns
+    True when the message landed).  ``done`` is the wall
+    pass's hand-back check: the owner's Done ends the
+    hold, and the pipeline re-reads the page state and
+    resumes.  The manager is duck-typed (``request_takeover``
+    returning a grant with ``url`` / ``done`` /
+    ``needs_public_base``) so the seam fakes cleanly."""
+
+    def __init__(self, manager: Any, session: NavSession, *,
+                 notify: Callable[[str], bool],
+                 session_id: str = "",
+                 owner_chat: str = "",
+                 task_label: str = "browsing",
+                 arm: "Callable[[], bool] | None" = None) -> None:
+        self._manager = manager
+        self._session = session
+        self._notify = notify
+        self._session_id = session_id
+        self._owner_chat = owner_chat
+        self._task_label = task_label
+        #: When set, the hook consults it BEFORE registering
+        #: anything: the ladder race arms the takeover only
+        #: once every other fingerprint has failed, so a
+        #: rung that clears can never trigger a spurious
+        #: takeover for a job already won.  ``arm()``
+        #: returning False = the race was decided elsewhere;
+        #: the hook then reports "not delivered" and no
+        #: grant, no link, no message ever exists.
+        self.arm = arm
+        self.grant: Any = None
+        self.error: str = ""
+
+    def hook(self, ask: TakeoverAsk) -> bool:
+        if self.arm is not None and not self.arm():
+            return False
+        try:
+            grant = self._manager.request_takeover(
+                session_id=self._session_id
+                or f"webnav-{time.time_ns():x}",
+                url=ask.url, task_label=self._task_label,
+                signal_kind=ask.wall,
+                attempts=list(ask.attempts), resume_state={},
+                tab=NavTabAdapter(self._session),
+                owner_chat=self._owner_chat)
+        except Exception as exc:  # noqa: BLE001 - a grant that
+            # cannot start is a fact, not a crash
+            self.error = f"{type(exc).__name__}: {exc}"
+            return False
+        self.grant = grant
+        try:
+            return bool(self._notify(
+                format_takeover_message(ask, grant)))
+        except Exception:  # noqa: BLE001 - a failed notice is
+            return False           # a fact the pipeline needs
+
+    def done(self) -> bool:
+        return bool(self.grant is not None
+                    and getattr(self.grant, "done", False))
+
+
+#: Identity sentinel: when a caller supplies a takeover
+#: FACTORY but no plain hook, navigate passes this stand-in
+#: into the ladder so the last rung is still marked (the
+#: ladder attaches takeover help to the last rung only).
+#: open_one substitutes the factory-built bridge whenever
+#: a factory is in play; the mark itself only ever
+#: answers "not delivered" (a factory that declined to
+#: build a bridge for its session).
+_FACTORY_MARK: TakeoverHook = lambda ask: False  # noqa: E731
+
+
 # ── entry points ──────────────────────────────────────────
+
+
+class _LadderRace:
+    """Shared state for one ladder race: which rungs
+    failed, which (if any) won.  The takeover rung's
+    hook/bridge ARMS only when every other rung has
+    failed and no winner exists — takeover stays the
+    last resort even though the rungs now run in
+    parallel, and a rung that clears can never trigger
+    a spurious takeover for a job already won."""
+
+    def __init__(self, rungs: int) -> None:
+        self._cond = threading.Condition()
+        self._rungs = max(1, rungs)
+        self._failed: set[int] = set()
+        self._winner: int | None = None
+
+    def note_failure(self, idx: int) -> None:
+        with self._cond:
+            self._failed.add(idx)
+            self._cond.notify_all()
+
+    def note_winner(self, idx: int) -> bool:
+        """Record a clearing rung.  True when it is THE
+        winner (the first to clear); a later clearer is
+        superseded and closes its own session."""
+        with self._cond:
+            if self._winner is None:
+                self._winner = idx
+                self._cond.notify_all()
+                return True
+            return False
+
+    def winner(self) -> int | None:
+        with self._cond:
+            return self._winner
+
+    def arm(self, *, except_idx: int) -> bool:
+        """Wait until the takeover may engage: every
+        other rung failed and nobody won.  False when
+        the race was won elsewhere — the takeover then
+        never registers, never messages, never holds."""
+        with self._cond:
+            while self._winner is None and len(
+                    self._failed - {except_idx}) \
+                    < self._rungs - 1:
+                self._cond.wait(timeout=0.25)
+            return self._winner is None
+
+
+#: How long the race gives losing rungs to record their
+#: outcomes after a winner is known, before returning
+#: the winner (stragglers' sessions close themselves
+#: out; their verdicts land as 'superseded').
+_RACE_GRACE_S = 2.0
+
+
+def _rung_verdict(exc: BaseException) -> str:
+    if isinstance(exc, GateBlocked):
+        if any(g.kind == "age_dob" for g in exc.gates):
+            return "dob_refused"
+        return "gate_blocked"
+    if isinstance(exc, WallBlocked):
+        return "wall_blocked"
+    if isinstance(exc, NavUnavailable):
+        return "unavailable"
+    return "error"
 
 
 def open_with_ladder(
@@ -1425,58 +1774,169 @@ def open_with_ladder(
             tuple[Any, NavOutcome]],
         *, takeover_hook: TakeoverHook | None = None,
         on_step: StepHook | None = None,
+        race: _LadderRace | None = None,
         ) -> tuple[Any, NavOutcome]:
-    """Walk the fingerprint ladder for one navigation.
+    """Race the fingerprint ladder for one navigation.
 
-    ``open_one(presentation, hook)`` opens one session
-    under one presentation and runs the pipeline, raising
-    GateBlocked/WallBlocked when that presentation is
-    refused (having cleaned up its own session).  A hard
-    wall or an unclearable gate under one fingerprint is
-    a fact about THAT fingerprint, so the walk rotates to
-    the next rung and re-runs the pass there — the
-    owner's takeover hook is attached ONLY on the last
-    rung.  A date-of-birth refusal never rotates: the
-    page's demand, not the fingerprint, is the refusal.
-    The outcome journals every presentation tried and
-    names the one that cleared."""
-    tried: list[str] = []
-    last_error: NavError | None = None
+    Every presentation runs CONCURRENTLY, each in its
+    own session (``open_one(presentation, hook)`` opens
+    one session under one presentation and runs the
+    pipeline, raising GateBlocked/WallBlocked when that
+    presentation is refused, having cleaned up its own
+    session).  The first rung to clear wins; losing
+    sessions are closed immediately, and every rung's
+    verdict is journaled on the outcome — a job that
+    loses every rung reports every rung tried, never
+    just the first failure.
+
+    The owner's takeover is attached ONLY to the last
+    rung, and it is GATED: the hook fires only once
+    every other rung has failed (see :class:`_LadderRace`),
+    so a parallel clearer never produces a spurious
+    takeover.  A date-of-birth refusal is never answered
+    on any rung; when nothing clears, a DOB refusal
+    among the failures is the verdict that surfaces —
+    the page's demand, not a fingerprint's, is the
+    refusal."""
+    names = [str(p.get("name") or f"presentation-{i + 1}")
+             for i, p in enumerate(presentations)]
     last_idx = len(presentations) - 1
-    for idx, pres in enumerate(presentations):
-        name = str(pres.get("name")
-                   or f"presentation-{idx + 1}")
-        hook = takeover_hook if idx == last_idx else None
+    if race is None:
+        race = _LadderRace(len(presentations))
+
+    def gated_hook(ask: TakeoverAsk) -> bool:
+        if not race.arm(except_idx=last_idx):
+            return False
+        return bool(takeover_hook(ask)) \
+            if takeover_hook is not None else False
+
+    results: dict[int, tuple[str, Any]] = {}
+    results_lock = threading.Lock()
+    all_done = threading.Event()
+
+    def _record(idx: int, kind: str, payload: Any) -> None:
+        with results_lock:
+            results[idx] = (kind, payload)
+            if len(results) >= len(presentations):
+                all_done.set()
+
+    def run(idx: int, pres: dict[str, Any]) -> None:
+        hook = gated_hook if idx == last_idx \
+            and takeover_hook is not None else None
         try:
             session, outcome = open_one(pres, hook)
-        except (GateBlocked, WallBlocked) as exc:
-            if isinstance(exc, GateBlocked) and any(
-                    g.kind == "age_dob" for g in exc.gates):
-                raise
-            tried.append(name)
-            last_error = exc
-            if idx < last_idx:
-                _emit(
-                    on_step,
-                    f"the {name} fingerprint was refused "
-                    "— rotating to the next")
-            continue
-        outcome.presentations_tried = [*tried, name]
-        outcome.presentation = name
+        except BaseException as exc:  # noqa: BLE001 - a
+            # rung's failure is data for the race
+            race.note_failure(idx)
+            _record(idx, "err", exc)
+            return
+        if race.note_winner(idx):
+            _record(idx, "ok", (session, outcome))
+        else:
+            # Superseded: another rung cleared first —
+            # this session closes immediately.
+            with suppress(Exception):
+                session.__exit__()
+            _record(idx, "late", outcome)
+
+    threads = [
+        threading.Thread(target=run, args=(idx, pres),
+                         name=f"webnav-rung-{names[idx]}",
+                         daemon=True)
+        for idx, pres in enumerate(presentations)]
+    for thread in threads:
+        thread.start()
+
+    # The race resolves when a winner is known and the
+    # field has had a brief grace to journal its
+    # outcomes, or when every rung has reported.
+    winner_seen_at: float | None = None
+    while not all_done.is_set():
+        if race.winner() is not None:
+            if winner_seen_at is None:
+                winner_seen_at = time.monotonic()
+            elif time.monotonic() - winner_seen_at \
+                    >= _RACE_GRACE_S:
+                break
+        all_done.wait(timeout=0.05)
+
+    with results_lock:
+        snapshot = dict(results)
+    verdicts: dict[str, str] = {}
+    for idx, name in enumerate(names):
+        entry = snapshot.get(idx)
+        if entry is None:
+            verdicts[name] = "superseded"
+        elif entry[0] == "ok":
+            verdicts[name] = "cleared"
+        elif entry[0] == "late":
+            verdicts[name] = "cleared_late"
+        else:
+            verdicts[name] = _rung_verdict(entry[1])
+
+    winner_idx = race.winner()
+    if winner_idx is not None \
+            and snapshot.get(winner_idx, (None,))[0] == "ok":
+        session, outcome = snapshot[winner_idx][1]
+        outcome.presentations_tried = list(names)
+        outcome.presentation = names[winner_idx]
+        outcome.rung_outcomes = verdicts
         return session, outcome
-    names = ", ".join(tried)
-    if isinstance(last_error, WallBlocked):
+
+    # No rung cleared: wait out the field (a takeover
+    # hold on the last rung is a live outcome, not a
+    # straggler) and report EVERY rung, honestly.
+    for thread in threads:
+        thread.join()
+    with results_lock:
+        snapshot = dict(results)
+    # A winner that recorded after the grace snapshot
+    # still wins — never raise over a cleared page.
+    for idx, (kind, payload) in snapshot.items():
+        if kind == "ok":
+            session, outcome = payload
+            outcome.presentations_tried = list(names)
+            outcome.presentation = names[idx]
+            outcome.rung_outcomes = {
+                names[i]: (
+                    "cleared" if snap[0] == "ok"
+                    else "cleared_late" if snap[0] == "late"
+                    else _rung_verdict(snap[1]))
+                for i, snap in snapshot.items()}
+            return session, outcome
+    errors = {idx: payload for idx, (kind, payload)
+              in snapshot.items() if kind == "err"}
+    names_csv = ", ".join(names)
+    for idx in sorted(errors):
+        exc = errors[idx]
+        if isinstance(exc, GateBlocked) and any(
+                g.kind == "age_dob" for g in exc.gates):
+            raise exc
+    base_exc = errors.get(last_idx) or (
+        errors[max(errors)] if errors else None)
+    if isinstance(base_exc, NavUnavailable):
+        # No engine on this host is a fact about the
+        # host, not the ladder — callers branch on it
+        # (seed fall-through, the fetch rung), so it
+        # surfaces unwrapped.
+        raise base_exc
+    if isinstance(base_exc, WallBlocked):
         raise WallBlocked(
-            f"{last_error} — fingerprints tried: {names}; "
-            "none cleared",
-            wall=last_error.wall,
-            attempts=[*last_error.attempts,
-                      *(f"fingerprint {t}" for t in tried)])
-    if isinstance(last_error, GateBlocked):
+            f"{base_exc} — fingerprints tried: "
+            f"{names_csv}; none cleared",
+            wall=base_exc.wall,
+            attempts=[*base_exc.attempts,
+                      *(f"fingerprint {t}" for t in names)])
+    if isinstance(base_exc, GateBlocked):
         raise GateBlocked(
-            f"{last_error} — fingerprints tried: {names}; "
-            "none cleared",
-            gates=last_error.gates)
+            f"{base_exc} — fingerprints tried: "
+            f"{names_csv}; none cleared",
+            gates=base_exc.gates)
+    if base_exc is not None:
+        raise NavError(
+            f"no presentation could open the page — "
+            f"fingerprints tried: {names_csv}; "
+            f"last failure: {base_exc}")
     raise NavError(
         "no presentation could open the page")
 
@@ -1486,30 +1946,67 @@ def navigate(url: str, *, device: dict[str, Any] | None = None,
              scheme: str = "light",
              profile_dir: Path | None = None,
              takeover_hook: TakeoverHook | None = None,
+             takeover_factory: "Callable[[NavSession], "
+             "TakeoverBridge | None] | None" = None,
              memory: GateMemory | None = None,
              on_step: StepHook | None = None,
              managed_budget_s: float = MANAGED_BUDGET_S,
              takeover_budget_s: float = TAKEOVER_BUDGET_S
              ) -> tuple[NavSession, NavOutcome]:
-    """Open a session and run the pipeline, walking the
-    fingerprint ladder when one is given (a wall or gate
-    that refuses one presentation rotates to the next;
-    takeover is the last rung).  The CALLER owns the
-    returned session (capture from it, then close it — it
-    is a context manager)."""
+    """Open a session and run the pipeline, RACING the
+    fingerprint ladder when one is given: every
+    presentation opens concurrently in its own session,
+    the first to clear wins, and the owner's takeover
+    stays the last resort (attached to the last rung,
+    armed only when every other rung has failed).  The
+    CALLER owns the returned session (capture from it,
+    then close it — it is a context manager).
+
+    Racing rungs run on EPHEMERAL contexts: a persistent
+    profile is one browser's state and cannot be raced
+    against itself.  A single-presentation navigation
+    (no ladder) keeps the caller's ``profile_dir``
+    exactly as before.  ``takeover_factory`` builds a
+    :class:`TakeoverBridge` for the session that reaches
+    the last rung (the factory receives that session —
+    the bridge must bind the live session, which only
+    exists inside the race).  A bridge takes precedence
+    over the plain hook."""
     presentations = [dict(p) for p in ladder] if ladder \
         else [dict(device or PRESENTATIONS[
             DEFAULT_PRESENTATION])]
+    ladder_hook = takeover_hook
+    if takeover_factory is not None and ladder_hook is None:
+        ladder_hook = _FACTORY_MARK
+    race = _LadderRace(len(presentations))
+    racing = len(presentations) > 1
+    by_name = {
+        str(p.get("name") or f"presentation-{i + 1}"): i
+        for i, p in enumerate(presentations)}
 
     def open_one(pres: dict[str, Any],
                  hook: TakeoverHook | None,
                  ) -> tuple[NavSession, NavOutcome]:
-        session = NavSession(profile_dir=profile_dir,
-                             device=pres, scheme=scheme)
+        session = NavSession(
+            profile_dir=None if racing else profile_dir,
+            device=pres, scheme=scheme)
         try:
             session.__enter__()
+            bridge = takeover_factory(session) \
+                if takeover_factory is not None \
+                and hook is not None else None
+            if bridge is not None:
+                idx = by_name.get(
+                    str(pres.get("name") or ""),
+                    len(presentations) - 1)
+                bridge.arm = (
+                    lambda idx=idx: race.arm(except_idx=idx))
+            plain = None if hook is _FACTORY_MARK else hook
             outcome = session.open(
-                url, takeover_hook=hook, memory=memory,
+                url,
+                takeover_hook=None if bridge is not None
+                else plain,
+                takeover_bridge=bridge, memory=memory,
                 on_step=on_step,
                 managed_budget_s=managed_budget_s,
                 takeover_budget_s=takeover_budget_s)
@@ -1520,7 +2017,8 @@ def navigate(url: str, *, device: dict[str, Any] | None = None,
 
     return open_with_ladder(
         url, presentations, open_one,
-        takeover_hook=takeover_hook, on_step=on_step)
+        takeover_hook=ladder_hook, on_step=on_step,
+        race=race)
 
 
 @dataclass
@@ -1577,6 +2075,8 @@ def record_page(url: str, *, seconds: float,
                 scheme: str = "light",
                 profile_dir: Path | None = None,
                 takeover_hook: TakeoverHook | None = None,
+                takeover_factory: "Callable[[NavSession], "
+                "TakeoverBridge | None] | None" = None,
                 on_step: StepHook | None = None,
                 managed_budget_s: float = MANAGED_BUDGET_S,
                 takeover_budget_s: float = TAKEOVER_BUDGET_S
@@ -1594,6 +2094,7 @@ def record_page(url: str, *, seconds: float,
     warm_session, warm_nav = navigate(
         url, device=device, ladder=ladder, scheme=scheme,
         profile_dir=profile_dir, takeover_hook=takeover_hook,
+        takeover_factory=takeover_factory,
         memory=memory, on_step=on_step,
         managed_budget_s=managed_budget_s,
         takeover_budget_s=takeover_budget_s)
@@ -1612,8 +2113,13 @@ def record_page(url: str, *, seconds: float,
         session.__enter__()
         video: Path | None = None
         try:
+            bridge = takeover_factory(session) \
+                if takeover_factory is not None else None
             nav = session.open(
-                url, takeover_hook=takeover_hook, memory=memory,
+                url,
+                takeover_hook=None if bridge is not None
+                else takeover_hook,
+                takeover_bridge=bridge, memory=memory,
                 on_step=on_step,
                 managed_budget_s=managed_budget_s,
                 takeover_budget_s=takeover_budget_s)

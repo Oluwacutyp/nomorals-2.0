@@ -87,6 +87,12 @@ MAX_INFLIGHT_DEFAULT = 8
 #: (``mind.inflight_acquire_timeout_s``, env NM_MIND_INFLIGHT_TIMEOUT).
 INFLIGHT_ACQUIRE_TIMEOUT_S = 30.0
 
+#: How long a browse job holds a walled session for the owner's
+#: takeover (the handoff link's working window) before reporting
+#: the wall honestly. Longer than a capture's hold: reading is
+#: the owner's errand, and a human needs minutes, not seconds.
+BROWSE_TAKEOVER_BUDGET_S = 600.0
+
 #: Dispatch crash budget: a dispatch *setup* crash is retried this many
 #: times total (1 retry) with ``_DISPATCH_RETRY_BACKOFF_S`` between
 #: attempts. Organ-level failures are the organ's own job note, not
@@ -2265,26 +2271,158 @@ class CoreMind:
             return "https://news.ycombinator.com"
         return (f"https://{target if '.' in target else target + '.com'}")
 
+    # -- browse: the owner's link, opened by the real browser ──
+
+    def _webnav_profile_dir(self):  # type: ignore[no-untyped-def]
+        """Devon's persistent webnav profile — the same one
+        /webshot uses (beside the webshot book), so a gate
+        cleared on any surface stays cleared on all of them."""
+        try:
+            from pathlib import Path
+
+            settings = self.context.settings
+            ws = getattr(settings, "workspace_dir", None)
+            if not ws:
+                return None
+            return Path(ws) / "data" / "social" / "browser_profile"
+        except Exception as exc:  # noqa: BLE001
+            record_failure("coremind.webnav_profile_dir", exc)
+            return None
+
+    def _takeover_manager(self):  # type: ignore[no-untyped-def]
+        """The ONE takeover manager for browse handoffs
+        (cached; the same data home the partner runtime's
+        manager audits into).  None when it cannot be built
+        — browse then proceeds with no takeover rung rather
+        than no browse."""
+        mgr = getattr(self, "_takeover_manager_inst", None)
+        if mgr is None:
+            try:
+                from ..browser.takeover import (
+                    TakeoverConfig, TakeoverManager)
+
+                settings = self.context.settings
+                mgr = TakeoverManager(
+                    TakeoverConfig.from_settings(settings),
+                    data_dir=settings.resolve("data/takeover"))
+            except Exception as exc:  # noqa: BLE001
+                record_failure("coremind.takeover_manager", exc)
+                return None
+            self._takeover_manager_inst = mgr
+        return mgr
+
+    def _browse_takeover_factory(self, chat_key: str):  # type: ignore[no-untyped-def]
+        """A webnav takeover factory whose notice lands in
+        the browse job's own chat: the handoff link, in
+        plain words, while the session holds.  None when
+        there is no chat to reach (console) or no manager —
+        a wall then refuses honestly instead of holding a
+        session nobody can open."""
+        runtime = getattr(self, "runtime", None)
+        if runtime is None or not chat_key:
+            return None
+        manager = self._takeover_manager()
+        if manager is None:
+            return None
+
+        def factory(session):  # type: ignore[no-untyped-def]
+            from ..social.chat.webnav import TakeoverBridge
+
+            def notify(text):  # type: ignore[no-untyped-def]
+                try:
+                    ref = runtime._ref_from_key(chat_key)
+                    sent = runtime._send_long(
+                        ref.platform, ref, text)
+                except Exception:  # noqa: BLE001 - a failed
+                    # notice is a fact the pipeline needs
+                    _log.debug("browse takeover notice failed",
+                               exc_info=True)
+                    return False
+                return bool(sent)
+
+            return TakeoverBridge(
+                manager, session, notify=notify,
+                owner_chat=chat_key, task_label="browse")
+
+        return factory
+
+    def _browse_job(self, url: str, chat_key: str = "",
+                    job_id: str = "") -> str:
+        """Open one owner-handed URL and bring back its
+        readable content.
+
+        The handoff is real: webnav's NavSession pipeline
+        (persistent profile, fingerprint ladder, gate/wall
+        passes, owner takeover with a live handoff link)
+        opens the page in Devon's actual browser — never a
+        urllib fetch with a robots check; an owner-directed
+        open is not crawling.  The stdlib fetch survives
+        only as the rung for hosts with no browser engine,
+        and there the session is owner-directed, so
+        robots.txt does not gate it either.  Every failure
+        renders as a plain sentence — never a raw report."""
+        from ..social.chat import webnav
+
+        try:
+            session, nav = webnav.navigate(
+                url,
+                ladder=webnav.presentation_ladder(None),
+                profile_dir=self._webnav_profile_dir(),
+                takeover_factory=self._browse_takeover_factory(
+                    chat_key),
+                takeover_budget_s=BROWSE_TAKEOVER_BUDGET_S)
+        except webnav.NavUnavailable:
+            return self._browse_fetch_fallback(url, job_id)
+        except webnav.NavError as exc:
+            return f"❌ couldn't open {url} — {exc}"
+        try:
+            probe = session.probe
+            html = probe.html() if probe is not None else ""
+        finally:
+            session.__exit__()
+        from ..tools.browser import node_to_markdown, parse_html
+
+        md = node_to_markdown(parse_html(html)) if html else ""
+        if not md.strip():
+            return (f"❌ couldn't read {url} — the page "
+                    "opened in the browser but gave back no "
+                    "readable text")
+        return f"🌐 from {nav.final_url or url}:\n\n{md[:3500]}"
+
+    def _browse_fetch_fallback(self, url: str,
+                               job_id: str = "") -> str:
+        """The fetch rung of an owner-directed read — only
+        for hosts where no browser engine exists.  The
+        session is owner-directed (``origin="owner"``):
+        the owner handed Devon this page, so robots.txt
+        etiquette, which governs autonomous discovery,
+        does not refuse it."""
+        from ..core.errors import ToolError
+        from ..tools.browser import BrowserSession
+
+        session = BrowserSession(
+            name=f"mind-{job_id or 'browse'}", origin="owner",
+            session_dir=self._browser_session_dir())
+        try:
+            opened = session.open(url)
+            if not opened.get("ok"):
+                return (f"❌ couldn't open {url} — the fetch "
+                        "rung answered HTTP "
+                        f"{opened.get('status')}")
+            md = str(session.markdown().get("markdown", ""))
+        except ToolError as exc:
+            return f"❌ couldn't open {url} — {exc}"
+        if not md.strip():
+            return (f"❌ couldn't read {url} — the fetch rung "
+                    "got the page but no readable text")
+        return f"🌐 from {session.url or url}:\n\n{md[:3500]}"
+
     def _dispatch_browse(self, intent: Intent, job_id: str, chat_key: str,
                          message: Any) -> str:
         url = self._browse_url(intent.target)
 
         def job() -> str:
-            from ..tools.browser import BrowserSession
-
-            session = BrowserSession(name=f"mind-{job_id}",
-                                     session_dir=self._browser_session_dir())
-            report = session.task(steps=[
-                {"act": "open", "url": url},
-                {"act": "extract", "kind": "markdown"},
-            ])
-            md = ""
-            for step in report.get("steps", []):
-                if step.get("act") == "extract" and step.get("ok"):
-                    md = str(step.get("data", ""))
-            if not report.get("ok"):
-                return f"❌ browse failed: {str(report.get('error', report))[:300]}"
-            return f" from {url}:\n\n{md[:3500]}"
+            return self._browse_job(url, chat_key, job_id)
 
         return self._send_async(
             chat_key, job, job_id,
@@ -3020,20 +3158,10 @@ def _dispatch_inline(mind: CoreMind, fn: Callable, intent: Intent, job_id: str) 
         return (f"❌ gave up: {str(getattr(result, 'error', ''))[:400]}\n"
                 f"{account_bit}".rstrip())
     if intent.kind == "browse":
-        from ..tools.browser import BrowserSession
-
         url = mind._browse_url(intent.target)
-        session = BrowserSession(name=f"mind-{job_id}",
-                                 session_dir=mind._browser_session_dir())
-        report = session.task(steps=[{"act": "open", "url": url},
-                                      {"act": "extract", "kind": "markdown"}])
-        md = ""
-        for step in report.get("steps", []):
-            if step.get("act") == "extract" and step.get("ok"):
-                md = str(step.get("data", ""))
-        mind._job_done(job_id, bool(report.get("ok")))
-        return f"🌐 from {url}:\n\n{md[:3500]}" if report.get("ok") else \
-            f"❌ {str(report.get('error', report))[:300]}"
+        text = mind._browse_job(url, job_id=job_id)
+        mind._job_done(job_id, not text.startswith("❌"))
+        return text
     if intent.kind == "download":
         from ..tools import media
 

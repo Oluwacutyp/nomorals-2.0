@@ -423,6 +423,7 @@ def playwright_renderer(url: str, opts: ShotOptions
 
 def nav_renderer(url: str, opts: ShotOptions, *,
                  takeover_hook: Any = None,
+                 takeover_factory: Any = None,
                  profile_dir: Path | None = None,
                  on_step: Any = None) -> CaptureResult:
     """Rung 1: one shot through the navigation pipeline
@@ -438,6 +439,7 @@ def nav_renderer(url: str, opts: ShotOptions, *,
     session, nav = webnav.navigate(
         url, ladder=ladder, scheme=opts.scheme,
         profile_dir=profile_dir, takeover_hook=takeover_hook,
+        takeover_factory=takeover_factory,
         on_step=on_step)
     try:
         if opts.pdf:
@@ -583,6 +585,7 @@ def capture(url: str, opts: ShotOptions, *,
             fetcher: Callable[..., tuple[int, bytes, str]] | None
             = None,
             takeover_hook: Any = None,
+            takeover_factory: Any = None,
             profile_dir: Path | None = None,
             on_step: Any = None) -> CaptureResult:
     """Shoot ``url`` down the ladder.  ``local_renderer`` /
@@ -607,6 +610,7 @@ def capture(url: str, opts: ShotOptions, *,
         else:
             result = nav_renderer(
                 url, opts, takeover_hook=takeover_hook,
+                takeover_factory=takeover_factory,
                 profile_dir=profile_dir, on_step=on_step)
         result.rung = result.rung or "playwright"
         if not result.data:
@@ -758,6 +762,7 @@ def record_video(url: str, opts: RecOptions, *,
                  out_dir: Path,
                  profile_dir: Path | None = None,
                  takeover_hook: Any = None,
+                 takeover_factory: Any = None,
                  on_step: Any = None) -> Any:
     """Record ``url`` through the navigation pipeline
     (``webnav.record_page``): the interstitial + bot-check
@@ -773,6 +778,7 @@ def record_video(url: str, opts: RecOptions, *,
         url, seconds=opts.seconds, out_dir=out_dir,
         ladder=ladder, scheme=opts.scheme,
         profile_dir=profile_dir, takeover_hook=takeover_hook,
+        takeover_factory=takeover_factory,
         on_step=on_step)
 
 

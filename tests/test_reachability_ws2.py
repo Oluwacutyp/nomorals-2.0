@@ -255,6 +255,11 @@ class TempSmsTests(unittest.TestCase):
 
 
 class FakeBrowserSession:
+    def __init__(self, **kwargs: Any) -> None:
+        # Absorb constructor kwargs like the real session
+        # (owner-directed opens pass origin="owner").
+        self.kwargs = kwargs
+
     def open(self, url: str = "", **_: Any) -> dict[str, Any]:
         return {"ok": True, "url": url, "status": 200, "title": "Example",
                 "chars": 42, "links": 2, "forms": 1, "cookies": 0}

@@ -4352,43 +4352,53 @@ class RuntimeGroupMixin:
             return None
         return Path(root) / "browser_profile"
 
-    def _webshot_takeover_hook(self, message):  # type: ignore[no-untyped-def]
-        """The takeover route for a hard bot wall: ONE
-        message into the originating chat saying the page
-        needs the owner's hand, what was tried, and that
-        the session is holding.  Returns True when the
-        notice landed — the pipeline holds only on a
-        delivered notice.  (No live-view link exists for
-        the ephemeral capture context; stitching the
-        browser daemon's TakeoverManager view into this
-        pipeline is a named remainder.)"""
+    def _webshot_takeover_factory(self, message, task_label="webshot"):  # type: ignore[no-untyped-def]
+        """The takeover route for a hard bot wall: a REAL
+        handoff.  The factory binds the runtime's ONE
+        takeover manager to the live NavSession the
+        pipeline is driving (webnav.TakeoverBridge): the
+        session is registered under a one-time expiring
+        token, and ONE message into the originating chat
+        carries the live-view link.  The owner opens it,
+        drives the SAME session, hands back — the pipeline
+        re-reads the page and resumes.  Returns None when
+        no chat route or no manager exists: the pipeline
+        then refuses the wall honestly instead of holding
+        a session nobody can reach."""
         gateway = getattr(self, "gateway", None)
         send = getattr(gateway, "send", None)
         if send is None or message is None:
             return None
+        try:
+            manager = self._takeover_manager()
+        except Exception:  # noqa: BLE001 - no manager,
+            # no handoff — an honest refusal beats a
+            # link that cannot exist
+            _log.debug("webshot takeover manager "
+                       "unavailable", exc_info=True)
+            return None
 
-        def hook(ask):  # type: ignore[no-untyped-def]
-            tried = "; ".join(ask.attempts) or \
-                "the standard passes"
-            text = (
-                f"🧱 bot wall ({ask.wall}) at {ask.url} — "
-                "this page needs your hand in the live "
-                f"session. Already tried: {tried}. The "
-                f"capture session is holding for "
-                f"{ask.hold_s:.0f}s; clear the check in "
-                "your browser and the shot resumes on its "
-                "own.")
-            try:
-                sent = send(message.chat.platform,
-                            str(message.chat.key), text)
-            except Exception:  # noqa: BLE001 - a failed
-                # notice is a fact the pipeline needs
-                _log.debug("webshot takeover notice failed",
-                           exc_info=True)
-                return False
-            return bool(getattr(sent, "ok", True))
+        def factory(session):  # type: ignore[no-untyped-def]
+            from ...social.chat.webnav import TakeoverBridge
 
-        return hook
+            def notify(text):  # type: ignore[no-untyped-def]
+                try:
+                    sent = send(message.chat.platform,
+                                str(message.chat.key), text)
+                except Exception:  # noqa: BLE001 - a
+                    # failed notice is a fact the
+                    # pipeline needs
+                    _log.debug("webshot takeover notice "
+                               "failed", exc_info=True)
+                    return False
+                return bool(getattr(sent, "ok", True))
+
+            return TakeoverBridge(
+                manager, session, notify=notify,
+                owner_chat=str(message.chat.key),
+                task_label=task_label)
+
+        return factory
 
     def _nav_progress(self, message, label):  # type: ignore[no-untyped-def]
         """Live progress for a navigation job (the proxy-lab
@@ -4537,7 +4547,7 @@ class RuntimeGroupMixin:
         try:
             result = shot_organ.capture(
                 url, opts, db=db,
-                takeover_hook=self._webshot_takeover_hook(
+                takeover_factory=self._webshot_takeover_factory(
                     message),
                 profile_dir=self._webshot_profile_dir(book),
                 on_step=on_step)
@@ -4683,8 +4693,8 @@ class RuntimeGroupMixin:
             outcome = shot_organ.record_video(
                 url, opts, out_dir=out_dir,
                 profile_dir=self._webshot_profile_dir(book),
-                takeover_hook=self._webshot_takeover_hook(
-                    message),
+                takeover_factory=self._webshot_takeover_factory(
+                    message, task_label="webrec"),
                 on_step=on_step)
         except nav_organ.NavError as exc:
             book.record(url=url, ok=False, error=str(exc),
