@@ -834,7 +834,8 @@ def resolve_account(registry: PairingRegistry, platform: str,
 def toggle_live_verdicts(rec: AccountRecord, *, stopped: bool,
                          running: bool, attached: bool | None,
                          connected: bool | None,
-                         presence_state: str | None = None
+                         presence_state: str | None = None,
+                         status_receipt_mode: str | None = None
                          ) -> dict[str, str]:
     """Per-toggle LIVE verdicts for one account's ON toggles.
 
@@ -856,6 +857,15 @@ def toggle_live_verdicts(rec: AccountRecord, *, stopped: bool,
       verdict falls back to the process leg.
     * ``presence_state`` — the personal organ's presence truth
       for always_online, when the caller owns the organ.
+    * ``status_receipt_mode`` — the last receipt mode the
+      status_view bridge reported for this account ("read" /
+      "read-self" / "unknown"), when the caller owns the seam
+      that learned it.  "read-self" means the account's WhatsApp
+      read receipts are OFF: views fire, but WhatsApp downgrades
+      every receipt so posters are never notified — the
+      status_viewing verdict names the setting (which only the
+      owner can flip, in WhatsApp itself) instead of calling
+      the toggle live.
 
     Returns {toggle: verdict} for ON toggles only.  A live verdict
     starts "✓ live"; anything else names the reason in plain
@@ -883,7 +893,14 @@ def toggle_live_verdicts(rec: AccountRecord, *, stopped: bool,
         return {name: f"⚠ not live — {reason}" for name in on}
     verdicts: dict[str, str] = {}
     for name in on:
-        if name == "always_online" and presence_state is not None:
+        if name == "status_viewing" \
+                and status_receipt_mode == "read-self":
+            verdicts[name] = (
+                "⚠ on but can't register — WhatsApp read "
+                "receipts are OFF on this account (Settings → "
+                "Privacy → Read receipts): views fire, but "
+                "posters aren't notified")
+        elif name == "always_online" and presence_state is not None:
             if presence_state == "online":
                 verdicts[name] = "✓ live — presence online"
             elif presence_state:

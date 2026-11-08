@@ -1210,11 +1210,67 @@ func (b *bridge) cmdStatusSend(ctx context.Context, cc *clientConn, id string, r
 		"message_id": string(resp.ID)})
 }
 
+// statusReceiptMode names what a read receipt under the
+// account's privacy settings actually does when it leaves this
+// client (status mining, 2026-11-07): whatsmeow's MarkRead
+// silently rewrites type="read" to type="read-self" when the
+// account's Read-receipts privacy is off (the pin's
+// receipt.go), so the verb returns ok while the poster is
+// never notified.  "read" = the poster is notified;
+// "read-self" = receipts off, the view cannot register with
+// the poster; "unknown" = the setting could not be read
+// (GetPrivacySettings returns an empty struct when its fetch
+// fails) — reported, never guessed.
+func statusReceiptMode(settings types.PrivacySettings) string {
+	switch settings.ReadReceipts {
+	case types.PrivacySettingNone:
+		return "read-self"
+	case types.PrivacySettingAll:
+		return "read"
+	default:
+		return "unknown"
+	}
+}
+
+// statusViewClient is the slice of *whatsmeow.Client the
+// status-view verb rides — an interface so the verb's call
+// SHAPE is pinnable in tests.  (The truth pass's recording
+// fake accepted any well-shaped call; the bridge layer itself
+// is where the mined divergences lived.)
+type statusViewClient interface {
+	MarkRead(ctx context.Context, ids []types.MessageID,
+		timestamp time.Time, chat, sender types.JID,
+		receiptTypeExtra ...types.ReceiptType) error
+	GetPrivacySettings(ctx context.Context) types.PrivacySettings
+}
+
+var _ statusViewClient = (*whatsmeow.Client)(nil)
+
+// markStatusViewed fires the read receipt for one status post
+// and reports the receipt mode in force.  The receipt's
+// timestamp is the READ time (now, like the phone) — plumbing
+// the post's own timestamp into MarkRead made the receipt
+// claim the owner viewed the post when it was posted.
+func markStatusViewed(ctx context.Context, cli statusViewClient,
+	sender types.JID, msgID types.MessageID) (string, error) {
+	if err := cli.MarkRead(ctx, []types.MessageID{msgID},
+		time.Now(), types.StatusBroadcastJID, sender); err != nil {
+		return "", err
+	}
+	return statusReceiptMode(cli.GetPrivacySettings(ctx)), nil
+}
+
 // cmdStatusView marks one contact status as viewed by this
 // account (§15 status viewing): a read receipt for the status
 // post — MarkRead addressed to status@broadcast with the poster
 // as sender, the same receipt the phone sends when the owner
-// opens the status.
+// opens the status.  The reply carries receipt_mode: when the
+// account's read receipts are off the receipt leaves as
+// read-self and the poster is never notified, so an ok without
+// the mode would be a silent no-op wearing a success's clothes.
+// The request's ts (the post's timestamp, sent by older
+// adapters) is deliberately unused — the receipt is stamped at
+// read time inside markStatusViewed.
 func (b *bridge) cmdStatusView(ctx context.Context, cc *clientConn, id string, req request) {
 	msgID := req.str("id")
 	sender, err := parseJID(req.str("from"))
@@ -1223,16 +1279,14 @@ func (b *bridge) cmdStatusView(ctx context.Context, cc *clientConn, id string, r
 			"error": "status_view needs the status message id and the poster's jid"})
 		return
 	}
-	tsMs := int64(req.num("ts", 0))
-	if tsMs <= 0 {
-		tsMs = time.Now().UnixMilli()
-	}
-	if err := b.cli.MarkRead(ctx, []types.MessageID{types.MessageID(msgID)},
-		time.UnixMilli(tsMs), types.StatusBroadcastJID, sender); err != nil {
+	mode, err := markStatusViewed(ctx, b.cli, sender,
+		types.MessageID(msgID))
+	if err != nil {
 		b.fail(cc, id, err)
 		return
 	}
-	b.reply(cc, id, map[string]any{"ok": true})
+	b.reply(cc, id, map[string]any{"ok": true,
+		"receipt_mode": mode})
 }
 
 // ── chat & privacy wave (FEI gap wave F) ──────────────────────
@@ -1356,10 +1410,45 @@ func (b *bridge) cmdMessageStar(ctx context.Context, cc *clientConn, id string, 
 	b.reply(cc, id, map[string]any{"ok": true})
 }
 
+// statusReactClient is the slice of *whatsmeow.Client the
+// status-react verb rides (see statusViewClient for why).
+type statusReactClient interface {
+	BuildReaction(chat, sender types.JID, id types.MessageID,
+		reaction string) *waE2E.Message
+	SendMessage(ctx context.Context, to types.JID,
+		message *waE2E.Message,
+		extra ...whatsmeow.SendRequestExtra,
+	) (whatsmeow.SendResponse, error)
+}
+
+var _ statusReactClient = (*whatsmeow.Client)(nil)
+
+// sendStatusReaction delivers one status reaction to its
+// poster.  The reaction's KEY points at the status post
+// (BuildReaction over status@broadcast + poster + post id),
+// but the SEND goes to the poster 1:1 — the peer shape the
+// real protocol uses for status reactions.  A send ADDRESSED
+// to status@broadcast is a broadcast: whatsmeow fans it out
+// to the account's OWN status-privacy audience
+// (getStatusBroadcastRecipients — the people allowed to see
+// MY statuses), the poster may not even be in it, and
+// SendRequestExtra offers no audience override (status
+// mining, 2026-11-07).  The poster's client surfaces the
+// peer-delivered reaction on their status, where status
+// reactions and replies live.
+func sendStatusReaction(ctx context.Context, cli statusReactClient,
+	poster types.JID, msgID types.MessageID, emoji string) error {
+	msg := cli.BuildReaction(types.StatusBroadcastJID, poster,
+		msgID, emoji)
+	_, err := cli.SendMessage(ctx, poster, msg)
+	return err
+}
+
 // cmdStatusReact reacts to one contact status post as the
-// owner (the status_react toggle's verb): a reaction message
-// addressed to status@broadcast keyed on the post, the same
-// construction the phone sends.
+// owner (the status_react toggle's verb): a reaction keyed on
+// the post, delivered to the poster — see sendStatusReaction
+// for why the destination is the poster and not the
+// broadcast.
 func (b *bridge) cmdStatusReact(ctx context.Context, cc *clientConn, id string, req request) {
 	msgID := strings.TrimSpace(req.str("id"))
 	poster, err := parseJID(req.str("from"))
@@ -1370,10 +1459,8 @@ func (b *bridge) cmdStatusReact(ctx context.Context, cc *clientConn, id string, 
 				"the poster's jid and an emoji"})
 		return
 	}
-	msg := b.cli.BuildReaction(types.StatusBroadcastJID, poster,
-		types.MessageID(msgID), emoji)
-	if _, err := b.cli.SendMessage(ctx, types.StatusBroadcastJID,
-		msg); err != nil {
+	if err := sendStatusReaction(ctx, b.cli, poster,
+		types.MessageID(msgID), emoji); err != nil {
 		b.fail(cc, id, err)
 		return
 	}

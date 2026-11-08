@@ -7,10 +7,18 @@ personal surfaces.  What the libraries actually carry (mined,
 not assumed):
 
 - whatsmeow (Go bridge pin): SendMessage routes a newsletter
-  JID to sendNewsletter (send.go) — the channel post IS the
-  WhatsApp channel story format; UploadNewsletter for media;
+  JID to sendNewsletter (send.go) — that posts a channel POST
+  to the channel feed; UploadNewsletter for media;
   NewsletterMarkViewed is the view verb; GetNewsletterMessages
-  + GetSubscribedNewsletters are the feed.
+  + GetSubscribedNewsletters are the feed.  (Language
+  corrected by the status fix, 2026-11-07: this module
+  originally called that post "the WhatsApp channel story
+  format" — the status mining refuted it.  WhatsApp's Channel
+  Status is a distinct feature — Status tray, 24h expiry —
+  that NO library exposes posting; a named WALL.  The
+  WhatsApp half of /chanstory therefore says "channel post",
+  never "story"; the Telegram half below is a real story API
+  and keeps the word.)
 - Baileys 6.7.24: sendMessage posts; newsletterFetchMessages
   fetches (raw iq node); NO mark-viewed verb in
   lib/Socket/newsletter.d.ts — the view leg is a named wall on
@@ -411,12 +419,24 @@ def _command_message(platform, media=None, meta=None):
         media=media or [], meta=meta or {})
 
 
+# The WhatsApp success reply names a channel POST and the
+# Channel Status wall (status fix, 2026-11-07): the old reply
+# ("posted to … on WhatsApp.") was pinned when the build
+# believed a channel post WAS WhatsApp's channel story
+# format; the mining refuted that, so these pins now assert
+# the honest wording.
+WA_POSTED_SUFFIX = (" — a channel post in the channel feed. "
+                    "(WhatsApp's Channel Status tray stories "
+                    "can't be posted by any bridge library yet.)")
+
+
 def test_chanstory_whatsapp_text_posts_and_journals(tmp_path):
     fake = FakeWAChannelAdapter()
     rt, svc, rec = _command_runtime(tmp_path, "whatsapp", fake)
     reply = rt._control_chatops(
         "chanstory", f"{NL} gold update", _command_message("whatsapp"))
-    assert reply == "posted to your channel on WhatsApp."
+    assert reply == "posted to your channel on WhatsApp" \
+        + WA_POSTED_SUFFIX
     assert fake.calls == [{"chat": NL, "text": "gold update",
                            "media_path": "", "caption": ""}]
     rows = [r for r in svc["personal"].vault.journal(rec.id)
@@ -435,7 +455,8 @@ def test_chanstory_whatsapp_invite_link_resolves(tmp_path):
         _command_message("whatsapp"))
     assert fake.resolves == ["AbC123xYz"]
     assert fake.calls[0]["chat"] == NL
-    assert reply == "posted to “Gold Signals WA” on WhatsApp."
+    assert reply == "posted to “Gold Signals WA” on WhatsApp" \
+        + WA_POSTED_SUFFIX
 
 
 def test_chanstory_whatsapp_media_from_caption_message(tmp_path):
@@ -476,7 +497,8 @@ def test_chanstory_whatsapp_channel_name_form(tmp_path):
         "chanstory", "Gold Signals WA gold update",
         _command_message("whatsapp"))
     # the multi-word name resolves; the rest is the post text
-    assert reply == "posted to “Gold Signals WA” on WhatsApp."
+    assert reply == "posted to “Gold Signals WA” on WhatsApp" \
+        + WA_POSTED_SUFFIX
     assert fake.calls == [{"chat": NL, "text": "gold update",
                            "media_path": "", "caption": ""}]
 

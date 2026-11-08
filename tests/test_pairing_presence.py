@@ -373,7 +373,13 @@ def test_whatsapp_adapter_presence_and_status_view_verbs():
     assert sent[-1]["cmd"] == "status_view"
     assert sent[-1]["id"] == "MSGID42"
     assert sent[-1]["from"] == "111@s.whatsapp.net"
-    assert sent[-1]["ts"] == 7500
+    # No ts on the wire (status fix, 2026-11-07): this pin used
+    # to assert ts == 7500 — the post's timestamp plumbed into
+    # MarkRead, divergence D5 of the status mining.  The
+    # bridges now stamp the receipt at READ time, like the
+    # phone; the adapter's ts argument is accepted and
+    # deliberately not sent.
+    assert "ts" not in sent[-1]
     # missing parts refuse BEFORE any bridge traffic
     before = len(sent)
     assert adapter.view_status("", "X")["ok"] is False

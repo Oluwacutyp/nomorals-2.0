@@ -1157,12 +1157,30 @@ async function handleCommand(sock, req) {
         // Mark one contact status viewed (§15 status viewing):
         // the read receipt for a status post is a readMessages
         // call with the status key — status@broadcast remoteJid,
-        // the poster as participant.
+        // the poster as participant. The reply carries
+        // receipt_mode: Baileys' own readMessages downgrades
+        // the receipt to read-self when the account's
+        // read-receipts privacy isn't 'all', so the mode is
+        // read back from the account's privacy settings (the
+        // socket's fetchPrivacySettings — the same read the Go
+        // engine surfaces from whatsmeow) and reported, never
+        // hidden behind a bare ok. A build without the fetch,
+        // or a failed one, reports "unknown" — the value is
+        // read, never invented.
         if (!req.id || !req.from) {
           return reply(sock, id, { ok: false, error: 'status_view needs the status message id and the poster jid' });
         }
         await wa.readMessages([{ remoteJid: 'status@broadcast', id: String(req.id), participant: String(req.from), fromMe: false }]);
-        return reply(sock, id, { ok: true });
+        let receiptMode = 'unknown';
+        try {
+          if (typeof wa.fetchPrivacySettings === 'function') {
+            const privacy = await wa.fetchPrivacySettings();
+            if (privacy && typeof privacy === 'object') {
+              receiptMode = privacy.readreceipts === 'all' ? 'read' : 'read-self';
+            }
+          }
+        } catch { /* the mode stays "unknown" — read, never invented */ }
+        return reply(sock, id, { ok: true, receipt_mode: receiptMode });
       }
       case 'edit': {
         // Edit one of the account's OWN messages (the Python
@@ -1243,16 +1261,35 @@ async function handleCommand(sock, req) {
       case 'status_react': {
         // React to one contact status post as the owner (the
         // status_react toggle's verb): a reaction keyed on the
-        // status message at status@broadcast.
+        // status message at status@broadcast. The send MUST
+        // carry its audience: for a status@broadcast send,
+        // Baileys' relay starts from an EMPTY participant list
+        // and only options.statusJidList fills it — without it
+        // the reaction is sender-key encrypted for zero devices
+        // and delivered to nobody while sendMessage resolves ok
+        // (status mining, 2026-11-07; the very invariant
+        // status_send's comment above states). The audience is
+        // the poster alone.
         if (!req.id || !req.from || !req.emoji) {
           return reply(sock, id, { ok: false, error: 'status_react needs the status message id, the poster jid and an emoji' });
         }
-        await wa.sendMessage('status@broadcast', {
-          react: {
-            text: String(req.emoji),
-            key: { remoteJid: 'status@broadcast', id: String(req.id), participant: String(req.from), fromMe: false },
-          },
-        });
+        const poster = String(req.from);
+        try {
+          await wa.sendMessage('status@broadcast', {
+            react: {
+              text: String(req.emoji),
+              key: { remoteJid: 'status@broadcast', id: String(req.id), participant: poster, fromMe: false },
+            },
+          }, { statusJidList: [poster] });
+        } catch (e) {
+          // No retry on a second JID form: this file holds no
+          // LID⇄PN mapping for posters and Baileys 6.7.24's
+          // message keys carry no alternate form, so there is
+          // no honest second shape to try — the refusal returns
+          // in the bridge's own words instead of being retried
+          // blind or swallowed.
+          return reply(sock, id, { ok: false, error: 'status_react refused: ' + (e.message || String(e)) });
+        }
         return reply(sock, id, { ok: true });
       }
       case 'react': {

@@ -605,27 +605,68 @@ class RuntimeProvisionMixin:
 
         def _status_viewer(rec: Any, item: dict[str, Any]) -> bool:
             """Mark one WhatsApp status viewed as the owner: the
-            adapter's view_status (bridge status_view verb)."""
+            adapter's view_status (bridge status_view verb).
+
+            The bridge's raw verdict is annotated onto the item
+            (``bridge_verdict``) whatever happens — the organ's
+            per-post ``status_view_trace`` journal carries it
+            verbatim, so the exact values this chain carried are
+            on the record instead of another round of guessing.
+
+            A landed view whose verdict carries
+            ``receipt_mode: "read-self"`` is NOT a landed view:
+            the account's WhatsApp read receipts are OFF, so the
+            platform downgraded the receipt and the poster is
+            never notified (status mining, 2026-11-07).  The seam
+            annotates the mode and returns False; the organ
+            journals ``status_view_ineffective`` (once per post
+            per process) instead of the refusal entry, and the
+            mode is remembered per account so the /pair live
+            verdict for status_viewing can name the setting.
+            A bridge REFUSAL (ok:false) still records the
+            bridge's own reason in the failure ledger, as before."""
             adapter = self._adapter_for("whatsapp")
             fn = getattr(adapter, "view_status", None)
             if not callable(fn):
+                item["bridge_verdict"] = {
+                    "ok": False,
+                    "error": "the whatsapp adapter has no "
+                             "view_status verb"}
                 return False
             try:
                 res = fn(str(item.get("poster_id") or ""),
                          str(item.get("source_id") or ""),
                          float(item.get("ts") or 0.0))
             except Exception as exc:  # noqa: BLE001
+                item["bridge_verdict"] = {
+                    "ok": False, "error": str(exc),
+                    "exception": True}
                 record_failure(
                     "runtime_provision.status_viewer", exc)
                 return False
             if isinstance(res, dict):
+                item["bridge_verdict"] = {
+                    "ok": bool(res.get("ok")),
+                    "error": str(res.get("error") or "")}
                 if not res.get("ok"):
                     record_failure(
                         "runtime_provision.status_viewer",
                         RuntimeError(str(
                             res.get("error")
                             or "status_view verb refused")))
-                return bool(res.get("ok"))
+                    return False
+                mode = str(res.get("receipt_mode") or "")
+                if mode:
+                    item["receipt_mode"] = mode
+                    item["bridge_verdict"]["receipt_mode"] = mode
+                    modes = getattr(
+                        self, "_status_receipt_modes", None)
+                    if modes is None:
+                        modes = {}
+                        self._status_receipt_modes = modes
+                    modes[str(getattr(rec, "id", "") or "")] = mode
+                return mode != "read-self"
+            item["bridge_verdict"] = {"ok": bool(res), "error": ""}
             return bool(res)
 
         def _story_viewer(rec: Any, poster_id: str,
@@ -1394,7 +1435,10 @@ class RuntimeProvisionMixin:
             return toggle_live_verdicts(
                 rec, stopped=stopped, running=running,
                 attached=attached, connected=connected,
-                presence_state=presence)
+                presence_state=presence,
+                status_receipt_mode=(
+                    getattr(self, "_status_receipt_modes", None)
+                    or {}).get(rec.id))
         except Exception as exc:  # noqa: BLE001 - display helper
             record_failure(
                 "runtime_provision.pair_toggle_live", exc)

@@ -189,7 +189,14 @@ def test_organ_status_miss_silent_when_saving_off(tmp_path):
     personal.observe_status_post(
         "whatsapp", poster_id="111@s.whatsapp.net",
         source_id="st1", media=[], media_missing=True, ts=10.0)
-    assert vault.journal(rec.id) == []
+    rows = vault.journal(rec.id)
+    # The MISS stays silent when saving is off (the pin's
+    # original contract: no status_missed row).  The one row
+    # present is the status_view_trace (status fix,
+    # 2026-11-07): the owner ordered a trace row for EVERY
+    # observed post, so the journal is no longer empty here —
+    # what it must never contain is a miss row.
+    assert [r["kind"] for r in rows] == ["status_view_trace"]
 
 
 # ── 4. the runtime turn carries the miss into the journal ──────────

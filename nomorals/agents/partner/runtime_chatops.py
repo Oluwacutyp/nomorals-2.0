@@ -956,11 +956,14 @@ class RuntimeChatOpsMixin:
                            message: Any) -> str:
         """/chanstory — post to a CHANNEL as the owner, on his
         personal surface (channel stories build, 2026-11-07).
-        WhatsApp channels and Telegram channels both carry
-        stories now; on WhatsApp the channel post IS the
-        channel's story format (neither bridge library has a
-        separate story verb for newsletters), on Telegram it is
-        a real stories.SendStory with the channel as peer.
+        On WhatsApp this posts a channel POST — it lands in the
+        channel feed and persists like one.  WhatsApp's Channel
+        Status (the Status-tray stories that expire in 24h) is
+        a DIFFERENT feature, and no bridge library exposes
+        posting one (status mining, 2026-11-07): a named wall,
+        so the WhatsApp half of this command says "channel
+        post" and never "story".  On Telegram it IS a real
+        story — stories.SendStory with the channel as peer.
         The channel is named first: a WhatsApp channel link or
         JID or invite code or the channel's name, a Telegram
         @name or channel id.  Media comes from the command
@@ -1032,7 +1035,11 @@ class RuntimeChatOpsMixin:
                     media_kind=media_kind,
                     source_id=str(verdict.get("server_id") or ""))
                 where = f"“{name}”" if name else "your channel"
-                return f"posted to {where} on WhatsApp."
+                return (f"posted to {where} on WhatsApp — a "
+                        f"channel post in the channel feed. "
+                        f"(WhatsApp's Channel Status tray stories "
+                        f"can't be posted by any bridge library "
+                        f"yet.)")
             return self._chatops_verdict(verdict, "")
         # Telegram: a channel story is a media post, and the
         # channel must be one this account admins — Telegram

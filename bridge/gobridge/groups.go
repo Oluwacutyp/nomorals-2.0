@@ -1045,10 +1045,13 @@ func (b *bridge) handleGroupAdminCommand(ctx context.Context, cc *clientConn, id
 
 	case "channel_send":
 		// Post to a channel the account admins (channel stories
-		// build, 2026-11-07): a channel "story" on WhatsApp IS a
-		// channel post — whatsmeow exposes no separate story
-		// verb for newsletters, and SendMessage routes a
-		// newsletter JID to sendNewsletter (send.go).  Text rides
+		// build, 2026-11-07): this posts a channel POST — it
+		// lands in the channel feed.  WhatsApp's Channel Status
+		// (the tray stories that expire in 24h) is a distinct
+		// feature whatsmeow exposes no verb for (status mining,
+		// 2026-11-07) — a named wall, never a post dressed as a
+		// story.  SendMessage routes a newsletter JID to
+		// sendNewsletter (send.go).  Text rides
 		// a plain conversation message; media uploads through
 		// UploadNewsletter (the newsletter media host — the
 		// regular upload path produces chat-media URLs the

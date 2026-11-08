@@ -1794,7 +1794,16 @@ class WhatsAppAdapter(ChatAdapter):
         the read receipt for that status post (whatsmeow MarkRead
         on status@broadcast / Baileys readMessages with the
         status key).  The bridge's verdict dict comes back —
-        ok:false carries the honest reason."""
+        ok:false carries the honest reason, and a landed view
+        carries ``receipt_mode``: "read" when the poster is
+        notified, "read-self" when the account's WhatsApp read
+        receipts are OFF and the platform downgraded the receipt
+        so the poster never sees it (the bridges read the
+        account's privacy setting to say so; a rung that cannot
+        read it reports "unknown").  *ts* (the post's timestamp)
+        is accepted for call-shape compatibility and deliberately
+        NOT sent: the bridges stamp the receipt at read time,
+        like the phone (status mining, 2026-11-07)."""
         poster_id = str(poster_id or "").strip()
         message_id = str(message_id or "").strip()
         if not poster_id or not message_id:
@@ -1802,8 +1811,7 @@ class WhatsAppAdapter(ChatAdapter):
                     "error": "status_view needs the poster's jid "
                              "and the status message id"}
         return self._admin_cmd("status_view", {
-            "id": message_id, "from": poster_id,
-            "ts": int(float(ts or 0) * 1000)}, timeout=10)
+            "id": message_id, "from": poster_id}, timeout=10)
 
     def send_status(self, text: str = "", *,
                     media_path: str = "",
@@ -2820,10 +2828,13 @@ class WhatsAppAdapter(ChatAdapter):
                      caption: str = "") -> dict[str, Any]:
         """Post to a channel as the owner (channel stories
         build — the /chanstory send half): the bridges'
-        ``channel_send`` verb.  On WhatsApp a channel "story"
-        IS a channel post — neither bridge library exposes a
-        separate story verb for newsletters, and this is the
-        real capability under that name.  Text, or an image /
+        ``channel_send`` verb.  On WhatsApp this posts a
+        channel POST — it lands in the channel feed.
+        WhatsApp's Channel Status (the Status-tray stories
+        that expire in 24h) is a distinct feature neither
+        bridge library exposes (status mining, 2026-11-07):
+        a named wall, never something this verb dresses a
+        post up as.  Text, or an image /
         video already on disk with an optional caption.  The
         verdict carries the stanza ``message_id`` and, on the
         Go engine, the post's ``server_id`` — its public

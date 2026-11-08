@@ -419,6 +419,17 @@ class PersonalSurfaces:
         self._view_failed_status: set[tuple[str, str]] = set()
         self._react_failed_status: set[tuple[str, str]] = set()
         self._story_view_failed: set[tuple[str, str, int]] = set()
+        # Status-fix guards (2026-11-07): views WhatsApp
+        # downgraded to read-self (receipts off — landed on the
+        # wire, invisible to the poster) journal apart from
+        # refusals, and EVERY observed post leaves one
+        # status_view_trace row: the resolved record, the toggle
+        # value read from it, the exact values handed to the
+        # viewer seam and the bridge's raw verdict — the live
+        # chain's evidence, once per post per process like the
+        # rest of the family.
+        self._view_ineffective_status: set[tuple[str, str]] = set()
+        self._view_traced_status: set[tuple[str, str]] = set()
         #: Mass-tag DM flags: (account, chat_key) → last delivered
         #: flag ts, and the count suppressed since (carried into
         #: the next delivered flag so he sees the volume, once).
@@ -654,7 +665,13 @@ class PersonalSurfaces:
         status-saving toggle is on; the same post never saves
         twice.  Marked viewed as the owner when the status-viewing
         toggle is on — independently of saving, at most once per
-        post per process.  Reacted to as the owner when the
+        post per process; every observed post also leaves one
+        ``status_view_trace`` row (the resolved record, the
+        toggle read from it, the exact values handed to the
+        viewer seam, the bridge's raw verdict), and a view the
+        platform downgraded to read-self journals
+        ``status_view_ineffective`` instead of counting as
+        viewed.  Reacted to as the owner when the
         status-react toggle is on (wave F): one reaction per
         post, at most once per post per process, journaled —
         the face drawn from the account's rotation pool (her
@@ -670,19 +687,55 @@ class PersonalSurfaces:
         rec = self.resolve_event_account(platform, account_id)
         out: list[dict[str, Any]] = []
         ts = float(ts or self._clock())
+        # The exact item handed to the viewer seam for this post
+        # (kept so the trace below can journal what the chain
+        # carried, including the seam's verdict annotation).
+        view_item: dict[str, Any] | None = None
         if source_id and rec.toggle("status_viewing") \
                 and self.status_viewer is not None:
             vkey = (rec.id, str(source_id))
             if vkey not in self._viewed_status:
+                view_item = {
+                    "poster_id": poster_id,
+                    "poster_name": poster_name,
+                    "source_id": str(source_id), "ts": ts}
                 try:
-                    viewed = bool(self.status_viewer(rec, {
-                        "poster_id": poster_id,
-                        "poster_name": poster_name,
-                        "source_id": str(source_id), "ts": ts}))
+                    viewed = bool(self.status_viewer(rec, view_item))
                 except Exception:  # noqa: BLE001 - the wired seam
                     viewed = False     # records its own failures
                 if viewed:
                     self._viewed_status.add(vkey)
+                elif str(view_item.get("receipt_mode") or "") \
+                        == "read-self":
+                    # The verb LANDED but WhatsApp downgraded
+                    # the receipt to read-self — the account's
+                    # read receipts are OFF, so the poster is
+                    # never notified (status mining, 2026-11-07).
+                    # Not a landed view (the post stays unviewed
+                    # for dedupe; a redelivery retries) and not
+                    # a bridge refusal either: journal the fact,
+                    # once per post per process, so a SETTING can
+                    # never again read as either "broken" or
+                    # "live".  (The mode gates the branch: a
+                    # retried read-self must never fall through
+                    # to the refusal journal below.)
+                    if vkey not in self._view_ineffective_status:
+                        self._view_ineffective_status.add(vkey)
+                        _append_jsonl(self.vault.journal_path, {
+                            "ts": ts,
+                            "kind": "status_view_ineffective",
+                            "account": rec.id, "platform": platform,
+                            "counterpart_id": poster_id,
+                            "poster_name": poster_name,
+                            "media_kind": "",
+                            "source_id": str(source_id),
+                            "path": "", "bytes": 0,
+                            "note": "status view fired but cannot "
+                                    "register — WhatsApp read "
+                                    "receipts are OFF on this "
+                                    "account, so the receipt went "
+                                    "out as read-self and the "
+                                    "poster is not notified"})
                 elif vkey not in self._view_failed_status:
                     # A refused view is a FACT about the surface,
                     # not a miss: journal it (once per post per
@@ -701,6 +754,39 @@ class PersonalSurfaces:
                                 "the bridge refused it or is "
                                 "unreachable; the post stays "
                                 "unviewed"})
+        if source_id:
+            # The live trace (status fix, 2026-11-07): one row
+            # per observed post per process, on EVERY outcome —
+            # success included — carrying the resolved record,
+            # the status_viewing value read from THAT record,
+            # the exact poster/source/ts the seam was handed and
+            # the bridge's raw verdict once known.  The chain
+            # has been read three times and found canonically
+            # shaped while dying live; this row is the evidence
+            # that names the break point on the real account
+            # instead of a fourth reading.
+            tkey = (rec.id, str(source_id))
+            if tkey not in self._view_traced_status:
+                self._view_traced_status.add(tkey)
+                _append_jsonl(self.vault.journal_path, {
+                    "ts": ts, "kind": "status_view_trace",
+                    "account": rec.id, "platform": platform,
+                    "counterpart_id": poster_id,
+                    "poster_name": poster_name,
+                    "media_kind": "", "source_id": str(source_id),
+                    "path": "", "bytes": 0,
+                    "status_viewing_toggle": bool(
+                        rec.toggle("status_viewing")),
+                    "seam_poster_id": poster_id,
+                    "seam_source_id": str(source_id),
+                    "seam_ts": ts,
+                    "view_attempted": view_item is not None,
+                    "bridge_verdict": (
+                        view_item.get("bridge_verdict")
+                        if view_item is not None else None),
+                    "note": "status view trace — the exact "
+                            "values the view chain carried for "
+                            "this post"})
         if source_id and rec.toggle("status_react") \
                 and self.status_reactor is not None \
                 and not self.registry.owner_stopped(platform):
