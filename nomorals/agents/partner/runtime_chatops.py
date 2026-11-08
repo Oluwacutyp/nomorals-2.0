@@ -228,6 +228,8 @@ class RuntimeChatOpsMixin:
                 return self._chatops_privacy(tail, message)
             if kind == "makepoll":
                 return self._chatops_makepoll(tail, message)
+            if kind == "vcf":
+                return self._chatops_vcf(tail, message)
             if kind in ("tagall", "hidetag"):
                 return self._chatops_tagall(kind, tail, message)
         except Exception as exc:  # noqa: BLE001 - a command answers
@@ -1892,3 +1894,369 @@ class RuntimeChatOpsMixin:
                      f"{TAG_CAP} got tagged; the cap keeps a "
                      f"tag from becoming a flood.")
         return line
+
+    # ── contacts export (/vcf) ───────────────────────────────
+
+    def _vcf_operator(self, message: Any) -> bool:
+        """The owner's own hand, wherever this runtime exposes
+        it — guarded so bare rigs answer False, never crash."""
+        fn = getattr(self, "_is_operator", None)
+        if not callable(fn):
+            return False
+        try:
+            return bool(fn(message))
+        except Exception:  # noqa: BLE001 - no proof, no owner
+            return False
+
+    def _vcf_admin_ok(self, message: Any) -> bool:
+        """Group-admin proof for the sender in this room (the
+        cleanup family's gate: operator, or the platform's own
+        word that this sender admins the group) — guarded the
+        same way as the operator check."""
+        fn = getattr(self, "_group_admin_ok", None)
+        if not callable(fn):
+            return False
+        try:
+            return bool(fn(message))
+        except Exception:  # noqa: BLE001 - no proof, no admin
+            return False
+
+    def _vcf_ledger_rows(self, keys: list[str], *,
+                         whatsapp: bool) -> list[dict[str, Any]]:
+        """Member-ledger rows for one group, from Devon's own
+        group surface — the people she has SEEN join and speak.
+        Observed, never probed: a row she holds is evidence; a
+        person she has never seen is simply not in this source.
+        Left members are excluded."""
+        from ...social.chat import vcf as _vcf
+
+        surface_fn = getattr(self, "_group_surface", None)
+        if not callable(surface_fn):
+            return []
+        try:
+            surface = surface_fn()
+        except Exception:  # noqa: BLE001 - a source, not a need
+            return []
+        rows: list[dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        for key in keys:
+            if not key or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            try:
+                members = surface.members(key)
+            except Exception:  # noqa: BLE001 - degrade a source
+                continue
+            for uid, led in (members or {}).items():
+                if not isinstance(led, dict) or led.get("left_ts"):
+                    continue
+                numbers: list[str] = []
+                if whatsapp:
+                    disp, _d = _vcf.whatsapp_number_from_jid(uid)
+                    if disp:
+                        numbers.append(disp)
+                rows.append({
+                    "platform_id": str(uid),
+                    "name": str(led.get("name") or ""),
+                    "name_rank": _vcf.RANK_LEDGER,
+                    "username": str(led.get("username") or ""),
+                    "numbers": numbers,
+                    "bot": bool(led.get("is_bot")),
+                    "source": "member ledger"})
+        return rows
+
+    def _vcf_roster(self, ref: Any, platform: str
+                    ) -> tuple[list[dict[str, Any]], str]:
+        """Assemble one group's roster rows from EVERY route
+        this deployment has, for the merge.  Returns
+        (rows, group_title).  No route is a precondition for
+        another: whatever answers, contributes; the coverage
+        line names the sources that actually did."""
+        from ...social.chat import vcf as _vcf
+
+        rows: list[dict[str, Any]] = []
+        title = str(getattr(ref, "title", "") or "")
+        chat_id = str(getattr(ref, "chat_id", "") or "")
+        if platform == "whatsapp":
+            adapter = self._adapter_for("whatsapp")
+            if adapter is not None:
+                info = self._chatops_call(adapter.group_info, ref)
+                if isinstance(info, dict) and info.get("subject"):
+                    title = str(info["subject"])
+                roster = self._chatops_call(
+                    adapter.group_participants, ref)
+                for p in roster if isinstance(roster, list) else []:
+                    if not isinstance(p, dict):
+                        continue
+                    jid = str(p.get("jid") or "")
+                    disp, _d = _vcf.whatsapp_number_from_jid(jid)
+                    rows.append({
+                        "platform_id": jid,
+                        # The bridges resolve this name from
+                        # the account's contact store first
+                        # (saved name, then push name) — the
+                        # strongest name WhatsApp offers.
+                        "name": str(p.get("name") or ""),
+                        "name_rank": _vcf.RANK_CONTACT,
+                        "username": "",
+                        "numbers": [disp] if disp else [],
+                        "source": "WhatsApp roster"})
+            rows.extend(self._vcf_ledger_rows(
+                [f"whatsapp:{chat_id}"], whatsapp=True))
+            return rows, title
+        # Telegram family: ledger + bot-API administrators +
+        # the personal surface's member fetch, merged.  The
+        # personal fetch is ONE rung — the export stands on
+        # the ledger and the admin list without it.
+        plats = [platform, "telegram", "telegram-bot",
+                 "telegram-personal"]
+        adapters: list[tuple[str, Any]] = []
+        seen_obj: set[int] = set()
+        for plat in plats:
+            fn = getattr(self, "_group_adapter", None)
+            adapter = fn(plat) if callable(fn) else None
+            if adapter is None:
+                adapter = self._adapter_for(plat)
+            if adapter is not None and id(adapter) not in seen_obj:
+                seen_obj.add(id(adapter))
+                adapters.append((plat, adapter))
+        fetched: list[dict[str, Any]] = []
+        for _plat, adapter in adapters:
+            fn = getattr(adapter, "admin_members_full", None)
+            if not callable(fn):
+                continue
+            verdict = self._chatops_call(fn, ref, 20000)
+            if isinstance(verdict, dict) and verdict.get("ok"):
+                fetched = [r for r in verdict.get("members") or []
+                           if isinstance(r, dict)]
+                break
+        if not fetched:
+            for _plat, adapter in adapters:
+                fn = getattr(adapter, "admin_members", None)
+                if not callable(fn):
+                    continue
+                verdict = self._chatops_call(fn, ref, 500)
+                if isinstance(verdict, dict) and verdict.get("ok"):
+                    fetched = [r for r in verdict.get("members")
+                               or [] if isinstance(r, dict)]
+                    break
+        for r in fetched:
+            rows.append({
+                "platform_id": str(r.get("id") or ""),
+                "name": str(r.get("name") or ""),
+                "name_rank": _vcf.RANK_DISPLAY,
+                "username": str(r.get("username") or ""),
+                "numbers": [str(r["phone"])] if r.get("phone")
+                else [],
+                "bot": bool(r.get("bot") or r.get("is_bot")),
+                "deleted": bool(r.get("deleted")),
+                "source": "personal member list"})
+        for _plat, adapter in adapters:
+            fn = getattr(adapter, "admin_administrators", None)
+            if not callable(fn):
+                continue
+            verdict = self._chatops_call(fn, ref)
+            if isinstance(verdict, dict) and verdict.get("ok"):
+                for a in verdict.get("administrators") or []:
+                    if not isinstance(a, dict):
+                        continue
+                    rows.append({
+                        "platform_id": str(a.get("id") or ""),
+                        "name": str(a.get("name") or ""),
+                        "name_rank": _vcf.RANK_DISPLAY,
+                        "username": str(a.get("username") or ""),
+                        "numbers": [],
+                        "source": "admin list"})
+                break
+        rows.extend(self._vcf_ledger_rows(
+            [f"{p}:{chat_id}" for p in dict.fromkeys(plats)],
+            whatsapp=False))
+        return rows, title
+
+    def _vcf_deliver(self, message: Any, title: str,
+                     merged: dict[str, Any], *,
+                     operator: bool,
+                     filename: str = "") -> str:
+        """Render the merged people to a .vcf, send it into
+        this chat with the coverage line as its caption, and
+        journal the export.  Shared by the group and manual
+        forms."""
+        from pathlib import Path
+
+        from ...social.chat import vcf as _vcf
+
+        people = merged["people"]
+        carded = [p for p in people if p["numbers"]]
+        hidden = len(people) - len(carded)
+        sources: list[str] = []
+        for p in people:
+            for s in p["sources"]:
+                if s not in sources:
+                    sources.append(s)
+        line = _vcf.compose_export_line(
+            title=title, people=len(people), cards=len(carded),
+            hidden=hidden, sources=sources)
+        if not carded:
+            return (f"{line} — so no file: a card needs a "
+                    f"number, and none were visible.")
+        body = _vcf.build_vcf(carded)
+        if not filename:
+            filename = (f"{_vcf.slugify_filename(title)}"
+                        f"-contacts.vcf")
+        ws = Path(str(getattr(
+            getattr(getattr(self, "context", None), "settings",
+                    None), "workspace_dir", ".") or "."))
+        out_dir = ws / "data" / "exports"
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            path = out_dir / filename
+            path.write_bytes(body.encode("utf-8"))
+        except OSError as exc:
+            record_failure("runtime_chatops.vcf_write", exc)
+            return (f"{line} — but writing the file failed: "
+                    f"{exc}")
+        gateway = getattr(self, "gateway", None)
+        send_file = getattr(gateway, "send_file", None)
+        if gateway is None or send_file is None:
+            return (f"{line} — the file is built at {path}, "
+                    f"but this surface can't carry files back.")
+        result = send_file(
+            str(getattr(message.chat, "platform", "") or ""),
+            message.chat, str(path), caption=line, name=filename)
+        if not getattr(result, "ok", False):
+            return (f"{line} — but sending the file failed: "
+                    f"{getattr(result, 'error', '') or 'send refused'} "
+                    f"(it is kept at {path}.)")
+        self._vcf_journal(message, title, len(people),
+                          len(carded), hidden, sources,
+                          personal_ok=operator)
+        return (f"📇 sent {filename} — {len(carded)} contact "
+                f"card{'' if len(carded) == 1 else 's'} for "
+                f"{title}.")
+
+    def _vcf_journal(self, message: Any, title: str, people: int,
+                     cards: int, hidden: int,
+                     sources: list[str], *,
+                     personal_ok: bool) -> None:
+        """The export in the record: the owner's own acts land
+        in the personal vault when a paired account covers
+        this platform (the personal-surface pattern); an
+        admin's export in a group lands in the group's own
+        audit trail instead — his journal is for HIS acts."""
+        platform = str(getattr(message.chat, "platform", "")
+                       or "")
+        base_platform = ("whatsapp" if platform == "whatsapp"
+                         else "telegram")
+        svc, rec = None, None
+        if personal_ok:
+            try:
+                svc, rec = self._chatops_personal_account(
+                    base_platform)
+            except Exception:  # noqa: BLE001 - a record,
+                svc, rec = None, None    # never a gate
+        if svc is not None and rec is not None:
+            try:
+                svc["personal"].note_vcf_exported(
+                    base_platform, account_id=rec.id,
+                    counterpart_id=str(
+                        getattr(message.chat, "key", "") or ""),
+                    group_title=title, people=people,
+                    cards=cards, hidden=hidden, sources=sources)
+                return
+            except Exception as exc:  # noqa: BLE001
+                record_failure("runtime_chatops.vcf_journal", exc)
+        surface_fn = getattr(self, "_group_surface", None)
+        key = str(getattr(message.chat, "key", "") or "")
+        if callable(surface_fn) and key:
+            try:
+                surface_fn()._audit(
+                    key, "vcf_exported", people=people,
+                    cards=cards, hidden=hidden,
+                    sources=list(sources))
+            except Exception as exc:  # noqa: BLE001
+                record_failure("runtime_chatops.vcf_audit", exc)
+
+    def _chatops_vcf(self, tail: str, message: Any) -> str:
+        """/vcf — export a group's people as one import-ready
+        contacts file: each person a card, their own number
+        with their own name (owner ask, 2026-11-08).
+
+        Forms: bare in a group exports THAT group; a group
+        name from a DM exports that group; the manual shape
+        ``Name | +number [| +number]`` (one person per line)
+        cards people who share no group with her.  The roster
+        merges every route she has (see _vcf_roster) — no
+        route is a gate.  Posture: the owner anywhere; inside
+        a group, the owner or a group admin — it hands out
+        people's numbers, so it is never public."""
+        from ...social.chat import vcf as _vcf
+
+        chat = message.chat
+        kind_here = str(getattr(chat, "kind", "") or "")
+        operator = self._vcf_operator(message)
+
+        if "|" in tail:
+            if kind_here == "group" and not operator \
+                    and not self._vcf_admin_ok(message):
+                return ("/vcf hands out people's numbers — "
+                        "that's the owner's or a group admin's "
+                        "call, not a member's.")
+            if kind_here != "group" and not operator:
+                return ("/vcf is the owner's tool — it makes "
+                        "contact cards with people's numbers.")
+            parsed = _vcf.parse_manual_entries(tail)
+            if not parsed.get("ok"):
+                return str(parsed.get("error") or "bad shape")
+            rows = [{
+                "platform_id": "", "name": e["name"],
+                "name_rank": _vcf.RANK_CONTACT, "username": "",
+                "numbers": list(e["numbers"]),
+                "source": "manual entry"}
+                for e in parsed["entries"]]
+            merged = _vcf.merge_people(rows)
+            return self._vcf_deliver(
+                message, "manual contacts", merged,
+                operator=operator, filename="contacts.vcf")
+
+        if tail:
+            if not operator:
+                return ("/vcf by group name is the owner's "
+                        "tool — inside the group itself, a "
+                        "group admin can run it too.")
+            ref, _adapter, error = self._chatops_target(
+                message, tail)
+            if error:
+                return error
+        else:
+            if kind_here != "group":
+                return ("run /vcf inside a group to export "
+                        "its people — or /vcf Group Name from "
+                        "here, or /vcf Name | +number for a "
+                        "person with no group in common.")
+            ref = chat
+        if str(getattr(ref, "kind", "") or "") != "group":
+            return ("that's not a group — /vcf exports a "
+                    "group's people; channels and DMs have no "
+                    "member roster to card.")
+        platform = str(getattr(ref, "platform", "") or "")
+        same_room = str(getattr(ref, "key", "") or "") == \
+            str(getattr(chat, "key", "") or "")
+        if same_room and not operator \
+                and not self._vcf_admin_ok(message):
+            return ("/vcf hands out people's numbers — "
+                    "that's the owner's or a group admin's "
+                    "call, not a member's.")
+        if platform != "whatsapp" \
+                and not platform.startswith("telegram"):
+            return (f"/vcf rides WhatsApp and Telegram — the "
+                    f"{platform} surface has no roster route "
+                    f"to build from.")
+        rows, title = self._vcf_roster(ref, platform)
+        if not rows:
+            return (f"no roster came back for "
+                    f"{title or 'that group'} from any route — "
+                    f"nothing to export.")
+        merged = _vcf.merge_people(rows)
+        return self._vcf_deliver(
+            message, title or "this group", merged,
+            operator=operator)

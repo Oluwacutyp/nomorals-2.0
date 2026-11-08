@@ -51,7 +51,13 @@ function participantRow(p) {
   const admin = p.admin === 'superadmin' || !!p.isSuperAdmin ? 'superadmin'
     : p.admin === 'admin' || !!p.isAdmin ? 'admin' : '';
   return {
-    jid: jidNormalizedUser(p.id || ''),
+    // Prefer the phone-number form (Contact.jid) when the
+    // participant carries one: in LID-addressed groups p.id
+    // is the anonymous @lid id, and the number lives on
+    // p.jid. Mirrors the Go bridge's participantRow, which
+    // prefers PhoneNumber the same way. Falls back to p.id
+    // untouched when no PN form exists.
+    jid: jidNormalizedUser(p.jid || p.id || ''),
     // name/notify come from the local contact store when known; may be
     // empty for strangers — never invented.
     name: p.name || p.notify || '',

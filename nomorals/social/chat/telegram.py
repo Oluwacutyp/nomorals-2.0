@@ -3463,6 +3463,13 @@ class TelegramAdapter(ChatAdapter):
                     getattr(u, "first_name", ""),
                     getattr(u, "last_name", "")])).strip(),
                 "username": getattr(u, "username", "") or "",
+                # The phone number WHEN Telegram shows one:
+                # visibility is per-user privacy, so this is
+                # "" for most members — the /vcf export reads
+                # it and counts the hidden ones honestly
+                # instead of treating a Telegram id as a
+                # number (it is not one).
+                "phone": str(getattr(u, "phone", "") or ""),
                 "bot": bool(getattr(u, "bot", False)),
                 # The cleanup scan's raw material (group build,
                 # member cleanup): Telegram's own deleted flag

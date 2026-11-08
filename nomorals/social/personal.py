@@ -1132,6 +1132,38 @@ class PersonalSurfaces:
         _append_jsonl(self.vault.journal_path, entry)
         return entry
 
+    def note_vcf_exported(self, platform: str, *,
+                          account_id: str = "",
+                          counterpart_id: str = "",
+                          group_title: str = "",
+                          people: int = 0, cards: int = 0,
+                          hidden: int = 0,
+                          sources: Any = (),
+                          ts: float = 0.0) -> dict[str, Any]:
+        """Journal one /vcf group-contacts export taken on a
+        personal surface: kind ``vcf_exported``, the group in
+        counterpart_id, and the coverage counts (people seen,
+        cards written, people left uncarded for having no
+        visible number) with the roster sources named — the
+        export hands out other people's numbers, so the act
+        itself is part of the personal record like every act
+        taken as the owner."""
+        rec = self.resolve_event_account(platform, account_id)
+        entry = {
+            "ts": float(ts or self._clock()),
+            "kind": "vcf_exported", "account": rec.id,
+            "platform": platform,
+            "counterpart_id": str(counterpart_id or ""),
+            "poster_name": "", "media_kind": "",
+            "source_id": "", "path": "", "bytes": 0,
+            "text": str(group_title or "")[:200],
+            "people": int(people), "cards": int(cards),
+            "hidden": int(hidden),
+            "sources": [str(s) for s in (sources or ())],
+            "note": "group contacts exported via /vcf"}
+        _append_jsonl(self.vault.journal_path, entry)
+        return entry
+
     def note_message_acted(self, platform: str, *,
                            kind: str,
                            account_id: str = "",

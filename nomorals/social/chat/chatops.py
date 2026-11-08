@@ -62,7 +62,7 @@ CHATOPS_COMMANDS = frozenset({
     "pollres", "tagall", "hidetag", "antitag",
     "viewonce", "vv",
     "joinlink", "newgroup", "newchannel", "leave",
-    "myprofile", "privacy", "makepoll",
+    "myprofile", "privacy", "makepoll", "vcf",
 })
 
 #: Tagall pacing law: one message carries at most this many

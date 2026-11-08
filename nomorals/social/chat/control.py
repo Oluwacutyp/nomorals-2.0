@@ -561,6 +561,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "myprofile": (0, None),   # /myprofile [name|about|photo] … — the WhatsApp account's identity
     "privacy": (0, 2),        # /privacy [category value] — the account's privacy settings
     "makepoll": (1, None),    # /makepoll Question | Opt | Opt — a native poll in this chat
+    "vcf": (0, None),         # /vcf — this group's people as a contacts (.vcf) file
     "tagall": (0, None),      # /tagall [text] — mention all (capped)
     "hidetag": (0, None),     # /hidetag [text] — mention all, hidden
     "antitag": (0, 1),        # /antitag [on|off] — mass-tag DM flags
@@ -2753,6 +2754,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/makepoll Question | Option | Option · /makepoll multi | Question | Option | Option",
               "example": "/makepoll Lunch today? | Pizza | Sushi",
               "related": "/pollres · /poll · /pair"},
+    "vcf": {"what": "export a group's people as one import-ready contacts (.vcf) file — every person a card, their own number with their own name. The roster is assembled from every route Devon has and merged: on WhatsApp the bridge's group roster (its contact-store names included) plus her member ledger; on Telegram her member ledger, the bot's admin list, and the personal surface's member fetch — no single route is a gate. WhatsApp members addressed only by an anonymous LID whose number no store can resolve, and Telegram members whose number their own privacy settings hide, are counted in the reply and left out — a number is never invented, and a Telegram id is never dressed up as one. The reply counts people, cards written and people left out, and names the sources used. The manual shape (/vcf Name | +number, one person per line) makes cards for people who share no group with her. Owner anywhere; inside a group, the owner or a group admin — it hands out people's numbers, so it is never a public command. An export taken on a personal surface lands in the personal journal.",
+              "usage": "/vcf (inside the group) · /vcf Group Name · /vcf Name | +number [| +number]",
+              "example": "/vcf",
+              "related": "/gcstatus · /tagall · /pair journal"},
     "tagall": {"what": "mention every member of this group by name, from your personal surface (the only one that can enumerate a room). Paced in chunks of 50 and capped at 100 members — the cap is named in the reply when a group is bigger.",
               "usage": "/tagall [text]",
               "example": "/tagall meeting in 10",
@@ -4397,7 +4402,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "statusreact", "poststatus", "chanstory", "banchecker", "gcstatus", "statusinfo",
       "pollres", "tagall", "hidetag", "antitag", "viewonce", "vv",
       "joinlink", "newgroup", "newchannel", "leave",
-      "myprofile", "privacy", "makepoll"]),
+      "myprofile", "privacy", "makepoll", "vcf"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
@@ -4661,6 +4666,7 @@ LIST_ONELINERS: dict[str, str] = {
     "myprofile": "your WhatsApp name, about and photo — read or set them — /myprofile [name|about|photo] …",
     "privacy": "your WhatsApp privacy settings — read or set one — /privacy [category value]",
     "makepoll": "post a native WhatsApp poll in this chat — /makepoll Question | Option | Option",
+    "vcf": "export this group's people as a contacts file, each number with its name — /vcf",
     "tagall": "mention every member (chunked, capped at 100) — /tagall [text]",
     "hidetag": "mention every member, names hidden — /hidetag [text]",
     "antitag": "mass-tags of you flagged to your DM — /antitag [on|off]",
