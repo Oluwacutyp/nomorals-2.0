@@ -3463,6 +3463,27 @@ class GroupSurface:
         return self._execute_proposal(group_key, proposal_id,
                                       by=by, now=now)
 
+    def deny_spend(self, group_key: str, proposal_id: str, *,
+                   by: str,
+                   now: float | None = None) -> dict[str, Any]:
+        """Close an open proposal WITHOUT executing it — the
+        deny half of the governance decision (the handler checks
+        admin rights). Any admin may deny, including the proposer
+        withdrawing their own spend; the money never moves and
+        the journal says who closed it."""
+        now = now if now is not None else time.time()
+        proposals = self._extras(group_key).setdefault(
+            "proposals", {})
+        proposal = proposals.get(proposal_id)
+        if not proposal or not proposal.get("open"):
+            return {"ok": False, "reason": "no_proposal"}
+        proposal["open"] = False
+        proposal["denied_by"] = by
+        self._audit(group_key, "proposal_denied",
+                    proposal=proposal_id, by=by)
+        self.store.save()
+        return {"ok": True, "proposal": proposal}
+
     def _execute_proposal(self, group_key: str, proposal_id: str,
                           *, by: str,
                           now: float) -> dict[str, Any]:
@@ -6223,6 +6244,18 @@ class GroupSurface:
             self.store.save()
         return feed
 
+    def proposal_feed_take(self, group_key: str) -> list[dict[str, Any]]:
+        """Drain the queued governance announcements (gift
+        proposals) for the runtime to post with their Approve/Deny
+        decision buttons — the proposal id rides only in the
+        buttons' callback data."""
+        extras = self._extras(group_key)
+        feed = list(extras.get("proposal_feed") or [])
+        if feed:
+            extras["proposal_feed"] = []
+            self.store.save()
+        return feed
+
     def _report_tallies(self, group_key: str, *, now: float
                         ) -> dict[str, int]:
         """Distinct reporters per target over 7 days, counted
@@ -7513,13 +7546,24 @@ class GroupSurface:
         self._audit(group_key, "gift_proposal",
                     proposal=proposal["id"], user_id=uid,
                     amount=amount)
-        return (f"🎁 <b>Gift proposal open</b> — "
-                f"{sparks(amount)} to "
-                f"{self._member_label(group_key, uid)}, the "
-                f"week's top reviewed contributor "
-                f"({count} counted). Admins decide: "
-                f"/approve {proposal['id']} or "
-                f"/deny {proposal['id']}.")
+        # The announcement rides the proposal feed (drained by the
+        # runtime next to the conflict feed) as a button-carrying
+        # post: admins decide by TAP in the room where it posts,
+        # and the proposal id lives only in the buttons' callback
+        # data — never in member text. The old text post named
+        # /approve with the raw id while the public surface refused
+        # that very command in the room (owner report 2026-11-07):
+        # a system message must never instruct an action its own
+        # surface refuses.
+        feed = self._extras(group_key).setdefault(
+            "proposal_feed", [])
+        feed.append({"kind": "gift_proposal",
+                     "proposal": proposal["id"],
+                     "amount": amount, "recipient": uid,
+                     "label": self._member_label(group_key, uid),
+                     "count": count})
+        self._extras(group_key)["proposal_feed"] = feed[-10:]
+        return ""
 
     # -- channels (§16 / P4a): registry, queue, analytics --------
     #

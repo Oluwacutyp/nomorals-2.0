@@ -11,7 +11,10 @@ The bot-DM menu is ONE live message:
 * the persistent catalog reply-keyboard grid no longer attaches on
   the menu flow, and a chat still holding one gets exactly one
   removal carrier (empty ``reply_keyboard`` = ReplyKeyboardRemove);
-* groups and WhatsApp keep the catalog text paths.
+* WhatsApp keeps its catalog text path; groups rode the text path
+  until the 2026-11-07 paging law moved them onto the session too
+  (nothing splits into (n/m) text pages anywhere it can page in
+  one live message instead).
 """
 
 from __future__ import annotations
@@ -257,15 +260,22 @@ class BotDmMenuFlowTests(unittest.TestCase):
         self.assertNotIn("power status", flat)
         self.assertNotIn("trial", reply.text)
 
-    def test_group_list_stays_the_text_catalog(self):
+    def test_group_list_rides_the_menu_session(self):
+        # Supersedes test_group_list_stays_the_text_catalog: the
+        # 2026-11-07 paging law (nothing splits into (n/m) text
+        # pages; long content pages inside ONE live message) moved
+        # groups onto the same menu session the DM rides. The
+        # catalog text path remains for WhatsApp and buttonless
+        # surfaces only.
         rt, _adapter, _chat = _dm_runtime()
         group = ChatRef(platform="telegram-personal", chat_id="99",
                         kind=ChatKind.GROUP)
         rt._owner_chats.add(group.key)  # the owner, in his group
         out = rt.handle_control("/list games", group.key,
                                 message=_msg(group, "/list games"))
-        self.assertIsInstance(out, str)
-        self.assertIn("/wordchain", out)
+        self.assertNotIsInstance(out, str)
+        self.assertEqual(out.session, "menu")
+        self.assertIn("/wordchain", out.text)
 
     def test_whatsapp_list_stays_the_text_catalog(self):
         rt, _adapter, _chat = _dm_runtime()

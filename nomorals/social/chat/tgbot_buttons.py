@@ -321,13 +321,17 @@ def personal_buttons_for(text: str, last_command: str = "") -> Keyboard | None:
     if kind in ("help", "list", "menu", "commands"):
         from .personal_commands import PERSONAL_HELP_CATEGORIES
 
-        # Wide layout (owner law, 2026-11-05): one category per
-        # row, DMs included — the group surfaces' standard.
-        rows: Keyboard = []
+        # Grid layout (owner order 2026-11-07, superseding the
+        # 2026-11-05 one-per-row wide layout): categories pack
+        # side by side, two per row — with eleven categories the
+        # last one (All commands) closes the grid on its own row.
+        singles: list[Button] = []
         for label, data in PERSONAL_HELP_CATEGORIES:
             btn = _personal_btn(label, data)
             if btn is not None:
-                rows.append([btn])
+                singles.append(btn)
+        rows = [singles[i:i + 2]
+                for i in range(0, len(singles), 2)]
         return rows or None
 
     # ── /toolhub — per-screen keyboards (origin + reply-text markers) ──

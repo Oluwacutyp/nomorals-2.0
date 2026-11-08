@@ -249,6 +249,20 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
 ])
 
 
+#: Group governance decisions: kinds that decide a treasury proposal
+#: the bot itself opened in a group (the weekly gift proposal, a
+#: threshold spend, a treasury poll's execution). They are NOT public
+#: commands — in a DM they stay owner-only — but inside a group chat
+#: they belong to the group's admins, and the runtime passes them to
+#: their handlers there (the handlers enforce the admin rule). The
+#: standing rule this set implements (owner report 2026-11-07): a
+#: system message never instructs an action its own surface refuses —
+#: a proposal posted in a room is decidable in that room.
+GROUP_DECISION_COMMANDS: frozenset[str] = frozenset([
+    "approve", "deny",
+])
+
+
 #: Commands that require an explicit confirmation before they run.
 #: The gate lives in ``PartnerRuntime.handle_control``: a bare
 #: ``/<kind> ...`` returns a confirm prompt (with Confirm/Cancel inline
@@ -1659,6 +1673,15 @@ def _menu_session_pages(items) -> list[list[tuple[str, str]]]:
     return pages
 
 
+def _pack_menu_rows(singles: list, per_row: int = 2) -> list:
+    """Pack single category buttons into grid rows (owner order
+    2026-11-07: the menu is a GRID — categories sit side by side,
+    never one stretched full-width line each). Order is preserved
+    row-major, so the walk the buttons describe is unchanged."""
+    return [list(singles[i:i + per_row])
+            for i in range(0, len(singles), per_row)]
+
+
 def menu_session_render(topic: str = "", page: int = 1, *,
                         platform: str = "",
                         public_only: bool = False,
@@ -1697,14 +1720,15 @@ def menu_session_render(topic: str = "", page: int = 1, *,
         card.note("tap a category — every page lives in this one "
                   "message · /help <command> for the full page on "
                   "one command")
-        buttons = [list(row) for row in nav]
+        singles = [row[0] for row in nav]
         if not public_only:
             # Parity with the personal category menu's Power row (an
             # owner-surface affordance; never on the gated bot).
             for i, (_e, title, _i) in enumerate(sections):
                 if _menu_section_key(title) == "games":
-                    buttons.insert(i + 1, [("⚡ Power", "power status")])
+                    singles.insert(i + 1, ("⚡ Power", "power status"))
                     break
+        buttons = _pack_menu_rows(singles)
         buttons.append([("📋 All commands",
                          f"list {_menu_section_key(sections[0][1])}")])
         return actionable(render_card(card, platform=platform).text,
@@ -1741,7 +1765,7 @@ def menu_session_render(topic: str = "", page: int = 1, *,
     if turn:
         buttons.append(turn)
     buttons.append([("⌂ Menu home", "list home")])
-    buttons.extend(list(row) for row in nav)
+    buttons.extend(_pack_menu_rows([row[0] for row in nav]))
     return actionable(render_card(card, platform=platform).text,
                       buttons, session="menu", session_edit=True)
 

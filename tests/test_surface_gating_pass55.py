@@ -300,11 +300,18 @@ class PublicBotPipelineTests(unittest.TestCase):
         return self.adapter.sent[0]
 
     def test_help_on_public_bot_is_public_catalog_with_typing(self):
+        # Pass55's law stands (no owner catalog on the public
+        # bot); the ARRIVAL SHAPE changed under the owner's
+        # 2026-11-07 paging law: bare /help opens the PUBLIC live
+        # menu — categories in one message, the public catalog
+        # paging inside it — instead of the public catalog text.
+        # The leak assertions stand verbatim.
         reply = self._run("telegram-bot", "/help")
         self.assertNotIn("full catalog", reply)
         for kind in ("/update", "/exness", "/tempmail"):
             self.assertNotIn(kind, reply, kind)
-        self.assertIn("/search", reply)
+        self.assertIn("command menu", reply)
+        self.assertIn("search", reply)
         self.assertTrue(self.adapter.typing_calls,
                         "command replies on telegram-bot must show typing")
 

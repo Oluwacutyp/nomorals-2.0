@@ -353,7 +353,12 @@ def test_named_target_without_duration_asks_for_it(tmp_path):
     mixin, surface, bot, _ = _rig(tmp_path, userbot=_Userbot())
     surface.handle_message(KEY, "777", username="loud", text="hi")
     out = mixin._control_mute("@loud", _msg())
-    assert "for how long should I mute @loud" in out
+    # The ask now rides buttons (owner report 2026-11-07: the
+    # question offered typed commands and a typed answer
+    # completed nothing) — the question text lives in the
+    # reply's text, the lengths in its buttons.
+    assert hasattr(out, "buttons"), out
+    assert "for how long should I mute @loud" in out.text
     assert bot.calls == []
 
 

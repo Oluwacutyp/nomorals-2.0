@@ -1637,14 +1637,32 @@ class PartnerRuntime(
             # Unknown slashes keep falling through to her as ordinary
             # text, as before.
             if message.chat.platform == "telegram-bot" and command is not None:
-                from ...social.chat.control import PUBLIC_COMMANDS
+                from ...social.chat.control import (
+                    GROUP_DECISION_COMMANDS,
+                    PUBLIC_COMMANDS,
+                )
 
                 # Bare /start and bare /menu are menu triggers (the menu
-                # text is public); /menu <group> and /start <platform>
-                # are NOT bare, so they fall to the redirect below —
-                # list_catalog would leak the owner-only catalog.
-                bare_menu = message.text.strip() in ("/start", "/menu")
-                if bare_menu or command.kind in PUBLIC_COMMANDS:
+                # text is public) — bare by the PARSED command, so the
+                # addressed form Telegram's command menu inserts
+                # (/menu@Nomorals_bot) is the same trigger when the
+                # addressee is THIS surface (a foreign addressee never
+                # reaches here: the stand-down arbitration already
+                # stood this copy down). /menu <group> and /start
+                # <platform> carry a tail, so they are NOT bare and
+                # fall to the redirect below — list_catalog would leak
+                # the owner-only catalog.
+                bare_menu = (
+                    command.kind in ("menu", "start")
+                    and not command.tail
+                    and (not command.addressee
+                         or self._surface_usernames().get(
+                             command.addressee)
+                         == message.chat.platform))
+                if bare_menu or command.kind in PUBLIC_COMMANDS \
+                        or (message.chat.kind == ChatKind.GROUP
+                            and command.kind
+                            in GROUP_DECISION_COMMANDS):
                     self._bump("controls")
                     _log.info("public-bot command /%s from %s in %s",
                               command.kind, message.sender or "?",
@@ -1695,9 +1713,13 @@ class PartnerRuntime(
             if (command is not None
                     and message.chat.kind == ChatKind.GROUP
                     and not self._is_operator(message)):
-                from ...social.chat.control import PUBLIC_COMMANDS
+                from ...social.chat.control import (
+                    GROUP_DECISION_COMMANDS,
+                    PUBLIC_COMMANDS,
+                )
 
                 if (command.kind in PUBLIC_COMMANDS
+                        or command.kind in GROUP_DECISION_COMMANDS
                         or command.kind == "error"):
                     self._bump("controls")
                     _log.info("group command /%s from %s in %s",
@@ -4203,16 +4225,19 @@ class PartnerRuntime(
         return "\n".join(parts)
 
     def _menu_session_reply(self, message, chat_key, command):  # type: ignore[no-untyped-def]
-        """The live bot-DM menu render for /menu, /list, /commands —
-        or None when this surface keeps the catalog text path.
+        """The live menu render for /menu, /list, /commands and bare
+        /help — or None when this surface keeps the catalog text path.
 
         The session render applies only where the one-live-message
-        law can hold (2026-11-06 menufix): a real inbound message, a
-        DM, a platform whose limits support buttons AND text edit,
-        and never WhatsApp (its menu bytes are its own law). Groups,
-        buttonless surfaces and internal (message=None) calls keep
-        the text path, byte for byte. An unknown topic also falls
-        back — the catalog's "no group" reply stays the answer.
+        law can hold: a real inbound message, a DM or a group (the
+        2026-11-07 paging law moved groups onto the session too —
+        the catalog pages inside the one live message there as
+        well), a platform whose limits support buttons AND text
+        edit, and never WhatsApp (its menu bytes are its own law).
+        Buttonless surfaces and internal (message=None) calls keep
+        the text path. An unknown topic also falls back — the
+        catalog's "no group" reply stays the answer. Channels never
+        reach dispatch at all.
         """
         if message is None:
             return None
@@ -4220,7 +4245,8 @@ class PartnerRuntime(
         if platform in ("whatsapp", "wa"):
             return None
         chat = getattr(message, "chat", None)
-        if chat is None or getattr(chat, "kind", None) is not ChatKind.DM:
+        if chat is None or getattr(chat, "kind", None) not in (
+                ChatKind.DM, ChatKind.GROUP):
             return None
         from ...social.chat.control import menu_session_render
         from ...social.chat.platform_limits import for_platform
@@ -4664,7 +4690,20 @@ class PartnerRuntime(
         # deny without grant. message=None means an internal call
         # (tour/heal/self-heal probe), which runs as the owner.
         is_owner = True if message is None else self._is_operator(message)
-        if not caller_may_run(kind, is_owner):
+        # Group governance decisions (approve/deny of treasury
+        # proposals) are the GROUP's commands, not the owner's: in
+        # a group chat the grant passes and the handler enforces
+        # the admin rule — a proposal the bot itself posted in the
+        # room must be decidable in the room (owner report
+        # 2026-11-07: the public surface refused the very /approve
+        # its own gift proposal instructed).
+        from ...social.chat.control import GROUP_DECISION_COMMANDS
+
+        _group_decision = (
+            kind in GROUP_DECISION_COMMANDS
+            and message is not None
+            and self._group_key_or_none(message) is not None)
+        if not caller_may_run(kind, is_owner) and not _group_decision:
             # On the gated public surface the honest denial names the
             # surface, not the person: the owner is denied there too
             # (operator power is a surface property — see _is_operator).
@@ -4770,11 +4809,11 @@ class PartnerRuntime(
             # (platform control, money, trial tooling) that must never
             # be advertised there.
             #
-            # Bot-DM surfaces with buttons + text edit get the LIVE
-            # menu instead (2026-11-06 menufix): one message, paged
-            # in place via the menu session — the catalog text below
-            # stays the path for groups, WhatsApp and buttonless
-            # surfaces, byte for byte.
+            # Surfaces with buttons + text edit get the LIVE menu
+            # instead (2026-11-06 menufix; groups joined it under
+            # the 2026-11-07 paging law): one message, paged in
+            # place via the menu session — the catalog text below
+            # stays the path for WhatsApp and buttonless surfaces.
             session_reply = self._menu_session_reply(
                 message, chat_key, command)
             if session_reply is not None:
@@ -4796,6 +4835,18 @@ class PartnerRuntime(
             if not (arg or command.tail) \
                     and self._group_key_or_none(message) is not None:
                 return self._control_group_help(message)
+            # A bare /help on a buttons+edit surface opens the same
+            # live menu home as /menu (2026-11-07 paging law): the
+            # catalog's front door pages inside one message instead
+            # of arriving as the multi-message text dump. A topic
+            # keeps its full command page below; the session helper
+            # self-gates (WhatsApp, buttonless, message=None keep
+            # the paths they have always had).
+            if not (arg or command.tail):
+                session_reply = self._menu_session_reply(
+                    message, chat_key, command)
+                if session_reply is not None:
+                    return session_reply
             # WhatsApp gets its OWN menu (owner rule): the bare catalog
             # on WhatsApp serves the WhatsApp-native, text-first menu —
             # control.help_menu existed for exactly this but had no
@@ -5052,6 +5103,10 @@ class PartnerRuntime(
         if kind == "approve" \
                 and self._group_key_or_none(message) is not None:
             return self._control_approve(command.tail, message)
+
+        if kind == "deny" \
+                and self._group_key_or_none(message) is not None:
+            return self._control_deny(command.tail, message)
 
         # Real estate (§17 slice 2 / §20): group-only kinds —
         # in DM they fall to the unknown-command honesty like

@@ -1269,6 +1269,10 @@ class RuntimeGroupMixin:
         # the conflict cycle opened them; this drains the
         # queue under the same §33/§31 rules.
         self._post_conflict_feed(surface, key, message)
+        # Governance announcements (gift proposals) ride the
+        # same cycle and the same §33/§31 rules, carrying their
+        # Approve/Deny decision buttons (owner report 2026-11-07).
+        self._post_proposal_feed(surface, key, message)
         self._execute_pending_pin(surface, message)
         # §16/P4a: group turns also drive the channel posting
         # cycle — due queue posts in claimed channels ride the
@@ -1304,6 +1308,22 @@ class RuntimeGroupMixin:
                 str(a.get("kind") or "") == "delete"
                 for a in actions):
             collect(surface, key, message)
+        # A plain-text answer to a pending choice question (the
+        # mute-length ask and its class) completes the ask here,
+        # before the message can become conversation: the answer
+        # IS the decision the room was waiting for.
+        ask_reply = self._resolve_pending_ask(surface, key, message)
+        if ask_reply is not None:
+            if isinstance(ask_reply, str):
+                if ask_reply:
+                    self._send(message.chat, ask_reply)
+            else:
+                self._send(
+                    message.chat, ask_reply.text,
+                    buttons=ask_reply.buttons,
+                    parse_mode=self._rendered_mode(
+                        message, ask_reply.text))
+            return True
         if not actions:
             return False
         adapter = self._group_adapter(message.chat.platform)
@@ -2367,6 +2387,64 @@ class RuntimeGroupMixin:
             except Exception:  # noqa: BLE001 - one bad item
                 _log.warning("conflict feed item failed",  # never
                              exc_info=True)  # breaks the turn
+
+    def _post_proposal_feed(self, surface, key, message) -> None:  # type: ignore[no-untyped-def]
+        """Drain the surface's queued governance announcements
+        (the weekly gift proposal): each posts as a Card with
+        Approve/Deny buttons — the decision happens by tap, in
+        this room, and the proposal id rides only in the buttons'
+        callback data, never in member text (owner report
+        2026-11-07). §33 at send time and §31 quiet, like every
+        system output: a refused or silent room keeps its queue;
+        the proposal itself is state either way (see /approve)."""
+        extras = surface._extras(key)
+        if not (extras.get("proposal_feed") or []):
+            return
+        if surface.rhythm_silent(key) \
+                or not self._system_send_ok(
+                    surface, key, message, "proposal feed"):
+            return
+        items = surface.proposal_feed_take(key)
+        for item in items:
+            try:
+                text, buttons = self._proposal_feed_render(
+                    surface, key, message, item)
+                result = self._send(
+                    message.chat, text, buttons=buttons,
+                    parse_mode=self._rendered_mode(message, text))
+                mid = getattr(result, "message_id", "") or ""
+                if mid:
+                    msgs = dict(extras.get("proposal_msgs") or {})
+                    msgs[str(item.get("proposal"))] = str(mid)
+                    extras["proposal_msgs"] = msgs
+                    surface.store.save()
+            except Exception:  # noqa: BLE001 - one bad item
+                _log.warning("proposal feed item failed",  # never
+                             exc_info=True)  # breaks the turn
+
+    def _proposal_feed_render(self, surface, key, message, item):  # type: ignore[no-untyped-def]
+        """The gift-proposal announcement: what, who, how much —
+        contents named, never an id; the decision rides the
+        buttons (id in callback data only), so the text never
+        instructs a typed command."""
+        from ...social.chat.expression import buttons_from_spec
+        from ...social.chat.typography import Card, sparks
+
+        settings = surface.store.settings(key)
+        card = Card("announcement", title="Gift proposal",
+                    icon="🎁")
+        card.line(f"**{sparks(int(item.get('amount') or 0))}** to "
+                  f"{item.get('label') or 'a member'} — the week's "
+                  f"top reviewed contributor "
+                  f"({int(item.get('count') or 0)} counted).")
+        card.note("admins decide — a tap settles it in this room")
+        buttons = buttons_from_spec(
+            [[("approve", "Approve",
+               f"approve {item.get('proposal')}"),
+              ("deny", "Deny", f"deny {item.get('proposal')}")]],
+            settings=settings)
+        rendered = self._card(message, card, buttons)
+        return rendered.text, rendered.buttons
 
     def _sysdrop_render(self, surface, key, message, drop):  # type: ignore[no-untyped-def]
         """The system-drop announcement: contents named (never
@@ -7921,10 +7999,32 @@ class RuntimeGroupMixin:
 
         rest = str(res.rest or "").split(None, 1)
         if not rest or rest[0].lower() not in CATEGORIES:
-            return (f"which kind? /flag {res.member.label} "
-                    f"<category> [note] — categories: scam · "
-                    f"fraud · raid · harassment · spam-ring · "
-                    f"other.")
+            # The same choice-question class as the mute-length
+            # ask (2026-11-07): the member is resolved, the
+            # missing piece is one of a fixed set — buttons, and
+            # a pending ask a text reply can answer.
+            from ...social.chat.tgbot_buttons import actionable
+
+            token = str(res.named_token or res.member.user_id)
+            self._note_pending_ask(surface, key, {
+                "kind": "flag_category",
+                "user_id": str(res.member.user_id),
+                "label": res.member.label,
+                "named_token": token,
+                "by": by, "at": time.time()})
+            buttons: list = []
+            row: list = []
+            for cat, info in CATEGORIES.items():
+                row.append((str((info or {}).get("label") or cat),
+                            f"flag {token} {cat}"))
+                if len(row) == 3:
+                    buttons.append(row)
+                    row = []
+            if row:
+                buttons.append(row)
+            return actionable(
+                f"which kind of flag for {res.member.label}? "
+                f"Tap one — or just reply with it.", buttons)
         category = rest[0].lower()
         note = rest[1] if len(rest) > 1 else ""
         person = surface.reputation_person(
@@ -9643,6 +9743,99 @@ class RuntimeGroupMixin:
         return self._cleanup_remove(message, which="inactive",
                                     days_override=days)
 
+    # ---- pending choice questions --------------------------------
+    # The class the owner named on 2026-11-07 (the mute-length
+    # ask): she asks a question whose answer is one of a SMALL
+    # FIXED SET of options. Such an ask carries buttons, and it
+    # is recorded as the group's pending ask so a plain-text
+    # reply naming the option resolves it too — the old shape
+    # ("type /mute @x 10m|2h|1d — or /gsettings …") made the
+    # admin drive three typed steps for one tap's decision, and
+    # his typed answer ("2h") completed nothing.
+
+    _PENDING_ASK_TTL_S = 900
+
+    def _note_pending_ask(self, surface, key, ask) -> None:  # type: ignore[no-untyped-def]
+        extras = surface._extras(key)
+        extras["pending_ask"] = dict(ask)
+        surface.store.save()
+
+    def _clear_pending_ask(self, surface, key, *, user_id="") -> None:  # type: ignore[no-untyped-def]
+        extras = surface._extras(key)
+        ask = extras.get("pending_ask") or {}
+        if ask and (not user_id
+                    or str(ask.get("user_id") or "") == user_id):
+            extras["pending_ask"] = {}
+            surface.store.save()
+
+    def _mute_duration_ask(self, surface, key, message, res, label):  # type: ignore[no-untyped-def]
+        """The mute-length question: the target is resolved and
+        the only missing piece is the length — buttons for the
+        standard lengths plus the standing-default star, and the
+        pending-ask record so a text reply ("2h") completes it
+        identically."""
+        from ...social.chat.tgbot_buttons import actionable
+
+        token = str(res.named_token or res.member.user_id)
+        self._note_pending_ask(surface, key, {
+            "kind": "mute_duration",
+            "user_id": str(res.member.user_id),
+            "label": label, "named_token": token,
+            "by": str(message.sender_id or message.sender or ""),
+            "at": time.time()})
+        return actionable(
+            f"for how long should I mute {label}? Tap a length "
+            f"— or just reply with one.",
+            [[("10m", f"mute {token} 10m"),
+              ("2h", f"mute {token} 2h"),
+              ("1d", f"mute {token} 1d")],
+             [("⭐ 2h as default + mute",
+               f"mute {token} 2h +default")]])
+
+    def _resolve_pending_ask(self, surface, key, message):  # type: ignore[no-untyped-def]
+        """A plain-text answer to a pending choice question:
+        only the asker or another admin may answer; only an
+        answer naming one of the offered options exactly
+        resolves (anything else is ordinary chat and flows on);
+        the ask is one-shot and dies after 15 minutes. The
+        resolution re-enters the SAME command handler with the
+        answer folded into its tail, so the execution path —
+        gates, audits, confirmations — is the command's own."""
+        extras = surface._extras(key)
+        ask = extras.get("pending_ask") or {}
+        if not ask:
+            return None
+        if time.time() - float(ask.get("at") or 0) \
+                > self._PENDING_ASK_TTL_S:
+            extras["pending_ask"] = {}
+            surface.store.save()
+            return None
+        text = str(message.text or "").strip()
+        if not text or text.startswith("/"):
+            return None
+        sender = str(message.sender_id or message.sender or "")
+        if sender != str(ask.get("by") or "") \
+                and not self._group_admin_ok(message):
+            return None
+        token = str(ask.get("named_token")
+                    or ask.get("user_id") or "")
+        kind = str(ask.get("kind") or "")
+        if kind == "mute_duration":
+            seconds, rest = _parse_duration(text)
+            if seconds is None or rest:
+                return None
+            self._clear_pending_ask(surface, key)
+            return self._control_mute(f"{token} {text}", message)
+        if kind == "flag_category":
+            from ...social.chat.group_reputation import CATEGORIES
+
+            if text.lower() not in CATEGORIES:
+                return None
+            self._clear_pending_ask(surface, key)
+            return self._control_flag(
+                f"{token} {text.lower()}", message)
+        return None
+
     def _control_mute(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._mod_gate(message)
         if err:
@@ -9657,6 +9850,12 @@ class RuntimeGroupMixin:
                     "/mute, or /mute @member [10m|2h|1d].")
         user_id, label = res.member.user_id, res.member.label
         seconds, reason = _parse_duration(res.rest)
+        if seconds is not None and reason.strip() == "+default":
+            # The ask's ⭐ button: this length becomes the group's
+            # standing default AND applies now (the /gsettings
+            # write, ridden by the same tap).
+            surface.update_settings(key, mute_default_s=seconds)
+            reason = ""
         if seconds is None:
             # Target first, then the rest (§29): the group's
             # standing default when one is set; the standing
@@ -9670,10 +9869,13 @@ class RuntimeGroupMixin:
             elif res.via_reply:
                 seconds = 3600
             else:
-                return (f"for how long should I mute {label}? "
-                        f"/mute {res.named_token} 10m|2h|1d — or "
-                        f"set a standing default: /gsettings "
-                        f"mute default 2h.")
+                return self._mute_duration_ask(
+                    surface, key, message, res, label)
+        # An execution answers any pending length ask for this
+        # member — the button tap and the typed command converge
+        # here, and the ask must not linger past its answer.
+        self._clear_pending_ask(surface, key,
+                                user_id=str(user_id))
         ok = self._mod_run(
             surface, key, message, "mute", user_id,
             self._mod_mute_call(message, user_id, seconds))
@@ -12990,9 +13192,8 @@ class RuntimeGroupMixin:
             from ...social.chat.tgbot_buttons import actionable
             return actionable(
                 f"🗳️ that gems gift ({amount} 💎) is above the "
-                f"governance threshold ({threshold}) — "
-                f"proposal <code>{proposal['id']}</code> is "
-                f"open. A SECOND admin approves it:",
+                f"governance threshold ({threshold}) — the "
+                f"proposal is open. A SECOND admin approves it:",
                 [[("✅ Approve gift",
                    f"approve {proposal['id']}")]])
         result = surface.estate_grant_gems(
@@ -13027,17 +13228,25 @@ class RuntimeGroupMixin:
             open_now = surface.open_proposals(key)
             if not open_now:
                 return "no treasury proposals are open."
-            from ...social.chat.typography import Card
+            from ...social.chat.expression import buttons_from_spec
+            from ...social.chat.typography import Card, sparks
 
+            settings = surface.store.settings(key)
             card = Card("economy", title="Open treasury "
                         "proposals", icon="🗳️")
-            card.block_lines([
-                f"`{open_pid}` — {proposal.get('kind')}: "
-                f"{proposal.get('payload') or {}}"
-                for open_pid, proposal in open_now.items()])
-            card.note("approve with /approve <id> (a different "
-                      "admin than the proposer)")
-            return self._card(message, card)
+            for _open_pid, proposal in open_now.items():
+                payload = proposal.get("payload") or {}
+                amount = int(payload.get("amount") or 0)
+                card.line(f"{proposal.get('kind')} — "
+                          f"{sparks(amount)}" if amount
+                          else str(proposal.get("kind")))
+            card.note("decision by tap — approving takes a "
+                      "different admin than the proposer")
+            rows = [[("approve", "Approve", f"approve {open_pid}"),
+                     ("deny", "Deny", f"deny {open_pid}")]
+                    for open_pid in list(open_now)[:6]]
+            buttons = buttons_from_spec(rows, settings=settings)
+            return self._card(message, card, buttons)
         admin = str(message.sender_id or message.sender or "")
         proposal = surface.open_proposals(key).get(pid) or {}
         result = surface.approve_spend(key, pid, by=admin)
@@ -13071,8 +13280,83 @@ class RuntimeGroupMixin:
             if self._system_send_ok(surface, key, message,
                                     "governance"):
                 self._send_best_effort(message.chat, text)
-        return (f"✅ proposal <code>{pid}</code> approved and "
-                "executed.")
+        if self._settle_proposal_announcement(
+                surface, key, message, pid,
+                f"✅ approved by {message.sender or 'an admin'} "
+                f"and executed."):
+            return ""
+        return "✅ proposal approved and executed."
+
+    def _control_deny(self, tail, message):  # type: ignore[no-untyped-def]
+        """The deny half of the governance decision — the mirror
+        of _control_approve (it never existed: a typed /deny used
+        to fall through to the owner-proposals handler, the wrong
+        system entirely). Closing moves nothing and says so."""
+        key = self._group_key_or_none(message)
+        if key is None:
+            return "that's a group command — run it inside the group."
+        surface = self._group_surface()
+        sender = str(message.sender_id or message.sender or "")
+        if not self._group_admin_ok(message) \
+                and not surface.gang_power_actor(key, sender):
+            return "denials are for admins."
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        pid = str(tail or "").strip().split()[0] \
+            if str(tail or "").strip() else ""
+        if not pid:
+            open_now = surface.open_proposals(key)
+            if not open_now:
+                return "no treasury proposals are open."
+            return ("the open proposals and their decision "
+                    "buttons are listed by /approve.")
+        result = surface.deny_spend(key, pid, by=sender)
+        if not result["ok"]:
+            return {"no_proposal": "no open proposal with that id."
+                    }.get(result["reason"], "can't deny that.")
+        if self._settle_proposal_announcement(
+                surface, key, message, pid,
+                f"❌ denied by {message.sender or 'an admin'} — "
+                f"the sparks stay in the treasury."):
+            return ""
+        return ("❌ proposal denied — nothing moved.")
+
+    def _settle_proposal_announcement(self, surface, key, message,  # type: ignore[no-untyped-def]
+                                      pid, outcome) -> bool:
+        """Edit the proposal's posted announcement in place to
+        its decided state (buttons cleared) — the decision reads
+        where the proposal was posted, not in a fresh message.
+        False when there is nothing editable (the announcement
+        never posted, or this surface cannot edit it): the
+        caller answers with its normal text reply instead. A
+        settle failure never unmakes the decision itself."""
+        try:
+            extras = surface._extras(key)
+            mid = str((extras.get("proposal_msgs") or {}).get(pid)
+                      or "")
+            if not mid:
+                return False
+            from ...social.chat.live_session import edit_session_message
+            from ...social.chat.typography import Card
+
+            card = Card("announcement", title="Gift proposal",
+                        icon="🎁")
+            card.line(outcome)
+            rendered = self._card(message, card)
+            text = rendered.text if hasattr(rendered, "text") \
+                else str(rendered)
+            adapter = self._group_adapter(message.chat.platform)
+            ok = edit_session_message(adapter, message.chat, mid,
+                                      text, buttons=[])
+            if ok:
+                msgs = dict(extras.get("proposal_msgs") or {})
+                msgs.pop(pid, None)
+                extras["proposal_msgs"] = msgs
+                surface.store.save()
+            return ok
+        except Exception:  # noqa: BLE001 - cosmetic; the
+            return False  # decision already happened
 
     def _announce_governance_drop(self, surface, key, message,  # type: ignore[no-untyped-def]
                                   drop) -> None:
@@ -13336,9 +13620,8 @@ class RuntimeGroupMixin:
             return actionable(
                 f"🗳️ a public {TIERS[tier]['name']} "
                 f"({price} sparks of treasury money) is above "
-                f"the governance threshold ({threshold}) — "
-                f"proposal <code>{proposal['id']}</code> is "
-                f"open. A SECOND admin approves it:",
+                f"the governance threshold ({threshold}) — the "
+                f"proposal is open. A SECOND admin approves it:",
                 [[("✅ Approve purchase",
                    f"approve {proposal['id']}")]])
         result = surface.estate_buy_public(key, district, tier,
