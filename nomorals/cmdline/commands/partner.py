@@ -67,22 +67,19 @@ def _cmd_partner_ask(args, context) -> int:
 
     db = context.db
     try:
-        with db.transaction():
-            db.execute(
-                "INSERT INTO conversations (id, title, agent, channel, "
-                "created_at, updated_at) VALUES (?, ?, 'partner', 'local', "
-                "0, ?) ON CONFLICT(id) DO UPDATE SET updated_at = "
-                "excluded.updated_at",
-                (chat_key, "you", _time.time()))
-            db.execute(
-                "INSERT INTO messages (id, conversation_id, role, content, "
-                "name, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (ulid_now(), chat_key, "user", ask, "you", "", _time.time()))
-            db.execute(
-                "INSERT INTO messages (id, conversation_id, role, content, "
-                "name, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (ulid_now(), chat_key, "assistant", reply, name, model,
-                 _time.time()))
+        from ...storage.conversations import ConversationLog
+        log = ConversationLog(db)
+        with log.transaction():
+            log.ensure_conversation(
+                chat_key, title="you", agent="partner", channel="local",
+                now=_time.time(), bump_title=False)
+            log.append_message(
+                row_id=ulid_now(), conversation_id=chat_key, role="user",
+                content=ask, name="you", model="", created_at=_time.time())
+            log.append_message(
+                row_id=ulid_now(), conversation_id=chat_key,
+                role="assistant", content=reply, name=name, model=model,
+                created_at=_time.time())
     except Exception as exc:  # noqa: BLE001 — journalling must not swallow the reply
         _log.warning("partner ask journal failed: %s", exc)
 

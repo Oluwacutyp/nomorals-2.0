@@ -265,14 +265,11 @@ def refresh_profile(db: Any, chat_key: str, *, force: bool = False) -> dict[str,
         old_count = int(row["message_count"]) if row else 0
 
         # Participant counts from the whole history (cheap aggregate).
+        from ..storage.conversations import ConversationLog
+        log = ConversationLog(db)
         participants: dict[str, int] = {}
         total = 0
-        for r in db.query(
-            "SELECT name, COUNT(*) AS n FROM messages "
-            "WHERE conversation_id = ? AND role = 'user' "
-            "GROUP BY name ORDER BY n DESC LIMIT ?",
-            (chat_key, _MAX_PARTICIPANTS),
-        ):
+        for r in log.participant_counts(chat_key, limit=_MAX_PARTICIPANTS):
             name = (r.get("name") or "").strip() or "someone"
             participants[name] = int(r.get("n") or 0)
             total += int(r.get("n") or 0)
@@ -300,13 +297,9 @@ def refresh_profile(db: Any, chat_key: str, *, force: bool = False) -> dict[str,
         if force or new_messages >= _PROFILE_UPDATE_EVERY or not old.get("topics"):
             texts: list[str] = []
             try:
-                for r in db.query(
-                    "SELECT content FROM messages "
-                    "WHERE conversation_id = ? AND role = 'user' "
-                    "ORDER BY created_at DESC LIMIT ?",
-                    (chat_key, _TOPIC_WINDOW),
-                ):
-                    c = (r.get("content") or "").strip()
+                for content in log.recent_user_contents(
+                        chat_key, limit=_TOPIC_WINDOW):
+                    c = (content or "").strip()
                     if c and len(c) < 2000:
                         texts.append(c)
             except Exception:  # noqa: BLE001

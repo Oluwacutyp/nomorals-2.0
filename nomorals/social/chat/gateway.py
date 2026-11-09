@@ -521,19 +521,12 @@ class ChatGateway:
         if self.db is None:
             return {"key": key, "is_owner": is_owner, "in_us": in_us}
         try:
-            with self.db.transaction():
-                self.db.execute(
-                    """INSERT INTO chats (id, platform, chat_id, kind, title, peer, is_owner, in_us, last_active)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(id) DO UPDATE SET
-                         kind=excluded.kind,
-                         title=CASE WHEN excluded.title != '' THEN excluded.title ELSE chats.title END,
-                         peer=CASE WHEN excluded.peer != '' THEN excluded.peer ELSE chats.peer END,
-                         last_active=excluded.last_active""",
-                    (key, chat.platform, chat.chat_id, chat.kind, chat.title, chat.peer,
-                     is_owner, in_us, self.clock()),
-                )
-            row = self.db.query_one("SELECT * FROM chats WHERE id = ?", (key,))
+            from ...storage.conversations import ConversationLog
+            row = ConversationLog(self.db).upsert_chat(
+                chat_id=key, platform=chat.platform,
+                platform_chat_id=chat.chat_id, kind=chat.kind,
+                title=chat.title, peer=chat.peer, is_owner=is_owner,
+                in_us=in_us, now=self.clock())
             return row or {"key": key, "is_owner": is_owner, "in_us": in_us}
         except Exception as exc:  # noqa: BLE001 - registry must never block a message
             _log.debug("chat registry upsert failed: %s", exc)
@@ -543,9 +536,8 @@ class ChatGateway:
         if self.db is None:
             return
         try:
-            self.db.execute(
-                "UPDATE chats SET last_active = ? WHERE id = ?", (self.clock(), chat.key)
-            )
+            from ...storage.conversations import ConversationLog
+            ConversationLog(self.db).touch_chat(chat.key, self.clock())
         except Exception as exc:  # noqa: BLE001 - touch is best-effort, but log it
             _log.warning("chat touch failed for %s: %s", chat.key, exc)
 

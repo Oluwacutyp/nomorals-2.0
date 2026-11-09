@@ -1480,6 +1480,13 @@ _RUN_COLUMNS = ("id", "ts", "scoreboard", "suite", "mode", "provider",
                 "seconds", "notes")
 
 
+def _runs_table(db: Any):
+    """The seam-backed benchmark_runs table (Mongo P3), or None on the
+    SQLite default, where the native statements run unchanged."""
+    from ..storage.rowstore import attached_rows
+    return attached_rows(db, "benchmark_runs")
+
+
 def save_run(db: Any, report: ScoreboardReport, *,
              notes: str = "") -> str:
     """Persist a scoreboard run. Returns the run id ("" when no database —
@@ -1505,8 +1512,12 @@ def save_run(db: Any, report: ScoreboardReport, *,
         "notes": notes or "",
     }
     try:
-        with db.transaction():
-            db.insert("benchmark_runs", row)
+        runs = _runs_table(db)
+        if runs is not None:
+            runs.put(row)
+        else:
+            with db.transaction():
+                db.insert("benchmark_runs", row)
         return report.run_id
     except Exception:  # noqa: BLE001 — persistence is best-effort
         _log.warning("benchmark run %s not persisted", report.run_id,
@@ -1518,6 +1529,17 @@ def list_runs(db: Any, *, suite: str = "",
               limit: int = 50) -> list[dict[str, Any]]:
     """Newest-first run summaries (no per-dimension detail payload)."""
     if db is None:
+        return []
+    try:
+        runs = _runs_table(db)
+        if runs is not None:
+            rows = runs.find({"suite": suite} if suite else None)
+            rows.sort(key=lambda r: r.get("ts") or 0, reverse=True)
+            keep = [c for c in _RUN_COLUMNS if c != "dimensions"]
+            return [{k: r.get(k) for k in keep}
+                    for r in rows[:max(1, int(limit))]]
+    except Exception:  # noqa: BLE001
+        _log.warning("benchmark list_runs failed", exc_info=True)
         return []
     sql = ("SELECT id, ts, scoreboard, suite, mode, provider, measurable, "
            "overall, passed, total, seconds, notes FROM benchmark_runs")
@@ -1539,8 +1561,12 @@ def get_run(db: Any, run_id: str) -> dict[str, Any] | None:
     if db is None or not run_id:
         return None
     try:
-        row = db.query_one(
-            "SELECT * FROM benchmark_runs WHERE id = ?", (run_id,))
+        runs = _runs_table(db)
+        if runs is not None:
+            row = runs.get(run_id)
+        else:
+            row = db.query_one(
+                "SELECT * FROM benchmark_runs WHERE id = ?", (run_id,))
     except Exception:  # noqa: BLE001
         _log.warning("benchmark get_run failed", exc_info=True)
         return None

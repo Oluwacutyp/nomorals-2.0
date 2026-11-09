@@ -963,6 +963,29 @@ class ProjectManager:
                 f"exit 0): {out[:400]}")
 
     # ── acceptance regression suite (wave 67) ──────────────────────────────
+    def _acceptance(self):
+        """The seam-backed acceptance_runs table (Mongo P3), or None on
+        the SQLite default, where the native statements run unchanged.
+        Only the acceptance ledger is ported; the rest of this module is
+        the missions/projects domain, which is not a P3 table set."""
+        from ..storage.rowstore import attached_rows
+        return attached_rows(self.db, "acceptance_runs")
+
+    def _acceptance_rows(self, project_id: str, *, ok_only: bool = False,
+                         exclude_step_id: str = "") -> list[dict[str, Any]]:
+        """Acceptance rows for a project, oldest first (ts ASC), read
+        through the seam. Call only when :meth:`_acceptance` returned a
+        table; the native path stays at the call sites below."""
+        table = self._acceptance()
+        assert table is not None  # guarded by every caller
+        rows = table.find({"project_id": project_id})
+        if ok_only:
+            rows = [r for r in rows if r.get("ok") == 1]
+        if exclude_step_id:
+            rows = [r for r in rows if r.get("step_id") != exclude_step_id]
+        rows.sort(key=lambda r: r.get("ts") or 0)
+        return rows
+
     def _record_acceptance_run(self, p: "Project", step_id: str,
                                cmd: str, output: str) -> None:
         """Freeze one acceptance run (command + output hash) for the
@@ -975,12 +998,19 @@ class ProjectManager:
 
             digest = hashlib.sha256(str(output or "").encode(
                 "utf-8", "replace")).hexdigest()[:16]
-            self.db.execute(
-                "INSERT INTO acceptance_runs "
-                "(id, project_id, step_id, cmd, output_hash, ok, ts) "
-                "VALUES (?,?,?,?,?,1,?)",
-                (new_short_id("acc"), p.id, step_id, cmd, digest,
-                 time.time()))
+            table = self._acceptance()
+            if table is not None:
+                table.put({"id": new_short_id("acc"), "project_id": p.id,
+                           "step_id": step_id, "cmd": cmd,
+                           "output_hash": digest, "ok": 1,
+                           "ts": time.time()})
+            else:
+                self.db.execute(
+                    "INSERT INTO acceptance_runs "
+                    "(id, project_id, step_id, cmd, output_hash, ok, ts) "
+                    "VALUES (?,?,?,?,?,1,?)",
+                    (new_short_id("acc"), p.id, step_id, cmd, digest,
+                     time.time()))
         except Exception as exc:  # noqa: BLE001
             _log.debug("acceptance record failed: %s", exc)
 
@@ -988,6 +1018,11 @@ class ProjectManager:
                            limit: int = 50) -> list[dict[str, Any]]:
         """The frozen acceptance runs for a project, oldest first."""
         try:
+            if self._acceptance() is not None:
+                rows = self._acceptance_rows(project_id)
+                cols = ("id", "project_id", "step_id", "cmd",
+                        "output_hash", "ok", "ts")
+                return [{k: r.get(k) for k in cols} for r in rows[:limit]]
             return list(self.db.query(
                 "SELECT id, project_id, step_id, cmd, output_hash, ok, ts "
                 "FROM acceptance_runs WHERE project_id=? "
@@ -1001,10 +1036,14 @@ class ProjectManager:
         """The latest PASSING acceptance command of every other step of
         this project — the regression set for the current step."""
         try:
-            rows = self.db.query(
-                "SELECT step_id, cmd FROM acceptance_runs "
-                "WHERE project_id=? AND ok=1 AND step_id != ? "
-                "ORDER BY ts ASC", (p.id, exclude_step_id))
+            if self._acceptance() is not None:
+                rows = self._acceptance_rows(
+                    p.id, ok_only=True, exclude_step_id=exclude_step_id)
+            else:
+                rows = self.db.query(
+                    "SELECT step_id, cmd FROM acceptance_runs "
+                    "WHERE project_id=? AND ok=1 AND step_id != ? "
+                    "ORDER BY ts ASC", (p.id, exclude_step_id))
         except Exception as exc:  # noqa: BLE001
             record_failure("projects.prior_acceptance_cmds", exc)
             return []
@@ -1053,9 +1092,12 @@ class ProjectManager:
         if p is None:
             raise KeyError(f"unknown project: {project_id!r}")
         try:
-            rows = self.db.query(
-                "SELECT step_id, cmd FROM acceptance_runs "
-                "WHERE project_id=? AND ok=1 ORDER BY ts ASC", (p.id,))
+            if self._acceptance() is not None:
+                rows = self._acceptance_rows(p.id, ok_only=True)
+            else:
+                rows = self.db.query(
+                    "SELECT step_id, cmd FROM acceptance_runs "
+                    "WHERE project_id=? AND ok=1 ORDER BY ts ASC", (p.id,))
         except Exception as exc:  # noqa: BLE001
             record_failure("projects.regression_check", exc)
             return {"ok": True, "results": [], "project_id": p.id,

@@ -230,6 +230,14 @@ class MusicLibrary:
         if self.db is None:
             raise RuntimeError("MusicLibrary needs a context with a database")
 
+    # ── seam tables (None on the SQLite default) ─────────────────────────
+    # Mongo P3: when boot attached a document store, the media tables
+    # route through storage.rowstore (documents are carry-v1 rows); the
+    # SQLite default runs the native statements below unchanged.
+    def _t(self, table: str):
+        from ..storage.rowstore import attached_rows
+        return attached_rows(self.db, table)
+
     # ── playlists ─────────────────────────────────────────────────────────
     def create_playlist(self, name: str, description: str = ""
                         ) -> dict[str, Any]:
@@ -238,6 +246,15 @@ class MusicLibrary:
             raise ToolError("playlist name can't be empty")
         if len(name) > 120:
             raise ToolError("playlist name is too long (max 120 chars)")
+        playlists = self._t("media_playlists")
+        if playlists is not None:
+            if playlists.find_one({"name": name}) is not None:
+                raise ToolError(f"playlist {name!r} already exists")
+            playlists.put({
+                "id": _slug_id("pl"), "name": name,
+                "description": description or "", "created_at": time.time(),
+                "updated_at": time.time()})
+            return {"created": name, "description": description or ""}
         try:
             self.db.execute(
                 "INSERT INTO media_playlists (id, name, description, "
@@ -249,14 +266,64 @@ class MusicLibrary:
         return {"created": name, "description": description or ""}
 
     def _playlist_id(self, name: str) -> str:
-        row = self.db.query_one("SELECT id FROM media_playlists WHERE name=?",
-                                ((name or "").strip(),))
+        playlists = self._t("media_playlists")
+        if playlists is not None:
+            row = playlists.find_one({"name": (name or "").strip()})
+        else:
+            row = self.db.query_one(
+                "SELECT id FROM media_playlists WHERE name=?",
+                ((name or "").strip(),))
         if not row:
             raise ToolError(f"no playlist named {(name or '').strip()!r}")
         return str(row["id"])
 
+    def _playlist_row(self, pid: str) -> dict[str, Any] | None:
+        playlists = self._t("media_playlists")
+        if playlists is not None:
+            return playlists.get(pid)
+        return self.db.query_one(
+            "SELECT * FROM media_playlists WHERE id=?", (pid,))
+
+    def _touch_playlist(self, pid: str) -> None:
+        playlists = self._t("media_playlists")
+        if playlists is not None:
+            playlists.update(pid, {"updated_at": time.time()})
+            return
+        self.db.execute("UPDATE media_playlists SET updated_at=? WHERE id=?",
+                        (time.time(), pid))
+
+    def _put_item(self, row: dict[str, Any]) -> None:
+        items = self._t("media_playlist_items")
+        if items is not None:
+            items.put(row)
+            return
+        self.db.execute(
+            "INSERT INTO media_playlist_items (id, playlist_id, path, "
+            "title, artist, album, duration, kind, position, added_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (row["id"], row["playlist_id"], row["path"], row["title"],
+             row["artist"], row["album"], row["duration"], row["kind"],
+             row["position"], row["added_at"]))
+
+    def _clear_items(self, pid: str) -> None:
+        items = self._t("media_playlist_items")
+        if items is not None:
+            items.delete_where({"playlist_id": pid})
+            return
+        self.db.execute("DELETE FROM media_playlist_items WHERE "
+                        "playlist_id=?", (pid,))
+
     def delete_playlist(self, name: str) -> dict[str, Any]:
         pid = self._playlist_id(name)
+        items_t = self._t("media_playlist_items")
+        if items_t is not None:
+            removed = items_t.count({"playlist_id": pid})
+            items_t.delete_where({"playlist_id": pid})
+            playlists = self._t("media_playlists")
+            assert playlists is not None  # same pickup rule
+            playlists.delete(pid)
+            return {"deleted": (name or "").strip(),
+                    "tracks_removed": removed}
         items = self.db.query_one(
             "SELECT COUNT(*) AS n FROM media_playlist_items WHERE "
             "playlist_id=?", (pid,)) or {"n": 0}
@@ -272,6 +339,14 @@ class MusicLibrary:
             raise ToolError("new playlist name can't be empty")
         if len(new_name) > 120:
             raise ToolError("playlist name is too long (max 120 chars)")
+        playlists = self._t("media_playlists")
+        if playlists is not None:
+            clash = playlists.find_one({"name": new_name})
+            if clash is not None and str(clash["id"]) != pid:
+                raise ToolError(f"playlist {new_name!r} already exists")
+            playlists.update(pid, {"name": new_name,
+                                   "updated_at": time.time()})
+            return {"renamed": (name or "").strip(), "to": new_name}
         try:
             self.db.execute("UPDATE media_playlists SET name=?, updated_at=? "
                             "WHERE id=?", (new_name, time.time(), pid))
@@ -280,6 +355,23 @@ class MusicLibrary:
         return {"renamed": (name or "").strip(), "to": new_name}
 
     def playlists(self) -> list[dict[str, Any]]:
+        playlists = self._t("media_playlists")
+        if playlists is not None:
+            items = self._t("media_playlist_items")
+            assert items is not None  # same pickup rule
+            tracks: dict[str, int] = {}
+            seconds: dict[str, float] = {}
+            for it in items.all():
+                key = str(it.get("playlist_id"))
+                tracks[key] = tracks.get(key, 0) + 1
+                seconds[key] = seconds.get(key, 0.0) + float(
+                    it.get("duration") or 0)
+            rows = sorted(playlists.all(),
+                          key=lambda r: str(r.get("name") or ""))
+            return [{"name": r["name"], "description": r["description"],
+                     "tracks": tracks.get(str(r["id"]), 0),
+                     "seconds": round(seconds.get(str(r["id"]), 0.0), 1),
+                     "updated_at": r["updated_at"]} for r in rows]
         rows = self.db.query(
             "SELECT p.id, p.name, p.description, p.created_at, p.updated_at, "
             "COUNT(i.id) AS tracks, "
@@ -293,11 +385,9 @@ class MusicLibrary:
 
     def playlist(self, name: str, limit: int = 500) -> dict[str, Any]:
         pid = self._playlist_id(name)
-        info = self.db.query_one("SELECT name, description FROM "
-                                 "media_playlists WHERE id=?", (pid,))
-        rows = self.db.query(
-            "SELECT * FROM media_playlist_items WHERE playlist_id=? "
-            "ORDER BY position, added_at LIMIT ?", (pid, max(1, limit)))
+        info = self._playlist_row(pid)
+        assert info is not None  # _playlist_id resolved it
+        rows = self._playlist_rows(pid)[:max(1, limit)]
         items = [{"index": i, "path": r["path"], "title": r["title"],
                   "artist": r["artist"], "album": r["album"],
                   "duration": r["duration"], "kind": r["kind"] or "file"}
@@ -327,23 +417,27 @@ class MusicLibrary:
             else:
                 path = t
             meta = read_metadata(path)
-            self.db.execute(
-                "INSERT INTO media_playlist_items (id, playlist_id, path, "
-                "title, artist, album, duration, kind, position, added_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (_slug_id("pli"), pid, path, meta["title"],
-                 meta["artist"], meta["album"], meta["duration"], kind,
-                 time.time() + len(added), time.time()))
+            self._put_item({
+                "id": _slug_id("pli"), "playlist_id": pid, "path": path,
+                "title": meta["title"], "artist": meta["artist"],
+                "album": meta["album"], "duration": meta["duration"],
+                "kind": kind, "position": time.time() + len(added),
+                "added_at": time.time()})
             added.append({"path": path, "kind": kind,
                           "title": meta["title"], "artist": meta["artist"],
                           "album": meta["album"],
                           "duration": meta["duration"]})
-        self.db.execute("UPDATE media_playlists SET updated_at=? WHERE id=?",
-                        (time.time(), pid))
+        self._touch_playlist(pid)
         return {"playlist": (name or "").strip(), "added": added,
                 "tracks": len(self.playlist(name)["items"])}
 
     def _playlist_rows(self, pid: str) -> list[Any]:
+        items = self._t("media_playlist_items")
+        if items is not None:
+            rows = items.find({"playlist_id": pid})
+            rows.sort(key=lambda r: (r.get("position") or 0,
+                                     r.get("added_at") or 0))
+            return rows
         return self.db.query(
             "SELECT * FROM media_playlist_items WHERE playlist_id=? "
             "ORDER BY position, added_at", (pid,))
@@ -354,8 +448,12 @@ class MusicLibrary:
         if not (0 <= int(index) < len(rows)):
             raise ToolError(
                 f"no track {index} in playlist {(name or '').strip()!r}")
-        self.db.execute("DELETE FROM media_playlist_items WHERE id=?",
-                        (rows[int(index)]["id"],))
+        items = self._t("media_playlist_items")
+        if items is not None:
+            items.delete(str(rows[int(index)]["id"]))
+        else:
+            self.db.execute("DELETE FROM media_playlist_items WHERE id=?",
+                            (rows[int(index)]["id"],))
         return {"removed": rows[int(index)]["title"],
                 "tracks": len(rows) - 1}
 
@@ -373,20 +471,21 @@ class MusicLibrary:
         ids = [r["id"] for r in rows]
         rid = ids.pop(i)
         ids.insert(j, rid)
+        items = self._t("media_playlist_items")
         for pos, rid2 in enumerate(ids):
-            self.db.execute("UPDATE media_playlist_items SET position=? "
-                            "WHERE id=?", (pos, rid2))
-        self.db.execute("UPDATE media_playlists SET updated_at=? WHERE id=?",
-                        (time.time(), pid))
+            if items is not None:
+                items.update(str(rid2), {"position": pos})
+            else:
+                self.db.execute("UPDATE media_playlist_items SET position=? "
+                                "WHERE id=?", (pos, rid2))
+        self._touch_playlist(pid)
         return {"moved": rows[i]["title"], "from": i, "to": j,
                 "tracks": n}
 
     def playlist_clear(self, name: str) -> dict[str, Any]:
         pid = self._playlist_id(name)
-        self.db.execute("DELETE FROM media_playlist_items WHERE playlist_id=?",
-                        (pid,))
-        self.db.execute("UPDATE media_playlists SET updated_at=? WHERE id=?",
-                        (time.time(), pid))
+        self._clear_items(pid)
+        self._touch_playlist(pid)
         return {"cleared": (name or "").strip()}
 
     # ── queue ↔ playlist / M3U ──────────────────────────────────────────
@@ -403,31 +502,39 @@ class MusicLibrary:
             raise ToolError("playlist name can't be empty")
         if not items:
             raise ToolError("the queue is empty — nothing to save")
-        row = self.db.query_one("SELECT id FROM media_playlists WHERE "
-                                "name=?", (clean,))
+        playlists = self._t("media_playlists")
+        if playlists is not None:
+            row = playlists.find_one({"name": clean})
+        else:
+            row = self.db.query_one("SELECT id FROM media_playlists WHERE "
+                                    "name=?", (clean,))
         if row:
             pid = str(row["id"])
-            self.db.execute("DELETE FROM media_playlist_items WHERE "
-                            "playlist_id=?", (pid,))
+            self._clear_items(pid)
         else:
             pid = _slug_id("pl")
-            self.db.execute(
-                "INSERT INTO media_playlists (id, name, description, "
-                "created_at, updated_at) VALUES (?,?, '', ?,?)",
-                (pid, clean, time.time(), time.time()))
+            if playlists is not None:
+                playlists.put({"id": pid, "name": clean, "description": "",
+                               "created_at": time.time(),
+                               "updated_at": time.time()})
+            else:
+                self.db.execute(
+                    "INSERT INTO media_playlists (id, name, description, "
+                    "created_at, updated_at) VALUES (?,?, '', ?,?)",
+                    (pid, clean, time.time(), time.time()))
         stamp = time.time()
         for i, it in enumerate(items):
-            self.db.execute(
-                "INSERT INTO media_playlist_items (id, playlist_id, path, "
-                "title, artist, album, duration, kind, position, added_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (_slug_id("pli"), pid, it.get("path", ""),
-                 it.get("title") or os.path.basename(it.get("path", "")),
-                 it.get("artist") or "", it.get("album") or "",
-                 float(it.get("duration") or 0),
-                 it.get("kind") or "file", stamp + i, stamp))
-        self.db.execute("UPDATE media_playlists SET updated_at=? WHERE id=?",
-                        (time.time(), pid))
+            self._put_item({
+                "id": _slug_id("pli"), "playlist_id": pid,
+                "path": it.get("path", ""),
+                "title": it.get("title") or os.path.basename(
+                    it.get("path", "")),
+                "artist": it.get("artist") or "",
+                "album": it.get("album") or "",
+                "duration": float(it.get("duration") or 0),
+                "kind": it.get("kind") or "file",
+                "position": stamp + i, "added_at": stamp})
+        self._touch_playlist(pid)
         return {"saved": clean, "tracks": len(items)}
 
     def export_m3u(self, name: str, dest: str) -> dict[str, Any]:
@@ -500,20 +607,37 @@ class MusicLibrary:
             pending_title = ""
         if not targets:
             raise ToolError(f"{src_p} has no playable entries")
-        row = self.db.query_one("SELECT id FROM media_playlists WHERE "
-                                "name=?", ((name or "").strip(),))
+        playlists = self._t("media_playlists")
+        if playlists is not None:
+            row = playlists.find_one({"name": (name or "").strip()})
+        else:
+            row = self.db.query_one("SELECT id FROM media_playlists WHERE "
+                                    "name=?", ((name or "").strip(),))
         if row:
             pid = str(row["id"])
         else:
             pid = _slug_id("pl")
-            self.db.execute(
-                "INSERT INTO media_playlists (id, name, description, "
-                "created_at, updated_at) VALUES (?,?, '', ?,?)",
-                (pid, (name or "").strip(), time.time(), time.time()))
-        max_pos = self.db.query_one(
-            "SELECT COALESCE(MAX(position), -1) AS m FROM "
-            "media_playlist_items WHERE playlist_id=?", (pid,)) or {"m": -1}
-        pos = float(max_pos["m"]) + 1
+            if playlists is not None:
+                playlists.put({"id": pid, "name": (name or "").strip(),
+                               "description": "", "created_at": time.time(),
+                               "updated_at": time.time()})
+            else:
+                self.db.execute(
+                    "INSERT INTO media_playlists (id, name, description, "
+                    "created_at, updated_at) VALUES (?,?, '', ?,?)",
+                    (pid, (name or "").strip(), time.time(), time.time()))
+        items_t = self._t("media_playlist_items")
+        if items_t is not None:
+            existing = items_t.find({"playlist_id": pid})
+            top = max((float(r.get("position") or 0) for r in existing),
+                      default=-1.0)
+            pos = top + 1
+        else:
+            max_pos = self.db.query_one(
+                "SELECT COALESCE(MAX(position), -1) AS m FROM "
+                "media_playlist_items WHERE playlist_id=?", (pid,)) \
+                or {"m": -1}
+            pos = float(max_pos["m"]) + 1
         added = 0
         for raw_path, title in targets:
             kind = "url" if _is_url(raw_path) else "file"
@@ -526,17 +650,14 @@ class MusicLibrary:
             else:
                 path = raw_path
             meta = read_metadata(path)
-            self.db.execute(
-                "INSERT INTO media_playlist_items (id, playlist_id, path, "
-                "title, artist, album, duration, kind, position, added_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (_slug_id("pli"), pid, path,
-                 title or meta["title"], meta["artist"], meta["album"],
-                 meta["duration"], kind, pos, time.time()))
+            self._put_item({
+                "id": _slug_id("pli"), "playlist_id": pid, "path": path,
+                "title": title or meta["title"], "artist": meta["artist"],
+                "album": meta["album"], "duration": meta["duration"],
+                "kind": kind, "position": pos, "added_at": time.time()})
             pos += 1
             added += 1
-        self.db.execute("UPDATE media_playlists SET updated_at=? WHERE id=?",
-                        (time.time(), pid))
+        self._touch_playlist(pid)
         return {"imported": (name or "").strip(), "file": str(src_p),
                 "added": added, "skipped": len(targets) - added}
 
@@ -550,35 +671,77 @@ class MusicLibrary:
         path = (path or "").strip()
         if not path:
             raise ToolError("record_played needs a path")
-        last = self.db.query_one(
-            "SELECT path, played_at FROM media_history ORDER BY played_at "
-            "DESC LIMIT 1")
+        hist = self._t("media_history")
+        if hist is not None:
+            rows = hist.all()
+            last = max(rows, key=lambda r: r.get("played_at") or 0,
+                       default=None)
+        else:
+            last = self.db.query_one(
+                "SELECT path, played_at FROM media_history ORDER BY played_at "
+                "DESC LIMIT 1")
         if last and last["path"] == path and \
                 time.time() - float(last["played_at"] or 0) < _dedup_window:
             return {"recorded": False, "reason": "dedup"}
         title = title or read_metadata(path)["title"]
-        self.db.execute(
-            "INSERT INTO media_history (id, path, title, artist, album, "
-            "duration, played_at, source) VALUES (?,?,?,?,?,?,?,?)",
-            (_slug_id("mh"), path, title, artist or "", album or "",
-             float(duration or 0), time.time(), source or ""))
+        if hist is not None:
+            hist.put({"id": _slug_id("mh"), "path": path, "title": title,
+                      "artist": artist or "", "album": album or "",
+                      "duration": float(duration or 0),
+                      "played_at": time.time(), "source": source or ""})
+        else:
+            self.db.execute(
+                "INSERT INTO media_history (id, path, title, artist, album, "
+                "duration, played_at, source) VALUES (?,?,?,?,?,?,?,?)",
+                (_slug_id("mh"), path, title, artist or "", album or "",
+                 float(duration or 0), time.time(), source or ""))
         return {"recorded": True, "title": title}
 
     def history(self, limit: int = 50) -> list[dict[str, Any]]:
-        rows = self.db.query(
-            "SELECT * FROM media_history ORDER BY played_at DESC LIMIT ?",
-            (max(1, int(limit)),))
+        hist = self._t("media_history")
+        if hist is not None:
+            rows = hist.all()
+            rows.sort(key=lambda r: r.get("played_at") or 0, reverse=True)
+            rows = rows[:max(1, int(limit))]
+        else:
+            rows = self.db.query(
+                "SELECT * FROM media_history ORDER BY played_at DESC "
+                "LIMIT ?", (max(1, int(limit)),))
         return [{"path": r["path"], "title": r["title"], "artist": r["artist"],
                  "album": r["album"], "duration": r["duration"],
                  "played_at": r["played_at"], "source": r["source"]}
                 for r in rows]
 
     def clear_history(self) -> dict[str, Any]:
+        hist = self._t("media_history")
+        if hist is not None:
+            removed = hist.count()
+            hist.delete_where()
+            return {"cleared": True, "removed": removed}
         row = self.db.query_one("SELECT COUNT(*) AS n FROM media_history")
         self.db.execute("DELETE FROM media_history")
         return {"cleared": True, "removed": (row or {"n": 0})["n"]}
 
     def top_played(self, limit: int = 10) -> list[dict[str, Any]]:
+        hist = self._t("media_history")
+        if hist is not None:
+            groups: dict[str, dict[str, Any]] = {}
+            for r in hist.all():
+                g = groups.setdefault(str(r.get("path")), {
+                    "path": r.get("path"), "title": "", "artist": "",
+                    "album": "", "plays": 0, "last": 0.0})
+                g["plays"] += 1
+                g["title"] = max(g["title"], str(r.get("title") or ""))
+                g["artist"] = max(g["artist"], str(r.get("artist") or ""))
+                g["album"] = max(g["album"], str(r.get("album") or ""))
+                g["last"] = max(g["last"], float(r.get("played_at") or 0))
+            rows = sorted(groups.values(),
+                          key=lambda g: (g["plays"], g["last"]),
+                          reverse=True)[:max(1, int(limit))]
+            return [{"path": g["path"], "title": g["title"],
+                     "artist": g["artist"], "album": g["album"],
+                     "plays": g["plays"], "last_played": g["last"]}
+                    for g in rows]
         rows = self.db.query(
             "SELECT path, MAX(title) AS title, MAX(artist) AS artist, "
             "MAX(album) AS album, COUNT(*) AS plays, MAX(played_at) AS last "
@@ -598,6 +761,13 @@ class MusicLibrary:
             meta = read_metadata(path)
             title, artist = meta["title"], meta["artist"] or artist
             album, duration = meta["album"] or album, meta["duration"]
+        favs = self._t("media_favorites")
+        if favs is not None:
+            favs.put({"path": path, "title": title, "artist": artist or "",
+                      "album": album or "",
+                      "duration": float(duration or 0),
+                      "liked_at": time.time()})
+            return {"liked": True, "title": title, "path": path}
         self.db.execute(
             "INSERT INTO media_favorites (path, title, artist, album, "
             "duration, liked_at) VALUES (?,?,?,?,?,?) "
@@ -610,6 +780,13 @@ class MusicLibrary:
 
     def unlike(self, path: str) -> dict[str, Any]:
         path = (path or "").strip()
+        favs = self._t("media_favorites")
+        if favs is not None:
+            row = favs.get(path)
+            if not row:
+                raise ToolError(f"{path!r} is not in favorites")
+            favs.delete(path)
+            return {"unliked": True, "title": row["title"]}
         row = self.db.query_one("SELECT title FROM media_favorites WHERE "
                                 "path=?", (path,))
         if not row:
@@ -618,14 +795,23 @@ class MusicLibrary:
         return {"unliked": True, "title": row["title"]}
 
     def is_liked(self, path: str) -> bool:
+        favs = self._t("media_favorites")
+        if favs is not None:
+            return favs.get((path or "").strip()) is not None
         row = self.db.query_one("SELECT path FROM media_favorites WHERE "
                                 "path=?", ((path or "").strip(),))
         return row is not None
 
     def favorites(self, limit: int = 200) -> list[dict[str, Any]]:
-        rows = self.db.query(
-            "SELECT * FROM media_favorites ORDER BY liked_at DESC LIMIT ?",
-            (max(1, int(limit)),))
+        favs = self._t("media_favorites")
+        if favs is not None:
+            rows = favs.all()
+            rows.sort(key=lambda r: r.get("liked_at") or 0, reverse=True)
+            rows = rows[:max(1, int(limit))]
+        else:
+            rows = self.db.query(
+                "SELECT * FROM media_favorites ORDER BY liked_at DESC "
+                "LIMIT ?", (max(1, int(limit)),))
         return [{"path": r["path"], "title": r["title"], "artist": r["artist"],
                  "album": r["album"], "duration": r["duration"],
                  "liked_at": r["liked_at"]} for r in rows]
@@ -636,8 +822,54 @@ class MusicLibrary:
         q = (query or "").strip()
         if not q:
             raise ToolError("search needs a query")
-        like = f"%{q}%"
         lim = max(1, int(limit))
+        favs_t = self._t("media_favorites")
+        if favs_t is not None:
+            needle = q.lower()
+
+            def hit(r: dict[str, Any]) -> bool:
+                return any(needle in str(r.get(f) or "").lower()
+                           for f in ("title", "artist", "album", "path"))
+
+            favs = [r for r in favs_t.all() if hit(r)][:lim]
+            seen: set[tuple] = set()
+            hist = []
+            hist_t = self._t("media_history")
+            assert hist_t is not None  # same pickup rule
+            for r in hist_t.all():
+                key = (r.get("path"), r.get("title"), r.get("artist"),
+                       r.get("album"))
+                if hit(r) and key not in seen:
+                    seen.add(key)
+                    hist.append(r)
+            hist = hist[:lim]
+            pls_t = self._t("media_playlists")
+            assert pls_t is not None  # same pickup rule
+            pls = [r for r in pls_t.all()
+                   if needle in str(r.get("name") or "").lower()
+                   or needle in str(r.get("description") or "").lower()][:lim]
+            items_t = self._t("media_playlist_items")
+            assert items_t is not None  # same pickup rule
+            tracks = [r for r in items_t.all() if hit(r)][:lim]
+            names = {str(r["id"]): str(r["name"]) for r in pls_t.all()}
+            queue_t = self._t("media_queue")
+            assert queue_t is not None  # same pickup rule
+            queue_rows = [r for r in queue_t.all() if hit(r)][:lim]
+
+            def slim_s(r: Any) -> dict[str, Any]:
+                return {"path": r["path"], "title": r["title"],
+                        "artist": r["artist"], "album": r["album"]}
+
+            return {"query": q,
+                    "favorites": [slim_s(r) for r in favs],
+                    "history": [slim_s(r) for r in hist],
+                    "playlists": [r["name"] for r in pls],
+                    "playlist_tracks": [
+                        {**slim_s(r),
+                         "playlist": names.get(str(r["playlist_id"]), "")}
+                        for r in tracks],
+                    "queue": [slim_s(r) for r in queue_rows]}
+        like = f"%{q}%"
         favs = self.db.query(
             "SELECT path, title, artist, album FROM media_favorites "
             "WHERE title LIKE ? OR artist LIKE ? OR album LIKE ? OR path "
@@ -676,6 +908,26 @@ class MusicLibrary:
                 "queue": [slim(r) for r in queue_rows]}
 
     def stats(self) -> dict[str, Any]:
+        playlists = self._t("media_playlists")
+        if playlists is not None:
+            items = self._t("media_playlist_items")
+            favs = self._t("media_favorites")
+            hist = self._t("media_history")
+            queue = self._t("media_queue")
+            assert items is not None and favs is not None  # pickup rule
+            assert hist is not None and queue is not None
+            hist_rows = hist.all()
+            return {"playlists": playlists.count(),
+                    "playlist_tracks": items.count(),
+                    "favorites": favs.count(),
+                    "plays": len(hist_rows),
+                    "unique_tracks_played": len(
+                        {r.get("path") for r in hist_rows}),
+                    "favorites_seconds": round(
+                        sum(float(r.get("duration") or 0)
+                            for r in favs.all()), 1),
+                    "queue": queue.count()}
+
         def count(table: str) -> int:
             row = self.db.query_one(f"SELECT COUNT(*) AS n FROM {table}")
             return int((row or {"n": 0})["n"])

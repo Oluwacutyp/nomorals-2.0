@@ -378,6 +378,16 @@ def _resolve_image(context: Any, ref: str, client: HttpClient) -> tuple[Path | N
     return (path if path.exists() else None), ""
 
 
+def _image_index(context: Any):
+    """The seam-backed image_index table (Mongo P3), or None on the
+    SQLite default, where the native statements run unchanged."""
+    db = getattr(context, "db", None)
+    if db is None:
+        return None
+    from ..storage.rowstore import attached_rows
+    return attached_rows(db, "image_index")
+
+
 def _index_row(context: Any, digest: str, path: Path, size: int, fmt: str,
                seen_in: str) -> dict[str, Any] | None:
     """Upsert into image_index; returns the previous sighting (if any)."""
@@ -385,6 +395,19 @@ def _index_row(context: Any, digest: str, path: Path, size: int, fmt: str,
     if db is None:
         return None
     try:
+        table = _image_index(context)
+        if table is not None:
+            row = table.get(digest)
+            now = time.time()
+            table.put({
+                "hash": digest, "path": str(path), "size": size,
+                "mime": fmt,
+                "first_seen": now if row is None else row["first_seen"],
+                "last_seen": now,
+                "seen_in": seen_in if seen_in != ""
+                else (row or {}).get("seen_in", ""),
+            })
+            return row
         row = db.query_one("SELECT * FROM image_index WHERE hash = ?", (digest,))
         with db.transaction():
             db.execute(
@@ -428,9 +451,12 @@ def _lookup_impl(context: Any, ref: str, seen_in: str) -> dict[str, Any]:
         db = getattr(context, "db", None)
         if db is not None:
             try:
+                table = _image_index(context)
+                index_rows = table.all() if table is not None else \
+                    db.query("SELECT hash, path FROM image_index")
                 # compare perceptual hashes (not content digests — dhash is
                 # 16 hex chars, blake2b digests are 32, so they can never match)
-                for row in db.query("SELECT hash, path FROM image_index"):
+                for row in index_rows:
                     other = dhash(row.get("path", "")) if row.get("path") else None
                     distance = hamming(phash, other or "")
                     if distance is not None and 0 < distance <= 10:
@@ -462,6 +488,9 @@ def _library_rows(context: Any) -> list[dict[str, Any]]:
     if db is None:
         return []
     try:
+        table = _image_index(context)
+        if table is not None:
+            return table.all()
         return list(db.query("SELECT hash, path, size, mime FROM image_index"))
     except Exception as e:  # noqa: BLE001
         record_failure("_library_rows", e)

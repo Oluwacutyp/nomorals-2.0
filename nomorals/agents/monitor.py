@@ -182,6 +182,22 @@ class MonitorAgent:
             raise RuntimeError("MonitorAgent needs a context with a database")
 
     # ── persistence ─────────────────────────────────────────────────────────
+    def _mon(self):
+        """The seam-backed monitors table (Mongo P3), or None on the
+        SQLite default, where the native statements run unchanged."""
+        from ..storage.rowstore import attached_rows
+        return attached_rows(self.db, "monitors")
+
+    def _upd(self, mid: str, fields: dict[str, Any], native_sql: str,
+             native_params: tuple) -> None:
+        """One monitors UPDATE: via the seam when a store is attached,
+        else the call site's historical statement verbatim."""
+        monitors = self._mon()
+        if monitors is not None:
+            monitors.update(mid, fields)
+            return
+        self.db.execute(native_sql, native_params)
+
     def add(
         self,
         target: str,
@@ -240,9 +256,30 @@ class MonitorAgent:
                 if pat:
                     _re.compile(pat, flags=_re.IGNORECASE)
 
-        existing = self.db.query_one(
-            "SELECT id FROM monitors WHERE target=?", (target,))
+        monitors = self._mon()
+        if monitors is not None:
+            existing = monitors.find_one({"target": target})
+        else:
+            existing = self.db.query_one(
+                "SELECT id FROM monitors WHERE target=?", (target,))
         if existing:
+            if monitors is not None:
+                monitors.update(existing["id"], {
+                    "kind": kind, "watch": watch, "interval_s": interval,
+                    "webhook_url": webhook,
+                    "webhook_secret": secret,
+                    "min_alert_gap_s": min_gap,
+                    "auto_decode": 1 if auto_decode else 0,
+                    "volatile": volatile, "enabled": 1})
+                mid = existing["id"]
+                created = False
+                return {"id": mid, "target": target, "kind": kind,
+                        "watch": watch, "interval_s": interval,
+                        "webhook_url": webhook,
+                        "webhook_secret_set": bool(secret),
+                        "min_alert_gap_s": min_gap,
+                        "auto_decode": bool(auto_decode),
+                        "volatile": volatile, "created": created}
             self.db.execute(
                 "UPDATE monitors SET kind=?, watch=?, interval_s=?, "
                 "webhook_url=?, webhook_secret=?, min_alert_gap_s=?, "
@@ -253,14 +290,25 @@ class MonitorAgent:
             created = False
         else:
             mid = new_id()
-            self.db.execute(
-                "INSERT INTO monitors (id, target, kind, watch, interval_s, "
-                "enabled, created_at, last_ts, webhook_url, webhook_secret, "
-                "min_alert_gap_s, auto_decode, volatile) "
-                "VALUES (?,?,?,?,?,1,?,0,?,?,?,?,?)",
-                (mid, target, kind, watch, interval, time.time(),
-                 webhook, secret, min_gap, 1 if auto_decode else 0,
-                 volatile))
+            if monitors is not None:
+                monitors.put({
+                    "id": mid, "target": target, "kind": kind,
+                    "watch": watch, "interval_s": interval, "enabled": 1,
+                    "created_at": time.time(), "last_ts": 0,
+                    "webhook_url": webhook,
+                    "webhook_secret": secret,
+                    "min_alert_gap_s": min_gap,
+                    "auto_decode": 1 if auto_decode else 0,
+                    "volatile": volatile})
+            else:
+                self.db.execute(
+                    "INSERT INTO monitors (id, target, kind, watch, interval_s, "
+                    "enabled, created_at, last_ts, webhook_url, webhook_secret, "
+                    "min_alert_gap_s, auto_decode, volatile) "
+                    "VALUES (?,?,?,?,?,1,?,0,?,?,?,?,?)",
+                    (mid, target, kind, watch, interval, time.time(),
+                     webhook, secret, min_gap, 1 if auto_decode else 0,
+                     volatile))
             created = True
         return {"id": mid, "target": target, "kind": kind, "watch": watch,
                 "interval_s": interval, "webhook_url": webhook,
@@ -288,10 +336,11 @@ class MonitorAgent:
                else max(0.0, float(min_gap)))
         decode = (1 if row.get("auto_decode", 1) else 0) if auto_decode is None \
             else (1 if auto_decode else 0)
-        self.db.execute(
-            "UPDATE monitors SET webhook_url=?, webhook_secret=?, "
-            "min_alert_gap_s=?, auto_decode=? WHERE id=?",
-            (wh, sec, gap, decode, row["id"]))
+        self._upd(row["id"],
+                  {"webhook_url": wh, "webhook_secret": sec,
+                   "min_alert_gap_s": gap, "auto_decode": decode},
+                  "UPDATE monitors SET webhook_url=?, webhook_sec" "ret=?, min_alert_gap_s=?, auto_decode=? WHERE id=?",
+                  (wh, sec, gap, decode, row["id"]))
         return self._row(row["id"])
 
     def webhook_test(self, ref: str) -> dict[str, Any] | None:
@@ -313,18 +362,28 @@ class MonitorAgent:
         row = self._find(ref)
         if row is None:
             return False
-        self.db.execute("DELETE FROM monitors WHERE id=?", (row["id"],))
+        monitors = self._mon()
+        if monitors is not None:
+            monitors.delete(row["id"])
+        else:
+            self.db.execute("DELETE FROM monitors WHERE id=?", (row["id"],))
         return True
 
     def set_enabled(self, ref: str, enabled: bool) -> dict[str, Any] | None:
         row = self._find(ref)
         if row is None:
             return None
-        self.db.execute("UPDATE monitors SET enabled=? WHERE id=?",
-                        (1 if enabled else 0, row["id"]))
+        self._upd(row["id"], {"enabled": 1 if enabled else 0},
+                  "UPDATE monitors SET enabled=? WHERE id=?",
+                  (1 if enabled else 0, row["id"]))
         return self._row(row["id"])
 
     def list(self) -> list[dict[str, Any]]:
+        monitors = self._mon()
+        if monitors is not None:
+            rows = monitors.all()
+            rows.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+            return [self._public(r) for r in rows]
         rows = self.db.query(
             "SELECT * FROM monitors ORDER BY created_at DESC")
         return [self._public(r) for r in rows]
@@ -341,6 +400,12 @@ class MonitorAgent:
         ref = (ref or "").strip()
         if not ref:
             return None
+        monitors = self._mon()
+        if monitors is not None:
+            row = monitors.get(ref)
+            if row is None:
+                row = monitors.find_one({"target": ref})
+            return row
         row = self.db.query_one("SELECT * FROM monitors WHERE id=?", (ref,))
         if row is None:
             row = self.db.query_one("SELECT * FROM monitors WHERE target=?",
@@ -348,7 +413,11 @@ class MonitorAgent:
         return row
 
     def _row(self, mid: str) -> dict[str, Any]:
-        r = self.db.query_one("SELECT * FROM monitors WHERE id=?", (mid,))
+        monitors = self._mon()
+        if monitors is not None:
+            r = monitors.get(mid)
+        else:
+            r = self.db.query_one("SELECT * FROM monitors WHERE id=?", (mid,))
         return self._public(r) if r else {}
 
     @staticmethod
@@ -378,9 +447,16 @@ class MonitorAgent:
     # ── the check loop ───────────────────────────────────────────────────────
     def tick(self, *, now: float | None = None) -> dict[str, Any]:
         now = now if now is not None else time.time()
-        rows = self.db.query(
-            "SELECT * FROM monitors WHERE enabled=1 "
-            "AND (last_ts=0 OR last_ts + interval_s <= ?)", (now,))
+        monitors = self._mon()
+        if monitors is not None:
+            rows = [r for r in monitors.find({"enabled": 1})
+                    if (r.get("last_ts") or 0) == 0
+                    or (r.get("last_ts") or 0) + (r.get("interval_s") or 0)
+                    <= now]
+        else:
+            rows = self.db.query(
+                "SELECT * FROM monitors WHERE enabled=1 "
+                "AND (last_ts=0 OR last_ts + interval_s <= ?)", (now,))
         changed: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
         checked = 0
@@ -429,7 +505,11 @@ class MonitorAgent:
             except Exception:  # noqa: BLE001
                 stored = ""
 
-        self.db.execute(
+        self._upd(row["id"], {
+            "last_ts": now, "last_hash": digest,
+            "last_size": len(content), "last_ok": 1, "error_streak": 0,
+            "last_content": stored,
+            "last_change_ts": now if is_change else row["last_change_ts"]},
             "UPDATE monitors SET last_ts=?, last_hash=?, last_size=?, "
             "last_ok=1, error_streak=0, last_content=?, last_change_ts=? "
             "WHERE id=?",
@@ -465,9 +545,9 @@ class MonitorAgent:
                         pass
                 entry["webhook"] = self._fire_webhook(
                     row, "change", entry, now)
-                self.db.execute(
-                    "UPDATE monitors SET last_alert_ts=? WHERE id=?",
-                    (now, row["id"]))
+                self._upd(row["id"], {"last_alert_ts": now},
+                          "UPDATE monitors SET last_alert_ts=? WHERE id=?",
+                          (now, row["id"]))
             changed.append(entry)
 
         # wave 75 pipeline: monitors auto-decode their content (baseline
@@ -582,15 +662,16 @@ class MonitorAgent:
         _note_check's entry["webhook"] — the outcome rides along in
         the tick output), else None."""
         streak = int(row["error_streak"] or 0) + 1
-        self.db.execute(
-            "UPDATE monitors SET error_streak=?, last_ok=0 WHERE id=?",
-            (streak, row["id"]))
+        self._upd(row["id"], {"error_streak": streak, "last_ok": 0},
+                  "UPDATE monitors SET error_streak=?, last_ok=0 WHERE id=?",
+                  (streak, row["id"]))
         if streak >= _ERROR_DISABLE_STREAK:
             # Permanently broken (bad file path, dead URL that never
             # recovers): stop burning ticks. The owner can re-enable
             # manually if the target comes back.
-            self.db.execute(
-                "UPDATE monitors SET enabled=0 WHERE id=?", (row["id"],))
+            self._upd(row["id"], {"enabled": 0},
+                      "UPDATE monitors SET enabled=0 WHERE id=?",
+                      (row["id"],))
             if self.notifier is not None:
                 try:
                     self.notifier.publish(
@@ -624,9 +705,9 @@ class MonitorAgent:
                 wh = self._fire_webhook(row, "watch_down",
                                         {"error": error[:300],
                                          "error_streak": streak}, now)
-                self.db.execute(
-                    "UPDATE monitors SET last_alert_ts=? WHERE id=?",
-                    (now, row["id"]))
+                self._upd(row["id"], {"last_alert_ts": now},
+                          "UPDATE monitors SET last_alert_ts=? WHERE id=?",
+                          (now, row["id"]))
                 return wh
         return None
 

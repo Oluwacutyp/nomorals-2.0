@@ -90,12 +90,30 @@ class Thread:
 
 
 class SideChatManager:
-    """Manages multiple persistent conversation threads."""
-    
+    """Manages multiple persistent conversation threads.
+
+    Persistence routes through the document seam when boot attached a
+    store to the database (Mongo program P3 — the ``threads`` /
+    ``thread_messages`` documents are carry-v1 rows); on the SQLite
+    default the native statements below run unchanged. The seam path
+    performs the message-insert + counter-increment as two
+    single-document writes where the native path uses one transaction —
+    the seam's advertised guarantee (see storage/docstore.py).
+    """
+
     def __init__(self, db: Database) -> None:
         self.db = db
         self._ensure_schema()
         _log.info("Side chat manager initialized")
+
+    # ── seam tables (None on the SQLite default) ─────────────────────────
+    def _threads(self):
+        from ...storage.rowstore import attached_rows
+        return attached_rows(self.db, "threads")
+
+    def _messages(self):
+        from ...storage.rowstore import attached_rows
+        return attached_rows(self.db, "thread_messages")
     
     def _ensure_schema(self) -> None:
         with self.db.transaction():
@@ -148,12 +166,20 @@ class SideChatManager:
         thread_id = new_id("thread")
         now = time.time()
         tags = tags or []
-        
-        with self.db.transaction():
-            self.db.execute("""
-                INSERT INTO threads (thread_id, user_id, topic, description, created_at, updated_at, tags)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (thread_id, user_id, topic, description, now, now, json.dumps(tags)))
+
+        threads = self._threads()
+        if threads is not None:
+            threads.put({
+                "thread_id": thread_id, "user_id": user_id, "topic": topic,
+                "description": description, "created_at": now,
+                "updated_at": now, "tags": json.dumps(tags),
+            })
+        else:
+            with self.db.transaction():
+                self.db.execute("""
+                    INSERT INTO threads (thread_id, user_id, topic, description, created_at, updated_at, tags)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (thread_id, user_id, topic, description, now, now, json.dumps(tags)))
         
         thread = Thread(
             thread_id=thread_id,
@@ -178,16 +204,28 @@ class SideChatManager:
         message_id = new_id("msg")
         now = time.time()
         metadata = metadata or {}
-        
-        with self.db.transaction():
-            self.db.execute("""
-                INSERT INTO thread_messages (message_id, thread_id, role, content, timestamp, metadata)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (message_id, thread_id, role, content, now, json.dumps(metadata)))
-            
-            self.db.execute("""
-                UPDATE threads SET updated_at = ?, message_count = message_count + 1 WHERE thread_id = ?
-            """, (now, thread_id))
+
+        messages = self._messages()
+        if messages is not None:
+            messages.put({
+                "message_id": message_id, "thread_id": thread_id,
+                "role": role, "content": content, "timestamp": now,
+                "metadata": json.dumps(metadata),
+            })
+            threads = self._threads()
+            assert threads is not None  # same pickup rule as messages
+            threads.update(thread_id, {"updated_at": now})
+            threads.inc(thread_id, "message_count", 1)
+        else:
+            with self.db.transaction():
+                self.db.execute("""
+                    INSERT INTO thread_messages (message_id, thread_id, role, content, timestamp, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (message_id, thread_id, role, content, now, json.dumps(metadata)))
+
+                self.db.execute("""
+                    UPDATE threads SET updated_at = ?, message_count = message_count + 1 WHERE thread_id = ?
+                """, (now, thread_id))
         
         return ThreadMessage(
             message_id=message_id,
@@ -205,17 +243,26 @@ class SideChatManager:
         before: float | None = None,
     ) -> list[ThreadMessage]:
         """Get thread message history."""
-        query = "SELECT * FROM thread_messages WHERE thread_id = ?"
-        params: list[Any] = [thread_id]
-        
-        if before:
-            query += " AND timestamp < ?"
-            params.append(before)
-        
-        query += " ORDER BY timestamp ASC LIMIT ?"
-        params.append(limit)
-        
-        rows = self.db.query(query, params)
+        messages = self._messages()
+        if messages is not None:
+            filt: dict[str, Any] = {"thread_id": thread_id}
+            if before:
+                filt["timestamp"] = {"$lt": before}
+            rows = messages.find(filt)
+            rows.sort(key=lambda r: r.get("timestamp") or 0)
+            rows = rows[:limit]
+        else:
+            query = "SELECT * FROM thread_messages WHERE thread_id = ?"
+            params: list[Any] = [thread_id]
+
+            if before:
+                query += " AND timestamp < ?"
+                params.append(before)
+
+            query += " ORDER BY timestamp ASC LIMIT ?"
+            params.append(limit)
+
+            rows = self.db.query(query, params)
         
         return [
             ThreadMessage(
@@ -236,15 +283,23 @@ class SideChatManager:
         include_archived: bool = False,
     ) -> list[Thread]:
         """List all threads for a user."""
-        query = "SELECT * FROM threads WHERE user_id = ?"
-        params: list[Any] = [user_id]
-        
-        if not include_archived:
-            query += " AND is_archived = 0"
-        
-        query += " ORDER BY updated_at DESC"
-        
-        rows = self.db.query(query, params)
+        threads = self._threads()
+        if threads is not None:
+            filt: dict[str, Any] = {"user_id": user_id}
+            if not include_archived:
+                filt["is_archived"] = 0
+            rows = threads.find(filt)
+            rows.sort(key=lambda r: r.get("updated_at") or 0, reverse=True)
+        else:
+            query = "SELECT * FROM threads WHERE user_id = ?"
+            params: list[Any] = [user_id]
+
+            if not include_archived:
+                query += " AND is_archived = 0"
+
+            query += " ORDER BY updated_at DESC"
+
+            rows = self.db.query(query, params)
         
         return [
             Thread(
@@ -263,15 +318,27 @@ class SideChatManager:
     
     async def archive(self, thread_id: str) -> bool:
         """Archive a thread."""
+        threads = self._threads()
+        if threads is not None:
+            threads.update(thread_id,
+                           {"is_archived": 1, "updated_at": time.time()})
+            return True
         with self.db.transaction():
             self.db.execute(
                 "UPDATE threads SET is_archived = 1, updated_at = ? WHERE thread_id = ?",
                 (time.time(), thread_id)
             )
         return True
-    
+
     async def delete(self, thread_id: str) -> bool:
         """Delete a thread and all messages."""
+        messages = self._messages()
+        if messages is not None:
+            messages.delete_where({"thread_id": thread_id})
+            threads = self._threads()
+            assert threads is not None  # same pickup rule as messages
+            threads.delete(thread_id)
+            return True
         with self.db.transaction():
             self.db.execute("DELETE FROM thread_messages WHERE thread_id = ?", (thread_id,))
             self.db.execute("DELETE FROM threads WHERE thread_id = ?", (thread_id,))
@@ -285,13 +352,25 @@ class SideChatManager:
         limit: int = 20,
     ) -> list[ThreadMessage]:
         """Search across all threads for a user."""
-        rows = self.db.query("""
-            SELECT m.* FROM thread_messages m
-            JOIN threads t ON m.thread_id = t.thread_id
-            WHERE t.user_id = ? AND m.content LIKE ?
-            ORDER BY m.timestamp DESC
-            LIMIT ?
-        """, (user_id, f"%{query}%", limit))
+        messages = self._messages()
+        if messages is not None:
+            threads = self._threads()
+            assert threads is not None  # same pickup rule as messages
+            mine = {t["thread_id"]
+                    for t in threads.find({"user_id": user_id})}
+            rows = [r for r in messages.all()
+                    if r.get("thread_id") in mine
+                    and query in (r.get("content") or "")]
+            rows.sort(key=lambda r: r.get("timestamp") or 0, reverse=True)
+            rows = rows[:limit]
+        else:
+            rows = self.db.query("""
+                SELECT m.* FROM thread_messages m
+                JOIN threads t ON m.thread_id = t.thread_id
+                WHERE t.user_id = ? AND m.content LIKE ?
+                ORDER BY m.timestamp DESC
+                LIMIT ?
+            """, (user_id, f"%{query}%", limit))
         
         return [
             ThreadMessage(

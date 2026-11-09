@@ -182,20 +182,8 @@ class SessionBridge:
         if db is None:
             return
         try:
-            with db.transaction():
-                db.execute(
-                    "INSERT INTO conversations (id, title, agent, channel,"
-                    " summary, tokens, created_at, updated_at, metadata)"
-                    " SELECT ?, title, agent, channel, summary, tokens,"
-                    " created_at, updated_at, metadata FROM conversations"
-                    " WHERE id = ? ON CONFLICT(id) DO NOTHING",
-                    (new_conv, old_conv))
-                db.execute(
-                    "UPDATE messages SET conversation_id = ?"
-                    " WHERE conversation_id = ?",
-                    (new_conv, old_conv))
-                db.execute(
-                    "DELETE FROM conversations WHERE id = ?", (old_conv,))
+            from ..storage.conversations import ConversationLog
+            ConversationLog(db).rekey(old_conv, new_conv)
         except Exception:  # noqa: BLE001 — history merge must not break handoff
             _log.warning("handoff history re-key %s -> %s failed",
                          old_conv, new_conv, exc_info=True)

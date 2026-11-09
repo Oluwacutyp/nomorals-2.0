@@ -434,19 +434,34 @@ class SearchEngine:
         out = list(found.values())
         if save and out:
             try:
-                with self.context.db.transaction():
+                leads = self._t("search_leads")
+                if leads is not None:
                     for lead in out:
-                        self.context.db.execute(
-                            "INSERT OR IGNORE INTO search_leads (id, url, title, note, created_at) "
-                            "VALUES (?, ?, ?, ?, ?)",
-                            (new_short_id("lead"), lead["url"], lead["title"], "paid-task platform", time.time()),
-                        )
+                        leads.insert_ignore({
+                            "id": new_short_id("lead"), "url": lead["url"],
+                            "title": lead["title"],
+                            "note": "paid-task platform",
+                            "created_at": time.time()})
+                else:
+                    with self.context.db.transaction():
+                        for lead in out:
+                            self.context.db.execute(
+                                "INSERT OR IGNORE INTO search_leads (id, url, title, note, created_at) "
+                                "VALUES (?, ?, ?, ?, ?)",
+                                (new_short_id("lead"), lead["url"], lead["title"], "paid-task platform", time.time()),
+                            )
             except Exception as exc:  # noqa: BLE001
                 _log.warning("could not save leads: %s", exc)
         return out
 
     def history(self, limit: int = 20) -> list[dict[str, Any]]:
         try:
+            log = self._t("search_log")
+            if log is not None:
+                rows = log.all()
+                rows.sort(key=lambda r: r.get("created_at") or 0,
+                          reverse=True)
+                return rows[:limit]
             rows = self.context.db.query(
                 "SELECT * FROM search_log ORDER BY created_at DESC LIMIT ?", (limit,)
             )
@@ -455,10 +470,26 @@ class SearchEngine:
         return list(rows)
 
     # ── persistence ─────────────────────────────────────────────────────────
+    def _t(self, table: str):
+        """The seam-backed table (Mongo P3), or None on the SQLite
+        default, where the native statements run unchanged."""
+        from ...storage.rowstore import attached_rows
+        return attached_rows(self.context.db, table)
+
     def _journal(self, report: dict[str, Any]) -> None:
         try:
             import json
 
+            log = self._t("search_log")
+            if log is not None:
+                log.put({
+                    "id": report["id"], "query": report["query"],
+                    "mode": report["mode"],
+                    "results": json.dumps(report["results"]),
+                    "summary": report["summary"][:8000],
+                    "seconds": report["seconds"],
+                    "created_at": time.time()})
+                return
             with self.context.db.transaction():
                 self.context.db.execute(
                     "INSERT INTO search_log (id, query, mode, results, summary, seconds, created_at) "
@@ -478,7 +509,11 @@ class SearchEngine:
 
     def _cache_get(self, url: str) -> dict[str, Any] | None:
         try:
-            row = self.context.db.query_one("SELECT * FROM page_cache WHERE url = ?", (url,))
+            cache = self._t("page_cache")
+            if cache is not None:
+                row = cache.get(url)
+            else:
+                row = self.context.db.query_one("SELECT * FROM page_cache WHERE url = ?", (url,))
         except Exception:  # noqa: BLE001
             return None
         if not row:
@@ -495,6 +530,12 @@ class SearchEngine:
 
     def _cache_put(self, page: dict[str, Any]) -> None:
         try:
+            cache = self._t("page_cache")
+            if cache is not None:
+                cache.put({"url": page["url"], "title": page["title"],
+                           "text": page["text"][:60000],
+                           "fetched_at": time.time()})
+                return
             with self.context.db.transaction():
                 self.context.db.execute(
                     "INSERT INTO page_cache (url, title, text, fetched_at) VALUES (?, ?, ?, ?) "

@@ -99,6 +99,24 @@ CREATE INDEX IF NOT EXISTS idx_trial_sms_watches_state
 #: not an archive.
 _SMS_WATCH_TTL = 7 * 24 * 3600
 
+
+def _runs_table(db: Any):
+    """The seam-backed trial_assist_runs table (Mongo P3), or None on
+    the SQLite default, where the native statements run unchanged."""
+    if db is None:
+        return None
+    from ...storage.rowstore import attached_rows
+    return attached_rows(db, "trial_assist_runs")
+
+
+def _watches_table(db: Any):
+    """The seam-backed trial_sms_watches table (Mongo P3), or None on
+    the SQLite default, where the native statements run unchanged."""
+    if db is None:
+        return None
+    from ...storage.rowstore import attached_rows
+    return attached_rows(db, "trial_sms_watches")
+
 #: kv_store key where the latest grabbed temp number is stashed so
 #: ``/trial sms code`` can poll it without the owner pasting JSON around.
 TEMP_SMS_KV_KEY = "trial.temp_sms"
@@ -869,16 +887,27 @@ class TrialFlow:
         if not run:
             return
         try:
-            self.db.execute(
-                "INSERT OR REPLACE INTO trial_assist_runs"
-                " (run_id, platform, chat_key, started, state, note,"
-                " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (run_id, str(run.get("platform", "")),
-                 str(run.get("chat_key", "")),
-                 float(run.get("started", 0) or 0),
-                 str(run.get("state", "")),
-                 str(run.get("note", ""))[:2000], time.time()),
-            )
+            runs = _runs_table(self.db)
+            if runs is not None:
+                runs.put({
+                    "run_id": run_id,
+                    "platform": str(run.get("platform", "")),
+                    "chat_key": str(run.get("chat_key", "")),
+                    "started": float(run.get("started", 0) or 0),
+                    "state": str(run.get("state", "")),
+                    "note": str(run.get("note", ""))[:2000],
+                    "updated_at": time.time()})
+            else:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO trial_assist_runs"
+                    " (run_id, platform, chat_key, started, state, note,"
+                    " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (run_id, str(run.get("platform", "")),
+                     str(run.get("chat_key", "")),
+                     float(run.get("started", 0) or 0),
+                     str(run.get("state", "")),
+                     str(run.get("note", ""))[:2000], time.time()),
+                )
         except Exception as exc:  # noqa: BLE001 - persistence is best-effort
             record_failure("flow._persist_assist_run", exc)
             _log.debug("trial assist run persist failed for %s", run_id)
@@ -887,10 +916,15 @@ class TrialFlow:
         """Reload persisted runs; prune terminal runs older than the TTL."""
         if self.db is None:
             return
+        runs = _runs_table(self.db)
         try:
-            rows = self.db.query(
-                "SELECT run_id, platform, chat_key, started, state, note"
-                " FROM trial_assist_runs ORDER BY started")
+            if runs is not None:
+                rows = runs.all()
+                rows.sort(key=lambda r: r.get("started") or 0)
+            else:
+                rows = self.db.query(
+                    "SELECT run_id, platform, chat_key, started, state, note"
+                    " FROM trial_assist_runs ORDER BY started")
         except Exception as exc:  # noqa: BLE001
             record_failure("flow._load_assist_runs.query", exc)
             return
@@ -910,11 +944,16 @@ class TrialFlow:
                     "note": str(row.get("note") or ""),
                 }
         try:
-            self.db.execute(
-                "DELETE FROM trial_assist_runs WHERE started < ?"
-                f" AND state IN ({terminal})",
-                (cutoff,),
-            )
+            if runs is not None:
+                runs.delete_where({
+                    "started": {"$lt": cutoff},
+                    "state": {"$in": sorted(_ASSIST_TERMINAL_STATES)}})
+            else:
+                self.db.execute(
+                    "DELETE FROM trial_assist_runs WHERE started < ?"
+                    f" AND state IN ({terminal})",
+                    (cutoff,),
+                )
         except Exception as exc:  # noqa: BLE001 - pruning is best-effort
             record_failure("flow._load_assist_runs.prune", exc)
             _log.debug("trial assist run prune failed")
@@ -962,14 +1001,21 @@ class TrialFlow:
         db = getattr(context, "db", None)
         if db is None:
             return recovered
+        runs = None
         try:
             db.executescript(_ASSIST_RUNS_DDL)
-            terminal = ", ".join(f"'{s}'"
-                                 for s in sorted(_ASSIST_TERMINAL_STATES))
-            rows = db.query(
-                "SELECT run_id, platform, chat_key, started"
-                " FROM trial_assist_runs WHERE state NOT IN"
-                f" ({terminal}) ORDER BY started")
+            runs = _runs_table(db)
+            if runs is not None:
+                rows = [r for r in runs.all()
+                        if r.get("state") not in _ASSIST_TERMINAL_STATES]
+                rows.sort(key=lambda r: r.get("started") or 0)
+            else:
+                terminal = ", ".join(f"'{s}'"
+                                     for s in sorted(_ASSIST_TERMINAL_STATES))
+                rows = db.query(
+                    "SELECT run_id, platform, chat_key, started"
+                    " FROM trial_assist_runs WHERE state NOT IN"
+                    f" ({terminal}) ORDER BY started")
         except Exception as exc:  # noqa: BLE001
             record_failure("flow.recover_interrupted_runs.query", exc)
             return recovered
@@ -985,11 +1031,15 @@ class TrialFlow:
                 f"  /trial assist {platform}"
             )
             try:
-                db.execute(
-                    "UPDATE trial_assist_runs SET state='interrupted',"
-                    " note=?, updated_at=? WHERE run_id=?",
-                    (note, time.time(), rid),
-                )
+                if runs is not None:
+                    runs.update(rid, {"state": "interrupted", "note": note,
+                                      "updated_at": time.time()})
+                else:
+                    db.execute(
+                        "UPDATE trial_assist_runs SET state='interrupted',"
+                        " note=?, updated_at=? WHERE run_id=?",
+                        (note, time.time(), rid),
+                    )
             except Exception as exc:  # noqa: BLE001
                 record_failure("flow.recover_interrupted_runs.interrupt_mark", exc)
                 _log.debug("trial run interrupt-mark failed for %s", rid)
@@ -1136,21 +1186,37 @@ class TrialFlow:
         if not watch:
             return
         try:
-            self.db.execute(
-                "INSERT OR REPLACE INTO trial_sms_watches"
-                " (watch_id, number, number_info, chat_key, started,"
-                "  deadline, timeout, state, code, note, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (watch_id, str(watch.get("number", "")),
-                 json.dumps(watch.get("number_info") or {}),
-                 str(watch.get("chat_key", "")),
-                 float(watch.get("started", 0) or 0),
-                 float(watch.get("deadline", 0) or 0),
-                 float(watch.get("timeout", 0) or 0),
-                 str(watch.get("state", "")),
-                 str(watch.get("code", "")),
-                 str(watch.get("note", ""))[:2000], time.time()),
-            )
+            watches = _watches_table(self.db)
+            if watches is not None:
+                watches.put({
+                    "watch_id": watch_id,
+                    "number": str(watch.get("number", "")),
+                    "number_info": json.dumps(watch.get("number_info")
+                                              or {}),
+                    "chat_key": str(watch.get("chat_key", "")),
+                    "started": float(watch.get("started", 0) or 0),
+                    "deadline": float(watch.get("deadline", 0) or 0),
+                    "timeout": float(watch.get("timeout", 0) or 0),
+                    "state": str(watch.get("state", "")),
+                    "code": str(watch.get("code", "")),
+                    "note": str(watch.get("note", ""))[:2000],
+                    "updated_at": time.time()})
+            else:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO trial_sms_watches"
+                    " (watch_id, number, number_info, chat_key, started,"
+                    "  deadline, timeout, state, code, note, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (watch_id, str(watch.get("number", "")),
+                     json.dumps(watch.get("number_info") or {}),
+                     str(watch.get("chat_key", "")),
+                     float(watch.get("started", 0) or 0),
+                     float(watch.get("deadline", 0) or 0),
+                     float(watch.get("timeout", 0) or 0),
+                     str(watch.get("state", "")),
+                     str(watch.get("code", "")),
+                     str(watch.get("note", ""))[:2000], time.time()),
+                )
         except Exception as exc:  # noqa: BLE001 - persistence is best-effort
             record_failure("flow._persist_sms_watch", exc)
             _log.debug("trial sms watch persist failed for %s", watch_id)
@@ -1159,11 +1225,16 @@ class TrialFlow:
         """Reload persisted watches; prune terminal ones older than the TTL."""
         if self.db is None:
             return
+        watches = _watches_table(self.db)
         try:
-            rows = self.db.query(
-                "SELECT watch_id, number, number_info, chat_key, started,"
-                " deadline, timeout, state, code, note"
-                " FROM trial_sms_watches ORDER BY started")
+            if watches is not None:
+                rows = watches.all()
+                rows.sort(key=lambda r: r.get("started") or 0)
+            else:
+                rows = self.db.query(
+                    "SELECT watch_id, number, number_info, chat_key, started,"
+                    " deadline, timeout, state, code, note"
+                    " FROM trial_sms_watches ORDER BY started")
         except Exception as exc:  # noqa: BLE001
             record_failure("flow._load_sms_watches.query", exc)
             return
@@ -1192,11 +1263,16 @@ class TrialFlow:
                     "note": str(row.get("note") or ""),
                 }
         try:
-            self.db.execute(
-                "DELETE FROM trial_sms_watches WHERE started < ?"
-                f" AND state IN ({terminal})",
-                (cutoff,),
-            )
+            if watches is not None:
+                watches.delete_where({
+                    "started": {"$lt": cutoff},
+                    "state": {"$in": sorted(_SMS_WATCH_TERMINAL_STATES)}})
+            else:
+                self.db.execute(
+                    "DELETE FROM trial_sms_watches WHERE started < ?"
+                    f" AND state IN ({terminal})",
+                    (cutoff,),
+                )
         except Exception as exc:  # noqa: BLE001 - pruning is best-effort
             record_failure("flow._load_sms_watches.prune", exc)
             _log.debug("trial sms watch prune failed")
@@ -1245,12 +1321,18 @@ class TrialFlow:
         db = getattr(context, "db", None)
         if db is None:
             return recovered
+        watches = None
         try:
             db.executescript(_SMS_WATCHES_DDL)
-            rows = db.query(
-                "SELECT watch_id, number, number_info, chat_key, started,"
-                " deadline, timeout FROM trial_sms_watches"
-                " WHERE state='watching' ORDER BY started")
+            watches = _watches_table(db)
+            if watches is not None:
+                rows = watches.find({"state": "watching"})
+                rows.sort(key=lambda r: r.get("started") or 0)
+            else:
+                rows = db.query(
+                    "SELECT watch_id, number, number_info, chat_key, started,"
+                    " deadline, timeout FROM trial_sms_watches"
+                    " WHERE state='watching' ORDER BY started")
         except Exception as exc:  # noqa: BLE001
             record_failure("flow.recover_interrupted_watches.query", exc)
             return recovered
@@ -1275,11 +1357,16 @@ class TrialFlow:
         def _finish(watch_id: str, state: str, code: str,
                     note: str) -> None:
             try:
-                db.execute(
-                    "UPDATE trial_sms_watches SET state=?, code=?, note=?,"
-                    " updated_at=? WHERE watch_id=?",
-                    (state, code, note[:2000], time.time(), watch_id),
-                )
+                if watches is not None:
+                    watches.update(watch_id, {
+                        "state": state, "code": code,
+                        "note": note[:2000], "updated_at": time.time()})
+                else:
+                    db.execute(
+                        "UPDATE trial_sms_watches SET state=?, code=?, "
+                        "note=?, updated_at=? WHERE watch_id=?",
+                        (state, code, note[:2000], time.time(), watch_id),
+                    )
             except Exception as exc:  # noqa: BLE001
                 record_failure("flow.recover_interrupted_watches.finish", exc)
                 _log.debug("trial sms watch close failed for %s", watch_id)
@@ -1368,11 +1455,15 @@ class TrialFlow:
                 f"for another {remaining:.0f}s."
             )
             try:
-                db.execute(
-                    "UPDATE trial_sms_watches SET note=?, updated_at=?"
-                    " WHERE watch_id=?",
-                    (note[:2000], time.time(), wid),
-                )
+                if watches is not None:
+                    watches.update(wid, {"note": note[:2000],
+                                         "updated_at": time.time()})
+                else:
+                    db.execute(
+                        "UPDATE trial_sms_watches SET note=?, updated_at=?"
+                        " WHERE watch_id=?",
+                        (note[:2000], time.time(), wid),
+                    )
             except Exception as exc:  # noqa: BLE001
                 record_failure("flow.recover_interrupted_watches.resume_mark", exc)
                 _log.debug("trial sms watch resume-mark failed: %s", wid)

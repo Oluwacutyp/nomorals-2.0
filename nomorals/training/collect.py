@@ -397,11 +397,16 @@ class TrainingCollector:
         # ``exclude_prefixes`` (e.g. ("telegram:",)) hands social-platform
         # conversations to the quality-pair miner instead of the whole-convo
         # reader, so the same chat is not trained on twice.
-        rows = self._rows(
-            "SELECT * FROM messages WHERE created_at >= ? ORDER BY conversation_id, created_at, rowid",
-            since,
-            limit=limit,
-        )
+        from ..storage.conversations import ConversationLog
+        try:
+            rows = ConversationLog(self.db).messages_since(since)
+        except Exception as exc:  # absent optional tables should not stop harvest
+            if "no such table" in str(exc).lower():
+                rows = []
+            else:
+                raise
+        if limit:
+            rows = rows[:limit]
         grouped: dict[str, list[Turn]] = {}
         ids: dict[str, str] = {}
         for row in rows:
@@ -518,25 +523,22 @@ class TrainingCollector:
         surrounding :meth:`collect` pass like every other source.
         """
         out: list[Example] = []
+        from ..storage.conversations import ConversationLog
+        try:
+            all_rows = ConversationLog(self.db).messages_since(since)
+        except Exception as exc:  # noqa: BLE001 - optional table absent
+            if "no such table" in str(exc).lower():
+                all_rows = []
+            else:
+                raise
         for platform in platforms:
             prefix = str(platform).strip().lower()
             if not prefix:
                 continue
-            sql = (
-                "SELECT id, conversation_id, role, content, created_at FROM messages "
-                "WHERE conversation_id LIKE ? AND created_at >= ? "
-                "ORDER BY conversation_id, created_at, rowid"
-            )
-            params: tuple[Any, ...] = (f"{prefix}:%", since)
+            rows = [r for r in all_rows
+                    if str(r.get("conversation_id") or "").startswith(f"{prefix}:")]
             if limit:
-                sql += " LIMIT ?"
-                params = (f"{prefix}:%", since, limit * 10)
-            try:
-                rows = [dict(r) for r in self.db.query(sql, params)]
-            except Exception as exc:  # noqa: BLE001 - optional table absent
-                if "no such table" in str(exc).lower():
-                    continue
-                raise
+                rows = rows[: limit * 10]
             grouped: dict[str, list[Turn]] = {}
             for row in rows:
                 role = str(row.get("role") or "")
@@ -717,14 +719,13 @@ class ConversationMiner:
     # ── source ──────────────────────────────────────────────────────────────
     def conversations(self, *, since: float = 0.0) -> list[list[Turn]]:
         """All partner conversations, oldest message first."""
-        sql = (
-            "SELECT m.* FROM messages m "
-            "JOIN conversations c ON c.id = m.conversation_id "
-            "WHERE c.agent = 'partner' AND m.created_at >= ? "
-            "ORDER BY m.conversation_id, m.created_at, m.rowid"
-        )
+        from ..storage.conversations import ConversationLog
+        log = ConversationLog(self.db)
         try:
-            rows = [dict(r) for r in self.db.query(sql, (since,))]
+            partner_ids = {c["id"] for c in log.conversations()
+                           if c.get("agent") == "partner"}
+            rows = [r for r in log.messages_since(since)
+                    if r.get("conversation_id") in partner_ids]
         except Exception as exc:
             if "no such table" in str(exc).lower():
                 return []

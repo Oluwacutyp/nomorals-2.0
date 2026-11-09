@@ -91,11 +91,21 @@ class CoreBlocks:
         except Exception:  # noqa: BLE001
             _log.debug("core blocks schema init failed", exc_info=True)
 
+    def _table(self):
+        """The seam-backed table (Mongo P3), or None on the SQLite
+        default, where the native statements below run unchanged."""
+        from ..storage.rowstore import attached_rows
+        return attached_rows(self._db, "memory_core_blocks")
+
     # -- reads ------------------------------------------------------------
 
     def get(self, name: str) -> str:
         """Block text, "" when unset or the store is broken."""
         try:
+            table = self._table()
+            if table is not None:
+                row = table.get((name or "").strip().lower())
+                return str(row["text"]) if row else ""
             cur = self._db.execute(
                 "SELECT text FROM memory_core_blocks WHERE name = ?",
                 ((name or "").strip().lower(),))
@@ -110,6 +120,9 @@ class CoreBlocks:
     def all(self) -> dict[str, str]:
         """Every block as name → text."""
         try:
+            table = self._table()
+            if table is not None:
+                return {str(r["name"]): str(r["text"]) for r in table.all()}
             rows = self._db.execute(
                 "SELECT name, text FROM memory_core_blocks").fetchall()
             out = {}
@@ -153,6 +166,10 @@ class CoreBlocks:
     def clear(self, name: str) -> bool:
         """Empty a block. True on success."""
         try:
+            table = self._table()
+            if table is not None:
+                table.delete((name or "").strip().lower())
+                return True
             self._db.execute(
                 "DELETE FROM memory_core_blocks WHERE name = ?",
                 ((name or "").strip().lower(),))
@@ -174,12 +191,17 @@ class CoreBlocks:
             if len(text) > self.limit:
                 text = text[:self.limit]
                 truncated = True
-            self._db.execute(
-                """INSERT INTO memory_core_blocks (name, text, updated_at)
-                   VALUES (?,?,?)
-                   ON CONFLICT(name) DO UPDATE SET
-                     text=excluded.text, updated_at=excluded.updated_at""",
-                (name, text, time.time()))
+            table = self._table()
+            if table is not None:
+                table.put({"name": name, "text": text,
+                           "updated_at": time.time()})
+            else:
+                self._db.execute(
+                    """INSERT INTO memory_core_blocks (name, text, updated_at)
+                       VALUES (?,?,?)
+                       ON CONFLICT(name) DO UPDATE SET
+                         text=excluded.text, updated_at=excluded.updated_at""",
+                    (name, text, time.time()))
             result.update(ok=True, chars=len(text), truncated=truncated,
                           pressure=self._pressure_for(name, len(text)))
             return result

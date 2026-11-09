@@ -101,6 +101,12 @@ class CanaryRollout:
         self.min_hours = min_hours
         self._rng = rng or random.Random()
 
+    def _t(self, table: str):
+        """The seam-backed table (Mongo P3), or None on the SQLite
+        default, where the native statements below run unchanged."""
+        from ..storage.rowstore import attached_rows
+        return attached_rows(self.db, table)
+
     # ── versions: hash chain per skill ──────────────────────────────────────
     @staticmethod
     def _hash(parent_hash: str, body: str) -> str:
@@ -109,6 +115,14 @@ class CanaryRollout:
 
     def latest_hash(self, skill_name: str) -> str:
         try:
+            versions = self._t("skill_versions")
+            if versions is not None:
+                rows = versions.find({"skill_name": skill_name})
+                if not rows:
+                    return ""
+                rows.sort(key=lambda r: r.get("created_at") or 0,
+                          reverse=True)
+                return str(rows[0]["version_hash"])
             row = self.db.query_one(
                 "SELECT version_hash FROM skill_versions WHERE skill_name=? "
                 "ORDER BY created_at DESC LIMIT 1", (skill_name,))
@@ -122,21 +136,34 @@ class CanaryRollout:
         parent = self.latest_hash(skill_name)
         vhash = self._hash(parent, body)
         try:
-            self.db.execute(
-                "INSERT OR IGNORE INTO skill_versions (id, skill_name, "
-                "version_hash, parent_hash, body, source, created_at) VALUES "
-                "(?,?,?,?,?,?,?)",
-                (new_short_id("skver"), skill_name, vhash, parent, body,
-                 source[:80], time.time()))
+            versions = self._t("skill_versions")
+            if versions is not None:
+                versions.insert_ignore({
+                    "id": new_short_id("skver"), "skill_name": skill_name,
+                    "version_hash": vhash, "parent_hash": parent,
+                    "body": body, "source": source[:80],
+                    "created_at": time.time()})
+            else:
+                self.db.execute(
+                    "INSERT OR IGNORE INTO skill_versions (id, skill_name, "
+                    "version_hash, parent_hash, body, source, created_at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (new_short_id("skver"), skill_name, vhash, parent, body,
+                     source[:80], time.time()))
         except Exception:  # noqa: BLE001
             _log.debug("skill_versions store failed", exc_info=True)
         return vhash
 
     def get_body(self, skill_name: str, version_hash: str) -> str | None:
         try:
-            row = self.db.query_one(
-                "SELECT body FROM skill_versions WHERE skill_name=? AND "
-                "version_hash=?", (skill_name, version_hash))
+            versions = self._t("skill_versions")
+            if versions is not None:
+                row = versions.find_one({"skill_name": skill_name,
+                                         "version_hash": version_hash})
+            else:
+                row = self.db.query_one(
+                    "SELECT body FROM skill_versions WHERE skill_name=? AND "
+                    "version_hash=?", (skill_name, version_hash))
         except Exception:  # noqa: BLE001
             return None
         return row["body"] if row else None
@@ -144,6 +171,16 @@ class CanaryRollout:
     def versions(self, skill_name: str, *,
                  limit: int = 20) -> list[dict[str, Any]]:
         try:
+            versions = self._t("skill_versions")
+            if versions is not None:
+                rows = versions.find({"skill_name": skill_name})
+                rows.sort(key=lambda r: r.get("created_at") or 0,
+                          reverse=True)
+                return [{"version_hash": r["version_hash"],
+                         "parent_hash": r["parent_hash"],
+                         "source": r["source"],
+                         "created_at": r["created_at"]}
+                        for r in rows[:limit]]
             rows = self.db.query(
                 "SELECT version_hash, parent_hash, source, created_at FROM "
                 "skill_versions WHERE skill_name=? ORDER BY created_at DESC "
@@ -184,12 +221,20 @@ class CanaryRollout:
                                           source="canary")
         run_id = new_short_id("canary")
         try:
-            self.db.execute(
-                "INSERT INTO canary_runs (id, skill_name, canary_hash, "
-                "baseline_hash, fraction, status, started_at) VALUES "
-                "(?,?,?,?,?,'running',?)",
-                (run_id, skill_name, canary_hash, baseline_hash, fraction,
-                 time.time()))
+            runs = self._t("canary_runs")
+            if runs is not None:
+                runs.put({
+                    "id": run_id, "skill_name": skill_name,
+                    "canary_hash": canary_hash,
+                    "baseline_hash": baseline_hash, "fraction": fraction,
+                    "status": "running", "started_at": time.time()})
+            else:
+                self.db.execute(
+                    "INSERT INTO canary_runs (id, skill_name, canary_hash, "
+                    "baseline_hash, fraction, status, started_at) VALUES "
+                    "(?,?,?,?,?,'running',?)",
+                    (run_id, skill_name, canary_hash, baseline_hash, fraction,
+                     time.time()))
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)[:200]}
         _log.info("canary started for %s (%s -> %s, %.0f%%)",
@@ -200,6 +245,15 @@ class CanaryRollout:
 
     def active(self, skill_name: str) -> CanaryRun | None:
         try:
+            runs = self._t("canary_runs")
+            if runs is not None:
+                rows = runs.find({"skill_name": skill_name,
+                                  "status": "running"})
+                if not rows:
+                    return None
+                rows.sort(key=lambda r: r.get("started_at") or 0,
+                          reverse=True)
+                return CanaryRun.from_row(rows[0])
             row = self.db.query_one(
                 "SELECT * FROM canary_runs WHERE skill_name=? AND status="
                 "'running' ORDER BY started_at DESC LIMIT 1", (skill_name,))
@@ -216,11 +270,19 @@ class CanaryRollout:
                 return
             if version_hash not in (run.canary_hash, run.baseline_hash):
                 return
-            self.db.execute(
-                "INSERT INTO canary_observations (id, canary_id, "
-                "version_hash, success, observed_at) VALUES (?,?,?,?,?)",
-                (new_short_id("cob"), run.id, version_hash,
-                 1 if success else 0, time.time()))
+            observations = self._t("canary_observations")
+            if observations is not None:
+                observations.put({
+                    "id": new_short_id("cob"), "canary_id": run.id,
+                    "version_hash": version_hash,
+                    "success": 1 if success else 0,
+                    "observed_at": time.time()})
+            else:
+                self.db.execute(
+                    "INSERT INTO canary_observations (id, canary_id, "
+                    "version_hash, success, observed_at) VALUES (?,?,?,?,?)",
+                    (new_short_id("cob"), run.id, version_hash,
+                     1 if success else 0, time.time()))
         except Exception:  # noqa: BLE001
             _log.debug("canary observe failed", exc_info=True)
 
@@ -248,6 +310,19 @@ class CanaryRollout:
         """(ok, n) per version for a run."""
         out = {"canary": (0, 0), "baseline": (0, 0)}
         try:
+            observations = self._t("canary_observations")
+            if observations is not None:
+                agg_s: dict[str, list[int]] = {}
+                for r in observations.find({"canary_id": run.id}):
+                    key = ("canary" if r["version_hash"] == run.canary_hash
+                           else "baseline")
+                    ok, n = agg_s.get(key, [0, 0])
+                    if r["success"]:
+                        ok += 1
+                    agg_s[key] = [ok, n + 1]
+                for k, (ok, n) in agg_s.items():
+                    out[k] = (ok, n)
+                return out
             rows = self.db.query(
                 "SELECT version_hash, success, COUNT(*) AS n FROM "
                 "canary_observations WHERE canary_id=? GROUP BY "
@@ -325,10 +400,18 @@ class CanaryRollout:
         else:
             status = "promoted" if decision == "promote" else "reverted"
         try:
-            self.db.execute(
-                "UPDATE canary_runs SET status=?, decision=?, "
-                "decision_detail=?, decided_at=? WHERE id=?",
-                (status, decision, json.dumps(detail), time.time(), run.id))
+            runs = self._t("canary_runs")
+            if runs is not None:
+                runs.update(run.id, {
+                    "status": status, "decision": decision,
+                    "decision_detail": json.dumps(detail),
+                    "decided_at": time.time()})
+            else:
+                self.db.execute(
+                    "UPDATE canary_runs SET status=?, decision=?, "
+                    "decision_detail=?, decided_at=? WHERE id=?",
+                    (status, decision, json.dumps(detail), time.time(),
+                     run.id))
         except Exception as exc:  # noqa: BLE001
             assert isinstance(exc, Exception)
             # The decision was NOT recorded: returning the success dict
@@ -346,6 +429,13 @@ class CanaryRollout:
     def history(self, skill_name: str = "",
                 limit: int = 20) -> list[CanaryRun]:
         try:
+            runs = self._t("canary_runs")
+            if runs is not None:
+                rows = runs.find(
+                    {"skill_name": skill_name} if skill_name else None)
+                rows.sort(key=lambda r: r.get("started_at") or 0,
+                          reverse=True)
+                return [CanaryRun.from_row(r) for r in rows[:limit]]
             q = "SELECT * FROM canary_runs"
             args: tuple = ()
             if skill_name:

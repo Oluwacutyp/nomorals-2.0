@@ -53,6 +53,16 @@ def _db(context: Any) -> Any | None:
     return getattr(context, "db", None)
 
 
+def _jobs_table(context: Any):
+    """The seam-backed research_jobs table (Mongo P3), or None on the
+    SQLite default, where the native statements run unchanged."""
+    db = _db(context)
+    if db is None:
+        return None
+    from ...storage.rowstore import attached_rows
+    return attached_rows(db, "research_jobs")
+
+
 def _now() -> float:
     return time.time()
 
@@ -64,6 +74,25 @@ def _store(context: Any, job: dict[str, Any]) -> None:
             _FALLBACK[job["id"]] = dict(job)
         return
     try:
+        jobs = _jobs_table(context)
+        if jobs is not None:
+            # The native upsert refreshes only the mutable fields on
+            # conflict; the seam mirrors that exactly.
+            fields = {
+                "state": job["state"], "progress": job.get("progress", ""),
+                "result": json.dumps(job.get("report") or {}),
+                "error": job.get("error", ""), "updated_at": _now(),
+            }
+            if jobs.get(job["id"]) is not None:
+                jobs.update(job["id"], fields)
+            else:
+                jobs.put({
+                    "id": job["id"], "query": job["query"],
+                    "mode": job["mode"],
+                    "params": json.dumps(job.get("params") or {}),
+                    "created_at": job.get("created_at", _now()),
+                    **fields})
+            return
         with db.transaction():
             db.execute(
                 "INSERT INTO research_jobs "
@@ -91,7 +120,11 @@ def _load(context: Any, job_id: str) -> dict[str, Any] | None:
     db = _db(context)
     if db is not None:
         try:
-            row = db.query_one("SELECT * FROM research_jobs WHERE id = ?", (job_id,))
+            jobs = _jobs_table(context)
+            if jobs is not None:
+                row = jobs.get(job_id)
+            else:
+                row = db.query_one("SELECT * FROM research_jobs WHERE id = ?", (job_id,))
         except Exception:  # noqa: BLE001
             row = None
         if row:
@@ -120,9 +153,16 @@ def _list(context: Any, limit: int = 20) -> list[dict[str, Any]]:
     db = _db(context)
     if db is not None:
         try:
-            rows = db.query(
-                "SELECT * FROM research_jobs ORDER BY created_at DESC LIMIT ?", (limit,)
-            )
+            jobs_t = _jobs_table(context)
+            if jobs_t is not None:
+                all_rows = jobs_t.all()
+                all_rows.sort(key=lambda r: r.get("created_at") or 0,
+                              reverse=True)
+                rows = all_rows[:limit]
+            else:
+                rows = db.query(
+                    "SELECT * FROM research_jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+                )
             for row in rows or []:
                 job = _load(context, row["id"])
                 if job:

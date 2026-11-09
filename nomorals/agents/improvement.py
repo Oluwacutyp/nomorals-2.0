@@ -361,9 +361,20 @@ class ImprovementLoop:
             lines.append(f"  [{mark}] {d.get('task', '')}: {d.get('detail', '')}")
         return "\n".join(lines) or "(no task details)"
 
+    def _runs(self):
+        """The seam-backed improvement_runs table (Mongo P3), or None on
+        the SQLite default, where the native statements run unchanged."""
+        from ..storage.rowstore import attached_rows
+        return attached_rows(self.db, "improvement_runs")
+
     def _recently_regressed(self, dimension: str, *, window_h: float = 24.0
                             ) -> bool:
         cutoff = time.time() - window_h * 3600
+        runs = self._runs()
+        if runs is not None:
+            return runs.find_one({
+                "dimension": dimension, "status": "regressed",
+                "created_at": {"$gt": cutoff}}) is not None
         row = self.db.query_one(
             "SELECT 1 FROM improvement_runs WHERE dimension=? AND status="
             "'regressed' AND created_at > ? LIMIT 1", (dimension, cutoff))
@@ -381,20 +392,32 @@ class ImprovementLoop:
             action=action, rationale=rationale[:500],
             edit_summary=edit_summary[:400], status=status,
             created_at=time.time(), details=details)
-        self.db.execute(
-            "INSERT INTO improvement_runs (id, dimension, before_score, "
-            "after_score, delta, proposal_id, action, rationale, "
-            "edit_summary, status, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            # improvement_runs score columns are NOT NULL (migrations):
-            # 0.0 is the no-score sentinel, '' the no-text sentinel.
-            # The returned CycleRecord keeps None (Optional[float]) —
-            # only the persisted row is coerced to the schema contract.
-            (cycle_id, dimension,
-             before if before is not None else 0.0,
-             after if after is not None else 0.0,
-             delta if delta is not None else 0.0,
-             proposal_id or "", action,
-             rec.rationale, rec.edit_summary, status, rec.created_at))
+        runs = self._runs()
+        if runs is not None:
+            runs.put({
+                "id": cycle_id, "dimension": dimension,
+                "before_score": before if before is not None else 0.0,
+                "after_score": after if after is not None else 0.0,
+                "delta": delta if delta is not None else 0.0,
+                "proposal_id": proposal_id or "", "action": action,
+                "rationale": rec.rationale,
+                "edit_summary": rec.edit_summary, "status": status,
+                "created_at": rec.created_at})
+        else:
+            self.db.execute(
+                "INSERT INTO improvement_runs (id, dimension, before_score, "
+                "after_score, delta, proposal_id, action, rationale, "
+                "edit_summary, status, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                # improvement_runs score columns are NOT NULL (migrations):
+                # 0.0 is the no-score sentinel, '' the no-text sentinel.
+                # The returned CycleRecord keeps None (Optional[float]) —
+                # only the persisted row is coerced to the schema contract.
+                (cycle_id, dimension,
+                 before if before is not None else 0.0,
+                 after if after is not None else 0.0,
+                 delta if delta is not None else 0.0,
+                 proposal_id or "", action,
+                 rec.rationale, rec.edit_summary, status, rec.created_at))
         # stash full details in kv so history can show them
         try:
             KVStore(self.db).set_raw(
@@ -408,6 +431,11 @@ class ImprovementLoop:
 
     # ── approval flow ───────────────────────────────────────────────────────
     def pending_approvals(self) -> list[CycleRecord]:
+        runs = self._runs()
+        if runs is not None:
+            rows = runs.find({"status": "pending"})
+            rows.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+            return [CycleRecord.from_row(r) for r in rows[:50]]
         rows = self.db.query(
             "SELECT * FROM improvement_runs WHERE status='pending' ORDER BY "
             "created_at DESC LIMIT 50")
@@ -415,8 +443,12 @@ class ImprovementLoop:
 
     def approve(self, cycle_id: str) -> dict[str, Any]:
         """Apply a held (approval-mode) cycle now, then re-benchmark."""
-        row = self.db.query_one(
-            "SELECT * FROM improvement_runs WHERE id=?", (cycle_id,))
+        runs = self._runs()
+        if runs is not None:
+            row = runs.get(cycle_id)
+        else:
+            row = self.db.query_one(
+                "SELECT * FROM improvement_runs WHERE id=?", (cycle_id,))
         if not row or row["status"] != "pending":
             return {"ok": False, "error": "no pending cycle with that id"}
         proposal_id = row["proposal_id"]
@@ -429,10 +461,15 @@ class ImprovementLoop:
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)[:200]}
         if not out.get("applied"):
-            self.db.execute(
-                "UPDATE improvement_runs SET status='regressed', action="
-                "'reverted', rationale=? WHERE id=?",
-                (out.get("reason", "reverted")[:500], cycle_id))
+            if runs is not None:
+                runs.update(cycle_id, {
+                    "status": "regressed", "action": "reverted",
+                    "rationale": out.get("reason", "reverted")[:500]})
+            else:
+                self.db.execute(
+                    "UPDATE improvement_runs SET status='regressed', action="
+                    "'reverted', rationale=? WHERE id=?",
+                    (out.get("reason", "reverted")[:500], cycle_id))
             return {"ok": False, "error": out.get("reason", "reverted")}
         rerun = run_benchmark(self.context, dimensions=[dimension], limit=2)
         dim = rerun.scores.get(dimension)
@@ -447,15 +484,29 @@ class ImprovementLoop:
             status = "regressed"
         else:
             status = "neutral"
-        self.db.execute(
-            "UPDATE improvement_runs SET after_score=?, delta=?, status=? "
-            "WHERE id=?",
-            (after if after is not None else 0.0,
-             delta if delta is not None else 0.0, status, cycle_id))
+        if runs is not None:
+            runs.update(cycle_id, {
+                "after_score": after if after is not None else 0.0,
+                "delta": delta if delta is not None else 0.0,
+                "status": status})
+        else:
+            self.db.execute(
+                "UPDATE improvement_runs SET after_score=?, delta=?, "
+                "status=? WHERE id=?",
+                (after if after is not None else 0.0,
+                 delta if delta is not None else 0.0, status, cycle_id))
         return {"ok": True, "status": status, "before": before,
                 "after": after, "delta": delta}
 
     def deny(self, cycle_id: str) -> bool:
+        runs = self._runs()
+        if runs is not None:
+            row = runs.get(cycle_id)
+            if not row or row.get("status") != "pending":
+                return False
+            runs.update(cycle_id, {"status": "skipped",
+                                   "action": "denied"})
+            return True
         row = self.db.query_one(
             "SELECT * FROM improvement_runs WHERE id=? AND status='pending'",
             (cycle_id,))
@@ -467,9 +518,15 @@ class ImprovementLoop:
 
     # ── history / status ────────────────────────────────────────────────────
     def history(self, *, limit: int = 20) -> list[CycleRecord]:
-        rows = self.db.query(
-            "SELECT * FROM improvement_runs ORDER BY created_at DESC LIMIT ?",
-            (limit,))
+        runs_t = self._runs()
+        if runs_t is not None:
+            rows = runs_t.all()
+            rows.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+            rows = rows[:limit]
+        else:
+            rows = self.db.query(
+                "SELECT * FROM improvement_runs ORDER BY created_at DESC "
+                "LIMIT ?", (limit,))
         out = []
         for r in rows:
             rec = CycleRecord.from_row(r)

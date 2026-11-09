@@ -928,14 +928,20 @@ class DevonAgent:
 
     def _tool_message_flow(self, args: dict[str, Any]) -> str:
         limit = _as_int(args.get("limit"), 14, lo=1, hi=60)
-        rows = self.context.db.query(
-            """SELECT c.id AS chat, c.channel, c.title,
-                      m.role, m.name, m.model, substr(m.content, 1, 90) AS content, m.created_at
-               FROM messages m
-               JOIN conversations c ON c.id = m.conversation_id
-               ORDER BY m.created_at DESC LIMIT ?""",
-            (limit * 3,),
-        )
+        from ..storage.conversations import ConversationLog
+        log = ConversationLog(self.context.db)
+        rows = []
+        for m in log.recent_messages(limit=limit * 3):
+            conv = log.get_conversation(m["conversation_id"])
+            if conv is None:
+                continue  # the JOIN drops messages with no conversation row
+            rows.append({
+                "chat": conv["id"], "channel": conv.get("channel"),
+                "title": conv.get("title"), "role": m.get("role"),
+                "name": m.get("name"), "model": m.get("model"),
+                "content": (m.get("content") or "")[:90],
+                "created_at": m.get("created_at"),
+            })
         if not rows:
             return "no messages recorded yet (brain has not persisted any chat)"
         # Group by chat, most recent chat first.
@@ -1285,19 +1291,17 @@ class DevonAgent:
     def _tool_trace(self, args: dict[str, Any]) -> str:
         chat_key = str(args.get("chat_key") or "").strip()
         limit = _as_int(args.get("limit"), 8, lo=1, hi=30)
+        from ..storage.conversations import ConversationLog
+        log = ConversationLog(self.context.db)
         if not chat_key:
             # Latest chat if none given.
-            row = self.context.db.query_one(
-                "SELECT id FROM chats ORDER BY last_active DESC LIMIT 1"
-            )
+            row = log.latest_chat()
             if not row:
                 return "no chats recorded"
             chat_key = row["id"]
-        rows = self.context.db.query(
-            """SELECT role, name, model, substr(content, 1, 120) AS content, created_at
-               FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?""",
-            (chat_key, limit * 2),
-        )
+        rows = log.history(chat_key, limit=limit * 2)
+        for m in rows:
+            m["content"] = (m.get("content") or "")[:120]
         if not rows:
             return f"no messages recorded for {chat_key}"
         rows = list(reversed(rows))

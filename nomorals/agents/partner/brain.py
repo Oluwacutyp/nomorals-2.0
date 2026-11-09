@@ -410,10 +410,9 @@ class PartnerBrain:
         """
         if limit <= 0:
             return []
-        rows = self.context.db.query(
-            "SELECT id, role, content, name FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?",
-            (chat_key, limit * 2),
-        )
+        from ...storage.conversations import ConversationLog
+        rows = ConversationLog(self.context.db).history(chat_key,
+                                                        limit=limit * 2)
         rows.reverse()
         out: list[Message] = []
         for row in rows:
@@ -459,18 +458,15 @@ class PartnerBrain:
         now = time.time()
         row_id = ulid_now()
         try:
-            with db.transaction():
-                db.execute(
-                    """INSERT INTO conversations (id, title, agent, channel, created_at, updated_at)
-                       VALUES (?, ?, 'partner', ?, 0, ?)
-                       ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at,
-                                                    title = CASE WHEN excluded.title != '' THEN excluded.title ELSE conversations.title END""",
-                    (conv_id, title, chat.platform, now),
-                )
-                db.execute(
-                    "INSERT INTO messages (id, conversation_id, role, content, name, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (row_id, conv_id, "user", message.text, sender, "", now),
-                )
+            from ...storage.conversations import ConversationLog
+            log = ConversationLog(db)
+            with log.transaction():
+                log.ensure_conversation(
+                    conv_id, title=title, agent="partner",
+                    channel=chat.platform, now=now)
+                log.append_message(
+                    row_id=row_id, conversation_id=conv_id, role="user",
+                    content=message.text, name=sender, model="", created_at=now)
             # Remember WHICH row this turn is, so history assembly can
             # keep it out of the prompt's history (the live turn is
             # appended separately by both generation paths).
@@ -511,12 +507,9 @@ class PartnerBrain:
         conversation moved past this message — replying now would double up.
         """
         try:
-            rows = self.context.db.query(
-                "SELECT role, name FROM messages "
-                "WHERE conversation_id = ? AND created_at > ? "
-                "ORDER BY created_at DESC LIMIT 5",
-                (chat_key, persisted_at),
-            )
+            from ...storage.conversations import ConversationLog
+            rows = ConversationLog(self.context.db).messages_after(
+                chat_key, persisted_at, limit=5)
             for r in rows:
                 if (r.get("name") or "") == "__owner__":
                     return True
@@ -548,11 +541,12 @@ class PartnerBrain:
             return
         conv_id = session_id or chat.key
         try:
-            with self.context.db.transaction():
-                self.context.db.execute(
-                    "INSERT INTO messages (id, conversation_id, role, content, name, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (ulid_now(), conv_id, "assistant", "\n".join(reply_parts), self.persona.name, model, time.time()),
-                )
+            from ...storage.conversations import ConversationLog
+            ConversationLog(self.context.db).append_message(
+                row_id=ulid_now(), conversation_id=conv_id,
+                role="assistant", content="\n".join(reply_parts),
+                name=self.persona.name, model=model,
+                created_at=time.time())
         except Exception as exc:  # noqa: BLE001 - persistence must never block a reply
             _log.warning("persist turn failed: %s", exc)
 

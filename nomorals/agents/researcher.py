@@ -363,14 +363,24 @@ class ResearchAgent:
         wanted = [d.strip() for d in (getattr(raw, "domains", "") or "lifestyle,tech,cyber").split(",") if d.strip()]
         return tuple(d for d in wanted if d in DOMAINS) or ("lifestyle", "tech", "cyber")
 
+    def _log(self):
+        """The seam-backed research_log table (Mongo P3), or None on
+        the SQLite default, where the native statements run unchanged."""
+        from ..storage.rowstore import attached_rows
+        return attached_rows(self.db, "research_log")
+
     def _used_topics(self, domain: str) -> set[str]:
         used: set[str] = set()
         if self.db is None:
             return used
         try:
-            rows = self.db.query(
-                "SELECT topic FROM research_log WHERE domain = ? LIMIT 200", (domain,)
-            )
+            log = self._log()
+            if log is not None:
+                rows = log.find({"domain": domain})[:200]
+            else:
+                rows = self.db.query(
+                    "SELECT topic FROM research_log WHERE domain = ? LIMIT 200", (domain,)
+                )
             for row in rows:
                 used.add(str(row.get("topic", "")))
         except Exception:  # noqa: BLE001
@@ -453,16 +463,28 @@ class ResearchAgent:
         journaled = True
         if self.db is not None:
             try:
-                with self.db.transaction():
-                    self.db.execute(
-                        "INSERT INTO research_log (id, domain, topic, digest, suggestion, sources, "
-                        "delivered, created_at, score, score_detail, status) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (rid, dom, topic, digest[:4000], suggestion,
-                         json.dumps(sources, ensure_ascii=False),
-                         delivered, time.time(),
-                         scores["total"], json.dumps(scores, ensure_ascii=False), status),
-                    )
+                log = self._log()
+                if log is not None:
+                    log.put({
+                        "id": rid, "domain": dom, "topic": topic,
+                        "digest": digest[:4000], "suggestion": suggestion,
+                        "sources": json.dumps(sources, ensure_ascii=False),
+                        "delivered": delivered, "created_at": time.time(),
+                        "score": scores["total"],
+                        "score_detail": json.dumps(scores,
+                                                   ensure_ascii=False),
+                        "status": status})
+                else:
+                    with self.db.transaction():
+                        self.db.execute(
+                            "INSERT INTO research_log (id, domain, topic, digest, suggestion, sources, "
+                            "delivered, created_at, score, score_detail, status) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (rid, dom, topic, digest[:4000], suggestion,
+                             json.dumps(sources, ensure_ascii=False),
+                             delivered, time.time(),
+                             scores["total"], json.dumps(scores, ensure_ascii=False), status),
+                        )
             except Exception as exc:  # noqa: BLE001
                 assert isinstance(exc, Exception)
                 journaled = False
@@ -540,8 +562,15 @@ class ResearchAgent:
         if self.db is None:
             return []
         try:
-            rows = self.db.query(
-                "SELECT topic FROM research_log ORDER BY created_at DESC LIMIT ?", (limit,))
+            log = self._log()
+            if log is not None:
+                rows = log.all()
+                rows.sort(key=lambda r: r.get("created_at") or 0,
+                          reverse=True)
+                rows = rows[:limit]
+            else:
+                rows = self.db.query(
+                    "SELECT topic FROM research_log ORDER BY created_at DESC LIMIT ?", (limit,))
             return [str(row.get("topic", "")) for row in rows]
         except Exception:  # noqa: BLE001
             return []
@@ -550,17 +579,33 @@ class ResearchAgent:
         """Pending-first view of the proposal queue, best score on top."""
         if self.db is None:
             return []
+        lim = max(1, min(int(limit), 50))
+        log = self._log()
+        if log is not None:
+            cols = ("id", "domain", "topic", "suggestion", "score",
+                    "status", "delivered", "created_at")
+            rows = log.find({"status": status} if status else None)
+            if status:
+                rows.sort(key=lambda r: (-(r.get("score") or 0),
+                                         -(r.get("created_at") or 0)))
+            else:
+                rank = {"pending": 0, "notified": 1}
+                rows.sort(key=lambda r: (
+                    rank.get(str(r.get("status")), 2),
+                    -(r.get("score") or 0),
+                    -(r.get("created_at") or 0)))
+            return [{k: r.get(k) for k in cols} for r in rows[:lim]]
         if status:
             rows = self.db.query(
                 "SELECT id, domain, topic, suggestion, score, status, delivered, created_at "
                 "FROM research_log WHERE status = ? ORDER BY score DESC, created_at DESC LIMIT ?",
-                (status, max(1, min(int(limit), 50))))
+                (status, lim))
         else:
             rows = self.db.query(
                 "SELECT id, domain, topic, suggestion, score, status, delivered, created_at "
                 "FROM research_log ORDER BY "
                 "CASE status WHEN 'pending' THEN 0 WHEN 'notified' THEN 1 ELSE 2 END, "
-                "score DESC, created_at DESC LIMIT ?", (max(1, min(int(limit), 50)),))
+                "score DESC, created_at DESC LIMIT ?", (lim,))
         return [dict(r) for r in rows]
 
     def resolve_proposal(self, ref: str) -> dict[str, Any] | None:
@@ -595,7 +640,27 @@ class ResearchAgent:
         ref = ref.strip()
         cols = ("id, domain, topic, suggestion, digest, score, status, "
                 "created_at")
-        if ref in {"latest", "last"}:
+        col_names = ("id", "domain", "topic", "suggestion", "digest",
+                     "score", "status", "created_at")
+        log = self._log()
+        if log is not None:
+            if ref in {"latest", "last"}:
+                all_rows = log.all()
+                if not all_rows:
+                    return None, ("no such proposal "
+                                  "(ids: try /research ideas)")
+                latest = max(all_rows,
+                             key=lambda r: r.get("created_at") or 0)
+                return {k: latest.get(k) for k in col_names}, ""
+            exact = log.get(ref)
+            if exact is not None:
+                return {k: exact.get(k) for k in col_names}, ""
+            rows = [{k: r.get(k) for k in col_names}
+                    for r in log.all()
+                    if str(r.get("id") or "").lower().startswith(
+                        ref.lower())]
+            rows.sort(key=lambda r: str(r.get("id")))
+        elif ref in {"latest", "last"}:
             row = self.db.query_one(
                 f"SELECT {cols} FROM research_log "
                 "ORDER BY created_at DESC LIMIT 1")
@@ -603,14 +668,15 @@ class ResearchAgent:
                 return None, "no such proposal (ids: try /research ideas)"
             return dict(row), ""
         # exact id wins — even when the full id is also a prefix of another
-        row = self.db.query_one(
-            f"SELECT {cols} FROM research_log WHERE id = ?", (ref,))
-        if row is not None:
-            return dict(row), ""
-        rows = self.db.query(
-            f"SELECT {cols} FROM research_log WHERE id LIKE ? ESCAPE '\\' "
-            "ORDER BY id",
-            (self._like_escape(ref) + "%",)) or []
+        if log is None:
+            row = self.db.query_one(
+                f"SELECT {cols} FROM research_log WHERE id = ?", (ref,))
+            if row is not None:
+                return dict(row), ""
+            rows = self.db.query(
+                f"SELECT {cols} FROM research_log WHERE id LIKE ? ESCAPE '\\' "
+                "ORDER BY id",
+                (self._like_escape(ref) + "%",)) or []
         if not rows:
             return None, "no such proposal (ids: try /research ideas)"
         by_id = {str(r["id"]): dict(r) for r in rows}
@@ -645,6 +711,12 @@ class ResearchAgent:
         if self.db is None:
             return False
         try:
+            log = self._log()
+            if log is not None:
+                # Native parity: an UPDATE over zero rows still returns
+                # True (the statement ran); only an exception is False.
+                log.update(rid, {"status": status})
+                return True
             self.db.execute("UPDATE research_log SET status = ? WHERE id = ?", (status, rid))
             return True
         except Exception as exc:  # noqa: BLE001

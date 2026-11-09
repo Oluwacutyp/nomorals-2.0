@@ -143,6 +143,25 @@ class TrainingRegistry:
         )
         self.models = models or ModelRegistry(db)
 
+    # ── seam table (None on the SQLite default) ──────────────────────────
+    # Mongo P3: with a document store attached, training_runs route
+    # through storage.rowstore with Repository's own encode/decode, so
+    # the documents are the carry-v1 rows; the Repository path below is
+    # the SQLite default, unchanged.
+    def _runs(self):
+        from ..storage.rowstore import attached_rows
+        return attached_rows(self.db, "training_runs")
+
+    @staticmethod
+    def _enc(row: dict[str, Any]) -> dict[str, Any]:
+        from ..storage.rowstore import repository_encode
+        return repository_encode(row, ("config", "metrics"))
+
+    @staticmethod
+    def _dec(row: dict[str, Any]) -> dict[str, Any]:
+        from ..storage.rowstore import repository_decode
+        return repository_decode(row, ("config", "metrics"))
+
     def start(
         self,
         name: str = "",
@@ -161,12 +180,21 @@ class TrainingRegistry:
             status=RunStatus.RUNNING, config=config or {}, metadata=metadata or {},
             started_at=time.time(),
         )
-        self.repo.create(run.to_row())
+        runs = self._runs()
+        if runs is not None:
+            runs.put(self._enc(run.to_row()))
+        else:
+            self.repo.create(run.to_row())
         _log.info("training run %s started (backend=%s)", run.name, backend)
         return run
 
     def get(self, run_id: str) -> TrainingRun:
-        row = self.repo.get(run_id) or self.repo.find_one(name=run_id)
+        runs = self._runs()
+        if runs is not None:
+            raw = runs.get(run_id) or runs.find_one({"name": run_id})
+            row = self._dec(raw) if raw is not None else None
+        else:
+            row = self.repo.get(run_id) or self.repo.find_one(name=run_id)
         if row is None:
             raise NotFound(f"no training run {run_id!r}")
         return TrainingRun.from_row(row)
@@ -177,7 +205,11 @@ class TrainingRegistry:
             run.started_at = now
         if run.status in RunStatus.TERMINAL and not run.finished_at:
             run.finished_at = now
-        self.repo.update(run.id, run.to_row())
+        runs = self._runs()
+        if runs is not None:
+            runs.update(run.id, self._enc(run.to_row()))
+        else:
+            self.repo.update(run.id, run.to_row())
         return run
 
     def complete(self, run: TrainingRun, *, metrics: dict[str, Any], output_path: str = "") -> TrainingRun:
@@ -495,6 +527,12 @@ class TrainingRegistry:
         return "\n".join(lines)
 
     def list(self, *, status: str = "", limit: int = 50) -> list[TrainingRun]:
+        runs = self._runs()
+        if runs is not None:
+            rows = runs.find({"status": status} if status else None)
+            rows.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+            return [TrainingRun.from_row(self._dec(r))
+                    for r in rows[:limit]]
         # Not repo.find(limit=...): that becomes `WHERE "limit" = 50` and returns
         # nothing, because find() treats every kwarg as a column filter.
         query = self.repo.query()
@@ -505,6 +543,12 @@ class TrainingRegistry:
 
     def interrupted(self) -> list[TrainingRun]:
         """Runs left in flight by a crash. Startup should mark these failed."""
+        runs = self._runs()
+        if runs is not None:
+            rows = runs.find(
+                {"status": {"$in": ["pending", "running"]}})
+            rows.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+            return [TrainingRun.from_row(self._dec(r)) for r in rows[:100]]
         rows = self.db.query(
             "SELECT * FROM training_runs WHERE status IN ('pending','running') "
             "ORDER BY created_at DESC LIMIT 100"
@@ -524,6 +568,21 @@ class TrainingRegistry:
         return count
 
     def stats(self) -> dict[str, Any]:
+        runs = self._runs()
+        if runs is not None:
+            all_rows = runs.all()
+            by_status: dict[str, int] = {}
+            for r in all_rows:
+                key = str(r.get("status"))
+                by_status[key] = by_status.get(key, 0) + 1
+            return {
+                "total": len(all_rows),
+                "by_status": by_status,
+                "promoted": by_status.get(RunStatus.PROMOTED, 0),
+                "rejected": by_status.get(RunStatus.REJECTED, 0),
+                "gate_passed": sum(
+                    1 for r in all_rows if r.get("gate_passed") == 1),
+            }
         rows = self.db.query("SELECT status, COUNT(*) AS n FROM training_runs GROUP BY status")
         by_status = {r["status"]: int(r["n"]) for r in rows}
         return {

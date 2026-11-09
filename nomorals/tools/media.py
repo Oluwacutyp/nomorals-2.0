@@ -560,15 +560,18 @@ def register(registry: Any) -> None:
             from ..core.ids import new_id
 
             try:
-                db.insert(
-                    "media_items",
-                    {
-                        "id": new_id(), "url": url, "extractor": result.get("extractor", ""),
-                        "kind": "audio" if audio_only else "video", "title": result.get("title", ""),
-                        "path": result["path"], "size_bytes": result["bytes"],
-                        "status": "done", "created_at": time.time(), "metadata": "{}",
-                    },
-                )
+                item = {
+                    "id": new_id(), "url": url, "extractor": result.get("extractor", ""),
+                    "kind": "audio" if audio_only else "video", "title": result.get("title", ""),
+                    "path": result["path"], "size_bytes": result["bytes"],
+                    "status": "done", "created_at": time.time(), "metadata": "{}",
+                }
+                from ..storage.rowstore import attached_rows
+                table = attached_rows(db, "media_items")
+                if table is not None:
+                    table.put(item)
+                else:
+                    db.insert("media_items", item)
             except Exception as exc:  # noqa: BLE001 - bookkeeping must not fail the download
                 _log.debug("could not record media item: %s", exc)
         return result

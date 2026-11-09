@@ -611,6 +611,17 @@ class DeepResearcher:
         try:
             import json
 
+            from ...storage.rowstore import attached_rows
+            log = attached_rows(self.context.db, "search_log")
+            if log is not None:
+                log.put({
+                    "id": report["id"], "query": report["query"],
+                    "mode": report["mode"],
+                    "results": json.dumps(report["results"]),
+                    "summary": report["summary"][:8000],
+                    "seconds": report["seconds"],
+                    "created_at": time.time()})
+                return
             with self.context.db.transaction():
                 self.context.db.execute(
                     "INSERT INTO search_log (id, query, mode, results, summary, seconds, created_at) "

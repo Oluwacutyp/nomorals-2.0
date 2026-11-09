@@ -427,8 +427,15 @@ class RuntimeLiveMixin:
         if verb == "status":
             counts: dict[str, int] = {}
             try:
-                for row in self.context.db.query("SELECT domain, COUNT(*) AS n FROM research_log GROUP BY domain"):
-                    counts[str(row.get("domain"))] = int(row.get("n", 0))
+                from ...storage.rowstore import attached_rows
+                log = attached_rows(self.context.db, "research_log")
+                if log is not None:
+                    for r in log.all():
+                        key = str(r.get("domain"))
+                        counts[key] = counts.get(key, 0) + 1
+                else:
+                    for row in self.context.db.query("SELECT domain, COUNT(*) AS n FROM research_log GROUP BY domain"):
+                        counts[str(row.get("domain"))] = int(row.get("n", 0))
             except Exception as exc:  # noqa: BLE001
                 record_failure("runtime_live._control_research", exc)
             lines = [f"research feature: on — domains: {', '.join(sorted(DOMAINS))}"]
@@ -479,9 +486,20 @@ class RuntimeLiveMixin:
             n = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 5
             if self.context.db is None:
                 return "no database attached — research history only lives in the full runtime"
-            rows = self.context.db.query(
-                "SELECT id, domain, topic, score, status, created_at FROM research_log "
-                "ORDER BY created_at DESC LIMIT ?", (max(1, min(n, 20)),))
+            from ...storage.rowstore import attached_rows
+            log = attached_rows(self.context.db, "research_log")
+            if log is not None:
+                all_rows = log.all()
+                all_rows.sort(key=lambda r: r.get("created_at") or 0,
+                              reverse=True)
+                cols = ("id", "domain", "topic", "score", "status",
+                        "created_at")
+                rows = [{k: r.get(k) for k in cols}
+                        for r in all_rows[:max(1, min(n, 20))]]
+            else:
+                rows = self.context.db.query(
+                    "SELECT id, domain, topic, score, status, created_at FROM research_log "
+                    "ORDER BY created_at DESC LIMIT ?", (max(1, min(n, 20)),))
             if not rows:
                 return "no research history yet"
             lines = ["recent research:"]

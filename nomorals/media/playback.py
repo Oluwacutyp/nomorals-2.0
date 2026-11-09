@@ -347,6 +347,40 @@ class PlaybackEngine:
         return max(0, min(pos, len(q) - 1))
 
     # ── queue (durable) ───────────────────────────────────────────────────
+    def _queue_table(self):
+        """The seam-backed media_queue table (Mongo P3), or None on the
+        SQLite default, where the native statements run unchanged."""
+        from ..storage.rowstore import attached_rows
+        return attached_rows(self.db, "media_queue")
+
+    def _put_queue_row(self, row: dict[str, Any]) -> None:
+        queue = self._queue_table()
+        if queue is not None:
+            queue.put(row)
+            return
+        self.db.execute(
+            "INSERT INTO media_queue (id, position, path, title, kind, "
+            "artist, album, duration, added_at) VALUES "
+            "(?,?,?,?,?,?,?,?,?)",
+            (row["id"], row["position"], row["path"], row["title"],
+             row["kind"], row["artist"], row["album"], row["duration"],
+             row["added_at"]))
+
+    def _set_queue_position(self, rid: str, position: float) -> None:
+        queue = self._queue_table()
+        if queue is not None:
+            queue.update(rid, {"position": position})
+            return
+        self.db.execute("UPDATE media_queue SET position=? WHERE id=?",
+                        (position, rid))
+
+    def _clear_queue_rows(self) -> None:
+        queue = self._queue_table()
+        if queue is not None:
+            queue.delete_where()
+            return
+        self.db.execute("DELETE FROM media_queue")
+
     def _enqueue(self, path: str, kind: str, title: str, *,
                  artist: str = "", album: str = "",
                  duration: float = 0.0) -> dict[str, Any]:
@@ -355,13 +389,11 @@ class PlaybackEngine:
         # must reproduce insertion order even for same-second inserts.
         seq = getattr(self, "_enqueue_seq", 0)
         self._enqueue_seq = seq + 1
-        self.db.execute(
-            "INSERT INTO media_queue (id, position, path, title, kind, "
-            "artist, album, duration, added_at) VALUES "
-            "(?,?,?,?,?,?,?,?,?)",
-            (f"mq-{time.time_ns()}-{uuid.uuid4().hex[:8]}",
-             time.time() + seq * 0.001, path, title, kind, artist, album,
-             float(duration or 0), time.time()))
+        self._put_queue_row({
+            "id": f"mq-{time.time_ns()}-{uuid.uuid4().hex[:8]}",
+            "position": time.time() + seq * 0.001, "path": path,
+            "title": title, "kind": kind, "artist": artist, "album": album,
+            "duration": float(duration or 0), "added_at": time.time()})
         return {"path": path, "kind": kind, "title": title,
                 "artist": artist, "album": album,
                 "duration": float(duration or 0)}
@@ -955,6 +987,12 @@ class PlaybackEngine:
                 **started}
 
     def _queue_rows(self) -> list[Any]:
+        queue = self._queue_table()
+        if queue is not None:
+            rows = queue.all()
+            rows.sort(key=lambda r: (r.get("position") or 0,
+                                     r.get("added_at") or 0))
+            return rows
         return self.db.query(
             "SELECT * FROM media_queue ORDER BY position, added_at")
 
@@ -967,17 +1005,20 @@ class PlaybackEngine:
                 for i, r in enumerate(rows)]
 
     def remove(self, index: int) -> dict[str, Any]:
-        rows = self.db.query("SELECT * FROM media_queue ORDER BY position, "
-                             "added_at")
+        rows = self._queue_rows()
         if not (0 <= int(index) < len(rows)):
             raise ToolError(f"no queue item {index}")
-        self.db.execute("DELETE FROM media_queue WHERE id=?",
-                        (rows[int(index)]["id"],))
+        queue = self._queue_table()
+        if queue is not None:
+            queue.delete(str(rows[int(index)]["id"]))
+        else:
+            self.db.execute("DELETE FROM media_queue WHERE id=?",
+                            (rows[int(index)]["id"],))
         return {"removed": rows[int(index)]["path"],
                 "queue": len(self.queue())}
 
     def clear(self) -> dict[str, Any]:
-        self.db.execute("DELETE FROM media_queue")
+        self._clear_queue_rows()
         self._state["position"] = 0
         self._save_state()
         return {"cleared": True, "queue": 0}
@@ -999,8 +1040,7 @@ class PlaybackEngine:
             rest = [r["id"] for i, r in enumerate(rows) if i != pos]
             random.shuffle(rest)
             for new_pos, rid in enumerate([cur_id, *rest]):
-                self.db.execute("UPDATE media_queue SET position=? WHERE "
-                                "id=?", (new_pos, rid))
+                self._set_queue_position(rid, new_pos)
             self._state["position"] = 0
             if self.backend.name == "mpv" and self._mpv_alive():
                 # keep the live mpv playlist truthful after the reorder
@@ -1050,8 +1090,7 @@ class PlaybackEngine:
         rid = ids.pop(i)
         ids.insert(j, rid)
         for new_pos, rid2 in enumerate(ids):
-            self.db.execute("UPDATE media_queue SET position=? WHERE id=?",
-                            (new_pos, rid2))
+            self._set_queue_position(rid2, new_pos)
         cur_id = rows[self._resolve_position()]["id"]
         self._state["position"] = ids.index(cur_id)
         self._save_state()
@@ -1077,17 +1116,17 @@ class PlaybackEngine:
         items = pl["items"]
         if not items:
             raise ToolError(f"playlist {name!r} is empty")
-        self.db.execute("DELETE FROM media_queue")
+        self._clear_queue_rows()
         stamp = time.time()
         for i, it in enumerate(items):
-            self.db.execute(
-                "INSERT INTO media_queue (id, position, path, title, kind, "
-                "artist, album, duration, added_at) VALUES "
-                "(?,?,?,?,?,?,?,?,?)",
-                (f"mq-{time.time_ns()}-{uuid.uuid4().hex[:8]}",
-                 stamp + i, it["path"], it["title"], it.get("kind") or "file",
-                 it.get("artist") or "", it.get("album") or "",
-                 float(it.get("duration") or 0), stamp))
+            self._put_queue_row({
+                "id": f"mq-{time.time_ns()}-{uuid.uuid4().hex[:8]}",
+                "position": stamp + i, "path": it["path"],
+                "title": it["title"], "kind": it.get("kind") or "file",
+                "artist": it.get("artist") or "",
+                "album": it.get("album") or "",
+                "duration": float(it.get("duration") or 0),
+                "added_at": stamp})
         self._state["position"] = 0
         self._save_state()
         if autoplay:

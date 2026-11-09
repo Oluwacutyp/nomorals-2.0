@@ -252,6 +252,25 @@ class DatasetRegistry:
             timestamp_columns=("created_at",),
         )
 
+    # ── seam table (None on the SQLite default) ──────────────────────────
+    # Mongo P3: with a document store attached, datasets route through
+    # storage.rowstore with Repository's own encode/decode, so the
+    # documents are the carry-v1 rows; the Repository path below is the
+    # SQLite default, unchanged.
+    def _datasets(self):
+        from ..storage.rowstore import attached_rows
+        return attached_rows(self.db, "datasets")
+
+    @staticmethod
+    def _enc(row: dict[str, Any]) -> dict[str, Any]:
+        from ..storage.rowstore import repository_encode
+        return repository_encode(row, ("schema_", "metadata"))
+
+    @staticmethod
+    def _dec(row: dict[str, Any]) -> dict[str, Any]:
+        from ..storage.rowstore import repository_decode
+        return repository_decode(row, ("schema_", "metadata"))
+
     def register(
         self,
         name: str,
@@ -287,7 +306,11 @@ class DatasetRegistry:
             created_at=__import__("time").time(),
             metadata=metadata or {},
         )
-        self.repo.create(dataset.to_row())
+        datasets = self._datasets()
+        if datasets is not None:
+            datasets.put(self._enc(dataset.to_row()))
+        else:
+            self.repo.create(dataset.to_row())
         _log.info("registered dataset %s: %d rows, %d bytes", name, rows, dataset.bytes)
         return dataset
 
@@ -310,12 +333,23 @@ class DatasetRegistry:
         return self.register(name, target, kind=kind, metadata=metadata)
 
     def get(self, dataset_id: str) -> Dataset:
-        row = self.repo.get(dataset_id) or self.repo.find_one(name=dataset_id)
+        datasets = self._datasets()
+        if datasets is not None:
+            raw = datasets.get(dataset_id) \
+                or datasets.find_one({"name": dataset_id})
+            row = self._dec(raw) if raw is not None else None
+        else:
+            row = self.repo.get(dataset_id) or self.repo.find_one(name=dataset_id)
         if row is None:
             raise NotFound(f"no dataset {dataset_id!r}")
         return Dataset.from_row(row)
 
     def list(self, *, kind: str = "", limit: int = 50) -> list[Dataset]:
+        datasets = self._datasets()
+        if datasets is not None:
+            rows = datasets.find({"kind": kind} if kind else None)
+            rows.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+            return [Dataset.from_row(self._dec(r)) for r in rows[:limit]]
         # Same trap as elsewhere: find() has no limit parameter, so passing one
         # filters on a column called "limit" and matches nothing.
         query = self.repo.query()
@@ -326,12 +360,25 @@ class DatasetRegistry:
 
     def delete(self, dataset_id: str, *, remove_file: bool = False) -> int:
         dataset = self.get(dataset_id)
-        removed = self.repo.delete(dataset_id)
+        datasets = self._datasets()
+        if datasets is not None:
+            removed = int(datasets.delete(dataset_id))
+        else:
+            removed = self.repo.delete(dataset_id)
         if remove_file and dataset.path:
             Path(dataset.path).unlink(missing_ok=True)
         return removed
 
     def stats(self) -> dict[str, Any]:
+        datasets = self._datasets()
+        if datasets is not None:
+            rows = datasets.all()
+            return {
+                "datasets": len(rows),
+                "rows": sum(int(r.get("rows") or 0) for r in rows),
+                "bytes": sum(int(r.get("bytes") or 0) for r in rows),
+                "tokens": sum(int(r.get("tokens") or 0) for r in rows),
+            }
         return {
             "datasets": int(self.db.scalar("SELECT COUNT(*) FROM datasets", default=0) or 0),
             "rows": int(self.db.scalar("SELECT COALESCE(SUM(rows),0) FROM datasets", default=0) or 0),

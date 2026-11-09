@@ -114,10 +114,26 @@ def _exchange_keys(context: Any, exchange: str) -> tuple[str, str]:
     return api_key, secret
 
 
+def _rows(db: Any, table: str):
+    """The seam-backed table for ``table`` (Mongo P3), or None on the
+    SQLite default, where the native statements run unchanged."""
+    from ..storage.rowstore import attached_rows
+    return attached_rows(db, table)
+
+
 def _journal(db: Any, kind: str, symbol: str, side: str, size: float,
              price: float, order_id: str, reason: str,
              meta: dict[str, Any] | None = None) -> str:
     jid = new_id("tj")
+    journal = _rows(db, "trade_journal")
+    if journal is not None:
+        journal.put({
+            "id": jid, "ts": _ts(), "kind": kind, "symbol": symbol,
+            "side": side, "size": float(size), "price": float(price),
+            "order_id": order_id, "reason": reason,
+            "meta_json": json.dumps(meta or {}),
+        })
+        return jid
     db.execute(
         "INSERT INTO trade_journal "
         "(id, ts, kind, symbol, side, size, price, order_id, reason, meta_json)"
@@ -160,9 +176,15 @@ def _daily_live_loss_pct(db: Any) -> float:
     start is the last fill before today (or the first fill today).
     """
     day_start = _ts() - (_ts() % 86400)
-    rows = db.query(
-        "SELECT ts, meta_json FROM trade_journal WHERE kind='live' "
-        "AND ts >= ? ORDER BY ts", (day_start - 86400 * 2,))
+    journal = _rows(db, "trade_journal")
+    if journal is not None:
+        rows = journal.find({"kind": "live",
+                             "ts": {"$gte": day_start - 86400 * 2}})
+        rows.sort(key=lambda r: r.get("ts") or 0)
+    else:
+        rows = db.query(
+            "SELECT ts, meta_json FROM trade_journal WHERE kind='live' "
+            "AND ts >= ? ORDER BY ts", (day_start - 86400 * 2,))
     equities: list[tuple[float, float]] = []
     for r in rows:
         try:
@@ -239,6 +261,15 @@ def _equity_after_fill(client: Any, fill: Any, symbol: str) -> float:
 
 
 def _valid_unlock(db: Any) -> dict[str, Any] | None:
+    unlocks = _rows(db, "live_unlocks")
+    if unlocks is not None:
+        now = _ts()
+        live = [r for r in unlocks.all()
+                if (r.get("expires_at") or 0) > now]
+        if not live:
+            return None
+        live.sort(key=lambda r: r.get("expires_at") or 0, reverse=True)
+        return live[0]
     row = db.query_one(
         "SELECT * FROM live_unlocks WHERE expires_at > ? "
         "ORDER BY expires_at DESC LIMIT 1", (_ts(),))
@@ -248,7 +279,11 @@ def _valid_unlock(db: Any) -> dict[str, Any] | None:
 def _auto_kill(context: Any, reason: str) -> dict[str, Any]:
     """Revoke all unlocks and journal the kill. Live goes inert."""
     db = context.db
-    db.execute("DELETE FROM live_unlocks")
+    unlocks = _rows(db, "live_unlocks")
+    if unlocks is not None:
+        unlocks.delete_where()
+    else:
+        db.execute("DELETE FROM live_unlocks")
     _kv_set(db, "trading.last_kill", json.dumps(
         {"ts": _ts(), "reason": reason}))
     jid = _journal(db, "live", "", "kill", 0, 0, "",
@@ -282,9 +317,31 @@ def _check_live_gates(context: Any) -> None:
 
 
 # ── paper sessions ──────────────────────────────────────────────────────
+def _paper_session(db: Any, session_id: str) -> dict[str, Any] | None:
+    sessions = _rows(db, "paper_sessions")
+    if sessions is not None:
+        return sessions.get(session_id)
+    return db.query_one("SELECT * FROM paper_sessions WHERE id=?",
+                        (session_id,))
+
+
+def _open_paper_session(db: Any, filt: dict[str, Any], native_sql: str,
+                        native_params: tuple) -> dict[str, Any] | None:
+    """The newest open paper session matching ``filt`` — each call site
+    passes its historical native statement verbatim for the SQL rung and
+    the equivalent row filter for the seam."""
+    sessions = _rows(db, "paper_sessions")
+    if sessions is not None:
+        rows = sessions.find(filt)
+        if not rows:
+            return None
+        rows.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+        return rows[0]
+    return db.query_one(native_sql, native_params)
+
+
 def _paper_broker_state(db: Any, session_id: str) -> dict[str, Any]:
-    row = db.query_one("SELECT state_json FROM paper_sessions WHERE id=?",
-                       (session_id,))
+    row = _paper_session(db, session_id)
     if not row:
         raise bridge.SentinelError(f"no paper session {session_id}")
     try:
@@ -294,6 +351,11 @@ def _paper_broker_state(db: Any, session_id: str) -> dict[str, Any]:
 
 
 def _paper_save(db: Any, session_id: str, state: dict[str, Any]) -> None:
+    sessions = _rows(db, "paper_sessions")
+    if sessions is not None:
+        sessions.update(session_id, {"state_json": json.dumps(state),
+                                     "updated_at": _ts()})
+        return
     db.execute("UPDATE paper_sessions SET state_json=?, updated_at=? "
                "WHERE id=?", (json.dumps(state), _ts(), session_id))
 
@@ -301,7 +363,8 @@ def _paper_save(db: Any, session_id: str, state: dict[str, Any]) -> None:
 def paper_start(context: Any, symbol: str, market: str = "crypto",
                 capital: float = 10000.0) -> dict[str, Any]:
     db = context.db
-    existing = db.query_one(
+    existing = _open_paper_session(
+        db, {"symbol": symbol, "market": market, "status": "open"},
         "SELECT * FROM paper_sessions WHERE symbol=? AND market=? "
         "AND status='open' ORDER BY created_at DESC LIMIT 1",
         (symbol, market))
@@ -311,12 +374,21 @@ def paper_start(context: Any, symbol: str, market: str = "crypto",
     sid = new_id("paper")
     state = {"cash": float(capital), "units": 0.0, "orders": [],
              "fee_bps": _PAPER_FEE_BPS, "capital": float(capital)}
-    db.execute(
-        "INSERT INTO paper_sessions (id, symbol, market, capital, status,"
-        " state_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
-        (sid, symbol, market, float(capital), "open",
-         json.dumps(state), _ts(), _ts()),
-    )
+    sessions = _rows(db, "paper_sessions")
+    if sessions is not None:
+        sessions.put({
+            "id": sid, "symbol": symbol, "market": market,
+            "capital": float(capital), "status": "open",
+            "state_json": json.dumps(state), "created_at": _ts(),
+            "updated_at": _ts(),
+        })
+    else:
+        db.execute(
+            "INSERT INTO paper_sessions (id, symbol, market, capital, status,"
+            " state_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (sid, symbol, market, float(capital), "open",
+             json.dumps(state), _ts(), _ts()),
+        )
     _journal(db, "paper", symbol, "start", 0, 0, sid,
              f"paper session opened with {capital:,.2f}")
     _log.info("paper session %s opened for %s", sid, symbol)
@@ -347,10 +419,10 @@ def paper_status(context: Any, session_id: str = "",
     (Sentinel LiveTrader + PaperBroker = simulated fills, never real)."""
     db = context.db
     if session_id:
-        row = db.query_one("SELECT * FROM paper_sessions WHERE id=?",
-                           (session_id,))
+        row = _paper_session(db, session_id)
     else:
-        row = db.query_one(
+        row = _open_paper_session(
+            db, {"symbol": symbol, "status": "open"},
             "SELECT * FROM paper_sessions WHERE symbol=? AND status='open'"
             " ORDER BY created_at DESC LIMIT 1", (symbol,))
     if not row:
@@ -381,15 +453,25 @@ def paper_status(context: Any, session_id: str = "",
 
 def paper_stop(context: Any, session_id: str = "") -> dict[str, Any]:
     db = context.db
-    row = db.query_one("SELECT * FROM paper_sessions WHERE id=? "
-                       "AND status='open'", (session_id,)) if session_id else None
+    row = None
+    if session_id:
+        candidate = _paper_session(db, session_id)
+        if candidate is not None and candidate.get("status") == "open":
+            row = candidate
     if row is None:
-        row = db.query_one("SELECT * FROM paper_sessions WHERE status='open'"
-                           " ORDER BY created_at DESC LIMIT 1")
+        row = _open_paper_session(
+            db, {"status": "open"},
+            "SELECT * FROM paper_sessions WHERE status='open'"
+            " ORDER BY created_at DESC LIMIT 1", ())
     if not row:
         raise bridge.SentinelError("no open paper session to stop")
-    db.execute("UPDATE paper_sessions SET status='closed', updated_at=? "
-               "WHERE id=?", (_ts(), row["id"]))
+    sessions = _rows(db, "paper_sessions")
+    if sessions is not None:
+        sessions.update(row["id"], {"status": "closed",
+                                    "updated_at": _ts()})
+    else:
+        db.execute("UPDATE paper_sessions SET status='closed', updated_at=? "
+                   "WHERE id=?", (_ts(), row["id"]))
     _journal(db, "paper", row["symbol"], "stop", 0, 0, row["id"],
              "paper session closed")
     return {"ok": True, "session_id": row["id"], "symbol": row["symbol"]}
@@ -408,10 +490,15 @@ def live_unlock(context: Any, confirm: str = "") -> dict[str, Any]:
     ttl = float(getattr(settings, "unlock_ttl_hours", 24.0)) * 3600
     now = _ts()
     uid = new_id("unlock")
-    context.db.execute(
-        "INSERT INTO live_unlocks (id, granted_at, expires_at, note)"
-        " VALUES (?,?,?,?)", (uid, now, now + ttl,
-                               "operator confirmed understanding"))
+    unlocks = _rows(context.db, "live_unlocks")
+    if unlocks is not None:
+        unlocks.put({"id": uid, "granted_at": now, "expires_at": now + ttl,
+                     "note": "operator confirmed understanding"})
+    else:
+        context.db.execute(
+            "INSERT INTO live_unlocks (id, granted_at, expires_at, note)"
+            " VALUES (?,?,?,?)", (uid, now, now + ttl,
+                                   "operator confirmed understanding"))
     _journal(context.db, "live", "", "unlock", 0, 0, uid,
              "live trading unlocked for 24h")
     return {"ok": True, "unlock_id": uid,

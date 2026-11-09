@@ -85,6 +85,10 @@ __all__ = [
     "STATE_COLLECTION",
     "RECORDS_TABLE",
     "EXCLUDED_TABLES",
+    "PORTED_TABLES",
+    "PORT_RESIDUE",
+    "decode_value",
+    "document_to_row",
     "TableMapping",
     "CarryCollectionResult",
     "CarryReport",
@@ -295,6 +299,219 @@ def _kv_store_row(mapping: TableMapping, row: Mapping[str, Any]):
 #: Per-table row transforms: ``(mapping, row) -> (doc_id, fields, expires_at)``.
 TRANSFORMS: dict[str, Callable[..., tuple[str, dict[str, Any], float | None]]] = {
     "kv_store": _kv_store_row,
+}
+
+
+def decode_value(value: Any) -> Any:
+    """One canonical document value → its SQLite value (inverse of
+    :func:`encode_value`). Only the tagged BLOB form is transformed;
+    everything else already carries verbatim."""
+    if isinstance(value, dict) and set(value) == {"$blob_b64"}:
+        return base64.b64decode(value["$blob_b64"])
+    return value
+
+
+def document_to_row(mapping: TableMapping,
+                    doc: Mapping[str, Any]) -> dict[str, Any]:
+    """Map one document back to its source row (inverse of
+    :func:`row_to_document`, generic mapping only).
+
+    This is what lets a domain port (Mongo program P3) read seam-written
+    documents as the rows its API has always returned: the ``_id``
+    restores the primary-key column(s), reserved field names un-rename,
+    and tagged BLOBs decode. Tables with a declared transform
+    (:data:`TRANSFORMS`) have no generic inverse — their seam shape is
+    owned by their own port (the kv_store precedent), so asking for one
+    here is a programming error, not a data condition.
+    """
+    if mapping.table in TRANSFORMS:
+        raise ValueError(
+            f"table {mapping.table!r} has a declared transform; its "
+            "document shape is owned by its port, not the generic mapping")
+    row: dict[str, Any] = {}
+    pk = mapping.pk_columns
+    doc_id = str(doc["_id"])
+    if len(pk) == 1:
+        row[pk[0]] = _restore_pk(doc_id, mapping)
+    elif pk:
+        parts = doc_id.split(_ID_SEP)
+        if len(parts) != len(pk):
+            raise ValueError(
+                f"composite id {doc_id!r} does not split into the "
+                f"{len(pk)} primary-key parts of {mapping.table!r}")
+        for name, part in zip(pk, parts, strict=True):
+            row[name] = _restore_pk(part, mapping, column=name)
+    for col in mapping.columns:
+        if col.name in pk:
+            continue
+        field_name = _RESERVED.get(col.name, col.name)
+        if field_name in doc:
+            row[col.name] = decode_value(doc[field_name])
+    return row
+
+
+def _restore_pk(part: str, mapping: TableMapping,
+                column: str | None = None) -> Any:
+    """Restore a stringified PK part to its column type where the DDL
+    declares an integer key (carry stringifies ``5`` and ``\"5\"`` to the
+    same id; an INTEGER PRIMARY KEY column reads back as an int)."""
+    name = column or (mapping.pk_columns[0] if mapping.pk_columns else "")
+    col = next((c for c in mapping.columns if c.name == name), None)
+    if col is not None and "INT" in (col.type or "").upper():
+        try:
+            return int(part)
+        except ValueError:
+            return part
+    return part
+
+
+# ── P3 port dispositions ─────────────────────────────────────────────────
+#
+# The census (§6, Pass 3) assigns the document-fit domains to the seam
+# port program. Every table in those domains has exactly one disposition,
+# recorded here beside the carry mapping that owns the shapes:
+#
+# * :data:`PORTED_TABLES` — the live write/read path routes through the
+#   DocumentStore seam whenever a store is attached to the Database
+#   (the KV pickup rule); the value names the module that owns the port.
+# * :data:`PORT_RESIDUE` — the live path stays on native SQL for now;
+#   the value is the reason, in the open. Data still carries (P2) —
+#   residue is about the live path, never about the data.
+#
+# A test pins the census P3 table set against these two registries: an
+# unaccounted table fails the suite, never slips through silently.
+
+#: Tables whose live path is ported to the seam (Mongo P3), by owner.
+PORTED_TABLES: dict[str, str] = {
+    # Core conversations (owner: storage/conversations.py + its callers)
+    "conversations": "storage/conversations.py (ConversationLog)",
+    "messages": "storage/conversations.py (ConversationLog)",
+    "chats": "storage/conversations.py (ConversationLog)",
+    "threads": "social/chat/side_chats.py (SideChatManager)",
+    "thread_messages": "social/chat/side_chats.py (SideChatManager)",
+    # Memory (the self-contained core-blocks store; see residue for the
+    # recall-coupled manager core)
+    "memory_core_blocks": "memory/manager.py (CoreBlocks)",
+    # Research & web
+    "research_jobs": "agents/search/jobs.py",
+    "page_cache": "agents/search/engine.py",
+    "search_log": "agents/search/engine.py (+ deep.py)",
+    "search_leads": "agents/search/engine.py",
+    "news_items": "agents/news.py",
+    "news_interest": "agents/news.py",
+    "monitors": "agents/monitor.py",
+    "watchers": "agents/watchers.py",
+    "watcher_state": "agents/watchers.py",
+    "watcher_checks": "agents/watchers.py",
+    "watcher_alerts": "agents/watchers.py",
+    "research_log": "agents/researcher.py",
+    # Learning & eval
+    "training_runs": "training/registry.py",
+    "datasets": "training/dataset.py",
+    "benchmark_runs": "agents/benchmark.py",
+    "canary_runs": "agents/skill_canary.py",
+    "canary_observations": "agents/skill_canary.py",
+    "skill_versions": "agents/skill_canary.py",
+    "improvement_runs": "agents/improvement.py",
+    "evolution_outcomes": "agents/evolution.py",
+    "acceptance_runs": "agents/projects.py",
+    "trial_assist_runs": "agents/trial/flow.py",
+    "trial_sms_watches": "agents/trial/flow.py",
+    # Media catalog
+    "media_playlists": "media/library.py",
+    "media_playlist_items": "media/library.py",
+    "media_history": "media/library.py",
+    "media_favorites": "media/library.py",
+    "media_queue": "media/playback.py",
+    "media_items": "tools/media.py",
+    "image_index": "tools/imagedb.py",
+    # Trading journal (append-only + session/unlock recorders)
+    "trade_journal": "tools/trading.py",
+    "paper_sessions": "tools/trading.py",
+    "live_unlocks": "tools/trading.py",
+}
+
+#: P3-domain tables whose live path stays on native SQL, with reasons.
+PORT_RESIDUE: dict[str, str] = {
+    # ── Memory & cognition: the MemoryManager core is recall-coupled.
+    "memories": (
+        "recall-coupled core: writes are owned by storage/repository.py "
+        "(Repository/Query), the lexical lane is FTS5 keyed on the SQLite "
+        "rowid (P4 residue by census), and the semantic lane is "
+        "VectorStore — porting CRUD alone would fork the write path from "
+        "the recall path, the split the program forbids; ports with the "
+        "FTS/vector story, not in P3"),
+    "memory_links": "written/read with the memories recall core (same residue)",
+    "memory_archive": "archive of the memories core (same residue)",
+    "devon_memory": (
+        "the autonomy loop's own observation journal, written inside "
+        "agents/devon.py's composed turn transactions (observation + "
+        "task state move together); ports with the agents/missions "
+        "domain, which the census does not assign to P3"),
+    "facts": "cognition-layer writers (agency/knowledge, agents/cognition); the census P3 memory item is the MemoryManager organ — these port with the cognition domain",
+    "lessons": "cognition-layer writers (same reason as facts)",
+    "lessons_archive": "archive of lessons (same reason as facts)",
+    "lesson_surfacings": "cognition-layer writers (same reason as facts)",
+    "reflections": "cognition-layer writers (same reason as facts)",
+    "relationship": "cognition-layer writers (same reason as facts)",
+    "mood_state": "memory/cadence.py reads/writes ride the memories table's metadata (recall-coupled core residue)",
+    "mood_history": "memory/cadence.py (same reason as mood_state)",
+    "cognition_log": "cognition-layer writers (same reason as facts)",
+    "coremind_telemetry": "router telemetry persists via storage/router_telemetry.py's KV-style rows — it inherits the KV port's rung, not a table port",
+    "embeddings": "VectorStore's tables: census keeps vectors in VectorStore (backends already plural); P4 confirms",
+    "kg_nodes": "knowledge-graph organ (agents/kg.py) over graph-shaped queries + the embeddings lane; ports with the cognition/graph story, not the document-fit pass",
+    "kg_edges": "knowledge-graph organ (same reason as kg_nodes)",
+    "side_chats": "no live code path at this commit: the migrations table is vestigial — the feature is implemented by SideChatManager over its runtime threads/thread_messages tables, which ARE ported; data carries via P2",
+    "price_snapshots": "name collision between two incompatible schemas: migrations define the marketplace shape (id/listing_id/snapshot_at, no live writer) while integrations/naija_shopping.py declares a runtime table of the same name with a composite (product_url, timestamp) key and different columns — its CREATE TABLE IF NOT EXISTS is a no-op in a migrated database, so the engine's writes target a shape that does not exist there; the seam ports neither shape until the collision itself is resolved (composite keys are also outside the seam's single-column-PK mapping)",
+    # ── Games & arena: one transactional state graph.
+    "game_players": "games/arena transactional core: see game_settlements",
+    "game_rooms": "games/arena transactional core: see game_settlements",
+    "game_sessions": "games/arena transactional core: see game_settlements",
+    "game_stats": "games/arena transactional core: written both by the transactional core (players/engine) and the achievements crust — a partial port would split this one table across two authoritative stores",
+    "game_wallet": "games/arena transactional core: see game_settlements",
+    "game_gear": "games/arena transactional core: see game_settlements",
+    "game_skills": "games/arena transactional core: see game_settlements",
+    "game_titles": "games/arena transactional core: see game_settlements",
+    "game_invites": "games/arena transactional core: see game_settlements",
+    "game_relays": "games/arena transactional core: see game_settlements",
+    "game_identity_names": "games/arena transactional core: see game_settlements",
+    "game_settlements": (
+        "DECLARED RESIDUE (whole games/arena domain): settlement, wallet, "
+        "ledger, gear, gifts and rating state compose multi-table "
+        "transactions with exactly-once guarantees hardened in Batch B "
+        "and the games-hardening pass; the seam advertises "
+        "multi_doc_transactions=False on Mongo, so a document port now "
+        "would silently weaken those guarantees. Ports with a "
+        "transaction-story pass (the P4 pattern), not the document-fit "
+        "pass"),
+    "game_ledger": "games/arena transactional core: see game_settlements",
+    "game_gems": "games/arena transactional core: see game_settlements",
+    "game_gifts": "games/arena transactional core: see game_settlements",
+    "game_elo": "games/arena transactional core: see game_settlements",
+    "game_glicko": "games/arena transactional core: see game_settlements",
+    "game_counters": "games/arena transactional core: see game_settlements",
+    "game_attributes": "games/arena transactional core: see game_settlements",
+    "arena_builds": "games/arena transactional core: see game_settlements",
+    "arena_scores": "games/arena transactional core: see game_settlements",
+    "arena_knowledge": "games/arena transactional core: see game_settlements",
+    "arena_stream": "games/arena transactional core: see game_settlements",
+    "arena_activity": "games/arena transactional core: see game_settlements",
+    "leaderboards": "written by games/achievements.py together with game_stats (same split-table reason as game_stats)",
+    "cards": "games-domain table with no live writer at this commit; data carries via P2 — nothing to port until a writer exists",
+    "progression_unlocks": "games achievements crust: writes land together with game_stats/achievements in one flow (same split-table reason as game_stats)",
+    "achievements": "games achievements crust (same reason as progression_unlocks)",
+    "achievement_progress": "games achievements crust (same reason as progression_unlocks)",
+    "achievement_showcase": "games achievements crust (same reason as progression_unlocks)",
+    # ── Research & web: no live path exists at this commit.
+    "web_pages": "no live code path at this commit (superseded by page_cache); data carries via P2 — nothing to port",
+    "research_loop_runs": "agents/research_loop.py records runs inside its composed loop transactions (KV + run row + ledger move together); ports with the agents domain, not P3",
+    # ── Learning & eval: no live path exists at this commit.
+    "eval_probes": "no live code path at this commit; data carries via P2 — nothing to port",
+    "eval_results": "no live code path at this commit; data carries via P2 — nothing to port",
+    "dataset_items": "file-by-design: dataset items live in the datasets' JSONL files (training/dataset.py reads them from disk); the table has no live code path — nothing to port",
+    # ── Trading & finance: no live path exists at this commit.
+    "finance_accounts": "no live code path at this commit; data carries via P2 — nothing to port",
+    "price_watches": "no live code path at this commit; data carries via P2 — nothing to port",
 }
 
 

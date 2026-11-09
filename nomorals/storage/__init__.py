@@ -47,6 +47,7 @@ from .queue import (
     parse_cron,
 )
 from .replication import SnapshotInfo, SqliteReplicator
+from .rowstore import RowTable, attached_rows
 from .s3blob import S3BlobStore, S3Config, open_blob_store, presign_url
 from .schema import Migration, MigrationRunner, SchemaError
 from .vectors import VectorRecord, VectorSearchHit, VectorStore, cosine, normalize
@@ -78,6 +79,7 @@ __all__ = [
     "RetentionPolicy",
     "Row",
     "RowDocumentView",
+    "RowTable",
     "S3BlobStore",
     "S3Config",
     "SQLiteAnalytics",
@@ -92,6 +94,7 @@ __all__ = [
     "VectorSearchHit",
     "VectorStore",
     "attach_document_store",
+    "attached_rows",
     "build_match_query",
     "carry_inventory",
     "check_document_parity",

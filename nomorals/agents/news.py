@@ -657,6 +657,31 @@ class NewsAgent:
             proxy_url=getattr(tools, "proxy_url", ""),
         )
 
+    # ── seam tables (None on the SQLite default) ─────────────────────────
+    # Mongo P3: with a document store attached, news_items / news_interest
+    # route through storage.rowstore (documents are carry-v1 rows; the
+    # runtime-ALTER columns are declared to the mapping). The SQLite
+    # default runs the native statements below unchanged.
+    _ITEM_EXTRA = ("publisher", "publisher_url", "delivery_state",
+                   "interest", "delivered_at", "delivery_channel")
+
+    def _items(self):
+        from ..storage.rowstore import attached_rows
+        return attached_rows(self.db, "news_items",
+                             extra_columns=self._ITEM_EXTRA)
+
+    def _profile_t(self):
+        from ..storage.rowstore import attached_rows
+        return attached_rows(self.db, "news_interest")
+
+    def _upd_item(self, item_id: str, fields: dict[str, Any],
+                  native_sql: str, native_params: tuple) -> None:
+        items = self._items()
+        if items is not None:
+            items.update(item_id, fields)
+            return
+        self.db.execute(native_sql, native_params)
+
     def _feeds(self) -> list[tuple[str, str]]:
         raw = (getattr(getattr(self.settings, "news", None), "feeds", "") or "").strip()
         if raw:
@@ -831,9 +856,14 @@ class NewsAgent:
         known_titles: set[str] = set()
         if self.db is not None:
             try:
-                rows = self.db.query(
-                    "SELECT title FROM news_items WHERE created_at >= ?",
-                    (time.time() - 14 * 86400,))
+                items = self._items()
+                if items is not None:
+                    rows = items.find(
+                        {"created_at": {"$gte": time.time() - 14 * 86400}})
+                else:
+                    rows = self.db.query(
+                        "SELECT title FROM news_items WHERE created_at >= ?",
+                        (time.time() - 14 * 86400,))
                 for row in rows or []:
                     raw = (row.get("title") if hasattr(row, "get")
                            else row[0]) or ""
@@ -848,7 +878,11 @@ class NewsAgent:
         for it in fetched:
             if self.db is not None:
                 try:
-                    known = self.db.query_one("SELECT id FROM news_items WHERE url = ?", (it["url"],))
+                    items = self._items()
+                    if items is not None:
+                        known = items.find_one({"url": it["url"]})
+                    else:
+                        known = self.db.query_one("SELECT id FROM news_items WHERE url = ?", (it["url"],))
                 except Exception as exc:  # noqa: BLE001
                     record_failure("news.url_known", exc)
                     known = None
@@ -867,10 +901,15 @@ class NewsAgent:
         held = 0
         if self.db is not None:
             try:
-                row = self.db.query_one(
-                    "SELECT COUNT(*) AS n FROM news_items "
-                    "WHERE delivery_state = ?", (STATE_UNDELIVERED,))
-                held = int((row or {}).get("n") or 0)
+                items = self._items()
+                if items is not None:
+                    held = items.count(
+                        {"delivery_state": STATE_UNDELIVERED})
+                else:
+                    row = self.db.query_one(
+                        "SELECT COUNT(*) AS n FROM news_items "
+                        "WHERE delivery_state = ?", (STATE_UNDELIVERED,))
+                    held = int((row or {}).get("n") or 0)
             except Exception as exc:  # noqa: BLE001
                 record_failure("news.held_count", exc)
                 held = 0
@@ -953,6 +992,25 @@ class NewsAgent:
         if self.db is None:
             self._pending.extend(rows)
             return rows
+        items = self._items()
+        if items is not None:
+            # INSERT OR IGNORE semantics, including the UNIQUE(url)
+            # constraint: a row whose id or url is already stored is
+            # skipped, exactly as the native statement skips it.
+            for r in rows:
+                if items.get(r["id"]) is not None:
+                    continue
+                if items.find_one({"url": r["url"]}) is not None:
+                    continue
+                items.put({
+                    "id": r["id"], "source": r["source"],
+                    "publisher": r["publisher"],
+                    "publisher_url": r["publisher_url"],
+                    "title": r["title"], "url": r["url"],
+                    "summary": r["summary"], "published": r["published"],
+                    "created_at": r["created_at"],
+                    "delivery_state": STATE_UNDELIVERED})
+            return rows
         stored = False
         try:
             with self.db.transaction():
@@ -1023,9 +1081,13 @@ class NewsAgent:
         saved: Any = None
         if self.db is not None:
             try:
-                row = self.db.query_one(
-                    "SELECT value FROM news_interest WHERE key = ?",
-                    ("profile",))
+                profile_t = self._profile_t()
+                if profile_t is not None:
+                    row = profile_t.get("profile")
+                else:
+                    row = self.db.query_one(
+                        "SELECT value FROM news_interest WHERE key = ?",
+                        ("profile",))
                 raw = (row or {}).get("value")
                 if raw:
                     saved = json.loads(raw)
@@ -1052,10 +1114,15 @@ class NewsAgent:
             self._profile_mem = profile  # type: ignore[attr-defined]
             return
         try:
-            self.db.execute(
-                "INSERT OR REPLACE INTO news_interest (key, value) "
-                "VALUES (?, ?)",
-                ("profile", json.dumps(profile)))
+            profile_t = self._profile_t()
+            if profile_t is not None:
+                profile_t.put({"key": "profile",
+                               "value": json.dumps(profile)})
+            else:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO news_interest (key, value) "
+                    "VALUES (?, ?)",
+                    ("profile", json.dumps(profile)))
         except Exception as exc:  # noqa: BLE001
             record_failure("news.save_profile", exc)
 
@@ -1174,7 +1241,11 @@ class NewsAgent:
             row["delivery_channel"] = channel
         if self.db is not None:
             try:
-                self.db.execute(
+                self._upd_item(
+                    row["id"],
+                    {"delivery_state": state,
+                     "delivered_at": row["delivered_at"],
+                     "delivery_channel": row.get("delivery_channel")},
                     "UPDATE news_items SET delivery_state = ?, "
                     "delivered_at = ?, delivery_channel = ? WHERE id = ?",
                     (state, row["delivered_at"],
@@ -1191,6 +1262,11 @@ class NewsAgent:
                        if r.get("delivery_state") == STATE_PUSHED
                        and (r.get("delivered_at") or 0) >= start)
         try:
+            items = self._items()
+            if items is not None:
+                return items.count({
+                    "delivery_state": STATE_PUSHED,
+                    "delivered_at": {"$gte": start}})
             row = self.db.query_one(
                 "SELECT COUNT(*) AS n FROM news_items "
                 "WHERE delivery_state = ? AND delivered_at >= ?",
@@ -1229,10 +1305,17 @@ class NewsAgent:
             r["id"]: r for r in new_rows}
         if self.db is not None:
             try:
-                rows = self.db.query(
-                    "SELECT * FROM news_items WHERE delivery_state = ? "
-                    "ORDER BY created_at ASC LIMIT ?",
-                    (STATE_UNDELIVERED, _TIER_BACKLOG_MAX))
+                items = self._items()
+                if items is not None:
+                    rows = items.find(
+                        {"delivery_state": STATE_UNDELIVERED})
+                    rows.sort(key=lambda r: r.get("created_at") or 0)
+                    rows = rows[:_TIER_BACKLOG_MAX]
+                else:
+                    rows = self.db.query(
+                        "SELECT * FROM news_items WHERE delivery_state = ? "
+                        "ORDER BY created_at ASC LIMIT ?",
+                        (STATE_UNDELIVERED, _TIER_BACKLOG_MAX))
                 for r in rows or []:
                     candidates.setdefault(r["id"], dict(r))
             except Exception as exc:  # noqa: BLE001
@@ -1257,7 +1340,8 @@ class NewsAgent:
             row["interest"] = val
             if self.db is not None:
                 try:
-                    self.db.execute(
+                    self._upd_item(
+                        rid, {"interest": val},
                         "UPDATE news_items SET interest = ? WHERE id = ?",
                         (val, rid))
                 except Exception as exc:  # noqa: BLE001
@@ -1334,10 +1418,15 @@ class NewsAgent:
         rows: list[dict[str, Any]] = []
         if self.db is not None:
             try:
-                queried = self.db.query(
-                    "SELECT * FROM news_items WHERE delivery_state = ? "
-                    "ORDER BY published DESC",
-                    (STATE_UNDELIVERED,)) or []
+                items = self._items()
+                if items is not None:
+                    queried = items.find(
+                        {"delivery_state": STATE_UNDELIVERED})
+                else:
+                    queried = self.db.query(
+                        "SELECT * FROM news_items WHERE delivery_state = ? "
+                        "ORDER BY published DESC",
+                        (STATE_UNDELIVERED,)) or []
                 rows = [r for r in queried if isinstance(r, dict)]
             except Exception as exc:  # noqa: BLE001
                 record_failure("news.undelivered", exc)
@@ -1450,10 +1539,16 @@ class NewsAgent:
                     r["delivery_channel"] = channel
                     n += 1
             return n
+        items = self._items()
         try:
-            rows = self.db.query(
-                "SELECT id, url FROM news_items WHERE delivery_state = ? "
-                "OR delivery_state IS NULL", (STATE_UNDELIVERED,))
+            if items is not None:
+                rows = [r for r in items.all()
+                        if r.get("delivery_state") == STATE_UNDELIVERED
+                        or r.get("delivery_state") is None]
+            else:
+                rows = self.db.query(
+                    "SELECT id, url FROM news_items WHERE delivery_state = ? "
+                    "OR delivery_state IS NULL", (STATE_UNDELIVERED,))
         except Exception as exc:  # noqa: BLE001
             record_failure("news.mark_delivered_select", exc)
             return 0
@@ -1461,7 +1556,10 @@ class NewsAgent:
         for r in rows or []:
             if str(r.get("url")) in wanted or str(r.get("id")) in wanted:
                 try:
-                    self.db.execute(
+                    self._upd_item(
+                        r["id"],
+                        {"delivery_state": STATE_DIGESTED,
+                         "delivered_at": now, "delivery_channel": channel},
                         "UPDATE news_items SET delivery_state = ?, "
                         "delivered_at = ?, delivery_channel = ? "
                         "WHERE id = ?",
@@ -1476,11 +1574,17 @@ class NewsAgent:
         counts: dict[str, int] = {}
         if self.db is not None:
             try:
-                for r in self.db.query(
-                        "SELECT delivery_state, COUNT(*) AS n "
-                        "FROM news_items GROUP BY delivery_state") or []:
-                    key = r.get("delivery_state") or "legacy"
-                    counts[str(key)] = int(r.get("n") or 0)
+                items = self._items()
+                if items is not None:
+                    for r in items.all():
+                        key = str(r.get("delivery_state") or "legacy")
+                        counts[key] = counts.get(key, 0) + 1
+                else:
+                    for r in self.db.query(
+                            "SELECT delivery_state, COUNT(*) AS n "
+                            "FROM news_items GROUP BY delivery_state") or []:
+                        key = r.get("delivery_state") or "legacy"
+                        counts[str(key)] = int(r.get("n") or 0)
             except Exception as exc:  # noqa: BLE001
                 record_failure("news.status", exc)
                 counts = {}
@@ -1541,9 +1645,16 @@ class NewsAgent:
         if self.db is None:
             return []
         try:
-            rows = self.db.query(
-                "SELECT * FROM news_items ORDER BY created_at DESC LIMIT ?", (limit,)
-            )
+            items = self._items()
+            if items is not None:
+                rows = items.all()
+                rows.sort(key=lambda r: r.get("created_at") or 0,
+                          reverse=True)
+                rows = rows[:limit]
+            else:
+                rows = self.db.query(
+                    "SELECT * FROM news_items ORDER BY created_at DESC LIMIT ?", (limit,)
+                )
         except Exception as exc:  # noqa: BLE001
             record_failure("news.recent", exc)
             return []

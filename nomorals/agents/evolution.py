@@ -65,6 +65,16 @@ from .failures import record_failure
 
 _log = get_logger(__name__)
 
+def _outcomes_table(db: Any):
+    """The seam-backed evolution_outcomes table (Mongo P3), or None on
+    the SQLite default, where the native statements run unchanged. Only
+    the outcomes ledger is ported; the agent's cross-domain count reads
+    (skills / kg / failures tables) stay SQL — they are other organs'
+    tables, outside this domain's port."""
+    from ..storage.rowstore import attached_rows
+    return attached_rows(db, "evolution_outcomes")
+
+
 __all__ = ["EvolutionAgent", "EvolutionGitController",
            "EvolutionProposal", "register"]
 
@@ -495,9 +505,15 @@ class EvolutionAgent:
                 f"{b.get('kg_nodes', 0)}")
         try:
             db = self.context.db
-            rows = db.query(
-                "SELECT instruction, applied, reason FROM evolution_outcomes "
-                "ORDER BY ts DESC LIMIT 5")
+            outcomes = _outcomes_table(db)
+            if outcomes is not None:
+                rows = outcomes.all()
+                rows.sort(key=lambda r: r.get("ts") or 0, reverse=True)
+                rows = rows[:5]
+            else:
+                rows = db.query(
+                    "SELECT instruction, applied, reason FROM "
+                    "evolution_outcomes ORDER BY ts DESC LIMIT 5")
             if rows:
                 recent = "; ".join(
                     ("applied: " if r["applied"] else "reverted: ") +
@@ -535,18 +551,32 @@ class EvolutionAgent:
         after = after or {}
         row_id = f"evo-out-{int(time.time() * 1000)}-{proposal_id[-6:]}"
         try:
-            self.context.db.execute(
-                "INSERT INTO evolution_outcomes (id, proposal_id, "
-                "instruction, source, applied, reverted, reason, "
-                "tests_before, tests_after, lines_before, lines_after, "
-                "commit_id, tag, ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (row_id, proposal_id,
-                 (getattr(self, "_last_instruction", "") or "")[:300],
-                 "", int(applied), int(not applied), reason[:500],
-                 int(before.get("tests", 0)), int(after.get("tests", 0)),
-                 int(before.get("prod_lines", 0)),
-                 int(after.get("prod_lines", 0)),
-                 commit, tag, time.time()))
+            outcomes = _outcomes_table(self.context.db)
+            if outcomes is not None:
+                outcomes.put({
+                    "id": row_id, "proposal_id": proposal_id,
+                    "instruction": (getattr(self, "_last_instruction", "")
+                                    or "")[:300],
+                    "source": "", "applied": int(applied),
+                    "reverted": int(not applied), "reason": reason[:500],
+                    "tests_before": int(before.get("tests", 0)),
+                    "tests_after": int(after.get("tests", 0)),
+                    "lines_before": int(before.get("prod_lines", 0)),
+                    "lines_after": int(after.get("prod_lines", 0)),
+                    "commit_id": commit, "tag": tag, "ts": time.time()})
+            else:
+                self.context.db.execute(
+                    "INSERT INTO evolution_outcomes (id, proposal_id, "
+                    "instruction, source, applied, reverted, reason, "
+                    "tests_before, tests_after, lines_before, lines_after, "
+                    "commit_id, tag, ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (row_id, proposal_id,
+                     (getattr(self, "_last_instruction", "") or "")[:300],
+                     "", int(applied), int(not applied), reason[:500],
+                     int(before.get("tests", 0)), int(after.get("tests", 0)),
+                     int(before.get("prod_lines", 0)),
+                     int(after.get("prod_lines", 0)),
+                     commit, tag, time.time()))
         except Exception as exc:  # noqa: BLE001
             _log.debug("could not record outcome: %s", exc)
         if not applied:
@@ -1757,6 +1787,16 @@ def register(registry: Any) -> None:
             return {"history": agent.metrics_history(limit=n)}
         if action == "outcomes":
             try:
+                outcomes = _outcomes_table(context.db)
+                if outcomes is not None:
+                    all_rows = outcomes.all()
+                    all_rows.sort(key=lambda r: r.get("ts") or 0,
+                                  reverse=True)
+                    cols = ("proposal_id", "instruction", "applied",
+                            "reason", "tests_before", "tests_after",
+                            "lines_before", "lines_after", "commit_id", "ts")
+                    return {"ok": True, "outcomes": [
+                        {k: r.get(k) for k in cols} for r in all_rows[:n]]}
                 rows = context.db.query(
                     "SELECT proposal_id, instruction, applied, reason, "
                     "tests_before, tests_after, lines_before, lines_after, "

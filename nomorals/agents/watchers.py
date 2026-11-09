@@ -982,16 +982,30 @@ _WATCHER_COLUMNS = (
 
 
 class WatcherStore:
-    """DB persistence for watchers, check history, and the alert audit log."""
+    """DB persistence for watchers, check history, and the alert audit log.
+
+    Mongo P3: when boot attached a document store to the database, the
+    four watcher tables route through storage.rowstore (documents are
+    carry-v1 rows); on the SQLite default the native statements below
+    run unchanged.
+    """
 
     def __init__(self, db: Any) -> None:
         if db is None:
             raise RuntimeError("WatcherStore needs a database")
         self.db = db
 
+    def _t(self, table: str):
+        from ..storage.rowstore import attached_rows
+        return attached_rows(self.db, table)
+
     # -- watchers ------------------------------------------------------
     def create(self, watcher: Watcher) -> Watcher:
         row = watcher.to_row()
+        watchers = self._t("watchers")
+        if watchers is not None:
+            watchers.put({c: row[c] for c in _WATCHER_COLUMNS})
+            return watcher
         cols = ", ".join(_WATCHER_COLUMNS)
         placeholders = ", ".join("?" for _ in _WATCHER_COLUMNS)
         self.db.execute(
@@ -1003,6 +1017,10 @@ class WatcherStore:
         ref = (ref or "").strip()
         if not ref:
             return None
+        watchers = self._t("watchers")
+        if watchers is not None:
+            row = watchers.get(ref) or watchers.find_one({"name": ref})
+            return watcher_from_row(row) if row else None
         row = self.db.query_one("SELECT * FROM watchers WHERE id=?", (ref,))
         if row is None:
             row = self.db.query_one("SELECT * FROM watchers WHERE name=?",
@@ -1010,6 +1028,11 @@ class WatcherStore:
         return watcher_from_row(row) if row else None
 
     def list(self, state: str = "") -> list[Watcher]:
+        watchers = self._t("watchers")
+        if watchers is not None:
+            rows = watchers.find({"state": state} if state else None)
+            rows.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+            return [watcher_from_row(r) for r in rows]
         if state:
             rows = self.db.query(
                 "SELECT * FROM watchers WHERE state=? ORDER BY created_at DESC",
@@ -1020,6 +1043,19 @@ class WatcherStore:
         return [watcher_from_row(r) for r in rows]
 
     def due(self, now: float) -> list[Watcher]:
+        watchers = self._t("watchers")
+        if watchers is not None:
+            rows = []
+            for r in watchers.find({"state": "active"}):
+                expires = r.get("expires_at") or 0
+                if expires != 0 and expires <= now:
+                    continue
+                last = r.get("last_check") or 0
+                if last != 0 and last + (r.get("interval_s") or 0) > now:
+                    continue
+                rows.append(r)
+            rows.sort(key=lambda r: r.get("last_check") or 0)
+            return [watcher_from_row(r) for r in rows]
         rows = self.db.query(
             "SELECT * FROM watchers WHERE state='active' "
             "AND (expires_at=0 OR expires_at > ?) "
@@ -1030,6 +1066,11 @@ class WatcherStore:
     def save(self, watcher: Watcher) -> None:
         watcher.updated_at = time.time()
         row = watcher.to_row()
+        watchers = self._t("watchers")
+        if watchers is not None:
+            watchers.update(watcher.id, {
+                c: row[c] for c in _WATCHER_COLUMNS if c != "id"})
+            return
         sets = ", ".join(f"{c}=?" for c in _WATCHER_COLUMNS if c != "id")
         self.db.execute(
             f"UPDATE watchers SET {sets} WHERE id=?",
@@ -1040,6 +1081,16 @@ class WatcherStore:
         watcher = self.get(ref)
         if watcher is None:
             return False
+        alerts = self._t("watcher_alerts")
+        if alerts is not None:
+            alerts.delete_where({"watcher_id": watcher.id})
+            checks = self._t("watcher_checks")
+            assert checks is not None  # same pickup rule
+            checks.delete_where({"watcher_id": watcher.id})
+            watchers = self._t("watchers")
+            assert watchers is not None  # same pickup rule
+            watchers.delete(watcher.id)
+            return True
         self.db.execute("DELETE FROM watcher_alerts WHERE watcher_id=?",
                         (watcher.id,))
         self.db.execute("DELETE FROM watcher_checks WHERE watcher_id=?",
@@ -1052,9 +1103,16 @@ class WatcherStore:
 
         Returns the removed watcher ids so the sweep can report them.
         """
-        rows = self.db.query(
-            "SELECT id, name FROM watchers "
-            "WHERE expires_at > 0 AND expires_at <= ?", (now,))
+        watchers = self._t("watchers")
+        if watchers is not None:
+            rows = [{"id": r["id"], "name": r.get("name")}
+                    for r in watchers.all()
+                    if (r.get("expires_at") or 0) > 0
+                    and (r.get("expires_at") or 0) <= now]
+        else:
+            rows = self.db.query(
+                "SELECT id, name FROM watchers "
+                "WHERE expires_at > 0 AND expires_at <= ?", (now,))
         removed = []
         for row in rows:
             if self.delete(row["id"]):
@@ -1068,6 +1126,17 @@ class WatcherStore:
                      summary: str, value_hash: str,
                      now: float | None = None) -> None:
         now = now if now is not None else time.time()
+        checks = self._t("watcher_checks")
+        if checks is not None:
+            checks.put({
+                "id": new_id(), "watcher_id": watcher_id,
+                "checked_at": now, "changed": 1 if changed else 0,
+                "summary": summary[:500], "value_hash": value_hash})
+            rows = checks.find({"watcher_id": watcher_id})
+            rows.sort(key=lambda r: r.get("checked_at") or 0, reverse=True)
+            for stale in rows[HISTORY_CAP:]:
+                checks.delete(stale["id"])
+            return
         self.db.execute(
             "INSERT INTO watcher_checks (id, watcher_id, checked_at, "
             "changed, summary, value_hash) VALUES (?,?,?,?,?,?)",
@@ -1081,6 +1150,14 @@ class WatcherStore:
 
     def check_history(self, watcher_id: str,
                       limit: int = HISTORY_CAP) -> list[dict[str, Any]]:
+        checks = self._t("watcher_checks")
+        if checks is not None:
+            rows = checks.find({"watcher_id": watcher_id})
+            rows.sort(key=lambda r: r.get("checked_at") or 0, reverse=True)
+            return [{"checked_at": r["checked_at"],
+                     "changed": r["changed"], "summary": r["summary"],
+                     "value_hash": r["value_hash"]}
+                    for r in rows[:limit]]
         return self.db.query(
             "SELECT checked_at, changed, summary, value_hash "
             "FROM watcher_checks WHERE watcher_id=? "
@@ -1094,6 +1171,13 @@ class WatcherStore:
         owner can audit 'why didn't you tell me' and 'why did you spam me'."""
         now = now if now is not None else time.time()
         aid = new_id()
+        alerts = self._t("watcher_alerts")
+        if alerts is not None:
+            alerts.put({
+                "id": aid, "watcher_id": watcher_id, "severity": severity,
+                "channel": channel, "status": status, "title": title[:300],
+                "body": body[:2000], "created_at": now})
+            return aid
         self.db.execute(
             "INSERT INTO watcher_alerts (id, watcher_id, severity, channel, "
             "status, title, body, created_at) VALUES (?,?,?,?,?,?,?,?)",
@@ -1102,18 +1186,33 @@ class WatcherStore:
         return aid
 
     def held_alerts(self) -> list[dict[str, Any]]:
+        alerts = self._t("watcher_alerts")
+        if alerts is not None:
+            rows = alerts.find({"status": "held"})
+            rows.sort(key=lambda r: r.get("created_at") or 0)
+            return rows
         return self.db.query(
             "SELECT * FROM watcher_alerts WHERE status='held' "
             "ORDER BY created_at ASC")
 
     def mark_digested(self, alert_ids: list[str]) -> None:
+        alerts = self._t("watcher_alerts")
         for aid in alert_ids:
-            self.db.execute(
-                "UPDATE watcher_alerts SET status='digested' WHERE id=?",
-                (aid,))
+            if alerts is not None:
+                alerts.update(aid, {"status": "digested"})
+            else:
+                self.db.execute(
+                    "UPDATE watcher_alerts SET status='digested' WHERE id=?",
+                    (aid,))
 
     def alert_log(self, watcher_id: str = "",
                   limit: int = 50) -> list[dict[str, Any]]:
+        alerts = self._t("watcher_alerts")
+        if alerts is not None:
+            rows = alerts.find(
+                {"watcher_id": watcher_id} if watcher_id else None)
+            rows.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+            return rows[:limit]
         if watcher_id:
             return self.db.query(
                 "SELECT * FROM watcher_alerts WHERE watcher_id=? "
@@ -1124,11 +1223,19 @@ class WatcherStore:
 
     # -- sweeper-level state (digest bookkeeping) ------------------------
     def get_state(self, key: str, default: str = "") -> str:
+        state = self._t("watcher_state")
+        if state is not None:
+            row = state.get(key)
+            return row["value"] if row else default
         row = self.db.query_one(
             "SELECT value FROM watcher_state WHERE key=?", (key,))
         return row["value"] if row else default
 
     def set_state(self, key: str, value: str) -> None:
+        state = self._t("watcher_state")
+        if state is not None:
+            state.put({"key": key, "value": value})
+            return
         self.db.execute(
             "INSERT INTO watcher_state (key, value) VALUES (?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
