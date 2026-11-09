@@ -39,6 +39,9 @@ from __future__ import annotations
 import bz2
 import contextlib
 import glob
+import hashlib
+import io
+import json
 import lzma
 import os
 import re
@@ -1717,3 +1720,612 @@ def extract_for_downloader(archivist: "Archivist", path: str,
 __all__ += ["MAGIC_SIGNATURES", "detect_magic_bytes", "detect_file_magic",
             "is_safe_member_name", "validate_archive_members",
             "extract_for_downloader"]
+
+
+# ── bundle seam (WS1-P5) ─────────────────────────────────────────────
+#
+# ONE bundle format + writer/reader for every family that packs
+# files into a single transportable unit: artifact export
+# (storage/artifacts), database-backup blob sidecars
+# (storage/backup), OS snapshot export (os/snapshots) and backup
+# generations (backup/).  Before P5 each family hand-rolled its own
+# tar/zip writer and its own manifest shape, sharing no code path.
+#
+# A bundle is a zip or tar-family archive whose members are joined
+# by a manifest member (``bundle.manifest.json``): JSON, versioned,
+# carrying every member's name, size and SHA-256 plus who made the
+# bundle and when.  A family's own domain manifest may ride along
+# as an ordinary member (the artifact store's ``manifest.json``);
+# the bundle manifest is the cross-family contract — the shape a
+# foreign reader (e.g. GoldenSwing harvest bundles, WS1-P7)
+# targets.
+#
+# Backward compatibility is a hard rule: bundles written before
+# the seam exist (no bundle manifest, each family's legacy layout)
+# and MUST still open.  The reader therefore treats the bundle
+# manifest as an overlay: present, it is authoritative; absent,
+# the member list is synthesized from the container itself, and a
+# family manifest (``manifest.json``) when one is visible rides
+# along in the result as ``family_manifest``.  Directory bundles —
+# a snapshot dir, a backup generation dir — open through the same
+# reader, their family manifests synthesized the same way.
+
+BUNDLE_FORMAT = "nomorals-bundle"
+BUNDLE_FORMAT_VERSION = 1
+BUNDLE_MANIFEST_NAME = "bundle.manifest.json"
+
+_BUNDLE_TAR_WRITE = {"tar": "w", "tar.gz": "w:gz",
+                     "tar.bz2": "w:bz2", "tar.xz": "w:xz"}
+_BUNDLE_CONTAINERS = ("zip", "tar", "tar.gz", "tar.bz2", "tar.xz")
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_file(path: str | Path) -> str:
+    """Streaming SHA-256 of a file — the seam's one hash helper."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def bundle_manifest(members: Any, *, created_by: str, kind: str = "",
+                    created_at: float | None = None,
+                    extra: dict[str, Any] | None = None
+                    ) -> dict[str, Any]:
+    """Build the standard bundle manifest dict.
+
+    ``members`` is an iterable of dicts with ``name`` / ``size`` /
+    ``sha256`` (``is_dir`` optional).  The shape is the contract:
+    ``format`` + ``version`` identify it, ``created_by`` /
+    ``created_at`` / ``kind`` say who made it and what family it
+    belongs to, ``members`` is the per-file truth a verifier checks
+    bytes against.  ``extra`` may add top-level keys but never
+    override the core ones.
+    """
+    entries = [{
+        "name": str(m["name"]),
+        "size": int(m.get("size", 0)),
+        "sha256": str(m.get("sha256", "")),
+        "is_dir": bool(m.get("is_dir", False)),
+    } for m in members]
+    out: dict[str, Any] = {
+        "format": BUNDLE_FORMAT,
+        "version": BUNDLE_FORMAT_VERSION,
+        "created_by": str(created_by),
+        "created_at": float(created_at if created_at is not None
+                            else time.time()),
+        "kind": str(kind),
+        "members": entries,
+    }
+    if extra:
+        for key, value in extra.items():
+            if key not in out:
+                out[key] = value
+    return out
+
+
+def create_bundle(dest: str | Path, members: Any, *,
+                  created_by: str, kind: str = "",
+                  container: str = "tar.gz",
+                  created_at: float | None = None) -> dict[str, Any]:
+    """Write a bundle to ``dest`` and return its manifest.
+
+    ``members`` is an iterable of ``(name, source)`` pairs: source
+    is a file path (its bytes ride), a directory path (a directory
+    entry rides — how an empty directory survives a round trip),
+    or raw bytes.  Member names must be safe (the Archivist's
+    member-name gate), unique, and may not claim the reserved
+    manifest name.  The bundle manifest is written LAST, so a
+    reader that sees it can trust it describes the whole archive;
+    the file is published by atomic rename, like
+    :meth:`Archivist.create`.
+    """
+    dest_p = Path(dest)
+    container = (container or "tar.gz").lower().lstrip(".")
+    if container == "tgz":
+        container = "tar.gz"
+    if container not in _BUNDLE_CONTAINERS:
+        raise ToolError(f"unsupported bundle container {container!r} "
+                        f"(one of {', '.join(_BUNDLE_CONTAINERS)})")
+    prepared: list[tuple[str, bool, int, str, Any]] = []
+    seen: set[str] = set()
+    for name, source in members:
+        norm = str(name).replace("\\", "/").rstrip("/")
+        ok, reason = is_safe_member_name(norm)
+        if not ok:
+            raise ToolError(f"refusing bundle member {name!r}: {reason}")
+        if norm == BUNDLE_MANIFEST_NAME:
+            raise ToolError(f"bundle member name {norm!r} is reserved "
+                            "for the bundle manifest")
+        if norm in seen:
+            raise ToolError(f"duplicate bundle member {norm!r}")
+        seen.add(norm)
+        if isinstance(source, (bytes, bytearray, memoryview)):
+            data = bytes(source)
+            prepared.append((norm, False, len(data),
+                             _sha256_bytes(data), data))
+            continue
+        src = Path(source)
+        if src.is_dir():
+            prepared.append((norm, True, 0, _sha256_bytes(b""), src))
+        elif src.is_file():
+            prepared.append((norm, False, src.stat().st_size,
+                             sha256_file(src), src))
+        else:
+            raise ToolError(f"bundle member source missing: {src}")
+    manifest = bundle_manifest(
+        [{"name": n, "size": s, "sha256": h, "is_dir": d}
+         for n, d, s, h, _src in prepared],
+        created_by=created_by, kind=kind, created_at=created_at)
+    manifest_bytes = json.dumps(manifest, indent=2,
+                                ensure_ascii=False).encode("utf-8")
+    dest_p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest_p.with_suffix(
+        dest_p.suffix + f".bundle-{int(time.time())}-{os.getpid()}")
+    try:
+        if container == "zip":
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED,
+                                 compresslevel=9) as zf:
+                for name, is_dir, _s, _h, src in prepared:
+                    if is_dir:
+                        zf.writestr(zipfile.ZipInfo(name + "/"), b"")
+                    elif isinstance(src, bytes):
+                        zf.writestr(name, src)
+                    else:
+                        zf.write(src, name)
+                zf.writestr(BUNDLE_MANIFEST_NAME, manifest_bytes)
+        else:
+            with tarfile.open(tmp, _BUNDLE_TAR_WRITE[container]) as tf:
+                for name, is_dir, _s, _h, src in prepared:
+                    if is_dir:
+                        info = tarfile.TarInfo(name)
+                        info.type = tarfile.DIRTYPE
+                        info.mode = 0o755
+                        tf.addfile(info)
+                    elif isinstance(src, bytes):
+                        info = tarfile.TarInfo(name)
+                        info.size = len(src)
+                        tf.addfile(info, io.BytesIO(src))
+                    else:
+                        info = tf.gettarinfo(str(src), arcname=name)
+                        with open(src, "rb") as fh:
+                            tf.addfile(info, fh)
+                info = tarfile.TarInfo(BUNDLE_MANIFEST_NAME)
+                info.size = len(manifest_bytes)
+                tf.addfile(info, io.BytesIO(manifest_bytes))
+        tmp.rename(dest_p)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+    return manifest
+
+
+class _BundleArchive:
+    """Member reader over one zip/tar container file (seam-internal).
+
+    Normalizes both stdlib readers to one shape: ``entries()``
+    yields ``{"name", "size", "is_dir", "kind"}`` dicts (kind is
+    ``"file"`` / ``"dir"`` / ``"other"`` — a tar link or device is
+    "other", and extraction refuses it), ``read`` / ``stream``
+    fetch a member's bytes by normalized name.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self.format = detect_format(self.path)
+        self._zip: zipfile.ZipFile | None = None
+        self._tar: tarfile.TarFile | None = None
+        self._raw: dict[str, Any] = {}
+        if self.format == "zip":
+            try:
+                self._zip = zipfile.ZipFile(self.path)
+            except (zipfile.BadZipFile, UnicodeDecodeError,
+                    OSError) as exc:
+                raise ToolError(
+                    f"unreadable bundle {self.path.name}: {exc}"
+                ) from exc
+            for info in self._zip.infolist():
+                is_dir = info.filename.endswith("/")
+                name = info.filename.rstrip("/")
+                self._raw[name] = info
+        elif self.format in ("tar", "tar.gz", "tar.bz2", "tar.xz"):
+            try:
+                self._tar = tarfile.open(self.path, "r:*")
+                members = self._tar.getmembers()
+            except (tarfile.TarError, EOFError, OSError) as exc:
+                raise ToolError(
+                    f"unreadable bundle {self.path.name}: {exc}"
+                ) from exc
+            for m in members:
+                self._raw[m.name.rstrip("/")] = m
+        else:
+            raise ToolError(
+                f"not a bundle container: {self.path.name} "
+                f"(format {self.format!r})")
+
+    def __enter__(self) -> "_BundleArchive":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._zip is not None:
+            self._zip.close()
+        if self._tar is not None:
+            self._tar.close()
+
+    def entries(self) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for name, raw in self._raw.items():
+            if self._zip is not None:
+                is_dir = raw.filename.endswith("/")
+                out.append({"name": name, "size": raw.file_size,
+                            "is_dir": is_dir,
+                            "kind": "dir" if is_dir else "file"})
+            else:
+                kind = ("dir" if raw.isdir() else
+                        "file" if raw.isfile() else "other")
+                out.append({"name": name, "size": raw.size,
+                            "is_dir": raw.isdir(), "kind": kind})
+        return out
+
+    def read(self, name: str) -> bytes:
+        if self._zip is not None:
+            return self._zip.read(self._raw[name])
+        fh = self._tar.extractfile(self._raw[name])  # type: ignore[union-attr]
+        if fh is None:
+            raise ToolError(f"unreadable bundle member {name!r}")
+        return fh.read()
+
+    def stream(self, name: str) -> Any:
+        if self._zip is not None:
+            return self._zip.open(self._raw[name])
+        fh = self._tar.extractfile(self._raw[name])  # type: ignore[union-attr]
+        if fh is None:
+            raise ToolError(f"unreadable bundle member {name!r}")
+        return fh
+
+
+def _parse_bundle_manifest(raw: bytes, origin: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ToolError(
+            f"bundle manifest in {origin} is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(parsed, dict) \
+            or parsed.get("format") != BUNDLE_FORMAT:
+        raise ToolError(
+            f"bundle manifest in {origin} is not a {BUNDLE_FORMAT} "
+            "manifest")
+    if int(parsed.get("version", 0)) != BUNDLE_FORMAT_VERSION:
+        raise ToolError(
+            f"unsupported bundle format version "
+            f"{parsed.get('version')!r} in {origin} "
+            f"(this reader speaks {BUNDLE_FORMAT_VERSION})")
+    return parsed
+
+
+def open_bundle(path: str | Path) -> dict[str, Any]:
+    """Open a bundle — archive file or directory — through the seam.
+
+    Returns ``{"path", "format", "legacy", "manifest",
+    "family_manifest", "members"}``.  ``manifest`` is the standard
+    bundle manifest when the bundle carries one (``legacy`` False)
+    and ``members`` then comes from it; on a legacy bundle
+    ``manifest`` is None, ``legacy`` is True, and ``members`` is
+    synthesized from the container itself.  A family's own
+    ``manifest.json``, when visible and parseable, rides along as
+    ``family_manifest`` either way.
+    """
+    p = Path(path)
+    if p.is_dir():
+        return _open_bundle_dir(p)
+    if not p.is_file():
+        raise ToolError(f"bundle not found: {p}")
+    with _BundleArchive(p) as arc:
+        entries = arc.entries()
+        names = {e["name"] for e in entries}
+        manifest = None
+        if BUNDLE_MANIFEST_NAME in names:
+            manifest = _parse_bundle_manifest(
+                arc.read(BUNDLE_MANIFEST_NAME), p.name)
+        family = None
+        if "manifest.json" in names:
+            try:
+                family = json.loads(
+                    arc.read("manifest.json").decode("utf-8"))
+            except Exception:  # noqa: BLE001 - family data, best effort
+                family = None
+        fmt = arc.format
+    members = (manifest.get("members", []) if manifest is not None
+               else entries)
+    return {"path": str(p), "format": fmt,
+            "legacy": manifest is None, "manifest": manifest,
+            "family_manifest": family, "members": members}
+
+
+def _open_bundle_dir(p: Path) -> dict[str, Any]:
+    manifest = None
+    family = None
+    members: list[dict[str, Any]] | None = None
+    bm = p / BUNDLE_MANIFEST_NAME
+    mf = p / "manifest.json"
+    if bm.is_file():
+        manifest = _parse_bundle_manifest(
+            bm.read_bytes(), str(bm))
+        members = list(manifest.get("members", []))
+    elif mf.is_file():
+        try:
+            family = json.loads(mf.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - family data, best effort
+            family = None
+        if isinstance(family, dict):
+            block = family.get("bundle")
+            if isinstance(block, dict) \
+                    and block.get("format") == BUNDLE_FORMAT:
+                manifest = _parse_bundle_manifest(
+                    json.dumps(block).encode("utf-8"), str(mf))
+                members = list(manifest.get("members", []))
+            elif isinstance(family.get("files"), dict):
+                # OS snapshot shape: {name: {sha256, bytes}}.
+                members = [{
+                    "name": name,
+                    "size": int(meta.get("bytes", 0)),
+                    "sha256": str(meta.get("sha256", "")),
+                    "is_dir": (p / name).is_dir(),
+                } for name, meta in sorted(family["files"].items())
+                    if isinstance(meta, dict)]
+            elif isinstance(family.get("files"), list):
+                # Backup generation shape: [{rel, size, sha256, ...}].
+                members = [{
+                    "name": str(e.get("rel", "")),
+                    "size": int(e.get("size", 0)),
+                    "sha256": str(e.get("sha256", "")),
+                    "is_dir": False,
+                } for e in family["files"] if isinstance(e, dict)]
+    if members is None:
+        members = [{
+            "name": f.relative_to(p).as_posix(),
+            "size": f.stat().st_size, "sha256": "", "is_dir": False,
+        } for f in sorted(p.rglob("*"))
+            if f.is_file() and f.name not in (BUNDLE_MANIFEST_NAME,
+                                              "manifest.json")]
+    return {"path": str(p), "format": "directory",
+            "legacy": manifest is None, "manifest": manifest,
+            "family_manifest": family, "members": members}
+
+
+def list_bundle(path: str | Path) -> list[dict[str, Any]]:
+    """The member list of a bundle (manifest view when carried)."""
+    return open_bundle(path)["members"]
+
+
+def verify_bundle(path: str | Path) -> dict[str, Any]:
+    """Verify a bundle against its manifest.
+
+    Manifest-carrying bundles: every recorded member is checked
+    for presence, size and SHA-256 — a mismatch names the member —
+    and any archive member the manifest does not record is itself
+    a problem.  Legacy bundles have no recorded hashes to check
+    against: verification is structural (the bundle opens, member
+    names are safe) plus, for directory bundles whose family
+    manifest records per-file hashes (snapshots), those hashes are
+    checked.  Returns ``{"path", "ok", "legacy", "checked",
+    "problems"}``.
+    """
+    p = Path(path)
+    info = open_bundle(p)
+    problems: list[str] = []
+    checked = 0
+    manifest = info["manifest"]
+    if manifest is not None:
+        recorded = {str(m["name"]): m
+                    for m in manifest.get("members", [])}
+        if p.is_dir():
+            for name, m in recorded.items():
+                checked += 1
+                target = p / name
+                if m.get("is_dir"):
+                    if not target.is_dir():
+                        problems.append(f"missing member: {name}")
+                    continue
+                if not target.is_file():
+                    problems.append(f"missing member: {name}")
+                    continue
+                actual_size = target.stat().st_size
+                if actual_size != int(m.get("size", -1)):
+                    problems.append(
+                        f"size mismatch: {name} (manifest "
+                        f"{m.get('size')}, actual {actual_size})")
+                    continue
+                if m.get("sha256") \
+                        and sha256_file(target) != m["sha256"]:
+                    problems.append(f"sha256 mismatch: {name}")
+            for f in sorted(p.rglob("*")):
+                if f.is_file():
+                    rel = f.relative_to(p).as_posix()
+                    if rel not in recorded and rel not in (
+                            BUNDLE_MANIFEST_NAME, "manifest.json"):
+                        problems.append(f"unmanifested member: {rel}")
+        else:
+            with _BundleArchive(p) as arc:
+                present = {e["name"]: e for e in arc.entries()}
+                for name, m in recorded.items():
+                    checked += 1
+                    entry = present.get(name)
+                    if entry is None:
+                        problems.append(f"missing member: {name}")
+                        continue
+                    if bool(m.get("is_dir")) != bool(entry["is_dir"]):
+                        problems.append(
+                            f"member kind mismatch: {name}")
+                        continue
+                    if entry["is_dir"]:
+                        continue
+                    if int(entry["size"]) != int(m.get("size", -1)):
+                        problems.append(
+                            f"size mismatch: {name} (manifest "
+                            f"{m.get('size')}, bundle {entry['size']})")
+                        continue
+                    if m.get("sha256"):
+                        digest = hashlib.sha256()
+                        with arc.stream(name) as fh:
+                            for chunk in iter(
+                                    lambda: fh.read(1 << 20), b""):
+                                digest.update(chunk)
+                        if digest.hexdigest() != m["sha256"]:
+                            problems.append(f"sha256 mismatch: {name}")
+                for name in present:
+                    if name not in recorded \
+                            and name != BUNDLE_MANIFEST_NAME:
+                        problems.append(f"unmanifested member: {name}")
+    else:
+        for entry in info["members"]:
+            name = entry.get("name", "")
+            if not name:
+                continue
+            ok, reason = is_safe_member_name(name)
+            if not ok:
+                problems.append(
+                    f"unsafe member name: {name} ({reason})")
+        if p.is_dir():
+            for entry in info["members"]:
+                if entry.get("sha256") and not entry.get("is_dir"):
+                    checked += 1
+                    target = p / entry["name"]
+                    if not target.is_file():
+                        problems.append(
+                            f"missing member: {entry['name']}")
+                    elif sha256_file(target) != entry["sha256"]:
+                        problems.append(
+                            f"sha256 mismatch: {entry['name']}")
+    return {"path": str(p), "ok": not problems,
+            "legacy": info["legacy"], "checked": checked,
+            "problems": problems}
+
+
+def extract_bundle(path: str | Path, dest: str | Path, *,
+                   max_files: int = _MAX_EXTRACT_FILES,
+                   max_bytes: int = _MAX_EXTRACT_BYTES
+                   ) -> dict[str, Any]:
+    """Extract a bundle file into ``dest`` under the Archivist's
+    safety semantics.
+
+    Bundles are machine-made, so the contract is refuse-whole (the
+    ``extract_for_downloader`` rule, not the chat extractor's
+    skip-and-report): any unsafe member name, any non-file member
+    that is not a directory (a tar link, a device), or a bomb
+    budget trip (member count / live-streamed bytes) refuses the
+    whole bundle with the offender named.  Directory bundles are
+    already on disk and refuse.  Returns ``{"path", "dest",
+    "format", "extracted", "bytes", "files", "manifest",
+    "legacy"}``.
+    """
+    p = Path(path)
+    if p.is_dir():
+        raise ToolError(f"{p} is a directory bundle — its files "
+                        "are already on disk, nothing to extract")
+    if not p.is_file():
+        raise ToolError(f"bundle not found: {p}")
+    dest_p = Path(dest)
+    dest_p.mkdir(parents=True, exist_ok=True)
+    root = dest_p.resolve()
+    written: list[str] = []
+    total = 0
+    manifest = None
+    with _BundleArchive(p) as arc:
+        entries = arc.entries()
+        verdict = validate_archive_members(
+            [e["name"] for e in entries if e["name"]])
+        if verdict["unsafe"]:
+            first = verdict["unsafe"][0]
+            raise ToolError(
+                f"refused: bundle {p.name} carries unsafe member "
+                f"{first['name']!r} ({first['reason']}) — bundles "
+                "are machine-made, so one bad name refuses the "
+                "whole bundle")
+        for entry in entries:
+            if entry["kind"] == "other":
+                raise ToolError(
+                    f"refused: bundle {p.name} member "
+                    f"{entry['name']!r} is not a regular file or "
+                    "directory (links and devices never ride a "
+                    "bundle)")
+        if len(entries) > max_files:
+            raise _BombError(
+                f"bundle {p.name} holds {len(entries)} members, "
+                f"over the {max_files} extraction budget")
+        for entry in entries:
+            target = root / entry["name"]
+            if not Archivist._within(root, target):
+                raise ToolError(
+                    f"refused: bundle member {entry['name']!r} "
+                    "escapes the destination")
+            if entry["is_dir"]:
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with arc.stream(entry["name"]) as src, \
+                    open(target, "wb") as out:
+                while True:
+                    chunk = src.read(1 << 20)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise _BombError(
+                            f"bundle {p.name} exceeds the "
+                            f"{max_bytes}-byte extraction budget")
+                    out.write(chunk)
+            written.append(entry["name"])
+        if BUNDLE_MANIFEST_NAME in {e["name"] for e in entries}:
+            manifest = _parse_bundle_manifest(
+                arc.read(BUNDLE_MANIFEST_NAME), p.name)
+        fmt = arc.format
+    return {"path": str(p), "dest": str(root), "format": fmt,
+            "extracted": len(written), "bytes": total,
+            "files": written, "manifest": manifest,
+            "legacy": manifest is None}
+
+
+def read_bundle_members(path: str | Path, *,
+                        max_bytes: int = _MAX_EXTRACT_BYTES
+                        ) -> dict[str, bytes]:
+    """Read every file member of a bundle file into memory.
+
+    For consumers that work on member bytes directly (the artifact
+    store's import).  Budget-capped like extraction; directory
+    members are skipped; insertion order is archive order.
+    """
+    p = Path(path)
+    if p.is_dir():
+        raise ToolError(f"{p} is a directory bundle — read its "
+                        "files from disk instead")
+    if not p.is_file():
+        raise ToolError(f"bundle not found: {p}")
+    out: dict[str, bytes] = {}
+    total = 0
+    with _BundleArchive(p) as arc:
+        for entry in arc.entries():
+            if entry["is_dir"]:
+                continue
+            data = arc.read(entry["name"])
+            total += len(data)
+            if total > max_bytes:
+                raise _BombError(
+                    f"bundle {p.name} exceeds the {max_bytes}-byte "
+                    "read budget")
+            out[entry["name"]] = data
+    return out
+
+
+__all__ += ["BUNDLE_FORMAT", "BUNDLE_FORMAT_VERSION",
+            "BUNDLE_MANIFEST_NAME", "bundle_manifest", "create_bundle",
+            "open_bundle", "list_bundle", "verify_bundle",
+            "extract_bundle", "read_bundle_members", "sha256_file"]

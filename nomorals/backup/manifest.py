@@ -99,6 +99,8 @@ def build_manifest(
     notes: str = "",
 ) -> dict[str, Any]:
     """Build the git-native record for one generation."""
+    from ..archives import bundle_manifest
+
     files = []
     for item in protected:
         entry = item.to_dict() if hasattr(item, "to_dict") else dict(item)
@@ -115,6 +117,18 @@ def build_manifest(
         "total_encrypted_bytes": sum(f["size"] for f in files),
         "file_count": len(files),
         "notes": notes,
+        # The shared bundle seam's manifest block (WS1-P5): the
+        # generation is a directory bundle, and this block is its
+        # standard manifest — any seam reader (archives.open_bundle
+        # on the generation dir) sees the same member truth the
+        # drill verifies below.  Members are the logical files:
+        # name = rel path, size/SHA-256 of the ciphertext as a
+        # whole (split parts reassemble to exactly these bytes).
+        "bundle": bundle_manifest(
+            [{"name": f.get("rel", ""), "size": f.get("size", 0),
+              "sha256": f.get("sha256", "")} for f in files],
+            created_by="backup.package", kind="backup-generation",
+            created_at=created_at or time.time()),
     }
     if plan is not None:
         manifest["plan"] = (
@@ -177,9 +191,10 @@ def verify_manifest_files(
 
     Mirrors :func:`nomorals.memory.backup.verify_backup`: returns a list
     of problems; empty means clean. Hash mismatches stop at the report —
-    a mismatch is FAILED, not partial.
+    a mismatch is FAILED, not partial.  Per-file hashing is the shared
+    bundle seam's helper (``archives.sha256_file``, WS1-P5).
     """
-    import hashlib
+    from ..archives import sha256_file
 
     base = Path(base_dir)
     problems: list[str] = []
@@ -195,11 +210,7 @@ def verify_manifest_files(
             # parts hash to the whole-file ciphertext hash after joining,
             # which the drill does explicitly.
             if len(entry.get("parts", []) or []) <= 1:
-                h = hashlib.sha256()
-                with path.open("rb") as fh:
-                    for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-                        h.update(chunk)
-                if h.hexdigest() != entry.get("sha256"):
+                if sha256_file(path) != entry.get("sha256"):
                     problems.append(
                         f"checksum mismatch: {path.name} "
                         "(FAILED, not partial — do not trust these bytes)"

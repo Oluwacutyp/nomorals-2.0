@@ -507,41 +507,52 @@ class BackupManager:
             _log.debug("blob dir %s missing; skipping blob backup", source)
             return "", "", 0, {}
         archive = self.directory / f"{base}-blobs.tar.gz"
-        files: dict[str, str] = {}
+        # Packing rides the shared bundle seam (WS1-P5): the sidecar
+        # is a seam bundle (tar.gz + bundle.manifest.json), so the
+        # per-file digests the manifest below records ARE the bundle
+        # manifest's member digests — one hash truth, not two.
+        from ..archives import ToolError, create_bundle
+
+        sources: list[tuple[str, Path]] = []
+        for path in sorted(source.rglob("*")):
+            if not path.is_file() or path.is_symlink():
+                continue
+            sources.append((path.relative_to(source).as_posix(), path))
         try:
-            with tarfile.open(archive, "w:gz", compresslevel=6) as tar:
-                for path in sorted(source.rglob("*")):
-                    if not path.is_file() or path.is_symlink():
-                        continue
-                    rel = path.relative_to(source).as_posix()
-                    digest = _sha256_file(path)
-                    files[rel] = digest
-                    tarinfo = tar.gettarinfo(str(path), arcname=rel)
-                    with path.open("rb") as handle:
-                        tar.addfile(tarinfo, handle)
-        except OSError as exc:
+            bundle = create_bundle(
+                archive, sources, created_by="storage.backup",
+                kind="backup-blobs", container="tar.gz")
+        except (OSError, ToolError) as exc:
             archive.unlink(missing_ok=True)
             raise StorageError(f"cannot archive blobs from {source}: {exc}") from exc
+        files = {m["name"]: m["sha256"] for m in bundle["members"]}
         return archive.name, _sha256_file(archive), len(files), files
 
     def _extract_blob_archive(self, archive: Path, dest: Path) -> Path:
-        """Extract a blob tarball, refusing path-traversal entries."""
+        """Extract a blob tarball, refusing path-traversal entries.
+
+        Extraction rides the shared bundle seam (WS1-P5), which
+        refuses a bundle carrying any unsafe member name or any
+        non-file member; sidecars written before the seam (plain
+        tar.gz, no bundle manifest) extract through it unchanged.
+        The traversal pre-flight keeps this family's historic error
+        shape: the offending entry is named as an unsafe blob
+        archive entry, not a generic extraction failure.
+        """
+        from ..archives import (ToolError, extract_bundle, list_bundle,
+                                validate_archive_members)
+
         try:
-            with tarfile.open(archive, "r:gz") as tar:
-                for member in tar.getmembers():
-                    name = member.name
-                    if not name or name.startswith("/") or ".." in Path(name).parts:
-                        raise StorageError(f"unsafe blob archive entry: {name!r}")
-                    if not member.isfile():
-                        continue
-                    target = dest / name
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    src = tar.extractfile(member)
-                    if src is None:
-                        raise StorageError(f"unreadable blob archive entry: {name!r}")
-                    with src, target.open("wb") as out:
-                        shutil.copyfileobj(src, out, CHUNK)
-        except (tarfile.TarError, EOFError, OSError) as exc:
+            names = [str(e["name"]) for e in list_bundle(archive)]
+            verdict = validate_archive_members(names)
+            if verdict["unsafe"]:
+                raise StorageError(
+                    f"unsafe blob archive entry: "
+                    f"{verdict['unsafe'][0]['name']!r}")
+            extract_bundle(archive, dest)
+        except StorageError:
+            raise
+        except (ToolError, tarfile.TarError, EOFError, OSError) as exc:
             raise StorageError(f"cannot extract blob archive {archive.name}: {exc}") from exc
         return dest
 

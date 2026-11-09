@@ -656,33 +656,70 @@ class SnapshotManager:
     # ── export / import ──────────────────────────────────────────────────
     def export_tar(self, snapshot_id: str, dest: str | os.PathLike[str],
                    *, compress: str = "gz") -> Path:
-        """Pack a snapshot into a portable tarball for off-machine backup."""
-        import tarfile
+        """Pack a snapshot into a portable tarball for off-machine backup.
+
+        Packing rides the shared bundle seam (WS1-P5): the tarball
+        is a seam bundle (members under ``<snapshot-id>/`` plus a
+        ``bundle.manifest.json``), so any seam reader can inspect a
+        snapshot export without knowing this module.
+        """
+        from ..archives import create_bundle
 
         snap = self.get(snapshot_id)
         assert snap.path is not None
         dest = Path(dest)
-        mode = {"gz": "w:gz", "bz2": "w:bz2", "": "w"}.get(compress, "w:gz")
+        container = {"gz": "tar.gz", "bz2": "tar.bz2",
+                     "": "tar"}.get(compress, "tar.gz")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(dest, mode) as tar:
-            tar.add(snap.path, arcname=snap.id)
+        members: list[tuple[str, Path]] = []
+        for path in sorted(snap.path.rglob("*")):
+            rel = path.relative_to(snap.path).as_posix()
+            if path.is_dir() or path.is_file():
+                members.append((f"{snap.id}/{rel}", path))
+        create_bundle(dest, members, created_by="os.snapshots",
+                      kind="snapshot", container=container)
         _log.info("snapshot %s exported to %s", snap.id, dest)
         return dest
 
     def import_tar(self, tarball: str | os.PathLike[str]) -> Snapshot:
-        """Import a snapshot from an :meth:`export_tar` tarball."""
-        import tarfile
+        """Import a snapshot from an :meth:`export_tar` tarball.
+
+        Reads and extracts through the shared bundle seam (WS1-P5):
+        seam bundles and pre-seam tarballs (plain ``tar.add``
+        output) import through the same path.  Extraction is the
+        seam's refuse-whole rule — a tarball carrying an unsafe
+        member name or a link refuses outright rather than landing
+        partially.
+        """
+        from ..archives import (BUNDLE_MANIFEST_NAME, ToolError,
+                                extract_bundle, list_bundle)
 
         self.root.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(tarball, "r:*") as tar:
-            members = tar.getmembers()
-            top = {m.name.split("/")[0] for m in members if m.name}
-            if len(top) != 1:
-                raise SnapshotError("tarball must contain exactly one snapshot")
-            snap_id = next(iter(top))
-            if (self.root / snap_id).exists():
-                raise SnapshotError(f"snapshot {snap_id} already exists")
-            tar.extractall(self.root, filter="data")
+        try:
+            entries = list_bundle(tarball)
+        except ToolError as exc:
+            raise SnapshotError(
+                f"cannot read snapshot tarball {tarball}: {exc}"
+            ) from exc
+        names = [str(e["name"]) for e in entries
+                 if e["name"] != BUNDLE_MANIFEST_NAME]
+        top = {n.split("/")[0] for n in names if n}
+        if len(top) != 1:
+            raise SnapshotError("tarball must contain exactly one snapshot")
+        snap_id = next(iter(top))
+        if (self.root / snap_id).exists():
+            raise SnapshotError(f"snapshot {snap_id} already exists")
+        try:
+            extract_bundle(tarball, self.root)
+        except ToolError as exc:
+            raise SnapshotError(
+                f"cannot extract snapshot tarball {tarball}: {exc}"
+            ) from exc
+        # The bundle manifest is transport metadata, not snapshot
+        # state: it never becomes part of the imported snapshot.
+        stray = self.root / BUNDLE_MANIFEST_NAME
+        if stray.is_file():
+            stray.unlink()
         snap = self.get(snap_id)
         problems = self.verify(snap.id)
         if problems:

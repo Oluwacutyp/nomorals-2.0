@@ -916,74 +916,69 @@ class ArtifactStore:
         """Export artifacts as a ``.tar.gz`` bundle (bytes + manifest.json).
 
         The DVC-``get``/fetch story: one file carries the artifacts, their
-        metadata, and provenance anywhere.
+        metadata, and provenance anywhere.  The packing rides the shared
+        bundle seam (``nomorals.archives.create_bundle``, WS1-P5): the
+        family's ``manifest.json`` (the artifact entries) rides as an
+        ordinary member, and the seam's ``bundle.manifest.json`` joins
+        it with every member's size + SHA-256.
         """
-        import tarfile
+        from ..archives import create_bundle
 
         target = Path(dest).expanduser()
         if target.suffix != ".gz":
             target = target.with_suffix(target.suffix + ".tar.gz")
         target.parent.mkdir(parents=True, exist_ok=True)
         manifest: list[dict[str, Any]] = []
-        with tarfile.open(target, "w:gz") as tar:
-            for artifact_id in artifact_ids:
-                art = self.get(artifact_id)
-                if art is None:
-                    continue
-                data = self.blobs.get_bytes(art.content_hash)
-                entry = art.to_dict()
-                manifest.append(entry)
-                info = tarfile.TarInfo(name=f"{artifact_id}.bin")
-                info.size = len(data)
-                info.mtime = int(art.created_at)
-                import io as _io
-
-                tar.addfile(info, _io.BytesIO(data))
-            manifest_bytes = json.dumps(
-                manifest, indent=2, ensure_ascii=False).encode("utf-8")
-            info = tarfile.TarInfo(name="manifest.json")
-            info.size = len(manifest_bytes)
-            import io as _io2
-
-            tar.addfile(info, _io2.BytesIO(manifest_bytes))
+        members: list[tuple[str, bytes]] = []
+        for artifact_id in artifact_ids:
+            art = self.get(artifact_id)
+            if art is None:
+                continue
+            data = self.blobs.get_bytes(art.content_hash)
+            manifest.append(art.to_dict())
+            members.append((f"{artifact_id}.bin", data))
+        manifest_bytes = json.dumps(
+            manifest, indent=2, ensure_ascii=False).encode("utf-8")
+        members.append(("manifest.json", manifest_bytes))
+        create_bundle(target, members, created_by="artifact-store",
+                      kind="artifacts", container="tar.gz")
         return target
 
     def import_bundle(self, bundle: str | os.PathLike[str], *,
                       creator: str = "") -> list[Artifact]:
-        """Import a bundle created by :meth:`export_bundle`."""
-        import io as _io
-        import tarfile
+        """Import a bundle created by :meth:`export_bundle`.
+
+        Reads through the shared bundle seam (WS1-P5), so bundles
+        written before the seam existed (plain tar.gz, no bundle
+        manifest) import exactly as before.
+        """
+        from ..archives import read_bundle_members
 
         source = Path(bundle).expanduser()
         if not source.is_file():
             raise FileNotFoundError(f"bundle not found: {source}")
+        members = read_bundle_members(source)
+        if "manifest.json" not in members:
+            raise KeyError("manifest.json")
+        manifest = json.loads(members["manifest.json"].decode("utf-8"))
+        by_id = {m["id"]: m for m in manifest if isinstance(m, dict)}
         imported: list[Artifact] = []
-        with tarfile.open(source, "r:gz") as tar:
-            manifest_member = tar.getmember("manifest.json")
-            manifest_file = tar.extractfile(manifest_member)
-            if manifest_file is None:
-                raise ValueError(f"bundle {source} has no manifest.json")
-            manifest = json.loads(manifest_file.read().decode("utf-8"))
-            by_id = {m["id"]: m for m in manifest if isinstance(m, dict)}
-            for member in tar.getmembers():
-                if not member.isfile() or not member.name.endswith(".bin"):
-                    continue
-                artifact_id = member.name[: -len(".bin")]
-                entry = by_id.get(artifact_id, {})
-                data_file = tar.extractfile(member)
-                if data_file is None:
-                    continue
-                art = self.put(
-                    data_file.read(),
-                    type=entry.get("type", "blob"),
-                    creator=creator or entry.get("creator", ""),
-                    mission_id=entry.get("mission_id", ""),
-                    task_id=entry.get("task_id", ""),
-                    mime=entry.get("mime", ""),
-                    metadata=entry.get("metadata", {}),
-                    provenance=entry.get("provenance", {}),
-                )
-                imported.append(art)
+        for name, data in members.items():
+            if not name.endswith(".bin"):
+                continue
+            artifact_id = name[: -len(".bin")]
+            entry = by_id.get(artifact_id, {})
+            art = self.put(
+                data,
+                type=entry.get("type", "blob"),
+                creator=creator or entry.get("creator", ""),
+                mission_id=entry.get("mission_id", ""),
+                task_id=entry.get("task_id", ""),
+                mime=entry.get("mime", ""),
+                metadata=entry.get("metadata", {}),
+                provenance=entry.get("provenance", {}),
+            )
+            imported.append(art)
         return imported
 
     # ── presentation ───────────────────────────────────────────────────────
