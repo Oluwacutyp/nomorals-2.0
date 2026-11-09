@@ -5603,7 +5603,8 @@ class TelegramBotAdapter(ChatAdapter):
                                                      "chat_join_request",
                                                      "chat_boost",
                                                      "business_connection",
-                                                     "removed_chat_boost"])
+                                                     "removed_chat_boost",
+                                                     "pre_checkout_query"])
             except Exception as exc:  # noqa: BLE001 - transient, back off a little
                 # A persistent failure (revoked token, dead DNS) must not
                 # hot-spin the poll loop every 5s — back off exponentially,
@@ -5664,6 +5665,21 @@ class TelegramBotAdapter(ChatAdapter):
                                  type(query).__name__)
                     return
                 self._handle_callback(query, handler)
+                return
+            # Pre-checkout queries (parity bundle #18): a buyer
+            # is paying one of this bot's Stars invoices and
+            # Telegram waits up to 10 seconds for the bot's
+            # approval — unanswered, the payment fails.  The
+            # handler answers immediately; it is a payment
+            # handshake, never conversation.
+            if "pre_checkout_query" in update:
+                query = update["pre_checkout_query"]
+                if not isinstance(query, dict):
+                    _log.warning("telegram-bot: dropping non-dict "
+                                 "pre_checkout_query %r",
+                                 type(query).__name__)
+                    return
+                self._handle_pre_checkout_query(query)
                 return
             # Join requests (DESIGN §28): an approval-mode invite
             # link produced a candidate — the group surface's
@@ -5961,6 +5977,29 @@ class TelegramBotAdapter(ChatAdapter):
         meta = {"update_id": update.get("update_id"),
                 "partner_context": self.partner_context,
                 "bot_role": "personal" if self.owner_only else "gated"}
+        # A paid Stars invoice lands as a message whose only
+        # payload is successful_payment (parity bundle #18):
+        # surface it as a payment service event carrying
+        # exactly what Telegram reported — the amount, the
+        # currency, the invoice payload it answers and both
+        # charge ids (the durable receipt handles).  It is a
+        # receipt, not conversation: text stays empty and the
+        # service marker keeps it out of the chat pipeline,
+        # the same shape as the boost/reaction events.
+        payment = msg.get("successful_payment")
+        if isinstance(payment, dict) and payment:
+            meta["service"] = "successful_payment"
+            meta["payment"] = {
+                "currency": str(payment.get("currency") or ""),
+                "total_amount": payment.get("total_amount"),
+                "invoice_payload": str(
+                    payment.get("invoice_payload") or ""),
+                "telegram_payment_charge_id": str(
+                    payment.get("telegram_payment_charge_id")
+                    or ""),
+                "provider_payment_charge_id": str(
+                    payment.get("provider_payment_charge_id")
+                    or "")}
         if replied_audio_file_id:
             meta["replied_audio_file_id"] = replied_audio_file_id
         # /steal support (§21): the replied message's visual media
@@ -8050,6 +8089,183 @@ class TelegramBotAdapter(ChatAdapter):
 
     def admin_leave(self, chat: ChatRef) -> dict[str, Any]:
         return self._admin("leaveChat", chat)
+
+    # ── bot self-profile + Stars invoices (parity bundle #18) ──
+    # The bot's OWN public identity (the BotFather fields) and
+    # its payment rail.  Until this bundle both lived outside
+    # Devon entirely: the name/descriptions could only be
+    # changed by hand in BotFather, and no invoice verb existed
+    # at all.  Same verdict contract as the admin family —
+    # {"ok": True, ...} or {"ok": False, "error": ...} with
+    # Telegram's honest reason — and every shape rule is
+    # checked before traffic.
+
+    def _bot_self(self, method: str, **params: Any) -> dict[str, Any]:
+        """One chat-less Bot API call (the getMy*/setMy*
+        family), in the admin family's verdict shape."""
+        try:
+            result = self._api(method, **params)
+            return {"ok": True, "result": result}
+        except Exception as exc:  # noqa: BLE001 - honest error
+            return {"ok": False, "error": str(exc)[:200]}
+
+    def get_bot_profile(self) -> dict[str, Any]:
+        """The bot's own public identity as Telegram holds
+        it: getMe for the account facts, getMyName /
+        getMyDescription / getMyShortDescription for the
+        BotFather fields.  A field read that fails is named
+        in the verdict (``<field>_error``) beside the fields
+        that DID read — never silently rendered as empty,
+        which would read as "no description set"."""
+        me = self._bot_self("getMe")
+        if not me["ok"]:
+            return me
+        info = me["result"] if isinstance(me["result"], dict) else {}
+        out: dict[str, Any] = {
+            "ok": True,
+            "id": info.get("id"),
+            "username": str(info.get("username") or ""),
+            "first_name": str(info.get("first_name") or "")}
+        for field, method, key in (
+                ("name", "getMyName", "name"),
+                ("description", "getMyDescription", "description"),
+                ("short_description", "getMyShortDescription",
+                 "short_description")):
+            got = self._bot_self(method)
+            if got["ok"] and isinstance(got["result"], dict):
+                out[field] = str(got["result"].get(key) or "")
+            else:
+                out[field] = ""
+                out[field + "_error"] = str(
+                    got.get("error") or "read failed")
+        return out
+
+    def _set_bot_field(self, field: str, method: str,
+                       param: str, value: str) -> dict[str, Any]:
+        from .base import bot_profile_shape_error
+
+        error = bot_profile_shape_error(field, value)
+        if error:
+            return {"ok": False, "error": error}
+        return self._bot_self(method, **{param: str(value or "")})
+
+    def set_bot_name(self, name: str) -> dict[str, Any]:
+        """setMyName — the bot's display name; "" reverts
+        to the name Telegram defaults to."""
+        return self._set_bot_field("name", "setMyName",
+                                   "name", name)
+
+    def set_bot_description(self, description: str
+                            ) -> dict[str, Any]:
+        """setMyDescription — the long text on the bot's
+        profile page; "" clears it."""
+        return self._set_bot_field(
+            "description", "setMyDescription", "description",
+            description)
+
+    def set_bot_short_description(self, short: str
+                                  ) -> dict[str, Any]:
+        """setMyShortDescription — the one-liner shown when
+        the bot's profile is shared; "" clears it."""
+        return self._set_bot_field(
+            "short_description", "setMyShortDescription",
+            "short_description", short)
+
+    def _invoice_params(self, title: str, description: str,
+                        amount_stars: int, payload: str
+                        ) -> dict[str, Any]:
+        """The shared sendInvoice/createInvoiceLink body —
+        or the shape refusal, in the same verdict shape.
+        Currency XTR: the price is a whole number of Stars
+        and no provider token rides (Telegram IS the
+        provider for digital goods paid in Stars)."""
+        from .base import invoice_shape_error
+
+        error = invoice_shape_error(title, description,
+                                    amount_stars)
+        if error:
+            return {"ok": False, "error": error}
+        return {
+            "title": str(title).strip(),
+            "description": str(description).strip(),
+            "payload": (str(payload or "").strip()
+                        or "devon-invoice"),
+            "currency": "XTR",
+            "prices": [{"label": str(title).strip(),
+                        "amount": int(amount_stars)}]}
+
+    def send_invoice(self, chat: ChatRef, title: str,
+                     description: str, amount_stars: int, *,
+                     payload: str = "") -> dict[str, Any]:
+        """sendInvoice into one chat.  The invoice lands as
+        a message with a Pay button; Telegram runs the
+        checkout and a paid invoice returns to this adapter
+        as a successful_payment service message (answered
+        upstream by the pre-checkout handler — without that
+        answer no payment can complete)."""
+        params = self._invoice_params(title, description,
+                                      amount_stars, payload)
+        if "error" in params:
+            return params
+        try:
+            result = self._api(
+                "sendInvoice", chat_id=int(chat.chat_id),
+                **params)
+        except Exception as exc:  # noqa: BLE001 - honest error
+            return {"ok": False, "error": str(exc)[:200]}
+        message_id = ""
+        if isinstance(result, dict):
+            message_id = str(result.get("message_id") or "")
+        return {"ok": True, "message_id": message_id,
+                "amount": int(amount_stars), "currency": "XTR"}
+
+    def create_invoice_link(self, title: str,
+                            description: str,
+                            amount_stars: int, *,
+                            payload: str = "") -> dict[str, Any]:
+        """createInvoiceLink — the same invoice as a t.me
+        link, for sharing outside any one chat."""
+        params = self._invoice_params(title, description,
+                                      amount_stars, payload)
+        if "error" in params:
+            return params
+        out = self._bot_self("createInvoiceLink", **params)
+        if not out["ok"]:
+            return out
+        return {"ok": True, "link": str(out["result"] or ""),
+                "amount": int(amount_stars), "currency": "XTR"}
+
+    def _handle_pre_checkout_query(self, query: dict[str, Any]
+                                   ) -> None:
+        """Answer one pre_checkout_query — Telegram gives a
+        bot 10 seconds to approve a payment before it can
+        complete, and an unanswered query FAILS the payment.
+
+        Policy: approve.  This bot only ever charges through
+        invoices it sent itself (sendInvoice /
+        createInvoiceLink above — there is no other invoice
+        source in the system), so a pre-checkout arriving
+        here is a buyer paying one of Devon's own invoices;
+        the successful_payment service message that follows
+        is the receipt of record.  A failed answer is logged
+        with Telegram's reason — never retried blind, never
+        raised into the poll loop."""
+        query_id = str(query.get("id") or "")
+        if not query_id:
+            _log.warning("telegram-bot: pre-checkout query "
+                         "without an id — cannot answer it")
+            return
+        try:
+            self._api("answerPreCheckoutQuery",
+                      pre_checkout_query_id=query_id, ok=True)
+            _log.info("telegram-bot: pre-checkout %s approved "
+                      "(%s %s, payload %r)", query_id,
+                      query.get("total_amount"),
+                      query.get("currency"),
+                      str(query.get("invoice_payload") or ""))
+        except Exception as exc:  # noqa: BLE001 - poll loop survives
+            _log.warning("telegram-bot: pre-checkout %s answer "
+                         "failed: %s", query_id, exc)
 
     def health(self) -> dict[str, Any]:
         info = super().health()

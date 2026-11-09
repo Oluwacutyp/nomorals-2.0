@@ -290,6 +290,10 @@ class RuntimeChatOpsMixin:
                 return self._chatops_pollres(message)
             if kind == "myprofile":
                 return self._chatops_myprofile(tail, message)
+            if kind == "botprofile":
+                return self._chatops_botprofile(tail, message)
+            if kind == "invoice":
+                return self._chatops_invoice(tail, message)
             if kind == "privacy":
                 return self._chatops_privacy(tail, message)
             if kind == "makepoll":
@@ -2407,6 +2411,171 @@ class RuntimeChatOpsMixin:
                     "/myprofile photo")
         return ("usage: /myprofile — or /myprofile name …, "
                 "/myprofile about …, /myprofile photo")
+
+    def _chatops_bot_home(self, message: Any, kind: str
+                          ) -> tuple[Any, str]:
+        """The shared gate for the bot-surface family
+        (/botprofile + /invoice, parity bundle #18):
+        (adapter, error) — these verbs belong to a Telegram
+        BOT: its own public identity, and its Stars payment
+        rail.  The bot acted on is the one whose chat the
+        command was sent in (the gated bot and the personal
+        bot each carry their own profile and their own
+        invoices).  Personal surfaces have neither shape —
+        a personal account's identity is /myprofile's, and
+        no personal account or WhatsApp chat can charge
+        Stars — so they answer that truth."""
+        platform = str(getattr(message.chat, "platform", "")
+                       or "")
+        if platform in ("telegram-bot", "telegram-personal"):
+            adapter = self._adapter_for(platform)
+            if adapter is None:
+                return None, (f"no live bot surface here to "
+                              f"run /{kind} from.")
+            return adapter, ""
+        if kind == "botprofile":
+            return None, (
+                "/botprofile shapes a Telegram bot's own "
+                "identity — run it in a chat with the bot. "
+                "Your personal accounts' identity is "
+                "/myprofile.")
+        return None, (
+            "/invoice charges Telegram Stars — a bot "
+            "payment rail. Run it in a chat with the bot; "
+            "personal accounts and WhatsApp can't take "
+            "Stars payments.")
+
+    def _chatops_botprofile(self, tail: str,
+                            message: Any) -> str:
+        """/botprofile — read and set a Telegram bot's OWN
+        public identity (parity bundle #18, the census's
+        "bot self-profile" row): the display name, the long
+        description on its profile page, and the short
+        description shown when the profile is shared.
+        Before this bundle those fields lived only in
+        BotFather — nothing in Devon could even read them.
+        They are Bot API verbs now (getMyName/setMyName and
+        family) behind one grammar: bare reads; naming a
+        part changes it; "clear" empties a field (for the
+        name, that reverts to Telegram's default).  A
+        refusal — Telegram rate-limits identity changes —
+        comes back in Telegram's own words."""
+        adapter, error = self._chatops_bot_home(
+            message, "botprofile")
+        if error:
+            return error
+        parts = tail.split(None, 1)
+        head = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        if not head:
+            verdict = self._chatops_call(
+                adapter.get_bot_profile)
+            if not (isinstance(verdict, dict)
+                    and verdict.get("ok")):
+                return self._chatops_verdict(verdict, "")
+            handle = str(verdict.get("username") or "")
+            lines = ["🤖 The bot's identity"
+                     + (f" (@{handle}):" if handle else ":")]
+            for field, label in (
+                    ("name", "name"),
+                    ("description", "description"),
+                    ("short_description", "short")):
+                if verdict.get(field + "_error"):
+                    lines.append(
+                        f"• {label}: couldn't read it just "
+                        f"now ({verdict[field + '_error']})")
+                else:
+                    lines.append(
+                        f"• {label}: "
+                        f"{verdict.get(field) or '(not set)'}")
+            lines.append(
+                "Change it: /botprofile name New Name · "
+                "/botprofile description some text · "
+                "/botprofile short one line — append 'clear' "
+                "as the value to empty a field.")
+            return "\n".join(lines)
+        fields = {
+            "name": ("set_bot_name", "name"),
+            "description": ("set_bot_description",
+                            "description"),
+            "short": ("set_bot_short_description",
+                      "short description")}
+        if head not in fields:
+            return ("usage: /botprofile — or /botprofile "
+                    "name …, /botprofile description …, "
+                    "/botprofile short …")
+        clearing = rest.lower() == "clear"
+        if clearing:
+            rest = ""
+        fn_name, label = fields[head]
+        verdict = self._chatops_call(
+            getattr(adapter, fn_name), rest)
+        if isinstance(verdict, dict) and verdict.get("ok"):
+            if clearing and head == "name":
+                return ("done — the bot's name is back to "
+                        "its default.")
+            if clearing:
+                return f"done — the bot's {label} is cleared."
+            return (f"done — the bot's {label} is now "
+                    f"“{rest}”.")
+        return self._chatops_verdict(verdict, "")
+
+    def _chatops_invoice(self, tail: str,
+                         message: Any) -> str:
+        """/invoice — charge Telegram Stars (parity bundle
+        #18, the census's "Telegram Stars / invoice
+        payments" row): an invoice posted INTO THIS CHAT,
+        or — with 'link' first — a shareable t.me invoice
+        link.  The buyer pays in Stars inside Telegram;
+        Telegram runs the checkout and asks this bot to
+        approve it first (the pre-checkout query the
+        adapter now answers — a payment cannot complete
+        unanswered), and a paid invoice lands back in the
+        chat as a successful_payment receipt.  Before this
+        bundle Devon had no payment verb of any kind."""
+        from ...social.chat.chatops import invoice_payload_for, parse_invoice_args
+
+        adapter, error = self._chatops_bot_home(
+            message, "invoice")
+        if error:
+            return error
+        want_link = False
+        body = tail
+        head, _, remainder = tail.partition(" ")
+        if head.lower() == "link":
+            want_link = True
+            body = remainder.strip()
+        parsed = parse_invoice_args(body)
+        if not parsed.get("ok"):
+            return str(parsed.get("error")
+                       or "usage: /invoice Title | "
+                          "Description | Stars")
+        payload = invoice_payload_for(parsed["title"])
+        if want_link:
+            verdict = self._chatops_call(
+                adapter.create_invoice_link, parsed["title"],
+                parsed["description"], parsed["amount"],
+                payload=payload)
+            if isinstance(verdict, dict) \
+                    and verdict.get("ok"):
+                return (
+                    f"⭐ {parsed['amount']} XTR — "
+                    f"“{parsed['title']}”\n"
+                    f"{verdict.get('link')}\n"
+                    "anyone with the link can open it and "
+                    "pay in Stars.")
+            return self._chatops_verdict(verdict, "")
+        verdict = self._chatops_call(
+            adapter.send_invoice, message.chat,
+            parsed["title"], parsed["description"],
+            parsed["amount"], payload=payload)
+        if isinstance(verdict, dict) and verdict.get("ok"):
+            return (
+                f"invoice posted — ⭐ {parsed['amount']} XTR "
+                f"for “{parsed['title']}”. The buyer pays in "
+                f"this chat; the paid receipt lands here "
+                f"when it completes.")
+        return self._chatops_verdict(verdict, "")
 
     def _chatops_privacy(self, tail: str, message: Any) -> str:
         """/privacy — read and set the paired personal

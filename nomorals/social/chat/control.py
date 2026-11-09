@@ -581,6 +581,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "sendlater": (1, None),   # /sendlater +2h words — queue a message to land later in this chat (personal Telegram; /schedule is the cron surface)
     "deletechat": (0, None),  # /deletechat [chat name] — delete a conversation as the owner (personal Telegram)
     "clearhistory": (0, None), # /clearhistory [chat name] — wipe a chat's history, keep the chat (personal Telegram)
+    "botprofile": (0, None),  # /botprofile [name|description|short] … — a Telegram bot's own identity (bot surfaces)
+    "invoice": (1, None),     # /invoice [link] Title | Description | Stars — a Telegram Stars invoice (bot surfaces)
     "tagall": (0, None),      # /tagall [text] — mention all (capped)
     "hidetag": (0, None),     # /hidetag [text] — mention all, hidden
     "antitag": (0, 1),        # /antitag [on|off] — mass-tag DM flags
@@ -2850,6 +2852,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/clearhistory · /clearhistory <chat name>",
               "example": "/clearhistory",
               "related": "/deletechat · /leave · /archive"},
+    "botprofile": {"what": "a Telegram bot's OWN public identity — the display name, the long description on its profile page and the short description shown when the profile is shared. These were BotFather-only fields: nothing in Devon could read or change them. Bare reads the bot whose chat you run it in (the gated bot and the personal bot each carry their own); naming a part changes it; 'clear' empties a field (for the name, that reverts to Telegram's default). Length ceilings are the Bot API's own (name 64, description 512, short 120) and refuse in words rather than truncating. Telegram rate-limits identity changes; a refusal comes back in its words. Bot surfaces only — your personal accounts' identity is /myprofile. Owner only (a bot configuration act, never public).",
+              "usage": "/botprofile · /botprofile name|description|short text|clear",
+              "example": "/botprofile description Devon — your personal AI, on duty.",
+              "related": "/myprofile · /invoice"},
+    "invoice": {"what": "charge Telegram Stars through one of your bots: an invoice posted into this chat, or — with 'link' first — a shareable t.me invoice link anyone can open and pay. The buyer pays in Stars (XTR) inside Telegram; Telegram runs the checkout, asks the bot to approve it (the pre-checkout query — the adapter answers it, and a payment cannot complete unanswered), and a paid invoice lands back in the chat as a successful_payment receipt carrying the amount, the payload and Telegram's charge id. Title 1–32 characters, description 1–255, price a whole number of Stars; shape problems refuse in words before anything is sent. Bot surfaces only — Stars are a bot payment rail; WhatsApp and personal accounts have no equivalent and say so. Owner only.",
+              "usage": "/invoice Title | Description | Stars · /invoice link Title | Description | Stars",
+              "example": "/invoice Signal pack | One month of premium signals | 50",
+              "related": "/botprofile"},
     "vcf": {"what": "export a group's people as one import-ready contacts (.vcf) file — every person a card, their own number with their own name. The roster is assembled from every route Devon has and merged: on WhatsApp the bridge's group roster (its contact-store names included) plus her member ledger; on Telegram her member ledger, the bot's admin list, and the personal surface's member fetch — no single route is a gate. WhatsApp members addressed only by an anonymous LID whose number no store can resolve, and Telegram members whose number their own privacy settings hide, are counted in the reply and left out — a number is never invented, and a Telegram id is never dressed up as one. The reply counts people, cards written and people left out, and names the sources used. The manual shape (/vcf Name | +number, one person per line) makes cards for people who share no group with her. Owner anywhere; inside a group, the owner or a group admin — it hands out people's numbers, so it is never a public command. An export taken on a personal surface lands in the personal journal.",
               "usage": "/vcf (inside the group) · /vcf Group Name · /vcf Name | +number [| +number]",
               "example": "/vcf",
@@ -4506,7 +4516,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "joinlink", "newgroup", "newchannel", "leave",
       "myprofile", "privacy", "makepoll", "vcf", "addcontact",
       "sendloc", "sendcontact", "find", "findall",
-      "sendlater", "deletechat", "clearhistory"]),
+      "sendlater", "deletechat", "clearhistory",
+      "botprofile", "invoice"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
@@ -4784,6 +4795,8 @@ LIST_ONELINERS: dict[str, str] = {
     "sendlater": "queue a message to land later in this chat (personal Telegram) — /sendlater +2h the words",
     "deletechat": "delete a conversation outright, as you (personal Telegram) — /deletechat [chat name]",
     "clearhistory": "wipe a chat's history but keep the chat (personal Telegram) — /clearhistory [chat name]",
+    "botprofile": "a Telegram bot's own name and descriptions — read or set them in the bot's chat — /botprofile [name|description|short] …",
+    "invoice": "charge Telegram Stars through the bot — an invoice in this chat or a pay link — /invoice Title | Description | 50",
     "vcf": "export this group's people as a contacts file, each number with its name — /vcf",
     "tagall": "mention every member (chunked, capped at 100) — /tagall [text]",
     "hidetag": "mention every member, names hidden — /hidetag [text]",

@@ -175,6 +175,62 @@ def status_audience_shape_error(mode: Any,
         if not jid.endswith("@s.whatsapp.net"):
             return ("a status audience list holds people, "
                     "not " + jid)
+#: Bot API ceilings for a bot's own profile fields (parity
+#: bundle #18): the display name is capped at 64 characters,
+#: the long description at 512, the short description at 120.
+#: An EMPTY value is legal for all three — it clears the
+#: custom value and the field falls back to its default.
+BOT_PROFILE_LIMITS = {"name": 64, "description": 512,
+                      "short_description": 120}
+
+
+def bot_profile_shape_error(field: Any, value: Any) -> str:
+    """Why this value cannot be written to a bot's own
+    profile field, or "" when it can (parity bundle #18 —
+    the shape rule checked BEFORE traffic).  ``field`` is
+    one of name / description / short_description; each has
+    the Bot API's own length ceiling, and a value over it is
+    refused in words instead of being truncated silently —
+    a profile is identity, never something to clip."""
+    field = str(field or "")
+    limit = BOT_PROFILE_LIMITS.get(field)
+    if limit is None:
+        return (f"“{field}” is not a bot profile field — "
+                f"use name, description or short")
+    text = str(value or "")
+    if len(text) > limit:
+        return (f"a bot's {field} is at most {limit} "
+                f"characters — that one has {len(text)}")
+    return ""
+
+
+def invoice_shape_error(title: Any, description: Any,
+                        amount: Any) -> str:
+    """Why this (title, description, amount) cannot be a
+    Telegram Stars invoice, or "" when it can (parity
+    bundle #18 — checked BEFORE traffic).  The Bot API's
+    own bounds: a title of 1–32 characters, a description
+    of 1–255, and for currency XTR the price is a positive
+    WHOLE number of Stars — Stars have no fractional unit,
+    so a float or a zero/negative amount is not a price."""
+    title = str(title or "").strip()
+    if not title:
+        return "an invoice needs a title — what is being sold"
+    if len(title) > 32:
+        return (f"an invoice title is at most 32 characters "
+                f"— that one has {len(title)}")
+    description = str(description or "").strip()
+    if not description:
+        return ("an invoice needs a description — what the "
+                "buyer gets")
+    if len(description) > 255:
+        return (f"an invoice description is at most 255 "
+                f"characters — that one has {len(description)}")
+    if isinstance(amount, bool) or not isinstance(amount, int):
+        return ("a Stars price is a whole number of Stars "
+                "(⭐ XTR has no fractional unit)")
+    if amount <= 0:
+        return "a Stars price must be at least 1 ⭐"
     return ""
 
 
@@ -793,6 +849,77 @@ class ChatAdapter(ABC):
         itself.  The base adapter reports the truth."""
         return {"ok": False,
                 "error": "status viewers are not supported "
+                         "on this adapter"}
+
+    # ── bot self-profile + Stars invoices (parity bundle #18) ──
+    def get_bot_profile(self) -> dict[str, Any]:
+        """Read a BOT's own public identity: its display
+        name, long description and short description (the
+        BotFather fields).  Only a bot surface HAS a bot
+        profile — a personal account's identity lives in
+        the /myprofile family instead — so the base adapter
+        reports the truth and the one bot adapter overrides.
+        Verdict shape like the read verbs: ``{"ok": True,
+        "name": …, "description": …, "short_description": …,
+        "username": …}`` or ``{"ok": False, "error": …}``.
+        Shape rules are :func:`bot_profile_shape_error`."""
+        return {"ok": False,
+                "error": "bot self-profile not supported "
+                         "on this adapter"}
+
+    def set_bot_name(self, name: str) -> dict[str, Any]:
+        """Set a bot's display name ("" reverts to the
+        default).  Bot surfaces only, like get_bot_profile."""
+        return {"ok": False,
+                "error": "bot self-profile not supported "
+                         "on this adapter"}
+
+    def set_bot_description(self, description: str
+                            ) -> dict[str, Any]:
+        """Set a bot's long description — the text on its
+        profile page ("" clears it).  Bot surfaces only."""
+        return {"ok": False,
+                "error": "bot self-profile not supported "
+                         "on this adapter"}
+
+    def set_bot_short_description(self, short: str
+                                  ) -> dict[str, Any]:
+        """Set a bot's short description — the line shown
+        when its profile is shared ("" clears it).  Bot
+        surfaces only."""
+        return {"ok": False,
+                "error": "bot self-profile not supported "
+                         "on this adapter"}
+
+    def send_invoice(self, chat: ChatRef, title: str,
+                     description: str, amount_stars: int, *,
+                     payload: str = "") -> dict[str, Any]:
+        """Send a Telegram Stars (XTR) invoice INTO a chat:
+        the buyer pays in Stars, Telegram runs the checkout,
+        and a paid invoice lands back as a
+        successful_payment service message.  Only the
+        Telegram bot surface can charge — Stars are a bot
+        payment rail, no personal account or other platform
+        has them — so the base adapter reports the truth
+        and the bot adapter overrides.  ``{"ok": True,
+        "message_id": …}`` or ``{"ok": False, "error": …}``;
+        shape rules are :func:`invoice_shape_error`,
+        checked before traffic by every override."""
+        return {"ok": False,
+                "error": "invoices not supported "
+                         "on this adapter"}
+
+    def create_invoice_link(self, title: str,
+                            description: str,
+                            amount_stars: int, *,
+                            payload: str = "") -> dict[str, Any]:
+        """Mint a shareable Stars invoice LINK instead of
+        posting one into a chat — the same invoice, as a
+        t.me URL anyone can open and pay.  ``{"ok": True,
+        "link": …}`` or the honest refusal, like
+        send_invoice."""
+        return {"ok": False,
+                "error": "invoices not supported "
                          "on this adapter"}
 
     # ── health ───────────────────────────────────────────────────────────────

@@ -53,6 +53,8 @@ __all__ = [
     "parse_sendcontact_args",
     "parse_schedule_args",
     "format_schedule_instant",
+    "parse_invoice_args",
+    "invoice_payload_for",
     "format_search_results",
     "parse_statusaud_args",
     "format_status_audience",
@@ -79,6 +81,7 @@ CHATOPS_COMMANDS = frozenset({
     "sendloc", "sendcontact", "find", "findall",
     "statusaud", "statusviewers",
     "sendlater", "deletechat", "clearhistory",
+    "botprofile", "invoice",
 })
 
 #: Tagall pacing law: one message carries at most this many
@@ -483,6 +486,50 @@ def format_schedule_instant(at: float) -> str:
     codebase's one clock face for owner-visible times)."""
     return time.strftime("%Y-%m-%d %H:%M UTC",
                          time.gmtime(float(at)))
+def parse_invoice_args(tail: str) -> dict[str, Any]:
+    """Parse /invoice's tail: ``Title | Description |
+    Stars`` — what is sold, what the buyer gets, and the
+    price as a whole number of Telegram Stars (parity
+    bundle #18).  Shape problems come back as ``error`` in
+    words; the field bounds themselves are
+    base.invoice_shape_error's, shared with the adapter so
+    the command and the verb refuse identically."""
+    from .base import invoice_shape_error
+
+    usage = ("usage: /invoice Title | Description | Stars "
+             "— e.g. /invoice Signal pack | One month of "
+             "premium signals | 50 (add 'link' first for a "
+             "shareable invoice link instead)")
+    parts = [p.strip() for p in str(tail or "").split("|")]
+    if len(parts) != 3 or not all(parts):
+        return {"ok": False, "error": usage}
+    title, description, amount_raw = parts
+    try:
+        amount = int(amount_raw)
+    except ValueError:
+        return {"ok": False, "error": (
+            f"“{amount_raw}” isn't a whole number of Stars — "
+            f"the price is a count of ⭐, e.g. 50")}
+    problem = invoice_shape_error(title, description, amount)
+    if problem:
+        return {"ok": False, "error": problem}
+    return {"ok": True, "title": title,
+            "description": description, "amount": amount}
+
+
+def invoice_payload_for(title: str) -> str:
+    """The invoice payload slug for a title — the opaque
+    string Telegram hands back in the pre-checkout query
+    and the successful_payment receipt, tying the payment
+    to what was sold.  Derived from the title only (never
+    from buyer data): lowercased, non-alphanumerics folded
+    to dashes, capped well under the Bot API's 128-byte
+    payload ceiling."""
+    slug = "".join(
+        ch if ch.isalnum() else "-"
+        for ch in str(title or "").lower())
+    slug = "-".join(p for p in slug.split("-") if p)[:48]
+    return f"devon:{slug}" if slug else "devon-invoice"
 
 
 # -- message search (parity bundle #11, census "search depth") --
