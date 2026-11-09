@@ -850,6 +850,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "alert": (0, None),       # /alert add|list|remove|check|snooze|sync-bills
     "goal": (0, None),        # /goal add|list|done|snooze|remove
     "goals": (0, None),       # /goals [list [class]] | briefing | review | focus | progress <goal> | add <title> [in <class>] | class <goal> <class> | classes — goal classes board (owner-only)
+    "careers": (0, None),     # /careers [list] | add <company> | <role> | move <app> <stage> | next <app> | <action> [by <date>] | note <app> | <text> | attach <app> <artifact> | remove <app> | stages — career pipeline (owner-only)
     "insights": (0, None),    # /insights [days] — native money analytics
     "predict": (0, 3),       # /predict <stake> <over|under> <1-99> — prediction pit (progression-unlocked)
     "menu": (0, 2),          # alias of /list ([group] [page] ride the same grammar)
@@ -3320,6 +3321,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/goals [list [class]] | briefing | review | focus | progress <goal> | add <title> [in <class>] | class <goal> <class> | classes",
               "example": "/goals add save for a house in finance",
               "related": "/goal /skills"},
+    "careers": {"what": "your career pipeline: job applications tracked by stage (saved → applied → screen → interview → offer → accepted/rejected/withdrawn) with an append-only stage history, notes, and a next action with a due date for each — overdue actions and stale applications are called out on the board, never listed silently. Careers-class goals on /goals are measured from this pipeline. A CV you send with an application is recorded as an artifact reference (the artifact store keeps the versions).",
+              "usage": "/careers [list] | add <company> | <role> [| <source or link>] | move <app> <stage> [note] | next <app> | <action> [by YYYY-MM-DD | in Nd] | note <app> | <text> | attach <app> <artifact> | remove <app> | stages",
+              "example": "/careers add Acme | Senior Developer | linkedin",
+              "related": "/goals /artifact"},
     "api": {"what": "external API connectors: weather, fx, github, …",
             "usage": "/api list | <connector> [json]", "example": "/api weather city=Lagos",
             "related": ""},
@@ -4250,7 +4255,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "benchmark", "redteam", "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible",
                            "people", "commitments", "decisions", "iddocs", "focus"]),
     ("money & spending", ["spend", "budget", "spending", "mandate",
-                          "balances", "goal", "goals", "insights", "alert"]),
+                          "balances", "goal", "goals", "careers", "insights", "alert"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -4514,7 +4519,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "proposals", "approve", "deny", "start", "stop", "quit",
       "mode", "agent", "chatmode", "style", "stylepin", "doctor", "profile", "mind",
       "spend", "budget", "spending", "mandate", "balances", "goal",
-      "goals", "insights", "alert", "cost", "heal", "tour", "pulse"]),
+      "goals", "careers", "insights", "alert", "cost", "heal", "tour", "pulse"]),
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "audit", "whois", "ports",
@@ -4960,6 +4965,7 @@ LIST_ONELINERS: dict[str, str] = {
     "db": "inspect the database (tables|schema|query|counts)",
     "artifact": "saved artifacts: list, info, search bodies, send (or convert) one, export bundles",
     "goals": "goal classes board: goals by domain class, measured vs self-reported progress, briefing/review/focus",
+    "careers": "career pipeline: applications by stage, next actions with due dates, stale/overdue called out",
     "api": "external API connectors (weather, fx, github, …)",
     "connectors": "manage the service connectors: list, status, connect",
     "shorts": "short-form content empire: make, queue, post vertical videos",

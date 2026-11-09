@@ -7485,6 +7485,9 @@ class PartnerRuntime(
         if kind == "goals":
             return self._control_goals(command.tail or arg,
                                        chat_key=chat_key)
+        if kind == "careers":
+            return self._control_careers(command.tail or arg,
+                                         chat_key=chat_key)
         if kind == "api":
             return self._control_api(command.tail or arg)
         if kind == "connectors":

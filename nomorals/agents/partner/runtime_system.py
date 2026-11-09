@@ -1244,6 +1244,13 @@ class RuntimeSystemMixin:
                     return str(exc)
             text = surface.render_class_board(tracker, user, only_class=only)
             if only is not None:
+                if only == "careers":
+                    # The class board carries the measured reading;
+                    # the pipeline board below it is the drill-down
+                    # (the careers organ's own surface).
+                    from ...careers.surface import render_pipeline_board
+                    text += "\n\n" + render_pipeline_board(
+                        self._careers_store())
                 return text
             from ...social.chat.tgbot_buttons import actionable, grid_layout
             buttons = [(c.title, f"/goals list {c.id}")
@@ -1304,6 +1311,177 @@ class RuntimeSystemMixin:
         return ("usage: /goals [list [class]] | briefing | review | focus | "
                 "progress <goal> | add <title> [in <class>] | "
                 "class <goal> <class> | classes")
+
+    # ── careers: /careers ─────────────────────────────────────────────
+    def _careers_store(self) -> Any:
+        """The career pipeline store (nomorals/careers), resolved via
+        the process settings — the same resolution the careers goal
+        provider uses, so surface and measurement read one file."""
+        from ...careers.store import CareerStore, careers_path
+        from ...core.config import get_settings
+
+        return CareerStore(careers_path(get_settings()))
+
+    def _control_careers(self, tail: str, chat_key: str = "") -> Any:
+        """/careers — the career pipeline board and its verbs.
+
+        /careers                          — pipeline board (attention
+                                            call-outs, then by stage)
+        /careers add <company> | <role> [| <source or link>]
+                                          — file an application (saved)
+        /careers move <app> <stage> [note]
+                                          — move it, history appended
+        /careers next <app> | <action> [by YYYY-MM-DD | in Nd]
+                                          — set the next action + due
+        /careers note <app> | <text>      — append a note
+        /careers attach <app> <artifact>  — record the CV artifact sent
+        /careers remove <app>             — delete the application
+        /careers stages                   — the stage vocabulary
+
+        <app> is an application id (or unique prefix), #n from the
+        board, or a unique part of "company role".  Owner-only.
+        Careers-class goals measure from this pipeline (the
+        application_pipeline provider) — see /goals list careers.
+        """
+        import re
+        from datetime import UTC, datetime
+
+        from ...careers import surface as careers_surface
+        from ...careers.store import STAGES, CareerError
+
+        store = self._careers_store()
+        parts = (tail or "").split(None, 1)
+        verb = parts[0].lower() if parts else "list"
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        def _resolve(ref: str) -> Any:
+            app, candidates = careers_surface.resolve_application(
+                store, ref)
+            if app is None:
+                return None, careers_surface.unknown_application_text(
+                    ref, candidates)
+            return app, None
+
+        if verb in ("list", "board", ""):
+            return careers_surface.render_pipeline_board(store)
+        if verb == "stages":
+            return careers_surface.render_stages()
+        if verb == "add":
+            fields = [f.strip() for f in rest.split("|")]
+            if len(fields) < 2 or not fields[0] or not fields[1]:
+                return ("usage: /careers add <company> | <role> "
+                        "[| <source or link>]")
+            source, link = "", ""
+            for extra in fields[2:]:
+                if extra.startswith(("http://", "https://")):
+                    link = extra
+                elif extra:
+                    source = extra
+            try:
+                app = store.add(fields[0], fields[1],
+                                source=source, link=link)
+            except CareerError as exc:
+                return str(exc)
+            return (f"filed **{app.company} — {app.role}** at saved "
+                    f"· `{app.id}`\n  move it: /careers move "
+                    f"{app.id} applied")
+        if verb == "move":
+            tokens = rest.split()
+            stage_at = next(
+                (i for i in range(1, len(tokens))
+                 if tokens[i].lower() in STAGES), None)
+            if stage_at is None:
+                return ("usage: /careers move <app> <stage> [note] — "
+                        f"stages: {', '.join(STAGES)}")
+            ref = " ".join(tokens[:stage_at])
+            stage = tokens[stage_at].lower()
+            note = " ".join(tokens[stage_at + 1:]).lstrip("—- ").strip()
+            app, error = _resolve(ref)
+            if app is None:
+                return error
+            try:
+                moved = store.move(app.id, stage, note=note)
+            except CareerError as exc:
+                return str(exc)
+            return (f"moved **{moved.company} — {moved.role}** to "
+                    f"{moved.stage}")
+        if verb in ("next", "note"):
+            if "|" in rest:
+                ref, payload = (p.strip() for p in rest.split("|", 1))
+            else:
+                head = rest.split(None, 1)
+                ref = head[0] if head else ""
+                payload = head[1].strip() if len(head) > 1 else ""
+            app, error = _resolve(ref)
+            if app is None:
+                return error
+            if verb == "note":
+                try:
+                    store.add_note(app.id, payload)
+                except CareerError as exc:
+                    return str(exc)
+                return f"noted on **{app.company} — {app.role}**."
+            due = None
+            m = re.search(r"\s+by\s+(\d{4})-(\d{2})-(\d{2})\s*$", payload)
+            if m:
+                try:
+                    due = datetime(int(m.group(1)), int(m.group(2)),
+                                   int(m.group(3)), 12, 0,
+                                   tzinfo=UTC).timestamp()
+                except ValueError:
+                    return (f"that date doesn't exist: "
+                            f"{m.group(1)}-{m.group(2)}-{m.group(3)}")
+                payload = payload[:m.start()].strip()
+            else:
+                m = re.search(r"\s+in\s+(\d+)\s*d\s*$", payload)
+                if m:
+                    import time as _time
+                    due = _time.time() + int(m.group(1)) * 86400
+                    payload = payload[:m.start()].strip()
+            try:
+                updated = store.set_next_action(app.id, payload, due)
+            except CareerError as exc:
+                return str(exc)
+            if not updated.next_action:
+                return (f"next action cleared for "
+                        f"**{app.company} — {app.role}**.")
+            due_note = ""
+            if updated.next_action_due is not None:
+                due_note = (" · due " + datetime.fromtimestamp(
+                    updated.next_action_due, tz=UTC
+                ).strftime("%Y-%m-%d"))
+            return (f"next for **{app.company} — {app.role}**: "
+                    f"{updated.next_action}{due_note}")
+        if verb == "attach":
+            head = rest.split(None, 1)
+            if len(head) < 2:
+                return ("usage: /careers attach <app> "
+                        "<artifact id|uri|alias>")
+            app, error = _resolve(head[0])
+            if app is None:
+                return error
+            artifacts = self._artifact_store()
+            if artifacts is None:
+                return ("careers attach unavailable: no database is "
+                        "attached to this chat context — artifacts "
+                        "live in the database.")
+            art = self._resolve_artifact(artifacts, head[1].strip())
+            if art is None:
+                return self._artifact_unknown(artifacts, head[1].strip())
+            store.attach_cv(app.id, art.id)
+            return (f"attached 📎 {art.id} ({art.type}) to "
+                    f"**{app.company} — {app.role}** — the CV of "
+                    "record for this application.")
+        if verb == "remove":
+            app, error = _resolve(rest)
+            if app is None:
+                return error
+            store.remove(app.id)
+            return f"removed **{app.company} — {app.role}** ({app.id})."
+        return ("usage: /careers [list] | add <company> | <role> | "
+                "move <app> <stage> | next <app> | <action> [by <date>] | "
+                "note <app> | <text> | attach <app> <artifact> | "
+                "remove <app> | stages")
 
     # ── api connectors: /api ─────────────────────────────────────────────────
     def _control_api(self, tail: str) -> str:

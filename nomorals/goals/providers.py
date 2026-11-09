@@ -1,9 +1,9 @@
-"""Measured-progress providers for goal classes (WS2 P3).
+"""Measured-progress providers for goal classes (WS2 P3 + P4).
 
 P1 shipped the provider registry empty by design
-(:mod:`nomorals.goals.classes`); this module is where the first two
-real providers land — **finance** and **trading** — and
-:func:`register_providers` wires them into the registry.  The wiring
+(:mod:`nomorals.goals.classes`); this module is where the real
+providers land — **finance** and **trading** (P3), **careers**
+(P4) — and :func:`register_providers` wires them into the registry.  The wiring
 runs when the goals package loads (see the module-end registration
 at the bottom of :mod:`nomorals.goals`, the ``agents/goals.py``
 precedent), so every entry point that builds a ``GoalTracker`` —
@@ -37,6 +37,14 @@ the link rides the fields each store already owns:
   ``pnl-target:<amount>`` (account currency, must be > 0).  No tag
   (or an unparsable/non-positive one) = no measurable target =
   ``None``.
+* careers: the pipeline store (:mod:`nomorals.careers.store`)
+  holds applications, not goal targets, so the link rides tags
+  again: an explicit ``career-app:<application-id>`` naming ONE
+  application whose stage is the reading, else a declared
+  ``career-target:<n>`` — submit ``n`` applications (counted from
+  the pipeline's own stage histories, filed at/after the goal).
+  A present-but-stale ``career-app:`` tag measures nothing (the
+  P3 rule: a broken deliberate link is not a licence to guess).
 
 The finance directory is resolved through
 :func:`nomorals.finance.budgets.finance_paths` over the process
@@ -44,9 +52,9 @@ settings — the same resolution ``finance/commands.py`` uses for the
 ledger behind ``/goal`` — so provider and surfaces read the same
 files (in a default-home deployment these are exactly the files the
 bare ``GoalStore()`` construction in the ``/goal`` handler uses too).
-The tracker ``db`` argument is unused by both providers: the finance
-and trading stores are file stores (JSON / JSONL) beside that
-directory, not tables in the context database.
+The tracker ``db`` argument is unused by all three providers: the
+finance, trading and careers stores are file stores (JSON / JSONL)
+beside that directory, not tables in the context database.
 
 Measures
 --------
@@ -70,6 +78,16 @@ Measures
   STATE.md prose into a progress number would manufacture
   precision.  That reader is WS2 P7's scope, where the census put
   it; this provider ships complete over Devon's own journal.
+* careers (``application_pipeline``): for a ``career-app:``-linked
+  goal, the linked application's stage weight
+  (:data:`nomorals.careers.store.STAGE_PROGRESS` — saved 10,
+  applied 30, screen 50, interview 70, offer 90, accepted 100;
+  a rejected/withdrawn link reads 0 with the closure named in the
+  headline — it ended, and it did not succeed).  For a
+  ``career-target:<n>`` goal, applications submitted since the
+  goal was filed (stage history reached ``applied``) divided by
+  ``n``.  Both are computed from the pipeline store's own records
+  — the append-only stage histories, never a self-report.
 """
 
 from __future__ import annotations
@@ -79,6 +97,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..careers.store import STAGE_PROGRESS, CareerStore, careers_path
 from ..core.config import get_settings
 from ..core.logging_setup import get_logger
 from ..finance.budgets import finance_paths
@@ -94,8 +113,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, avoids a cycle
 _log = get_logger(__name__)
 
 __all__ = [
+    "CAREER_APP_TAG",
+    "CAREER_TARGET_TAG",
     "FINANCE_GOAL_TAG",
     "PNL_TARGET_TAG",
+    "careers_progress",
     "finance_progress",
     "register_providers",
     "trading_progress",
@@ -350,11 +372,128 @@ def trading_progress(
         return None
 
 
+# ── careers: stage funnel from the pipeline store ─────────────────────
+
+#: Explicit careers link: a tracker-goal tag
+#: ``career-app:<application-id>`` naming one application in the
+#: pipeline store (the ``app_<hex>`` ids
+#: :class:`nomorals.careers.store.CareerStore` mints).  The linked
+#: application's stage IS the goal's measured progress.
+CAREER_APP_TAG = "career-app:"
+
+#: Careers target declaration: a tracker-goal tag
+#: ``career-target:<n>`` — submit ``n`` applications (counted from
+#: stage histories, filed at/after the goal's creation).
+CAREER_TARGET_TAG = "career-target:"
+
+
+def _career_store() -> CareerStore:
+    """The pipeline store, resolved via the process settings —
+    the resolution the /careers surface itself uses."""
+    return CareerStore(careers_path(get_settings()))
+
+
+def _tag_value(goal: Goal, prefix: str) -> str | None:
+    """The value of the goal's first ``prefix`` tag, if any."""
+    for tag in getattr(goal, "tags", None) or []:
+        text = str(tag).strip()
+        if text.startswith(prefix):
+            return text[len(prefix):].strip() or None
+    return None
+
+
+def _careers_progress(goal: Goal, *, now: float | None) -> ClassProgress | None:
+    store = _career_store()
+    linked_id = _tag_value(goal, CAREER_APP_TAG)
+    if linked_id is not None:
+        app = store.get(linked_id)
+        if app is None:
+            return None  # stale deliberate link: never fall through
+        percent = STAGE_PROGRESS[app.stage]
+        if app.stage in ("rejected", "withdrawn"):
+            headline = (
+                f"{app.company} — {app.role} closed ({app.stage}): "
+                "the linked application ended without an offer")
+        elif app.stage == "accepted":
+            headline = f"{app.company} — {app.role}: offer accepted"
+        else:
+            headline = (
+                f"{app.company} — {app.role} is at the {app.stage} "
+                f"stage ({percent:.0f}% of the pipeline)")
+        evidence: dict[str, Any] = {
+            "application_id": app.id,
+            "link": "career-app",
+            "company": app.company,
+            "role": app.role,
+            "stage": app.stage,
+            "stage_progress": percent,
+            "stages_visited": [h.get("stage") for h in app.history],
+        }
+        if app.next_action:
+            evidence["next_action"] = app.next_action
+            evidence["next_action_due"] = app.next_action_due
+        return ClassProgress(
+            percent=percent,
+            basis="measured",
+            source="application pipeline",
+            headline=headline,
+            evidence=evidence,
+        )
+    raw_target = _tag_value(goal, CAREER_TARGET_TAG)
+    if raw_target is None:
+        return None
+    try:
+        target = int(raw_target)
+    except ValueError:
+        return None
+    if target <= 0:
+        return None
+    since = float(getattr(goal, "created_at", 0.0) or 0.0)
+    submitted = store.submitted_since(since)
+    percent = submitted / target * 100.0
+    headline = (
+        f"{submitted} of {target} application(s) submitted since "
+        "this goal was filed")
+    return ClassProgress(
+        percent=percent,
+        basis="measured",
+        source="application pipeline",
+        headline=headline,
+        evidence={
+            "link": "career-target",
+            "submitted": submitted,
+            "target_applications": target,
+            "since": since,
+            "funnel": store.funnel_counts(),
+        },
+    )
+
+
+def careers_progress(
+    db: Any, goal: Goal, *, now: float | None = None,
+) -> ClassProgress | None:
+    """Careers-class provider: the application pipeline, measured.
+
+    ``None`` when the goal declares no pipeline link (no
+    ``career-app:`` / valid ``career-target:`` tag), when a
+    deliberate link is stale, or when the pipeline store cannot
+    be read — the failure is logged with the goal named, never
+    raised into a board.
+    """
+    try:
+        return _careers_progress(goal, now=now)
+    except Exception as exc:  # noqa: BLE001 - contained: see docstring
+        _log.warning(
+            "careers progress provider failed for goal %s (%r): %s",
+            getattr(goal, "goal_id", "?"), getattr(goal, "title", ""), exc)
+        return None
+
+
 # ── registration ──────────────────────────────────────────────────────
 
 
 def register_providers() -> None:
-    """Register the finance + trading providers with the registry.
+    """Register the finance + trading + careers providers.
 
     Idempotent (re-registration replaces).  Called by
     :mod:`nomorals.goals` when the package loads — the one wiring
@@ -362,3 +501,4 @@ def register_providers() -> None:
     """
     register_progress_provider("finance", finance_progress)
     register_progress_provider("trading", trading_progress)
+    register_progress_provider("careers", careers_progress)

@@ -127,6 +127,11 @@ LAYERS: dict[str, int] = {
     # learn/ is the learning service organ (courses, tutoring): imports
     # documents/voice (L4), imported by agents (L5). L4.
     "learn": 4,
+    # careers/ is the career-pipeline organ (WS2 P4): the owner's job
+    # pipeline (applications/stages/next actions) the careers goal
+    # class measures. Imports core only; imported by goals providers
+    # (L4, same layer) and agents (L5). L4, peer of finance/learn.
+    "careers": 4,
     # legal/ is the legal-aid service organ: imports documents (L4),
     # imported by agents (L5). L4.
     "legal": 4,

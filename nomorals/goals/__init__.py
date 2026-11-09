@@ -2700,8 +2700,8 @@ class IdeaTracker:
         }
 
 
-# ── WS2 P3: measured-progress providers ───────────────────────────────
-# The finance + trading class providers register when the goals
+# ── WS2 P3/P4: measured-progress providers ────────────────────────────
+# The finance + trading + careers class providers register when the goals
 # package loads — the module-end registration pattern (cf. the brain
 # `goal` tool registered at the end of agents/goals.py).  This is the
 # one wiring point every GoalTracker entry point shares (partner

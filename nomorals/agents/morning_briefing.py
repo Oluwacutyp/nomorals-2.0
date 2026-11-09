@@ -1251,8 +1251,11 @@ class GoalClassesProvider(_Provider):
     """Goal classes (WS2): per-class one-liners from the user-goal
     tracker — counts, average progress, overdue per domain class.
     The GoalsProvider above triages the agent GoalSystem; this one
-    rolls up the owner's GoalTracker goals by class.  No goals (or
-    no database) → no section.  Never raises."""
+    rolls up the owner's GoalTracker goals by class.  It also
+    carries the careers pipeline's next-action triage (WS2 P4):
+    overdue and due-soon application actions surface here, through
+    the existing briefing seam — no new scheduler.  No goals, no
+    pipeline actions (or no database) → no section.  Never raises."""
     name = "goal_classes"
     title = "🧭 Goal classes"
     priority = 24
@@ -1273,6 +1276,7 @@ class GoalClassesProvider(_Provider):
 
         tracker = GoalTracker(db)
         lines = class_briefing_lines(tracker, OWNER_USER_ID)
+        lines += self._careers_action_lines()
         if not lines:
             return None
         items = [{"id": f"goal-class-{i}", "title": line[2:],
@@ -1280,6 +1284,47 @@ class GoalClassesProvider(_Provider):
         return BriefingSection(
             name=self.name, title=self.title, priority=self.priority,
             source="goal-tracker", items=items, lines=lines)
+
+    @staticmethod
+    def _careers_action_lines() -> list[str]:
+        """Careers next-action triage: overdue first, then due ≤48h.
+
+        The pipeline store resolves via the process settings (the
+        same resolution the /careers surface and the careers goal
+        provider use).  Contained: any store problem reads as no
+        lines — a briefing never breaks on the pipeline.
+        """
+        try:
+            import time as _time
+            from datetime import UTC, datetime
+
+            from ..careers.store import CareerStore, careers_path
+            from ..core.config import get_settings
+
+            store = CareerStore(careers_path(get_settings()))
+            now = _time.time()
+
+            def _due(ts: float) -> str:
+                return datetime.fromtimestamp(
+                    ts, tz=UTC).strftime("%Y-%m-%d")
+
+            lines: list[str] = []
+            for app in store.overdue_actions(now=now)[:3]:
+                assert app.next_action_due is not None
+                lines.append(
+                    f"• ⛔ Careers: {app.company} — {app.role}: "
+                    f"“{app.next_action}” was due "
+                    f"{_due(app.next_action_due)}")
+            for app in store.due_soon_actions(now=now)[:3]:
+                assert app.next_action_due is not None
+                lines.append(
+                    f"• 💼 Careers: {app.company} — {app.role}: "
+                    f"“{app.next_action}” due "
+                    f"{_due(app.next_action_due)}")
+            return lines
+        except Exception:  # noqa: BLE001 — triage never sinks a briefing
+            _log.debug("careers briefing lines skipped", exc_info=True)
+            return []
 
 
 class DisruptionProvider(_Provider):
