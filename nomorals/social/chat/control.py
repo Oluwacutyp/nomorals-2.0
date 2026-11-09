@@ -341,6 +341,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "chatmode": (0, None),  # /chatmode [mode|status|list|feature <f> <on|off>] [target] — per-chat mode + feature toggles; the target is a chat NAME (any length), a phone number, or a full key, so the tail is unbounded
     "style": (0, None),  # /style | /style <field> <value> [target] | /style reset [target] | /style list — inspect + tune the mined style profile (owner-only); the target is a chat NAME (any length), a phone number, or a full key, so the tail is unbounded
     "stylepin": (0, None),  # /stylepin [set <global|family> <intent|font|theme|preset|trait> <value…> | clear <global|family> [field]] — pin a style (typography intent/face, theme traits) globally or per surface family; pins outrank semantic defaults at the one selection seam (owner-only)
+    "pack": (0, None),      # /pack [open <id> | on|off <id> | act <id> <verb> …] — experience packs (Living Chat P4): the 25 journeys of the pack registry as living cards over the manifest/action/operations substrate; lifecycle persists, a disabled pack's surfaces stop resolving
     "doctor": (0, 0),  # /doctor — system health: registry + config + stores + adapters + providers (owner-only)
     "model": (0, 6),  # provider + up to 5 fallback providers
     "providers": (0, 0),  # /providers — probe the whole chain, live or why not
@@ -2001,6 +2002,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/stylepin  ·  /stylepin set <global|family> <intent|font|theme|preset|trait> <value…>  ·  /stylepin clear <global|family> [field]",
              "example": "/stylepin set global intent display   ·   /stylepin set creation theme neon   ·   /stylepin clear global",
              "related": "/style /create"},
+    "pack": {"what": "experience packs: the 25 journeys of the Living Chat program (music deck, research cockpit, learning cards, decision room, travel board, celebration engine…) as living cards over the common interaction model. Each pack is a declarative definition in one registry; wrapped packs open their real feature, native packs keep their state per owner or per room. /pack lists what's installed with its state; disabling a pack persists and its surfaces stop resolving. A pack's card family is its own id, so /stylepin can target a single pack.",
+             "usage": "/pack  ·  /pack open <id>  ·  /pack on|off <id>  ·  /pack act <id> <verb> [args…]",
+             "example": "/pack   ·   /pack open music-deck   ·   /pack act travel-board add Lagos | fly in Friday   ·   /pack off smart-digest",
+             "related": "/stylepin /list /menu"},
     "model": {"what": "switch the active model live (up to 5 fallbacks); no argument shows the chain.",
               "usage": "/model [provider [fallback …]]", "example": "/model local",
               "related": "/status /providers"},
@@ -4471,7 +4476,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "tag", "bansender", "unbansender", "reactwipe", "boosters",
       "party", "ajo"]),
     ("discovery",
-     ["list", "commands", "menu", "help"]),
+     ["list", "commands", "menu", "help", "pack"]),
 ]
 
 #: Septorch-style emoji headers for the menu groups
@@ -4545,6 +4550,7 @@ LIST_ONELINERS: dict[str, str] = {
     "chatmode": "per-chat mode + feature toggles: /chatmode games-only | games-off | games-on | quiet | normal | status | list | feature <games|music|voice|images|proactive|games.<game>> <on|off>",
     "style": "mined style profile: /style shows it, /style <field> <value> tunes it, /style reset clears overrides",
     "stylepin": "pin a style (typography intent/font, theme traits) globally or per family — /stylepin set <global|family> <field> <value…>",
+    "pack": "experience packs — 25 journeys as living cards: /pack lists them, /pack open <id> launches one, /pack act <id> <verb> drives it",
     "doctor": "system health: registry + config + stores + adapters + providers",
     "profile": "profile-aware runtime: detected environment + every tuned knob",
     "update": "self-update from chat: gate + checkpoint + pull + restart",

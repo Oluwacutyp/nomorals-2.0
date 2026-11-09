@@ -613,6 +613,16 @@ def inline_results_for(query: str) -> list[dict]:
     """
     q = (query or "").strip().lower()
 
+    # "pack …" → experience-pack entries (Living Chat P4): the
+    # inline-creation pack's surface. Tapping one posts
+    # /pack open <id> into the current chat. Local import: the
+    # pack registry imports the action schema, which imports
+    # this module — a module-level import would cycle.
+    if q == "pack" or q.startswith("pack "):
+        from .packs import pack_inline_articles
+
+        return pack_inline_articles(q[4:].strip())
+
     # Empty query → starter pack.
     if not q:
         return [

@@ -6059,6 +6059,9 @@ class PartnerRuntime(
         if kind == "stylepin":
             return self._control_stylepin(command.tail or "", message)
 
+        if kind == "pack":
+            return self._control_pack(command.tail or "", message)
+
         if kind == "doctor":
             return self._control_doctor()
 

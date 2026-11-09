@@ -717,6 +717,57 @@ SURFACES: tuple[Surface, ...] = (
         tests=("tests/test_living_chat_p3.py",),
     ),
     Surface(
+        id="packs",
+        title="Experience packs (Living Chat P4)",
+        producer="nomorals.social.chat.packs:PACKS via "
+                 "agents.partner.runtime_expression:"
+                 "_control_pack",
+        card_type="living card (family: the pack's own id) — "
+                  "one home card per pack per chat, revised "
+                  "in place as the pack's state moves",
+        actions=(
+            ActionRef("packs.list", "navigate", "control:pack",
+                      "pack"),
+            ActionRef("packs.open", "callback", "control:pack",
+                      "pack open music-deck"),
+            ActionRef("packs.disable", "callback", "control:pack",
+                      "pack off music-deck"),
+            ActionRef("packs.act", "callback", "control:pack",
+                      "pack act travel-board add Lagos"),
+        ),
+        platforms=_ALL_CHAT,
+        routes=_ALL_CHAT_ROUTES,
+        operation="the pack registry (social.chat.packs) "
+                  "composes the earlier surfaces per pack: a "
+                  "wrapped pack's home card points at its real "
+                  "feature command, a native pack's verbs run "
+                  "as pure state transitions over the durable "
+                  "pack store (lifecycle + sessions + usage); "
+                  "the home card is published/revised through "
+                  "the living-card host under the pack's own "
+                  "family, so a style pin can target one pack; "
+                  "a disabled pack's open/verbs answer "
+                  "unavailable and publish nothing",
+        receipt=_RECEIPT,
+        fallback=_NUMBERED,
+        # The pack registry's ids, declared as a copy: the P4
+        # drift test compares this set against packs.PACKS and
+        # fails by name when they diverge.
+        members=(
+            "command-center", "artifact-workbench",
+            "research-cockpit", "music-deck", "creative-director",
+            "sticker-atelier", "learning-cards", "game-boards",
+            "book-studio", "smart-digest", "memory-shelf",
+            "calendar-host", "travel-board", "media-vault",
+            "decision-room", "diagnostic-panel", "adventure",
+            "celebration-engine", "workflow-buttons",
+            "inline-creation", "companion-views",
+            "cross-device-handoff", "language-expression",
+            "action-bar", "surprise-me",
+        ),
+        tests=("tests/test_living_chat_p4.py",),
+    ),
+    Surface(
         id="inline-query",
         title="Telegram inline-query results",
         producer="nomorals.social.chat.tgbot_buttons:inline_results_for",

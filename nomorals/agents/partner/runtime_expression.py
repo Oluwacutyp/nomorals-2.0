@@ -1472,3 +1472,224 @@ class RuntimeExpressionMixin:
                 "<global|family> <intent|font|theme|preset|"
                 "trait> <value…> · /stylepin clear "
                 "<global|family> [field]")
+
+    # ---- /pack: experience packs (Living Chat P4) --------------
+
+    def _pack_facts(self, message) -> dict:  # type: ignore[no-untyped-def]
+        """The fact snapshot pack homes and verbs compose over:
+        this chat's live cards, the expression library, the
+        pack store, a writable artifact dir. Every source is
+        guarded — a missing organ reads as empty, never as a
+        crashed pack."""
+        from ...social.chat import packs as _packs
+        from . import runtime as _runtime_mod
+
+        facts: dict = {"store": _packs.get_pack_store()}
+        chat = getattr(message, "chat", None)
+        chat_key = str(getattr(chat, "key", "") or "")
+        facts["chat_key"] = chat_key
+        facts["actor"] = _runtime_mod._pick_owner_key(message)
+        try:
+            host = self._living_card_host()
+            facts["live_cards"] = [
+                (c.family, c.title, c.status)
+                for c in host.store.live_for_chat(chat_key)]
+        except Exception as exc:  # noqa: BLE001 - facts degrade
+            record_failure("packs.facts.live_cards", exc)
+            facts["live_cards"] = []
+        try:
+            library = self._expression_library()
+            facts["library_items"] = library.items()
+            facts["library_len"] = len(library)
+        except Exception as exc:  # noqa: BLE001 - facts degrade
+            record_failure("packs.facts.library", exc)
+            facts["library_items"] = []
+            facts["library_len"] = 0
+        try:
+            facts["out_dir"] = self._expression_root() / "packs"
+        except Exception as exc:  # noqa: BLE001 - facts degrade
+            record_failure("packs.facts.out_dir", exc)
+        facts["db"] = getattr(self.context, "db", None)
+        facts["digest_items"] = []
+        return facts
+
+    @staticmethod
+    def _pack_card_id(pack, chat_key: str, scope: str) -> str:  # type: ignore[no-untyped-def]
+        """One home card per (pack, chat, scope): owner-scoped
+        packs get a card per owner, chat-scoped packs (the
+        decision room) share one card per room."""
+        import hashlib
+
+        raw = f"{pack.id}\x1f{chat_key}\x1f{scope}".encode()
+        return "pk" + hashlib.sha256(raw).hexdigest()[:10]
+
+    def _control_pack(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
+        """Experience packs (Living Chat P4): /pack lists the
+        registry with honest state; /pack open <id> publishes
+        the pack's living home card (family = the pack's own
+        id, so a style pin targets it through the P3 seam);
+        /pack on|off <id> flips the persisted lifecycle;
+        /pack act <id> <verb> runs a native verb as a state
+        transition over the pack store. A disabled pack's
+        surfaces stop resolving — open and act answer
+        unavailable in words and publish nothing."""
+        from ...social.chat import packs as _packs
+
+        store = _packs.get_pack_store()
+        text = " ".join(str(tail or "").split()).strip()
+        parts = text.split()
+        if not parts or parts[0].lower() == "list":
+            return "\n".join(_packs.listing_lines(store))
+        verb = parts[0].lower()
+        if verb in ("on", "off"):
+            if len(parts) < 2:
+                return "which pack? /pack lists them all."
+            pack_id = parts[1].lower()
+            if pack_id not in _packs.PACK_IDS:
+                return (f"no pack called {pack_id!r} — /pack "
+                        f"lists them all.")
+            store.set_enabled(pack_id, verb == "on")
+            pack = _packs.pack_by_id(pack_id)
+            if verb == "on":
+                return f"{pack.title} ({pack_id}) is on now."
+            return (f"{pack.title} ({pack_id}) is off now — its "
+                    f"surfaces stop resolving until you switch "
+                    f"it back on.")
+        if verb == "act":
+            if len(parts) < 3:
+                return "usage: /pack act <id> <verb> [args…]"
+            pack_id = parts[1].lower()
+            if pack_id not in _packs.PACK_IDS:
+                return (f"no pack called {pack_id!r} — /pack "
+                        f"lists them all.")
+            pack = _packs.pack_by_id(pack_id)
+            if not store.is_enabled(pack_id):
+                return (f"{pack.title} ({pack_id}) is off — "
+                        f"unavailable until you switch it back "
+                        f"on: /pack on {pack_id}")
+            if message is None:
+                return ("pack verbs run in a chat, where their "
+                        "state lives.")
+            return self._pack_act(pack, parts[2].lower(),
+                                  " ".join(parts[3:]), message)
+        pack_id = (parts[1] if verb == "open" and len(parts) > 1
+                   else parts[0]).lower()
+        if pack_id not in _packs.PACK_IDS:
+            return (f"no pack called {pack_id!r} — /pack lists "
+                    f"all {len(_packs.PACKS)} of them.")
+        pack = _packs.pack_by_id(pack_id)
+        if not store.is_enabled(pack_id):
+            return (f"{pack.title} ({pack_id}) is off — "
+                    f"unavailable until you switch it back on: "
+                    f"/pack on {pack_id}")
+        if message is None:
+            return (f"in a chat I'd open the {pack.title} pack "
+                    f"as a living card; here I can only describe "
+                    f"it: {pack.tagline}.")
+        return self._pack_open(pack, message)
+
+    def _pack_open(self, pack, message) -> str:  # type: ignore[no-untyped-def]
+        """Publish (or revise) the pack's home card in this
+        chat and record the use on the action bar's memory."""
+        from ...social.chat import packs as _packs
+        from ...social.chat.living_cards import Card
+        from . import runtime as _runtime_mod
+
+        if not self._group_gate(message, "pack"):
+            return (f"I can open the {pack.title} pack — but "
+                    f"this room isn't claimed for my bot-system "
+                    f"posts (§33), so I'm not dropping its card "
+                    f"here.")
+        store = _packs.get_pack_store()
+        chat = message.chat
+        chat_key = str(getattr(chat, "key", "") or "")
+        owner_key = _runtime_mod._pick_owner_key(message)
+        scope = _packs.scope_key(pack, chat_key, owner_key)
+        session = store.session(pack.id, scope)
+        if not session:
+            session = _packs.initial_session(pack.id)
+            if session:
+                store.save_session(pack.id, scope, session)
+        facts = self._pack_facts(message)
+        home = _packs.build_home(pack, session=session,
+                                 facts=facts)
+        host = self._living_card_host()
+        card_id = self._pack_card_id(pack, chat_key, scope)
+        existing = host.store.get(card_id)
+        card = Card(
+            card_id=card_id, family=pack.family,
+            chat_key=chat_key, owner_key=owner_key,
+            platform=str(getattr(chat, "platform", "") or ""),
+            chat_id=str(getattr(chat, "chat_id", "") or ""),
+            title=home.title, body=home.body, rows=home.rows,
+            actions=home.actions, status="open")
+        if existing is not None and not existing.terminal:
+            host.revise(card, chat, title=home.title,
+                        body=home.body, rows=home.rows,
+                        actions=home.actions, status="open")
+        else:
+            host.publish(card, chat)
+        store.record_use(pack.id)
+        return (f"{pack.icon} {pack.title} — its card is live "
+                f"above; it revises as the pack moves.")
+
+    def _pack_act(self, pack, verb: str, args: str, message) -> str:  # type: ignore[no-untyped-def]
+        """Run one native verb: a pure transition over the
+        pack's session, persisted, with the pack's home card
+        revised to the new state when one is live here."""
+        from ...social.chat import packs as _packs
+        from . import runtime as _runtime_mod
+
+        store = _packs.get_pack_store()
+        chat = message.chat
+        chat_key = str(getattr(chat, "key", "") or "")
+        owner_key = _runtime_mod._pick_owner_key(message)
+        scope = _packs.scope_key(pack, chat_key, owner_key)
+        session = store.session(pack.id, scope)
+        facts = self._pack_facts(message)
+        outcome = _packs.apply_verb(pack, verb, args,
+                                    session=session, facts=facts)
+        if outcome.session is not None:
+            store.save_session(pack.id, scope, outcome.session)
+            session = outcome.session
+        if outcome.dispatch:
+            if getattr(self, "_pack_dispatching", False):
+                return ("that workflow would loop back into a "
+                        "pack dispatch — refused.")
+            self._pack_dispatching = True
+            try:
+                return self.handle_control(
+                    "/" + outcome.dispatch, chat_key,
+                    message=message)
+            finally:
+                self._pack_dispatching = False
+        # Refresh the home card to the post-verb state.
+        try:
+            host = self._living_card_host()
+            card_id = self._pack_card_id(pack, chat_key, scope)
+            existing = host.store.get(card_id)
+            if existing is not None and not existing.terminal:
+                home = _packs.build_home(pack, session=session,
+                                         facts=facts)
+                host.revise(existing, chat, title=home.title,
+                            body=home.body, rows=home.rows,
+                            actions=home.actions)
+        except Exception as exc:  # noqa: BLE001 - card is garnish
+            record_failure("packs.act.card_revise", exc)
+        if outcome.artifact is not None:
+            path, media_kind = outcome.artifact
+            try:
+                from ...social.chat.base import MediaRef
+
+                ref = MediaRef(path=str(path), kind=media_kind,
+                               name=Path(path).name)
+                sent = self._expression_send(message, ref)
+                if not getattr(sent, "ok", False):
+                    return (outcome.reply + f"\n(the send failed "
+                            f"here: "
+                            f"{getattr(sent, 'error', '')})")
+            except Exception as exc:  # noqa: BLE001 - named below
+                record_failure("packs.act.artifact_send", exc)
+                return (outcome.reply + "\n(the artifact send "
+                        "itself failed on my end.)")
+        return outcome.reply
