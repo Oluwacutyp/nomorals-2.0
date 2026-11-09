@@ -46,6 +46,7 @@ __all__ = [
     "class_briefing_lines",
     "create_goal_filed",
     "goals_context_snapshot",
+    "interest_watch_note",
     "progress_label",
     "refile_goal",
     "render_briefing",
@@ -381,24 +382,79 @@ def create_goal_filed(
     proposes a class; the returned flag says whether the filing was
     a suggestion (the caller names it in the reply so it is never
     silent).  Returns ``(goal, class_id, suggested)``.
+
+    An interests filing also registers the goal's watch topics as
+    news beats (WS2 P5 — the census's settled behaviour change;
+    :func:`nomorals.goals.providers.register_interest_beats` is
+    best-effort and never fails the creation).  Callers state the
+    live watch in the reply via :func:`interest_watch_note`.
     """
     if class_arg:
         class_id = validate_class_id(class_arg)
         goal = run_sync(tracker.create(user_id, title, goal_class=class_id))
-        return goal, class_id, False
-    suggestion = suggest_class(title)
-    if suggestion is not None:
-        goal = run_sync(
-            tracker.create(user_id, title, goal_class=suggestion.id))
-        return goal, suggestion.id, True
-    goal = run_sync(tracker.create(user_id, title))
-    return goal, goal.goal_class or DEFAULT_CLASS_ID, False
+        suggested = False
+    else:
+        suggestion = suggest_class(title)
+        if suggestion is not None:
+            goal = run_sync(
+                tracker.create(user_id, title, goal_class=suggestion.id))
+            class_id, suggested = suggestion.id, True
+        else:
+            goal = run_sync(tracker.create(user_id, title))
+            class_id = goal.goal_class or DEFAULT_CLASS_ID
+            suggested = False
+    if class_id == "interests":
+        from . import providers
+
+        providers.register_interest_beats(tracker.db, goal)
+    return goal, class_id, suggested
+
+
+def interest_watch_note(tracker: GoalTracker, goal: Goal) -> str:
+    """The create-reply statement of an interests goal's live watch.
+
+    Names the goal's topics that are news beats right now (its own
+    registration just ran, or they were already covered) — the
+    effect stated truthfully in both cases.  Empty when the goal
+    is not an interests goal or no topic is a beat (e.g. the news
+    profile could not be read).  Never raises.
+    """
+    try:
+        if (goal.goal_class or DEFAULT_CLASS_ID) != "interests":
+            return ""
+        from . import providers
+
+        profile = providers._load_news_profile(tracker.db)
+        if profile is None:
+            return ""
+        beats = {str(b.get("topic") or "").casefold()
+                 for b in profile["beats"]}
+        live = [t for t in providers.interest_topics(goal)
+                if t.casefold() in beats]
+        if not live:
+            return ""
+        return ("📡 this watch is live — its topics are news beats: "
+                + " · ".join(live)
+                + " (re-file the goal out of Interests to stop "
+                  "watching)")
+    except Exception:  # noqa: BLE001 - a reply extra, never a failure
+        return ""
 
 
 def refile_goal(
     tracker: GoalTracker, user_id: str, ref: str, class_arg: str,
 ) -> str:
-    """Move one goal to another class (update(goal_class=...))."""
+    """Move one goal to another class (update(goal_class=...)).
+
+    Moving INTO interests registers the goal's watch topics as
+    news beats; moving OUT un-files this goal's beats (seed beats,
+    stated briefing topics and topics other interests goals still
+    claim are kept — see
+    :func:`nomorals.goals.providers.remove_interest_beats`; the
+    profile carries no per-beat provenance, so the un-filed set is
+    the goal's topics minus those protections).  Both acts are
+    named in the reply.
+    """
     class_id = validate_class_id(class_arg)
     goal, candidates = resolve_goal(tracker, user_id, ref)
     if goal is None:
@@ -407,8 +463,30 @@ def refile_goal(
     updated = run_sync(
         tracker.update(goal.goal_id, goal_class=class_id))
     after = get_class(updated.goal_class)
-    return (f"moved **{updated.title}** from {before.title} "
+    text = (f"moved **{updated.title}** from {before.title} "
             f"to {after.title} (`{after.id}`).")
+    if after.id == "interests" and before.id != "interests":
+        from . import providers
+
+        added = providers.register_interest_beats(tracker.db, updated)
+        if added:
+            text += ("\n  📡 registered as news beat(s): "
+                     + " · ".join(added))
+        else:
+            text += "\n  📡 its watch topics were already news beats."
+    elif before.id == "interests" and after.id != "interests":
+        from . import providers
+
+        keep: list[str] = []
+        for other in run_sync(tracker.list_goals(
+                user_id, status="active", goal_class="interests")):
+            keep.extend(providers.interest_topics(other))
+        removed = providers.remove_interest_beats(
+            tracker.db, goal, keep_topics=keep)
+        if removed:
+            text += ("\n  📡 stopped watching — removed news beat(s): "
+                     + " · ".join(removed))
+    return text
 
 
 # ── morning briefing one-liners ───────────────────────────────────────

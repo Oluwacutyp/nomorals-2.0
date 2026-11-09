@@ -71,6 +71,10 @@ def _cmd_goals(args: argparse.Namespace, context: Any) -> int:
             _emit(args, {"error": str(exc)}, str(exc))
             return 1
         note = " (suggested from the title)" if suggested else ""
+        if class_id == "interests":
+            watch = surface.interest_watch_note(tracker, goal)
+            if watch:
+                note += f"\n  {watch}"
         _emit(args, {"goal": goal.to_dict(), "id": goal.goal_id},
               f"created {goal.goal_id} — {goal.title} "
               f"[class: {class_id}]{note}")

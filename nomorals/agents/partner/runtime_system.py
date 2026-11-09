@@ -1297,6 +1297,10 @@ class RuntimeSystemMixin:
             note = (f" — filed under {descriptor.title} from the title; "
                     f"/goals class {goal.goal_id} <class> moves it"
                     if suggested else "")
+            if class_id == "interests":
+                watch = surface.interest_watch_note(tracker, goal)
+                if watch:
+                    note += f"\n  {watch}"
             return (f"filed **{goal.title}** under {descriptor.title} "
                     f"(`{class_id}`){note}\n  goal id: {goal.goal_id}")
         if verb == "class":
