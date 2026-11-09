@@ -195,9 +195,14 @@ PUBLIC_GAME_COMMANDS: tuple[str, ...] = (
     "2048", "snake", "connect4", "battleship",
 )
 
-#: Every kind a non-owner may run on the public bot: the 19 named public
-#: commands + /game + the 32 public game commands. ``/menu`` and ``/list``
-#: are NOT in here — bare /menu is a menu trigger, not a menu item.
+#: Every kind a non-owner may run on the public bot: the named public
+#: commands, the command families the FEI gap waves added (reactions,
+#: anime, fun one-shots, makers & tools, group governance), /game and
+#: the public game commands. ``/menu`` and ``/list`` are NOT in here —
+#: bare /menu is a menu trigger, not a menu item. public_menu_text()
+#: below lists every kind in this set, and tests/test_public_menu.py
+#: pins the two together — a wave that adds a kind here must add its
+#: menu line in the same change.
 PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "help", "ping", "search", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
@@ -294,11 +299,18 @@ def public_menu_text() -> str:
         "tools — /decode /dns /whois /cipher /wisdom /think\n"
         "express — /steal /sticker /convert /gif /emoji "
         "/customemoji /emojiart /react\n"
+        "reactions — /awoo /baka /bite /blush /bonk /bored "
+        "/bully /cringe /cry /cuddle /dance /facepalm /feed "
+        "/glomp /handhold /handshake /happy /highfive /hug "
+        "/kiss /laugh /lick /nom /pat /pout /shrug /slap "
+        "/sleep /smile /smug /stare /thumbsup /tickle /wave "
+        "/wink /yeet\n"
         "groups — /rules /member /glog /gsettings /strikes "
         "/recheck /joinq /console /undonotice /flag /rep "
         "/repclear /repdismiss /report /mute /unmute /ban "
         "/unban /kick /warn /pin /unpin /purge /cleanup "
-        "/rmdeleted /rminactive\n"
+        "/rmdeleted /rminactive /tag /bansender /unbansender "
+        "/reactwipe /boosters\n"
         "group purse — /balance /mine /work /pay /gshop "
         "/quests /treasury /deposit /withdraw /rob /bail "
         "/coinflip /top /tax /grant /property /buyproperty "
@@ -307,7 +319,22 @@ def public_menu_text() -> str:
         "conflict — /gear /heist /shoot /kill /assassinate "
         "/sabotage /gang /war /police /bounty /claimdrop\n"
         "group life — /poll /vote /milestones /contributions "
-        "/boards /webshot\n"
+        "/boards /webshot /webrec\n"
+        "anime — /anime /manga /anichar /charpic /staff "
+        "/studio /episodes /animechars /trailer /streaming "
+        "/animereview /genres /genre /topanime /topmanga "
+        "/popular /trending /airing /upcoming /season "
+        "/topchars /anischedule /nextep /recommend "
+        "/randomanime /randommanga /randomchar /animequote "
+        "/favorite /whatanime /waifu /neko /kitsune /husbando\n"
+        "fun — /joke /dadjoke /progjoke /chuck /fact /fact2 "
+        "/catfact /numfact /advice /quote /dog /cat /fox "
+        "/meme /riddle /8ball /choose /activity /pokemon "
+        "/history /nasa /calc\n"
+        "makers — /qcard /canvasquote /iqc /wndwqute /meme2 "
+        "/fakemsg /fakettc /nokiamsg /fakeff /fakeffduo "
+        "/ffgirl /removebg /qr /shorturl /unshorten /bible "
+        "/couplepp /pp\n"
         f"play — /game {games}\n"
         "\n"
         "tap a button below to run it · /help for what each one does"

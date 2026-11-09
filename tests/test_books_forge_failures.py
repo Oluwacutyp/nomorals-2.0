@@ -63,7 +63,7 @@ from unittest import mock
 
 import nomorals.books.forge as F
 import nomorals.books.outline as outline_mod
-from nomorals.books.failures import recent_failures
+from nomorals.books.failures import failure_count, recent_failures
 from nomorals.books.model import Book
 
 
@@ -207,6 +207,7 @@ def test_395_list_books_corrupt_book_skipped_recorded_counted(caplog):
     forge.list_books entry, and the count surfaces on the
     instance. Missing-json dirs stay silent and uncounted."""
     before = _snap()
+    count_before = failure_count()
     tmp = tempfile.mkdtemp()
     ctx = SimpleNamespace(settings=SimpleNamespace(workspace_dir=tmp))
     forge = F.BookForge(ctx)
@@ -232,8 +233,17 @@ def test_395_list_books_corrupt_book_skipped_recorded_counted(caplog):
     assert any("skipping unreadable book" in r.message
                for r in caplog.records)
     after = _snap()
-    new = after[len(before):]
-    assert len(new) == 1 and new[0].site == "forge.list_books"
+    # recent_failures() is NEWEST-first and failure_count() is the
+    # uncapped total, so "exactly one new entry" reads as: the total
+    # grew by one, the head of the after snapshot is that entry, and
+    # every older entry sits unmoved behind it. (A positional slice
+    # from the END of the snapshot would land on the OLDEST entry the
+    # persisted ledger carries — which is how this pin used to fail
+    # on any machine whose books failure store was non-empty while
+    # the recording itself was correct.)
+    assert failure_count() == count_before + 1
+    assert after[0].site == "forge.list_books"
+    assert after[1:] == before[: len(after) - 1]
     # control: fix the file -> both listed, count resets, no record
     (bad_dir / "book.json").write_text(json.dumps(good.to_dict()),
                                        encoding="utf-8")
