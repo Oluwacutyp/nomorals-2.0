@@ -20,6 +20,7 @@ import inspect
 import threading
 import time
 import weakref
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..core.ids import new_id
@@ -142,11 +143,33 @@ def render_game_over_card(game_name: str, players: list[Player],
         record_failure("render_game_over_card:outer", e)
         return ""
 
-__all__ = ["GameEngine", "SendFn"]
+__all__ = ["GameEngine", "SendFn", "FencedMove"]
 
 _log = get_logger(__name__)
 
 SendFn = Callable[[str, str], None]  # (chat_key, text) -> None
+
+
+@dataclass
+class FencedMove:
+    """The outcome of :meth:`GameEngine.move_fenced`.
+
+    ``status``: ``ok`` (the move ran), ``stale`` (the named table
+    revision has been superseded — nothing applied, the current
+    state rides in ``messages``), ``missing`` (no live room),
+    ``finished`` (the room is closed), ``not_player`` (the sender
+    holds no seat), ``not_turn`` (a seat, but not the current one).
+    """
+
+    status: str
+    messages: list[str] = field(default_factory=list)
+    room: Room | None = None
+
+
+class _SettleAbort(Exception):
+    """Internal: a db-backed settle failed mid-apply and rolled
+    back. Caught at the top of ``_finish_inner`` — never escapes
+    the engine."""
 
 #: A live room with no human activity (move/join/leave) for this long is
 #: closed by the scheduler and its table freed. Covers games with
@@ -224,6 +247,20 @@ class GameEngine:
         #: bound to the group economy estate).  None = every room
         #: plays against the games wallet (StorePurseBackend).
         self.purse_source = None
+        #: Optional live-table sink: callable(room, event) invoked
+        #: on table events (started/moved/joined/left/timeout/
+        #: finished) so a surface can keep ONE living card revised
+        #: in place. Installed by the runtime; None = no card.
+        self.table_sink = None
+        #: Persistence health: save outcomes for the room store.
+        #: A persist failure used to vanish into a debug log; now it
+        #: is counted here, recorded in the failure ledger, and
+        #: named on the table surface while it is the latest word.
+        self._persist_stats: dict[str, Any] = {
+            "ok": 0, "failed": 0, "last_error": "",
+            "last_ok_at": 0.0, "last_fail_at": 0.0}
+        self._settlements: Any = None  # lazy SettlementStore
+        self._sweep_count = 0
         self._lock = threading.RLock()
         self._rooms: dict[str, Room] = {}        # chat_key -> live room
         self._by_id: dict[str, Room] = {}
@@ -490,7 +527,42 @@ class GameEngine:
                 mm.maybe_sweep()
         except Exception:  # noqa: BLE001
             _log.debug("match sweep failed", exc_info=True)
+        self._maybe_recover_settlements()
         self._maybe_prune_history(now)
+
+    def _maybe_recover_settlements(self) -> None:
+        """Throttled: re-finish rooms whose game is decided but
+        whose settle never landed — a crash mid-settle (the plan
+        row stayed ``planned``, the credits rolled back), a crash
+        after the settle commit (receipts exist; the replay path
+        re-issues them and moves nothing), or a finish aborted
+        in-process. The re-finish is the ordinary one: plan-first,
+        atomic, receipt-resolving, so recovery can never double-pay.
+        """
+        self._sweep_count += 1
+        if self._sweep_count % 5 != 0:
+            return
+        store = self._settlement_store() if self.db is not None else None
+        due: list[Room] = []
+        with self._lock:
+            rooms = list(self._rooms.values())
+        for room in rooms:
+            if room.status != "active":
+                continue
+            try:
+                if (store is not None and store.available
+                        and store.get(room.id) is not None) \
+                        or self.is_over(room):
+                    due.append(room)
+            except Exception:  # noqa: BLE001 - one bad room never
+                _log.debug("settlement recovery scan failed",
+                           exc_info=True)
+        for room in due:
+            try:
+                self._finish(room)
+            except Exception:  # noqa: BLE001
+                _log.exception("settlement recovery finish failed: %s",
+                               room.game)
 
     def _maybe_prune_history(self, now: float) -> None:
         """Throttled: drop finished room rows older than 30 days.
@@ -546,41 +618,116 @@ class GameEngine:
             backend = StorePurseBackend(self.store, self.db)
         room.purse = BoundPurse(backend, room)
 
-    def _persist(self, room: Room) -> None:
-        if self.db is None:
+    # ── persistence health ──────────────────────────────────────────
+    def persist_health(self) -> dict[str, Any]:
+        """Save-health for the room store: counts plus the latest
+        error. ``degraded`` is True when the most recent save
+        outcome is a failure — the state the table surface names,
+        because a game whose saves fail will not survive a restart
+        and must not look identical to a healthy one."""
+        stats = dict(self._persist_stats)
+        stats["degraded"] = bool(
+            stats["failed"] and stats["last_fail_at"] >= stats["last_ok_at"])
+        return stats
+
+    def _settlement_store(self) -> Any:
+        """The settlement ledger over this engine's db (lazy)."""
+        if self._settlements is None:
+            from .settlement import SettlementStore
+
+            self._settlements = SettlementStore(self.db)
+        return self._settlements
+
+    def _table_event(self, room: Room, event: str) -> None:
+        """Notify the live-table sink (when installed). A sink
+        failure never breaks a game — the card is a surface, the
+        room is the truth."""
+        sink = getattr(self, "table_sink", None)
+        if sink is None:
             return
+        try:
+            sink(room, event)
+        except Exception:  # noqa: BLE001
+            _log.debug("game table sink failed", exc_info=True)
+
+    @staticmethod
+    def _journal_event(room: Room, kind: str, player: Player | None,
+                       text: str = "") -> None:
+        """Append one real event to the room's replay journal
+        (``state['_events']``, persisted with the room, capped).
+        Replays are built from these records — never invented."""
+        try:
+            journal = room.state.setdefault("_events", [])
+            journal.append({
+                "ts": time.time(), "kind": kind,
+                "actor": player.key if player is not None else "",
+                "name": player.name if player is not None else "",
+                "text": str(text or "")[:120]})
+            del journal[:-80]
+        except Exception:  # noqa: BLE001 - journaling never breaks play
+            _log.debug("event journal failed", exc_info=True)
+
+    def _persist(self, room: Room) -> bool:
+        """Persist one room; bump its table revision.
+
+        Returns whether the row landed. Every call is a new table
+        revision — the persisted snapshot IS the state actions are
+        fenced against. Failures are counted and recorded (see
+        :meth:`persist_health`), never just debug-logged.
+        """
+        room.revision += 1
+        if self.db is None:
+            return False
         # serialize under the room guard: a concurrent move mutating
         # state mid-dumps would otherwise raise or persist a torn room
         with room.guard:
-            self._persist_inner(room)
+            try:
+                self._persist_inner(room)
+            except Exception as exc:  # noqa: BLE001
+                self._persist_stats["failed"] += 1
+                self._persist_stats["last_error"] = \
+                    f"{type(exc).__name__}: {exc}"[:200]
+                self._persist_stats["last_fail_at"] = time.time()
+                record_failure("engine:_persist", exc)
+                return False
+            self._persist_stats["ok"] += 1
+            self._persist_stats["last_ok_at"] = time.time()
+            return True
 
     def _persist_inner(self, room: Room) -> None:
-        try:
-            import json as _json
-            with self.db.transaction():
-                self.db.execute(
-                    "INSERT INTO game_rooms (id, game, chat_key, platform, kind, "
-                    "players, turn, state, status, started_at, seed, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(id) DO UPDATE SET turn = excluded.turn, "
-                    "state = excluded.state, status = excluded.status, "
-                    "players = excluded.players, updated_at = excluded.updated_at",
-                    (room.id, room.game, room.chat_key, room.platform,
-                     room.kind, _json.dumps([
-                         # full identity, not just the key: from_row used
-                         # to rebuild the display name from the key, so a
-                         # restart turned every player into their raw
-                         # sender id ("Ada" -> "456"). Dict shape; the
-                         # legacy plain-key list still loads (see
-                         # Room.from_row).
-                         {"key": p.key, "name": p.name,
-                          "platform": p.platform, "is_ai": bool(p.is_ai)}
-                         for p in room.players]),
-                     room.turn, _json.dumps(room.state), room.status,
-                     room.started_at, room.seed, time.time()),
-                )
-        except Exception:  # noqa: BLE001
-            _log.debug("game room persist failed", exc_info=True)
+        """Write the room row. Raises on failure — the caller
+        (:meth:`_persist`) owns the health bookkeeping."""
+        import json as _json
+        # engine bookkeeping rides a COPY of the state blob: the
+        # revision and the turn/idle clocks, so a restart restores
+        # the same revision and the same deadline (Room.from_row
+        # pops them back out; games never see them in state).
+        blob = dict(room.state)
+        blob["_rev"] = room.revision
+        blob["_turn_started"] = room.turn_started
+        blob["_last_activity"] = room.last_activity
+        with self.db.transaction():
+            self.db.execute(
+                "INSERT INTO game_rooms (id, game, chat_key, platform, kind, "
+                "players, turn, state, status, started_at, seed, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET turn = excluded.turn, "
+                "state = excluded.state, status = excluded.status, "
+                "players = excluded.players, updated_at = excluded.updated_at",
+                (room.id, room.game, room.chat_key, room.platform,
+                 room.kind, _json.dumps([
+                     # full identity, not just the key: from_row used
+                     # to rebuild the display name from the key, so a
+                     # restart turned every player into their raw
+                     # sender id ("Ada" -> "456"). Dict shape; the
+                     # legacy plain-key list still loads (see
+                     # Room.from_row).
+                     {"key": p.key, "name": p.name,
+                      "platform": p.platform, "is_ai": bool(p.is_ai)}
+                     for p in room.players]),
+                 room.turn, _json.dumps(blob), room.status,
+                 room.started_at, room.seed, time.time()),
+            )
 
     def _load_live(self, chat_key: str) -> Room | None:
         """Restore a room that survived a restart (mid-game reboot)."""
@@ -614,8 +761,8 @@ class GameEngine:
         try:
             self.db.execute("DELETE FROM game_rooms WHERE id = ?",
                             (room_id,))
-        except Exception:  # noqa: BLE001
-            _log.debug("game room row delete failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            record_failure("engine:_delete_room_row", exc)
 
     # ── room lifecycle ─────────────────────────────────────────────────────
     def live(self, chat_key: str) -> Room | None:
@@ -765,6 +912,7 @@ class GameEngine:
         # game is no longer the one to run back
         with self._lock:
             self._last_game.pop(chat_key, None)
+        self._table_event(room, "started")
         return room, msgs
 
     def _mirror_inventory(self, room: Room) -> None:
@@ -965,6 +1113,7 @@ class GameEngine:
         room.last_activity = time.time()
         self._persist(room)
         self._emit(room, *msgs)
+        self._table_event(room, "joined")
         return msgs
 
     def leave(self, chat_key: str, player: Player) -> list[str]:
@@ -1017,7 +1166,76 @@ class GameEngine:
         self._emit(room, *msgs)
         self._pump_ai(room, [])
         self._persist(room)
+        self._table_event(room, "left")
         return msgs
+
+    def _resign_inner(self, room: Room, game: MultiGame, chat_key: str,
+                      player: Player) -> list[str]:
+        """An explicit resignation: a recorded loss, distinct from
+        walking away (``leave`` drops the seat; a resign DECIDES
+        the game against the resigner). Caller holds ``room.guard``
+        (via ``_move_inner``).
+
+        With 2+ other humans at the table the resigner is
+        eliminated and play continues; otherwise the game ends and
+        the remaining human takes it. The decision is recorded in
+        ``state['decided']`` and honored by the settle over the
+        game's own winner() read — the same discipline as the §34
+        forfeit record.
+        """
+        if room.player(player.key) is None or player.is_ai:
+            return [f"{player.name} isn't seated at this table."]
+        # wager integrity mirrors leave: escrow is cashed out
+        # before the seat drops, never silently kept.
+        wager_note = None
+        if getattr(game, "takes_wagers", False):
+            try:
+                wager_note = game.wager_leave(room, player)
+            except Exception as e:  # noqa: BLE001
+                record_failure("_resign_inner:wager_leave", e)
+        self._journal_clock(room, "resign", player)
+        self._journal_event(room, "resign", player)
+        resigned = room.state.setdefault("_resigned", [])
+        if player.key not in resigned:
+            resigned.append(player.key)
+        line = f"🏳 {player.name} resigns."
+        others = [p for p in room.players if p.key != player.key]
+        other_humans = [p for p in others if not p.is_ai]
+        if len(other_humans) >= 2:
+            # elimination: the decision binds the resigner alone;
+            # the winner half stays empty so a later natural
+            # finish is not hijacked by this record.
+            room.state["decided"] = {
+                "how": "resign", "loser": player.key, "winner": ""}
+            idx = room.players.index(player)
+            room.players = others
+            if room.turn > idx:
+                room.turn -= 1
+            if room.turn >= len(room.players):
+                room.turn = 0
+            room.turn_started = time.time()
+            room.last_activity = time.time()
+            out = [line + f" {player.name} is out of the game."]
+            if wager_note:
+                out.append(wager_note)
+            self._pump_ai(room, out)
+            if self.is_over(room):
+                out.extend(self._finish(room))
+            else:
+                self._persist(room)
+            return out
+        # the resign decides the game: the remaining human takes
+        # it, or the house seat when no human remains.
+        winner_key = ""
+        if len(other_humans) == 1:
+            winner_key = other_humans[0].key
+        elif others:
+            winner_key = others[0].key
+        room.state["decided"] = {
+            "how": "resign", "loser": player.key, "winner": winner_key}
+        if wager_note:
+            line = line + "\n" + wager_note
+        return self._finish(room, line)
 
     def move(self, chat_key: str, text: str, sender: Player,
              *, kind: str = "dm") -> list[str]:
@@ -1043,7 +1261,52 @@ class GameEngine:
         with room.guard:
             if room.status != "active":
                 return []  # quit/timeout closed it while we waited
-            return self._move_inner(room, game, chat_key, text, sender)
+            out = self._move_inner(room, game, chat_key, text, sender)
+            if room.status == "active":
+                self._table_event(room, "moved")
+            return out
+
+    def move_fenced(self, chat_key: str, text: str, sender: Player,
+                    *, revision: int, kind: str = "dm") -> FencedMove:
+        """A move fenced against the table revision it was cut at.
+
+        Card buttons and other revision-carrying actions route
+        here: a tap cut at a superseded revision is refused —
+        nothing applies — and the answer carries the CURRENT
+        table state. Identity is enforced the same way: a sender
+        with no seat is ``not_player``; a seated player moving out
+        of turn is ``not_turn``. Engine commands (status/help/…)
+        are not turn moves and pass straight through.
+        """
+        room = self.live(chat_key)
+        if room is None:
+            return FencedMove("missing",
+                              ["no game is live here."], None)
+        if room.status != "active":
+            return FencedMove("finished",
+                              ["that game is over."], room)
+        cmd, _ = parse_command(text)
+        if not cmd:
+            if int(revision) != room.revision:
+                return FencedMove(
+                    "stale",
+                    ["that action was cut at an older table state — "
+                     "nothing was played. Current table:",
+                     self.describe(room)], room)
+            if room.player(sender.key) is None or sender.is_ai:
+                return FencedMove(
+                    "not_player",
+                    [f"{sender.name} isn't seated at this table."],
+                    room)
+            if not self._is_turn(room, sender):
+                cur = room.current
+                return FencedMove(
+                    "not_turn",
+                    [f"it's not {sender.name}'s turn — waiting on "
+                     f"{cur.name if cur else '…'}.",
+                     self.describe(room)], room)
+        out = self.move(chat_key, text, sender, kind=kind)
+        return FencedMove("ok", out, room)
 
     def _move_inner(self, room: Room, game: MultiGame, chat_key: str,
                     text: str, sender: Player) -> list[str]:
@@ -1060,6 +1323,7 @@ class GameEngine:
             # a deliberate pass is presence, not a stall (§34)
             (room.state.get("_stalls") or {}).pop(sender.key, None)
             room.state["passes"] = int(room.state.get("passes") or 0) + 1
+            self._journal_event(room, "pass", sender)
             self._emit(room, f"{sender.name} passes.")
             room.advance_turn()
             out: list[str] = []
@@ -1116,6 +1380,8 @@ class GameEngine:
             return [f"🪙 {prof.coins} coins · {prof.points} points · items: {items}"]
         if cmd == "leave":
             return self.leave(chat_key, sender)
+        if cmd == "resign":
+            return self._resign_inner(room, game, chat_key, sender)
         if cmd == "game":
             return []  # control commands are the runtime's, not the game's
 
@@ -1138,6 +1404,7 @@ class GameEngine:
         # the current player showed up and played — their §34
         # consecutive-stall count resets (presence, not absence).
         (room.state.get("_stalls") or {}).pop(sender.key, None)
+        self._journal_event(room, "move", sender, text)
         try:
             out.extend(game.on_move(room, sender, text, self._mind))
         except Exception as exc:  # noqa: BLE001
@@ -1329,6 +1596,8 @@ class GameEngine:
                     self._persist(room)
             for m in msgs:
                 self._emit(room, m)
+            if room.status == "active":
+                self._table_event(room, "timeout")
 
     def _forfeit_staller(self, room: Room, game: MultiGame,
                          staller: Player, count: int) -> list[str]:
@@ -1367,6 +1636,11 @@ class GameEngine:
             room.state["forfeit_winner"] = other_humans[0].key
         elif others:
             room.state["forfeit_winner"] = others[0].key
+        # the unified decision record (resign writes the same
+        # shape); the legacy forfeit_* keys stay for compat.
+        room.state["decided"] = {
+            "how": "forfeit", "loser": staller.key,
+            "winner": str(room.state.get("forfeit_winner") or "")}
         return self._finish(room, line)
 
     def _finish_idle(self, room: Room) -> None:
@@ -1406,6 +1680,12 @@ class GameEngine:
         """
         with room.guard:
             msgs, rematch_mem, fair_mem = self._finish_inner(room, extra)
+        if getattr(room, "_settle_aborted", False):
+            # the settle rolled back and the room was restored to
+            # active (see _finish_inner): it stays live so the
+            # recovery sweep can re-finish it. Do NOT pop it, do
+            # NOT remember it as a finished table.
+            return msgs
         with self._lock:
             self._rooms.pop(room.chat_key, None)
             self._by_id.pop(room.id, None)
@@ -1415,6 +1695,7 @@ class GameEngine:
                 self._last_game[room.chat_key] = rematch_mem
             if fair_mem is not None:
                 self._last_fair[room.chat_key] = fair_mem
+        self._table_event(room, "finished")
         return msgs
 
     def _finish_inner(self, room: Room,
@@ -1436,11 +1717,35 @@ class GameEngine:
         if room.status == "finished":
             return ([extra] if extra else [], None, None)
         room.status = "finished"
+        room._settle_aborted = False
         msgs: list[str] = []
         card_scores: dict[str, int] = {}
         season_results: list[tuple[str, str, int, bool]] = []
         winner_label = ""
         fair_mem: tuple[str, dict[str, Any]] | None = None
+        # ── settlement ledger (games/settlement.py) ──
+        # plan first: the row exists BEFORE any credit moves, so a
+        # crash leaves a durable retry signal. An 'applied' row
+        # means this finish is a REPLAY of a committed settle: the
+        # credit loop resolves to the stored receipts and writes
+        # nothing. A db-less rig runs the legacy settle (no ledger,
+        # no transaction) exactly as before.
+        settle_store = self._settlement_store() \
+            if self.db is not None else None
+        settle_rec = settle_store.get(room.id) \
+            if settle_store is not None and settle_store.available \
+            else None
+        settle_replay = bool(
+            settle_rec and settle_rec["status"] == "applied")
+        settle_active = False
+        if settle_store is not None and settle_store.available \
+                and not settle_replay:
+            settle_active = settle_store.begin(
+                room.id, room.game, room.chat_key)
+        settle_receipts: dict[str, Any] = {"players": {}}
+        sink_due: list[tuple[Player, int]] = []
+        settle_cm: Any = None
+        settle_aborted = False
         if extra:
             msgs.append(extra)
         if game is not None:
@@ -1491,12 +1796,23 @@ class GameEngine:
                     _log.debug("dm finale failed", exc_info=True)
             # victory loot: games with exclusive drops (raid bosses)
             # roll them here; grants go through GearStore so pieces
-            # persist like any other gear.
-            try:
-                for line in self._grant_victory_loot(room, game):
-                    msgs.append(line)
-            except Exception:  # noqa: BLE001
-                _log.debug("victory loot failed", exc_info=True)
+            # persist like any other gear. A settlement REPLAY grants
+            # nothing again — the original settle already did.
+            if not settle_replay:
+                try:
+                    for line in self._grant_victory_loot(room, game):
+                        msgs.append(line)
+                except Exception:  # noqa: BLE001
+                    _log.debug("victory loot failed", exc_info=True)
+            # the settle transaction: every games-wallet write
+            # below (credits, XP, achievements, ranked) joins ONE
+            # transaction with the settlement flip, so the settle
+            # lands whole or not at all. Entered by hand because
+            # the block it wraps predates it; exited explicitly on
+            # both paths below.
+            if settle_active:
+                settle_cm = self.db.transaction()
+                settle_cm.__enter__()
             try:
                 winner = game.winner(room)
                 # §34 forfeit: the turn-clock law already decided
@@ -1507,23 +1823,46 @@ class GameEngine:
                     fp = room.player(str(fw))
                     if fp is not None:
                         winner = fp
+                # the unified decision record (forfeit AND resign
+                # write it): a recorded decision outranks winner().
+                dec = (room.state or {}).get("decided") or {}
+                if dec.get("winner"):
+                    dp = room.player(str(dec["winner"]))
+                    if dp is not None:
+                        winner = dp
                 winner_label = getattr(winner, "name", None) or (
                     str(winner) if winner not in (None, "draw") else "")
                 # ranked 1v1: move the ELO board (queue matches and
-                # hand-arranged duels alike)
-                try:
-                    from .matchmaking import maybe_record_ranked
-                    for line in maybe_record_ranked(
-                            self.db, room, game, winner):
-                        msgs.append(line)
-                except Exception:  # noqa: BLE001
-                    _log.debug("ranked record failed", exc_info=True)
+                # hand-arranged duels alike) — never twice for one
+                # game, so a settlement replay skips it.
+                if not settle_replay:
+                    try:
+                        from .matchmaking import maybe_record_ranked
+                        for line in maybe_record_ranked(
+                                self.db, room, game, winner):
+                            msgs.append(line)
+                    except Exception:  # noqa: BLE001
+                        _log.debug("ranked record failed", exc_info=True)
                 for p in list(room.players):
                     if p.is_ai:
                         continue
+                    if settle_replay:
+                        # resolve to the ORIGINAL receipt: the coin
+                        # line is re-issued verbatim; nothing writes.
+                        rec = (settle_rec["receipts"].get("players")
+                               or {}).get(p.key) or {}
+                        r_coins = int(rec.get("coins") or 0)
+                        card_scores[p.key] = int(rec.get("score") or 0)
+                        msgs.append(
+                            f"🪙 {p.name}: {r_coins:+} coins "
+                            f"({rec.get('why') or 'settled'})")
+                        continue
                     won = self._settle_won(game, room, p, winner)
-                    if (room.state or {}).get("forfeit_loser") == p.key:
-                        won = False  # a forfeit is a loss, full stop
+                    if (room.state or {}).get("forfeit_loser") == p.key \
+                            or dec.get("loser") == p.key \
+                            or p.key in ((room.state or {})
+                                         .get("_resigned") or []):
+                        won = False  # forfeit/resign is a loss, full stop
                     points = GameEconomy.reward_points(won, game.score(room, p))
                     # quarterly season (AA-16): this result folds
                     # into the group's season board after the settle
@@ -1596,6 +1935,16 @@ class GameEngine:
                         score=score)
                     msgs.append(f"🪙 {p.name}: {coins:+} coins "
                                 f"({coin_why})")
+                    # the receipt this settle will be remembered by:
+                    # a replayed finish re-issues these exact numbers
+                    # and moves nothing again.
+                    settle_receipts["players"][p.key] = {
+                        "name": p.name, "coins": int(coins),
+                        "why": coin_why, "points": int(points),
+                        "score": int(score),
+                        "won": (True if won is True else
+                                False if won is False else None),
+                        "sink_done": False}
                     if wager_net is not None:
                         # the health ledger records the NET flow
                         # (the purse journaled the legs themselves)
@@ -1618,15 +1967,15 @@ class GameEngine:
                         # Wager games skip this: their settlement
                         # already landed in the bound purse, and a
                         # sink pass would move the money twice.
-                        _sink = getattr(self, "coin_sink", None)
-                        if _sink is not None and coins > 0 \
-                                and room.kind == "group" and not p.is_ai:
-                            try:
-                                _sink(room.chat_key, p, int(coins),
-                                      room.game)
-                            except Exception:  # noqa: BLE001
-                                _log.debug("coin sink failed",
-                                           exc_info=True)
+                        # the group-purse mirror is a SECOND store:
+                        # it cannot join the settle transaction, so
+                        # the obligation is collected here and fired
+                        # after the commit (see the sink block after
+                        # the credit loop), marked per player in the
+                        # receipts so recovery fires only what's owed.
+                        if coins > 0 and room.kind == "group" \
+                                and not p.is_ai:
+                            sink_due.append((p, int(coins)))
                         # economy ledger: every faucet tagged for the
                         # health report (sources/sinks, inflation watch)
                         try:
@@ -1776,23 +2125,62 @@ class GameEngine:
                     msgs.append(
                         f"📈 points and coins credited — /game leaderboard"
                     )
-            except Exception:  # noqa: BLE001
-                _log.debug("game ledger credit failed", exc_info=True)
+            except Exception as exc:  # noqa: BLE001
+                if settle_cm is not None:
+                    # a db-backed settle failed mid-apply: roll the
+                    # WHOLE settle back (nobody is paid), keep the
+                    # plan row as the retry signal, and surface the
+                    # failure instead of the old silent half-pay.
+                    settle_cm.__exit__(type(exc), exc,
+                                       exc.__traceback__)
+                    settle_cm = None
+                    settle_aborted = True
+                    record_failure("_finish_inner:settle", exc)
+                else:
+                    _log.debug("game ledger credit failed",
+                               exc_info=True)
+        if settle_aborted:
+            # restore the room to active and persist THAT (the
+            # finished write never happens): the table stays open,
+            # the plan row stays 'planned', and the recovery sweep
+            # re-runs this finish once the fault clears. The
+            # wrapper sees _settle_aborted and keeps the room live.
+            room.status = "active"
+            room._settle_aborted = True
+            self._persist(room)
+            return (["⚠ the settle failed — nothing was paid. "
+                     "the table stays open; the settle will retry "
+                     "on its own."], None, None)
+        if settle_cm is not None:
+            # commit the settle: the receipts flip lands in the
+            # SAME transaction as every credit above.
+            settle_store.mark_applied(room.id, settle_receipts)
+            settle_cm.__exit__(None, None, None)
+            settle_cm = None
+        # post-commit group-purse mirrors: fire each due sink once
+        # and mark it in the receipts. On a replay, fire only what
+        # the receipts say is still owed. A db-less settle fires
+        # its dues directly (legacy behavior, nothing to mark).
+        if sink_due or settle_replay:
+            self._fire_sink_dues(room, sink_due, settle_rec,
+                                 settle_receipts, settle_store)
         # quarterly season board (AA-16): group-room results only —
         # a season is a group's standing table, DM tables don't feed
         # it. Fail-soft like every other settle bridge: a season
         # write must never sink a finished game.
-        if season_results and room.kind == "group":
+        if season_results and room.kind == "group" \
+                and not settle_replay:
             try:
                 from .tournaments_seasons import record_season_results
                 record_season_results(room.chat_key, room.game,
                                       season_results, context=self.context)
             except Exception:  # noqa: BLE001
                 _log.debug("season record failed", exc_info=True)
-        try:
-            self._reconcile_items(room)
-        except Exception:  # noqa: BLE001
-            _log.debug("game item reconcile failed", exc_info=True)
+        if not settle_replay:
+            try:
+                self._reconcile_items(room)
+            except Exception:  # noqa: BLE001
+                _log.debug("game item reconcile failed", exc_info=True)
         self._persist(room)
         # the final table card: standings, scores, balances, tier moves
         try:
@@ -1830,6 +2218,57 @@ class GameEngine:
             if humans:
                 rematch_mem = (room.game, humans, room.kind)
         return ([settle] if settle else []), rematch_mem, fair_mem
+
+    def _fire_sink_dues(self, room: Room,
+                        sink_due: list[tuple[Player, int]],
+                        settle_rec: dict[str, Any] | None,
+                        settle_receipts: dict[str, Any],
+                        settle_store: Any) -> None:
+        """Fire the group-purse mirror credits a settle owes.
+
+        The sink is a second store (the group economy) and cannot
+        join the settle transaction, so it runs post-commit: each
+        due credit fires once and is marked ``sink_done`` in the
+        receipts. A replayed finish fires only the dues the
+        receipts still show as owed. With no sink installed this
+        is a no-op, exactly as the inline call was.
+        """
+        sink = getattr(self, "coin_sink", None)
+        if sink is None:
+            return
+        receipts: dict[str, Any] | None = None
+        store = None
+        if settle_rec is not None \
+                and settle_rec.get("status") == "applied":
+            # replay: what's owed is read back from the receipts
+            receipts = settle_rec["receipts"]
+            store = settle_store
+            due: list[tuple[Player, int]] = []
+            for key, rec in (receipts.get("players") or {}).items():
+                if int(rec.get("coins") or 0) > 0 \
+                        and not rec.get("sink_done"):
+                    p = room.player(key)
+                    if p is not None and not p.is_ai:
+                        due.append((p, int(rec["coins"])))
+        else:
+            due = list(sink_due)
+            if settle_store is not None and settle_store.available:
+                receipts = settle_receipts
+                store = settle_store
+        changed = False
+        for p, amount in due:
+            try:
+                sink(room.chat_key, p, int(amount), room.game)
+            except Exception:  # noqa: BLE001 - bridge is best-effort
+                _log.debug("coin sink failed", exc_info=True)
+                continue
+            if receipts is not None:
+                rec = (receipts.get("players") or {}).get(p.key)
+                if rec is not None and not rec.get("sink_done"):
+                    rec["sink_done"] = True
+                    changed = True
+        if changed and store is not None:
+            store.save_receipts(room.id, receipts)
 
     @staticmethod
     def _settle_won(game: MultiGame, room: Room, player: Player,
@@ -2431,6 +2870,67 @@ class GameEngine:
         return newly
 
     # ── inspection ─────────────────────────────────────────────────────────
+    def table_view(self, room: Room,
+                   viewer_key: str | None = None) -> dict[str, Any]:
+        """One player's entitled view of the table (JSON-able).
+
+        The state inside is the game's REDACTED view for this
+        viewer (see ``MultiGame.view_state``): a per-player secret
+        appears only under its owner's own key in their own view,
+        and in nobody else's — the shared view (``viewer_key``
+        None) carries no secrets at all.
+        """
+        from .table import game_family, stakes_label, timeout_policy
+
+        game = self.games.get(room.game)
+        view_state = game.view_state(room, viewer_key) \
+            if game is not None else dict(room.state or {})
+        cur = room.current
+        deadline = None
+        if game is not None and game.move_timeout > 0 \
+                and room.status == "active":
+            deadline = room.turn_started + game.move_timeout
+        return {
+            "room_id": room.id, "game": room.game,
+            "family": game_family(game) if game is not None else "table",
+            "status": room.status, "kind": room.kind,
+            "revision": room.revision,
+            "players": [{"key": p.key, "name": p.name,
+                         "is_ai": bool(p.is_ai)} for p in room.players],
+            "turn": ({"key": cur.key, "name": cur.name}
+                     if cur is not None else None),
+            "deadline_at": deadline,
+            "stakes": stakes_label(game, room) if game is not None
+            else "",
+            "policy": timeout_policy(game) if game is not None else "",
+            "state": view_state,
+            "persist": self.persist_health(),
+        }
+
+    def replay_text(self, chat_key: str) -> str | None:
+        """The replay of this chat's most recent finished game,
+        built from its real event record — or None when no
+        finished game is on record here."""
+        if self.db is None:
+            return None
+        try:
+            row = self.db.query_one(
+                "SELECT * FROM game_rooms WHERE chat_key = ? "
+                "AND status = 'finished' ORDER BY updated_at DESC "
+                "LIMIT 1", (chat_key,))
+        except Exception as e:  # noqa: BLE001
+            record_failure("replay_text:db_query", e)
+            return None
+        if row is None:
+            return None
+        from .replay import build_replay
+
+        rec = None
+        store = self._settlement_store()
+        if store is not None and store.available:
+            rec = store.get(row["id"])
+        return build_replay(row, rec)
+
     def describe(self, room: Room) -> str:
         game = self.games.get(room.game)
         diff = (room.state or {}).get("_difficulty", "normal")
@@ -2452,6 +2952,14 @@ class GameEngine:
         cur = room.current
         if cur is not None and not cur.is_ai and room.status == "active":
             lines.append(f"turn: {cur.name}")
+        health = self.persist_health()
+        if health["degraded"]:
+            # OFF vs BROKEN: a table whose saves are failing must
+            # not look like a healthy one — the next restart would
+            # lose it, and the players deserve to know now.
+            lines.append(
+                f"⚠ table saves failing (last: {health['last_error']}) "
+                "— this game may not survive a restart")
         return "\n".join(lines)
 
     def list_games(self, *, with_groups: bool = False) -> str:

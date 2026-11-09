@@ -36,6 +36,7 @@ GAME_COMMANDS = {
     "pass": "pass your turn",
     "skip": "same as pass",
     "leave": "quit the game (your seat is dropped)",
+    "resign": "resign the game — an explicit, recorded loss",
     "status": "show the current table",
     "help": "show the rules again",
     "shop": "open the shop (catalog | buy <slug>)",
@@ -69,6 +70,11 @@ class Room:
     turn: int = 0                   # index into players whose turn it is
     state: dict[str, Any] = field(default_factory=dict)
     status: str = "waiting"         # waiting|active|finished
+    #: Table revision: bumped by the engine on every persisted state
+    #: change. Actions (card buttons, fenced moves) are cut at a
+    #: revision; a move naming an older one is refused as stale.
+    #: Persisted inside the state blob (``_rev``) — no schema change.
+    revision: int = 0
     started_at: float = field(default_factory=time.time)
     turn_started: float = field(default_factory=time.time)
     messages: list[str] = field(default_factory=list)  # transcript tail
@@ -150,6 +156,7 @@ class Room:
             "platform": self.platform, "kind": self.kind,
             "players": [p.key for p in self.players],
             "turn": self.turn, "state": self.state, "status": self.status,
+            "revision": self.revision,
             "started_at": self.started_at, "seed": self.seed,
             "last_activity": self.last_activity,
         }
@@ -160,6 +167,15 @@ class Room:
             state = json.loads(row.get("state") or "{}")
         except Exception:  # noqa: BLE001
             state = {}
+        if not isinstance(state, dict):
+            state = {}
+        # engine bookkeeping rides the state blob (see _persist_inner):
+        # the table revision and the turn/idle clocks, so a restart
+        # restores the SAME revision and the SAME deadline instead of
+        # quietly refreshing both. Popped — games never see them.
+        revision = int(state.pop("_rev", 0) or 0)
+        turn_started = state.pop("_turn_started", None)
+        last_activity = state.pop("_last_activity", None)
         try:
             raw_players = json.loads(row.get("players") or "[]")
         except Exception:  # noqa: BLE001
@@ -187,16 +203,28 @@ class Room:
                     name=k.split(":", 1)[-1] or k,
                     is_ai=(k == AI_PLAYER
                            or k.startswith(AI_PLAYER + ":"))))
-        return cls(
+        room = cls(
             id=row["id"], game=row["game"], chat_key=row["chat_key"],
             platform=row.get("platform") or "local",
             kind=row.get("kind") or "dm",
             players=players,
             turn=int(row.get("turn") or 0), state=state,
             status=row.get("status") or "active",
+            revision=revision,
             started_at=float(row.get("started_at") or time.time()),
             seed=int(row.get("seed") or 1),
         )
+        if turn_started is not None:
+            try:
+                room.turn_started = float(turn_started)
+            except (TypeError, ValueError):
+                pass
+        if last_activity is not None:
+            try:
+                room.last_activity = float(last_activity)
+            except (TypeError, ValueError):
+                pass
+        return room
 
 
 def table_purse(room: Room) -> Any | None:
@@ -273,6 +301,19 @@ class MultiGame:
     #: help. The word arrives as ``variant`` in ``new_state``; the game
     #: validates it against the player's mastery tier itself.
     variants: dict[str, str] = {}
+    #: presentation family for the live table (strategy, arcade,
+    #: cards, puzzles, party, narrative, casino, duel, inbox…).
+    #: "table" = undeclared: the table organ falls back to its
+    #: per-game / per-module family map.
+    family: str = "table"
+    #: hidden information: state key → secrecy mode, enforced by
+    #: :meth:`view_state` for every per-player or shared rendering
+    #: (the live table, view payloads). ``"per_player"``: the value
+    #: is a ``{player_key: secret}`` map — a viewer sees ONLY their
+    #: own entry. ``"hidden"``: the value never appears in any view
+    #: while the game is live. Finished games reveal (post-game and
+    #: replays are history, not play).
+    secret_state: dict[str, str] = {}
 
     def rng(self, room: Room) -> random.Random:
         return room.rng()
@@ -439,6 +480,37 @@ class MultiGame:
         return None
 
     # ── display ─────────────────────────────────────────────────────────────
+    def view_state(self, room: Room,
+                   viewer_key: str | None = None) -> dict[str, Any]:
+        """The state as ``viewer_key`` is entitled to see it.
+
+        The live table and every per-player payload render from
+        this — never from raw ``room.state`` — so a secret declared
+        in :attr:`secret_state` cannot reach a surface its owner
+        isn't entitled to. ``viewer_key=None`` is the shared view:
+        no per-player secret appears in it at all. Once the game
+        is finished the full state is history and is returned
+        whole. The returned dict is a copy; mutating it does not
+        touch the room.
+        """
+        state = room.state or {}
+        if not self.secret_state or room.status == "finished":
+            return dict(state)
+        out = dict(state)
+        for key, mode in self.secret_state.items():
+            if key not in out:
+                continue
+            if mode == "per_player":
+                sub = out.get(key)
+                if viewer_key and isinstance(sub, dict) \
+                        and viewer_key in sub:
+                    out[key] = {viewer_key: sub[viewer_key]}
+                else:
+                    out.pop(key, None)
+            else:  # "hidden" (and any unknown mode fails closed)
+                out.pop(key, None)
+        return out
+
     def describe_state(self, room: Room) -> str:
         """Extra lines for /status — the game's own picture of the table."""
         return ""

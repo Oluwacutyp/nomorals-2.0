@@ -74,7 +74,8 @@ _log = logging.getLogger(__name__)
 
 __all__ = [
     "FAMILY_GENERIC", "FAMILY_PROGRESS", "FAMILY_READINESS",
-    "FAMILY_RESTART", "FAMILY_CREATION", "CARD_FAMILIES",
+    "FAMILY_RESTART", "FAMILY_CREATION", "FAMILY_GAME",
+    "CARD_FAMILIES",
     "CARD_UPDATE_FORMS",
     "Card", "CardStore", "CardHost", "RenderedCard", "RENDERERS",
     "render_card", "update_form",
@@ -92,6 +93,10 @@ FAMILY_PROGRESS = "progress"
 FAMILY_READINESS = "readiness"
 FAMILY_RESTART = "restart"
 FAMILY_CREATION = "creation"
+#: The live game table (games hardening, doc 8 P4): the games
+#: organ (nomorals/games/table.py) owns the card's content and
+#: registers its rich renderer over the default below.
+FAMILY_GAME = "game"
 
 #: Card family → typography surface class (the theme system owns
 #: presets and stamps; families pick a class, never a look).
@@ -101,6 +106,7 @@ CARD_FAMILIES: dict[str, str] = {
     FAMILY_READINESS: "briefing",
     FAMILY_RESTART: "announcement",
     FAMILY_CREATION: "chat",
+    FAMILY_GAME: "game",
 }
 
 #: How a card update reaches each platform: "edit" (the recorded
@@ -422,12 +428,16 @@ def _render_restart(card: Card) -> str:
 
 
 #: One renderer per card family — the manifest records these.
+#: The game family's rich renderer registers itself from
+#: nomorals/games/table.py when the games organ loads; this
+#: default keeps the family renderable before that.
 RENDERERS: dict[str, Callable[[Card], str]] = {
     FAMILY_GENERIC: lambda card: _theme_text(card),
     FAMILY_PROGRESS: _render_progress,
     FAMILY_READINESS: lambda card: _theme_text(card),
     FAMILY_RESTART: _render_restart,
     FAMILY_CREATION: lambda card: _theme_text(card),
+    FAMILY_GAME: lambda card: _theme_text(card),
 }
 
 

@@ -215,6 +215,54 @@ class RuntimeGamesMixin:
                 self._relay_send(doomed.other_chat(chat_key), msg,
                                  buttons=relay_buttons)
             return "\n".join(out)
+        if verb == "move":
+            # /game move <revision> <text…> — the fenced action path
+            # the live table's buttons release (cardtap → this
+            # verb): the engine refuses a superseded revision, a
+            # non-player, and an out-of-turn move, by identity.
+            if len(parts) < 3:
+                return "usage: /game move <table revision> <move>"
+            try:
+                revision = int(parts[1])
+            except ValueError:
+                return ("that move's table revision isn't a number "
+                        "— the table has moved on.")
+            mover = player
+            if mover is None and str(kind).lower() == "dm":
+                mover = self._game_player_for_key(chat_key)
+            if mover is None:
+                return ("i couldn't tell who you are in this chat, "
+                        "so the move didn't register.")
+            out = engine.move_fenced(chat_key, " ".join(parts[2:]),
+                                     mover, revision=revision,
+                                     kind=kind)
+            return "\n".join(out.messages) or "…"
+        if verb == "resign":
+            # /game resign — an explicit, recorded loss (the engine
+            # also takes /resign as an in-game command).
+            resigner = player
+            if resigner is None and str(kind).lower() == "dm":
+                resigner = self._game_player_for_key(chat_key)
+            if resigner is None:
+                return ("i couldn't tell who you are in this chat, "
+                        "so the resignation didn't register.")
+            return "\n".join(engine.move(
+                chat_key, "/resign", resigner, kind=kind)) or "…"
+        if verb == "replay":
+            # the last finished game here, replayed from its real
+            # event record — never a regenerated story.
+            return engine.replay_text(chat_key) or (
+                "no finished game here yet — a replay is built "
+                "from a game's record once it ends.")
+        if verb == "table":
+            if live is None:
+                return "no game is live here."
+            self._game_table_sink(live, "sync")
+            from ...games.table import build_table_card
+            from ...social.chat.living_cards import render_card
+
+            card = build_table_card(engine, live)
+            return render_card(card, live.platform).text
         if verb == "rematch":
             # /game rematch [easy|normal|hard|expert] — same difficulty
             # words as the start path, default "normal" (unchanged).
@@ -2280,6 +2328,9 @@ class RuntimeGamesMixin:
             # estate itself (debits AND credits), every other room
             # plays against the games wallet.
             engine.purse_source = self._group_wager_purse
+            # Live game table (doc 8 P4): every table event keeps
+            # the room's living card revised in place.
+            engine.table_sink = self._game_table_sink
             # character/brain agent seats play through the live engine
             try:
                 from ...characters import CharacterStore, register_with_engine
@@ -2295,6 +2346,26 @@ class RuntimeGamesMixin:
         """The game relay system — one per engine, so the ticker reaps
         expired invites and every platform shares the same relay table."""
         return self._game_engine().relay
+
+    def _game_table_sink(self, room: Any, event: str) -> None:
+        """Engine table sink (doc 8 P4): publish/revise the room's
+        live-table living card through the runtime's card host.
+        Relay virtual rooms have no single chat to hold a card —
+        their fan-out stays the relay's own sends. Best-effort by
+        the engine's contract: a card failure never breaks a game.
+        """
+        if str(getattr(room, "chat_key", "")).startswith("relay:"):
+            return
+        from ...games.table import sync_table_card
+        from ...social.chat.base import ChatRef
+
+        chat_key = str(room.chat_key)
+        chat = ChatRef(
+            platform=room.platform,
+            chat_id=chat_key.split(":", 1)[1] if ":" in chat_key
+            else chat_key)
+        sync_table_card(self._living_card_host(), self._game_engine(),
+                        room, chat)
 
     def _relay_send(self, chat_key: str, text: str, *,
                     buttons=None) -> bool:

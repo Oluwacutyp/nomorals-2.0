@@ -631,6 +631,9 @@ class MafiaGame(MultiGame):
     ai_seats = 2
     needs_group = True
     move_timeout = 120
+    #: hidden information: roles are per-player (a viewer sees at
+    #: most their own), and the mafia list itself is never in a view
+    secret_state = {"roles": "per_player", "mafia": "hidden"}
     #: the DM narrates every night kill and the town's fate
     dm_finale = True
     rules = ("The house is the mafia. You are the town. Each night the "

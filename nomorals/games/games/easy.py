@@ -554,6 +554,8 @@ class HangmanGame(MultiGame):
     max_players = 6
     ai_seats = 1
     move_timeout = 60
+    #: the word is the secret — views carry only the revealed board
+    secret_state = {"word": "hidden"}
     #: mastery-gated word pool: long words (9+ letters) at tier 2.
     variants = {
         "long": "long words, 9+ letters (Adept mastery+)",
@@ -1111,6 +1113,9 @@ class SpyGame(MultiGame):
     max_players = 1
     ai_seats = 1
     move_timeout = 120
+    #: the word (and the unplayed rounds holding future words) is
+    #: the house's secret — no view ever carries it while playing
+    secret_state = {"current_word": "hidden", "rounds": "hidden"}
     rules = ("I'm holding a word. I'll describe it in one word — you never "
              "see mine. You describe *your* guess of it in one word. If "
              "yours matches the real word (or its family), you pass as an "
