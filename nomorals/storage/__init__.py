@@ -18,7 +18,21 @@ from .docstore import (
     resolve_document_store,
     storage_backend_status,
 )
-from .parity import ParityReport, check_document_parity, run_kv_parity_housekeeping
+from .carry import (
+    MAPPING_VERSION as CARRY_MAPPING_VERSION,
+    CarryReport,
+    RowDocumentView,
+    inventory as carry_inventory,
+    parity_gate_status,
+    run_parity_gate,
+)
+from .parity import (
+    ParityReport,
+    check_document_parity,
+    collection_checksum,
+    ensure_shadow_parity_job,
+    run_kv_parity_housekeeping,
+)
 from .failures import (Failure, clear_failures, failure_count,
                        format_failures, recent_failures, record_failure)
 from .fts import FTSIndex, SearchHit, build_match_query, escape_fts, near_query, phrase_query
@@ -45,6 +59,8 @@ __all__ = [
     "BackupManager",
     "BlobInfo",
     "BlobStore",
+    "CARRY_MAPPING_VERSION",
+    "CarryReport",
     "CronNeverMatchesError",
     "CronTimezoneError",
     "Database",
@@ -61,6 +77,7 @@ __all__ = [
     "QueueFull",
     "RetentionPolicy",
     "Row",
+    "RowDocumentView",
     "S3BlobStore",
     "S3Config",
     "SQLiteAnalytics",
@@ -76,9 +93,12 @@ __all__ = [
     "VectorStore",
     "attach_document_store",
     "build_match_query",
+    "carry_inventory",
     "check_document_parity",
     "clear_failures",
+    "collection_checksum",
     "cosine",
+    "ensure_shadow_parity_job",
     "escape_fts",
     "failure_count",
     "format_failures",
@@ -88,6 +108,7 @@ __all__ = [
     "open_analytics",
     "open_blob_store",
     "open_document_store",
+    "parity_gate_status",
     "parse_cron",
     "phrase_query",
     "presign_url",
@@ -95,6 +116,7 @@ __all__ = [
     "record_failure",
     "resolve_document_store",
     "run_kv_parity_housekeeping",
+    "run_parity_gate",
     "storage_backend_status",
     "transaction",
 ]

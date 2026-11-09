@@ -3014,6 +3014,20 @@ class PartnerRuntime(
                         self.context, scheduler_factory=Scheduler)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("consolidation job not registered: %s", exc)
+                # Shadow-parity housekeeping (Mongo program P2): one
+                # durable "storage-shadow-parity" job (every
+                # storage.shadow_parity_interval_seconds, default 1h)
+                # running the db_shadow_parity tool — sweep + parity
+                # check of the document-store shadow pair. Idempotent;
+                # the tool itself is inert when shadow mode is off.
+                try:
+                    from ...storage.parity import ensure_shadow_parity_job
+                    from ..scheduler import Scheduler
+
+                    ensure_shadow_parity_job(
+                        self.context, scheduler_factory=Scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("shadow parity job not registered: %s", exc)
                 # The cognitive loop (wave 51): one heartbeat that ticks
                 # goals (driving linked projects), improvement, and the
                 # personal-model fine-tune. On when the autonomy dial is on

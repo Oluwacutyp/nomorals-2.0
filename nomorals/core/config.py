@@ -83,6 +83,10 @@ class StorageSettings:
     # rung and parity-check the two (storage/parity.py). Reads stay on
     # Mongo; the shadow is proof + hot spare, never a second primary.
     mongo_shadow: bool = False
+    # Cadence of the shadow-parity housekeeping beat (the durable
+    # ``storage-shadow-parity`` scheduler job sweeps + parity-checks the
+    # shadow pair). The beat is inert when shadow mode is off.
+    shadow_parity_interval_seconds: float = 3600.0
 
 
 @dataclass
@@ -1019,6 +1023,7 @@ _ENV_MAP: dict[str, str] = {
     "NM_DB_BACKEND": "storage.backend",
     "NM_MONGO_URI": "storage.mongo_uri",
     "NM_MONGO_DB": "storage.mongo_db",
+    "NM_SHADOW_PARITY_INTERVAL_SECONDS": "storage.shadow_parity_interval_seconds",
     "NM_MONGO_SHADOW": "storage.mongo_shadow",
     "NM_BACKUP_DIR": "backup.dir",
     "NM_BACKUP_KEEP": "backup.keep",

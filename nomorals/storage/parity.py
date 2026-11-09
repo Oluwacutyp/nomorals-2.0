@@ -17,6 +17,7 @@ caller on any beat can invoke it unconditionally.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -28,7 +29,10 @@ from .failures import record_failure
 __all__ = [
     "ParityReport",
     "check_document_parity",
+    "collection_checksum",
+    "ensure_shadow_parity_job",
     "run_kv_parity_housekeeping",
+    "SHADOW_PARITY_JOB_NAME",
 ]
 
 _log = get_logger(__name__)
@@ -120,6 +124,102 @@ def check_document_parity(store_a: Any, store_b: Any, collection: str = "kv_stor
         differing=differing[:_MAX_REPORTED],
         truncated=truncated,
     )
+
+
+def collection_checksum(store: Any, collection: str, *,
+                        page: int = 1000) -> tuple[int, str]:
+    """``(count, ordered SHA-256)`` over one collection, read in pages.
+
+    The digest is byte-identical to the one :func:`check_document_parity`
+    computes over the same documents — the canonical serialization lives
+    here and only here; callers (the carry tool's progress journal, the
+    parity gate) reuse it instead of growing a second canonical form.
+    """
+    h = hashlib.sha256()
+    count = 0
+    after: str | None = None
+    while True:
+        docs = store.find(collection, include_expired=True,
+                          after_id=after, limit=page)
+        if not docs:
+            break
+        for doc in docs:
+            h.update(_canonical(doc).encode("utf-8"))
+            h.update(b"\n")
+        count += len(docs)
+        after = docs[-1]["_id"]
+        if len(docs) < page:
+            break
+    return count, h.hexdigest()
+
+
+#: Durable scheduler job name for the shadow-parity housekeeping beat.
+SHADOW_PARITY_JOB_NAME = "storage-shadow-parity"
+
+_DEFAULT_PARITY_INTERVAL_SECONDS = 3600.0
+
+
+def _parity_interval_seconds(context: Any) -> float:
+    settings = getattr(context, "settings", None)
+    storage = getattr(settings, "storage", None)
+    value = getattr(storage, "shadow_parity_interval_seconds", None)
+    try:
+        return float(value) if value is not None else _DEFAULT_PARITY_INTERVAL_SECONDS
+    except (TypeError, ValueError):
+        return _DEFAULT_PARITY_INTERVAL_SECONDS
+
+
+def ensure_shadow_parity_job(
+    context: Any,
+    *,
+    scheduler_factory: Any = None,
+) -> dict[str, Any]:
+    """Register the single durable ``storage-shadow-parity`` job (idempotent).
+
+    The beat's payload is the ``db_shadow_parity`` tool, which runs
+    :func:`run_kv_parity_housekeeping` — itself inert (returns ``None``)
+    whenever the install is not dual-writing in shadow mode, so the job is
+    safe to register unconditionally and costs one no-op tool call per
+    interval on non-shadow installs. Spec ``every <Ns>`` from
+    ``storage.shadow_parity_interval_seconds`` (default 3600). Safe to
+    call on every boot; a changed interval replaces the job. Never raises.
+
+    ``scheduler_factory`` builds the scheduler (``Scheduler(context)``,
+    injected — storage is L2 and may not import the scheduler). None means
+    the job is not scheduled, reported honestly.
+    """
+    try:
+        if scheduler_factory is None:
+            return {"name": SHADOW_PARITY_JOB_NAME,
+                    "scheduled": False,
+                    "reason": "no scheduler factory injected"}
+        interval = _parity_interval_seconds(context)
+        if interval <= 0:
+            return {"name": SHADOW_PARITY_JOB_NAME,
+                    "scheduled": False, "reason": "disabled"}
+        spec = f"every {int(interval)}s"
+        sched = scheduler_factory(context)
+        try:
+            have = [j for j in sched.list_jobs()
+                    if j.get("name") == SHADOW_PARITY_JOB_NAME]
+        except Exception:  # noqa: BLE001 — scheduler table may not exist yet
+            have = []
+        if have and have[0].get("spec") == spec:
+            return {"name": SHADOW_PARITY_JOB_NAME,
+                    "already_scheduled": True,
+                    "job_id": have[0].get("id")}
+        for job in have:  # stale interval → replace
+            with contextlib.suppress(Exception):
+                sched.remove(job["id"])
+        job = sched.add(SHADOW_PARITY_JOB_NAME, spec, "tool",
+                        {"tool": "db_shadow_parity", "args": {}})
+        _log.info("scheduled storage-shadow-parity job: %s", spec)
+        return {"name": SHADOW_PARITY_JOB_NAME, "scheduled": True,
+                "job_id": job.get("id"), "spec": spec}
+    except Exception as exc:  # noqa: BLE001 — optional wiring never breaks boot
+        _log.warning("shadow parity job not registered: %s", exc)
+        return {"name": SHADOW_PARITY_JOB_NAME, "scheduled": False,
+                "reason": str(exc)[:200]}
 
 
 def run_kv_parity_housekeeping(db: Any, settings: Any) -> ParityReport | None:

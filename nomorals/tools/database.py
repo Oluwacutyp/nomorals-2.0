@@ -8,6 +8,9 @@ storage instead of scraping flat files:
 * ``db_schema``  — columns of one table (type, not-null, default, pk)
 * ``db_query``   — SELECT-only, LIMIT-forced (the same rule Devon enforces)
 * ``db_counts``  — the big tables first, for a quick orientation shot
+* ``db_shadow_parity`` — the shadow-parity housekeeping beat's payload
+  (sweep + parity-check the document-store shadow pair; inert when the
+  install is not shadowing)
 
 Writes stay with the owning subsystems (memory manager, research agent, …);
 these tools are the *read* plane, gated behind ``db.read``.
@@ -148,6 +151,30 @@ def register(registry: Any) -> None:
         rows = _rows_to_dicts(db.query(safe_sql))
         cols = list(rows[0].keys()) if rows else []
         return {"sql": safe_sql, "rows": len(rows), "columns": cols, "data": rows}
+
+    @registry.register(
+        "db_shadow_parity",
+        description=(
+            "Run the document-store shadow-parity housekeeping: sweep "
+            "expired KV documents on both rungs and parity-check the pair "
+            "(Mongo program). Inert — reports shadow off — when the "
+            "install is not dual-writing in shadow mode. This is the "
+            "payload of the durable storage-shadow-parity scheduler beat."
+        ),
+        capability=Capability.DB_WRITE,
+        parameters={},
+    )
+    def db_shadow_parity() -> dict[str, Any]:
+        if db is None:
+            raise ToolError("no database attached to this context")
+        from ..storage.parity import run_kv_parity_housekeeping
+
+        settings = getattr(context, "settings", None)
+        report = run_kv_parity_housekeeping(db, settings)
+        if report is None:
+            return {"shadow": "off", "checked": False,
+                    "reason": "no shadow document-store pair is attached"}
+        return {"shadow": "on", "checked": True, **report.to_dict()}
 
     @registry.register(
         "db_counts",
