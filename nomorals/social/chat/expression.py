@@ -70,6 +70,7 @@ _log = get_logger("nomorals.social.expression")
 
 __all__ = [
     "BUTTON_EMOJI", "button_label", "buttons_from_spec",
+    "EXPRESSION_COMMANDS",
     "EXPRESSION_DEFAULTS",
     "EmojiEntry", "emoji_table", "search_emoji", "emoji_info",
     "confident_emoji_match", "describe_sequence",
@@ -88,6 +89,21 @@ __all__ = [
     "REACTION_SETS", "reaction_allowed", "pick_reaction",
     "classify_notice_moment",
 ]
+
+
+#: The expression organ's own command family — the control
+#: kinds whose handlers live in the expression runtime mixin
+#: (/steal /sticker /convert /gif /emoji /customemoji
+#: /emojiart /react). The per-emotion reaction commands are the
+#: separate live registry REACTION_GIF_COMMANDS below, and the
+#: moment vocabulary is MOMENT_TAGS. The surface manifest's
+#: expression surface declares exactly this union as its
+#: members; the Living Chat P3 drift test pins the two equal,
+#: so a new expression command that is not registered in the
+#: manifest fails by name.
+EXPRESSION_COMMANDS: tuple[str, ...] = (
+    "steal", "sticker", "convert", "gif", "emoji",
+    "customemoji", "emojiart", "react")
 
 
 # ── the button vocabulary (§27 completed) ────────────────────────

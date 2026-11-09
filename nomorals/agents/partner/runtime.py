@@ -3382,8 +3382,21 @@ class PartnerRuntime(
                 return edit_session_message(
                     adapter, chat, message_id, text, buttons=buttons)
 
+            def _register_picks(chat_key: str, commands: list,
+                                owner_key: str,
+                                operation_id: str) -> str:
+                # Living Chat P3 (P2 remainder #1): a card that
+                # landed in the numbered form registers its
+                # actions under its own identity at send time,
+                # so a bare number resolves against the card —
+                # whichever producer built it.
+                return self._button_pick_store().register_operation(
+                    chat_key, list(commands), owner_key=owner_key,
+                    operation_id=operation_id, kind="living-card")
+
             host = CardHost(self._living_card_store(),
-                            send=_send, edit=_edit)
+                            send=_send, edit=_edit,
+                            register_picks=_register_picks)
             self._living_card_host_obj = host
         return host
 
@@ -6043,6 +6056,9 @@ class PartnerRuntime(
         if kind == "style":
             return self._control_style(command, chat_key, message)
 
+        if kind == "stylepin":
+            return self._control_stylepin(command.tail or "", message)
+
         if kind == "doctor":
             return self._control_doctor()
 
@@ -6936,6 +6952,8 @@ class PartnerRuntime(
             return self._control_emojiart(command.tail or "", message)
         if kind == "react":
             return self._control_react(command.tail or "", message)
+        if kind == "create":
+            return self._control_create(command.tail or "", message)
         if kind in {
                 "awoo", "baka", "bite", "blush", "bonk", "bored",
                 "bully", "cringe", "cry", "cuddle", "dance",

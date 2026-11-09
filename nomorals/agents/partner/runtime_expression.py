@@ -1241,3 +1241,234 @@ class RuntimeExpressionMixin:
             return ""
         return (f"couldn't react here: "
                 f"{getattr(result, 'error', '')}")
+
+    # ---- /create: procedural creation (doc 6) -------------------
+
+    def _control_create(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
+        """Procedural creation: the brief becomes an EXECUTABLE
+        DESCRIPTION — a studio composition, a Scene3D document,
+        or a motion explainer spec — her own renderers execute
+        it, the pipeline inspects the real output and repairs
+        the description (bounded, journaled), and the verified
+        artifact is delivered. STRICT: no generation model is
+        ever called on this path; an unrenderable description
+        fails with its inspection evidence. The creation's
+        progress and result revise ONE living card."""
+        from ...social.chat.creation import (
+            author_motion_spec,
+            author_scene_spec,
+            author_studio_spec,
+            create_procedural,
+        )
+
+        if message is None:
+            return ("in a chat I'd create that procedurally — "
+                    "my own renderers executing a description I "
+                    "author, inspect and repair; here I can only "
+                    "describe it.")
+        text = " ".join(str(tail or "").split()).strip()
+        kind, brief = "studio", text
+        lowered = text.lower()
+        for prefix, k in (("scene ", "scene3d"),
+                          ("motion ", "motion"),
+                          ("video ", "motion")):
+            if lowered.startswith(prefix):
+                kind, brief = k, text[len(prefix):].strip()
+                break
+        if not brief:
+            return ("what should I create? /create <brief> "
+                    "makes a sticker from a studio composition; "
+                    "/create scene <brief> builds a 3D scene; "
+                    "/create motion <brief> renders a short "
+                    "explainer. Every render is inspected and "
+                    "repaired before it reaches you — no "
+                    "generation model, ever.")
+        if not self._group_gate(message, "emoji"):
+            return ("I can create that — but this room isn't "
+                    "claimed for my bot-system posts (§33), so "
+                    "I'm not dropping it here.")
+        author = {"studio": author_studio_spec,
+                  "scene3d": author_scene_spec,
+                  "motion": author_motion_spec}[kind]
+        try:
+            spec = author(brief)
+        except Exception as exc:  # noqa: BLE001 - authoring is guarded
+            record_failure("expression.create.author", exc)
+            return (f"I couldn't compose a description from "
+                    f"that brief: {exc}")
+        # The living card: one message, revised as the
+        # creation moves (working → repairing → delivered /
+        # failed), never a stream of separate posts.
+        card = None
+        host = None
+        try:
+            from ...social.chat.living_cards import (
+                FAMILY_CREATION,
+                Card,
+                new_card_id,
+            )
+            from . import runtime as _runtime_mod
+
+            host = self._living_card_host()
+            card = Card(
+                card_id=new_card_id(), family=FAMILY_CREATION,
+                chat_key=str(getattr(message.chat, "key", "") or ""),
+                owner_key=_runtime_mod._pick_owner_key(message),
+                platform=str(getattr(message.chat, "platform", "")
+                             or ""),
+                chat_id=str(getattr(message.chat, "chat_id", "")
+                            or ""),
+                title=f"Creating — {brief[:48]}",
+                body=(f"authoring a {kind} description and "
+                      f"rendering it with my own engines — the "
+                      f"render is inspected, and repaired if it "
+                      f"misses, before anything is delivered."),
+                status="working")
+            host.publish(card, message.chat)
+        except Exception as exc:  # noqa: BLE001 - card is a surface
+            record_failure("expression.create.card", exc)
+            card = None
+            host = None
+        out_dir = self._expression_root() / "procedural"
+        try:
+            result = create_procedural(
+                spec, out_dir,
+                db=getattr(self.context, "db", None))
+        except Exception as exc:  # noqa: BLE001 - pipeline is guarded
+            record_failure("expression.create.pipeline", exc)
+            return (f"the creation pipeline itself failed: {exc}")
+        if card is not None and host is not None:
+            try:
+                host.revise(
+                    card, message.chat,
+                    body=result.describe(),
+                    rows=result.summary_rows(),
+                    status="delivered" if result.ok else "failed",
+                    terminal=True)
+            except Exception as exc:  # noqa: BLE001 - surface only
+                record_failure("expression.create.card_revise", exc)
+        if not result.ok or result.path is None:
+            return result.describe()
+        # Shelve the verified artifact in her library
+        # (provenance journaled), like the sticker maker does.
+        media_kind = {"studio": "sticker", "scene3d": "image",
+                      "motion": "video"}[result.spec.kind]
+        try:
+            self._expression_library().add_item(
+                kind=media_kind, path=str(result.path),
+                tags=("procedural", result.spec.kind),
+                source="self:procedural-creation")
+        except Exception as exc:  # noqa: BLE001 - shelving is garnish
+            record_failure("expression.create.shelve", exc)
+        from ...social.chat.base import MediaRef
+
+        ref = MediaRef(path=str(result.path), kind=media_kind,
+                       name=result.path.name)
+        sent = self._expression_send(message, ref)
+        if getattr(sent, "ok", False):
+            return ""
+        return (f"created and verified it, but the send failed "
+                f"here: {getattr(sent, 'error', '')}")
+
+    # ---- /stylepin: owner style pins ----------------------------
+
+    def _control_stylepin(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
+        """Owner style pins: set / clear / show. A pin
+        (typography intent, font family, theme, preset, traits)
+        persists in the one pin store, applies globally or per
+        surface family, and outranks semantic defaults at the
+        selection seams — the typography service and the chat
+        theme resolver both consult core.style_pins."""
+        from ...core.style_pins import effective_pin, get_pin_store
+
+        store = get_pin_store()
+        text = " ".join(str(tail or "").split()).strip()
+        parts = text.split()
+        if not parts:
+            lines = ["style pins in force:"]
+            scopes = store.scopes()
+            if not scopes:
+                lines.append("  none — semantic defaults rule "
+                             "everywhere")
+            for scope in scopes:
+                pin = store.get(scope)
+                label = "global" if scope == "" else \
+                    f"family:{scope}"
+                bits = []
+                if pin.intent:
+                    bits.append(f"intent {pin.intent}")
+                if pin.font_family:
+                    bits.append(f"font {pin.font_family}")
+                if pin.theme:
+                    bits.append(f"theme {pin.theme}")
+                if pin.preset:
+                    bits.append(f"preset {pin.preset}")
+                for k in sorted(pin.traits):
+                    bits.append(f"{k} {pin.traits[k]}")
+                lines.append(f"  {label}: {', '.join(bits)}")
+            lines.append(
+                "set: /stylepin set <global|family> "
+                "<intent|font|theme|preset|trait> <value…> · "
+                "clear: /stylepin clear <global|family> [field]")
+            return "\n".join(lines)
+        verb = parts[0].lower()
+        if verb == "set" and len(parts) >= 4:
+            scope = parts[1]
+            field = parts[2].lower()
+            value = " ".join(parts[3:]).strip()
+            if not value:
+                return "a pin needs a value."
+            if field == "intent":
+                from ...media.typography.selection import INTENTS
+                if value not in INTENTS:
+                    return (f"{value!r} is not a typography "
+                            f"intent — the vocabulary is: "
+                            f"{', '.join(INTENTS)}")
+                store.set(scope, intent=value)
+            elif field in ("font", "font_family", "family"):
+                store.set(scope, font_family=value)
+            elif field == "theme":
+                from ...social.chat.typography import THEMES
+                if value.lower() not in THEMES:
+                    return (f"{value!r} is not a theme pack — "
+                            f"the packs are: "
+                            f"{', '.join(sorted(THEMES))}")
+                store.set(scope, theme=value.lower())
+            elif field == "preset":
+                from ...social.chat.typography import PRESETS
+                if value.lower() not in PRESETS:
+                    return (f"{value!r} is not a preset — the "
+                            f"presets are: {', '.join(PRESETS)}")
+                store.set(scope, preset=value.lower())
+            elif field in ("trait", "traits"):
+                name, _, trait_value = value.partition(" ")
+                if not name or not trait_value.strip():
+                    return ("a trait pin reads: /stylepin set "
+                            "<scope> trait <name> <value>")
+                store.set(scope, trait={name: trait_value.strip()})
+            else:
+                return (f"pins carry intent, font, theme, "
+                        f"preset or a trait — not {field!r}.")
+            eff = effective_pin(store, "" if scope.lower()
+                                in ("", "global") else scope)
+            label = eff.label if eff is not None else scope
+            return (f"pinned ({label}): "
+                    f"{eff.describe() if eff is not None else ''}"
+                    f" — it outranks the semantic defaults "
+                    f"wherever this style is selected, and "
+                    f"surfaces under it name it.")
+        if verb == "clear" and len(parts) >= 2:
+            scope = parts[1]
+            field = parts[2].lower() if len(parts) >= 3 else None
+            if field in ("font", "family"):
+                field = "font_family"
+            store.clear(scope, field=field)
+            where = "global" if scope.lower() in ("", "global") \
+                else f"family:{scope}"
+            return (f"pin cleared ({where}"
+                    f"{f', field {field}' if field else ''}) — "
+                    f"the semantic defaults rule there again.")
+        return ("usage: /stylepin — show · /stylepin set "
+                "<global|family> <intent|font|theme|preset|"
+                "trait> <value…> · /stylepin clear "
+                "<global|family> [field]")

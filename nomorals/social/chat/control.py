@@ -340,6 +340,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "agent": (0, None),  # /agent [adaptive|autonomous|planning|+x|-x|status|off|tick]
     "chatmode": (0, None),  # /chatmode [mode|status|list|feature <f> <on|off>] [target] — per-chat mode + feature toggles; the target is a chat NAME (any length), a phone number, or a full key, so the tail is unbounded
     "style": (0, None),  # /style | /style <field> <value> [target] | /style reset [target] | /style list — inspect + tune the mined style profile (owner-only); the target is a chat NAME (any length), a phone number, or a full key, so the tail is unbounded
+    "stylepin": (0, None),  # /stylepin [set <global|family> <intent|font|theme|preset|trait> <value…> | clear <global|family> [field]] — pin a style (typography intent/face, theme traits) globally or per surface family; pins outrank semantic defaults at the one selection seam (owner-only)
     "doctor": (0, 0),  # /doctor — system health: registry + config + stores + adapters + providers (owner-only)
     "model": (0, 6),  # provider + up to 5 fallback providers
     "providers": (0, 0),  # /providers — probe the whole chain, live or why not
@@ -472,6 +473,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "customemoji": (0, None), # /customemoji list|add|ref|show|remove — her own set (§22)
     "emojiart": (0, None),    # /emojiart dot|ascii|mosaic|draw|combo|fancy|remix|save — text-native art (§22)
     "react": (0, None),       # /react [emoji] — react to the replied message (§22)
+    "create": (0, None),      # /create [scene|motion] <brief> — procedural creation: an executable description (studio composition / Scene3D document / motion explainer) rendered, inspected and repaired by her own engines — never a generation model
     # per-emotion reaction GIFs (wave C): /<emotion> [@someone] | as a reply —
     # sources + captions live in expression.REACTION_GIFS
     "awoo": (0, None), "baka": (0, None), "bite": (0, None), "blush": (0, None),
@@ -1995,6 +1997,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/style  ·  /style <emoji_cap|target_chars|max_chars|sections|lists|markup> <value> [target]  ·  /style reset [target]  ·  /style list  ·  a target is a chat name, a phone number, or a full key (platform:chat_id)",
              "example": "/style   ·   /style emoji_cap 0   ·   /style target_chars 200   ·   /style reset",
              "related": "/chatmode /mood"},
+    "stylepin": {"what": "pin a style — a typography intent, a font family, a theme pack/preset, palette traits — globally or per surface family. Pins persist and outrank the semantic defaults wherever style is selected (the typography service and the card theme resolver consult one pin store); a surface under a pin names it, and clearing a pin restores the default exactly. Owner-only.",
+             "usage": "/stylepin  ·  /stylepin set <global|family> <intent|font|theme|preset|trait> <value…>  ·  /stylepin clear <global|family> [field]",
+             "example": "/stylepin set global intent display   ·   /stylepin set creation theme neon   ·   /stylepin clear global",
+             "related": "/style /create"},
     "model": {"what": "switch the active model live (up to 5 fallbacks); no argument shows the chain.",
               "usage": "/model [provider [fallback …]]", "example": "/model local",
               "related": "/status /providers"},
@@ -2440,6 +2446,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/sticker <text> · /sticker (as a reply to an image or video)",
                 "example": "/sticker no wahala",
                 "related": "/steal · /convert · /gif"},
+    "create": {"what": "procedural creation: the brief becomes an executable description — an emoji-studio composition, a Scene3D document, or a motion explainer spec — that her own renderers execute; the output is inspected (decodable, right size, not blank) and the description is repaired and re-rendered when inspection finds a defect, every repair journaled. STRICT: no generation model is ever used on this path — a description that cannot be made to render fails honestly with its inspection evidence.",
+                "usage": "/create <brief> · /create scene <brief> · /create motion <brief>",
+                "example": "/create a gold heart with sparkles   ·   /create scene a red cube   ·   /create motion how rain forms",
+                "related": "/sticker · /emoji · /stylepin"},
     "convert": {"what": "media conversions on the replied file, riding the house ffmpeg organ: sticker→MP4, GIF→MP4, MP4→GIF, MP4→MP3, MP3→video (waveform), image→sticker, video→sticker. In a group, /convert with an amount is the currency exchange instead: games coins ⇄ that group's sparks at the week's floating rate.",
                 "usage": "/convert <name> (as a reply to media) · /convert lists the names",
                 "example": "/convert mp4-to-mp3",
@@ -4360,7 +4370,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("her day — state & control",
      ["status", "ping", "platforms", "mood", "stage", "model", "providers", "say", "power",
       "proposals", "approve", "deny", "start", "stop", "quit",
-      "mode", "agent", "chatmode", "style", "doctor", "profile", "mind",
+      "mode", "agent", "chatmode", "style", "stylepin", "doctor", "profile", "mind",
       "spend", "budget", "spending", "mandate", "balances", "goal",
       "insights", "alert", "cost", "heal", "tour", "pulse"]),
     ("search & research",
@@ -4378,7 +4388,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "distribute", "dj", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
       "shorts", "caption", "imggen", "sham", "musicnote",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
-      "emojiart", "react",
+      "emojiart", "react", "create",
       "awoo", "baka", "bite", "blush", "bonk", "bored",
       "bully", "cringe", "cry", "cuddle", "dance", "facepalm",
       "feed", "glomp", "handhold", "handshake", "happy", "highfive",
@@ -4534,6 +4544,7 @@ LIST_ONELINERS: dict[str, str] = {
     "agent": "agent modes: adaptive | autonomous | planning (combinable)",
     "chatmode": "per-chat mode + feature toggles: /chatmode games-only | games-off | games-on | quiet | normal | status | list | feature <games|music|voice|images|proactive|games.<game>> <on|off>",
     "style": "mined style profile: /style shows it, /style <field> <value> tunes it, /style reset clears overrides",
+    "stylepin": "pin a style (typography intent/font, theme traits) globally or per family — /stylepin set <global|family> <field> <value…>",
     "doctor": "system health: registry + config + stores + adapters + providers",
     "profile": "profile-aware runtime: detected environment + every tuned knob",
     "update": "self-update from chat: gate + checkpoint + pull + restart",
@@ -4567,6 +4578,7 @@ LIST_ONELINERS: dict[str, str] = {
     "customemoji": "her own custom emoji set — /customemoji list|add|ref|show|remove",
     "emojiart": "emoji art: pictures as braille dot art / ASCII / mosaics, drawn subjects, her combo library, fancy text — /emojiart draw <subject>",
     "react": "react to the replied message — /react [emoji]",
+    "create": "procedural creation, no generation model: a brief becomes a description her renderers execute, inspect and repair — /create [scene|motion] <brief>",
     "awoo": "reaction GIF: awoos at them — /awoo [@someone] or as a reply",
     "baka": "reaction GIF: calls them a baka — /baka [@someone] or as a reply",
     "bite": "reaction GIF: bites them — /bite [@someone] or as a reply",

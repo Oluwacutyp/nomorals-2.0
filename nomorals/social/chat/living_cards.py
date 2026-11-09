@@ -74,7 +74,8 @@ _log = logging.getLogger(__name__)
 
 __all__ = [
     "FAMILY_GENERIC", "FAMILY_PROGRESS", "FAMILY_READINESS",
-    "FAMILY_RESTART", "CARD_FAMILIES", "CARD_UPDATE_FORMS",
+    "FAMILY_RESTART", "FAMILY_CREATION", "CARD_FAMILIES",
+    "CARD_UPDATE_FORMS",
     "Card", "CardStore", "CardHost", "RenderedCard", "RENDERERS",
     "render_card", "update_form",
     "TapStatus", "TapOutcome", "resolve_card_tap",
@@ -90,6 +91,7 @@ FAMILY_GENERIC = "generic"
 FAMILY_PROGRESS = "progress"
 FAMILY_READINESS = "readiness"
 FAMILY_RESTART = "restart"
+FAMILY_CREATION = "creation"
 
 #: Card family → typography surface class (the theme system owns
 #: presets and stamps; families pick a class, never a look).
@@ -98,6 +100,7 @@ CARD_FAMILIES: dict[str, str] = {
     FAMILY_PROGRESS: "chat",
     FAMILY_READINESS: "briefing",
     FAMILY_RESTART: "announcement",
+    FAMILY_CREATION: "chat",
 }
 
 #: How a card update reaches each platform: "edit" (the recorded
@@ -424,7 +427,24 @@ RENDERERS: dict[str, Callable[[Card], str]] = {
     FAMILY_PROGRESS: _render_progress,
     FAMILY_READINESS: lambda card: _theme_text(card),
     FAMILY_RESTART: _render_restart,
+    FAMILY_CREATION: lambda card: _theme_text(card),
 }
+
+
+def _pin_line(card: Card) -> str:
+    """The rendered attribution of an owner style pin in force
+    for this card's family (Living Chat P3): a card under a pin
+    NAMES it, so a pinned look is never mistaken for a default.
+    "" when no pin applies. Never raises."""
+    try:
+        from ...core.style_pins import effective_pin, get_pin_store
+        pin = effective_pin(get_pin_store(), card.family)
+    except Exception as exc:  # noqa: BLE001 - pins never break a card
+        _log.debug("card pin lookup failed: %s", exc)
+        return ""
+    if pin is None:
+        return ""
+    return f"style pin: {pin.label} ({pin.describe()})"
 
 
 def render_card(card: Card, platform: str) -> RenderedCard:
@@ -442,6 +462,9 @@ def render_card(card: Card, platform: str) -> RenderedCard:
     plat = str(platform or card.platform or "")
     renderer = RENDERERS.get(card.family, RENDERERS[FAMILY_GENERIC])
     text = renderer(card)
+    pin_line = _pin_line(card)
+    if pin_line:
+        text = f"{text}\n{pin_line}" if text else pin_line
     if not card.actions:
         return RenderedCard(text=text, form="text")
     probe = resolve_action(card.actions[0], plat)
@@ -544,14 +567,49 @@ class CardHost:
     gateway send and the live-session edit verb). The host owns
     the revision bookkeeping and the edit-vs-supersede decision;
     it never raises.
+
+    ``register_picks(chat_key, commands, owner_key, operation_id)``
+    (Living Chat P3, closing P2 remainder #1): whenever a
+    delivery lands in the NUMBERED form, the card's actions are
+    registered into the operation store AT SEND TIME, under the
+    card's own identity — so a bare-number reply resolves
+    against THIS card's operation, whichever producer built the
+    card, not only producers that register picks themselves.
+    A failed send registers nothing: numbers nobody saw must
+    not execute.
     """
 
     def __init__(self, store: CardStore, *,
                  send: Callable[..., tuple[bool, str]],
-                 edit: Callable[..., bool]) -> None:
+                 edit: Callable[..., bool],
+                 register_picks: Callable[..., Any] | None = None,
+                 ) -> None:
         self.store = store
         self._send = send
         self._edit = edit
+        self._register_picks = register_picks
+
+    def _register_numbered(self, card: Card,
+                           rendered: RenderedCard) -> None:
+        """Register a numbered delivery's actions under the
+        card's identity. Guarded: registration is a targeting
+        aid, never a reason to fail a delivered card."""
+        if self._register_picks is None \
+                or rendered.form != "numbered" \
+                or not card.actions or not card.chat_key:
+            return
+        commands = [
+            a.url if a.intent == "url" else a.data
+            for a in card.actions]
+        commands = [c for c in commands if str(c).strip()]
+        if not commands:
+            return
+        try:
+            self._register_picks(card.chat_key, commands,
+                                 card.owner_key, card.card_id)
+        except Exception as exc:  # noqa: BLE001 - degrade, never die
+            _log.debug("card pick registration failed for %s: %s",
+                       card.card_id, exc)
 
     def publish(self, card: Card, chat: Any) -> Card:
         """First delivery: send the render, record the message id
@@ -570,6 +628,7 @@ class CardHost:
         if ok:
             card.delivered = True
             card.message_id = str(message_id or "")
+            self._register_numbered(card, rendered)
         self.store.save(card)
         return card
 
@@ -635,6 +694,7 @@ class CardHost:
                     card.message_id = str(message_id)
                 delivered = True
         if delivered:
+            self._register_numbered(card, rendered)
             self.store.save(card)
 
 

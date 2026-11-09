@@ -64,6 +64,29 @@ class ButtonPickStore:
                             kind="button-fallback")
         return op.operation_id if op is not None else ""
 
+    def register_operation(self, chat_key: str, commands: list[str],
+                           *, owner_key: str = "",
+                           operation_id: str = "",
+                           kind: str = "living-card") -> str:
+        """Register one durable producer's actions under the
+        producer's OWN operation identity (Living Chat P3).
+
+        Unlike :meth:`register` — the control-reply fallback,
+        capped at MAX_PICKS like the copy it mirrors — a living
+        card's full action list registers: the card rendered
+        exactly those numbers, so exactly those numbers must
+        resolve. Returns the operation id (the caller's named
+        id when usable), "" when nothing was registered.
+        """
+        picks = [str(c) for c in (commands or []) if str(c).strip()]
+        if not str(chat_key or "") or not picks:
+            return ""
+        op = self._ops.open(str(chat_key), picks,
+                            owner_key=str(owner_key or ""),
+                            kind=str(kind or "living-card"),
+                            operation_id=str(operation_id or ""))
+        return op.operation_id if op is not None else ""
+
     def take(self, chat_key: str, number: int, *,
              owner_key: str = "", now: float | None = None) -> str:
         """The command for ``number`` in ``chat_key``, consuming it.

@@ -85,16 +85,53 @@ class TypographyService:
 
     def select(self, intent: str = "text", *, script: str | None = None,
                text: str | None = None, weight: int | None = None,
-               family: str | None = None) -> Selection:
+               family: str | None = None,
+               surface_family: str | None = None) -> Selection:
+        """Semantic selection — the ONE seam owner style pins
+        are consulted at (Living Chat P3). A pin in force for
+        ``surface_family`` (or the global pin) outranks the
+        semantic defaults: its font family fills an unpinned
+        ``family`` argument and its intent replaces the
+        requested intent. The returned Selection NAMES the pin
+        (``Selection.pin`` + a note) — a pinned choice is never
+        silent. Coverage gates (script/text) still apply inside
+        the selection, so a pin can steer taste, never fabricate
+        coverage."""
         if text and not script:
             script = _script_for_text(self.catalogue(), text)
-        return _select(self.catalogue(), intent, script=script,
-                       text=text, weight=weight, family=family)
+        pin = self._pin_for(surface_family)
+        if pin is not None:
+            if pin.font_family and not family:
+                family = pin.font_family
+            if pin.intent:
+                intent = pin.intent
+        selection = _select(self.catalogue(), intent, script=script,
+                            text=text, weight=weight, family=family)
+        if pin is not None:
+            selection.pin = pin.label
+            selection.notes = selection.notes + (
+                f"owner style pin applied ({pin.label}): "
+                f"{pin.describe()}",)
+        return selection
+
+    @staticmethod
+    def _pin_for(surface_family: str | None):
+        """The effective owner pin for one surface family, or
+        None. Pins never break selection: any store failure
+        reads as no pin."""
+        try:
+            from ...core.style_pins import effective_pin, get_pin_store
+            return effective_pin(get_pin_store(),
+                                 str(surface_family or ""))
+        except Exception as exc:  # noqa: BLE001 - pins are garnish
+            _log.debug("style pin lookup failed: %s", exc)
+            return None
 
     def pil_font(self, intent: str = "text", size: int = 48, *,
                  script: str | None = None, text: str | None = None,
                  weight: int | None = None,
-                 family: str | None = None):
+                 family: str | None = None,
+                 surface_family: str | None = None):
         """The selected face as a Pillow font, or None.
 
         Tries the selection's whole fallback chain before giving
@@ -103,7 +140,8 @@ class TypographyService:
         """
         try:
             selection = self.select(intent, script=script, text=text,
-                                    weight=weight, family=family)
+                                    weight=weight, family=family,
+                                    surface_family=surface_family)
         except Exception as exc:  # noqa: BLE001 - None is the contract
             _log.debug("typography select failed: %s", exc)
             return None
@@ -123,13 +161,15 @@ class TypographyService:
                     stroke_fill=(0, 0, 0, 255), background=None,
                     max_width: int | None = None,
                     script: str | None = None, weight: int | None = None,
-                    family: str | None = None, padding: int = 12) -> Path:
+                    family: str | None = None, padding: int = 12,
+                    surface_family: str | None = None) -> Path:
         return self._render(text, intent=intent, size=size, fill=fill,
                             stroke_width=stroke_width,
                             stroke_fill=stroke_fill, background=background,
                             max_width=max_width, script=script,
                             weight=weight, family=family,
-                            padding=padding, preview=False)
+                            padding=padding, preview=False,
+                            surface_family=surface_family)
 
     def preview_text(self, text: str, **kwargs: Any) -> Path:
         """A lightweight preview of the same render (capped font
@@ -141,13 +181,15 @@ class TypographyService:
                 stroke_fill=(0, 0, 0, 255), background=None,
                 max_width: int | None = None, script: str | None = None,
                 weight: int | None = None, family: str | None = None,
-                padding: int = 12, preview: bool = False) -> Path:
+                padding: int = 12, preview: bool = False,
+                surface_family: str | None = None) -> Path:
         from PIL import Image, ImageDraw
 
         text = str(text)
         eff_size = min(size, _PREVIEW_MAX_SIZE) if preview else size
         selection = self.select(intent, script=script, text=text,
-                                weight=weight, family=family)
+                                weight=weight, family=family,
+                                surface_family=surface_family)
         face = selection.face
         if face is None:
             raise RuntimeError(
@@ -156,7 +198,8 @@ class TypographyService:
             "renderer": RENDERER_VERSION, "engine": shaping.shaping_engine(),
             "text": text, "font_file": face.file_id,
             "face_index": face.face_index, "size": eff_size,
-            "intent": intent, "fill": list(fill),
+            "intent": selection.intent, "pin": selection.pin,
+            "fill": list(fill),
             "stroke_width": stroke_width,
             "stroke_fill": list(stroke_fill),
             "background": list(background) if background else None,

@@ -567,6 +567,156 @@ SURFACES: tuple[Surface, ...] = (
                "tests/test_living_chat_p1.py"),
     ),
     Surface(
+        id="expression",
+        title="Expression: custom emoji, stickers, reactions, "
+              "media moments (§21 + §22)",
+        producer="nomorals.agents.partner.runtime_expression:"
+                 "RuntimeExpressionMixin (moments + commands) "
+                 "over social.chat.expression",
+        card_type="expression media (GIF / sticker / custom "
+                  "emoji / reaction) and moment posts on group "
+                  "events",
+        actions=(
+            ActionRef("expression.steal", "callback",
+                      "control:steal", "steal"),
+            ActionRef("expression.sticker", "callback",
+                      "control:sticker", "sticker no wahala"),
+            ActionRef("expression.convert", "callback",
+                      "control:convert", "convert"),
+            ActionRef("expression.gif", "callback",
+                      "control:gif", "gif dance"),
+            ActionRef("expression.emoji", "callback",
+                      "control:emoji", "emoji heart"),
+            ActionRef("expression.customemoji", "callback",
+                      "control:customemoji", "customemoji list"),
+            ActionRef("expression.emojiart", "callback",
+                      "control:emojiart", "emojiart"),
+            ActionRef("expression.react", "callback",
+                      "control:react", "react"),
+            ActionRef("expression.reaction-gif", "callback",
+                      "control:hug", "hug"),
+        ),
+        platforms=_ALL_CHAT,
+        routes=_ALL_CHAT_ROUTES,
+        operation="the expression organ runs the named act: "
+                  "the library (stolen + made + provider media, "
+                  "tag/mood indexed) serves /steal /gif and the "
+                  "moment hooks; the studio + registry serve "
+                  "/sticker /emoji /customemoji /emojiart; "
+                  "per-emotion commands serve REACTION_GIFS "
+                  "through the provider chains; moments fire "
+                  "from group events under the §33 gate with "
+                  "per-room cooldowns — an unmedia'd moment "
+                  "ships text-only, never a claimed send",
+        receipt="the adapter's media send result; library "
+                "growth and moment outcomes are journaled in "
+                "the group's held audit as expression entries",
+        fallback="text-only: a moment with no available media "
+                 "ships as text (the organ's own law — "
+                 "expression never blocks the underlying act), "
+                 "and every command answers in words when its "
+                 "media path is unavailable",
+        # The organ's whole vocabulary, declared as a copy: the
+        # 8 core commands (expression.EXPRESSION_COMMANDS), the
+        # per-emotion reaction commands (REACTION_GIF_COMMANDS)
+        # and the moment vocabulary (MOMENT_TAGS). The P3 drift
+        # test compares this set against the live registries
+        # and fails by name when they diverge.
+        members=(
+            "steal", "sticker", "convert", "gif", "emoji",
+            "customemoji", "emojiart", "react",
+            "awoo", "baka", "bite", "blush", "bonk", "bored",
+            "bully", "cringe", "cry", "cuddle", "dance",
+            "facepalm", "feed", "glomp", "handhold", "handshake",
+            "happy", "highfive", "hug", "kiss", "laugh", "lick",
+            "nom", "pat", "poke", "pout", "shrug", "slap",
+            "sleep", "smile", "smug", "stare", "thumbsup",
+            "tickle", "wave", "wink", "yeet",
+            "ban", "celebration", "duel_win", "estate_milestone",
+            "jackpot", "quest_complete", "season_podium",
+            "welcome",
+        ),
+        tests=("tests/test_living_chat_p3.py",
+               "tests/test_living_chat_p1.py"),
+    ),
+    Surface(
+        id="creation",
+        title="Procedural creation (doc 6: author → render → "
+              "inspect → repair)",
+        producer="nomorals.social.chat.creation:create_procedural "
+                 "via agents.partner.runtime_expression:"
+                 "_control_create",
+        card_type="living card (family: creation) + the "
+                  "delivered artifact (sticker / image / video)",
+        actions=(
+            ActionRef("creation.create", "callback",
+                      "control:create", "create a gold heart"),
+            ActionRef("creation.create-scene", "callback",
+                      "control:create", "create scene a red cube"),
+            ActionRef("creation.create-motion", "callback",
+                      "control:create",
+                      "create motion how rain forms"),
+        ),
+        platforms=_ALL_CHAT,
+        routes=_ALL_CHAT_ROUTES,
+        operation="the brief becomes an EXECUTABLE DESCRIPTION "
+                  "(emoji-studio composition / Scene3D document "
+                  "/ motion explainer spec); the existing "
+                  "renderers execute it; the pipeline inspects "
+                  "the real output (decodability, dimensions, "
+                  "non-blankness, probe facts) and repairs the "
+                  "description — bounded attempts, every repair "
+                  "journaled in procedural_creations. STRICT: "
+                  "no generation model is ever called on this "
+                  "path; an unrenderable description fails with "
+                  "its inspection evidence",
+        receipt="the verified artifact file, sent as media "
+                "through the expression send seam; the creation "
+                "card's terminal revision carries the attempt / "
+                "repair rows",
+        fallback="an honest failure reply naming the findings "
+                 "(the card revised to the same state) — never "
+                 "a fabricated asset or a generation-model "
+                 "substitute",
+        tests=("tests/test_living_chat_p3.py",),
+    ),
+    Surface(
+        id="style-pins",
+        title="Owner style pins (intent / font / theme traits)",
+        producer="nomorals.agents.partner.runtime_expression:"
+                 "_control_stylepin over core.style_pins",
+        card_type="pin record + the surfaces it steers (named "
+                  "on selections, resolved styles and cards)",
+        actions=(
+            ActionRef("stylepin.show", "callback",
+                      "control:stylepin", "stylepin"),
+            ActionRef("stylepin.set", "callback",
+                      "control:stylepin",
+                      "stylepin set global intent display"),
+            ActionRef("stylepin.clear", "callback",
+                      "control:stylepin", "stylepin clear global"),
+        ),
+        platforms=_ALL_CHAT,
+        routes=_ALL_CHAT_ROUTES,
+        operation="pins persist in the core pin store "
+                  "(style_pins.json under the Devon home) and "
+                  "are consulted through ONE seam: the "
+                  "typography service's select (intent / font "
+                  "family) and the chat theme resolver "
+                  "(theme / preset), globally and per surface "
+                  "family; unsetting restores the semantic "
+                  "default exactly",
+        receipt="the /stylepin reply names the pin now in "
+                "force; selections carry Selection.pin, styles "
+                "carry ResolvedStyle.pin, and living cards "
+                "print the pin line for their family",
+        fallback="no pin = the semantic defaults: pinning is "
+                 "an override layer, never a requirement",
+        members=("intent", "font_family", "theme", "preset",
+                 "traits"),
+        tests=("tests/test_living_chat_p3.py",),
+    ),
+    Surface(
         id="inline-query",
         title="Telegram inline-query results",
         producer="nomorals.social.chat.tgbot_buttons:inline_results_for",

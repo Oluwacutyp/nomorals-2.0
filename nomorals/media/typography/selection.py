@@ -103,6 +103,11 @@ class Selection:
     covered: bool = False
     intent: str = "text"
     notes: tuple[str, ...] = ()
+    #: The owner style pin in force for this selection, named by
+    #: its scopes ("global", "family:posters", ...); "" when no
+    #: pin applied. Set by the service seam (media.typography
+    #: .service), which is where pins are consulted.
+    pin: str = ""
 
     @property
     def ok(self) -> bool:

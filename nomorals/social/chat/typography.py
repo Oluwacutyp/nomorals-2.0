@@ -196,13 +196,16 @@ _EXPANDABLE_CHARS = 220
 class ResolvedStyle:
     """The resolved look for ONE card: theme pack, the preset
     its class maps to under the group's overrides, and whether
-    the stamp closes it (and with what text)."""
+    the stamp closes it (and with what text). ``pin`` names the
+    owner style pin in force for this surface class ("" when
+    none) — a pinned look is attributed, never silent."""
 
     theme: str
     preset: str
     stamp: bool
     stamp_text: str
     surface_class: str
+    pin: str = ""
 
 
 def _surface_class(value: Any) -> str:
@@ -210,12 +213,26 @@ def _surface_class(value: Any) -> str:
     return cls if cls in SURFACE_CLASSES else "chat"
 
 
+def _owner_pin(surface_class: str):
+    """The effective owner style pin for one surface class —
+    the ONE pin seam (core.style_pins), consulted here for the
+    theme/preset fields. Never raises: pins are garnish over a
+    working default, so a store failure reads as no pin."""
+    try:
+        from ...core.style_pins import effective_pin, get_pin_store
+        return effective_pin(get_pin_store(), surface_class)
+    except Exception:  # noqa: BLE001 - a pin must never break a card
+        return None
+
+
 def resolve_style(settings: dict[str, Any] | None,
                   surface_class: Any) -> ResolvedStyle:
     """Resolve a group's presentation settings to the concrete
     style for one surface class.  Settings are data: unknown
     theme/preset names fall back to the house defaults, never
-    raise."""
+    raise. An owner style pin for this class (Living Chat P3)
+    outranks the settings: its theme/preset win when they name
+    real packs/presets, and the result names the pin."""
     cls = _surface_class(surface_class)
     block = (settings or {}).get("presentation") or {}
     pack = THEMES.get(str(block.get("theme") or "").strip().lower())
@@ -229,9 +246,18 @@ def resolve_style(settings: dict[str, Any] | None,
     stamp = bool(block.get("stamp", True)) and cls in stamp_classes
     text = str(block.get("stamp_text") or "").strip() \
         or DEFAULT_STAMP_TEXT
+    pin = _owner_pin(cls)
+    pin_label = ""
+    if pin is not None:
+        pin_label = pin.label
+        if pin.theme and pin.theme in THEMES:
+            pack = THEMES[pin.theme]
+            preset = pack.class_presets.get(cls, preset)
+        if pin.preset and pin.preset in PRESETS:
+            preset = pin.preset
     return ResolvedStyle(theme=pack.name, preset=preset,
                          stamp=stamp, stamp_text=text,
-                         surface_class=cls)
+                         surface_class=cls, pin=pin_label)
 
 
 @dataclass(frozen=True)
