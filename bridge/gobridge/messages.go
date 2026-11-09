@@ -1,6 +1,6 @@
 // messages.go — the adapter protocol's core: inbound message /
 // receipt events and the send / send_media / typing / history /
-// read / chats / status commands. Shapes are the old bridge's,
+// search / read / chats / status commands. Shapes are the old bridge's,
 // field for field (see whatsapp-bridge.mjs's header, now deleted —
 // the contract lives on here and in the Python adapter's docstring).
 package main
@@ -117,6 +117,8 @@ func (b *bridge) handleCommand(cc *clientConn, req request) {
 		b.cmdTyping(ctx, cc, id, req)
 	case "history":
 		b.cmdHistory(cc, id, req)
+	case "search":
+		b.cmdSearch(cc, id, req)
 	case "read":
 		b.cmdRead(ctx, cc, id, req)
 	case "presence":
@@ -1545,6 +1547,24 @@ func (b *bridge) cmdTyping(ctx context.Context, cc *clientConn, id string, req r
 	b.reply(cc, id, map[string]any{"ok": true})
 }
 
+// rememberedEntry is the wire shape of one remembered
+// message — the row `history` and `search` both answer with.
+func rememberedEntry(m *remembered) map[string]any {
+	media := m.media
+	if media == nil {
+		media = []map[string]any{}
+	}
+	ts := m.tsMs
+	if ts == 0 {
+		ts = time.Now().UnixMilli()
+	}
+	return map[string]any{
+		"id":       string(m.id),
+		"incoming": m.incoming, "text": m.text, "sender": m.sender,
+		"media": media, "reply_to": m.replyTo, "ts": ts,
+	}
+}
+
 func (b *bridge) cmdHistory(cc *clientConn, id string, req request) {
 	chat, err := parseJID(req.str("chat"))
 	if err != nil {
@@ -1563,21 +1583,79 @@ func (b *bridge) cmdHistory(cc *clientConn, id string, req request) {
 	}
 	msgs := make([]map[string]any, 0, len(arr))
 	for _, m := range arr {
-		media := m.media
-		if media == nil {
-			media = []map[string]any{}
-		}
-		ts := m.tsMs
-		if ts == 0 {
-			ts = time.Now().UnixMilli()
-		}
-		msgs = append(msgs, map[string]any{
-			"id":       string(m.id),
-			"incoming": m.incoming, "text": m.text, "sender": m.sender,
-			"media": media, "reply_to": m.replyTo, "ts": ts,
-		})
+		msgs = append(msgs, rememberedEntry(m))
 	}
 	b.reply(cc, id, map[string]any{"ok": true, "messages": msgs})
+}
+
+// searchRemembered filters one chat's remembered messages
+// by a case-insensitive substring over the message text
+// (parity bundle #11).  It returns the most recent `limit`
+// matches in remembered (oldest-first) order plus the
+// TOTAL number of matches found, so the caller can say
+// "shown X of Y" instead of silently capping.  Pure, so
+// search_test.go pins it without a client.
+func searchRemembered(arr []*remembered, query string,
+	limit int) ([]*remembered, int) {
+	needle := strings.ToLower(strings.TrimSpace(query))
+	if needle == "" || limit < 1 {
+		return nil, 0
+	}
+	var matches []*remembered
+	for _, m := range arr {
+		if m == nil {
+			continue
+		}
+		if strings.Contains(strings.ToLower(m.text), needle) {
+			matches = append(matches, m)
+		}
+	}
+	total := len(matches)
+	if total > limit {
+		matches = matches[total-limit:]
+	}
+	return matches, total
+}
+
+// cmdSearch is the in-chat half of the search-depth bundle:
+// a filter over the bridge's OWN remembered messages for
+// the chat.  WhatsApp exposes no server-side search to a
+// linked device (whatsmeow has no search verb), so the
+// remembered history — the same store `history` serves —
+// is the honest reach, and the adapter's coverage line
+// says so.  The query matches message TEXT (captions
+// included: they ride the same field); a query with no
+// words refuses in words, mirroring the Python shape rule.
+func (b *bridge) cmdSearch(cc *clientConn, id string, req request) {
+	chat, err := parseJID(req.str("chat"))
+	if err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	if strings.TrimSpace(req.str("query")) == "" {
+		b.reply(cc, id, map[string]any{
+			"ok":    false,
+			"error": "a search needs the words to look for"})
+		return
+	}
+	limit := req.num("limit", 20)
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > maxKeepPerChat {
+		limit = maxKeepPerChat
+	}
+	b.memMu.Lock()
+	arr := append([]*remembered{}, b.recent[chat.String()]...)
+	b.memMu.Unlock()
+	matches, total := searchRemembered(arr, req.str("query"),
+		limit)
+	msgs := make([]map[string]any, 0, len(matches))
+	for _, m := range matches {
+		msgs = append(msgs, rememberedEntry(m))
+	}
+	b.reply(cc, id, map[string]any{
+		"ok": true, "messages": msgs, "total": total})
 }
 
 func (b *bridge) cmdRead(ctx context.Context, cc *clientConn, id string, req request) {

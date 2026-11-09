@@ -298,6 +298,8 @@ class RuntimeChatOpsMixin:
                 return self._chatops_sendloc(tail, message)
             if kind == "sendcontact":
                 return self._chatops_sendcontact(tail, message)
+            if kind in ("find", "findall"):
+                return self._chatops_find(kind, tail, message)
             if kind == "vcf":
                 return self._chatops_vcf(tail, message)
             if kind == "addcontact":
@@ -2656,6 +2658,64 @@ class RuntimeChatOpsMixin:
         return (f"contact card shared: {parsed['name']} · "
                 f"{parsed['phone']} — anyone in this chat "
                 f"can save it.")
+
+    # ── message search (parity bundle #11) ───────────────
+
+    def _chatops_find(self, kind: str, tail: str,
+                      message: Any) -> str:
+        """/find + /findall — message search, the census's
+        "search depth" rows: WhatsApp in-chat search was a
+        history fetch with no filter and cross-chat search
+        did not exist; the Telegram userbot had no search
+        verb at all.  /find searches THIS chat; /findall
+        searches every chat on the surface, each hit naming
+        its conversation.  Both are READS: on the personal
+        surfaces they resolve through the identity home (a
+        paired account and a live adapter must exist), and
+        like every read in this family they are not acts as
+        the owner, so the standing stop — which gates acts
+        — does not halt them.  The bot surface answers the
+        platform truth instead: the Bot API has no
+        message-search endpoint."""
+        from ...social.chat.chatops import format_search_results
+
+        platform = str(getattr(message.chat, "platform", "")
+                       or "")
+        if platform == "telegram-bot":
+            return ("the bot surface can't search messages "
+                    "— the Bot API has no message-search "
+                    "endpoint. Your personal surfaces can: "
+                    "run /find in the chat there, or /findall "
+                    "from any of your own chats.")
+        if platform in ("whatsapp", "telegram"):
+            svc, rec, adapter, _p, error = \
+                self._chatops_identity_home(message, kind)
+            if error:
+                return error
+        elif platform == "telegram-personal":
+            adapter = self._adapter_for(platform)
+            if adapter is None:
+                return ("no live Telegram surface here to "
+                        "search from.")
+        else:
+            return (f"/{kind} searches your chats — run it "
+                    f"from your WhatsApp or your Telegram.")
+        query = str(tail or "").strip()
+        if not query:
+            return (f"usage: /{kind} words to look for — "
+                    f"e.g. /{kind} invoice")
+        if kind == "findall":
+            verdict = self._chatops_call(
+                adapter.search_global, query, 20)
+            return format_search_results(
+                verdict, scope="every chat on this surface",
+                show_chat=True)
+        chat = message.chat
+        verdict = self._chatops_call(
+            adapter.search_messages, chat, query, 20)
+        title = str(getattr(chat, "title", "") or "")
+        return format_search_results(
+            verdict, scope=title or "this chat")
 
     # ── tagging ──────────────────────────────────────────────
 

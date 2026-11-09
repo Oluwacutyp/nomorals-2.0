@@ -29,6 +29,7 @@ The platform truth these helpers encode:
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 __all__ = [
@@ -50,6 +51,7 @@ __all__ = [
     "parse_makepoll_args",
     "parse_sendloc_args",
     "parse_sendcontact_args",
+    "format_search_results",
     "compose_group_status",
     "kind_for_chat_key",
 ]
@@ -69,7 +71,7 @@ CHATOPS_COMMANDS = frozenset({
     "viewonce", "vv",
     "joinlink", "newgroup", "newchannel", "leave",
     "myprofile", "privacy", "makepoll", "vcf", "addcontact",
-    "sendloc", "sendcontact",
+    "sendloc", "sendcontact", "find", "findall",
 })
 
 #: Tagall pacing law: one message carries at most this many
@@ -402,6 +404,111 @@ def parse_sendcontact_args(tail: str) -> dict[str, Any]:
     if problem:
         return {"ok": False, "error": problem}
     return {"ok": True, "name": name, "phone": phone}
+
+
+# -- message search (parity bundle #11, census "search depth") --
+
+def _search_snippet(text: str, query: str,
+                    width: int = 140) -> str:
+    """One hit's text, flattened to a line and windowed
+    around the match when it is long — a search list is a
+    finding surface: the window shows WHY the message
+    matched, and the conversation it names is where the
+    full text lives."""
+    flat = " ".join(str(text or "").split())
+    if len(flat) <= width:
+        return flat
+    idx = flat.lower().find(str(query or "").lower())
+    if idx < 0:
+        return flat[:width].rstrip() + "…"
+    start = max(0, idx - 40)
+    end = min(len(flat), start + width)
+    start = max(0, end - width)
+    out = flat[start:end].strip()
+    if start > 0:
+        out = "…" + out
+    if end < len(flat):
+        out += "…"
+    return out
+
+
+def format_search_results(verdict: Any, *, scope: str = "",
+                            show_chat: bool = False) -> str:
+    """Render one search verdict (the adapters' shared
+    search shape) as plain lines for the owner.
+
+    Only what the surface actually found prints: the
+    header states the match count — the TOTAL when the
+    page was capped, so "20 shown of 57" never reads as
+    "20 exist" — and the closing line names the coverage,
+    what was actually searched, because each surface's
+    reach differs (a bridge's session memory is not an
+    archive).  A hit prints its date, its sender ("you"
+    for the owner's own messages) and a snippet around
+    the match; with ``show_chat`` it also names its
+    conversation.  Message ids and chat ids never print —
+    this is a reading surface, not a debug dump."""
+    verdict = verdict if isinstance(verdict, dict) else {}
+    if not verdict.get("ok"):
+        return ("the search didn't run — "
+                + str(verdict.get("error")
+                      or "the surface refused"))
+    messages = list(verdict.get("messages") or [])
+    total = verdict.get("total")
+    if not isinstance(total, int) or total < len(messages):
+        total = len(messages)
+    query = str(verdict.get("query") or "")
+    if not messages:
+        head = f"no messages match “{query}”"
+        if scope:
+            head += f" in {scope}"
+        lines = [head + "."]
+    else:
+        head = (f"{total} message"
+                f"{'' if total == 1 else 's'} match "
+                f"“{query}”")
+        if scope:
+            head += f" in {scope}"
+        if total > len(messages):
+            head += (f" — showing the {len(messages)} "
+                     f"most recent")
+        lines = [head + ":"]
+        for msg in messages:
+            lines.append(_search_hit_line(msg, query,
+                                          show_chat=show_chat))
+    coverage = str(verdict.get("coverage") or "")
+    if coverage:
+        lines.append(f"(searched {coverage})")
+    return "\n".join(lines)
+
+
+def _search_hit_line(msg: Any, query: str, *,
+                     show_chat: bool = False) -> str:
+    when = ""
+    ts = getattr(msg, "ts", None)
+    if ts:
+        try:
+            when = time.strftime(
+                "%Y-%m-%d %H:%M",
+                time.localtime(float(ts)))
+        except (TypeError, ValueError, OverflowError,
+                OSError):
+            when = ""
+    who = ("you" if not getattr(msg, "incoming", True)
+           else str(getattr(msg, "sender", "") or "")
+           or "someone")
+    parts = []
+    if show_chat:
+        chat = getattr(msg, "chat", None)
+        title = str(getattr(chat, "title", "") or "")
+        if title:
+            parts.append(title)
+    if when:
+        parts.append(when)
+    parts.append(who)
+    snippet = _search_snippet(
+        str(getattr(msg, "text", "") or ""), query)
+    return "• " + " · ".join(parts) + f" — {snippet}"
 
 
 def compose_group_status(*, title: str, platform: str,

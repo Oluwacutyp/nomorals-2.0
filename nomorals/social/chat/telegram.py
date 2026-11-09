@@ -38,7 +38,7 @@ from typing import Any
 from ...core.errors import ValidationError
 from ...core.logging_setup import get_logger
 from ...core.text import safe_filename
-from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult, contact_shape_error, location_shape_error
+from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult, contact_shape_error, location_shape_error, search_shape_error
 from .platform_limits import for_platform
 from .failures import record_failure
 
@@ -3262,6 +3262,178 @@ class TelegramAdapter(ChatAdapter):
         except Exception as exc:  # noqa: BLE001
             _log.debug("telegram history failed: %s", exc)
             return []
+
+    # ── message search (parity bundle #11) ───────────────
+    #: Telegram search reach, stated in the verdict: MTProto
+    #: search is SERVER-side — Telegram's own index over the
+    #: account's real archive, not a local cache.
+    _SEARCH_COVERAGE = (
+        "Telegram's own message index — the server "
+        "searched the account's real archive")
+
+    def search_messages(self, chat: ChatRef, query: str,
+                        limit: int = 20) -> dict[str, Any]:
+        """Search one chat via MTProto ``messages.Search``
+        — the in-chat half of the search-depth bundle."""
+        problem = search_shape_error(query)
+        if problem:
+            return {"ok": False, "error": problem}
+        if self._client is None:
+            return {"ok": False, "error": "not connected"}
+        try:
+            return self._run_on_loop(
+                self._search_chat_coro(
+                    chat, str(query).strip(), int(limit)),
+                timeout=30.0)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    def search_global(self, query: str,
+                      limit: int = 20) -> dict[str, Any]:
+        """Search every chat at once via MTProto
+        ``messages.SearchGlobal`` — the cross-chat half of
+        the search-depth bundle; each hit's ChatRef names
+        the conversation it lives in."""
+        problem = search_shape_error(query)
+        if problem:
+            return {"ok": False, "error": problem}
+        if self._client is None:
+            return {"ok": False, "error": "not connected"}
+        try:
+            return self._run_on_loop(
+                self._search_global_coro(
+                    str(query).strip(), int(limit)),
+                timeout=30.0)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    async def _search_chat_coro(self, chat: ChatRef,
+                                query: str, limit: int
+                                ) -> dict[str, Any]:
+        from telethon.tl.functions.messages import SearchRequest
+        from telethon.tl.types import InputMessagesFilterEmpty
+
+        entity = await self._resolve(chat)
+        result = await self._client(SearchRequest(
+            peer=entity, q=query,
+            filter=InputMessagesFilterEmpty(),
+            min_date=None, max_date=None, offset_id=0,
+            limit=max(1, limit)))
+        return self._search_verdict(result, query,
+                                    fallback_chat=chat)
+
+    async def _search_global_coro(self, query: str,
+                                  limit: int
+                                  ) -> dict[str, Any]:
+        from telethon.tl.functions.messages import (
+            SearchGlobalRequest,
+        )
+        from telethon.tl.types import (
+            InputMessagesFilterEmpty,
+            InputPeerEmpty,
+        )
+
+        result = await self._client(SearchGlobalRequest(
+            q=query, filter=InputMessagesFilterEmpty(),
+            min_date=None, max_date=None, offset_rate=0,
+            offset_peer=InputPeerEmpty(), offset_id=0,
+            limit=max(1, limit)))
+        return self._search_verdict(result, query)
+
+    @staticmethod
+    def _entity_name(entity: Any) -> str:
+        """A display name for one result entity: a chat's
+        title, else a person's full name, else a username —
+        "" when the entity carries none (never an id)."""
+        if entity is None:
+            return ""
+        title = str(getattr(entity, "title", None) or "")
+        if title:
+            return title
+        first = str(getattr(entity, "first_name", None)
+                    or "")
+        last = str(getattr(entity, "last_name", None) or "")
+        full = (first + " " + last).strip()
+        if full:
+            return full
+        return str(getattr(entity, "username", None) or "")
+
+    def _search_verdict(self, result: Any, query: str,
+                        fallback_chat: ChatRef | None = None
+                        ) -> dict[str, Any]:
+        """One messages.Messages search result → the shared
+        search verdict.  Peers resolve against the result's
+        own chats/users lists; a hit whose peer is in
+        neither falls back to the searched chat (in-chat
+        search) or is skipped (global search — a hit that
+        cannot name its conversation in words would have
+        to print an id, which never happens)."""
+        from telethon.utils import get_peer_id
+
+        users: dict[int, Any] = {}
+        chats: dict[int, Any] = {}
+        for user in (getattr(result, "users", None) or []):
+            try:
+                users[int(get_peer_id(user))] = user
+            except Exception:  # noqa: BLE001 - unkeyable
+                continue
+        for chat_ent in (getattr(result, "chats", None)
+                         or []):
+            try:
+                chats[int(get_peer_id(chat_ent))] = chat_ent
+            except Exception:  # noqa: BLE001 - unkeyable
+                continue
+
+        out: list[ChatMessage] = []
+        for msg in (getattr(result, "messages", None)
+                    or []):
+            peer = getattr(msg, "peer_id", None)
+            marked = 0
+            if peer is not None:
+                try:
+                    marked = int(get_peer_id(peer))
+                except Exception:  # noqa: BLE001
+                    marked = 0
+            entity = chats.get(marked) or users.get(marked)
+            if entity is not None:
+                ref = ChatRef(
+                    platform=self.name, chat_id=str(marked),
+                    kind=(ChatKind.DM if marked > 0
+                          else ChatKind.GROUP),
+                    title=self._entity_name(entity))
+            elif fallback_chat is not None:
+                ref = fallback_chat
+            else:
+                continue
+            sender = ""
+            from_id = getattr(msg, "from_id", None)
+            if from_id is not None:
+                try:
+                    sender = self._entity_name(users.get(
+                        int(get_peer_id(from_id))))
+                except Exception:  # noqa: BLE001
+                    sender = ""
+            if not sender and not bool(
+                    getattr(msg, "out", False)) and marked > 0:
+                sender = self._entity_name(entity)
+            date = getattr(msg, "date", None)
+            out.append(ChatMessage(
+                chat=ref,
+                incoming=not bool(getattr(msg, "out", False)),
+                text=str(getattr(msg, "message", None)
+                         or ""),
+                sender=sender,
+                message_id=str(getattr(msg, "id", "")
+                               or ""),
+                ts=(date.timestamp() if date is not None
+                    else time.time()),
+            ))
+        total = getattr(result, "count", None)
+        if not isinstance(total, int) or total < len(out):
+            total = len(out)
+        return {"ok": True, "query": query, "messages": out,
+                "total": total,
+                "coverage": self._SEARCH_COVERAGE}
 
     # ── group admin power mode ─────────────────────────────────────
     # Full admin surface for when the account is an admin. Every method

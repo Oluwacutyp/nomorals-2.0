@@ -88,7 +88,7 @@ import uuid
 from typing import Any
 
 from ...core.logging_setup import get_logger
-from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult, contact_shape_error, location_shape_error
+from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult, contact_shape_error, location_shape_error, search_shape_error
 from .platform_limits import for_platform
 from .failures import record_failure
 
@@ -3552,6 +3552,33 @@ class WhatsAppAdapter(ChatAdapter):
             timeout=5)
         return bool(response.get("ok"))
 
+    @staticmethod
+    def _entry_message(chat: ChatRef,
+                       entry: dict[str, Any]) -> ChatMessage:
+        """One bridge history/search row → ChatMessage (the
+        row shape both bridge verbs answer with)."""
+        try:
+            ts = float(entry.get("ts") or time.time()) / 1000.0
+        except (TypeError, ValueError):
+            ts = time.time()
+        return ChatMessage(
+            chat=chat,
+            incoming=bool(entry.get("incoming", True)),
+            text=str(entry.get("text") or ""),
+            sender=str(entry.get("sender") or ""),
+            message_id=str(entry.get("id") or ""),
+            media=[
+                MediaRef(path=str(m.get("path") or ""),
+                         mime=str(m.get("mime") or ""),
+                         kind=str(m.get("kind") or "file"),
+                         is_voice=str(m.get("kind") or "") == "voice")
+                for m in (entry.get("media") or [])
+                if m.get("path")
+            ],
+            reply_to=str(entry.get("reply_to") or ""),
+            ts=ts,
+        )
+
     def history(self, chat: ChatRef, limit: int = 20) -> list[ChatMessage]:
         if not self.connected.is_set():
             return []
@@ -3560,32 +3587,97 @@ class WhatsAppAdapter(ChatAdapter):
              "limit": int(limit)}, timeout=15)
         if not response.get("ok"):
             return []
-        out: list[ChatMessage] = []
-        for entry in response.get("messages") or []:
-            try:
-                ts = float(entry.get("ts") or time.time()) / 1000.0
-            except (TypeError, ValueError):
-                ts = time.time()
-            out.append(
-                ChatMessage(
-                    chat=chat,
-                    incoming=bool(entry.get("incoming", True)),
-                    text=str(entry.get("text") or ""),
-                    sender=str(entry.get("sender") or ""),
-                    message_id=str(entry.get("id") or ""),
-                    media=[
-                        MediaRef(path=str(m.get("path") or ""),
-                                 mime=str(m.get("mime") or ""),
-                                 kind=str(m.get("kind") or "file"),
-                                 is_voice=str(m.get("kind") or "") == "voice")
-                        for m in (entry.get("media") or [])
-                        if m.get("path")
-                    ],
-                    reply_to=str(entry.get("reply_to") or ""),
-                    ts=ts,
-                )
-            )
-        return out
+        return [self._entry_message(chat, entry)
+                for entry in response.get("messages") or []]
+
+    # ── message search (parity bundle #11) ───────────────
+    #: WhatsApp search reach, stated in the verdict: the
+    #: bridges carry no server-side search — whatsmeow and
+    #: Baileys expose none to a linked device — so the
+    #: bridges filter the messages they themselves have
+    #: seen (their in-memory history, the same store
+    #: `history` serves).  The coverage line says exactly
+    #: that, so a result never reads as a search of the
+    #: phone's full archive.
+    _SEARCH_COVERAGE = (
+        "the messages the bridge has seen this session "
+        "(WhatsApp offers a linked device no server-side "
+        "search)")
+
+    def search_messages(self, chat: ChatRef, query: str,
+                        limit: int = 20) -> dict[str, Any]:
+        """Search one chat via the bridges' ``search`` verb
+        (a filter over the bridge's remembered messages for
+        the chat — the census's honest first rung)."""
+        problem = search_shape_error(query)
+        if problem:
+            return {"ok": False, "error": problem}
+        if not self.connected.is_set():
+            return {"ok": False,
+                    "error": "whatsapp bridge not connected"}
+        response = self._send_cmd(
+            {"cmd": "search", "chat": self._jid(chat),
+             "query": str(query).strip(),
+             "limit": int(limit)}, timeout=20)
+        if not response.get("ok"):
+            return {"ok": False,
+                    "error": str(response.get("error") or
+                                 "the bridge refused the search")}
+        messages = [self._entry_message(chat, entry)
+                    for entry in response.get("messages") or []]
+        messages.reverse()  # bridge answers oldest-first
+        try:
+            total = int(response.get("total")
+                        or len(messages))
+        except (TypeError, ValueError):
+            total = len(messages)
+        return {"ok": True, "query": str(query).strip(),
+                "messages": messages, "total": total,
+                "coverage": self._SEARCH_COVERAGE}
+
+    def search_global(self, query: str,
+                      limit: int = 20) -> dict[str, Any]:
+        """Search across every chat the bridge remembers:
+        the adapter fan-out over :meth:`chats` — one
+        ``search`` per chat (a small per-chat cap; one
+        loud room cannot crowd out the rest), merged
+        newest-first under the caller's cap."""
+        problem = search_shape_error(query)
+        if problem:
+            return {"ok": False, "error": problem}
+        if not self.connected.is_set():
+            return {"ok": False,
+                    "error": "whatsapp bridge not connected"}
+        rows = self.chats(limit=30)
+        if not rows:
+            return {"ok": False,
+                    "error": "no chats came back from the "
+                             "bridge to search"}
+        merged: list[ChatMessage] = []
+        total = 0
+        searched = 0
+        refused = ""
+        for row in rows:
+            ref = ChatRef(
+                platform=self.name, chat_id=row["id"],
+                kind=row["kind"], title=row["title"])
+            verdict = self.search_messages(ref, query, limit=5)
+            if verdict.get("ok"):
+                searched += 1
+                total += int(verdict.get("total") or 0)
+                merged.extend(verdict.get("messages") or [])
+            elif not refused:
+                refused = str(verdict.get("error") or "")
+        if not searched:
+            return {"ok": False,
+                    "error": refused or
+                    "the bridge refused the search"}
+        merged.sort(key=lambda m: m.ts, reverse=True)
+        return {"ok": True, "query": str(query).strip(),
+                "messages": merged[:max(1, int(limit))],
+                "total": total,
+                "coverage": (f"{searched} of {len(rows)} chats — "
+                             + self._SEARCH_COVERAGE)}
 
     def health(self) -> dict[str, Any]:
         return {**super().health(), "connected": self.connected.is_set(),

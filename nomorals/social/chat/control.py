@@ -574,6 +574,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "addcontact": (0, None),  # /addcontact Name | +number — add to the Telegram account's contacts
     "sendloc": (1, None),     # /sendloc lat, lng [| name | address] — a location pin in this chat
     "sendcontact": (1, None), # /sendcontact Name | +number — share a contact card in this chat
+    "find": (1, None),        # /find words — search this chat's messages
+    "findall": (1, None),     # /findall words — search every chat on this surface
     "tagall": (0, None),      # /tagall [text] — mention all (capped)
     "hidetag": (0, None),     # /hidetag [text] — mention all, hidden
     "antitag": (0, 1),        # /antitag [on|off] — mass-tag DM flags
@@ -2815,6 +2817,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/sendcontact Name | +number",
               "example": "/sendcontact Ada Lovelace | +2348000000000",
               "related": "/addcontact · /vcf · /sendloc"},
+    "find": {"what": "search THIS chat's messages for words — the matches come back newest first with their dates, senders and a snippet around the match, and the reply states what was actually searched. The reach differs by surface and is never dressed up: on your Telegram the server searches the chat's real archive; on WhatsApp a linked device gets no server-side search, so the bridge filters the messages it has seen this session (the same reach as her history reads). The bot surface cannot search at all — the Bot API has no message-search endpoint — and says so. A read, not an act as you: your standing stop does not halt it. Owner only.",
+              "usage": "/find words to look for",
+              "example": "/find the gate code",
+              "related": "/findall · /channeltexts"},
+    "findall": {"what": "search EVERY chat on this surface for words at once — each match names the conversation it lives in, newest first, with the total count stated when the list is capped. Reach per surface is the /find reach: Telegram's server-side index across the account's chats; on WhatsApp the fan-out over the chats the bridge remembers, each filtered over its session memory. The bot surface has no message search in the Bot API and refuses in words. A read, not an act as you: your standing stop does not halt it. Owner only.",
+              "usage": "/findall words to look for",
+              "example": "/findall invoice",
+              "related": "/find · /channeltexts"},
     "vcf": {"what": "export a group's people as one import-ready contacts (.vcf) file — every person a card, their own number with their own name. The roster is assembled from every route Devon has and merged: on WhatsApp the bridge's group roster (its contact-store names included) plus her member ledger; on Telegram her member ledger, the bot's admin list, and the personal surface's member fetch — no single route is a gate. WhatsApp members addressed only by an anonymous LID whose number no store can resolve, and Telegram members whose number their own privacy settings hide, are counted in the reply and left out — a number is never invented, and a Telegram id is never dressed up as one. The reply counts people, cards written and people left out, and names the sources used. The manual shape (/vcf Name | +number, one person per line) makes cards for people who share no group with her. Owner anywhere; inside a group, the owner or a group admin — it hands out people's numbers, so it is never a public command. An export taken on a personal surface lands in the personal journal.",
               "usage": "/vcf (inside the group) · /vcf Group Name · /vcf Name | +number [| +number]",
               "example": "/vcf",
@@ -4470,7 +4480,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "pollres", "tagall", "hidetag", "antitag", "viewonce", "vv",
       "joinlink", "newgroup", "newchannel", "leave",
       "myprofile", "privacy", "makepoll", "vcf", "addcontact",
-      "sendloc", "sendcontact"]),
+      "sendloc", "sendcontact", "find", "findall"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
@@ -4741,6 +4751,8 @@ LIST_ONELINERS: dict[str, str] = {
     "makepoll": "post a native WhatsApp poll in this chat — /makepoll Question | Option | Option",
     "sendloc": "drop a location pin in this chat, named if you name it — /sendloc 6.5244, 3.3792 [| Place | Address]",
     "sendcontact": "share a saveable contact card in this chat — /sendcontact Name | +number",
+    "find": "search this chat's messages for words — /find the gate code",
+    "findall": "search every chat on this surface for words — /findall invoice",
     "vcf": "export this group's people as a contacts file, each number with its name — /vcf",
     "tagall": "mention every member (chunked, capped at 100) — /tagall [text]",
     "hidetag": "mention every member, names hidden — /hidetag [text]",

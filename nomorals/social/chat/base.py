@@ -40,6 +40,7 @@ __all__ = [
     "is_owner_chat",
     "location_shape_error",
     "contact_shape_error",
+    "search_shape_error",
 ]
 
 _log = get_logger(__name__)
@@ -116,6 +117,19 @@ def contact_shape_error(phone: Any, name: Any) -> str:
     if not 7 <= len(digits) <= 15:
         return ("a phone number is 7–15 digits — that one has "
                 + str(len(digits)))
+    return ""
+
+
+def search_shape_error(query: Any) -> str:
+    """Why this text cannot be a message search, or "" when
+    it can (parity bundle #11 — the one shape rule every
+    surface checks BEFORE traffic, mirrored in the bridges).
+
+    A search needs actual words: an empty query would
+    "match" everything, which is not a search result but a
+    history dump wearing search's clothes."""
+    if not str(query or "").strip():
+        return "a search needs the words to look for"
     return ""
 
 
@@ -621,6 +635,45 @@ class ChatAdapter(ABC):
     def history(self, chat: ChatRef, limit: int = 20) -> list[ChatMessage]:
         """Recent inbound history, oldest first. Empty when unavailable."""
         return []
+
+    # ── message search (parity bundle #11) ───────────────
+    def search_messages(self, chat: ChatRef, query: str,
+                        limit: int = 20) -> dict[str, Any]:
+        """Search ONE chat's messages for ``query`` — the
+        in-chat half of the search-depth bundle.  Returns a
+        verdict dict, the read-verb shape the poll-results
+        family established:
+
+        ``{"ok": True, "query": …, "messages": […],
+        "total": n, "coverage": "…"}`` — messages are
+        :class:`ChatMessage` newest-first, ``total`` counts
+        every match found (it exceeds ``len(messages)``
+        when the cap trimmed the list), and ``coverage``
+        names in words what was actually searched, because
+        each surface's reach differs and a result that hides
+        its reach overstates itself.  Failure is
+        ``{"ok": False, "error": "…"}`` with the specific
+        reason.  The base adapter reports the truth — this
+        platform path carries no search verb — and each
+        adapter that CAN search overrides.  Shape rules are
+        :func:`search_shape_error`, checked before traffic
+        by every override."""
+        return {"ok": False,
+                "error": "message search not supported "
+                         "on this adapter"}
+
+    def search_global(self, query: str,
+                      limit: int = 20) -> dict[str, Any]:
+        """Search across EVERY chat on this surface — the
+        cross-chat half of the search-depth bundle.  Same
+        verdict shape as :meth:`search_messages`; each
+        message's ``chat`` carries its own ChatRef, so a
+        hit always names the conversation it lives in.
+        The base adapter reports the truth like
+        search_messages."""
+        return {"ok": False,
+                "error": "message search not supported "
+                         "on this adapter"}
 
     # ── health ───────────────────────────────────────────────────────────────
     def health(self) -> dict[str, Any]:

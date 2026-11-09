@@ -7074,7 +7074,8 @@ class PartnerRuntime(
                 "antitag", "viewonce", "vv",
                 "joinlink", "newgroup", "newchannel", "leave",
                 "myprofile", "privacy", "makepoll", "vcf",
-                "addcontact", "sendloc", "sendcontact"}:
+                "addcontact", "sendloc", "sendcontact",
+                "find", "findall"}:
             # The chat & privacy set (FEI gap wave F): the set
             # is spelled out so the catalog's handler-path scan
             # sees every kind; social/chat/chatops.py's

@@ -40,6 +40,10 @@
  *     {"id":"<req>","cmd":"typing","chat":"<jid>","seconds":3,
  *      "presence":"composing|recording"}
  *     {"id":"<req>","cmd":"history","chat":"<jid>","limit":20}
+ *     {"id":"<req>","cmd":"search","chat":"<jid>","query":"...","limit":20}
+ *      (a case-insensitive filter over the bridge's remembered messages
+ *      for the chat — Baileys has no server-side search; the reply's
+ *      "total" counts every match, "messages" carries the recent page)
  *     {"id":"<req>","cmd":"read","chat":"<jid>"}
  *     {"id":"<req>","cmd":"chats","limit":30}
  *     {"id":"<req>","cmd":"status"}
@@ -1489,6 +1493,38 @@ async function handleCommand(sock, req) {
           ts: m.ts || Date.now(),
         }));
         return reply(sock, id, { ok: true, messages: msgs });
+      }
+      case 'search': {
+        // In-chat message search (parity bundle #11): a
+        // case-insensitive substring filter over this
+        // bridge's OWN remembered messages for the chat —
+        // the same store `history` serves, and the honest
+        // reach: Baileys exposes no server-side search to
+        // a linked device.  `total` counts every match;
+        // `messages` carries the most recent page, in
+        // history's row shape and order.
+        const query = String(req.query || '').trim();
+        if (!query) {
+          return reply(sock, id, { ok: false,
+            error: 'a search needs the words to look for' });
+        }
+        const arr = recentByChat.get(jidNormalizedUser(req.chat || '')) || [];
+        const limit = Math.max(1, Math.min(MAX_KEEP,
+          parseInt(req.limit || '20', 10)));
+        const needle = query.toLowerCase();
+        const hits = arr.filter((m) => String(m.text || '')
+          .toLowerCase().includes(needle));
+        const msgs = hits.slice(-limit).map((m) => ({
+          id: (m.key && m.key.id) || m.id || '',
+          incoming: m.incoming !== false,
+          text: m.text || '',
+          sender: m.sender || (m.from && m.from.name) || '',
+          media: m.media || [],
+          reply_to: m.reply_to || '',
+          ts: m.ts || Date.now(),
+        }));
+        return reply(sock, id, { ok: true, messages: msgs,
+          total: hits.length });
       }
       case 'read': {
         const jid = jidNormalizedUser(req.chat || '');
