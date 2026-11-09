@@ -32,6 +32,9 @@
  *      WhatsApp's 3-button cap, the rest as text action lines; the
  *      reply's "buttons_form" names the form used)}
  *     {"id":"<req>","cmd":"send_media","chat":"<jid>","path":"...","caption":"...","ptt":false}
+ *     {"id":"<req>","cmd":"send_location","chat":"<jid>","latitude":6.5244,"longitude":3.3792,
+ *      "name":"...","address":"..."} (name/address optional — the pin's label)
+ *     {"id":"<req>","cmd":"send_contact","chat":"<jid>","name":"...","phone":"...","vcard":"..."}
  *     {"id":"<req>","cmd":"typing","chat":"<jid>","seconds":3,
  *      "presence":"composing|recording"}
  *     {"id":"<req>","cmd":"history","chat":"<jid>","limit":20}
@@ -1933,6 +1936,54 @@ async function handleCommand(sock, req) {
             || sent.message?.pollCreationMessageV3;
           notePollCreation(req.chat, mid, creation,
             sent.message?.messageContextInfo?.messageSecret);
+          return reply(sock, id, { ok: true, message_id: mid });
+        } catch (e) {
+          return reply(sock, id, { ok: false, error: String(e.message || e) });
+        }
+      }
+      // Location + contact cards (parity bundle #9):
+      // sendMessage's { location } / { contacts } payloads
+      // are Baileys' own forms; shape rules refuse BEFORE
+      // traffic with the same words the Go engine uses.
+      case 'send_location': {
+        const lat = Number(req.latitude);
+        const lon = Number(req.longitude);
+        const bad = req.latitude === undefined || req.longitude === undefined
+          || Number.isNaN(lat) || Number.isNaN(lon)
+          ? 'a location pin needs numeric latitude and longitude'
+          : !Number.isFinite(lat) || !Number.isFinite(lon)
+          ? "a location pin's coordinates must be finite numbers"
+          : lat < -90 || lat > 90 ? 'a location pin needs latitude between -90 and 90'
+          : lon < -180 || lon > 180 ? 'a location pin needs longitude between -180 and 180'
+          : '';
+        if (bad) return reply(sock, id, { ok: false, error: bad });
+        const location = { degreesLatitude: lat, degreesLongitude: lon };
+        const name = String(req.name || '').trim();
+        const address = String(req.address || '').trim();
+        if (name) location.name = name;
+        if (address) location.address = address;
+        try {
+          const sent = await wa.sendMessage(req.chat, { location });
+          const mid = sent?.key?.id || '';
+          if (!mid) return reply(sock, id, { ok: false, error: 'the bridge returned no message id for the location pin' });
+          return reply(sock, id, { ok: true, message_id: mid });
+        } catch (e) {
+          return reply(sock, id, { ok: false, error: String(e.message || e) });
+        }
+      }
+      case 'send_contact': {
+        const name = String(req.name || '').trim();
+        const vcard = String(req.vcard || '');
+        const bad = !name ? 'a contact card needs a display name'
+          : !vcard.trim() ? "a contact card needs a vcard — it is what the recipient's phone parses"
+          : '';
+        if (bad) return reply(sock, id, { ok: false, error: bad });
+        try {
+          const sent = await wa.sendMessage(req.chat, {
+            contacts: { displayName: name, contacts: [{ vcard }] },
+          });
+          const mid = sent?.key?.id || '';
+          if (!mid) return reply(sock, id, { ok: false, error: 'the bridge returned no message id for the contact card' });
           return reply(sock, id, { ok: true, message_id: mid });
         } catch (e) {
           return reply(sock, id, { ok: false, error: String(e.message || e) });

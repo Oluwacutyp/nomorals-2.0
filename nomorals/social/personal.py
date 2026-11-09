@@ -1732,6 +1732,67 @@ class PersonalSurfaces:
         _append_jsonl(self.vault.journal_path, entry)
         return entry
 
+    def note_location_sent(self, platform: str, *,
+                           account_id: str = "",
+                           counterpart_id: str = "",
+                           source_id: str = "",
+                           latitude: float = 0.0,
+                           longitude: float = 0.0,
+                           name: str = "", address: str = "",
+                           ts: float = 0.0) -> dict[str, Any]:
+        """Journal one location pin dropped AS the owner
+        (parity bundle #9, /sendloc): kind ``location_sent``,
+        the chat in counterpart_id, the pin's message id in
+        source_id, and the coordinates + any place name in
+        the entry — a pin's whole content, nothing invented."""
+        rec = self.resolve_event_account(platform, account_id)
+        label = str(name or "").strip()
+        text = (f"{label} — " if label else "")
+        text += f"{latitude:.6f}, {longitude:.6f}"
+        if address:
+            text += f" · {str(address).strip()}"
+        entry = {
+            "ts": float(ts or self._clock()),
+            "kind": "location_sent", "account": rec.id,
+            "platform": platform,
+            "counterpart_id": str(counterpart_id or ""),
+            "poster_name": "", "media_kind": "",
+            "source_id": str(source_id or ""), "path": "",
+            "bytes": 0, "text": text[:200],
+            "latitude": float(latitude),
+            "longitude": float(longitude),
+            "note": "location pin sent as the owner via /sendloc"}
+        _append_jsonl(self.vault.journal_path, entry)
+        return entry
+
+    def note_contact_shared(self, platform: str, *,
+                            account_id: str = "",
+                            counterpart_id: str = "",
+                            source_id: str = "",
+                            name: str = "", phone: str = "",
+                            ts: float = 0.0) -> dict[str, Any]:
+        """Journal one contact card shared AS the owner
+        (parity bundle #9, /sendcontact): kind
+        ``contact_shared``, the chat in counterpart_id, the
+        card's message id in source_id, and the carded name +
+        number as the text — the /addcontact journal's shape,
+        for the send side."""
+        rec = self.resolve_event_account(platform, account_id)
+        entry = {
+            "ts": float(ts or self._clock()),
+            "kind": "contact_shared", "account": rec.id,
+            "platform": platform,
+            "counterpart_id": str(counterpart_id or ""),
+            "poster_name": "", "media_kind": "",
+            "source_id": str(source_id or ""), "path": "",
+            "bytes": 0,
+            "text": (f"{str(name or '')} · "
+                     f"{str(phone or '')}")[:200],
+            "note": "contact card shared as the owner via "
+                    "/sendcontact"}
+        _append_jsonl(self.vault.journal_path, entry)
+        return entry
+
     def note_vcf_exported(self, platform: str, *,
                           account_id: str = "",
                           counterpart_id: str = "",

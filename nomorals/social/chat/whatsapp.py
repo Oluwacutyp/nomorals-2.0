@@ -88,7 +88,7 @@ import uuid
 from typing import Any
 
 from ...core.logging_setup import get_logger
-from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult
+from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult, contact_shape_error, location_shape_error
 from .platform_limits import for_platform
 from .failures import record_failure
 
@@ -2384,6 +2384,107 @@ class WhatsAppAdapter(ChatAdapter):
         return self._admin_cmd("poll_results", {
             "chat": self._jid(chat), "message_id": message_id},
             timeout=15)
+
+    def send_location(self, chat: ChatRef, latitude: float,
+                      longitude: float) -> SendResult:
+        """Drop a static location pin via the bridges'
+        ``send_location`` (whatsmeow LocationMessage / Baileys
+        sendMessage {location}) — parity bundle #9.  A bare
+        pin carries coordinates only; a NAMED place rides
+        :meth:`send_venue`, which is the same bridge verb with
+        its name/address fields set (WhatsApp's one named-pin
+        form).  Shape refuses BEFORE traffic, and a send the
+        bridge cannot prove with a message id is unproven,
+        never success."""
+        problem = location_shape_error(latitude, longitude)
+        if problem:
+            return SendResult(ok=False, platform=self.name,
+                              error=problem)
+        return self._send_bridge_location(
+            chat, float(latitude), float(longitude), "", "")
+
+    def send_venue(self, chat: ChatRef, latitude: float,
+                   longitude: float, title: str,
+                   address: str = "") -> SendResult:
+        """Send a named place: WhatsApp renders a location
+        message's name + address as the pin's label — the
+        platform's venue form (parity bundle #9)."""
+        problem = location_shape_error(latitude, longitude)
+        if problem:
+            return SendResult(ok=False, platform=self.name,
+                              error=problem)
+        title = str(title or "").strip()
+        if not title:
+            return SendResult(ok=False, platform=self.name,
+                              error="a venue needs the place's "
+                                    "name")
+        return self._send_bridge_location(
+            chat, float(latitude), float(longitude), title,
+            str(address or "").strip())
+
+    def _send_bridge_location(self, chat: ChatRef, latitude: float,
+                              longitude: float, name: str,
+                              address: str) -> SendResult:
+        result = self._admin_cmd("send_location", {
+            "chat": self._jid(chat), "latitude": latitude,
+            "longitude": longitude, "name": name,
+            "address": address}, timeout=20)
+        if not result.get("ok"):
+            return SendResult(ok=False, platform=self.name,
+                              error=str(result.get("error") or
+                                        "the bridge refused the "
+                                        "location"))
+        message_id = str(result.get("message_id") or "")
+        if not message_id:
+            return SendResult(ok=False, platform=self.name,
+                              error=("the bridge sent the location "
+                                     "but returned no message id — "
+                                     "the send is unproven"))
+        return SendResult(ok=True, platform=self.name,
+                          message_id=message_id)
+
+    def send_contact(self, chat: ChatRef, phone: str, name: str,
+                     *, vcard: str = "") -> SendResult:
+        """Share a contact card via the bridges' ``send_contact``
+        (whatsmeow ContactMessage / Baileys sendMessage
+        {contacts}) — parity bundle #9.  The card body is the
+        standard vCard 3.0 from vcf.build_vcard unless the
+        caller passes a richer one; both bridges require the
+        card text (it is what recipients' phones parse), so a
+        number the vCard builder cannot card refuses here,
+        before traffic."""
+        problem = contact_shape_error(phone, name)
+        if problem:
+            return SendResult(ok=False, platform=self.name,
+                              error=problem)
+        name = str(name).strip()
+        phone = str(phone).strip()
+        card = str(vcard or "").strip()
+        if not card:
+            from .vcf import build_vcard
+
+            card = build_vcard(name, [phone])
+        if not card:
+            return SendResult(ok=False, platform=self.name,
+                              error=("no vCard could be built for "
+                                     "that number — the card was "
+                                     "not sent"))
+        result = self._admin_cmd("send_contact", {
+            "chat": self._jid(chat), "name": name,
+            "phone": phone, "vcard": card}, timeout=20)
+        if not result.get("ok"):
+            return SendResult(ok=False, platform=self.name,
+                              error=str(result.get("error") or
+                                        "the bridge refused the "
+                                        "contact card"))
+        message_id = str(result.get("message_id") or "")
+        if not message_id:
+            return SendResult(ok=False, platform=self.name,
+                              error=("the bridge sent the contact "
+                                     "card but returned no message "
+                                     "id — the send is unproven"))
+        return SendResult(ok=True, platform=self.name,
+                          message_id=message_id)
 
     def reject_call(self, call_id: str,
                     from_jid: str) -> dict[str, Any]:

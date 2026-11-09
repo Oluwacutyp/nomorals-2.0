@@ -38,6 +38,8 @@ __all__ = [
     "ChatAdapter",
     "IncomingHandler",
     "is_owner_chat",
+    "location_shape_error",
+    "contact_shape_error",
 ]
 
 _log = get_logger(__name__)
@@ -71,6 +73,50 @@ def is_owner_chat(chat: Any, *, owner_chats: Any = (), db_is_owner: bool = False
     if db_is_owner:
         return True
     return key.endswith(":console")
+
+
+def location_shape_error(latitude: Any, longitude: Any) -> str:
+    """Why these coordinates cannot be a location pin, or ""
+    when they can (parity bundle #9 — the one shape rule every
+    surface checks BEFORE traffic, mirrored in the bridges).
+
+    Coordinates are degrees: latitude in [-90, 90], longitude
+    in [-180, 180].  NaN and infinities are not places."""
+    import math
+
+    try:
+        lat = float(latitude)
+        lon = float(longitude)
+    except (TypeError, ValueError):
+        return ("a location needs numeric latitude and "
+                "longitude (degrees)")
+    if not (math.isfinite(lat) and math.isfinite(lon)):
+        return "a location's coordinates must be finite numbers"
+    if not -90.0 <= lat <= 90.0:
+        return "latitude must be between -90 and 90"
+    if not -180.0 <= lon <= 180.0:
+        return "longitude must be between -180 and 180"
+    return ""
+
+
+def contact_shape_error(phone: Any, name: Any) -> str:
+    """Why this (phone, name) pair cannot be a contact card,
+    or "" when it can (parity bundle #9).  A card needs a
+    display name and a dialable number: 7–15 digits once the
+    punctuation a human writes (+, spaces, dashes) is stripped
+    — a shorter or longer digit string is not a phone number
+    anyone can be reached at, and inventing digits to fill the
+    shape is never an option."""
+    if not str(name or "").strip():
+        return "a contact card needs the person's name"
+    digits = "".join(
+        ch for ch in str(phone or "") if ch.isdigit())
+    if not digits:
+        return "a contact card needs a phone number"
+    if not 7 <= len(digits) <= 15:
+        return ("a phone number is 7–15 digits — that one has "
+                + str(len(digits)))
+    return ""
 
 
 class ChatKind:
@@ -520,6 +566,45 @@ class ChatAdapter(ABC):
         """``{emoji: count}`` currently on a message, where the platform
         exposes them (Discord); ``{}`` where it does not."""
         return {}
+
+    # ── locations & contact cards (parity bundle #9) ─────────
+    def send_location(self, chat: ChatRef, latitude: float,
+                      longitude: float) -> SendResult:
+        """Drop a static location pin in a chat.  The base
+        adapter reports the truth — this platform path carries
+        no location verb — and each adapter that CAN send one
+        overrides.  Never a fake success; shape rules are
+        :func:`location_shape_error`, checked before traffic
+        by every override."""
+        return SendResult(ok=False, platform=self.name,
+                          error="location sending not supported "
+                                "on this adapter")
+
+    def send_venue(self, chat: ChatRef, latitude: float,
+                   longitude: float, title: str,
+                   address: str = "") -> SendResult:
+        """Send a NAMED place (a venue): a pin that carries its
+        name and street address, the form a person shares for
+        a business or a meeting point.  Each platform renders
+        it in its own named-pin form (WhatsApp's location
+        message name/address fields, Telegram's venue).  The
+        base adapter reports the truth like send_location."""
+        return SendResult(ok=False, platform=self.name,
+                          error="venue sending not supported "
+                                "on this adapter")
+
+    def send_contact(self, chat: ChatRef, phone: str, name: str,
+                     *, vcard: str = "") -> SendResult:
+        """Share a contact card (name + phone number) in a
+        chat — the card a recipient saves into their own
+        address book with one tap.  ``vcard`` lets a caller
+        pass a richer card; adapters build the standard
+        vCard 3.0 (vcf.build_vcard) when it is empty.  The
+        base adapter reports the truth like send_location;
+        shape rules are :func:`contact_shape_error`."""
+        return SendResult(ok=False, platform=self.name,
+                          error="contact cards not supported "
+                                "on this adapter")
 
     def typing(self, chat: ChatRef, seconds: float = 3.0,
              action: str = "typing") -> bool:

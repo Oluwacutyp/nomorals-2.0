@@ -292,6 +292,10 @@ class RuntimeChatOpsMixin:
                 return self._chatops_privacy(tail, message)
             if kind == "makepoll":
                 return self._chatops_makepoll(tail, message)
+            if kind == "sendloc":
+                return self._chatops_sendloc(tail, message)
+            if kind == "sendcontact":
+                return self._chatops_sendcontact(tail, message)
             if kind == "vcf":
                 return self._chatops_vcf(tail, message)
             if kind == "addcontact":
@@ -2411,6 +2415,152 @@ class RuntimeChatOpsMixin:
         return (f"🗳️ poll posted: “{parsed['question']}” — "
                 f"reply to it with /pollres to read the count "
                 f"as votes land.")
+
+    # ── location + contact sending (parity bundle #9) ──────
+
+    def _chatops_send_home(self, message: Any, kind: str
+                           ) -> tuple[Any, Any, Any, str, str]:
+        """The send home for /sendloc + /sendcontact:
+        (svc, rec, adapter, platform, error).  On the
+        personal surfaces (WhatsApp, the Telegram userbot)
+        the act is AS the owner, so the identity home
+        resolves the paired account + live adapter and the
+        caller applies the standing stop and journals.  On
+        the bot surfaces the bot posts in the very chat the
+        command was typed in — no personal account is
+        involved and nothing journals as an as-him act."""
+        platform = str(getattr(message.chat, "platform", "")
+                       or "")
+        if platform in ("whatsapp", "telegram"):
+            return self._chatops_identity_home(message, kind)
+        if platform in ("telegram-bot", "telegram-personal"):
+            adapter = self._adapter_for(platform)
+            if adapter is None:
+                return None, None, None, platform, (
+                    "no live Telegram bot surface here to "
+                    "post from.")
+            return None, None, adapter, platform, ""
+        return None, None, None, platform, (
+            f"/{kind} posts into a chat — run it from your "
+            f"WhatsApp, your Telegram, or a chat the bot "
+            f"sits in.")
+
+    @staticmethod
+    def _send_verdict(result: Any) -> tuple[bool, str, str]:
+        """(ok, error, message_id) for one adapter send —
+        SendResult-shaped, with _chatops_call's dict fallback
+        read as a dict."""
+        if isinstance(result, dict):
+            return (bool(result.get("ok")),
+                    str(result.get("error") or ""), "")
+        return (bool(getattr(result, "ok", False)),
+                str(getattr(result, "error", "") or ""),
+                str(getattr(result, "message_id", "") or ""))
+
+    def _chatops_sendloc(self, tail: str, message: Any) -> str:
+        """/sendloc — drop a location pin in THIS chat
+        (parity bundle #9, the location/contact census rows
+        on every surface).  Grammar: /sendloc <lat>, <lng>
+        [| Place name | Address] — bare coordinates send a
+        plain pin; a name (or an address standing as the
+        label) sends the platform's named-place form.  On
+        the personal surfaces the pin drops as the owner:
+        the standing stop gates it and a landed pin
+        journals location_sent."""
+        from ...social.chat.chatops import parse_sendloc_args
+
+        svc, rec, adapter, platform, error = \
+            self._chatops_send_home(message, "sendloc")
+        if error:
+            return error
+        personal = svc is not None
+        if personal and svc["registry"].owner_stopped(platform):
+            label = ("WhatsApp" if platform == "whatsapp"
+                     else "Telegram")
+            return (f"{label} is under your standing stop — "
+                    f"it stays halted until you start it "
+                    f"again; no location was sent.")
+        parsed = parse_sendloc_args(tail)
+        if not parsed.get("ok"):
+            return str(parsed.get("error")
+                       or "bad location shape")
+        chat = message.chat
+        lat = parsed["latitude"]
+        lon = parsed["longitude"]
+        coords = (f"{lat:.6f}".rstrip("0").rstrip(".")
+                  + ", "
+                  + f"{lon:.6f}".rstrip("0").rstrip("."))
+        if parsed["name"] or parsed["address"]:
+            title = parsed["name"] or parsed["address"]
+            result = self._chatops_call(
+                adapter.send_venue, chat, lat, lon, title,
+                parsed["address"])
+            what = f"📍 {title} ({coords})"
+        else:
+            result = self._chatops_call(
+                adapter.send_location, chat, lat, lon)
+            what = f"📍 location pin ({coords})"
+        ok, why, message_id = self._send_verdict(result)
+        if not ok:
+            return (f"couldn't send the location — "
+                    f"{why or 'the surface refused'}")
+        if personal:
+            svc["personal"].note_location_sent(
+                platform, account_id=rec.id,
+                counterpart_id=str(
+                    getattr(chat, "key", "")
+                    or getattr(chat, "chat_id", "")),
+                source_id=message_id, latitude=lat,
+                longitude=lon, name=parsed["name"],
+                address=parsed["address"])
+        return f"{what} sent to this chat."
+
+    def _chatops_sendcontact(self, tail: str,
+                             message: Any) -> str:
+        """/sendcontact — share a contact card in THIS chat
+        (parity bundle #9): /sendcontact Name | +number.
+        The card is the saveable kind — name + number a
+        recipient adds to their own address book with one
+        tap (distinct from /addcontact, which saves into
+        YOUR Telegram contacts).  On the personal surfaces
+        the card goes out as the owner: the standing stop
+        gates it and a landed card journals
+        contact_shared."""
+        from ...social.chat.chatops import parse_sendcontact_args
+
+        svc, rec, adapter, platform, error = \
+            self._chatops_send_home(message, "sendcontact")
+        if error:
+            return error
+        personal = svc is not None
+        if personal and svc["registry"].owner_stopped(platform):
+            label = ("WhatsApp" if platform == "whatsapp"
+                     else "Telegram")
+            return (f"{label} is under your standing stop — "
+                    f"it stays halted until you start it "
+                    f"again; no card was shared.")
+        parsed = parse_sendcontact_args(tail)
+        if not parsed.get("ok"):
+            return str(parsed.get("error")
+                       or "bad contact shape")
+        result = self._chatops_call(
+            adapter.send_contact, message.chat,
+            parsed["phone"], parsed["name"])
+        ok, why, message_id = self._send_verdict(result)
+        if not ok:
+            return (f"couldn't share the contact card — "
+                    f"{why or 'the surface refused'}")
+        if personal:
+            svc["personal"].note_contact_shared(
+                platform, account_id=rec.id,
+                counterpart_id=str(
+                    getattr(message.chat, "key", "")
+                    or getattr(message.chat, "chat_id", "")),
+                source_id=message_id, name=parsed["name"],
+                phone=parsed["phone"])
+        return (f"contact card shared: {parsed['name']} · "
+                f"{parsed['phone']} — anyone in this chat "
+                f"can save it.")
 
     # ── tagging ──────────────────────────────────────────────
 

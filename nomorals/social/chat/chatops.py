@@ -48,6 +48,8 @@ __all__ = [
     "tg_privacy_pair_error",
     "format_tg_privacy_settings",
     "parse_makepoll_args",
+    "parse_sendloc_args",
+    "parse_sendcontact_args",
     "compose_group_status",
     "kind_for_chat_key",
 ]
@@ -66,6 +68,7 @@ CHATOPS_COMMANDS = frozenset({
     "viewonce", "vv",
     "joinlink", "newgroup", "newchannel", "leave",
     "myprofile", "privacy", "makepoll", "vcf", "addcontact",
+    "sendloc", "sendcontact",
 })
 
 #: Tagall pacing law: one message carries at most this many
@@ -340,6 +343,64 @@ def parse_makepoll_args(tail: str) -> dict[str, Any]:
             "/makepoll Question | Option | Option")}
     return {"ok": True, "question": question,
             "options": options, "multiple": multiple}
+
+
+def parse_sendloc_args(tail: str) -> dict[str, Any]:
+    """Parse /sendloc's tail: ``<lat>, <lng> [| Place name |
+    Address]`` — the coordinates comma- or space-separated,
+    then an optional place name and address as pipe segments
+    (a named place rides the platform's venue form; bare
+    coordinates drop a plain pin).  Shape problems come back
+    as ``error`` in words; the coordinate range rule itself
+    is base.location_shape_error's, shared with the adapters
+    and mirrored in the bridges."""
+    from .base import location_shape_error
+
+    parts = [p.strip() for p in str(tail or "").split("|")]
+    head = parts[0] if parts else ""
+    words = head.replace(",", " ").split()
+    if len(words) != 2:
+        return {"ok": False, "error": (
+            "usage: /sendloc latitude, longitude — e.g. "
+            "/sendloc 6.5244, 3.3792 — add '| Place name | "
+            "Address' to name the pin")}
+    try:
+        latitude = float(words[0])
+        longitude = float(words[1])
+    except ValueError:
+        return {"ok": False, "error": (
+            "usage: /sendloc latitude, longitude — e.g. "
+            "/sendloc 6.5244, 3.3792 — add '| Place name | "
+            "Address' to name the pin")}
+    problem = location_shape_error(latitude, longitude)
+    if problem:
+        return {"ok": False, "error": problem}
+    name = parts[1] if len(parts) > 1 else ""
+    address = parts[2] if len(parts) > 2 else ""
+    return {"ok": True, "latitude": latitude,
+            "longitude": longitude, "name": name,
+            "address": address}
+
+
+def parse_sendcontact_args(tail: str) -> dict[str, Any]:
+    """Parse /sendcontact's tail: ``Name | +number`` — the
+    /addcontact grammar, for the card form: the name before
+    the pipe, the number after it.  Shape problems come back
+    as ``error`` in words (base.contact_shape_error is the
+    shared rule)."""
+    from .base import contact_shape_error
+
+    name_part, sep, phone_part = str(tail or "").partition("|")
+    name = name_part.strip()
+    phone = phone_part.strip()
+    if not sep or not name or not phone:
+        return {"ok": False, "error": (
+            "usage: /sendcontact Name | +number — e.g. "
+            "/sendcontact Ada Lovelace | +2348000000000")}
+    problem = contact_shape_error(phone, name)
+    if problem:
+        return {"ok": False, "error": problem}
+    return {"ok": True, "name": name, "phone": phone}
 
 
 def compose_group_status(*, title: str, platform: str,

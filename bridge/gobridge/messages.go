@@ -51,6 +51,22 @@ func (r request) num(key string, def int) int {
 	return def
 }
 
+// flt reads a JSON number as float64.  The second return is
+// presence: coordinates are float-typed AND tri-state (an
+// absent latitude is not 0.0 — 0,0 is a real place in the
+// Gulf of Guinea, and a missing one is a shape error).
+func (r request) flt(key string) (float64, bool) {
+	switch v := r[key].(type) {
+	case float64:
+		return v, true
+	case string:
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f, true
+		}
+	}
+	return 0, false
+}
+
 func (r request) boolean(key string) bool {
 	v, _ := r[key].(bool)
 	return v
@@ -137,6 +153,10 @@ func (b *bridge) handleCommand(cc *clientConn, req request) {
 		b.cmdSendPoll(ctx, cc, id, req)
 	case "poll_results":
 		b.cmdPollResults(ctx, cc, id, req)
+	case "send_location":
+		b.cmdSendLocation(ctx, cc, id, req)
+	case "send_contact":
+		b.cmdSendContact(ctx, cc, id, req)
 	case "check_number":
 		b.cmdCheckNumber(ctx, cc, id, req)
 	case "chats":

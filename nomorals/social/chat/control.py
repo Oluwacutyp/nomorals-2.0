@@ -570,6 +570,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "makepoll": (1, None),    # /makepoll Question | Opt | Opt — a native poll in this chat
     "vcf": (0, None),         # /vcf — this group's people as a contacts (.vcf) file
     "addcontact": (0, None),  # /addcontact Name | +number — add to the Telegram account's contacts
+    "sendloc": (1, None),     # /sendloc lat, lng [| name | address] — a location pin in this chat
+    "sendcontact": (1, None), # /sendcontact Name | +number — share a contact card in this chat
     "tagall": (0, None),      # /tagall [text] — mention all (capped)
     "hidetag": (0, None),     # /hidetag [text] — mention all, hidden
     "antitag": (0, 1),        # /antitag [on|off] — mass-tag DM flags
@@ -2795,6 +2797,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/makepoll Question | Option | Option · /makepoll multi | Question | Option | Option",
               "example": "/makepoll Lunch today? | Pizza | Sushi",
               "related": "/pollres · /poll · /pair"},
+    "sendloc": {"what": "drop a location pin in this chat: bare coordinates send a plain pin; add a place name (and optionally its street address) and the pin goes out in the platform's named-place form — WhatsApp's location label, Telegram's venue. Works on every surface the command is run from: your personal WhatsApp, your personal Telegram, or a chat the bot sits in. Coordinates are degrees (latitude −90…90, longitude −180…180); a shape that is not a place refuses in words before anything is sent. On your personal surfaces the pin drops as you and lands in the personal journal. Owner only; your standing stop halts it there.",
+              "usage": "/sendloc latitude, longitude · /sendloc latitude, longitude | Place name | Address",
+              "example": "/sendloc 6.5244, 3.3792 | Lekki Phase 1 Gate | Admiralty Way, Lekki",
+              "related": "/sendcontact · /pair"},
+    "sendcontact": {"what": "share a contact card in this chat — the saveable kind: the person's name and number as a native card anyone in the chat can add to their own address book with one tap. Works on every surface the command is run from: your personal WhatsApp, your personal Telegram, or a chat the bot sits in. (Distinct from /addcontact, which saves a person into YOUR Telegram contacts instead of sharing a card outward.) A number that is not dialable shape (7–15 digits) refuses in words before anything is sent. On your personal surfaces the card goes out as you and lands in the personal journal. Owner only; your standing stop halts it there.",
+              "usage": "/sendcontact Name | +number",
+              "example": "/sendcontact Ada Lovelace | +2348000000000",
+              "related": "/addcontact · /vcf · /sendloc"},
     "vcf": {"what": "export a group's people as one import-ready contacts (.vcf) file — every person a card, their own number with their own name. The roster is assembled from every route Devon has and merged: on WhatsApp the bridge's group roster (its contact-store names included) plus her member ledger; on Telegram her member ledger, the bot's admin list, and the personal surface's member fetch — no single route is a gate. WhatsApp members addressed only by an anonymous LID whose number no store can resolve, and Telegram members whose number their own privacy settings hide, are counted in the reply and left out — a number is never invented, and a Telegram id is never dressed up as one. The reply counts people, cards written and people left out, and names the sources used. The manual shape (/vcf Name | +number, one person per line) makes cards for people who share no group with her. Owner anywhere; inside a group, the owner or a group admin — it hands out people's numbers, so it is never a public command. An export taken on a personal surface lands in the personal journal.",
               "usage": "/vcf (inside the group) · /vcf Group Name · /vcf Name | +number [| +number]",
               "example": "/vcf",
@@ -4449,7 +4459,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "statusreact", "poststatus", "chanstory", "channeltexts", "banchecker", "gcstatus", "statusinfo",
       "pollres", "tagall", "hidetag", "antitag", "viewonce", "vv",
       "joinlink", "newgroup", "newchannel", "leave",
-      "myprofile", "privacy", "makepoll", "vcf", "addcontact"]),
+      "myprofile", "privacy", "makepoll", "vcf", "addcontact",
+      "sendloc", "sendcontact"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
@@ -4718,6 +4729,8 @@ LIST_ONELINERS: dict[str, str] = {
     "privacy": "your WhatsApp or Telegram privacy settings — read or set one — /privacy [category value]",
     "addcontact": "add a person to your Telegram contacts by number — /addcontact Name | +number",
     "makepoll": "post a native WhatsApp poll in this chat — /makepoll Question | Option | Option",
+    "sendloc": "drop a location pin in this chat, named if you name it — /sendloc 6.5244, 3.3792 [| Place | Address]",
+    "sendcontact": "share a saveable contact card in this chat — /sendcontact Name | +number",
     "vcf": "export this group's people as a contacts file, each number with its name — /vcf",
     "tagall": "mention every member (chunked, capped at 100) — /tagall [text]",
     "hidetag": "mention every member, names hidden — /hidetag [text]",

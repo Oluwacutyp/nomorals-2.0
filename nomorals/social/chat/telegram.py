@@ -38,7 +38,7 @@ from typing import Any
 from ...core.errors import ValidationError
 from ...core.logging_setup import get_logger
 from ...core.text import safe_filename
-from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult
+from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult, contact_shape_error, location_shape_error
 from .platform_limits import for_platform
 from .failures import record_failure
 
@@ -4201,6 +4201,121 @@ class TelegramAdapter(ChatAdapter):
                               error=str(exc),
                               seconds=time.perf_counter() - started)
 
+    async def _send_input_media_coro(self, chat: ChatRef,
+                                     media: Any) -> Any:
+        """Send one pre-built InputMedia via SendMediaRequest
+        (the poll path's shape, shared by the location /
+        venue / contact verbs of parity bundle #9): the
+        message is extracted from the result's updates, and
+        a send that produces no message raises — unproven is
+        never success."""
+        import random as _random
+
+        from telethon.tl.functions.messages import SendMediaRequest
+
+        entity = await self._resolve(chat)
+        result = await self._client(SendMediaRequest(
+            peer=entity, media=media, message="",
+            random_id=_random.getrandbits(63)))
+        for upd in getattr(result, "updates", None) or []:
+            msg = getattr(upd, "message", None)
+            if msg is not None and getattr(msg, "id", None):
+                self._remember_sent(getattr(msg, "id", None))
+                return msg
+        raise ValueError("media send returned no message")
+
+    def _send_input_media(self, chat: ChatRef,
+                          media: Any) -> SendResult:
+        """The sync wrapper every InputMedia verb shares:
+        run the coro on the adapter loop, count the send,
+        and turn any raise into an honest SendResult."""
+        started = time.perf_counter()
+        try:
+            msg = self._run_on_loop(
+                self._send_input_media_coro(chat, media),
+                timeout=60.0)
+            self.stats["sent"] += 1
+            views = getattr(msg, "views", None)
+            return SendResult(
+                ok=True, platform=self.name,
+                message_id=str(getattr(msg, "id", "") or ""),
+                seconds=time.perf_counter() - started,
+                views=views if isinstance(views, int) else None)
+        except Exception as exc:  # noqa: BLE001
+            self.stats["send_errors"] += 1
+            return SendResult(ok=False, platform=self.name,
+                              error=str(exc),
+                              seconds=time.perf_counter() - started)
+
+    def send_location(self, chat: ChatRef, latitude: float,
+                      longitude: float) -> SendResult:
+        """Drop a static location pin via MTProto
+        (messages.sendMedia with InputMediaGeoPoint) —
+        parity bundle #9.  A bare geo point carries
+        coordinates only; a named place is send_venue."""
+        if self._client is None:
+            return SendResult(ok=False, platform=self.name,
+                              error="not connected")
+        problem = location_shape_error(latitude, longitude)
+        if problem:
+            return SendResult(ok=False, platform=self.name,
+                              error=problem)
+        from telethon.tl.types import InputGeoPoint, InputMediaGeoPoint
+
+        media = InputMediaGeoPoint(geo_point=InputGeoPoint(
+            lat=float(latitude), long=float(longitude)))
+        return self._send_input_media(chat, media)
+
+    def send_venue(self, chat: ChatRef, latitude: float,
+                   longitude: float, title: str,
+                   address: str = "") -> SendResult:
+        """Send a named place via MTProto InputMediaVenue
+        (parity bundle #9): the pin carries its title and
+        street address — Telegram's venue form."""
+        if self._client is None:
+            return SendResult(ok=False, platform=self.name,
+                              error="not connected")
+        problem = location_shape_error(latitude, longitude)
+        if problem:
+            return SendResult(ok=False, platform=self.name,
+                              error=problem)
+        title = str(title or "").strip()
+        if not title:
+            return SendResult(ok=False, platform=self.name,
+                              error="a venue needs the place's "
+                                    "title")
+        from telethon.tl.types import InputGeoPoint, InputMediaVenue
+
+        media = InputMediaVenue(
+            geo_point=InputGeoPoint(lat=float(latitude),
+                                    long=float(longitude)),
+            title=title, address=str(address or ""),
+            provider="", venue_id="", venue_type="")
+        return self._send_input_media(chat, media)
+
+    def send_contact(self, chat: ChatRef, phone: str, name: str,
+                     *, vcard: str = "") -> SendResult:
+        """Share a contact card via MTProto InputMediaContact
+        (parity bundle #9): phone + first/last name are the
+        type's own fields; a caller-supplied vCard rides
+        along when given."""
+        if self._client is None:
+            return SendResult(ok=False, platform=self.name,
+                              error="not connected")
+        problem = contact_shape_error(phone, name)
+        if problem:
+            return SendResult(ok=False, platform=self.name,
+                              error=problem)
+        words = str(name).strip().split(None, 1)
+        from telethon.tl.types import InputMediaContact
+
+        media = InputMediaContact(
+            phone_number=str(phone).strip(),
+            first_name=words[0],
+            last_name=words[1] if len(words) > 1 else "",
+            vcard=str(vcard or ""))
+        return self._send_input_media(chat, media)
+
     def channel_poll_results(self, chat: ChatRef,
                              message_id: str) -> dict[str, Any]:
         """Read a published poll's CURRENT results back from
@@ -6870,6 +6985,99 @@ class TelegramBotAdapter(ChatAdapter):
         started = time.perf_counter()
         try:
             result = self._api("sendPoll", **params)
+            mid = ""
+            if isinstance(result, dict):
+                mid = str(result.get("message_id") or "")
+            return SendResult(
+                ok=True, platform=self.name, message_id=mid,
+                seconds=time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001
+            return SendResult(ok=False, platform=self.name,
+                              error=str(exc)[:200],
+                              seconds=time.perf_counter() - started)
+
+    def send_location(self, chat: ChatRef, latitude: float,
+                      longitude: float) -> SendResult:
+        """Drop a static location pin via sendLocation
+        (parity bundle #9).  The Bot API's location carries
+        coordinates only — a named place is send_venue."""
+        problem = location_shape_error(latitude, longitude)
+        if problem:
+            return SendResult(ok=False, platform=self.name,
+                              error=problem)
+        started = time.perf_counter()
+        try:
+            result = self._api(
+                "sendLocation", chat_id=int(chat.chat_id),
+                latitude=float(latitude),
+                longitude=float(longitude))
+            mid = ""
+            if isinstance(result, dict):
+                mid = str(result.get("message_id") or "")
+            return SendResult(
+                ok=True, platform=self.name, message_id=mid,
+                seconds=time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001
+            return SendResult(ok=False, platform=self.name,
+                              error=str(exc)[:200],
+                              seconds=time.perf_counter() - started)
+
+    def send_venue(self, chat: ChatRef, latitude: float,
+                   longitude: float, title: str,
+                   address: str = "") -> SendResult:
+        """Send a named place via sendVenue (parity bundle
+        #9): the pin carries its title and street address —
+        Telegram's venue form."""
+        problem = location_shape_error(latitude, longitude)
+        if problem:
+            return SendResult(ok=False, platform=self.name,
+                              error=problem)
+        title = str(title or "").strip()
+        if not title:
+            return SendResult(ok=False, platform=self.name,
+                              error="a venue needs the place's "
+                                    "title")
+        started = time.perf_counter()
+        try:
+            result = self._api(
+                "sendVenue", chat_id=int(chat.chat_id),
+                latitude=float(latitude),
+                longitude=float(longitude), title=title,
+                address=str(address or ""))
+            mid = ""
+            if isinstance(result, dict):
+                mid = str(result.get("message_id") or "")
+            return SendResult(
+                ok=True, platform=self.name, message_id=mid,
+                seconds=time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001
+            return SendResult(ok=False, platform=self.name,
+                              error=str(exc)[:200],
+                              seconds=time.perf_counter() - started)
+
+    def send_contact(self, chat: ChatRef, phone: str, name: str,
+                     *, vcard: str = "") -> SendResult:
+        """Share a contact card via sendContact (parity
+        bundle #9): phone_number + first_name are the Bot
+        API's required fields; the rest of the name rides
+        last_name, and a caller-supplied vCard rides vcard."""
+        problem = contact_shape_error(phone, name)
+        if problem:
+            return SendResult(ok=False, platform=self.name,
+                              error=problem)
+        words = str(name).strip().split(None, 1)
+        params: dict[str, Any] = {
+            "chat_id": int(chat.chat_id),
+            "phone_number": str(phone).strip(),
+            "first_name": words[0],
+        }
+        if len(words) > 1:
+            params["last_name"] = words[1]
+        if str(vcard or "").strip():
+            params["vcard"] = str(vcard)
+        started = time.perf_counter()
+        try:
+            result = self._api("sendContact", **params)
             mid = ""
             if isinstance(result, dict):
                 mid = str(result.get("message_id") or "")

@@ -49,6 +49,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -58,6 +59,7 @@ import (
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 )
 
 // ── profile / privacy ────────────────────────────────────────
@@ -688,4 +690,130 @@ func (b *bridge) cmdPollResults(ctx context.Context, cc *clientConn, id string, 
 	}
 	out["ok"] = true
 	b.reply(cc, id, out)
+}
+
+// ── location + contact cards (parity bundle #9) ─────────────
+//
+// The census graded both ABSENT on WhatsApp: no location or
+// contact message type existed in either bridge's send path.
+// Both are plain waE2E messages on this engine — a
+// LocationMessage (degrees + the name/address label fields,
+// which are also WhatsApp's venue form) and a ContactMessage
+// (display name + the vCard text recipients' phones parse).
+// Shape rules refuse BEFORE traffic, mirroring the Python
+// adapter's (base.location_shape_error / contact_shape_error)
+// — one rule, stated in each layer that can be reached
+// without the other.
+
+// pinClient is the slice of *whatsmeow.Client the pin/card
+// verbs ride — just SendMessage, like the poll send.
+type pinClient interface {
+	SendMessage(ctx context.Context, to types.JID,
+		message *waE2E.Message,
+		extra ...whatsmeow.SendRequestExtra,
+	) (whatsmeow.SendResponse, error)
+}
+
+func locationShapeError(lat, lon float64, hasLat, hasLon bool) string {
+	if !hasLat || !hasLon {
+		return "a location pin needs numeric latitude and longitude"
+	}
+	if math.IsNaN(lat) || math.IsNaN(lon) ||
+		math.IsInf(lat, 0) || math.IsInf(lon, 0) {
+		return "a location pin's coordinates must be finite numbers"
+	}
+	if lat < -90 || lat > 90 {
+		return "a location pin needs latitude between -90 and 90"
+	}
+	if lon < -180 || lon > 180 {
+		return "a location pin needs longitude between -180 and 180"
+	}
+	return ""
+}
+
+func buildLocationMessage(lat, lon float64, name, address string) *waE2E.Message {
+	loc := &waE2E.LocationMessage{
+		DegreesLatitude:  proto.Float64(lat),
+		DegreesLongitude: proto.Float64(lon),
+	}
+	if strings.TrimSpace(name) != "" {
+		loc.Name = proto.String(name)
+	}
+	if strings.TrimSpace(address) != "" {
+		loc.Address = proto.String(address)
+	}
+	return &waE2E.Message{LocationMessage: loc}
+}
+
+func contactCardError(name, vcard string) string {
+	if strings.TrimSpace(name) == "" {
+		return "a contact card needs a display name"
+	}
+	if strings.TrimSpace(vcard) == "" {
+		return "a contact card needs a vcard — it is what the recipient's phone parses"
+	}
+	return ""
+}
+
+func buildContactMessage(name, vcard string) *waE2E.Message {
+	return &waE2E.Message{ContactMessage: &waE2E.ContactMessage{
+		DisplayName: proto.String(name),
+		Vcard:       proto.String(vcard),
+	}}
+}
+
+func sendPin(ctx context.Context, cli pinClient,
+	chat types.JID, msg *waE2E.Message) (types.MessageID, error) {
+	resp, err := cli.SendMessage(ctx, chat, msg)
+	if err != nil {
+		return "", err
+	}
+	return resp.ID, nil
+}
+
+func (b *bridge) cmdSendLocation(ctx context.Context, cc *clientConn, id string, req request) {
+	chat, err := parseJID(req.str("chat"))
+	if err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	lat, hasLat := req.flt("latitude")
+	lon, hasLon := req.flt("longitude")
+	if msg := locationShapeError(lat, lon, hasLat, hasLon); msg != "" {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": msg})
+		return
+	}
+	msgID, err := sendPin(ctx, b.cli, chat,
+		buildLocationMessage(lat, lon, req.str("name"),
+			req.str("address")))
+	if err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	b.reply(cc, id, map[string]any{"ok": true,
+		"message_id": string(msgID)})
+}
+
+func (b *bridge) cmdSendContact(ctx context.Context, cc *clientConn, id string, req request) {
+	chat, err := parseJID(req.str("chat"))
+	if err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	name := strings.TrimSpace(req.str("name"))
+	vcard := req.str("vcard")
+	if msg := contactCardError(name, vcard); msg != "" {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": msg})
+		return
+	}
+	msgID, err := sendPin(ctx, b.cli, chat,
+		buildContactMessage(name, vcard))
+	if err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	b.reply(cc, id, map[string]any{"ok": true,
+		"message_id": string(msgID)})
 }
