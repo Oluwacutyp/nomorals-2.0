@@ -2719,7 +2719,14 @@ class RenderedTab:
     def reload(self, *, wait_until: str = "domcontentloaded",
                timeout: int = 60_000) -> dict[str, Any]:
         """Reload the current page (retries a flaky load, refreshes
-        session-gated content)."""
+        session-gated content).
+
+        THE reload for this class (audit F13): a second, simpler
+        definition once shadowed this one, so keyword callers (the
+        daemon's r_reload op) raised TypeError and no-arg callers got
+        a navigate instead of a reload. No-arg callers — the challenge
+        ladder's retry rung, the takeover adapter — use the defaults.
+        """
         page = self._require_loaded()
         wait_until = (wait_until or "domcontentloaded").strip().lower()
         if wait_until not in _GOTO_WAIT_UNTIL:
@@ -2763,10 +2770,6 @@ class RenderedTab:
             raise self._action_error("back", exc) from exc
         return self._after_navigation(page, before,
                                       f"went back to {self.url}")
-
-    def reload(self) -> None:
-        """Reload the current URL (challenge-ladder retry rung)."""
-        self.navigate(self.url)
 
     # -- form intelligence ---------------------------------------------------------
     def candidates(self, name: str, limit: int = 5) -> dict[str, Any]:

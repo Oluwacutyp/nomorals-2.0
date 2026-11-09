@@ -35,12 +35,12 @@ Each applied fix is committed to git separately so it's reversible.
 from __future__ import annotations
 
 import ast
-import concurrent.futures as _cf
 import os
 import re
 import subprocess
 import sys
 import textwrap
+import threading
 import traceback
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -128,6 +128,152 @@ class ProbeReport:
     loc: str
     timed_out: bool = False
     elapsed: float = 0.0
+    #: True when this report is a cooldown answer, not a fresh probe:
+    #: the kind timed out recently and was not re-run (see F14 below).
+    backed_off: bool = False
+
+
+# ---------------------------------------------------------------------------
+# probe supervision (audit F14) — the timeout bounds the CALLER, not
+# just the report.
+#
+# The old shape ran the command on a ThreadPoolExecutor inside a
+# ``with`` block: on timeout the future was cancelled, but leaving the
+# ``with`` JOINED the worker — so the caller waited for the hung
+# command anyway, and a command that never returns blocked the healer
+# (and, via the executor's atexit thread join, process shutdown)
+# indefinitely while the report already claimed ``timed_out``.
+#
+# The contract now:
+# - the command runs on a dedicated DAEMON thread and the caller waits
+#   at most ``_PROBE_TIMEOUT`` for it. A thread cannot be killed, so a
+#   hung command keeps running detached — but it stops blocking the
+#   healer, and being a daemon it can never block process exit.
+# - outstanding probe threads are BUDGETED (:func:`_probe_budget`).
+#   A hung command holds its slot until it actually returns; when the
+#   budget is spent, a new probe fails fast with the machinery report
+#   instead of queueing another unbounded worker.
+# - a kind that just timed out is BACKED OFF for ``_PROBE_COOLDOWN_S``:
+#   re-probing a hung command back-to-back would burn another timeout
+#   (and another slot) every tour for the same answer. The cooldown
+#   answer keeps the timed_out verdict — the terminal honest state for
+#   a hang — and is marked ``backed_off`` so nobody mistakes it for a
+#   fresh probe.
+# ---------------------------------------------------------------------------
+
+_PROBE_MAX_OUTSTANDING = 4
+_PROBE_COOLDOWN_S = 300.0
+
+_probe_lock = threading.Lock()
+_probe_outstanding = 0
+_probe_cooldowns: dict[str, float] = {}
+
+
+class _ProbeMachineryError(Exception):
+    """The probe machinery itself failed (spawn refused, budget spent).
+
+    Carries the original error so the report names it exactly. The
+    command was never probed, so this is always the report-only shape:
+    broken with ``exc=None``, never auto-fixed.
+    """
+
+    def __init__(self, orig: BaseException):
+        super().__init__(str(orig))
+        self.orig = orig
+
+
+def _probe_budget() -> int:
+    """Max simultaneously-outstanding probe threads.
+
+    ``NM_HEAL_PROBE_MAX_OUTSTANDING`` wins when set to a positive int.
+    On Termux — where pools are off and fork is unreliable — probing
+    is strictly serial (1): a phone never accumulates detached hung
+    commands behind the healer's back.
+    """
+    raw = os.environ.get("NM_HEAL_PROBE_MAX_OUTSTANDING", "")
+    try:
+        n = int(raw)
+        if n >= 1:
+            return n
+    except (TypeError, ValueError):
+        pass
+    try:
+        from .profile import is_termux
+        if is_termux():
+            return 1
+    except Exception:  # noqa: BLE001 - detection never breaks probing
+        pass
+    return _PROBE_MAX_OUTSTANDING
+
+
+def _start_probe_thread(target) -> threading.Thread:
+    """Create + start the daemon probe worker.
+
+    The machinery seam: if this raises, the command was never probed
+    and the caller reports machinery failure (never "healthy").
+    """
+    thread = threading.Thread(target=target, daemon=True,
+                              name="heal-probe")
+    thread.start()
+    return thread
+
+
+def _run_probe_command(fn, kind: str, timeout: float):
+    """Run ``fn`` under the probe supervision contract.
+
+    Returns ``(status, payload)``: ``("reply", value)``,
+    ``("error", exception)``, or ``("timeout", backed_off)``.
+    Raises :class:`_ProbeMachineryError` when the probe could not
+    run at all.
+    """
+    import time as _time
+    global _probe_outstanding
+    now = _time.monotonic()
+    with _probe_lock:
+        # Prune expired cooldowns so the map stays catalog-sized.
+        for k in [k for k, until in _probe_cooldowns.items()
+                  if until <= now]:
+            del _probe_cooldowns[k]
+        until = _probe_cooldowns.get(kind)
+        if until is not None and until > now:
+            return ("timeout", True)
+        if _probe_outstanding >= _probe_budget():
+            raise _ProbeMachineryError(RuntimeError(
+                f"probe budget exhausted: {_probe_outstanding} probe "
+                "thread(s) still running — hung commands hold their "
+                "slots until they return"))
+        _probe_outstanding += 1
+
+    box: dict[str, Any] = {}
+    done = threading.Event()
+
+    def _target():
+        global _probe_outstanding
+        try:
+            box["reply"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - ferried to the caller
+            box["error"] = exc
+        finally:
+            with _probe_lock:
+                _probe_outstanding -= 1
+            done.set()
+
+    try:
+        _start_probe_thread(_target)
+    except Exception as exc:  # noqa: BLE001 - spawn failure is machinery
+        with _probe_lock:
+            _probe_outstanding -= 1
+        raise _ProbeMachineryError(exc) from exc
+
+    if not done.wait(timeout):
+        with _probe_lock:
+            _probe_cooldowns[kind] = _time.monotonic() + _PROBE_COOLDOWN_S
+        return ("timeout", False)
+    with _probe_lock:
+        _probe_cooldowns.pop(kind, None)
+    if "error" in box:
+        return ("error", box["error"])
+    return ("reply", box.get("reply"))
 
 
 def _probe_inner(handle_control, kind: str, chat_key: str = "") -> ProbeReport:
@@ -139,39 +285,45 @@ def _probe_inner(handle_control, kind: str, chat_key: str = "") -> ProbeReport:
         return handle_control(f"/{kind}", chat_key, message=None)
 
     try:
-        with _cf.ThreadPoolExecutor(max_workers=1,
-                                     thread_name_prefix="heal") as _ex:
-            fut = _ex.submit(_run)
-            try:
-                reply = fut.result(timeout=_PROBE_TIMEOUT)
-            except _cf.TimeoutError:
-                fut.cancel()
-                elapsed = _time.monotonic() - start
-                # A hung command IS a finding — report it distinctly instead
-                # of the old "slow → not our problem" shrug.
-                return ProbeReport(broken=True, exc=None, err="",
-                                   loc="",
-                                   timed_out=True, elapsed=elapsed)
-            except Exception as exc:  # noqa: BLE001 - captured, not raised
-                err = f"{type(exc).__name__}: {exc}"
-                loc = ""
-                frames = _safe(lambda: traceback.extract_tb(exc.__traceback__))
-                if frames:
-                    loc = (f"{frames[-1].filename.split('/')[-1]}:"
-                           f"{frames[-1].lineno}")
-                return ProbeReport(broken=True, exc=exc, err=err, loc=loc,
-                                   elapsed=_time.monotonic() - start)
+        status, payload = _run_probe_command(_run, kind, _PROBE_TIMEOUT)
+    except _ProbeMachineryError as mex:
+        # The probe MACHINERY failed (spawn, budget) — the command was
+        # never actually probed, so "healthy" would be a lie on the
+        # heal decision surface. Report broken with exc=None: the
+        # report-only shape (never auto-fixed — there is no command
+        # exception to fix from; the caller reports).
+        orig = mex.orig
+        return ProbeReport(
+            broken=True, exc=None,
+            err=(f"probe machinery failed: "
+                 f"{type(orig).__name__}: {orig}"),
+            loc="", elapsed=_time.monotonic() - start)
     except Exception as exc:  # noqa: BLE001 - the probe itself must never die
-        # The probe MACHINERY failed (executor, submit machinery) —
-        # the command was never actually probed, so "healthy" would
-        # be a lie on the heal decision surface. Report broken with
-        # exc=None: the report-only shape (never auto-fixed — there
-        # is no command exception to fix from; the caller reports).
         return ProbeReport(
             broken=True, exc=None,
             err=(f"probe machinery failed: "
                  f"{type(exc).__name__}: {exc}"),
             loc="", elapsed=_time.monotonic() - start)
+    if status == "timeout":
+        # A hung command IS a finding — report it distinctly instead
+        # of the old "slow → not our problem" shrug. The caller waited
+        # at most the probe timeout to learn this (F14).
+        return ProbeReport(broken=True, exc=None, err="", loc="",
+                           timed_out=True, backed_off=bool(payload),
+                           elapsed=_time.monotonic() - start)
+    if status == "error":
+        exc = payload
+        if not isinstance(exc, Exception):
+            raise exc  # SystemExit & co. propagate, as they always have
+        err = f"{type(exc).__name__}: {exc}"
+        loc = ""
+        frames = _safe(lambda: traceback.extract_tb(exc.__traceback__))
+        if frames:
+            loc = (f"{frames[-1].filename.split('/')[-1]}:"
+                   f"{frames[-1].lineno}")
+        return ProbeReport(broken=True, exc=exc, err=err, loc=loc,
+                           elapsed=_time.monotonic() - start)
+    reply = payload
     # Like the tour: a reply is only healthy if it is a real answer.
     # The probe used to discard the reply, so a registered command
     # answering "unknown command /<kind>" (dispatch gap) or nothing at
@@ -772,11 +924,24 @@ def _heal_one_inner(handle_control, kind, chat_key, dry_run, res, intelligence):
         # A hung command is a finding with its own report — not "healthy",
         # and never auto-fixed (we don't know WHY it hangs).
         res.broken = True
-        res.error = (f"probe timed out after {report.elapsed:.1f}s — "
-                     f"/{kind} hangs")
         res.fixable = False
-        res.skip_reason = ("probe timed out — the command hangs; no safe "
-                           "auto-fix for hangs, investigate the blocking call")
+        if report.backed_off:
+            # Cooldown answer (F14): the kind timed out recently and
+            # was NOT re-probed — say so, never dress it as a fresh
+            # timeout or as progress toward a fix.
+            res.error = (f"probe of /{kind} backed off — it timed out "
+                         "recently and is in cooldown; the command "
+                         "hangs")
+            res.skip_reason = ("probe in cooldown after a recent "
+                               "timeout — the command hangs; no safe "
+                               "auto-fix for hangs, investigate the "
+                               "blocking call")
+        else:
+            res.error = (f"probe timed out after {report.elapsed:.1f}s — "
+                         f"/{kind} hangs")
+            res.skip_reason = ("probe timed out — the command hangs; "
+                               "no safe auto-fix for hangs, investigate "
+                               "the blocking call")
         res.suggestion = ("The command did not return within "
                           f"{_PROBE_TIMEOUT:.0f}s. Look for a blocking call "
                           "without a timeout (network I/O, locks, joins).")

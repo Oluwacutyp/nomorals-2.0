@@ -405,18 +405,35 @@ def _expand_test_files(root: Path, targets: list[str] | None) -> list[str]:
 
 def _is_dir_target(root: Path, targets: list[str] | None) -> bool:
     return bool(targets) and any((root / t).is_dir() for t in targets)
+
+
+def _path_to_module(path: str) -> str:
     """``tests/test_mod.py`` -> ``tests.test_mod``.
 
     pytest accepts file paths on its command line; ``python -m unittest``
     needs dotted module names.  The changed-only selector returns paths,
     so the unittest fallback converts them.
+
+    Node selectors convert too: ``tests/test_mod.py::TestX::test_y``
+    -> ``tests.test_mod.TestX.test_y``.  A parametrized selector's
+    ``[param]`` suffix has no unittest spelling — it is dropped, so
+    unittest runs the whole method (a superset of the selection); a
+    file of plain pytest-style functions still collects zero under
+    unittest and the caller reports that honestly as nothing-ran
+    (see :func:`_run_unittest`).
     """
     p = path.replace("\\", "/")
-    while p.startswith("./"):
-        p = p[2:]
-    if p.endswith(".py"):
-        p = p[:-3]
-    return p.replace("/", ".")
+    head, *nodes = p.split("::")
+    while head.startswith("./"):
+        head = head[2:]
+    if head.endswith(".py"):
+        head = head[:-3]
+    dotted = head.replace("/", ".")
+    for node in nodes:
+        node = node.split("[", 1)[0].strip()
+        if node:
+            dotted = f"{dotted}.{node}" if dotted else node
+    return dotted
 
 
 def _unittest_cmd(root: Path,
@@ -470,10 +487,14 @@ def _run_unittest(root: Path, paths: list[str] | None,
     passed = 0
     pm = re.search(r"Ran (\d+) tests?", out)
     ran = int(pm.group(1)) if pm else 0
-    if ran == 0 and proc.returncode == 0:
+    if ran == 0 and (proc.returncode == 0 or "NO TESTS RAN" in out):
         # nothing collected (e.g. pytest-style test functions with no
         # pytest installed): honest skip, not a failure — mirrors the
-        # pytest exit-5 handling above.
+        # pytest exit-5 handling above. Newer unittest also exits 5
+        # with "NO TESTS RAN" for an empty selection; that is the
+        # same signal, not a failure. (A module that fails to LOAD
+        # still reports ran >= 1 with an error, so this cannot mask
+        # a real breakage.)
         return {"ok": True, "passed": 0, "failed": [], "errors": 0,
                 "seconds": round(time.perf_counter() - t0, 2),
                 "selected": paths or ["tests"], "runner": "unittest",

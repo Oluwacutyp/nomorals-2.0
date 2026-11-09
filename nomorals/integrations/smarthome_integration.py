@@ -713,7 +713,7 @@ class SmartHomeIntegration:
                            media_content_type: str = "",
                            media_content_id: str = "") -> Any:
         """Browse a media_player's library (media_player.browse_media)."""
-        entity_id = await self._resolve_entity_id(device_id_or_name,
+        entity_id = await self._resolve_entity_id(entity_id_or_name,
                                                   domain="media_player")
         return await self.call_service(
             "media_player", "browse_media", entity_id=entity_id,

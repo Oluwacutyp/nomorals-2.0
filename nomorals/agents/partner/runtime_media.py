@@ -8,8 +8,11 @@ import os
 import re
 from typing import Any
 
+from ...core.logging_setup import get_logger
 from ...search.adaptive import adaptive_result_limit
 from .failures import record_failure
+
+_log = get_logger(__name__)
 
 _AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac",
                ".wav"}

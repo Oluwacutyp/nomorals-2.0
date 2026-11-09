@@ -15,8 +15,6 @@ behavior; see SURVEY.md in the tail-72 verify dir):
 - 858 heal_all outer guard: loop failure -> partial results, never raises
 """
 
-import types
-
 import nomorals.core.error_intelligence as ei
 from nomorals.core import self_heal as sh
 
@@ -39,24 +37,26 @@ def test_safe_returns_default_on_failure():
 # --------------------------------------------------------------------- 164
 def test_probe_machinery_failure_reports_broken_not_healthy(monkeypatch):
     """CONVERTED (tail-72 parent amendment): if the probe machinery
-    itself dies (here the ThreadPoolExecutor constructor raises), the
+    itself dies (here the probe-thread spawn raises), the
     command was never probed — reporting healthy would be a lie on
     the module's central decision surface. The honest shape is the
     module's own report-only one: broken=True with exc=None (never
     auto-fixed; the caller reports) and the machinery failure named
-    in err. "Never raises" still holds."""
+    in err. "Never raises" still holds.
+
+    Batch E (F14) moved the injection seam: the probe no longer runs
+    on a ThreadPoolExecutor (its ``with``-block join was the F14
+    defect), so the machinery failure is injected at the daemon-thread
+    spawn — the report contract asserted below is byte-identical."""
     made = []
 
-    class RaisingTP:
-        def __init__(self, *a, **k):
-            made.append((a, k))
-            raise RuntimeError("no threads")
+    def raising_start(target):
+        made.append(target)
+        raise RuntimeError("no threads")
 
-    fake_cf = types.SimpleNamespace(
-        ThreadPoolExecutor=RaisingTP, TimeoutError=sh._cf.TimeoutError)
-    monkeypatch.setattr(sh, "_cf", fake_cf)
+    monkeypatch.setattr(sh, "_start_probe_thread", raising_start)
     rep = sh._probe_inner(lambda *a, **k: "fine", "whatever")
-    assert made  # the executor construction was attempted (control)
+    assert made  # the probe-thread spawn was attempted (control)
     assert rep.broken is True
     assert rep.exc is None  # report-only: no exception to auto-fix from
     assert rep.err == "probe machinery failed: RuntimeError: no threads"
