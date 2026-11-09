@@ -87,6 +87,9 @@ __all__ = [
     "EXCLUDED_TABLES",
     "PORTED_TABLES",
     "PORT_RESIDUE",
+    "PINNED_DOMAINS",
+    "PINNED_TABLES",
+    "pinned_domains",
     "decode_value",
     "document_to_row",
     "TableMapping",
@@ -128,15 +131,17 @@ EXCLUDED_TABLES: dict[str, str] = {
         "sqlite-internal AUTOINCREMENT counter; Mongo _ids carry the "
         "identity it tracked"),
     "work_queue": (
-        "coordination residue: atomic claim/lease semantics port in P4 "
-        "(findOneAndUpdate), not bulk carry — carrying rows would move "
-        "lease state, not data"),
+        "coordination: bulk carry stays excluded — a job row's lease "
+        "fields are live coordination state, not data to move (the "
+        "live claim path itself ported to the seam in P4; see "
+        "PORTED_TABLES)"),
     "schedule_jobs": (
-        "coordination residue: scheduler claim/lease port is P4, same "
-        "reason as work_queue"),
+        "coordination: bulk carry stays excluded, same reason as "
+        "work_queue (the seam claim book is P4; the live scheduler "
+        "path's disposition is in PORT_RESIDUE)"),
     "schedule_runs": (
-        "scheduler run log of the coordination residue — moves with "
-        "schedule_jobs in P4"),
+        "scheduler run log of the coordination tables — bulk carry "
+        "stays excluded with schedule_jobs"),
     "docstore_docs": (
         "the document seam's own SQLite-rung table: its Mongo "
         "counterpart is written by the seam itself (shadow parity), "
@@ -429,20 +434,18 @@ PORTED_TABLES: dict[str, str] = {
     "trade_journal": "tools/trading.py",
     "paper_sessions": "tools/trading.py",
     "live_unlocks": "tools/trading.py",
+    # Coordination (P4): the claim path itself — every WorkQueue
+    # operation runs over the seam when a store is attached, the
+    # claim a single cas on the job document (storage/queue.py).
+    "work_queue": "storage/queue.py (WorkQueue seam path, P4)",
 }
 
 #: P3-domain tables whose live path stays on native SQL, with reasons.
 PORT_RESIDUE: dict[str, str] = {
-    # ── Memory & cognition: the MemoryManager core is recall-coupled.
-    "memories": (
-        "recall-coupled core: writes are owned by storage/repository.py "
-        "(Repository/Query), the lexical lane is FTS5 keyed on the SQLite "
-        "rowid (P4 residue by census), and the semantic lane is "
-        "VectorStore — porting CRUD alone would fork the write path from "
-        "the recall path, the split the program forbids; ports with the "
-        "FTS/vector story, not in P3"),
-    "memory_links": "written/read with the memories recall core (same residue)",
-    "memory_archive": "archive of the memories core (same residue)",
+    # ── Memory & cognition. The recall core itself (memories and its
+    # riders) is SQLite-PINNED by design since P4 — see PINNED_DOMAINS
+    # below; what remains here is cognition that ports with its own
+    # domain in a later pass.
     "devon_memory": (
         "the autonomy loop's own observation journal, written inside "
         "agents/devon.py's composed turn transactions (observation + "
@@ -454,54 +457,28 @@ PORT_RESIDUE: dict[str, str] = {
     "lesson_surfacings": "cognition-layer writers (same reason as facts)",
     "reflections": "cognition-layer writers (same reason as facts)",
     "relationship": "cognition-layer writers (same reason as facts)",
-    "mood_state": "memory/cadence.py reads/writes ride the memories table's metadata (recall-coupled core residue)",
-    "mood_history": "memory/cadence.py (same reason as mood_state)",
     "cognition_log": "cognition-layer writers (same reason as facts)",
     "coremind_telemetry": "router telemetry persists via storage/router_telemetry.py's KV-style rows — it inherits the KV port's rung, not a table port",
-    "embeddings": "VectorStore's tables: census keeps vectors in VectorStore (backends already plural); P4 confirms",
     "kg_nodes": "knowledge-graph organ (agents/kg.py) over graph-shaped queries + the embeddings lane; ports with the cognition/graph story, not the document-fit pass",
     "kg_edges": "knowledge-graph organ (same reason as kg_nodes)",
     "side_chats": "no live code path at this commit: the migrations table is vestigial — the feature is implemented by SideChatManager over its runtime threads/thread_messages tables, which ARE ported; data carries via P2",
-    "price_snapshots": "name collision between two incompatible schemas: migrations define the marketplace shape (id/listing_id/snapshot_at, no live writer) while integrations/naija_shopping.py declares a runtime table of the same name with a composite (product_url, timestamp) key and different columns — its CREATE TABLE IF NOT EXISTS is a no-op in a migrated database, so the engine's writes target a shape that does not exist there; the seam ports neither shape until the collision itself is resolved (composite keys are also outside the seam's single-column-PK mapping)",
-    # ── Games & arena: one transactional state graph.
-    "game_players": "games/arena transactional core: see game_settlements",
-    "game_rooms": "games/arena transactional core: see game_settlements",
-    "game_sessions": "games/arena transactional core: see game_settlements",
-    "game_stats": "games/arena transactional core: written both by the transactional core (players/engine) and the achievements crust — a partial port would split this one table across two authoritative stores",
-    "game_wallet": "games/arena transactional core: see game_settlements",
-    "game_gear": "games/arena transactional core: see game_settlements",
-    "game_skills": "games/arena transactional core: see game_settlements",
-    "game_titles": "games/arena transactional core: see game_settlements",
-    "game_invites": "games/arena transactional core: see game_settlements",
-    "game_relays": "games/arena transactional core: see game_settlements",
-    "game_identity_names": "games/arena transactional core: see game_settlements",
-    "game_settlements": (
-        "DECLARED RESIDUE (whole games/arena domain): settlement, wallet, "
-        "ledger, gear, gifts and rating state compose multi-table "
-        "transactions with exactly-once guarantees hardened in Batch B "
-        "and the games-hardening pass; the seam advertises "
-        "multi_doc_transactions=False on Mongo, so a document port now "
-        "would silently weaken those guarantees. Ports with a "
-        "transaction-story pass (the P4 pattern), not the document-fit "
-        "pass"),
-    "game_ledger": "games/arena transactional core: see game_settlements",
-    "game_gems": "games/arena transactional core: see game_settlements",
-    "game_gifts": "games/arena transactional core: see game_settlements",
-    "game_elo": "games/arena transactional core: see game_settlements",
-    "game_glicko": "games/arena transactional core: see game_settlements",
-    "game_counters": "games/arena transactional core: see game_settlements",
-    "game_attributes": "games/arena transactional core: see game_settlements",
-    "arena_builds": "games/arena transactional core: see game_settlements",
-    "arena_scores": "games/arena transactional core: see game_settlements",
-    "arena_knowledge": "games/arena transactional core: see game_settlements",
-    "arena_stream": "games/arena transactional core: see game_settlements",
-    "arena_activity": "games/arena transactional core: see game_settlements",
-    "leaderboards": "written by games/achievements.py together with game_stats (same split-table reason as game_stats)",
+    "price_snapshots": "the migrations marketplace shape (id/listing_id/snapshot_at). The P4 collision resolution: this shape has NO live writer or reader at this commit, and the live shopping engine — whose incompatible runtime shape previously claimed this name and broke against migrated databases — now owns its own table (naija_price_snapshots in integrations/naija_shopping.py, legacy engine-shaped data renamed over at first construction). The frozen migration DDL keeps this table's name; nothing ports until a marketplace writer for this shape exists (its composite-key sibling shape was also outside the seam's single-column-PK mapping)",
+    # ── Coordination (P4): the claim semantics are ported (the work
+    # queue wholesale — see PORTED_TABLES; the scheduler's claim book
+    # in storage/schedule_claim.py). The live Scheduler's own path
+    # stays native in P4 for the reason recorded here.
+    "schedule_jobs": (
+        "claim book ported to the seam (storage/schedule_claim.py: "
+        "cas claim + token-fenced completion over schedule_jobs / "
+        "schedule_runs documents, proven on both rungs); the live "
+        "agents/scheduler.py path stays on native SQL in P4 — its "
+        "claim is single-process by design (in-process active set + "
+        "per-tick pool) and five other modules read/write these "
+        "tables natively, so a claim-only seam wiring would fork the "
+        "record between two stores; the wholesale scheduler domain "
+        "port is a later pass"),
+    "schedule_runs": "the claim book's history collection (same disposition as schedule_jobs)",
     "cards": "games-domain table with no live writer at this commit; data carries via P2 — nothing to port until a writer exists",
-    "progression_unlocks": "games achievements crust: writes land together with game_stats/achievements in one flow (same split-table reason as game_stats)",
-    "achievements": "games achievements crust (same reason as progression_unlocks)",
-    "achievement_progress": "games achievements crust (same reason as progression_unlocks)",
-    "achievement_showcase": "games achievements crust (same reason as progression_unlocks)",
     # ── Research & web: no live path exists at this commit.
     "web_pages": "no live code path at this commit (superseded by page_cache); data carries via P2 — nothing to port",
     "research_loop_runs": "agents/research_loop.py records runs inside its composed loop transactions (KV + run row + ledger move together); ports with the agents domain, not P3",
@@ -513,6 +490,131 @@ PORT_RESIDUE: dict[str, str] = {
     "finance_accounts": "no live code path at this commit; data carries via P2 — nothing to port",
     "price_watches": "no live code path at this commit; data carries via P2 — nothing to port",
 }
+
+
+# ── SQLite-pinned domains (Mongo program P4) ─────────────────────────────
+#
+# PORT_RESIDUE means "not ported YET — a later pass owns it". The
+# domains below are different: they are pinned to the SQLite rung BY
+# DESIGN, a terminal disposition unless a future program reopens them
+# with a parity story of their own. Pinning is a first-class state,
+# recorded here and surfaced by storage_backend_status, so "which
+# domains still live on SQLite when Mongo is primary" is a queryable
+# fact rather than tribal knowledge. The SQLite file therefore stays
+# alive, migrated and backed up on every install, whatever the
+# configured backend — pinned domains read it directly and no code
+# path may look for their data in Mongo.
+
+#: The named seam gap the games pin rests on.
+_GAMES_PIN_REASON = (
+    "settlement is one atomic state graph: plan row + every wallet / "
+    "ledger / progression credit + the applied flip commit in ONE "
+    "transaction, and the games-hardening suite pins the abort "
+    "semantics — a mid-settle failure leaves every player's balance "
+    "and counters at their pre-settle values (partial application is "
+    "invisible). The seam's gap, named: it offers atomic "
+    "SINGLE-document operations only (multi_doc_transactions=False "
+    "on the Mongo rung); a per-leg protocol on it gives exactly-once "
+    "COMPLETION (a crash mid-settle leaves earlier legs visible until "
+    "a recovery sweep finishes the rest), which observably fails the "
+    "pinned abort semantics. Demonstrated, not asserted: the P4 "
+    "suite runs a minimal leg applier over both seam rungs and shows "
+    "the partial state a crash leaves behind")
+
+#: Domains pinned to the SQLite rung by design (P4).
+PINNED_DOMAINS: dict[str, dict[str, Any]] = {
+    "games-arena": {
+        "owner": "games/engine.py + games/settlement.py (SettlementStore)",
+        "reason": _GAMES_PIN_REASON,
+        "tables": [
+            "game_players", "game_rooms", "game_sessions", "game_stats",
+            "game_wallet", "game_gear", "game_skills", "game_titles",
+            "game_invites", "game_relays", "game_identity_names",
+            "game_settlements", "game_ledger", "game_gems", "game_gifts",
+            "game_elo", "game_glicko", "game_counters", "game_attributes",
+            "arena_builds", "arena_scores", "arena_knowledge",
+            "arena_stream", "arena_activity",
+            "leaderboards", "progression_unlocks", "achievements",
+            "achievement_progress", "achievement_showcase",
+        ],
+        "table_notes": {
+            "game_stats": "written both by the transactional core and the achievements crust — one table, one store",
+            "leaderboards": "written by games/achievements.py together with game_stats",
+            "progression_unlocks": "games achievements crust: writes land together with game_stats/achievements in one flow",
+            "achievements": "games achievements crust (same flow as progression_unlocks)",
+            "achievement_progress": "games achievements crust (same flow as progression_unlocks)",
+            "achievement_showcase": "games achievements crust (same flow as progression_unlocks)",
+        },
+    },
+    "memory-recall": {
+        "owner": "memory/manager.py (MemoryManager)",
+        "reason": (
+            "the recall core is one composed write/read system: a "
+            "remember() lands the memories row, the VectorStore "
+            "embedding and the FTS5 entry in ONE transaction, with the "
+            "FTS lane keyed on the SQLite ROWID of the memories row; "
+            "recall merges the lexical lane, the semantic lane and "
+            "the graph riders off that same rowid identity. Mongo "
+            "documents have no rowid: porting the CRUD alone would "
+            "fork the write path from the recall path, the split the "
+            "program forbids. The coherent disposition is the whole "
+            "recall core on SQLite, checking in as pinned; a future "
+            "search program that re-keys the lexical lane on memory "
+            "ids and proves BM25 parity may reopen it — self-hosted "
+            "Mongo text indexes are not FTS5 parity (census §6)"),
+        "tables": [
+            "memories", "memory_links", "memory_archive", "embeddings",
+            "mood_state", "mood_history",
+        ],
+        "table_notes": {
+            "memory_links": "the recall core's graph riders, read with memories",
+            "memory_archive": "archive of the memories core",
+            "embeddings": "VectorStore's tables: vectors stay in VectorStore, whose backends are already plural by design (census)",
+            "mood_state": "memory/cadence.py reads/writes ride the memories core",
+            "mood_history": "memory/cadence.py (same reason as mood_state)",
+        },
+    },
+    "fts": {
+        "owner": "storage/fts.py (FTSIndex)",
+        "reason": (
+            "FTS5 virtual tables and their shadows stay on the SQLite "
+            "rung by design: there is no self-hosted Mongo equivalent "
+            "at FTS5/BM25 parity. FTSIndex is constructed over the "
+            "SQLite Database handle directly (memory recall's "
+            "memories_fts lane, the documents index) and never "
+            "consults the seam, so backend selection cannot strand "
+            "it; the inventory classifies the virtuals and shadows as "
+            "FTS residue with this same reason"),
+        "tables": [],
+        "table_notes": {},
+    },
+}
+
+#: Flattened table → pin reason (the domain reason, with any per-table
+#: note appended). Derived from PINNED_DOMAINS so the two never drift.
+PINNED_TABLES: dict[str, str] = {
+    table: (
+        f"[{domain}] {spec['reason']}"
+        + (f" — {spec['table_notes'][table]}"
+           if table in spec.get("table_notes", {}) else ""))
+    for domain, spec in PINNED_DOMAINS.items()
+    for table in spec["tables"]
+}
+
+
+def pinned_domains() -> dict[str, Any]:
+    """JSON-able pinned-domain summary for status surfaces: which
+    domains live on the SQLite rung by design, their tables, their
+    owners, and why — the queryable answer to "what is not on Mongo
+    and is not going to be"."""
+    return {
+        domain: {
+            "owner": spec["owner"],
+            "tables": list(spec["tables"]),
+            "reason": spec["reason"],
+        }
+        for domain, spec in PINNED_DOMAINS.items()
+    }
 
 
 def row_to_document(mapping: TableMapping,

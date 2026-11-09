@@ -12,8 +12,10 @@ in Redis or NATS later is a contained change.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import random
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -113,6 +115,10 @@ class WorkQueue:
         #: ``lease_token`` rides the same guarded-ALTER precedent: it is
         #: added lazily on first lease, never via the frozen migrations.
         self._token_column: bool | None = None
+        #: Mongo program P4: the seam-backed tables, resolved lazily per
+        #: call (the rowstore pickup rule) and cached per attached store.
+        self._seam_cache: dict[Any, Any] = {}
+        self._seam_build_lock = threading.Lock()
 
     def _has_lock_column(self) -> bool:
         if self._lock_column is None:
@@ -151,6 +157,156 @@ class WorkQueue:
             self._token_column = False
         return self._token_column
 
+    # ── document-seam plumbing (Mongo program P4) ────────────────────────
+    #
+    # When boot attached a DocumentStore to the Database (Mongo, or the
+    # shadow pair), every WorkQueue operation runs over the seam in
+    # carry-v1 document shape; on the SQLite default ``db.document_store``
+    # is None and the native SQL path below runs byte-for-byte as before.
+    # The claim semantics are the point of the port: a lease is ONE
+    # compare-and-swap on the job document (see RowTable.cas_row) whose
+    # expected fields are the job's status + lease token + lease
+    # deadline + attempt count as read — atomic on both seam rungs, so
+    # exactly one competing claimer wins per job, and every terminal
+    # write is fenced by the lease token the same way. No operation
+    # needs a multi-document transaction (the seam advertises
+    # ``multi_doc_transactions=False`` on Mongo and the port honors
+    # that): compositions are per-document writes whose order is
+    # chosen so a crash lands in a state the next operation can read
+    # truthfully (the queueing lock is claimed before the job document
+    # is written, so a lock can point at a not-yet-written job — the
+    # claim helper polls that window, then treats the lock as stale —
+    # but never at a job some other enqueue created).
+
+    #: Collection holding queueing-lock claims on the seam.
+    LOCK_COLLECTION = "work_queue_locks"
+
+    def _seam_rows(self, table: str, *,
+                   extra_columns: tuple[str, ...] = (),
+                   extra_defaults: dict[str, Any] | None = None):
+        """The seam-backed ``table`` for this queue's db, or None.
+
+        None is the SQLite default (no store attached): the caller runs
+        its native SQL path. Resolution is per call (organs built
+        before boot attachment still route correctly); the built
+        RowTable is cached per (table, store).
+        """
+        store = getattr(self.db, "document_store", None)
+        if store is None:
+            return None
+        # The built RowTable is cached on the Database handle (the
+        # attached_rows pattern), not on this WorkQueue: construction
+        # reads PRAGMA schema once, and claimers in worker threads —
+        # each typically holding its own WorkQueue — share it.
+        cache = getattr(self.db, "_queue_seam_tables", None)
+        if cache is None:
+            cache = self._seam_cache
+            with contextlib.suppress(Exception):
+                # A handle that refuses attribute writes keeps the
+                # per-instance cache instead — same behaviour, slower.
+                self.db._queue_seam_tables = cache
+        key = (table, extra_columns, id(store))
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+        # Build under a lock: concurrent first use from several
+        # claimer threads must construct the RowTable once (the
+        # build reads PRAGMA schema from the Database handle).
+        with self._seam_build_lock:
+            cached = cache.get(key)
+            if cached is not None:
+                return cached
+            from .rowstore import RowTable, column_defaults, mapping_for
+
+            defaults = column_defaults(self.db, table)
+            for name in extra_columns:
+                defaults.setdefault(
+                    name, (extra_defaults or {}).get(name))
+            rows = RowTable(
+                store,
+                mapping_for(self.db, table, extra_columns=extra_columns),
+                defaults=defaults)
+            cache[key] = rows
+            return rows
+
+    def _queue_rows(self):
+        """The seam-backed work_queue table, or None on the native path."""
+        return self._seam_rows(
+            self.TABLE,
+            extra_columns=("queueing_lock", "lease_token"),
+            extra_defaults={"queueing_lock": "", "lease_token": ""})
+
+    def _recurring_rows(self):
+        self._ensure_recurring_table()
+        return self._seam_rows(self.RECURRING_TABLE)
+
+    def _lock_claim(self, topic: str, queueing_lock: str,
+                    job_id: str) -> str | None:
+        """Claim ``(topic, queueing_lock)`` for ``job_id`` on the seam.
+
+        Returns the job id that owns the lock when it is not (or no
+        longer) ``job_id`` — i.e. the dedup winner to answer with —
+        and None when this call owns the lock. Insert-if-absent
+        (``cas`` with ``expected=None``) is atomic on both rungs, so
+        concurrent enqueues cannot both win; a lock whose job is
+        missing or no longer live is stale and is taken over by a
+        second cas fenced on the stale job id (the native partial
+        unique index has exactly this live-only scope).
+        """
+        store = getattr(self.db, "document_store", None)
+        rows = self._queue_rows()
+        lock_id = f"{topic}\x1f{queueing_lock}"
+        if store.cas(self.LOCK_COLLECTION, lock_id, None,
+                     {"job_id": job_id}):
+            return None
+        for _ in range(3):
+            current = store.get(self.LOCK_COLLECTION, lock_id)
+            if current is None:  # released between the two reads
+                if store.cas(self.LOCK_COLLECTION, lock_id, None,
+                             {"job_id": job_id}):
+                    return None
+                continue
+            owner = str(current.get("job_id") or "")
+            if owner == job_id:
+                return None
+            owner_row = rows.get(owner) if owner else None
+            if owner_row is None and owner:
+                # The winner claims the lock BEFORE writing its job
+                # document (so a lock never points at a job another
+                # enqueue created): a missing document usually means
+                # the winner is mid-write. Poll briefly before calling
+                # the lock stale — the two cases are indistinguishable
+                # at read time, and the native transaction never has
+                # to tell them apart.
+                deadline = time.time() + 0.5
+                while owner_row is None and time.time() < deadline:
+                    time.sleep(0.01)
+                    owner_row = rows.get(owner)
+            if owner_row is not None and owner_row["status"] in (
+                    "ready", "leased"):
+                return owner
+            # Stale lock (job gone, terminal, or never written): take
+            # it over, fenced on the job id just observed.
+            if store.cas(self.LOCK_COLLECTION, lock_id,
+                         {"job_id": owner}, {"job_id": job_id}):
+                return None
+        current = store.get(self.LOCK_COLLECTION, lock_id)
+        return str((current or {}).get("job_id") or job_id)
+
+    def _lock_release(self, row: dict[str, Any]) -> None:
+        """Release ``row``'s queueing lock on the seam when the job
+        leaves the live states — fenced on the job id, so a lock since
+        taken over by a newer job is never deleted from under it."""
+        lock = row.get("queueing_lock") or ""
+        if not lock:
+            return
+        store = getattr(self.db, "document_store", None)
+        lock_id = f"{row['topic']}\x1f{lock}"
+        current = store.get(self.LOCK_COLLECTION, lock_id)
+        if current is not None \
+                and str(current.get("job_id") or "") == str(row["id"]):
+            store.delete(self.LOCK_COLLECTION, lock_id)
+
     # ── producer ─────────────────────────────────────────────────────────────
     def enqueue(
         self,
@@ -172,6 +328,12 @@ class WorkQueue:
         backpressure — raises :class:`QueueFull` instead of growing the
         topic without bound.
         """
+        rows = self._queue_rows()
+        if rows is not None:
+            return self._enqueue_seam(
+                rows, topic, payload, priority=priority, delay=delay,
+                max_attempts=max_attempts, queueing_lock=queueing_lock,
+                max_depth=max_depth)
         now = time.time()
         if queueing_lock:
             # Lazily add the column on databases that predate it (migration
@@ -223,6 +385,13 @@ class WorkQueue:
         return job_id
 
     def enqueue_many(self, topic: str, payloads: list[dict[str, Any]], **kwargs: Any) -> list[str]:
+        if self._queue_rows() is not None:
+            # Seam: no multi-document transaction exists to wrap the
+            # batch in (advertised, not hidden) — each enqueue is its
+            # own atomic write, exactly the per-job guarantee the
+            # native path's callers rely on.
+            return [self.enqueue(topic, payload, **kwargs)
+                    for payload in payloads]
         ids: list[str] = []
         with self.db.transaction():
             for payload in payloads:
@@ -243,6 +412,11 @@ class WorkQueue:
         Priority first, then oldest. Expired leases on this topic are also
         eligible, which is how crashed workers' jobs get picked back up.
         """
+        rows = self._queue_rows()
+        if rows is not None:
+            return self._lease_seam(
+                rows, topic, worker, lease_seconds=lease_seconds,
+                batch=batch)
         ttl = lease_seconds if lease_seconds is not None else self.default_lease_seconds
         now = time.time()
         has_token = self._ensure_token_column()
@@ -307,6 +481,10 @@ class WorkQueue:
         token this remains the deliberate administrative completion
         path (operator tooling, tests); workers never use it.
         """
+        rows = self._queue_rows()
+        if rows is not None:
+            return self._complete_seam(rows, job_id, result,
+                                       lease_token=lease_token)
         now = time.time()
         payload = json.dumps(result, default=str) \
             if result is not None else ""
@@ -345,6 +523,10 @@ class WorkQueue:
         :meth:`complete`: a stale generation gets ``"stale"`` back
         and the current owner's job is untouched.
         """
+        rows = self._queue_rows()
+        if rows is not None:
+            return self._fail_seam(rows, job_id, error, retry=retry,
+                                   lease_token=lease_token)
         row = self.db.query_one(f"SELECT * FROM {self.TABLE} WHERE id = ?", (job_id,))
         if row is None:
             raise NotFound(f"job {job_id} not found")
@@ -397,6 +579,10 @@ class WorkQueue:
         release is fenced to the current lease generation (a stale
         worker cannot release another generation's job); returns
         whether the write landed."""
+        rows = self._queue_rows()
+        if rows is not None:
+            return self._requeue_seam(rows, job_id, delay=delay,
+                                      lease_token=lease_token)
         if lease_token:
             self._ensure_token_column()
             cursor = self.db.execute(
@@ -422,6 +608,9 @@ class WorkQueue:
 
     def reclaim_expired(self) -> int:
         """Return expired-lease jobs to the ready pool."""
+        rows = self._queue_rows()
+        if rows is not None:
+            return self._reclaim_expired_seam(rows)
         now = time.time()
         token_clear = ", lease_token = ''" \
             if self._ensure_token_column() else ""
@@ -450,6 +639,11 @@ class WorkQueue:
         is fenced to the lease generation too: the same worker NAME
         holding a later generation does not revive this one (F02).
         """
+        rows = self._queue_rows()
+        if rows is not None:
+            return self._extend_lease_seam(
+                rows, job_id, worker, extra_seconds,
+                lease_token=lease_token)
         now = time.time()
         fence = ""
         params: tuple[Any, ...] = (
@@ -471,6 +665,9 @@ class WorkQueue:
 
     def cancel(self, job_id: str) -> bool:
         """Move a live job to ``cancelled`` (terminal; workers skip it)."""
+        rows = self._queue_rows()
+        if rows is not None:
+            return self._cancel_seam(rows, job_id)
         cursor = self.db.execute(
             f"""
             UPDATE {self.TABLE}
@@ -484,6 +681,15 @@ class WorkQueue:
 
     def result_of(self, job_id: str) -> Any:
         """The stored result of a finished job (None when unfinished/missing)."""
+        rows = self._queue_rows()
+        if rows is not None:
+            row = rows.get(job_id)
+            if row is None or row["status"] not in ("done", "dead"):
+                return None
+            try:
+                return json.loads(row["result"]) if row["result"] else None
+            except (json.JSONDecodeError, TypeError):
+                return row["result"]
         row = self.db.query_one(
             f"SELECT status, result FROM {self.TABLE} WHERE id = ?", (job_id,)
         )
@@ -501,6 +707,23 @@ class WorkQueue:
         Raises :class:`TimeoutError` on timeout and re-raises the job's error
         as :class:`StorageError` when the job died.
         """
+        rows = self._queue_rows()
+        if rows is not None:
+            deadline = time.time() + max(0.0, timeout)
+            while True:
+                row = rows.get(job_id)
+                if row is None:
+                    raise NotFound(f"job {job_id} not found")
+                if row["status"] == "done":
+                    return self.result_of(job_id)
+                if row["status"] == "dead":
+                    raise StorageError(
+                        f"job {job_id} died: {str(row['error'])[:500]}")
+                if row["status"] == "cancelled":
+                    raise StorageError(f"job {job_id} was cancelled")
+                if time.time() >= deadline:
+                    raise TimeoutError(f"timed out waiting for job {job_id}")
+                time.sleep(min(poll, max(0.0, deadline - time.time())))
         deadline = time.time() + max(0.0, timeout)
         while True:
             row = self.db.query_one(
@@ -525,6 +748,19 @@ class WorkQueue:
         The QueueForge replayable-DLQ primitive; the operator has presumably
         fixed whatever killed it.
         """
+        rows = self._queue_rows()
+        if rows is not None:
+            row = rows.get(job_id)
+            if row is None or row["status"] != "dead":
+                return False
+            now = time.time()
+            new_row = {**row, "status": "ready", "attempts": 0,
+                       "error": "", "available_at": now + max(0.0, delay),
+                       "lease_owner": "", "lease_until": 0.0,
+                       "lease_token": "", "updated_at": now}
+            return rows.cas_row(
+                job_id, {"status": "dead", "updated_at": row["updated_at"]},
+                new_row)
         now = time.time()
         cursor = self.db.execute(
             f"""
@@ -540,6 +776,12 @@ class WorkQueue:
 
     def dead_jobs(self, topic: str | None = None, limit: int = 100) -> list[Job]:
         """Inspect the dead-letter queue."""
+        rows = self._queue_rows()
+        if rows is not None:
+            found = rows.find({"status": "dead", **(
+                {"topic": topic} if topic else {})})
+            found.sort(key=lambda r: float(r["updated_at"]), reverse=True)
+            return [self._to_job(r) for r in found[:limit]]
         clause = "status = 'dead'"
         params: list[Any] = []
         if topic:
@@ -554,10 +796,20 @@ class WorkQueue:
 
     # ── introspection ────────────────────────────────────────────────────────
     def get(self, job_id: str) -> Job | None:
+        rows = self._queue_rows()
+        if rows is not None:
+            row = rows.get(job_id)
+            return self._to_job(row) if row else None
         row = self.db.query_one(f"SELECT * FROM {self.TABLE} WHERE id = ?", (job_id,))
         return self._to_job(row) if row else None
 
     def pending(self, topic: str | None = None) -> int:
+        rows = self._queue_rows()
+        if rows is not None:
+            live = {"status": {"$in": ["ready", "leased"]}}
+            if topic:
+                live["topic"] = topic
+            return rows.count(live)
         if topic:
             return int(
                 self.db.scalar(
@@ -573,6 +825,16 @@ class WorkQueue:
         )
 
     def topics(self) -> list[dict[str, Any]]:
+        rows = self._queue_rows()
+        if rows is not None:
+            counts: dict[tuple[str, str], int] = {}
+            for row in rows.find(None):
+                key = (str(row["topic"]), str(row["status"]))
+                counts[key] = counts.get(key, 0) + 1
+            return [
+                {"topic": topic, "status": status, "n": n}
+                for (topic, status), n in sorted(counts.items())
+            ]
         return self.db.query(
             f"""
             SELECT topic, status, COUNT(*) AS n
@@ -583,6 +845,19 @@ class WorkQueue:
         )
 
     def purge(self, topic: str | None = None, *, only_finished: bool = True) -> int:
+        rows = self._queue_rows()
+        if rows is not None:
+            victims = rows.find(
+                {"status": {"$in": ["done", "dead"]}} if only_finished
+                else None)
+            if topic:
+                victims = [r for r in victims if r["topic"] == topic]
+            deleted = 0
+            for row in victims:
+                if rows.delete(row["id"]):
+                    self._lock_release(row)
+                    deleted += 1
+            return deleted
         clause = "status IN ('done','dead')" if only_finished else "1=1"
         if topic:
             return self.db.delete(self.TABLE, f"topic = ? AND {clause}", (topic,))
@@ -600,6 +875,10 @@ class WorkQueue:
         dropped (row deleted or never written) it shows up here.  An empty
         list means every enqueued job is accounted for.
         """
+        rows = self._queue_rows()
+        if rows is not None:
+            return [job_id for job_id in receipts
+                    if rows.get(job_id) is None]
         missing: list[str] = []
         for job_id in receipts:
             row = self.db.query_one(
@@ -616,6 +895,18 @@ class WorkQueue:
         for jobs that are still ``ready``/``leased`` (terminal states are
         the legitimate history of a retried job, not a duplicate).
         """
+        rows = self._queue_rows()
+        if rows is not None:
+            groups: dict[tuple[str, str], list[str]] = {}
+            for row in rows.find({"status": {"$in": ["ready", "leased"]}}):
+                if topic and row["topic"] != topic:
+                    continue
+                key = (str(row["topic"]), str(row["payload"]))
+                groups.setdefault(key, []).append(str(row["id"]))
+            return [
+                {"topic": t, "payload": p, "ids": ids}
+                for (t, p), ids in groups.items() if len(ids) > 1
+            ]
         clause = "status IN ('ready','leased')"
         params: list[Any] = []
         if topic:
@@ -715,6 +1006,349 @@ class WorkQueue:
             processed += 1
         return processed
 
+    # ── seam implementations (Mongo program P4) ──────────────────────────
+    #
+    # Each mirrors its native counterpart's contract exactly; where the
+    # native path leans on a conditional UPDATE, the seam leans on
+    # ``cas_row`` with the fence fields taken verbatim from the row as
+    # read — the write lands only while the job is still in the state
+    # the decision was made from. A cas that loses a race fails CLOSED
+    # (the completion/heartbeat is refused), which is the F02
+    # philosophy: never guess at another generation's state.
+
+    def _enqueue_seam(self, rows: Any, topic: str,
+                      payload: dict[str, Any] | None, *,
+                      priority: int, delay: float, max_attempts: int,
+                      queueing_lock: str,
+                      max_depth: int | None) -> str:
+        now = time.time()
+        job_id = new_id()
+        if queueing_lock:
+            # Native order: the dedup answer comes before backpressure.
+            winner = self._lock_claim(topic, queueing_lock, job_id)
+            if winner is not None:
+                # Dedup hit: the native path returns the existing id
+                # without counting an enqueue; mirror both.
+                return winner
+        if max_depth is not None:
+            depth = rows.count({
+                "topic": topic,
+                "status": {"$in": ["ready", "leased"]}})
+            if depth >= max_depth:
+                if queueing_lock:
+                    # Backpressure refused the job: hand the lock back
+                    # (fenced on this call's job id) so the lock never
+                    # points at a job that was never written.
+                    store = getattr(self.db, "document_store", None)
+                    lock_id = f"{topic}\x1f{queueing_lock}"
+                    current = store.get(self.LOCK_COLLECTION, lock_id)
+                    if current is not None and str(
+                            current.get("job_id") or "") == job_id:
+                        store.delete(self.LOCK_COLLECTION, lock_id)
+                raise QueueFull(
+                    f"topic {topic!r} has {depth} live jobs "
+                    f"(max_depth={max_depth})")
+        row = {
+            "id": job_id,
+            "topic": topic,
+            "payload": json.dumps(payload or {}, default=str),
+            "priority": priority,
+            "status": "ready",
+            "attempts": 0,
+            "max_attempts": max_attempts,
+            "available_at": now + max(0.0, delay),
+            "lease_until": 0.0,
+            "lease_owner": "",
+            "queueing_lock": queueing_lock,
+            "lease_token": "",
+            "created_at": now,
+            "updated_at": now,
+        }
+        rows.put(row)
+        self.stats["enqueued"] += 1
+        return job_id
+
+    def _lease_seam(self, rows: Any, topic: str, worker: str, *,
+                    lease_seconds: float | None, batch: int) -> list[Job]:
+        ttl = lease_seconds if lease_seconds is not None \
+            else self.default_lease_seconds
+        now = time.time()
+        claimed: list[Job] = []
+        claimed_ids: set[str] = set()
+        for _round in range(3):
+            if len(claimed) >= batch:
+                break
+            candidates = [
+                row for row in rows.find({"topic": topic})
+                if (row["status"] == "ready"
+                    and float(row["available_at"]) <= now)
+                or (row["status"] == "leased"
+                    and float(row["lease_until"]) <= now)
+            ]
+            # Native order: priority first, then oldest.
+            candidates.sort(
+                key=lambda r: (-int(r["priority"]), float(r["created_at"])))
+            progressed = False
+            for row in candidates:
+                if len(claimed) >= batch:
+                    break
+                if row["id"] in claimed_ids:
+                    continue
+                # THE CLAIM: one cas. Every field that changes hands
+                # is in the expected set, so of N competing claimers
+                # exactly one wins this job; the rest re-read and move
+                # on. Attempts increments inside the same write, as
+                # the native UPDATE does.
+                token = new_id()
+                new_row = {
+                    **row,
+                    "status": "leased",
+                    "lease_owner": worker,
+                    "lease_until": now + ttl,
+                    "lease_token": token,
+                    "attempts": int(row["attempts"]) + 1,
+                    "updated_at": now,
+                }
+                expected = {
+                    "status": row["status"],
+                    "lease_token": row.get("lease_token"),
+                    "lease_until": row["lease_until"],
+                    "attempts": row["attempts"],
+                }
+                if rows.cas_row(row["id"], expected, new_row):
+                    claimed.append(self._to_job(new_row))
+                    claimed_ids.add(str(row["id"]))
+                    progressed = True
+            if not progressed:
+                break
+        self.stats["leased"] += len(claimed)
+        return claimed
+
+    def _complete_seam(self, rows: Any, job_id: str, result: Any, *,
+                       lease_token: str | None) -> bool:
+        now = time.time()
+        payload = json.dumps(result, default=str) \
+            if result is not None else ""
+        if lease_token:
+            row = rows.get(job_id)
+            if row is None or row["status"] != "leased" \
+                    or (row.get("lease_token") or "") != lease_token:
+                return False
+            new_row = {
+                **row, "status": "done", "result": payload, "error": "",
+                "lease_owner": "", "lease_until": 0.0, "lease_token": "",
+                "updated_at": now,
+            }
+            if not rows.cas_row(
+                    job_id,
+                    {"status": row["status"],
+                     "lease_token": row.get("lease_token")},
+                    new_row):
+                return False
+            self._lock_release(new_row)
+        else:
+            # Unfenced administrative completion: the native UPDATE by
+            # id lands unconditionally (a missing job is a no-op that
+            # still reports True); mirror it, releasing the lock when
+            # the row is there to release.
+            rows.update(job_id, {
+                "status": "done", "result": payload, "error": "",
+                "lease_owner": "", "lease_until": 0.0,
+                "lease_token": "", "updated_at": now,
+            })
+            row = rows.get(job_id)
+            if row is not None:
+                self._lock_release(row)
+        self.stats["completed"] += 1
+        return True
+
+    def _fail_seam(self, rows: Any, job_id: str, error: str, *,
+                   retry: bool, lease_token: str | None) -> str:
+        row = rows.get(job_id)
+        if row is None:
+            raise NotFound(f"job {job_id} not found")
+        fence: dict[str, Any] | None = None
+        if lease_token:
+            if row["status"] != "leased" \
+                    or (row.get("lease_token") or "") != lease_token:
+                return "stale"
+            fence = {"status": row["status"],
+                     "lease_token": row.get("lease_token")}
+        now = time.time()
+        attempts = int(row["attempts"])
+        if retry and attempts < int(row["max_attempts"]):
+            delay = min(self.backoff_cap, self.backoff_base ** attempts)
+            delay = random.uniform(0.0, delay)
+            new_row = {
+                **row, "status": "ready", "error": error[:2000],
+                "available_at": now + delay, "lease_owner": "",
+                "lease_until": 0.0, "lease_token": "", "updated_at": now,
+            }
+            if fence is not None:
+                if not rows.cas_row(job_id, fence, new_row):
+                    return "stale"
+            else:
+                rows.update(job_id, {
+                    k: new_row[k] for k in (
+                        "status", "error", "available_at", "lease_owner",
+                        "lease_until", "lease_token", "updated_at")})
+            self.stats["failed"] += 1
+            return "retrying"
+        new_row = {
+            **row, "status": "dead", "error": error[:2000],
+            "lease_owner": "", "lease_until": 0.0, "lease_token": "",
+            "updated_at": now,
+        }
+        if fence is not None:
+            if not rows.cas_row(job_id, fence, new_row):
+                return "stale"
+        else:
+            rows.update(job_id, {
+                k: new_row[k] for k in (
+                    "status", "error", "lease_owner", "lease_until",
+                    "lease_token", "updated_at")})
+        self._lock_release(new_row)
+        self.stats["dead"] += 1
+        return "dead"
+
+    def _requeue_seam(self, rows: Any, job_id: str, *, delay: float,
+                      lease_token: str | None) -> bool:
+        now = time.time()
+        fields = {
+            "status": "ready", "available_at": now + delay,
+            "lease_owner": "", "lease_until": 0.0, "lease_token": "",
+            "updated_at": now,
+        }
+        if lease_token:
+            row = rows.get(job_id)
+            if row is None or row["status"] != "leased" \
+                    or (row.get("lease_token") or "") != lease_token:
+                return False
+            return rows.cas_row(
+                job_id,
+                {"status": row["status"],
+                 "lease_token": row.get("lease_token")},
+                {**row, **fields})
+        return rows.update(job_id, fields)
+
+    def _reclaim_expired_seam(self, rows: Any) -> int:
+        now = time.time()
+        count = 0
+        for row in rows.find({"status": "leased"}):
+            if float(row["lease_until"]) > now:
+                continue
+            new_row = {
+                **row, "status": "ready", "lease_owner": "",
+                "lease_until": 0.0, "lease_token": "", "updated_at": now,
+            }
+            if rows.cas_row(
+                    row["id"],
+                    {"status": row["status"],
+                     "lease_token": row.get("lease_token"),
+                     "lease_until": row["lease_until"]},
+                    new_row):
+                count += 1
+        self.stats["reclaimed"] += count
+        if count:
+            _log.debug("reclaimed %d expired leases", count)
+        return count
+
+    def _extend_lease_seam(self, rows: Any, job_id: str, worker: str,
+                           extra_seconds: float, *,
+                           lease_token: str | None) -> bool:
+        now = time.time()
+        row = rows.get(job_id)
+        if row is None or row["status"] != "leased" \
+                or row["lease_owner"] != worker \
+                or float(row["lease_until"]) <= now:
+            return False
+        expected: dict[str, Any] = {
+            "status": row["status"],
+            "lease_owner": row["lease_owner"],
+            "lease_until": row["lease_until"],
+        }
+        if lease_token:
+            if (row.get("lease_token") or "") != lease_token:
+                return False
+            expected["lease_token"] = row.get("lease_token")
+        new_row = {
+            **row,
+            "lease_until": now + max(1.0, extra_seconds),
+            "updated_at": now,
+        }
+        return rows.cas_row(job_id, expected, new_row)
+
+    def _cancel_seam(self, rows: Any, job_id: str) -> bool:
+        row = rows.get(job_id)
+        if row is None or row["status"] not in ("ready", "leased"):
+            return False
+        new_row = {
+            **row, "status": "cancelled", "lease_owner": "",
+            "lease_until": 0.0, "updated_at": time.time(),
+        }
+        if not rows.cas_row(
+                job_id,
+                {"status": row["status"],
+                 "lease_token": row.get("lease_token")},
+                new_row):
+            return False
+        self._lock_release(new_row)
+        return True
+
+    def _tick_recurring_seam(self, rec: Any, now: float, *,
+                             timezone: str = "") -> list[str]:
+        """The seam twin of :meth:`tick_recurring`: same healing rules,
+        same canonical cron engine, same idempotent fire (the
+        queueing lock dedups a double tick — and here the fire and the
+        schedule-row update are separate writes, so the lock is doing
+        real work, exactly as designed)."""
+        fired: list[str] = []
+        for row in rec.find({"enabled": 1}):
+            name = row["name"]
+            stored_next = float(row["next_fire_at"])
+            if stored_next <= 0.0:
+                try:
+                    stored_next = next_cron_fire(
+                        row["cron"], after=now, timezone=timezone)
+                except ValueError as exc:
+                    self._note_dead_schedule(name, exc)
+                    continue
+                rec.update(name, {"next_fire_at": stored_next})
+            else:
+                anchor = max(float(row["last_fired_at"]),
+                             float(row["created_at"]))
+                try:
+                    canonical = next_cron_fire(
+                        row["cron"], after=anchor, timezone=timezone)
+                except ValueError as exc:
+                    self._note_dead_schedule(name, exc)
+                    continue
+                if canonical < stored_next:
+                    stored_next = canonical
+                    rec.update(name, {"next_fire_at": stored_next})
+            if stored_next > now:
+                continue
+            lock = row["queueing_lock"] or f"recurring:{name}"
+            try:
+                payload = json.loads(row["payload"]) if row["payload"] else {}
+            except json.JSONDecodeError:
+                payload = {}
+            self.enqueue(
+                row["topic"], payload,
+                priority=int(row["priority"]),
+                max_attempts=int(row["max_attempts"]),
+                queueing_lock=lock,
+            )
+            try:
+                nxt = next_cron_fire(row["cron"], after=now,
+                                     timezone=timezone)
+            except ValueError as exc:
+                self._note_dead_schedule(name, exc)
+                nxt = 0.0
+            rec.update(name, {"last_fired_at": now, "next_fire_at": nxt})
+            fired.append(name)
+        return fired
+
     # ── recurring (cron) jobs ────────────────────────────────────────────
     #
     # huey/Procrastinate periodic tasks, stdlib edition: schedules live in a
@@ -788,6 +1422,25 @@ class WorkQueue:
         """
         validate_cron(cron, timezone)  # refuse unschedulable by name
         self._ensure_recurring_table()
+        rec = self._recurring_rows()
+        if rec is not None:
+            now = time.time()
+            nxt = next_cron_fire(cron, after=now, timezone=timezone)
+            # The native upsert preserves last_fired_at / created_at on
+            # re-registration; a seam replace must do the same by hand.
+            existing = rec.get(name) or {}
+            rec.put({
+                "name": name, "topic": topic,
+                "payload": json.dumps(payload or {}, default=str),
+                "cron": cron, "priority": priority,
+                "max_attempts": max_attempts,
+                "queueing_lock": queueing_lock,
+                "last_fired_at": float(existing.get("last_fired_at") or 0.0),
+                "next_fire_at": nxt,
+                "created_at": float(existing.get("created_at") or now),
+                "enabled": 1 if enabled else 0,
+            })
+            return nxt
         now = time.time()
         nxt = next_cron_fire(cron, after=now, timezone=timezone)
         with self.db.transaction():
@@ -813,12 +1466,25 @@ class WorkQueue:
 
     def unschedule_recurring(self, name: str) -> bool:
         self._ensure_recurring_table()
+        rec = self._recurring_rows()
+        if rec is not None:
+            return rec.delete(name)
         return (
             self.db.delete(self.RECURRING_TABLE, "name = ?", (name,)) > 0
         )
 
     def list_recurring(self) -> list[dict[str, Any]]:
         self._ensure_recurring_table()
+        rec = self._recurring_rows()
+        if rec is not None:
+            out = []
+            for row in sorted(rec.find(None), key=lambda r: str(r["name"])):
+                try:
+                    payload = json.loads(row["payload"]) if row["payload"] else {}
+                except json.JSONDecodeError:
+                    payload = {}
+                out.append({**row, "payload": payload})
+            return out
         rows = self.db.query(
             f'SELECT * FROM "{self.RECURRING_TABLE}" ORDER BY name'
         )
@@ -856,6 +1522,9 @@ class WorkQueue:
         self._ensure_recurring_table()
         self._ensure_lock_column()
         now = time.time() if now is None else now
+        rec = self._recurring_rows()
+        if rec is not None:
+            return self._tick_recurring_seam(rec, now, timezone=timezone)
         fired: list[str] = []
         with self.db.transaction():
             rows = self.db.query(

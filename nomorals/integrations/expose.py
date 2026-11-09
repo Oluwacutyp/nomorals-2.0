@@ -396,7 +396,7 @@ def steal_score_from_history(
 
     Mirrors ``NaijaShoppingEngine.compute_steal_score``
     (``naija_shopping.py:749``) exactly: the caller supplies the
-    30-day price history (the engine reads it from ``price_snapshots``;
+    30-day price history (the engine reads it from ``naija_price_snapshots``;
     this function takes it as data so the score is computable without
     a DB or a scrape). Formula::
 

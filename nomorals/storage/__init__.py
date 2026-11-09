@@ -49,6 +49,7 @@ from .queue import (
 from .replication import SnapshotInfo, SqliteReplicator
 from .rowstore import RowTable, attached_rows
 from .s3blob import S3BlobStore, S3Config, open_blob_store, presign_url
+from .schedule_claim import ScheduleClaimStore
 from .schema import Migration, MigrationRunner, SchemaError
 from .vectors import VectorRecord, VectorSearchHit, VectorStore, cosine, normalize
 
@@ -81,6 +82,7 @@ __all__ = [
     "RowDocumentView",
     "RowTable",
     "S3BlobStore",
+    "ScheduleClaimStore",
     "S3Config",
     "SQLiteAnalytics",
     "SQLiteDocumentStore",

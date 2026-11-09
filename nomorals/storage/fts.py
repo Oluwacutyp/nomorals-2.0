@@ -7,6 +7,13 @@ built by merging both (see :mod:`nomorals.memory.working`).
 
 If the SQLite build lacks FTS5 the index degrades to unavailable and callers get
 empty results rather than an exception.
+
+Storage disposition (Mongo program P4): FTS5 is SQLite-PINNED by
+design — see :data:`nomorals.storage.carry.PINNED_DOMAINS`
+(``fts``). This index is constructed over the SQLite ``Database``
+handle directly and never consults the document seam, so it keeps
+serving whichever backend the rest of Devon runs on; no code path
+may look for FTS data in Mongo.
 """
 
 from __future__ import annotations

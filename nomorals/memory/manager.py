@@ -335,7 +335,21 @@ class RecallResult:
 
 
 class MemoryManager:
-    """Episodic + semantic + working memory with consolidation."""
+    """Episodic + semantic + working memory with consolidation.
+
+    Storage disposition (Mongo program P4): the recall core is
+    SQLite-PINNED by design — see
+    :data:`nomorals.storage.carry.PINNED_DOMAINS` (``memory-recall``).
+    A remember() lands the memories row, the vector embedding and
+    the FTS5 entry in one transaction, with the lexical lane keyed
+    on the SQLite rowid; this manager therefore always works over
+    the SQLite ``Database`` handle, whatever document backend the
+    rest of Devon runs on, and never reads its tables from the seam.
+    """
+
+    #: The rung this organ is pinned to (P4); surfaced for status
+    #: checks that must tell pinned apart from unported.
+    STORAGE_PIN = "sqlite"
 
     def __init__(
         self,

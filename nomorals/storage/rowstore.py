@@ -211,6 +211,35 @@ class RowTable:
         return self._store.inc(
             self.collection, str(pk_value), self._doc_field(field), delta)
 
+    def cas_row(self, pk_value: Any, expected: Mapping[str, Any],
+                new_row: Mapping[str, Any]) -> bool:
+        """Compare-and-swap one row: replace it with ``new_row`` only
+        when the stored row still matches ``expected`` on every named
+        field (row-field names, translated like filters).
+
+        This is the seam's claim primitive (Mongo program P4): both
+        rungs implement ``cas`` as one atomic single-document
+        operation — a conditional replace on Mongo, a checked replace
+        inside a transaction on the SQLite rung — so exactly one of
+        several competing writers presenting the same ``expected``
+        wins, with no multi-document transaction anywhere. Fencing
+        fields (a lease token, a status, a counter) ride in
+        ``expected``; the loser re-reads and sees the winner's state.
+        """
+        translated: dict[str, Any] = {}
+        for name, value in expected.items():
+            if isinstance(value, (bytes, bytearray, memoryview)):
+                value = carry.encode_value(value)
+            translated[self._doc_field(name)] = value
+        doc_id, fields, expires_at = carry.row_to_document(
+            self._mapping, self._complete(new_row))
+        if doc_id != str(pk_value):
+            raise ValueError(
+                f"cas_row new_row addresses {doc_id!r}, not {pk_value!r}")
+        return self._store.cas(
+            self.collection, doc_id, translated, fields,
+            expires_at=expires_at)
+
     def delete(self, pk_value: Any) -> bool:
         return self._store.delete(self.collection, str(pk_value))
 

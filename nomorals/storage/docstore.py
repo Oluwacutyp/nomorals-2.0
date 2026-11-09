@@ -990,10 +990,18 @@ def storage_backend_status(settings: Any, db: Any = None, *,
     """
     resolution = resolve_document_store(settings, db, platform=platform)
     caps = _platform_caps(platform)
+    # The pinned set (Mongo P4): domains that live on the SQLite rung
+    # BY DESIGN whatever the active backend — a queryable fact on the
+    # status surface, not tribal knowledge. Lazy import: carry imports
+    # this module, so the registry is read at call time, never at
+    # import time.
+    from .carry import pinned_domains
+
     return {
         **resolution.to_dict(),
         "profile_storage_default": getattr(caps, "storage_backend", None),
         "mongo_uri": mask_mongo_uri(
             str(getattr(settings.storage, "mongo_uri", "") or DEFAULT_MONGO_URI)),
         "mongo_shadow": bool(getattr(settings.storage, "mongo_shadow", False)),
+        "pinned_domains": pinned_domains(),
     }

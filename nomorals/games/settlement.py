@@ -28,6 +28,15 @@ The table is runtime-created (the living-cards pattern):
 transaction; it fires after the commit, per player, and each
 fired obligation is marked in the receipts (``sink_done``) so a
 recovery pass fires only what is still owed.
+
+Storage disposition (Mongo program P4): the whole games/arena
+domain is SQLite-PINNED by design — see
+:data:`nomorals.storage.carry.PINNED_DOMAINS` (``games-arena``).
+The atomicity this module documents IS the reason: the seam offers
+atomic single-document operations only, and a per-leg port would
+trade the pinned abort semantics (a failed settle pays nobody,
+invisibly) for exactly-once completion with partially visible
+state. The pin is the honest disposition, recorded in the open.
 """
 from __future__ import annotations
 

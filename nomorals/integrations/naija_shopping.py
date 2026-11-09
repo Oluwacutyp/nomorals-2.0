@@ -458,11 +458,38 @@ class NaijaShoppingEngine:
         self._ensure_schema()
         _log.info("Naija Shopping Engine initialized")
     
+    def _adopt_legacy_snapshots(self) -> None:
+        """Take ownership of a legacy engine-shaped ``price_snapshots``.
+
+        The name collision (Mongo program P4): migrations define a
+        marketplace-shaped ``price_snapshots`` (id/listing_id/…) with
+        no live writer, while this engine historically declared its
+        own incompatible shape under the same name — a
+        ``CREATE TABLE IF NOT EXISTS`` that silently no-opped on a
+        migrated database, leaving the engine writing to a shape
+        that did not exist there (construction itself failed on the
+        index). Resolution: the engine's table is its own —
+        ``naija_price_snapshots``. A legacy table in the ENGINE's
+        shape (it has ``product_url``) is renamed over with its
+        history intact; a table in the migrations shape (it has
+        ``listing_id``) is not this engine's data and is left
+        exactly as it is.
+        """
+        cols = {r["name"] for r in self.db.table_info("price_snapshots")}
+        if not cols or "product_url" not in cols:
+            return
+        if self.db.table_exists("naija_price_snapshots"):
+            return
+        self.db.execute(
+            "ALTER TABLE price_snapshots RENAME TO naija_price_snapshots")
+        _log.info("adopted legacy price_snapshots as naija_price_snapshots")
+
     def _ensure_schema(self) -> None:
         """Create shopping engine tables."""
         with self.db.transaction():
+            self._adopt_legacy_snapshots()
             self.db.execute("""
-                CREATE TABLE IF NOT EXISTS price_snapshots (
+                CREATE TABLE IF NOT EXISTS naija_price_snapshots (
                     product_url TEXT NOT NULL,
                     site TEXT NOT NULL,
                     price_ngn REAL NOT NULL,
@@ -506,7 +533,7 @@ class NaijaShoppingEngine:
                 )
             """)
             
-            self.db.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_url ON price_snapshots(product_url, timestamp)")
+            self.db.execute("CREATE INDEX IF NOT EXISTS idx_naija_snapshots_url ON naija_price_snapshots(product_url, timestamp)")
             self.db.execute("CREATE INDEX IF NOT EXISTS idx_steals_score ON steals(steal_score DESC)")
             self.db.execute("CREATE INDEX IF NOT EXISTS idx_watchlists_user ON watchlists(user_id, is_triggered)")
     
@@ -761,7 +788,7 @@ class NaijaShoppingEngine:
         thirty_days_ago = time.time() - (30 * 24 * 3600)
         
         snapshots = self.db.query("""
-            SELECT * FROM price_snapshots
+            SELECT * FROM naija_price_snapshots
             WHERE product_url = ? AND timestamp >= ?
             ORDER BY timestamp ASC
         """, (product_url, thirty_days_ago))
@@ -783,7 +810,7 @@ class NaijaShoppingEngine:
         
         # Cross-site best (lowest price for same product across all sites)
         cross_site = self.db.query("""
-            SELECT MIN(price_ngn) as best FROM price_snapshots
+            SELECT MIN(price_ngn) as best FROM naija_price_snapshots
             WHERE title = ? AND timestamp >= ?
         """, (current["title"], thirty_days_ago))
         
@@ -922,7 +949,7 @@ class NaijaShoppingEngine:
             try:
                 # Get latest price
                 latest = self.db.query_one("""
-                    SELECT price_ngn FROM price_snapshots
+                    SELECT price_ngn FROM naija_price_snapshots
                     WHERE product_url = ?
                     ORDER BY timestamp DESC LIMIT 1
                 """, (row["product_url"],))
@@ -967,7 +994,7 @@ class NaijaShoppingEngine:
         """Store a price snapshot."""
         with self.db.transaction():
             self.db.execute("""
-                INSERT OR REPLACE INTO price_snapshots
+                INSERT OR REPLACE INTO naija_price_snapshots
                 (product_url, site, price_ngn, title, timestamp, in_stock, original_price, discount_badge)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
