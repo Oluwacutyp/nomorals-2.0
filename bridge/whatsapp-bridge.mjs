@@ -31,7 +31,9 @@
  *      ButtonsMessage no longer renders on current clients — up to
  *      WhatsApp's 3-button cap, the rest as text action lines; the
  *      reply's "buttons_form" names the form used)}
- *     {"id":"<req>","cmd":"send_media","chat":"<jid>","path":"...","caption":"...","ptt":false}
+ *     {"id":"<req>","cmd":"send_media","chat":"<jid>","path":"...","caption":"...","ptt":false,
+ *      "view_once":false,"ptv":false}  (view_once: one-look photo/video;
+ *      ptv: round video note — parity bundle #10)
  *     {"id":"<req>","cmd":"send_location","chat":"<jid>","latitude":6.5244,"longitude":3.3792,
  *      "name":"...","address":"..."} (name/address optional — the pin's label)
  *     {"id":"<req>","cmd":"send_contact","chat":"<jid>","name":"...","phone":"...","vcard":"..."}
@@ -1297,12 +1299,20 @@ async function cmdSend({ chat, text, reply_to, buttons, buttons_style, mentions 
   return wa.sendMessage(chat, payload, opts);
 }
 
-async function cmdSendMedia({ chat, path: p, caption, ptt, buttons }) {
+async function cmdSendMedia({ chat, path: p, caption, ptt, buttons, view_once, ptv }) {
   if (!p || !fs.existsSync(p)) throw new Error(`media file not found: ${p}`);
   const ext = extOf(p);
   const mime = EXT_MIME[ext];
   const name = path.basename(p);
   const cap = caption || '';
+  // Special forms (parity bundle #10): view_once sends a photo/
+  // video the recipient can open once (Baileys wraps the media
+  // in its viewOnceMessage form); ptv sends a video as a ROUND
+  // video note (Baileys builds the ptvMessage form). Validated
+  // against the media type up front — a form the media cannot
+  // carry is an honest refusal, never a silent plain send.
+  const viewOnce = !!view_once;
+  const asNote = !!ptv;
   // Buttons (buttons completion, 2026-11-08): an image / video /
   // document heads an InteractiveMessage whose Header carries
   // the uploaded media (prepareWAMessageMedia does the upload) —
@@ -1316,7 +1326,17 @@ async function cmdSendMedia({ chat, path: p, caption, ptt, buttons }) {
   const isImage = ['.jpg', '.jpeg', '.png', '.webp'].includes(ext);
   const isVideo = ['.mp4', '.mov', '.gif'].includes(ext);
   const isAudio = ['.mp3', '.ogg', '.oga', '.wav', '.m4a'].includes(ext);
-  if (flat.length && (isImage || isVideo)) {
+  if (viewOnce && !isImage && !isVideo) {
+    throw new Error('view-once applies to photos and videos only');
+  }
+  if (asNote && !isVideo) {
+    throw new Error('a video note (ptv) needs a video file');
+  }
+  // A view-once or video-note send never takes the interactive
+  // header path: the wrap would replace the very form the
+  // caller asked for. Its buttons degrade to follow-up text
+  // lines below, like audio's.
+  if (flat.length && (isImage || isVideo) && !viewOnce && !asNote) {
     try {
       const mediaKey = isImage ? 'image' : 'video';
       const prepared = await prepareWAMessageMedia(
@@ -1366,10 +1386,36 @@ async function cmdSendMedia({ chat, path: p, caption, ptt, buttons }) {
     }
   }
   if (isImage) {
-    return wa.sendMessage(chat, { image: { url: p }, caption: cap, mimetype: mime });
+    const content = { image: { url: p }, caption: cap, mimetype: mime };
+    if (viewOnce) content.viewOnce = true;
+    const sent = await wa.sendMessage(chat, content);
+    if (flat.length && sent) {
+      await wa.sendMessage(chat, { text: buttonLines(flat) });
+      sent.buttonsForm = 'text';
+    }
+    return sent;
   }
   if (isVideo) {
-    return wa.sendMessage(chat, { video: { url: p }, caption: cap, mimetype: mime });
+    const content = { video: { url: p }, mimetype: mime };
+    if (asNote) {
+      // The round form: Baileys turns ptv into a ptvMessage.
+      // No client renders a caption on a video note, so the
+      // caption follows as its own text message — degraded,
+      // never dropped.
+      content.ptv = true;
+    } else {
+      content.caption = cap;
+    }
+    if (viewOnce) content.viewOnce = true;
+    const sent = await wa.sendMessage(chat, content);
+    const follow = [];
+    if (asNote && cap) follow.push(cap);
+    if (flat.length) follow.push(buttonLines(flat));
+    if (follow.length && sent) {
+      await wa.sendMessage(chat, { text: follow.join('\n') });
+      if (flat.length) sent.buttonsForm = 'text';
+    }
+    return sent;
   }
   if (isAudio) {
     const sent = await wa.sendMessage(chat, { audio: { url: p }, mimetype: mime || 'audio/ogg', ptt: !!ptt });

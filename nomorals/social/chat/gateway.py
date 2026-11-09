@@ -787,6 +787,7 @@ class ChatGateway:
                 mime=str(media.get("mime") or ""),
                 kind=str(media.get("kind") or "file"),
                 name=str(media.get("name") or ""),
+                view_once=bool(media.get("view_once")),
             )
             cap_mode = str(media.get("caption_parse_mode") or "")
             media_buttons = media.get("buttons")
@@ -1130,6 +1131,7 @@ class ChatGateway:
         kind: str = "",
         name: str = "",
         buttons: list[list[tuple[str, str]]] | None = None,
+        view_once: bool = False,
     ) -> SendResult:
         """Send a file, auto-compressing when it would exceed ``max_send_mb``.
 
@@ -1159,6 +1161,14 @@ class ChatGateway:
         ``buttons`` rides the media message on adapters that carry
         buttons on media sends, and is simply not offered where
         the adapter has no such verb.
+        ``view_once`` (parity bundle #10) asks for the one-look
+        form, and ``kind="video_note"`` for a round video note.
+        Both are FORMS, not decorations: when the resolved kind
+        cannot carry the form — the file resolved to a document
+        over the inline cap, or view-once was asked of something
+        that is not a photo/video — the send refuses with that
+        reason instead of silently delivering a different shape
+        than the caller asked for.
         """
         chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
         adapter = self._adapter_for(chat.platform)
@@ -1183,8 +1193,20 @@ class ChatGateway:
             size_bytes = os.path.getsize(target)
         except OSError:
             size_bytes = 0
-        kind = media_kind_for(size_bytes, str(kind or "file"),
-                              limits)
+        requested_kind = str(kind or "file")
+        kind = media_kind_for(size_bytes, requested_kind, limits)
+        if view_once and kind not in ("image", "photo", "video"):
+            return SendResult(
+                ok=False, platform=platform,
+                error="view-once needs a photo or video — this file "
+                      f"resolves to {kind} (over the inline cap or "
+                      "not visual media), so it was not sent")
+        if requested_kind == "video_note" and kind != "video_note":
+            return SendResult(
+                ok=False, platform=platform,
+                error="this file is too large to send as a video "
+                      "note — it exceeds the platform's inline cap, "
+                      "so it was not sent as a plain document instead")
         caption_width = utf16_len if limits.utf16_lengths else len
         caption_chunks = split_caption(caption, max_caption=limits.max_caption,
                                        width=caption_width) \
@@ -1211,7 +1233,8 @@ class ChatGateway:
                 caption_first, caption_parse_mode = presented, mode
         media = MediaRef(path=target, mime="", kind=kind,
                          name=str(name or "")
-                         or os.path.basename(target))
+                         or os.path.basename(target),
+                         view_once=bool(view_once))
         use_durable = durable if durable is not None else self.durable_outbox
         if use_durable and self.outbox is not None:
             group_id = new_id("send")
@@ -1224,7 +1247,8 @@ class ChatGateway:
                            or os.path.basename(target),
                            "caption": caption_first,
                            "caption_parse_mode": caption_parse_mode,
-                           "buttons": buttons},
+                           "buttons": buttons,
+                           "view_once": bool(view_once)},
                     caption_rest=caption_rest,
                 )
                 if not self.durable_drain_sync:

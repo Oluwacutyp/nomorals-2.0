@@ -269,12 +269,20 @@ def send_file(
     path: str,
     *,
     caption: str = "",
+    kind: str = "",
+    view_once: bool = False,
 ) -> dict[str, Any]:
     """Send a file to a chat on any live platform via the gateway.
 
     ``path`` may be a workspace-relative path (resolved safely) or an
     absolute path outside the workspace (the owner's own files are fair
     game).  Large files ride the gateway's auto-compression.
+
+    ``kind`` declares what the file IS (image / video / audio /
+    voice / video_note …) so it rides the platform's native form;
+    ``view_once`` sends a photo/video the recipient can open once
+    (a WhatsApp form — surfaces without it refuse honestly, and
+    the gateway refuses rather than downgrade the form away).
     """
     gateway = _gateway(context)
     target = (path or "").strip()
@@ -295,7 +303,9 @@ def send_file(
         chat_id = f"{platform}:{chat_id}"
     try:
         result = gateway.send_file(platform, chat_id, resolved,
-                                   caption=caption or "")
+                                   caption=caption or "",
+                                   kind=kind or "",
+                                   view_once=bool(view_once))
     except Exception as exc:  # noqa: BLE001 - report, don't crash the caller
         raise ToolError(f"send failed: {exc}") from exc
     if not getattr(result, "ok", False):
@@ -372,7 +382,10 @@ def register(registry: Any) -> None:
         description=(
             "Send a file to any active chat platform (telegram, discord, "
             "whatsapp, console) through the live gateway. Big files are "
-            "auto-compressed."
+            "auto-compressed. Special forms: kind='video_note' sends a "
+            "round video note; view_once=true sends a photo/video the "
+            "recipient can open only once (WhatsApp; other surfaces "
+            "refuse honestly rather than send a permanent copy)."
         ),
         capability=Capability.NET_OUT,
         parameters={
@@ -380,11 +393,15 @@ def register(registry: Any) -> None:
             "chat_id": "str — the target chat id",
             "path": "str — workspace path or absolute path",
             "caption": "str (optional)",
+            "kind": "str (optional) — image | video | audio | voice | video_note | document; declares the native form",
+            "view_once": "bool (optional) — send as view-once media (photo/video, WhatsApp)",
         },
     )
     def file_send(platform: str, chat_id: str, path: str,
-                  *, caption: str = "") -> dict[str, Any]:
-        return send_file(context, platform, chat_id, path, caption=caption)
+                  *, caption: str = "", kind: str = "",
+                  view_once: bool = False) -> dict[str, Any]:
+        return send_file(context, platform, chat_id, path, caption=caption,
+                         kind=kind, view_once=view_once)
 
     @registry.register(
         "report_publish",

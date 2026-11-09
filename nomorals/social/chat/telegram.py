@@ -2761,6 +2761,15 @@ class TelegramAdapter(ChatAdapter):
         client = self._client
         if client is None:
             return SendResult(ok=False, platform=self.name, error="not connected")
+        if getattr(media, "view_once", False):
+            # View-once is a WhatsApp form (parity bundle #10):
+            # MTProto has no view-once media outside secret
+            # chats, so the honest answer is a refusal — never a
+            # permanent copy wearing a view-once label.
+            return SendResult(
+                ok=False, platform=self.name,
+                error="view-once is a WhatsApp form — Telegram has "
+                      "no view-once media outside secret chats")
         started = time.perf_counter()
 
         async def _do() -> Any:
@@ -2771,6 +2780,12 @@ class TelegramAdapter(ChatAdapter):
             kwargs = self._thread_kwargs(chat)
             if getattr(media, "voice_note", False):
                 kwargs["voice_note"] = True
+            if (media.kind or "") == "video_note":
+                # A round video note (bundle #10): Telethon's
+                # send_file form flag — the document goes out
+                # with the round-message attribute set, which is
+                # what makes clients render the circle.
+                kwargs["video_note"] = True
             # F7: the caption's parse mode rides Telethon's own
             # parser (same accepted spellings as send()).
             if parse_mode in ("html", "HTML", "md", "markdown"):
@@ -2784,7 +2799,16 @@ class TelegramAdapter(ChatAdapter):
                     )
                 except TypeError:  # older Telethon without message_thread_id
                     call_kwargs.pop("message_thread_id", None)
-                    result = await client.send_file(entity, media.path, caption=cap or None)
+                    try:
+                        result = await client.send_file(
+                            entity, media.path, caption=cap or None,
+                            **call_kwargs)
+                    except TypeError:
+                        # A Telethon too old for the remaining
+                        # kwargs as well: the bare call is the
+                        # last rung (its historical shape).
+                        result = await client.send_file(
+                            entity, media.path, caption=cap or None)
                 self._remember_sent(getattr(result, "id", None))  # self-chat loop guard
                 return result
 
@@ -6442,6 +6466,16 @@ class TelegramBotAdapter(ChatAdapter):
                    ) -> SendResult:
         started = time.perf_counter()
         path = Path(media.path)
+        if getattr(media, "view_once", False):
+            # View-once is a WhatsApp form (parity bundle #10):
+            # the Bot API has no view-once media for ordinary
+            # chats, so the honest answer is a refusal — never a
+            # permanent copy wearing a view-once label.
+            return SendResult(
+                ok=False, platform=self.name,
+                error="view-once is a WhatsApp form — Telegram bots "
+                      "have no view-once media to send",
+                seconds=time.perf_counter() - started)
         if media.kind == "voice" or getattr(media, "voice_note", False):
             # A voice note must arrive as a voice bubble, not a file
             # attachment: kind="voice" used to fall through the map to
@@ -6459,11 +6493,16 @@ class TelegramBotAdapter(ChatAdapter):
                 "sticker": "sendSticker",
                 "animation": "sendAnimation",
                 "gif": "sendAnimation",
+                # A round video note (bundle #10): the Bot API's
+                # dedicated verb — a plain sendVideo lands as a
+                # rectangular video, never as the circle.
+                "video_note": "sendVideoNote",
             }.get(media.kind, "sendDocument")
         field = {"sendPhoto": "photo", "sendVideo": "video",
                  "sendVoice": "voice", "sendAudio": "audio",
                  "sendSticker": "sticker",
-                 "sendAnimation": "animation"}.get(method, "document")
+                 "sendAnimation": "animation",
+                 "sendVideoNote": "video_note"}.get(method, "document")
         # A ref carrying a platform file_id re-sends BY HANDLE —
         # the expression library's cache means a GIF uploads once
         # and is re-sent by id forever after (§21).
@@ -6473,7 +6512,8 @@ class TelegramBotAdapter(ChatAdapter):
             try:
                 data: dict[str, Any] = {"chat_id": chat.chat_id,
                                         field: held_id}
-                if caption and method != "sendSticker":
+                if caption and method not in ("sendSticker",
+                                              "sendVideoNote"):
                     cap0 = for_platform("telegram-bot").max_caption
                     data["caption"] = caption if parse_mode \
                         else caption[:cap0]
@@ -6483,6 +6523,9 @@ class TelegramBotAdapter(ChatAdapter):
                     data["reply_markup"] = markup
                 result = self._api(method, **data)
                 self.stats["sent"] += 1
+                if method == "sendVideoNote" and caption:
+                    self._note_caption_followup(chat, caption,
+                                                parse_mode)
                 return SendResult(
                     ok=True, platform=self.name,
                     message_id=str(result.get("message_id", "")),
@@ -6499,13 +6542,21 @@ class TelegramBotAdapter(ChatAdapter):
         cap = for_platform("telegram-bot").max_caption
         try:
             data = {"chat_id": chat.chat_id}
-            if caption and method != "sendSticker":
+            if caption and method in ("sendSticker", "sendVideoNote"):
+                # Neither form takes a caption field; a video
+                # note's caption follows as text (below), a
+                # sticker's is dropped by the platform's shape.
+                caption_for_data = ""
+            else:
+                caption_for_data = caption
+            if caption_for_data:
                 # A caption carrying a parse mode arrives pre-fitted
                 # by the gateway (F7): it is sent whole — truncating
                 # HTML mid-tag would break the entity parse.  Plain
                 # captions keep the historical truncation.
                 data["caption"] = caption if parse_mode else caption[:cap]
-            if parse_mode in ("HTML", "Markdown", "MarkdownV2"):
+            if parse_mode in ("HTML", "Markdown", "MarkdownV2") \
+                    and method != "sendVideoNote":
                 data["parse_mode"] = parse_mode
             if markup:
                 # Multipart fields are strings — the keyboard
@@ -6529,6 +6580,8 @@ class TelegramBotAdapter(ChatAdapter):
                 data["caption"] = strip_html(caption)[:cap]
                 result = self._api_upload(method, data, field, path)
             self.stats["sent"] += 1
+            if method == "sendVideoNote" and caption:
+                self._note_caption_followup(chat, caption, parse_mode)
             return SendResult(ok=True, platform=self.name,
                               message_id=str(result.get("message_id", "")),
                               media_file_id=_sent_file_id(result),
@@ -6537,6 +6590,19 @@ class TelegramBotAdapter(ChatAdapter):
             self.stats["send_errors"] += 1
             return SendResult(ok=False, platform=self.name, error=str(exc),
                               seconds=time.perf_counter() - started)
+
+    def _note_caption_followup(self, chat: ChatRef, caption: str,
+                               parse_mode: str = "") -> None:
+        """A video note carries no caption on Telegram (bundle
+        #10): the caption follows as its own text message —
+        degraded, never dropped. Best-effort by design: the note
+        itself already landed, so a failed caption follow-up
+        never flips the send's verdict."""
+        try:
+            self.send(chat, caption, parse_mode=parse_mode)
+        except Exception as exc:  # noqa: BLE001 - follow-up only
+            _log.debug("telegram-bot: video-note caption follow-up "
+                       "failed: %s", exc)
 
     def react(self, chat: ChatRef, message_id: str, emoji: str) -> SendResult:
         """Place a reaction via ``setMessageReaction`` (§22). The

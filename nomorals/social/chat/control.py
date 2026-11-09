@@ -555,6 +555,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "viewonce": (0, None),     # /viewonce [n] — reveal a captured view-once
     "vv": (0, None),           # /vv — short form of /viewonce
     "poststatus": (0, None),   # /poststatus [text] — post a status as the owner
+    "sendonce": (0, None),     # /sendonce [caption] — send a photo/video view-once into this chat (rides/replies to media)
+    "sendnote": (0, None),     # /sendnote [caption] — send a video as a round video note into this chat (rides/replies to media)
     "chanstory": (1, None),    # /chanstory <channel> [text] — post to a channel as the owner
     "channeltexts": (1, None), # /channeltexts <channel> [options] — a channel's stored texts as a file
     "joinlink": (1, None),     # /joinlink <link or code> — join a WhatsApp group via its invite link
@@ -2741,6 +2743,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/poststatus [text] · send a photo/video with /poststatus [caption] as its caption · reply to a photo/video with /poststatus [caption]",
               "example": "/poststatus building while others flex",
               "related": "/statusreact · /pair saved · /pair"},
+    "sendonce": {"what": "send a photo or video into THIS chat as view-once, as you: the recipient opens it once, then it's gone — the bridges put the real view-once form on the wire (WhatsApp's flag/wrap), verified in the payload, never a permanent copy wearing the label. It is a WhatsApp form: Telegram has no view-once media outside secret chats, and from a Telegram surface the command says exactly that and sends nothing. The media is the command's own attachment or the message it replies to; the tail is the caption. The send lands in the personal journal like every act taken as you. Owner only; your standing stop halts it.",
+              "usage": "/sendonce [caption] · send a photo/video with /sendonce [caption] as its caption · reply to a photo/video with /sendonce [caption]",
+              "example": "/sendonce for your eyes only",
+              "related": "/viewonce · /sendnote · /poststatus"},
+    "sendnote": {"what": "send a video into THIS chat as a round video note, as you: the circle form — WhatsApp's ptv message, Telegram's video note on both its surfaces — not a plain rectangular video file. A caption can't ride a video note on either platform, so it follows as its own text message rather than vanishing. The media is the command's own attachment or the message it replies to; the tail is the caption. The send lands in the personal journal like every act taken as you. Owner only; your standing stop halts it.",
+              "usage": "/sendnote [caption] · send a video with /sendnote [caption] as its caption · reply to a video with /sendnote [caption]",
+              "example": "/sendnote quick update",
+              "related": "/sendonce · /poststatus"},
     "chanstory": {"what": "post to a channel as you, from your personal surface: on WhatsApp a channel post (text, or an image/video when the command rides a photo/video) in the channel feed — WhatsApp's Channel Status tray stories are a separate feature no bridge library can post yet, a wall this command names rather than dresses a post up as; on Telegram a channel story from a photo/video the same way (stories are media posts — there is no text story). The channel must be one your account admins: WhatsApp refuses a non-admin server-side, and Telegram also gates channel stories behind the channel's boost level — either refusal comes back in the platform's own words. Followed channels' posts are saved and marked viewed under the same toggles as statuses. The post lands in the personal journal like every act taken as you. Owner only; your standing stop halts it.",
               "usage": "/chanstory channel [text] · send a photo/video with /chanstory channel [caption] as its caption · reply to a photo/video with /chanstory channel [caption] — the channel as its link, JID, invite code or name on WhatsApp, its @name or id on Telegram",
               "example": "/chanstory Gold Signals building while others flex",
@@ -4456,7 +4466,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "forward",
       "unsend", "edit", "editmsg", "antiedit",
       "block", "unblock", "anticall", "disappear",
-      "statusreact", "poststatus", "chanstory", "channeltexts", "banchecker", "gcstatus", "statusinfo",
+      "statusreact", "poststatus", "sendonce", "sendnote", "chanstory", "channeltexts", "banchecker", "gcstatus", "statusinfo",
       "pollres", "tagall", "hidetag", "antitag", "viewonce", "vv",
       "joinlink", "newgroup", "newchannel", "leave",
       "myprofile", "privacy", "makepoll", "vcf", "addcontact",

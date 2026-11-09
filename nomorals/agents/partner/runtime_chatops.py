@@ -267,6 +267,8 @@ class RuntimeChatOpsMixin:
                 return self._chatops_viewonce(kind, tail, message)
             if kind == "poststatus":
                 return self._chatops_poststatus(tail, message)
+            if kind in ("sendonce", "sendnote"):
+                return self._chatops_sendform(kind, tail, message)
             if kind == "chanstory":
                 return self._chatops_chanstory(tail, message)
             if kind == "channeltexts":
@@ -1109,6 +1111,99 @@ class RuntimeChatOpsMixin:
             return self._chatops_verdict(landed, "")
         return ("couldn't do it — the story post did not land "
                 "(not connected, or Telegram refused it).")
+
+    def _chatops_sendform(self, kind: str, tail: str,
+                          message: Any) -> str:
+        """/sendonce + /sendnote — send media INTO THIS CHAT in
+        a special form, AS the owner (parity bundle #10: the
+        census graded view-once sending and video-note sending
+        ABSENT on every surface).
+
+        /sendonce re-sends a photo/video the recipient can open
+        ONCE. It is a WhatsApp form: Telegram has no view-once
+        media outside secret chats, and the Telegram answer
+        says exactly that rather than sending a permanent copy
+        under a view-once label. /sendnote re-sends a video as
+        a ROUND video note — WhatsApp's ptv form, Telegram's
+        video-note form on both its surfaces.
+
+        The media is the command message's own attachment or
+        the message it replies to (the /poststatus extraction);
+        the tail is the caption. Owner-only by the control
+        gate; a standing owner stop halts it like every other
+        personal-surface act; a landed send is journaled in
+        the personal vault, never a silent act as him."""
+        from ...social.chat.base import MediaRef
+
+        chat = message.chat
+        platform = str(getattr(chat, "platform", "") or "")
+        if platform not in ("whatsapp", "telegram"):
+            return (f"/{kind} lives on your personal WhatsApp "
+                    f"or Telegram — run it from there.")
+        if kind == "sendonce" and platform == "telegram":
+            return ("Telegram has no view-once media outside "
+                    "secret chats — nothing was sent. "
+                    "View-once is a WhatsApp form; run /sendonce "
+                    "from your WhatsApp surface.")
+        svc, rec, error = self._chatops_gated_account(
+            platform, kind)
+        if error:
+            return error
+        adapter = self._adapter_for(platform)
+        if adapter is None:
+            return f"no live {platform} surface here to send from."
+        media_path, media_kind = self._chatops_media_of(message)
+        if not media_path:
+            return (f"usage: send a photo/video with /{kind} "
+                    f"[caption] as its caption, or reply to one "
+                    f"with /{kind} [caption].")
+        personal = svc["personal"]
+        chat_id = str(getattr(chat, "chat_id", "") or "")
+        if kind == "sendonce":
+            if media_kind not in ("image", "photo", "video"):
+                return ("/sendonce needs a photo or a video — "
+                        f"that attachment is a "
+                        f"{media_kind or 'unknown'}; nothing "
+                        f"was sent.")
+            media = MediaRef(path=media_path, kind=media_kind,
+                             view_once=True)
+            journal_kind = "message_viewonce_sent"
+            done = ("sent view-once — one look, then it's gone.")
+        else:
+            if media_kind not in ("video", "video_note"):
+                return ("/sendnote needs a video — that "
+                        f"attachment is a "
+                        f"{media_kind or 'unknown'}; nothing "
+                        f"was sent.")
+            media = MediaRef(path=media_path, kind="video_note")
+            journal_kind = "message_videonote_sent"
+            done = "sent as a round video note."
+        result = self._chatops_call(
+            adapter.send_media, chat, media, caption=tail)
+        if isinstance(result, dict):
+            ok = bool(result.get("ok"))
+            err = str(result.get("error") or "")
+            mid = str(result.get("message_id") or "")
+        else:
+            ok = bool(getattr(result, "ok", False))
+            err = str(getattr(result, "error", "") or "")
+            mid = str(getattr(result, "message_id", "") or "")
+        if ok:
+            personal.note_message_acted(
+                platform, kind=journal_kind,
+                account_id=rec.id, chat_id=chat_id,
+                dest_id=mid,
+                note=f"sent as the owner via /{kind}")
+            return done
+        if "queued for delivery" in err:
+            # The bridge is down and the adapter's outbox holds
+            # the send WITH its form: it goes out in form on
+            # reconnect, and the answer says so plainly.
+            return (f"the {platform} bridge is down — queued; "
+                    f"it goes out in form the moment it "
+                    f"reconnects.")
+        return (f"couldn't do it — "
+                f"{err or 'the surface refused the send'}")
 
     def _chatops_chanstory(self, tail: str,
                            message: Any) -> str:

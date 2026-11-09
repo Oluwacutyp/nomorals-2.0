@@ -1255,6 +1255,45 @@ func (b *bridge) cmdEdit(ctx context.Context, cc *clientConn, id string, req req
 	b.reply(cc, id, map[string]any{"ok": true, "message_id": mid})
 }
 
+// specialFormRefusal names why a requested send form cannot
+// ride this media type, or "" when it can (parity bundle #10).
+// The check runs before any upload: a form the media cannot
+// carry is refused by name, never silently sent plain.
+func specialFormRefusal(viewOnce, ptv bool,
+	mediaType whatsmeow.MediaType) string {
+	if viewOnce && mediaType != whatsmeow.MediaImage &&
+		mediaType != whatsmeow.MediaVideo {
+		return "view-once applies to photos and videos only"
+	}
+	if ptv && mediaType != whatsmeow.MediaVideo {
+		return "a video note (ptv) needs a video file"
+	}
+	return ""
+}
+
+// applyViewOnce sets the view-once flag on the media message
+// itself (bundle #10) — the flag form this bridge's
+// unwrapInbound recognizes on arrival, and the form current
+// clients send.
+func applyViewOnce(msg *waE2E.Message) {
+	if msg.ImageMessage != nil {
+		msg.ImageMessage.ViewOnce = proto.Bool(true)
+	}
+	if msg.VideoMessage != nil {
+		msg.VideoMessage.ViewOnce = proto.Bool(true)
+	}
+}
+
+// asVideoNote re-forms a built video message as a ROUND video
+// note (bundle #10): the VideoMessage rides as the message's
+// PtvMessage. No client renders a caption on a video note, so
+// the caption is lifted out of the proto — the caller sends it
+// as a follow-up text message (degraded, never dropped).
+func asVideoNote(msg *waE2E.Message) *waE2E.Message {
+	msg.VideoMessage.Caption = nil
+	return &waE2E.Message{PtvMessage: msg.VideoMessage}
+}
+
 var extMIME = map[string]string{
 	".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
 	".webp": "image/webp", ".gif": "image/gif", ".mp4": "video/mp4",
@@ -1279,6 +1318,16 @@ func (b *bridge) cmdSendMedia(ctx context.Context, cc *clientConn, id string, re
 	mime := extMIME[ext]
 	caption := req.str("caption")
 	ptt := req.boolean("ptt")
+	// Special forms (parity bundle #10): view_once wraps a
+	// photo/video so the recipient gets one look (the flag form
+	// on the media message — the same shape this bridge's
+	// unwrapInbound recognizes on arrival); ptv sends a video
+	// as a ROUND video note (the protocol's PtvMessage form).
+	// Both are validated against the media type BEFORE any
+	// upload: a form the media cannot carry is an honest
+	// refusal, never a silent plain send.
+	viewOnce := req.boolean("view_once")
+	ptv := req.boolean("ptv")
 
 	var mediaType whatsmeow.MediaType
 	switch {
@@ -1290,6 +1339,10 @@ func (b *bridge) cmdSendMedia(ctx context.Context, cc *clientConn, id string, re
 		mediaType = whatsmeow.MediaAudio
 	default:
 		mediaType = whatsmeow.MediaDocument
+	}
+	if refusal := specialFormRefusal(viewOnce, ptv, mediaType); refusal != "" {
+		b.reply(cc, id, map[string]any{"ok": false, "error": refusal})
+		return
 	}
 	var up whatsmeow.UploadResponse
 	if chat.Server == types.NewsletterServer {
@@ -1343,6 +1396,9 @@ func (b *bridge) cmdSendMedia(ctx context.Context, cc *clientConn, id string, re
 			FileLength: proto.Uint64(up.FileLength),
 		}}
 	}
+	if viewOnce {
+		applyViewOnce(msg)
+	}
 	// Buttons (buttons completion, 2026-11-08): an image / video /
 	// document heads an InteractiveMessage whose Header carries
 	// the uploaded media — the photo itself gets the buttons, in
@@ -1361,7 +1417,12 @@ func (b *bridge) cmdSendMedia(ctx context.Context, cc *clientConn, id string, re
 				b.cli.Store.ID.ToNonAD())
 		}
 	}
-	if len(flat) > 0 && mediaType != whatsmeow.MediaAudio {
+	// A view-once or video-note send never takes the interactive
+	// header path (bundle #10): the wrap would replace the very
+	// form the caller asked for. Its buttons degrade to the
+	// follow-up text lines below, like audio's.
+	if len(flat) > 0 && mediaType != whatsmeow.MediaAudio &&
+		!viewOnce && !ptv {
 		var header *waE2E.InteractiveMessage_Header
 		switch m := msg; {
 		case m.ImageMessage != nil:
@@ -1416,24 +1477,40 @@ func (b *bridge) cmdSendMedia(ctx context.Context, cc *clientConn, id string, re
 			return
 		}
 	}
-	resp, err := b.cli.SendMessage(ctx, chat, msg)
+	out := msg
+	if ptv {
+		out = asVideoNote(msg)
+	}
+	resp, err := b.cli.SendMessage(ctx, chat, out)
 	if err != nil {
 		b.fail(cc, id, err)
 		return
 	}
-	rememberMedia(msg, resp.ID)
+	rememberMedia(out, resp.ID)
+	follow := ""
+	if ptv && caption != "" {
+		follow = caption
+	}
 	if len(flat) > 0 {
-		// Audio (or an unheaderable media kind): the media is out;
-		// its actions follow as text lines in the same command.
+		if follow != "" {
+			follow += "\n"
+		}
+		follow += buttonLines(flat)
+	}
+	if follow != "" {
+		// Audio (or a special form): the media is out; its
+		// caption/actions follow as text in the same command.
 		if _, err := b.cli.SendMessage(ctx, chat,
-			b.textMessage(buttonLines(flat), nil)); err != nil {
+			b.textMessage(follow, nil)); err != nil {
 			b.fail(cc, id, err)
 			return
 		}
-		b.reply(cc, id, map[string]any{
-			"ok": true, "message_id": string(resp.ID),
-			"buttons_form": "text"})
-		return
+		if len(flat) > 0 {
+			b.reply(cc, id, map[string]any{
+				"ok": true, "message_id": string(resp.ID),
+				"buttons_form": "text"})
+			return
+		}
 	}
 	b.reply(cc, id, map[string]any{"ok": true, "message_id": string(resp.ID)})
 }

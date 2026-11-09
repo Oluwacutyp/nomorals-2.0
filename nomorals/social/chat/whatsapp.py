@@ -998,7 +998,8 @@ class WhatsAppAdapter(ChatAdapter):
             if kind == "media":
                 media = MediaRef(path=str(entry.get("path") or ""),
                                  kind=str(entry.get("media_kind") or "file"),
-                                 name=str(entry.get("name") or ""))
+                                 name=str(entry.get("name") or ""),
+                                 view_once=bool(entry.get("view_once")))
                 result = self.send_media(
                     chat, media,
                     caption=str(entry.get("caption") or ""),
@@ -1884,6 +1885,25 @@ class WhatsAppAdapter(ChatAdapter):
             return SendResult(ok=False, platform=self.name,
                               error="media has no path",
                               seconds=time.perf_counter() - started)
+        # Special forms (parity bundle #10): a VIDEO NOTE is a
+        # round video (kind "video_note", alias "ptv") and
+        # VIEW-ONCE (media.view_once) wraps a photo/video so the
+        # recipient gets one look. Both are validated HERE, before
+        # any queueing or wire traffic: a form the media cannot
+        # carry is an honest refusal, never a silent plain send —
+        # a view-once ask that went out as a permanent copy would
+        # be a lie about what was delivered.
+        kind = (media.kind or "").lower()
+        video_note = kind in ("video_note", "ptv")
+        if video_note and kind == "ptv":
+            kind = "video_note"
+        view_once = bool(getattr(media, "view_once", False))
+        if view_once and kind not in ("image", "photo", "video"):
+            return SendResult(
+                ok=False, platform=self.name,
+                error="view-once applies to photos and videos — "
+                      f"this is a {kind or 'unknown'} attachment",
+                seconds=time.perf_counter() - started)
         wire_buttons = (
             [[[str(label), str(data)] for label, data in row]
              for row in buttons if row] if buttons else None)
@@ -1894,10 +1914,11 @@ class WhatsAppAdapter(ChatAdapter):
                 "chat_kind": chat.kind,
                 "thread_id": chat.thread_id,
                 "path": path,
-                "media_kind": (media.kind or "").lower(),
+                "media_kind": kind,
                 "name": media.name or "",
                 "caption": caption,
                 "buttons": wire_buttons,
+                "view_once": view_once,
             })
         # Same send-once guard as text (see _send_text_outcome): a
         # media dispatch whose ack was lost is never re-dispatched.
@@ -1919,16 +1940,21 @@ class WhatsAppAdapter(ChatAdapter):
             # should reach the bridge AS what it is (§21). Whether
             # the bridge renders kinds beyond voice is the bridge's
             # side of the contract — reported, not assumed.
-            "media_kind": (media.kind or "").lower(),
+            "media_kind": kind,
         }
         if wire_buttons:
             # No buttons_style: a ListMessage cannot head media —
             # the media form is the interactive header on both
             # bridges regardless of the text-form preference.
             cmd["buttons"] = wire_buttons
-        kind = (media.kind or "").lower()
         if kind in ("voice", "ptt"):
             cmd["ptt"] = True  # voice-note bubble instead of an audio file
+        if video_note:
+            # A round video note (bundle #10): the bridges build
+            # the protocol's ptv form — not a plain video file.
+            cmd["ptv"] = True
+        if view_once:
+            cmd["view_once"] = True
         response = self._send_cmd(cmd, timeout=60)
         if response.get("ok"):
             self._clear_unconfirmed(media_key)
@@ -1958,6 +1984,26 @@ class WhatsAppAdapter(ChatAdapter):
         """Send a voice note. Convenience wrapper over :meth:`send_media`."""
         return self.send_media(
             chat, MediaRef(path=audio_path, kind="voice"), caption=caption)
+
+    def send_view_once(self, chat: ChatRef, media_path: str, *,
+                       kind: str = "image",
+                       caption: str = "") -> SendResult:
+        """Send a photo/video as VIEW-ONCE (parity bundle #10):
+        the recipient gets one look. Convenience wrapper over
+        :meth:`send_media` with the view-once form set — the
+        bridges put the flag/wrap on the wire, verified there."""
+        return self.send_media(
+            chat, MediaRef(path=media_path, kind=kind, view_once=True),
+            caption=caption)
+
+    def send_video_note(self, chat: ChatRef, video_path: str, *,
+                        caption: str = "") -> SendResult:
+        """Send a ROUND video note (parity bundle #10): the
+        protocol's ptv form, not a plain video file. Convenience
+        wrapper over :meth:`send_media`."""
+        return self.send_media(
+            chat, MediaRef(path=video_path, kind="video_note"),
+            caption=caption)
 
     def mark_read(self, chat: ChatRef) -> bool:
         """Send read receipts for a chat. Best-effort: older bridges that

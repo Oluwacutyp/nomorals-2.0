@@ -1916,6 +1916,8 @@ class RuntimeProvisionMixin:
                 "reaction · /react and /forward act on messages "
                 "as you · /viewonce (or /vv) shows a captured "
                 "view-once · /poststatus posts as you · "
+                "/sendonce sends a photo/video view-once and "
+                "/sendnote sends a round video note, as you · "
                 "/chanstory posts to a channel you admin · "
                 "/joinlink joins a WhatsApp group from its "
                 "invite link · /newgroup and /newchannel "
