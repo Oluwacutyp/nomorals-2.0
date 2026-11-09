@@ -6,9 +6,12 @@ over the existing search organs (no new fetchers), and candidate
 intake for the channels/topics discovery surfaces — the source
 registry's proven loop aimed at content instead of hosts.
 
-Trend identification (velocity, promotion rules, claims) is P2 and
-deliberately absent here: this package records facts and renders no
-verdicts. Autonomy (the durable scheduler) and the ``/explore``
+Trend identification is P2 (``trends.py``): cross-sweep
+differencing, velocity against each beat's own baseline, the
+promotion rule (observation → spike → corroborated trend claim),
+freshness decay, and candidate verdicts — claims are written only
+through the evaluator, in the digestion Claim shape the store
+persists. Autonomy (the durable scheduler) and the ``/explore``
 board are P3; both call the entry points defined here unchanged.
 
     from nomorals.media.explore import run_exploration, explore_status
@@ -40,8 +43,21 @@ from .instruments import (
                     default_instruments,
 )
 from .store import ExploreStore
+from .trends import (
+                    CLAIM_KINDS,
+                    CLAIM_SPIKE,
+                    CLAIM_TREND,
+                    CLAIM_UNVERIFIED,
+                    claim_standing,
+                    current_claims,
+                    evaluate_trends,
+)
 
 __all__ = [
+    "CLAIM_KINDS",
+    "CLAIM_SPIKE",
+    "CLAIM_TREND",
+    "CLAIM_UNVERIFIED",
     "EXPLORE_SEED_BEATS",
     "ExploreStore",
     "InstrumentError",
@@ -50,9 +66,12 @@ __all__ = [
     "WebSearchInstrument",
     "YouTubeSearchInstrument",
     "beats_from_profile",
+    "claim_standing",
     "collect_watch_topics",
+    "current_claims",
     "default_explore_store",
     "default_instruments",
+    "evaluate_trends",
     "explore_for_context",
     "explore_status",
     "load_beats",

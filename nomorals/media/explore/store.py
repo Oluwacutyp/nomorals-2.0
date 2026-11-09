@@ -480,6 +480,42 @@ class ExploreStore:
         self._persist()
         return True
 
+    def update_candidate_verdict(self, key: str, *,
+                                 status: str | None = None,
+                                 standing: dict[str, Any] | None = None,
+                                 reason: str = "",
+                                 now: float = 0.0) -> bool:
+        """Record an evidence verdict on a candidate (P2's write
+        path — the trend evaluator's promotion / standing / shed
+        decisions land here; P1 only intakes).
+
+        ``standing`` is the evaluator's evidence snapshot (sighting
+        counts, sweeps seen, source classes, corroboration, missed
+        sweeps, score — inputs stored, per the census's rule that a
+        score whose inputs aren't stored is not a score). A
+        ``status`` of ``shed`` delegates to :meth:`shed_candidate`
+        so the shed record + re-intake window stay single-sourced;
+        any other status updates the row in place. Returns False
+        when the key is unknown. Never raises."""
+        try:
+            if status == CANDIDATE_SHED:
+                row = self._candidates.get(key)
+                if row is not None and standing is not None:
+                    row["standing"] = dict(standing)
+                return self.shed_candidate(key, reason, now)
+            row = self._candidates.get(key)
+            if row is None:
+                return False
+            if status is not None:
+                row["status"] = status
+            if standing is not None:
+                row["standing"] = dict(standing)
+            self._persist()
+            return True
+        except Exception as e:  # noqa: BLE001
+            record_failure("ExploreStore.update_candidate_verdict", e)
+            return False
+
     # ── claims (P2 writes; P1 stores verbatim) ─────────────────────
     def record_claim(self, claim: dict[str, Any]) -> dict[str, Any]:
         """Store one claim record verbatim (digestion ``Claim``

@@ -10,6 +10,11 @@ WS4 Pass 1 ships the manual trigger + the read actions; the
 * ``observations`` — recent observation rows with provenance.
 * ``candidates`` — the watching pool with sighting counts.
 * ``beats`` — the beats a sweep would cover, with their origins.
+* ``trends`` — WS4 Pass 2: evaluate the observation history into
+  trend/spike/unverified claims (idempotent) and render the
+  current claim set with each claim's kind, basis and freshness —
+  the render source P3's board uses. ``refresh=false`` renders
+  the stored claims without re-evaluating.
 
 Rendered text carries no internal record ids — beats, timestamps
 and counts only; ids ride the structured result for programmatic
@@ -24,6 +29,7 @@ from typing import Any
 from ...core.errors import ToolError
 from ...core.policy import Capability
 from .engine import explore_for_context, explore_status, run_exploration
+from .trends import current_claims, evaluate_trends
 
 __all__ = ["register"]
 
@@ -92,6 +98,56 @@ def _render_run(report: dict[str, Any], beats: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _render_trends(claims: list[dict[str, Any]],
+                   report: dict[str, Any] | None) -> str:
+    lines = ["🔭 **Exploration trends**"]
+    if not claims:
+        lines.append("no claims yet — run a sweep (action=run), then "
+                     "evaluate again; one sweep alone can only ever "
+                     "be a spike or unverified, never a trend")
+    for claim in claims:
+        legs = claim.get("basis") or {}
+        bits = [f"{len(legs.get('sweeps') or [])} sweep(s)"]
+        classes = legs.get("source_classes") or []
+        if classes:
+            bits.append("classes: " + " + ".join(classes))
+        velocity = legs.get("velocity") or {}
+        if velocity.get("from_zero"):
+            bits.append("velocity: burst from a zero baseline")
+        elif velocity.get("ratio") is not None:
+            bits.append(f"velocity {velocity['ratio']}x baseline")
+        if legs.get("corroborated_urls"):
+            bits.append(f"{legs['corroborated_urls']} corroborated "
+                        "across classes")
+        if legs.get("corroborated_sightings"):
+            bits.append(f"{legs['corroborated_sightings']} sightings "
+                        "corroborated across classes")
+        if legs.get("single_source"):
+            bits.append("single-source (seed signal only)")
+        standing = claim.get("standing") or "fresh"
+        lines.append(
+            f"· [{claim.get('kind')}] {claim.get('text')} — "
+            f"{'; '.join(bits)} · {standing}, last evidence "
+            f"{_when(claim.get('observed_at') or 0)}")
+    if report:
+        verdicts = report.get("candidates") or {}
+        if verdicts.get("promoted"):
+            lines.append(
+                f"candidates promoted on evidence this evaluation: "
+                f"{len(verdicts['promoted'])}")
+        if verdicts.get("shed"):
+            lines.append(
+                f"candidates shed (absent past the threshold): "
+                f"{len(verdicts['shed'])}")
+        declined = report.get("declined") or []
+        if declined:
+            lines.append("\ndeclined to claim:")
+            for row in declined:
+                lines.append(
+                    f"· {row.get('subject')} — {row.get('reason')}")
+    return "\n".join(lines)
+
+
 def register(registry: Any) -> None:
     context = registry.context
 
@@ -104,13 +160,17 @@ def register(registry: Any) -> None:
             "observations with provenance; channels/topics discovered "
             "are noted as unpromoted candidates. action=run (one "
             "sweep) | status | observations (beat=, limit=) | "
-            "candidates | beats. Sweeps are unauthenticated public "
+            "candidates | beats | trends (evaluate observations into "
+            "trend/spike/unverified claims with their evidence basis "
+            "and freshness; refresh=false renders without "
+            "re-evaluating). Sweeps are unauthenticated public "
             "reads, metadata only — no files are downloaded."
         ),
         capability=Capability.NET_OUT,
     )
     def video_explore(action: str = "status", beat: str = "",
-                      limit: int = 20) -> dict[str, Any]:
+                      limit: int = 20,
+                      refresh: bool = True) -> dict[str, Any]:
         if action == "run":
             store, _engine, beats = explore_for_context(context)
             report = run_exploration(context, store=store, beats=beats,
@@ -130,4 +190,11 @@ def register(registry: Any) -> None:
             return {"candidates": rows, "count": len(rows)}
         if action == "beats":
             return {"beats": beats, "count": len(beats)}
+        if action == "trends":
+            now = time.time()
+            report = evaluate_trends(store, now=now) if refresh else None
+            claims = current_claims(store, now=now)
+            return {"claims": claims, "count": len(claims),
+                    "evaluation": report,
+                    "text": _render_trends(claims, report)}
         raise ToolError(f"unknown video_explore action {action!r}")
