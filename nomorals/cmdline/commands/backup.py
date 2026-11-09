@@ -39,8 +39,15 @@ def _cmd_backup(args: argparse.Namespace, context: Any) -> int:
         _emit(args, {"problems": problems}, "\n".join(problems) if problems else "backup verified clean")
         return 1 if problems else 0
     if args.restore:
-        path = manager.restore(args.restore)
-        _emit(args, {"restored": str(path)}, f"restored to {path}")
+        result = manager.restore(args.restore)
+        if isinstance(result, dict):
+            # Document-dump backup (Mongo-primary install): restored
+            # through the seam into the active document store.
+            _emit(args, result,
+                  f"restored {result['documents']} documents from "
+                  f"{result['backup']} into the document store")
+        else:
+            _emit(args, {"restored": str(result)}, f"restored to {result}")
         return 0
     if args.push:
         result = manager.push_to_git()

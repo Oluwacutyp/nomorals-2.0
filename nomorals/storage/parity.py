@@ -29,6 +29,7 @@ from .failures import record_failure
 __all__ = [
     "ParityReport",
     "check_document_parity",
+    "check_document_parity_streaming",
     "collection_checksum",
     "ensure_shadow_parity_job",
     "run_kv_parity_housekeeping",
@@ -123,6 +124,103 @@ def check_document_parity(store_a: Any, store_b: Any, collection: str = "kv_stor
         only_in_b=only_in_b[:_MAX_REPORTED],
         differing=differing[:_MAX_REPORTED],
         truncated=truncated,
+    )
+
+
+def _paged_docs(store: Any, collection: str, *, page: int):
+    """Yield every document of ``collection`` in ``_id`` order, one page
+    in memory at a time (the seam's ``after_id`` cursor)."""
+    after: str | None = None
+    while True:
+        docs = store.find(collection, include_expired=True,
+                          after_id=after, limit=page)
+        if not docs:
+            return
+        yield from docs
+        after = docs[-1]["_id"]
+        if len(docs) < page:
+            return
+
+
+class _MergeSide:
+    """One side of a streaming merge: a paged cursor plus the rolling
+    count + checksum over everything it has yielded."""
+
+    def __init__(self, store: Any, collection: str, page: int) -> None:
+        self._docs = _paged_docs(store, collection, page=page)
+        self._digest = hashlib.sha256()
+        self.count = 0
+        self.current: dict[str, Any] | None = None
+        self.advance()
+
+    def advance(self) -> None:
+        doc = next(self._docs, None)
+        if doc is not None:
+            if self.current is not None and doc["_id"] <= self.current["_id"]:
+                # The seam contract is _id-ordered find; a store that
+                # breaks it would make the merge report garbage. Fail
+                # loudly instead of issuing a false verdict.
+                raise ValueError(
+                    f"store returned documents out of _id order: "
+                    f"{doc['_id']!r} after {self.current['_id']!r}")
+            self._digest.update(_canonical(doc).encode("utf-8"))
+            self._digest.update(b"\n")
+            self.count += 1
+        self.current = doc
+
+    @property
+    def checksum(self) -> str:
+        return self._digest.hexdigest()
+
+
+def check_document_parity_streaming(store_a: Any, store_b: Any,
+                                    collection: str, *,
+                                    page: int = 1000) -> ParityReport:
+    """Compare ``collection`` across two stores with bounded memory.
+
+    The streaming twin of :func:`check_document_parity`: a two-pointer
+    merge over both stores' ``_id``-ordered cursors. Only one page per
+    side is ever held, so collections far beyond the in-memory
+    comparator's ``limit`` compare exactly. Verdict semantics are the
+    same contract — counts, the same ordered canonical checksums
+    (digested incrementally, byte-identical to :func:`_digest` over
+    the same documents), the same divergent-id lists capped at
+    ``_MAX_REPORTED`` — and ``truncated`` is always False: the merge
+    reads both collections to exhaustion, so there is no partial-read
+    state to confess. Divergence is data for the report, never an
+    exception.
+    """
+    side_a = _MergeSide(store_a, collection, page)
+    side_b = _MergeSide(store_b, collection, page)
+    only_in_a: list[str] = []
+    only_in_b: list[str] = []
+    differing: list[str] = []
+    while side_a.current is not None or side_b.current is not None:
+        a, b = side_a.current, side_b.current
+        if b is None or (a is not None and a["_id"] < b["_id"]):
+            if len(only_in_a) < _MAX_REPORTED:
+                only_in_a.append(a["_id"])
+            side_a.advance()
+        elif a is None or b["_id"] < a["_id"]:
+            if len(only_in_b) < _MAX_REPORTED:
+                only_in_b.append(b["_id"])
+            side_b.advance()
+        else:
+            if _canonical(a) != _canonical(b) \
+                    and len(differing) < _MAX_REPORTED:
+                differing.append(a["_id"])
+            side_a.advance()
+            side_b.advance()
+    return ParityReport(
+        collection=collection,
+        count_a=side_a.count,
+        count_b=side_b.count,
+        checksum_a=side_a.checksum,
+        checksum_b=side_b.checksum,
+        only_in_a=only_in_a,
+        only_in_b=only_in_b,
+        differing=differing,
+        truncated=False,
     )
 
 

@@ -6,6 +6,13 @@ A snapshot is a directory under ``<state>/snapshots/<id>/`` containing:
   ``VACUUM INTO`` so it is valid even while the database is open.
 * ``blobs/`` — a copy of the blob store directory (artifact payloads).
 * ``config.json`` — the resolved settings plus the raw config file when known.
+* ``docs.jsonl.gz`` — the document-store leg (Mongo program P6), present
+  when the snapshot was taken with a document store attached (a
+  Mongo-primary install): a gzipped document dump in the backup
+  machinery's format. The manifest's ``documents`` entry records its
+  status — ``included`` / ``unavailable`` (with the reason; such a
+  snapshot fails verification rather than silently omitting the
+  primary store) / ``not-applicable``.
 * ``manifest.json`` — id, timestamps, checksums, schema version, sizes.
 
 Restore is transactional: the snapshot is staged into a temp directory,
@@ -23,6 +30,7 @@ Restore refuses to run over a live or dirty system unless ``force=True``:
 from __future__ import annotations
 
 import errno
+import gzip
 import hashlib
 import json
 import os
@@ -42,6 +50,7 @@ __all__ = [
     "SnapshotError",
     "SnapshotLockedError",
     "SnapshotRefused",
+    "document_leg",
     "SnapshotManager",
     "system_state",
 ]
@@ -54,6 +63,9 @@ MANIFEST_FILENAME = "manifest.json"
 DB_FILENAME = "db.sqlite"
 BLOBS_DIRNAME = "blobs"
 CONFIG_FILENAME = "config.json"
+#: The document-store leg's payload: a gzipped document dump in the
+#: backup machinery's format (storage/backup.py's write_document_dump).
+DOCS_FILENAME = "docs.jsonl.gz"
 
 
 class SnapshotError(Exception):
@@ -199,6 +211,25 @@ def _new_id() -> str:
     return f"{ts}-{rand}"
 
 
+def document_leg(db: Any) -> tuple[Any, str]:
+    """Resolve a :class:`SnapshotManager` document-store leg from a
+    live database handle: ``(store, "")`` when the active backend's
+    store is attached; ``(None, reason)`` when the boot resolution
+    says Mongo is active but no store is attached (a wiring bug the
+    snapshot manifest must name, so verification can fail on it);
+    ``(None, "")`` when the install has no document leg at all.
+    """
+    store = getattr(db, "document_store", None)
+    if store is not None:
+        return store, ""
+    resolution = getattr(db, "store_resolution", None)
+    if resolution is not None and getattr(resolution, "active", "") == "mongo":
+        return None, (getattr(resolution, "detail", "")
+                      or "mongo backend active but no document store "
+                         "is attached")
+    return None, ""
+
+
 class SnapshotManager:
     """Create, verify, list, restore and delete state snapshots."""
 
@@ -210,12 +241,25 @@ class SnapshotManager:
         blob_dir: str | os.PathLike[str] | None = None,
         config_path: str | os.PathLike[str] | None = None,
         settings_dict: dict[str, Any] | None = None,
+        document_store: Any = None,
+        document_note: str = "",
     ) -> None:
         self.home = Path(home)
         self.db_path = Path(db_path)
         self.blob_dir = Path(blob_dir) if blob_dir else None
         self.config_path = Path(config_path) if config_path else None
         self.settings_dict = settings_dict or {}
+        # Document-store leg (Mongo program P6): on a Mongo-primary
+        # install the primary store's data must ride the snapshot as a
+        # document dump (docs.jsonl.gz — the backup machinery's
+        # format); a snapshot of only the SQLite rung on such an
+        # install is a fossil. ``document_note`` records WHY no store
+        # was attached when the configuration says one should be: the
+        # manifest then names the snapshot's documents "unavailable"
+        # with that reason, and verification fails on it rather than
+        # passing a snapshot that silently omits the primary store.
+        self.document_store = document_store
+        self.document_note = document_note
         self.root = self.home / SNAPSHOT_DIRNAME
         #: Bounded wait for a transient file-in-use failure during the
         #: restore swap (see :meth:`_replace_file`). Attributes, not
@@ -255,6 +299,16 @@ class SnapshotManager:
                 "bytes": _dir_size(blobs_dest),
             }
 
+        # 2b. document-store leg (Mongo program P6): when a document
+        # store is attached (a Mongo-primary install), its data rides
+        # the snapshot as a document dump in the backup machinery's
+        # format. When the install is configured for one but none could
+        # be attached, the leg records itself "unavailable" with the
+        # reason and verification fails on it (see verify()) — a
+        # snapshot that silently omits the primary store is worse
+        # than a loud one.
+        documents = self._write_documents_leg(dest, files)
+
         # 3. config.
         config_payload = {
             "settings": self.settings_dict,
@@ -287,6 +341,9 @@ class SnapshotManager:
             "schema_version": self._schema_version(db_dest),
             "files": files,
             "total_bytes": sum(f["bytes"] for f in files.values()),
+            # Document-store leg state (P6). Snapshots written before
+            # P6 have no "documents" key at all — read as not-applicable.
+            "documents": documents,
         }
         (dest / MANIFEST_FILENAME).write_text(
             json.dumps(manifest, indent=2), encoding="utf-8"
@@ -299,6 +356,101 @@ class SnapshotManager:
             path=dest,
             manifest=manifest,
         )
+
+    def _write_documents_leg(self, dest: Path,
+                             files: dict[str, dict[str, Any]],
+                             ) -> dict[str, Any]:
+        """Write the snapshot's document-store leg and return its
+        manifest entry: ``{"status": "included", ...}`` when a store
+        was attached and exported, ``{"status": "unavailable",
+        "reason": ...}`` when the install was configured for one but
+        the export could not happen, ``{"status":
+        "not-applicable"}`` on a plain SQLite install.
+        """
+        if self.document_store is None:
+            if self.document_note:
+                return {"status": "unavailable",
+                        "reason": self.document_note}
+            return {"status": "not-applicable"}
+        from ..storage.backup import write_document_dump
+
+        plain = dest / "_docs.jsonl"
+        docs_path = dest / DOCS_FILENAME
+        try:
+            summary = write_document_dump(self.document_store, plain)
+            with plain.open("rb") as src, gzip.open(
+                    docs_path, "wb", compresslevel=6) as dst:
+                shutil.copyfileobj(src, dst)
+        except Exception as exc:  # noqa: BLE001 - becomes manifest state
+            plain.unlink(missing_ok=True)
+            docs_path.unlink(missing_ok=True)
+            return {"status": "unavailable",
+                    "reason": f"{type(exc).__name__}: {exc}"}
+        plain.unlink(missing_ok=True)
+        files[DOCS_FILENAME] = {
+            "sha256": _sha256_file(docs_path),
+            "bytes": docs_path.stat().st_size,
+        }
+        return {
+            "status": "included",
+            "file": DOCS_FILENAME,
+            "collections": summary,
+            "documents": sum(c["count"] for c in summary.values()),
+        }
+
+    def _verify_documents_leg(self, snap: Snapshot) -> list[str]:
+        """Problems with a snapshot's document-store leg.
+
+        "unavailable" is always a problem: the snapshot declares its
+        primary store missing, and passing it would bless a fossil.
+        "included" is deep-proven: the dump loads into a scratch store
+        and its per-collection checksums must equal the manifest's.
+        A missing "documents" key (pre-P6 snapshot) is not-applicable.
+        """
+        documents = snap.manifest.get("documents") or {}
+        status = documents.get("status", "not-applicable")
+        if status == "not-applicable":
+            return []
+        if status == "unavailable":
+            return ["documents leg unavailable: "
+                    + str(documents.get("reason") or "no reason recorded")]
+        if status != "included":
+            return [f"documents leg has unknown status {status!r}"]
+        assert snap.path is not None
+        dump_path = snap.path / documents.get("file", DOCS_FILENAME)
+        if not dump_path.exists():
+            return [f"missing file: {dump_path.name}"]
+        from ..storage.backup import load_document_dump
+        from ..storage.db import Database
+        from ..storage.docstore import SQLiteDocumentStore
+        from ..storage.parity import collection_checksum
+
+        scratch = SQLiteDocumentStore(Database(":memory:"))
+        try:
+            counts = load_document_dump(dump_path, scratch)
+        except Exception as exc:  # noqa: BLE001 - the finding, reported
+            return [f"documents dump cannot be loaded: "
+                    f"{type(exc).__name__}: {exc}"]
+        problems: list[str] = []
+        recorded = documents.get("collections") or {}
+        for name in sorted(set(recorded) | set(counts)):
+            if name not in recorded or name not in counts:
+                problems.append(
+                    f"documents collection {name}: present in exactly "
+                    "one of manifest and dump")
+                continue
+            want = recorded[name]
+            if counts[name] != want.get("count"):
+                problems.append(
+                    f"documents collection {name}: dump holds "
+                    f"{counts[name]} documents, manifest records "
+                    f"{want.get('count')}")
+                continue
+            _n, checksum = collection_checksum(scratch, name)
+            if checksum != want.get("checksum"):
+                problems.append(
+                    f"documents collection {name}: checksum mismatch")
+        return problems
 
     def _copy_database(self, dest: Path) -> None:
         src = str(self.db_path)
@@ -612,6 +764,7 @@ class SnapshotManager:
                 problems.append(f"db integrity_check error: {exc}")
         else:
             problems.append("missing db.sqlite")
+        problems.extend(self._verify_documents_leg(snap))
         return problems
 
     # ── restore ────────────────────────────────────────────────────────────
@@ -630,6 +783,17 @@ class SnapshotManager:
             raise SnapshotError(
                 f"snapshot {snap.id} failed verification: {'; '.join(problems)}"
             )
+
+        documents = snap.manifest.get("documents") or {}
+        if (documents.get("status") == "included"
+                and self.document_store is None):
+            # Refuse BEFORE any file moves: restoring the file legs
+            # without the document leg would silently strand the
+            # primary store's data at the snapshot's point in time.
+            raise SnapshotRefused(
+                f"snapshot {snap.id} carries a document-store leg but "
+                "this manager has no document store attached; refusing "
+                "to restore the files without it")
 
         state = system_state(self.home, self.db_path)
         if not force and (state["running"] or state["dirty"]):
@@ -660,6 +824,26 @@ class SnapshotManager:
                 shutil.rmtree(stage, ignore_errors=True)
         finally:
             self._release_lock(lock_fd)
+
+        if documents.get("status") == "included":
+            # The file legs are in place; now converge the document
+            # store to the snapshot (upserts by id through the seam).
+            # A failure here is named, never hidden: the files DID
+            # swap, and the error says exactly that.
+            from ..storage.backup import load_document_dump
+
+            try:
+                counts = load_document_dump(
+                    snap.path / documents.get("file", DOCS_FILENAME),
+                    self.document_store)
+            except Exception as exc:  # noqa: BLE001 - re-raised, named
+                raise SnapshotError(
+                    f"snapshot {snap.id}: files restored but the "
+                    f"document leg failed to load ({type(exc).__name__}: "
+                    f"{exc}); the document store was NOT converged to "
+                    "the snapshot") from exc
+            _log.info("snapshot %s documents restored: %s",
+                      snap.id, counts)
 
         _log.info("snapshot %s restored", snap.id)
         return snap

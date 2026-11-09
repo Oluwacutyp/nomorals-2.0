@@ -15,12 +15,33 @@ def _manager(settings: Any, config_path: str | None) -> SnapshotManager:
     settings_dict: dict[str, Any] = {}
     with contextlib.suppress(Exception):  # noqa: BLE001 - best effort
         settings_dict = settings.to_dict()
+    # Document-store leg (Mongo program P6): a Mongo-configured install
+    # snapshots and restores its document store too. The CLI runs on
+    # settings only, so resolve the store straight from the config —
+    # healthy → attached; unhealthy → the note the manifest records as
+    # the leg's "unavailable" reason (verification then fails loudly
+    # instead of the snapshot silently omitting the primary store).
+    document_store = None
+    document_note = ""
+    storage = getattr(settings, "storage", None)
+    if storage is not None and getattr(storage, "backend", "") == "mongo":
+        from ...storage.docstore import MongoDocumentStore
+
+        store = MongoDocumentStore(
+            uri=storage.mongo_uri or None, db_name=storage.mongo_db)
+        report = store.health()
+        if report.ok:
+            document_store = store
+        else:
+            document_note = report.detail or "mongo target not healthy"
     return SnapshotManager(
         home=settings.home_path,
         db_path=settings.db_path,
         blob_dir=getattr(settings, "blob_dir", None),
         config_path=config_path,
         settings_dict=settings_dict,
+        document_store=document_store,
+        document_note=document_note,
     )
 
 

@@ -19,7 +19,28 @@ against the install's own context, the same shape as ``nm backup``:
     nm db parity [--status] [--json]
         run the parity gate (fresh re-read of both stores; the verdict
         is recorded) — or, with --status, print the latest record, the
-        exact dict the P6 cutover will gate on
+        exact dict the P6 cutover gates on
+
+Plus the cutover flow itself (P6, the Mongo program's final phase):
+
+    nm db cutover status [--json]
+        residue dispositions on record, the parity gate's latest
+        record, recent cutover runs
+    nm db cutover preflight [--json]
+        verify the target mongod (reachable, replica set, writable
+        primary, cache capped) and the residue dispositions — refuses
+        (exit 1) when anything is unready; mutates nothing
+    nm db cutover dispositions [--record STORE --as DISP [--note T]]
+                               [--record-missing --as DISP] [--json]
+        list residue dispositions, or record them (bulk with
+        --record-missing): exported / ports-later-accepted /
+        owner-data-risk
+    nm db cutover run [--dry-run] [--json]
+        preflight → carry → parity gate → flip → smoke; --dry-run
+        walks everything except the flip and says so
+    nm db cutover rollback [--json]
+        flip the config back to sqlite (the source was never written
+        by the carry; the Mongo copy is left in place)
 """
 
 from __future__ import annotations
@@ -35,7 +56,9 @@ def _usage() -> int:
           "       nm db query <select sql>\n"
           "       nm db counts [--top N]\n"
           "       nm db carry [--dry-run] [--collections a,b] [--json]\n"
-          "       nm db parity [--status] [--json]",
+          "       nm db parity [--status] [--json]\n"
+          "       nm db cutover status|preflight|dispositions|run|rollback"
+          " [--dry-run] [--json]",
           file=sys.stderr)
     return 2
 
@@ -59,6 +82,8 @@ def _cmd_db(args: Any, context: Any) -> int:
             return _db_carry(args, context, words[1:])
         if verb == "parity":
             return _db_parity(args, context, words[1:])
+        if verb == "cutover":
+            return _db_cutover(args, context, words[1:])
     except Exception as exc:  # noqa: BLE001 - fail fast with the real error
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
@@ -217,6 +242,151 @@ def _db_parity(args: Any, context: Any, rest: list[str]) -> int:
                       f"only_target={entry['only_in_target'][:5]} "
                       f"differing={entry['differing'][:5]}")
     return 0 if gate["passed"] else 1
+
+
+def _flag_value(rest: list[str], flag: str) -> str | None:
+    for i, word in enumerate(rest):
+        if word == flag and i + 1 < len(rest):
+            return rest[i + 1]
+    return None
+
+
+def _print_residue_lines(status: dict[str, Any]) -> None:
+    for name, info in status["residue_stores"].items():
+        if not info["has_data"] and info["disposition"] is None:
+            continue
+        files = ", ".join(
+            f"{f['path']} ({f['bytes']} bytes"
+            + (f", {f['rows']} rows" if f.get("rows") is not None else "")
+            + ")" for f in info["files"]) or "no file found"
+        disp = info["disposition"]
+        verdict = (f"disposition: {disp['disposition']}"
+                   if disp else "disposition: UNRECORDED")
+        print(f"  {name}: {files} — {verdict}")
+    for entry in status["unattributed_files"]:
+        print(f"  UNATTRIBUTED FILE: {entry['path']} "
+              f"({entry['bytes']} bytes) — no residue store claims it")
+
+
+def _db_cutover(args: Any, context: Any, rest: list[str]) -> int:
+    from ...storage import cutover
+
+    action = rest[0].lower() if rest else "status"
+    settings = context.settings
+    db = context.db
+
+    if action == "dispositions":
+        as_disp = _flag_value(rest, "--as")
+        record = _flag_value(rest, "--record")
+        note = _flag_value(rest, "--note") or ""
+        changed: list[dict[str, Any]] = []
+        if record and as_disp:
+            changed.append(cutover.record_disposition(
+                db, record, as_disp, note))
+        elif "--record-missing" in rest and as_disp:
+            status = cutover.cutover_status(db, settings)
+            for name in status["missing_dispositions"]:
+                changed.append(cutover.record_disposition(
+                    db, name, as_disp, note))
+        elif record or "--record-missing" in rest or as_disp:
+            print("usage: nm db cutover dispositions "
+                  "--record STORE --as DISPOSITION [--note TEXT] | "
+                  "--record-missing --as DISPOSITION",
+                  file=sys.stderr)
+            return 2
+        status = cutover.cutover_status(db, settings)
+        if _as_json(args):
+            print(json.dumps({"recorded": changed,
+                              "residue_stores": status["residue_stores"],
+                              "missing_dispositions":
+                                  status["missing_dispositions"]},
+                             indent=2, default=str))
+        else:
+            for entry in changed:
+                print(f"recorded: {entry['store']} → "
+                      f"{entry['disposition']}")
+            _print_residue_lines(status)
+            if status["missing_dispositions"]:
+                print("missing dispositions: "
+                      + ", ".join(status["missing_dispositions"]))
+        return 0
+
+    if action == "status":
+        status = cutover.cutover_status(db, settings)
+        if _as_json(args):
+            print(json.dumps(status, indent=2, default=str))
+            return 0
+        gate = status["parity_gate"]
+        verdict = ("no record" if gate["at"] is None
+                   else "PASS" if gate["passed"] else "FAIL")
+        print(f"parity gate: {verdict} "
+              f"(mapping {gate['mapping_version']})")
+        _print_residue_lines(status)
+        for run in status["recent_runs"][:5]:
+            print(f"  run: {run['action']} "
+                  f"{'dry-run ' if run['dry_run'] else ''}"
+                  f"{'ok' if run['ok'] else 'FAILED'} at {run['at']}")
+        return 0
+
+    if action == "preflight":
+        target = _mongo_target(context, require_live=False)
+        pre = cutover.preflight(db, settings, target)
+        if _as_json(args):
+            print(json.dumps(pre, indent=2, default=str))
+        else:
+            for name, ok in pre["checks"].items():
+                print(f"  {'ok ' if ok else 'FAIL'} {name}")
+            for name in pre["missing_dispositions"]:
+                print(f"  residue store {name} holds file data with "
+                      "no recorded disposition")
+            for entry in pre["residue"]["unattributed"]:
+                print(f"  UNATTRIBUTED FILE: {entry['path']} "
+                      f"({entry['bytes']} bytes)")
+            print("preflight: " + ("READY" if pre["ok"] else "REFUSED"))
+        return 0 if pre["ok"] else 1
+
+    if action == "run":
+        target = _mongo_target(context, require_live=False)
+        dry_run = "--dry-run" in rest
+
+        def progress(event: dict[str, Any]) -> None:
+            if event.get("event") in {"done", "verified_skip"}:
+                print(f"  {event['collection']}: {event['event']}",
+                      flush=True)
+
+        report = cutover.run_cutover(db, settings, target=target,
+                                     dry_run=dry_run, progress=progress)
+        if _as_json(args):
+            print(json.dumps(report, indent=2, default=str))
+        else:
+            for entry in report["steps"]:
+                print(f"  {entry['status']:>7}  {entry['step']}")
+            if report.get("refused_at"):
+                print(f"cutover refused at: {report['refused_at']}")
+            if report.get("rollback_hint"):
+                print(report["rollback_hint"])
+            print("cutover: " + (
+                "DRY RUN complete — nothing flipped" if dry_run
+                else "complete, install is on mongo" if report["ok"]
+                else "FAILED"))
+        return 0 if report["ok"] else 1
+
+    if action == "rollback":
+        result = cutover.rollback_cutover(db, settings)
+        if _as_json(args):
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            print("rollback: " + (
+                "config flipped back to sqlite "
+                "(mongo copy left in place)"
+                if result["ok"] else
+                f"FAILED — {result['flip']['culprits']}"))
+        return 0 if result["ok"] else 1
+
+    print(f"unknown cutover action: {action} "
+          "(status|preflight|dispositions|run|rollback)",
+          file=sys.stderr)
+    return 2
 
 
 def _db_counts(args: Any, context: Any) -> int:

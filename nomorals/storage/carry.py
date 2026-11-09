@@ -78,7 +78,11 @@ from typing import Any
 from ..core.logging_setup import get_logger
 from .docstore import _matches, mask_mongo_uri
 from .failures import record_failure
-from .parity import check_document_parity, collection_checksum
+from .parity import (
+    check_document_parity,
+    check_document_parity_streaming,
+    collection_checksum,
+)
 
 __all__ = [
     "MAPPING_VERSION",
@@ -102,6 +106,7 @@ __all__ = [
     "carry",
     "run_parity_gate",
     "parity_gate_status",
+    "STREAMING_PARITY_THRESHOLD",
 ]
 
 _log = get_logger(__name__)
@@ -149,6 +154,14 @@ EXCLUDED_TABLES: dict[str, str] = {
     RECORDS_TABLE: (
         "the P2 parity gate's own bookkeeping; records live with the "
         "operator's SQLite database by design"),
+    "cutover_dispositions": (
+        "the P6 cutover flow's own bookkeeping (residue dispositions "
+        "recorded at preflight); records live with the operator's "
+        "SQLite database by design, same disposition as "
+        "carry_parity_records"),
+    "cutover_runs": (
+        "the P6 cutover flow's own run ledger, same disposition as "
+        "cutover_dispositions"),
 }
 
 #: Exclusion reason for FTS5 virtual tables and their shadow tables.
@@ -909,32 +922,95 @@ def _field_level_sample(view: RowDocumentView, target: Any, collection: str,
     return mismatches
 
 
+#: Above this many documents on either side, the parity gate compares
+#: with the streaming comparator (one page per side in memory) instead
+#: of the in-memory one (two full collections). 50k documents is where
+#: two materialized copies of a collection stop being a rounding error
+#: on the small hosts this system runs on; below it, collections keep
+#: the exact in-memory path they have always had. The verdict contract
+#: is identical either way — see
+#: :func:`nomorals.storage.parity.check_document_parity_streaming`.
+STREAMING_PARITY_THRESHOLD = 50_000
+
+
+def _sample_ids(view: RowDocumentView, collection: str, *, total: int,
+                sample: int) -> list[str]:
+    """The gate's deterministic stride sample of ids, gathered paged.
+
+    Selects the same ids ``ids[::step][:sample]`` would select over the
+    full ordered id list (``step = total // sample``), without ever
+    materializing that list — the field-level sample for collections
+    the streaming comparator handled.
+    """
+    if total <= 0 or sample <= 0:
+        return []
+    step = max(1, total // sample)
+    picked: list[str] = []
+    seen = 0
+    after: str | None = None
+    while len(picked) < sample:
+        docs = view.find(collection, include_expired=True,
+                         after_id=after, limit=1000)
+        if not docs:
+            break
+        for doc in docs:
+            if seen % step == 0:
+                picked.append(doc["_id"])
+                if len(picked) >= sample:
+                    break
+            seen += 1
+        after = docs[-1]["_id"]
+        if len(docs) < 1000:
+            break
+    return picked
+
+
 def run_parity_gate(db: Any, target: Any, *, sample: int = 25,
                     record: bool = True,
-                    limit: int = 2_000_000) -> dict[str, Any]:
+                    limit: int = 2_000_000,
+                    streaming_threshold: int = STREAMING_PARITY_THRESHOLD,
+                    ) -> dict[str, Any]:
     """Re-read both stores fresh and prove (or refute) parity, per collection.
 
     PASS requires, for every mapped collection: equal counts, equal
-    ordered canonical checksums, no divergent ids from
-    :func:`check_document_parity`, and no field-level mismatch in the
-    sample. The verdict is persisted (``record=True``) as a durable
-    parity record and divergences are journaled to the failure ledger.
+    ordered canonical checksums, no divergent ids from the comparator,
+    and no field-level mismatch in the sample. Collections larger than
+    ``streaming_threshold`` on either side are compared with the
+    streaming comparator (bounded memory, same verdict contract); the
+    per-collection entry records which comparator produced it. The
+    verdict is persisted (``record=True``) as a durable parity record
+    and divergences are journaled to the failure ledger.
     """
     view = RowDocumentView(db)
     per_collection: list[dict[str, Any]] = []
     passed = True
     for mapping in mapped_tables(db):
         collection = mapping.collection
-        report = check_document_parity(view, target, collection, limit=limit)
+        source_count = int(db.scalar(
+            f'SELECT COUNT(*) FROM "{mapping.table}"', default=0) or 0)
+        target_count = target.count(collection, include_expired=True)
+        streaming = max(source_count, target_count) > streaming_threshold
+        if streaming:
+            report = check_document_parity_streaming(view, target, collection)
+        else:
+            report = check_document_parity(view, target, collection,
+                                           limit=limit)
         entry = report.to_dict()
+        entry["comparator"] = "streaming" if streaming else "in_memory"
         entry["source_count"] = entry.pop("count_a")
         entry["target_count"] = entry.pop("count_b")
         entry["source_checksum"] = entry.pop("checksum_a")
         entry["target_checksum"] = entry.pop("checksum_b")
         entry["only_in_source"] = entry.pop("only_in_a")
         entry["only_in_target"] = entry.pop("only_in_b")
-        ids = sorted({d["_id"] for d in view.find(
-            collection, include_expired=True, limit=limit)}) if sample > 0 else []
+        if sample > 0 and streaming:
+            ids = _sample_ids(view, collection,
+                              total=entry["source_count"], sample=sample)
+        elif sample > 0:
+            ids = sorted({d["_id"] for d in view.find(
+                collection, include_expired=True, limit=limit)})
+        else:
+            ids = []
         entry["field_mismatches"] = _field_level_sample(
             view, target, collection, ids, sample=sample)
         entry["ok"] = bool(report.ok and not entry["field_mismatches"])

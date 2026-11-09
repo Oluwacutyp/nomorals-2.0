@@ -459,14 +459,20 @@ _register(_S(
     name="backup-machinery", verdict="pinned", kind="mixed",
     modules=("backup/snapshot.py", "backup/verify.py", "os/snapshots.py"),
     reason=(
-        "snapshot/verify machinery is SQLite-FILE machinery by "
-        "definition: it copies, integrity-checks and restores the "
-        "SQLite rung's files, which stay alive on every install "
-        "(the pinned domains live there). Teaching the machinery "
-        "what 'the database' means under Mongo — exporter dumps in "
-        "the same manifest format — is the cutover pass (P6), "
-        "named there, not silently absorbed here."),
-    follows="mongo-p6-cutover",
+        "snapshot/verify machinery is FILE machinery by design: it "
+        "copies, integrity-checks and restores files, and backups are "
+        "files on every install. It is backend-aware since P6, as "
+        "shipped: BackupManager dispatches on the active backend — a "
+        "SQLite install snapshots its file exactly as before, while a "
+        "Mongo-primary install's payload is a document dump exported "
+        "through the seam (storage/backup.py's write_document_dump) "
+        "recorded in the same manifest format, verified by "
+        "scratch-restore + spot parity and restored through the "
+        "seam; os/snapshots.py carries the same document leg (a "
+        "snapshot missing it on a Mongo-configured install fails "
+        "verification rather than silently omitting the primary "
+        "store). The pin is on the machinery's medium, not on "
+        "database blindness."),
 ))
 
 _register(_S(

@@ -24,6 +24,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,7 +35,16 @@ from ..core.style import active_theme, header, styled_table
 from .db import Database
 from .failures import record_failure
 
-__all__ = ["BackupInfo", "BackupManager", "RetentionPolicy"]
+__all__ = [
+    "BackupInfo",
+    "BackupManager",
+    "RetentionPolicy",
+    "DOC_DUMP_FORMAT",
+    "DOC_DUMP_VERSION",
+    "write_document_dump",
+    "iter_document_dump",
+    "load_document_dump",
+]
 
 _log = get_logger(__name__)
 
@@ -61,6 +71,16 @@ class BackupInfo:
     blob_sha256: str = ""
     blob_count: int = 0
     blob_files: dict[str, str] = field(default_factory=dict)  # rel path -> sha256
+    # Backend leg (Mongo program P6): "" for a classic SQLite-file
+    # snapshot (every entry written before P6); "mongo" when the payload
+    # is a document dump exported through the seam from a Mongo-primary
+    # install — the same manifest, the same blob sidecar, a payload
+    # shaped like the store it came from.
+    backend: str = ""
+    # Per-collection {"count", "checksum"} of a document dump, digested
+    # during the export itself, so verify can prove the artifact (and a
+    # scratch restore of it) without the source store.
+    doc_collections: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -77,6 +97,8 @@ class BackupInfo:
             "blob_sha256": self.blob_sha256,
             "blob_count": self.blob_count,
             "blob_files": self.blob_files,
+            "backend": self.backend,
+            "doc_collections": self.doc_collections,
         }
 
 
@@ -136,6 +158,124 @@ class RetentionPolicy:
         return keepers
 
 
+# ── document-store dumps (Mongo program P6) ──────────────────────────────
+#
+# A Mongo-primary install's "database" is a document store, not a file.
+# Its backup payload is a dump: line-delimited JSON, one document per
+# line, streamed through the seam in _id order. The per-collection
+# checksums digested while writing use the parity module's canonical
+# serialization — the one canonical form in the system — so a dump
+# checksum IS a parity checksum, and a store restored from the dump can
+# be spot-proven against the manifest with ``collection_checksum``.
+
+DOC_DUMP_FORMAT = "nomorals-documents"
+DOC_DUMP_VERSION = 1
+_DOC_DUMP_PAGE = 1000
+
+
+def write_document_dump(store: Any, dest: str | os.PathLike[str],
+                        ) -> dict[str, dict[str, Any]]:
+    """Stream every collection of ``store`` into a JSONL dump at ``dest``.
+
+    Returns ``{collection: {"count": n, "checksum": h}}`` digested over
+    the documents as written (expired documents included — a backup
+    keeps TTL state faithfully, like the carry does). The file is
+    written uncompressed; callers gzip it the way they gzip a database
+    snapshot.
+    """
+    from .parity import _canonical
+
+    dest = Path(dest)
+    summary: dict[str, dict[str, Any]] = {}
+    with dest.open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "format": DOC_DUMP_FORMAT, "version": DOC_DUMP_VERSION,
+            "created_at": time.time(),
+            "store": getattr(store, "name", type(store).__name__),
+        }) + "\n")
+        for collection in store.collections():
+            digest = hashlib.sha256()
+            count = 0
+            after: str | None = None
+            while True:
+                docs = store.find(collection, include_expired=True,
+                                  after_id=after, limit=_DOC_DUMP_PAGE)
+                if not docs:
+                    break
+                for doc in docs:
+                    digest.update(_canonical(doc).encode("utf-8"))
+                    digest.update(b"\n")
+                    fh.write(json.dumps(
+                        {"collection": collection, "doc": doc},
+                        default=str) + "\n")
+                    count += 1
+                after = docs[-1]["_id"]
+                if len(docs) < _DOC_DUMP_PAGE:
+                    break
+            summary[collection] = {"count": count,
+                                   "checksum": digest.hexdigest()}
+        fh.write(json.dumps({
+            "format": DOC_DUMP_FORMAT, "trailer": True,
+            "collections": summary}) + "\n")
+    return summary
+
+
+def iter_document_dump(path: str | os.PathLike[str],
+                       ) -> Iterator[tuple[str, Any]]:
+    """Yield ``("header", dict)`` / ``("doc", (collection, doc))`` /
+    ``("trailer", dict)`` records from a dump file (gzip-aware)."""
+    path = Path(path)
+    if str(path).endswith(".gz"):
+        fh = gzip.open(path, "rt", encoding="utf-8")
+    else:
+        fh = path.open("r", encoding="utf-8")
+    with fh:
+        for lineno, line in enumerate(fh, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise StorageError(
+                    f"document dump {path} line {lineno}: {exc}") from exc
+            if "doc" in record:
+                yield ("doc", (record["collection"], record["doc"]))
+            elif record.get("trailer"):
+                yield ("trailer", record)
+            elif record.get("format") == DOC_DUMP_FORMAT:
+                yield ("header", record)
+            else:
+                raise StorageError(
+                    f"document dump {path} line {lineno}: "
+                    f"unrecognized record {str(record)[:120]}")
+
+
+def load_document_dump(path: str | os.PathLike[str], store: Any,
+                       ) -> dict[str, int]:
+    """Load a dump into ``store`` through the seam (upserts by document
+    id, managed expiry carried). Returns per-collection counts loaded."""
+    counts: dict[str, int] = {}
+    header_seen = False
+    for kind, payload in iter_document_dump(path):
+        if kind == "header":
+            header_seen = True
+            if payload.get("version") != DOC_DUMP_VERSION:
+                raise StorageError(
+                    f"document dump {path}: unsupported version "
+                    f"{payload.get('version')!r}")
+        elif kind == "doc":
+            collection, doc = payload
+            fields = {k: v for k, v in doc.items()
+                      if k not in ("_id", "expires_at")}
+            store.put(collection, doc["_id"], fields,
+                      expires_at=doc.get("expires_at"))
+            counts[collection] = counts.get(collection, 0) + 1
+    if not header_seen:
+        raise StorageError(f"not a document dump: {path}")
+    return counts
+
+
 @dataclass
 class BackupManager:
     """Creates, verifies, rotates, restores, and ships database backups."""
@@ -159,6 +299,27 @@ class BackupManager:
         self.directory.mkdir(parents=True, exist_ok=True)
 
     # ── create ───────────────────────────────────────────────────────────────
+    def _document_store(self) -> Any:
+        """The attached document store when this install's ACTIVE backend
+        is Mongo — the thing a backup must capture — else ``None``.
+
+        A handle whose boot resolution reports Mongo active but which
+        carries no store is a wiring bug: fail loudly rather than
+        "backing up" the SQLite file the install no longer treats as
+        primary (the fossilization failure the Mongo census names as
+        its highest-consequence risk).
+        """
+        resolution = getattr(self.db, "store_resolution", None)
+        if resolution is None or getattr(resolution, "active", "") != "mongo":
+            return None
+        store = getattr(self.db, "document_store", None)
+        if store is None:
+            raise StorageError(
+                "storage resolution reports mongo active but no document "
+                "store is attached to this database handle; refusing to "
+                "back up the sqlite file and call it the database")
+        return store
+
     def create(self, label: str = "") -> BackupInfo:
         """Take a consistent snapshot of the database.
 
@@ -170,12 +331,31 @@ class BackupManager:
         produce distinct snapshots instead of overwriting one path while
         the manifest records both. The reserved base is recorded in the
         manifest as ``snapshot_id``.
+
+        Backend-aware (Mongo program P6): when the install's active
+        backend is Mongo, the payload is a document dump exported
+        through the seam (:func:`write_document_dump`) in the same
+        manifest and with the same blob sidecar — one registry, two
+        payload shapes, each shaped like the store it came from.
         """
         stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
         base = f"nomorals-{stamp}"
         if label:
             safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in label)[:40]
             base = f"{base}-{safe}"
+        store = self._document_store()
+        if store is not None:
+            raw_path, base = self._reserve_snapshot(base,
+                                                    suffix=".docs.jsonl")
+            try:
+                return self._create_documents_at(raw_path, base, label,
+                                                 store)
+            except BaseException:
+                raw_path.unlink(missing_ok=True)
+                raw_path.with_suffix(".jsonl.gz").unlink(missing_ok=True)
+                (self.directory / f"{base}-blobs.tar.gz").unlink(
+                    missing_ok=True)
+                raise
         raw_path, base = self._reserve_snapshot(base)
         try:
             return self._create_at(raw_path, base, label)
@@ -187,7 +367,7 @@ class BackupManager:
             (self.directory / f"{base}-blobs.tar.gz").unlink(missing_ok=True)
             raise
 
-    def _reserve_snapshot(self, base: str) -> tuple[Path, str]:
+    def _reserve_snapshot(self, base: str, suffix: str = ".db") -> tuple[Path, str]:
         """Atomically reserve a unique snapshot base under ``base``.
 
         Returns ``(raw_path, unique_base)``; the raw file exists (empty)
@@ -196,7 +376,7 @@ class BackupManager:
         """
         for _ in range(100):
             candidate = f"{base}-{secrets.token_hex(3)}"
-            raw_path = self.directory / f"{candidate}.db"
+            raw_path = self.directory / f"{candidate}{suffix}"
             try:
                 fd = os.open(raw_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             except FileExistsError:
@@ -204,6 +384,52 @@ class BackupManager:
             os.close(fd)
             return raw_path, candidate
         raise StorageError(f"cannot reserve a unique snapshot name for {base!r}")
+
+    def _create_documents_at(self, raw_path: Path, base: str, label: str,
+                             store: Any) -> BackupInfo:
+        """Write a document-dump snapshot into a reserved identity."""
+        summary = write_document_dump(store, raw_path)
+        if self.compress:
+            final_path = raw_path.with_suffix(".jsonl.gz")
+            with raw_path.open("rb") as src, gzip.open(
+                    final_path, "wb", compresslevel=6) as dst:
+                shutil.copyfileobj(src, dst, CHUNK)
+            raw_path.unlink()
+        else:
+            final_path = raw_path
+        digest = _sha256_file(final_path)
+        blob_name, blob_sha256, blob_count, blob_files = \
+            self._archive_blobs(base)
+        schema_version = 0
+        with contextlib.suppress(Exception):
+            schema_version = int(self.db.scalar(
+                "SELECT MAX(version) FROM schema_migrations",
+                default=0) or 0)
+        info = BackupInfo(
+            name=final_path.name,
+            path=str(final_path),
+            size=final_path.stat().st_size,
+            sha256=digest,
+            pages=0,
+            created_at=time.time(),
+            schema_version=schema_version,
+            label=label,
+            snapshot_id=base,
+            blob_name=blob_name,
+            blob_sha256=blob_sha256,
+            blob_count=blob_count,
+            blob_files=blob_files,
+            backend="mongo",
+            doc_collections=summary,
+        )
+        self._append_manifest(info)
+        _log.info(
+            "document backup created: %s (%d bytes, %d collections, "
+            "%d documents, %d blobs)",
+            info.name, info.size, len(summary),
+            sum(c["count"] for c in summary.values()), info.blob_count,
+        )
+        return info
 
     def _create_at(self, raw_path: Path, base: str, label: str) -> BackupInfo:
         """Write the snapshot into an already-reserved identity."""
@@ -430,6 +656,8 @@ class BackupManager:
                     blob_sha256=entry.get("blob_sha256", ""),
                     blob_count=entry.get("blob_count", 0),
                     blob_files=entry.get("blob_files", {}) or {},
+                    backend=entry.get("backend", "") or "",
+                    doc_collections=entry.get("doc_collections", {}) or {},
                 )
             )
         return sorted(out, key=lambda b: b.created_at)
@@ -525,6 +753,14 @@ class BackupManager:
                 # would be noise, and decompression may itself explode.
                 return problems
 
+        if target.backend == "mongo":
+            # Document payload: extraction into SQLite is meaningless —
+            # prove it by loading it into a scratch document store and
+            # spot-checking parity against the manifest digests.
+            problems.extend(self._verify_documents(target))
+            problems.extend(self._verify_blobs(target))
+            return problems
+
         tmpdir = Path(tempfile.mkdtemp(prefix="nm-backup-verify-"))
         try:
             probe = tmpdir / "restore.db"
@@ -555,6 +791,48 @@ class BackupManager:
             shutil.rmtree(tmpdir, ignore_errors=True)
         return problems
 
+    def _verify_documents(self, target: BackupInfo) -> list[str]:
+        """Prove a document-dump backup: load it into a scratch store
+        (in-memory SQLite rung) and compare per-collection counts and
+        canonical checksums against the manifest's recorded digests —
+        the restore-into-scratch + spot-parity proof. Reports problems,
+        never raises."""
+        from .db import Database
+        from .docstore import SQLiteDocumentStore
+        from .parity import collection_checksum
+
+        scratch = SQLiteDocumentStore(Database(":memory:"))
+        try:
+            counts = load_document_dump(target.path, scratch)
+        except Exception as exc:  # noqa: BLE001 - the finding, reported
+            return [f"cannot load document dump {target.name}: "
+                    f"{type(exc).__name__}: {exc}"]
+        problems: list[str] = []
+        recorded = target.doc_collections or {}
+        for name in sorted(set(recorded) | set(counts)):
+            if name not in recorded:
+                problems.append(
+                    f"dump {target.name} holds collection {name} the "
+                    "manifest does not record")
+                continue
+            if name not in counts:
+                problems.append(
+                    f"dump {target.name} is missing collection {name}")
+                continue
+            want = recorded[name]
+            if counts[name] != want.get("count"):
+                problems.append(
+                    f"collection {name}: dump holds {counts[name]} "
+                    f"documents, manifest records {want.get('count')}")
+                continue
+            _n, checksum = collection_checksum(scratch, name)
+            if checksum != want.get("checksum"):
+                problems.append(
+                    f"collection {name}: restored checksum "
+                    f"{checksum[:12]}… != manifest "
+                    f"{str(want.get('checksum'))[:12]}…")
+        return problems
+
     def verify_all(self) -> dict[str, list[str]]:
         """Deep-check every backup (restic ``check``): name → problems.
 
@@ -568,8 +846,59 @@ class BackupManager:
                 report[backup.name] = problems
         return report
 
-    def restore(self, backup: BackupInfo | str | os.PathLike[str], *, target: str | os.PathLike[str] | None = None, overwrite: bool = False, safety_copy: bool = True) -> Path:
+    def _resolve_backup(self, backup: BackupInfo | str | os.PathLike[str],
+                        ) -> BackupInfo:
+        if isinstance(backup, (str, os.PathLike)):
+            candidates = [b for b in self.list()
+                          if b.name == Path(str(backup)).name
+                          or b.path == str(backup)]
+            if not candidates:
+                raise StorageError(f"backup not found: {backup}")
+            return candidates[-1]
+        return backup
+
+    def restore_documents(self, backup: BackupInfo | str | os.PathLike[str],
+                          target_store: Any) -> dict[str, Any]:
+        """Restore a document-dump backup into ``target_store`` through
+        the seam — the Mongo-primary counterpart of :meth:`restore`.
+
+        Verify-before-publish applies here too: the backup must pass
+        :meth:`verify` (artifact checksum + scratch-restore parity)
+        before a single document is written. Loads are upserts by
+        document id, so restoring into a store that already holds the
+        collections converges it to the backup. Returns
+        ``{"backup", "backend", "collections", "documents"}``.
+        """
+        info = self._resolve_backup(backup)
+        if info.backend != "mongo":
+            raise StorageError(
+                f"backup {info.name} is a database-file snapshot; "
+                "restore it with restore(), not restore_documents()")
+        if target_store is None:
+            raise StorageError(
+                "restore_documents needs a target document store")
+        problems = self.verify(info)
+        if problems:
+            raise StorageError(
+                f"restore refused: backup {info.name} failed "
+                "verification: " + "; ".join(problems))
+        counts = load_document_dump(info.path, target_store)
+        report = {"backup": info.name, "backend": "mongo",
+                  "collections": counts,
+                  "documents": sum(counts.values())}
+        _log.info("restored document backup %s into %s: %d documents",
+                  info.name, getattr(target_store, "name", "store"),
+                  report["documents"])
+        return report
+
+    def restore(self, backup: BackupInfo | str | os.PathLike[str], *, target: str | os.PathLike[str] | None = None, overwrite: bool = False, safety_copy: bool = True, target_store: Any = None) -> Path | dict[str, Any]:
         """Restore a backup to ``target`` (default: alongside the backup).
+
+        Document-dump backups (``backend == "mongo"``, Mongo program
+        P6) have no file destination: they restore through the seam
+        into ``target_store`` (default: the attached active store) via
+        :meth:`restore_documents`, and the return value is that
+        method's report dict instead of a Path.
 
         Verify-before-publish (F06): nothing is written to the destination
         until the snapshot has passed :meth:`verify` (archive checksum,
@@ -594,11 +923,19 @@ class BackupManager:
         stop its writer first — the mechanics protect the file, they do
         not coordinate with a live connection.
         """
-        if isinstance(backup, (str, os.PathLike)):
-            candidates = [b for b in self.list() if b.name == Path(str(backup)).name or b.path == str(backup)]
-            if not candidates:
-                raise StorageError(f"backup not found: {backup}")
-            backup = candidates[-1]
+        backup = self._resolve_backup(backup)
+        if backup.backend == "mongo":
+            # A document dump has no file destination: it restores into
+            # a document store through the seam (the attached active
+            # store by default), and the report dict is the result.
+            store = target_store or self._document_store()
+            if store is None:
+                raise StorageError(
+                    f"backup {backup.name} holds a document dump; "
+                    "restoring it needs a document store — pass "
+                    "target_store= or call restore() on a manager whose "
+                    "database handle has the active store attached")
+            return self.restore_documents(backup, store)
         destination = Path(target) if target else Path(backup.path).with_suffix("").with_suffix(".restored.db")
         if str(destination).endswith(".gz"):
             destination = destination.with_suffix("")

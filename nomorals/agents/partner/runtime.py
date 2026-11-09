@@ -3271,15 +3271,17 @@ class PartnerRuntime(
         try:
             from pathlib import Path
 
-            from ...os.snapshots import SnapshotManager
+            from ...os.snapshots import SnapshotManager, document_leg
             from ...os.update import UpdateManager
 
             settings = self.context.settings
             if repo_root is None:
                 repo_root = Path(__file__).resolve().parents[3]
+            _doc_store, _doc_note = document_leg(self.context.db)
             snapshots = SnapshotManager(
                 home=settings.home_path, db_path=settings.db_path,
-                blob_dir=getattr(settings, "blob_dir", None))
+                blob_dir=getattr(settings, "blob_dir", None),
+                document_store=_doc_store, document_note=_doc_note)
             manager = UpdateManager(repo_root, snapshots)
             receipt = manager.recover_interrupted()
             # Settle the restart journey: if the previous process
@@ -5970,16 +5972,18 @@ class PartnerRuntime(
             from pathlib import Path
 
             from ...missions.mission import MissionStore
-            from ...os.snapshots import SnapshotManager
+            from ...os.snapshots import SnapshotManager, document_leg
             from ...os.update import UpdateManager
             from ...social.chat.update_control import ChatUpdateController
 
             try:
                 settings = self.context.settings
                 repo_root = Path(__file__).resolve().parents[3]
+                _doc_store, _doc_note = document_leg(self.context.db)
                 snapshots = SnapshotManager(
                     home=settings.home_path, db_path=settings.db_path,
-                    blob_dir=getattr(settings, "blob_dir", None))
+                    blob_dir=getattr(settings, "blob_dir", None),
+                    document_store=_doc_store, document_note=_doc_note)
                 updater = UpdateManager(
                     repo_root, snapshots,
                     quiesce=self._quiesce_bridges_for_update)

@@ -714,6 +714,45 @@ class MongoDocumentStore:
                 "mongo", "unreachable",
                 f"{mask_mongo_uri(self._uri)}: {type(exc).__name__}: {exc}")
 
+    def server_facts(self) -> dict[str, Any]:
+        """Operator introspection for maintenance flows (cutover preflight).
+
+        Facts about the server behind this store, read through the one
+        client: replica-set membership, primary writability, server
+        version, and the WiredTiger cache ceiling the census (§5.1)
+        requires to be capped on small hosts. Never raises — an
+        unreachable or broken server reports ``reachable: False`` with
+        the error named, and the caller decides what that blocks.
+        """
+        facts: dict[str, Any] = {
+            "reachable": False,
+            "set_name": None,
+            "is_writable_primary": False,
+            "version": None,
+            "storage_engine": None,
+            "wiredtiger_cache_bytes": None,
+        }
+        try:
+            client = self._get_client()
+            hello = self._run(lambda: client.admin.command("hello"))
+            facts["reachable"] = True
+            facts["set_name"] = hello.get("setName")
+            facts["is_writable_primary"] = bool(
+                hello.get("isWritablePrimary", hello.get("ismaster", False)))
+            status = self._run(lambda: client.admin.command("serverStatus"))
+            facts["version"] = status.get("version")
+            wired = status.get("wiredTiger") or {}
+            if wired:
+                facts["storage_engine"] = "wiredTiger"
+                cache = (wired.get("cache") or {}).get(
+                    "maximum bytes configured")
+                if cache is not None:
+                    facts["wiredtiger_cache_bytes"] = int(cache)
+            return facts
+        except Exception as exc:  # noqa: BLE001 - facts report, never raise
+            facts["error"] = f"{type(exc).__name__}: {exc}"
+            return facts
+
     def close(self):
         if self._client is not None:
             try:
