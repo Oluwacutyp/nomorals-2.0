@@ -1461,6 +1461,71 @@ class TelegramAdapter(ChatAdapter):
         await client(ReadStoriesRequest(peer, max_id=max_story_id))
         return True
 
+    # ── story reactions (parity bundle #12) ───────────────────────
+
+    def react_to_story(self, poster_id: str, story_id: int,
+                       emoji: str) -> dict[str, Any]:
+        """React to one Telegram story as the owner (MTProto
+        ``stories.SendReactionRequest`` on the story's peer).
+
+        The story-family verdict shape — a dict, like
+        :meth:`send_channel_story`, because the refusal's REASON
+        is the useful part (an expired story or a peer the
+        account cannot reach answers in Telegram's own words).
+        Shape failures answer BEFORE any traffic, in the same
+        words the channel-story verb uses.  ``poster_id`` takes
+        the numeric peer id or an @name; ``emoji`` is the reaction
+        face itself."""
+        client = self._client
+        if client is None or self._loop is None:
+            return {"ok": False,
+                    "error": "telegram userbot not connected"}
+        poster = str(poster_id or "").strip()
+        if not poster:
+            return {"ok": False,
+                    "error": "react_to_story needs the story's "
+                             "poster (@name or id)"}
+        try:
+            sid = int(story_id)
+        except (TypeError, ValueError):
+            return {"ok": False,
+                    "error": "react_to_story needs the story's "
+                             "numeric id"}
+        face = str(emoji or "").strip()
+        if not face:
+            return {"ok": False,
+                    "error": "react_to_story needs an emoji to "
+                             "react with"}
+        try:
+            landed = self._run_on_loop(
+                self._react_to_story_async(client, poster, sid,
+                                           face),
+                timeout=30.0)
+        except Exception as exc:  # noqa: BLE001 - verdict dict
+            return {"ok": False, "error": str(exc)[:300]}
+        if landed:
+            return {"ok": True}
+        return {"ok": False,
+                "error": "the story reaction did not land"}
+
+    async def _react_to_story_async(self, client: Any,
+                                    poster_id: str, story_id: int,
+                                    emoji: str) -> bool:
+        from telethon.tl.functions.stories import (
+            SendReactionRequest,
+        )
+        from telethon.tl.types import ReactionEmoji
+
+        try:
+            peer_ref: Any = int(poster_id)
+        except (TypeError, ValueError):
+            peer_ref = poster_id
+        peer = await client.get_input_entity(peer_ref)
+        await client(SendReactionRequest(
+            peer=peer, story_id=int(story_id),
+            reaction=ReactionEmoji(emoticon=str(emoji))))
+        return True
+
     def send_story(self, media_path: str, caption: str = "") -> bool:
         """Post a story as the account owner (§15 status
         posting, the Telegram rung of /poststatus): Telethon
@@ -5156,6 +5221,14 @@ class TelegramBotAdapter(ChatAdapter):
         # tracking normally prevents replays, but a restarted poll loop
         # can re-fetch recent updates; guarantee at-most-once here too.
         self._seen_inbound: set[tuple[str, str]] = set()
+        # Telegram Business connections this bot manages
+        # (parity bundle #12): connection id -> recorded facts.
+        # The Bot API's ONLY story verb (postStory) posts on
+        # behalf of a connected business account, so the adapter
+        # remembers every business_connection update the poll
+        # loop delivers; post_story posts through the first
+        # enabled connection carrying the stories right.
+        self._business_connections: dict[str, dict[str, Any]] = {}
         # Single getUpdates consumer: lockfile path (see single_consumer).
         self._lock_path = lock_path
         # Last inbound /command per chat — the origin command for
@@ -5334,6 +5407,7 @@ class TelegramBotAdapter(ChatAdapter):
                                                      "message_reaction",
                                                      "chat_join_request",
                                                      "chat_boost",
+                                                     "business_connection",
                                                      "removed_chat_boost"])
             except Exception as exc:  # noqa: BLE001 - transient, back off a little
                 # A persistent failure (revoked token, dead DNS) must not
@@ -5374,6 +5448,19 @@ class TelegramBotAdapter(ChatAdapter):
             uid = update.get("update_id")
             if isinstance(uid, int) and not isinstance(uid, bool):
                 self._offset = max(self._offset, uid + 1)
+            # Business connections (parity bundle #12): adapter
+            # state, never chat traffic — the poll loop records
+            # them here so post_story can post through the
+            # connection later; the handler never sees them.
+            if "business_connection" in update:
+                conn = update["business_connection"]
+                if not isinstance(conn, dict):
+                    _log.warning("telegram-bot: dropping non-dict "
+                                 "business_connection %r",
+                                 type(conn).__name__)
+                    return
+                self._note_business_connection(conn)
+                return
             # Callback queries (inline button taps) get their own path.
             if "callback_query" in update:
                 query = update["callback_query"]
@@ -6631,6 +6718,146 @@ class TelegramBotAdapter(ChatAdapter):
             return SendResult(ok=False, platform=self.name,
                               error=str(exc),
                               seconds=time.perf_counter() - started)
+
+    # ── business connections + bot stories (parity bundle #12) ──
+
+    def _note_business_connection(self, conn: dict[str, Any]) -> None:
+        """Record one business_connection update: the facts
+        post_story needs — which connection, whose account,
+        whether it is enabled, and whether it carries the
+        stories right (rights.can_manage_stories)."""
+        cid = str(conn.get("id") or "").strip()
+        if not cid:
+            return
+        rights = conn.get("rights")
+        if not isinstance(rights, dict):
+            rights = {}
+        user = conn.get("user")
+        if not isinstance(user, dict):
+            user = {}
+        self._business_connections[cid] = {
+            "id": cid,
+            "user_id": str(user.get("id") or ""),
+            "user_name": str(user.get("first_name") or ""),
+            "is_enabled": bool(conn.get("is_enabled")),
+            "can_manage_stories": bool(
+                rights.get("can_manage_stories")),
+        }
+
+    def business_connections(self) -> list[dict[str, Any]]:
+        """The business connections this bot currently knows
+        (copies — callers never mutate adapter state)."""
+        return [dict(row) for row in
+                self._business_connections.values()]
+
+    #: Bot API story lifetimes, in seconds — the only values
+    #: postStory accepts for active_period.
+    STORY_ACTIVE_PERIODS = (21600, 43200, 86400, 172800)
+
+    def post_story(self, media_path: str = "", caption: str = "",
+                   *, file_id: str = "", media_kind: str = "",
+                   active_period: int = 86400) -> dict[str, Any]:
+        """Post a story through this bot (Bot API ``postStory``)
+        — the platform's one bot story route: on behalf of a
+        Telegram Business account connected to this bot, using
+        its *can_manage_stories* right.  The Bot API has NO
+        channel-story method for bots at all; channel stories
+        post from the personal account (``/chanstory`` there),
+        and this verb says so instead of faking one.
+
+        Verdict dict, like the personal adapter's story family:
+        every refusal answers BEFORE traffic with its reason —
+        no enabled connection carrying the stories right, a
+        lifetime Telegram does not offer, a gone file, or a
+        media kind a story cannot be.  An API refusal carries
+        Telegram's own description."""
+        conn = None
+        for row in self._business_connections.values():
+            if row.get("is_enabled") and \
+                    row.get("can_manage_stories"):
+                conn = row
+                break
+        if conn is None:
+            if self._business_connections:
+                return {"ok": False, "error": (
+                    "the bot's Telegram Business connection does "
+                    "not carry the stories right "
+                    "(can_manage_stories) or is disabled — grant "
+                    "it in the business account's bot settings, "
+                    "then the bot can post stories for it")}
+            return {"ok": False, "error": (
+                "Telegram bots post stories only on behalf of a "
+                "connected Telegram Business account (Bot API "
+                "postStory, with the can_manage_stories right) — "
+                "no business account is connected to this bot, "
+                "and the Bot API has no channel-story method for "
+                "bots at all; channel stories post from your "
+                "personal Telegram (/chanstory there)")}
+        try:
+            period = int(active_period)
+        except (TypeError, ValueError):
+            period = 0
+        if period not in self.STORY_ACTIVE_PERIODS:
+            return {"ok": False, "error": (
+                "a bot story's active period must be one of "
+                "21600, 43200, 86400 or 172800 seconds")}
+        text = str(caption or "").strip()
+        fid = str(file_id or "").strip()
+        path = str(media_path or "").strip()
+        if fid:
+            kind = str(media_kind or "").strip().lower()
+            if kind not in ("photo", "video"):
+                return {"ok": False, "error": (
+                    "post_story with a file_id needs media_kind "
+                    "'photo' or 'video' — the kind is never "
+                    "guessed from the id")}
+            content: dict[str, Any] = (
+                {"type": "video", "video": fid} if kind == "video"
+                else {"type": "photo", "photo": fid})
+            params: dict[str, Any] = {
+                "business_connection_id": conn["id"],
+                "content": content,
+                "active_period": period}
+            if text:
+                params["caption"] = text
+            try:
+                story = self._api("postStory", **params)
+            except Exception as exc:  # noqa: BLE001 - verdict dict
+                return {"ok": False, "error": str(exc)[:300]}
+            sid = story.get("id") if isinstance(story, dict) \
+                else None
+            return {"ok": True, "story_id": str(sid or "")}
+        if not path:
+            return {"ok": False, "error": (
+                "post_story needs a photo or video file (or a "
+                "file_id) — a story is a media post")}
+        file_path = Path(path)
+        if not file_path.exists():
+            return {"ok": False,
+                    "error": f"story media file not found: {path}"}
+        suffix = file_path.suffix.lower()
+        if suffix in (".jpg", ".jpeg", ".png", ".webp"):
+            kind = "photo"
+        elif suffix in (".mp4", ".mov", ".m4v"):
+            kind = "video"
+        else:
+            return {"ok": False, "error": (
+                "a story is a photo (.jpg/.png/.webp) or a video "
+                "(.mp4/.mov) — this file is neither")}
+        content = {"type": kind, kind: "attach://story_media"}
+        fields: dict[str, Any] = {
+            "business_connection_id": conn["id"],
+            "content": json.dumps(content),
+            "active_period": str(period)}
+        if text:
+            fields["caption"] = text
+        try:
+            story = self._api_upload("postStory", fields,
+                                     "story_media", file_path)
+        except Exception as exc:  # noqa: BLE001 - verdict dict
+            return {"ok": False, "error": str(exc)[:300]}
+        sid = story.get("id") if isinstance(story, dict) else None
+        return {"ok": True, "story_id": str(sid or "")}
 
     def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "",
                    parse_mode: str = "",

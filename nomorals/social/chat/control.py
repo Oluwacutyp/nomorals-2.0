@@ -2741,7 +2741,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/vv · /vv <n> · /vv (as a reply)",
               "example": "/vv",
               "related": "/viewonce · /pair saved"},
-    "poststatus": {"what": "post a status as you, from your personal surface: on WhatsApp a text status, or an image/video status when the command rides a photo/video (as its caption, or as a reply to one); on Telegram a story from a photo/video the same way (stories are media posts — there is no text story). The post lands in the personal journal like every act taken as you. Owner only; your standing stop halts it.",
+    "poststatus": {"what": "post a status as you, from your personal surface: on WhatsApp a text status, or an image/video status when the command rides a photo/video (as its caption, or as a reply to one); on Telegram a story from a photo/video the same way (stories are media posts — there is no text story). From a bot chat it posts a story through the bot's Telegram Business connection instead (the Bot API's postStory — the one story route bots have; bots have no channel-story method). The post lands in the personal journal like every act taken as you. Owner only; your standing stop halts it.",
               "usage": "/poststatus [text] · send a photo/video with /poststatus [caption] as its caption · reply to a photo/video with /poststatus [caption]",
               "example": "/poststatus building while others flex",
               "related": "/statusreact · /pair saved · /pair"},

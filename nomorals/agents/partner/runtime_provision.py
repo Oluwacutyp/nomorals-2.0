@@ -946,6 +946,35 @@ class RuntimeProvisionMixin:
                     "runtime_provision.story_viewer", exc)
                 return False
 
+        def _story_reactor(rec: Any, poster_id: str,
+                           story_id: int, emoji: str) -> bool:
+            """React to one Telegram story as the owner (parity
+            bundle #12 — the status_react toggle's story leg):
+            the adapter's react_to_story (MTProto
+            stories.SendReactionRequest).  A refused verdict is
+            recorded with Telegram's own reason, the same
+            discipline as the channel verbs."""
+            adapter = self._adapter_for("telegram")
+            fn = getattr(adapter, "react_to_story", None)
+            if not callable(fn):
+                return False
+            try:
+                res = fn(str(poster_id), int(story_id),
+                         str(emoji or "❤️"))
+            except Exception as exc:  # noqa: BLE001
+                record_failure(
+                    "runtime_provision.story_reactor", exc)
+                return False
+            if isinstance(res, dict):
+                if not res.get("ok"):
+                    record_failure(
+                        "runtime_provision.story_reactor",
+                        RuntimeError(str(
+                            res.get("error")
+                            or "story_react verb refused")))
+                return bool(res.get("ok"))
+            return bool(res)
+
         def _channel_fetcher(rec: Any) -> list[dict[str, Any]]:
             """The followed channels' recent posts for one
             WhatsApp account (channel stories build): the
@@ -1007,10 +1036,12 @@ class RuntimeProvisionMixin:
             """React to one contact's status post as the owner
             (chat & privacy wave — the status_react toggle's
             verb): the WhatsApp adapter's react_status (bridge
-            status_react).  Telegram grows no seam here: MTProto
-            exposes no status-reaction verb on this surface, so
-            the toggle simply never fires there — absence, not
-            a fake."""
+            status_react).  This seam is status-shaped (a status
+            post item); Telegram STORIES react through the
+            story_reactor seam beside it (MTProto
+            stories.SendReactionRequest, parity bundle #12) —
+            the same toggle fires on both surfaces, each
+            through its own verb."""
             adapter = self._adapter_for("whatsapp")
             fn = getattr(adapter, "react_status", None)
             if not callable(fn):
@@ -1083,6 +1114,7 @@ class RuntimeProvisionMixin:
             presence_setter=_presence_setter,
             status_viewer=_status_viewer,
             story_viewer=_story_viewer,
+            story_reactor=_story_reactor,
             channel_fetcher=_channel_fetcher,
             channel_viewer=_channel_viewer,
             status_reactor=_status_reactor,

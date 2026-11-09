@@ -1038,9 +1038,15 @@ class RuntimeChatOpsMixin:
         bytes for exactly this).  Owner-only by the control
         gate; a standing owner stop halts it like every other
         personal-surface act; a landed post is journaled in the
-        personal vault, never a silent act as him."""
+        personal vault, never a silent act as him.  From a bot
+        chat the ask routes to the bot's own story verb (parity
+        bundle #12): the Bot API's postStory, which posts on
+        behalf of the bot's connected Telegram Business
+        account — the one story route the platform gives bots."""
         platform = str(getattr(message.chat, "platform", "")
                        or "")
+        if platform == "telegram-bot":
+            return self._chatops_poststatus_bot(tail, message)
         if platform not in ("whatsapp", "telegram"):
             return ("/poststatus lives on your personal "
                     "WhatsApp or Telegram — run it from there.")
@@ -1207,6 +1213,40 @@ class RuntimeChatOpsMixin:
         return (f"couldn't do it — "
                 f"{err or 'the surface refused the send'}")
 
+    def _chatops_poststatus_bot(self, tail: str,
+                                message: Any) -> str:
+        """/poststatus from a bot chat (parity bundle #12): the
+        bot adapter's post_story — Bot API postStory through the
+        bot's Telegram Business connection.  Not a paired
+        personal surface, so no personal-vault journal and no
+        personal-account gate: the act is the BOT's, on behalf
+        of the business account that connected it, and the
+        adapter's refusal (no connection, no stories right)
+        answers in the platform's own terms."""
+        adapter = self._adapter_for("telegram-bot")
+        if adapter is None:
+            return "no live Telegram bot surface here to post from."
+        fn = getattr(adapter, "post_story", None)
+        if not callable(fn):
+            return ("this bot surface has no story-post verb "
+                    "wired.")
+        media_path, _kind = self._chatops_media_of(message)
+        if not media_path:
+            return ("bot stories are media posts — send a photo "
+                    "or video with /poststatus as its caption, "
+                    "or reply to one with it. The bot posts "
+                    "through its Telegram Business connection "
+                    "(the one story route the Bot API gives "
+                    "bots); a channel story is not a bot act — "
+                    "/chanstory posts those from your personal "
+                    "Telegram.")
+        verdict = self._chatops_call(fn, media_path,
+                                     caption=tail.strip())
+        return self._chatops_verdict(
+            verdict,
+            "posted to your story through the bot's business "
+            "connection.")
+
     def _chatops_chanstory(self, tail: str,
                            message: Any) -> str:
         """/chanstory — post to a CHANNEL as the owner, on his
@@ -1226,9 +1266,20 @@ class RuntimeChatOpsMixin:
         like /poststatus.  Owner-only by the control gate; a
         standing owner stop halts it like every other
         personal-surface act; a landed post is journaled in the
-        personal vault, never a silent act as him."""
+        personal vault, never a silent act as him.  From a bot
+        chat the answer is the platform truth (parity bundle
+        #12): the Bot API has no channel-story method for bots
+        at all, so the command names its real homes."""
         platform = str(getattr(message.chat, "platform", "")
                        or "")
+        if platform == "telegram-bot":
+            return ("channel stories are a personal-account "
+                    "post — the Bot API gives bots no "
+                    "channel-story method at all. Run /chanstory "
+                    "from your personal Telegram to post one; "
+                    "from this bot chat, /poststatus posts a "
+                    "story through the bot's Telegram Business "
+                    "connection instead.")
         if platform not in ("whatsapp", "telegram"):
             return ("/chanstory lives on your personal "
                     "WhatsApp or Telegram — run it from there.")

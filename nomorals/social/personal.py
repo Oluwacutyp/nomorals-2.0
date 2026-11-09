@@ -572,6 +572,8 @@ class PersonalSurfaces:
                  = None,
                  story_viewer: Callable[[AccountRecord, str, int],
                                         bool] | None = None,
+                 story_reactor: Callable[[AccountRecord, str, int,
+                                          str], bool] | None = None,
                  status_reactor: Callable[[AccountRecord,
                                            dict[str, Any]], bool] | None
                  = None,
@@ -601,6 +603,12 @@ class PersonalSurfaces:
         self.presence_setter = presence_setter
         self.status_viewer = status_viewer
         self.story_viewer = story_viewer
+        #: Story reactions (parity bundle #12): (record, poster
+        #: id, story id, emoji) -> landed — the story cycle's
+        #: react leg, driven by the same status_react toggle and
+        #: pool as status reactions.  An ACTION on his account:
+        #: the cycle honors the owner's sticky stop before it.
+        self.story_reactor = story_reactor
         #: The chat & privacy wave's acting seams, same contract:
         #: status_reactor places one reaction on a contact's status
         #: post as the owner; call_rejector rejects one incoming
@@ -653,6 +661,13 @@ class PersonalSurfaces:
         self._view_failed_status: set[tuple[str, str]] = set()
         self._react_failed_status: set[tuple[str, str]] = set()
         self._story_view_failed: set[tuple[str, str, int]] = set()
+        #: Story-reaction dedupe (parity bundle #12): landed
+        #: reactions seed from the journal at init (a restart
+        #: never re-fires at a story already reacted to), and a
+        #: refused reaction journals once per story per process,
+        #: the same law as the status pair above.
+        self._reacted_stories: set[tuple[str, str]] = set()
+        self._react_failed_stories: set[tuple[str, str]] = set()
         # Status-fix guards (2026-11-07): views WhatsApp
         # downgraded to read-self (receipts off — landed on the
         # wire, invisible to the poster) journal apart from
@@ -735,6 +750,9 @@ class PersonalSurfaces:
                         (str(row.get("account") or ""), sid))
             if sid and row.get("kind") == "status_react":
                 self._reacted_status.add(
+                    (str(row.get("account") or ""), sid))
+            if sid and row.get("kind") == "story_react":
+                self._reacted_stories.add(
                     (str(row.get("account") or ""), sid))
 
     # ── account resolution ──────────────────────────────────────────
@@ -2058,18 +2076,26 @@ class PersonalSurfaces:
                       account_id: str = "") -> list[dict[str, Any]]:
         """One story sweep: ask the fetcher for the account's
         currently-visible stories, save the new ones (saving
-        toggle), and mark the unseen ones viewed as the owner
+        toggle), mark the unseen ones viewed as the owner
         (viewing toggle — ReadStories per peer at its newest
-        story id).  The two toggles are independent.  No fetcher
-        (adapter exposes none) → nothing happens and the caller
-        can say exactly that."""
+        story id), and react to the unreacted ones (react toggle
+        — one SendReaction per story, parity bundle #12).  The
+        toggles are independent: a story can be reacted to
+        without being viewed, exactly as a status can.  Reacting
+        is an ACTION on his account, so the owner's sticky stop
+        suppresses it while saving/viewing (reads) continue.
+        No fetcher (adapter exposes none) → nothing happens and
+        the caller can say exactly that."""
         if self.story_fetcher is None:
             return []
         rec = self.resolve_event_account(platform, account_id)
         saving = rec.toggle("status_saving")
         viewing = rec.toggle("status_viewing") \
             and self.story_viewer is not None
-        if not saving and not viewing:
+        reacting = rec.toggle("status_react") \
+            and self.story_reactor is not None \
+            and not self.registry.owner_stopped(platform)
+        if not saving and not viewing and not reacting:
             return []
         out: list[dict[str, Any]] = []
         stories = self.story_fetcher(rec) or []
@@ -2150,6 +2176,74 @@ class PersonalSurfaces:
                                     "— the surface refused it or "
                                     "is unreachable; the stories "
                                     "stay unviewed"})
+        if reacting:
+            # One reaction per story (parity bundle #12): the
+            # same rotation the status funnel runs — each story
+            # draws the NEXT face from the pool (her custom set ∪
+            # the account's additions ∪ the built-in pool), the
+            # pick a peek whose cursor commits only when the
+            # reaction lands.  A landed reaction journals and
+            # dedupes across restarts (seeded at init); a refused
+            # one journals once per story per process.
+            from .pairing import status_react_pick
+
+            custom: list[str] = []
+            if self.status_react_pool is not None:
+                try:
+                    custom = list(self.status_react_pool(rec) or [])
+                except Exception:  # noqa: BLE001 - pool is garnish
+                    custom = []
+            for story in stories:
+                sid = str(story.get("story_id") or "")
+                poster = str(story.get("poster_id") or "")
+                if not sid or not poster:
+                    continue
+                rkey = (rec.id, sid)
+                if rkey in self._reacted_stories:
+                    continue
+                try:
+                    sid_int = int(sid)
+                except ValueError:
+                    continue
+                emoji, new_cursor = status_react_pick(rec, custom)
+                try:
+                    reacted = bool(self.story_reactor(
+                        rec, poster, sid_int, emoji))
+                except Exception:  # noqa: BLE001 - the wired seam
+                    reacted = False    # records its own failures
+                ts = float(story.get("ts") or self._clock())
+                if reacted:
+                    self._reacted_stories.add(rkey)
+                    if rec.status_react_rotate:
+                        rec.status_react_cursor = new_cursor
+                        rec.status_react_last = emoji
+                        # the walk state is garnish — a failed
+                        # persist never undoes a landed reaction
+                        with contextlib.suppress(Exception):
+                            self.registry.upsert(rec)
+                    _append_jsonl(self.vault.journal_path, {
+                        "ts": ts, "kind": "story_react",
+                        "account": rec.id, "platform": platform,
+                        "counterpart_id": poster,
+                        "poster_name": str(story.get("poster_name")
+                                           or ""),
+                        "media_kind": "", "source_id": sid,
+                        "path": "", "bytes": 0,
+                        "note": f"reacted {emoji}"})
+                elif rkey not in self._react_failed_stories:
+                    self._react_failed_stories.add(rkey)
+                    _append_jsonl(self.vault.journal_path, {
+                        "ts": ts, "kind": "story_react_failed",
+                        "account": rec.id, "platform": platform,
+                        "counterpart_id": poster,
+                        "poster_name": str(story.get("poster_name")
+                                           or ""),
+                        "media_kind": "", "source_id": sid,
+                        "path": "", "bytes": 0,
+                        "note": "story react verb did not land — "
+                                "the surface refused it or is "
+                                "unreachable; no reaction was "
+                                "placed"})
         return out
 
     # ── calls & mass tags (chat & privacy wave) ─────────────────
