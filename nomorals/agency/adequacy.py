@@ -10,6 +10,9 @@ A gap is resolved ONLY when ALL hold:
    sentinel.
 2. At least ``MIN_SOURCES`` findings from DISTINCT domains
    (syndicated duplicates / one domain ≠ independent confirmation).
+2b. The answer is RELEVANT to this gap: a third or more of the
+   question's key terms are evidenced in the synthesis/findings.
+   Domain diversity alone never establishes relevance (F12).
 3. Every declared subquestion is covered — either answered in the
    synthesis/findings or explicitly listed as unresolved (which keeps
    the gap open, not resolved).
@@ -26,6 +29,7 @@ expires or is contradicted — see :func:`should_reopen`.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -73,17 +77,39 @@ def _subquestions(gap: Any) -> list[str]:
     return [str(s) for s in sq]
 
 
-def _covered(subq: str, deep: Any) -> bool:
+def _evidence_hay(deep: Any) -> str:
     parts = [getattr(deep, "synthesis", "") or ""]
     for f in (getattr(deep, "findings", None) or []):
         parts.append(getattr(f, "snippet", "") or "")
         parts.append(getattr(f, "title", "") or "")
-    hay = "\n".join(parts).lower()
+    return "\n".join(parts).lower()
+
+
+def _covered(subq: str, deep: Any) -> bool:
+    hay = _evidence_hay(deep)
     # Subquestion is covered when its key terms appear in the evidence.
+    # Claim-level (F12): ONE incidental term is not coverage — at
+    # least half the subquestion's key terms must be evidenced.
     terms = [t for t in subq.lower().split() if len(t) > 3]
     if not terms:
         return subq.lower() in hay
-    return any(t in hay for t in terms)
+    hits = sum(1 for t in terms if t in hay)
+    return hits * 2 >= len(terms)
+
+
+#: Question words that carry no topical evidence.
+_QUESTION_STOP = frozenset({
+    "what", "when", "where", "which", "whom", "whose", "how", "does",
+    "did", "will", "would", "could", "should", "there", "their",
+    "about", "with", "from", "that", "this", "have", "has", "the",
+    "and", "for", "are", "was", "were", "into", "than", "then",
+})
+
+
+def _question_terms(gap: Any) -> list[str]:
+    question = gap.get("question", "") if isinstance(gap, dict) else ""
+    return [t for t in re.findall(r"[a-z0-9]+", (question or "").lower())
+            if len(t) >= 3 and t not in _QUESTION_STOP]
 
 
 def assess_gap_adequacy(deep: Any, gap: Any,
@@ -99,6 +125,20 @@ def assess_gap_adequacy(deep: Any, gap: Any,
     if len(domains) < MIN_SOURCES:
         reasons.append(
             f"only {len(domains)} distinct source domain(s); need >={MIN_SOURCES}")
+    # Relevance is a claim-level property (F12): domain diversity does
+    # NOT establish that the answer addresses THIS gap. At least a
+    # third of the question's key terms — and at least one — must
+    # actually appear in the synthesis/findings, or the "answer" is
+    # evidence about something else, however many domains carry it.
+    q_terms = _question_terms(gap)
+    if q_terms:
+        hay = _evidence_hay(deep)
+        hits = sum(1 for t in q_terms if t in hay)
+        if hits == 0 or hits * 3 < len(q_terms):
+            reasons.append(
+                f"answer does not address the gap question: "
+                f"{hits}/{len(q_terms)} question terms evidenced in the "
+                f"synthesis/findings (relevance not established)")
     unresolved = [sq for sq in _subquestions(gap) if not _covered(sq, deep)]
     if unresolved:
         reasons.append(f"unresolved subquestions: {unresolved}")

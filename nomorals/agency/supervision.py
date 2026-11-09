@@ -15,6 +15,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from .failures import record_failure
 from .initiatives import InitiativeStore
 
 __all__ = ["BootSupervisor"]
@@ -29,14 +30,60 @@ class BootSupervisor:
 
     def reregister_watches(self, watches: list[dict[str, Any]] | None = None
                            ) -> int:
-        """Idempotent watch re-registration after restart."""
+        """Idempotent watch re-registration after restart.
+
+        Registration is REAL, not bookkeeping (F12): when a scheduler
+        facade is injected, each new watch is handed to it —
+        ``facade.register_watch(watch)`` when the facade offers that
+        method, else the agent-scheduler shape the agency wiring uses
+        (``facade.add(name, spec, payload_kind, payload)``, which
+        needs the watch to carry a ``spec``/``schedule``/``cron``).
+        Only a facade-ACCEPTED watch counts in the return value and
+        is marked registered; a rejected/errored watch stays
+        unregistered so a later boot retries it. Before this, the
+        count was incremented from the supervisor's own set while the
+        scheduler received zero calls. Without a facade there is no
+        scheduler to call: the supervisor's own registry is the
+        record, and the count is tracked-only.
+        """
         count = 0
         for w in watches or []:
             wid = w.get("id") or w.get("topic", "")
-            if wid and wid not in self._registered_watches:
-                self._registered_watches.add(wid)
-                count += 1
+            if not wid or wid in self._registered_watches:
+                continue
+            if self.facade is not None \
+                    and not self._register_with_facade(w):
+                continue
+            self._registered_watches.add(wid)
+            count += 1
         return count
+
+    def _register_with_facade(self, watch: dict[str, Any]) -> bool:
+        """One real registration call into the injected facade."""
+        facade = self.facade
+        register = getattr(facade, "register_watch", None)
+        if callable(register):
+            try:
+                return bool(register(watch))
+            except Exception as exc:  # noqa: BLE001 - refused = retry later
+                record_failure("BootSupervisor.register_watch", exc)
+                return False
+        add = getattr(facade, "add", None)
+        if callable(add):
+            spec = watch.get("spec") or watch.get("schedule") \
+                or watch.get("cron")
+            if not spec:
+                return False  # this facade cannot schedule a spec-less watch
+            name = watch.get("name") or watch.get("id") \
+                or watch.get("topic", "")
+            try:
+                add(name, spec, watch.get("payload_kind", "tool"),
+                    watch.get("payload") or {"watch": watch})
+                return True
+            except Exception as exc:  # noqa: BLE001 - refused = retry later
+                record_failure("BootSupervisor.register_watch.add", exc)
+                return False
+        return False
 
     @staticmethod
     def coalesce_missed(missed: list[dict[str, Any]]) -> list[dict[str, Any]]:

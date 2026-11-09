@@ -15,19 +15,18 @@ nervous system through plain language:
   ``presence_sense`` failure mode). See ``pulse``/``briefing``.
 * ``__agency_shift__`` — scheduler-internal agency shift (observe →
   see what needs doing → do it → verify → follow through, no prompt).
-  Same closure pattern. Builds ``ActiveSystems`` with real organ
-  ADAPTERS injected into the L0 agency layer (this module is pinned
-  L5, so it may import L1–L5) and runs ``work_shift()``. The
-  research/wisdom/impossible organs are deliberately NOT constructed
-  here: their ticks do heavyweight work (web research, corpus
-  ingest, claim attempts) that a scheduled job should not silently
-  start — those systems run organ-less, work their initiative
-  lifecycles, and record honest "no organ injected" blockers.
-  Scheduled shifts run under default-deny policy (observe/draft/propose, never silent
-  outbound): the persistent ``MandateStore`` DOES apply to scheduled
-  shifts, but ``Policy`` allow-rules do not persist, so silent
-  posting needs the runtime's configured ``AgencyAuthority``, not a
-  scheduled shift.
+  Same closure pattern. The shift's systems are built by the ONE
+  agency composition root (``agency/wiring.compose_agency`` — the
+  same root the interactive runtime boot uses), so a scheduled shift
+  runs with the real gateway (resolved from ``context.extras``,
+  where the runtime binds it), the live ``web_search``-backed
+  opportunity hunter, and the research/wisdom/impossible organs
+  joined to their initiative lifecycles. Per-system wiring state is
+  reported in the shift result's ``composition`` readiness map.
+  Scheduled shifts run under the durable policy: the persistent
+  ``MandateStore`` and the persisted ``Policy`` allow-rules BOTH
+  apply to scheduled shifts (loaded by the composition root); with
+  no persisted rules, default-deny stands.
 * ``__agent_modes_tick__`` — scheduler-internal agent-modes tick: one
   autonomous cycle for every chat running the autonomous mode.
   Same closure pattern. Reads the runtime's persistent ``AgentModes``
@@ -170,15 +169,14 @@ def _gradient_for_shift(db: Any) -> Any:
     shift runs under the SAME authority as interactive use — not a
     weaker default-deny shadow. Missing/empty table = no persisted
     rules = default-deny stands (never a widened grant).
-    """
-    from ..core.policy import PermissionGradient, Policy
 
-    policy = Policy()
-    try:
-        policy.load_rules(db)
-    except Exception:  # noqa: BLE001 - unreadable rules = default-deny
-        pass
-    return PermissionGradient(policy)
+    The implementation lives in the ONE composition root
+    (``agency/wiring.durable_permission_gradient``); this name is
+    kept as the shift tool's historical entry point.
+    """
+    from ..agency.wiring import durable_permission_gradient
+
+    return durable_permission_gradient(db)
 
 
 def register(registry: Any) -> None:
@@ -230,125 +228,42 @@ def register(registry: Any) -> None:
         result_protocol="dict_ok",
     )
     def _agency_shift_tool() -> dict[str, Any]:
-        # Real organs are constructed HERE (this module is pinned L5,
-        # so it may import L1–L5) and INJECTED into the L0 agency
-        # layer — the agency layer itself never imports organs
-        # (ARCHITECTURE.md §1 layering). Each construction is
-        # best-effort: a missing organ yields an organ-less adapter
-        # (empty observations, refused actions), never a crash.
-        import functools
-
-        from ..agency.adapters import AgencyAuthority, build_adapters
+        # The shift's systems come from the ONE composition root
+        # (agency/wiring.compose_agency — the same root the
+        # interactive runtime boot uses): real organs constructed
+        # there and INJECTED into the L0 agency layer (the agency
+        # layer itself never imports organs — ARCHITECTURE.md §1
+        # layering). Composition is best-effort per organ: a missing
+        # organ yields an organ-less adapter (empty observations,
+        # refused actions) plus a concrete readiness entry, never a
+        # crash and never a silent degraded twin.
         from ..agency.systems import ActiveSystems
+        from ..agency.wiring import compose_agency, run_scheduled_expansion
         from ..autonomy.idle import workspace_db
 
         def _try(fn):
             try:
                 return fn()
-            except Exception:  # noqa: BLE001 - organ unavailable
+            except Exception:  # noqa: BLE001 - expansion is best-effort
                 return None
 
         ws = getattr(getattr(_context, "settings", None),
                      "workspace_dir", None) or "."
         db = workspace_db(ws)
-
-        def _news_agent():
-            from ..agents.news import NewsAgent
-            return NewsAgent(_context)
-
-        def _social_manager():
-            from ..social.manager import SocialManager
-            return SocialManager(_context) if _context is not None else None
-
-        def _gradient():
-            return _gradient_for_shift(db)
-
-        def _mandate_check():
-            from ..finance.mandate import MandateStore, check_mandate
-            return functools.partial(check_mandate, MandateStore())
-
-        def _weather():
-            from ..agents.weather import Weather
-            return Weather()
-
-        def _leads_store():
-            from ..social.leads import LeadStore
-            return LeadStore()
-
-        def _opp_hunter():
-            from ..agents.opportunities import OpportunityHunter
-            return OpportunityHunter()
-
-        def _applier():
-            from ..agents.gig_applier import GigApplier
-            return GigApplier()
-
-        def _payout_extractor():
-            from ..agents.opportunities import extract_payout_usd
-            return extract_payout_usd
-
-        def _opp_factory():
-            from ..agents.opportunities import Opportunity
-            return Opportunity.from_dict
-
-        def _graph_fns():
-            from ..planning.graph_missions import (
-                PlanGraph, execute_graph, plan_authoring)
-            return PlanGraph.from_dict, execute_graph, plan_authoring
-
-        graph_factory, graph_execute, graph_compile = _try(_graph_fns) or (
-            None, None, None)
-
-        def _relationships():
-            from ..social.relationships import RelationshipTracker
-            return RelationshipTracker(
-                path=str(ws) + "/data/social_relationships.json")
-
-        def _draft_queue():
-            from ..social.drafts import DraftQueue
-            return DraftQueue()
-
-        def _dm_sender(gateway):
-            # The real DM-send channel: the chat gateway's send path.
-            # None when no gateway is wired — sends then block honestly.
-            if gateway is None:
-                return None
-
-            def _send(platform, contact, body):
-                try:
-                    res = gateway.send(platform, contact, body)
-                    return bool(getattr(res, "ok", False))
-                except Exception:  # noqa: BLE001 - send failure = not sent
-                    return False
-
-            return _send
-
-        settings = getattr(_context, "settings", None)
-        gateway = getattr(_context, "gateway", None)
-        adapters = build_adapters(
-            weather=_try(_weather), news_agent=_try(_news_agent),
-            social_manager=_try(_social_manager),
-            leads_store=_try(_leads_store),
-            opp_hunter=_try(_opp_hunter), applier=_try(_applier),
-            payout_extractor=_try(_payout_extractor),
-            opp_factory=_try(_opp_factory),
-            graph_factory=graph_factory, graph_execute_fn=graph_execute,
-            graph_compile_fn=graph_compile, settings=settings,
-            gateway=gateway, relationships=_try(_relationships),
-            draft_queue=_try(_draft_queue), dm_sender=_dm_sender(gateway))
-        authority = AgencyAuthority(
-            gradient=_try(_gradient), grant=None,
-            mandate_check=_try(_mandate_check))
-        systems = ActiveSystems(db=db, adapters=adapters,
-                                authority=authority)
+        comp = compose_agency(_context, db=db)
+        systems = ActiveSystems(
+            db=db, adapters=comp["adapters"], authority=comp["authority"],
+            research_organ=comp["research_organ"],
+            wisdom_organ=comp["wisdom_organ"],
+            impossible=comp["impossible"])
         shift = systems.work_shift()
         # Expansion runs on the SAME schedule: SourceHealth actually
         # re-verifies sources every shift (the scheduler entrypoint).
-        from ..agency.wiring import run_scheduled_expansion
-
         expansion = _try(
-            lambda: run_scheduled_expansion(db, authority=authority))
-        return {"ok": True, "shift": shift, "expansion": expansion}
+            lambda: run_scheduled_expansion(
+                db, authority=comp["authority"]))
+        return {"ok": True, "shift": shift, "expansion": expansion,
+                "composition": comp["readiness"]}
 
     @registry.register(
         "__agent_modes_tick__",

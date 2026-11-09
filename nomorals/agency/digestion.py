@@ -28,7 +28,6 @@ domains are worth its time, and the pipeline re-ranks by it).
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -36,7 +35,12 @@ __all__ = ["Claim", "ThreeDeltas", "digest", "record_outcome"]
 
 
 def _normalize(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+    # The ONE normalization (agency/knowledge.py): Unicode-aware, so a
+    # claim's identity never depends on its script (F11). Delegated —
+    # a second ASCII-only copy here silently keyed every non-Latin
+    # claim to "".
+    from .knowledge import _normalize as _knowledge_normalize
+    return _knowledge_normalize(text)
 
 
 @dataclass

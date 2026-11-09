@@ -65,23 +65,54 @@ class DeliberationLoop:
         # with their wake-up; deliberation never drops them. Neither
         # are initiatives under a live lease: another entrypoint owns
         # them this cycle (F03), so choosing them would double-work.
+        # Nor is a FUTURE WAIT executable (F12): an initiative with no
+        # next action whose only plan is a wake-up in the future has
+        # nothing to start yet — selecting it early starts nothing and
+        # crowds out work that is actually due. (An initiative WITH a
+        # next action is workable now even if its review is future.)
         executable = [it for it in active if not it.blocker
-                      and not (it.lease_owner and it.lease_until > now)]
+                      and not (it.lease_owner and it.lease_until > now)
+                      and not (not (it.next_action or "").strip()
+                               and it.next_review_at
+                               and it.next_review_at > now)]
         blocked = [it for it in active if it.blocker]
-        # Starvation guard: overdue-critical first, always.
+        # Starvation guard: overdue-critical first — but capacity is a
+        # CONTRACT ("never start more commitments than capacity
+        # allows", this module's own header), not a suggestion the
+        # critical lane may override (F12: five critical initiatives
+        # were returned for capacity=1). Critical work wins the slots
+        # by score; the overflow is deferred with its event, like
+        # everything else, and its overdue score keeps it first next
+        # cycle.
         critical = [it for it in executable
                     if it.next_review_at and now - it.next_review_at > OVERDUE_CRITICAL_S
                     and it.priority >= 0.8]
+        critical.sort(key=lambda it: score(it, now=now), reverse=True)
         rest = [it for it in executable if it not in critical]
         rest.sort(key=lambda it: score(it, now=now), reverse=True)
         explore = [it for it in rest if it.kind == "exploration"]
         exploit = [it for it in rest if it.kind != "exploration"]
-        max_explore = max(0, int(capacity * self.exploration_share))
-        chosen: list[Initiative] = list(critical)
+        chosen: list[Initiative] = critical[:capacity]
         room = max(0, capacity - len(chosen))
+        # Exploration's bounded share (F12): the share is a RESERVATION,
+        # not a remainder — exploit must not consume the whole batch
+        # first and leave exploration with the int() truncation of a
+        # small capacity (capacity=3 × 20% truncated to 0, so a lone
+        # exploration candidate was selected zero times). When
+        # exploration candidates exist and the share is positive, at
+        # least one slot is reserved for them; the share still bounds
+        # exploration when both lanes compete for a large batch.
+        max_explore = int(capacity * self.exploration_share)
+        if explore and self.exploration_share > 0:
+            max_explore = max(1, max_explore)
+        max_explore = min(max_explore, len(explore), room)
+        explore_pick = explore[:max_explore]
+        room -= len(explore_pick)
         chosen += exploit[:room]
-        room = max(0, capacity - len(chosen))
-        chosen += explore[:min(room, max_explore)]
+        chosen += explore_pick
+        # Any remaining room stays unfilled: the share is a bound, and
+        # an under-filled batch is honest — capacity is a ceiling on
+        # commitments started, not a quota to fill.
         # Deferred set is implicit: everything active not chosen. Record
         # the decision cheaply so "Why?" can explain it — and record the
         # SELECTIONS too. Before this, only deferrals were logged: the

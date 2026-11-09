@@ -23,7 +23,9 @@ per system:
   still hold); publish claims re-read ``due_posts()`` (must be empty).
 * leads — re-read the lead from the store: stage/status must match
   the claimed transition (``dmed`` for a sent DM).
-* gigs — re-score the opportunity: the recommendation must match.
+* gigs — re-score the opportunity: the recommendation must match;
+  a draft claim must additionally carry a real draft artifact (the
+  adapter's ``no_applier``/``draft_failed`` shapes never verify).
 * research — the gap must no longer be open (``open_gaps`` re-read,
   or the ``knowledge_gaps`` DB row when a db is available).
 * wisdom — the claimed ingested slug must no longer be pending.
@@ -216,11 +218,38 @@ class Checker:
                     False, reason="maker-checker: follow-up draft gone "
                                   "on re-read",
                     checks=["gigs: follow_up_draft re-read"])
+            if str(fresh.get("status", "")) in (
+                    "no_applier", "draft_failed"):
+                # The re-read returns the adapter's REFUSAL shape:
+                # no draft artifact exists (F10).
+                return CheckResult(
+                    False, reason="maker-checker: follow-up draft is "
+                                  f"the adapter's no-artifact shape "
+                                  f"(status={fresh.get('status')})",
+                    checks=["gigs: follow_up_draft re-read"])
             return CheckResult(True, checks=[
                 "gigs: follow_up_draft re-read agrees"])
         if not opp or not callable(getattr(adapter, "score", None)):
             return CheckResult(False, reason="maker-checker: no gig "
                                              "opportunity to re-score")
+        # A "scored + drafted" claim must carry a draft ARTIFACT
+        # (F10): the adapter's no-artifact shapes (no_applier /
+        # draft_failed, or a draft with no gig id and no text) can
+        # never verify, however well the re-score agrees — scoring is
+        # not drafting.
+        if "draft" in claimed:
+            draft = claimed.get("draft") or {}
+            if not isinstance(draft, dict) or str(
+                    draft.get("status", "")) in (
+                        "", "no_applier", "draft_failed") or not (
+                            draft.get("gig_id")
+                            or draft.get("draft_text")
+                            or draft.get("draft")):
+                return CheckResult(
+                    False, reason="maker-checker: draft claim carries "
+                                  "no draft artifact "
+                                  f"(status={draft.get('status') if isinstance(draft, dict) else draft!r})",
+                    checks=["gigs: draft artifact present"])
         fresh = adapter.score(dict(opp)) or {}
         claimed_score = claimed.get("score") or {}
         if "recommendation" in claimed_score and fresh.get(

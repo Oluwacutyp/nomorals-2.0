@@ -14,7 +14,6 @@ reclaims them.
 """
 from __future__ import annotations
 
-import re
 import time
 import uuid
 from typing import Any
@@ -23,7 +22,20 @@ __all__ = ["KnowledgeStore"]
 
 
 def _normalize(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+    """Unicode-aware normalization for dedupe keys and search terms.
+
+    Letters/digits from EVERY script are word characters (Arabic,
+    Chinese, Devanagari, Cyrillic, accented Latin, …): a fact's
+    identity must never depend on the script it was written in (F11 —
+    the old ``[^a-z0-9]`` pattern deleted non-Latin content outright,
+    so entire deposits normalized to "" and were silently refused).
+    Everything else — punctuation, symbols, emoji, whitespace — is a
+    word separator. The ORIGINAL text is always what gets stored;
+    this only derives keys/terms from it.
+    """
+    lowered = (text or "").lower()
+    chars = [ch if ch.isalnum() else " " for ch in lowered]
+    return " ".join("".join(chars).split())
 
 
 class KnowledgeStore:
@@ -71,16 +83,30 @@ class KnowledgeStore:
         if not key:
             return False
         row = self.db.query_one(
-            "SELECT id, sightings, sources FROM agency_knowledge WHERE dedupe_key = ?", (key,))
+            "SELECT id, sightings, sources, ts, expires_at"
+            " FROM agency_knowledge WHERE dedupe_key = ?", (key,))
         if row:
             # Corroboration, not a new fact: record the witness.
             seen = [s for s in str(row.get("sources") or "").split(",") if s]
             if source and source not in seen:
                 seen.append(source)
+            # Freshness renewal (F12): a re-observation is a FRESH
+            # sighting, so it renews the entry's freshness — with the
+            # TTL supplied alongside this sighting when given, else by
+            # re-applying the entry's own original lifetime from now.
+            # Before this, a duplicate sighting updated last_seen but
+            # left an already-passed expires_at untouched, so a fact
+            # that was being seen again stayed invisible forever.
+            expires = float(row.get("expires_at") or 0)
+            if ttl_s:
+                expires = now + float(ttl_s)
+            elif expires and expires <= now:
+                lifetime = expires - float(row.get("ts") or now)
+                expires = now + lifetime if lifetime > 0 else 0.0
             self.db.execute(
                 "UPDATE agency_knowledge SET sightings = COALESCE(sightings, 0) + 1,"
-                " last_seen = ?, sources = ? WHERE id = ?",
-                (now, ",".join(seen), row["id"]))
+                " last_seen = ?, sources = ?, expires_at = ? WHERE id = ?",
+                (now, ",".join(seen), expires, row["id"]))
             return False
         self.db.execute(
             "INSERT INTO agency_knowledge (id, system, kind, text, source,"
@@ -102,12 +128,24 @@ class KnowledgeStore:
         if not terms:
             return []
         now = time.time() if now is None else now
-        cond = " AND ".join("LOWER(text) LIKE ?" for _ in terms)
-        params = [f"%{t}%" for t in terms]
-        return self.db.query(
-            f"SELECT * FROM agency_knowledge WHERE {cond}"
-            f" AND (expires_at <= 0 OR expires_at > ?)"
-            f" ORDER BY ts DESC LIMIT ?", (*params, now, limit))
+        # Matching is done on the Python-normalized text, NOT SQL
+        # LIKE: SQLite's LOWER()/LIKE fold ASCII only, so a Cyrillic
+        # (or otherwise non-ASCII-cased) term could never match its
+        # own stored text (F11). SQL pre-filters expiry only; the
+        # term check is the same all-terms-substring semantics the
+        # LIKE form had, applied script-correctly.
+        rows = self.db.query(
+            "SELECT * FROM agency_knowledge"
+            " WHERE (expires_at <= 0 OR expires_at > ?)"
+            " ORDER BY ts DESC", (now,))
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            hay = _normalize(str(row.get("text") or ""))
+            if all(t in hay for t in terms):
+                out.append(row)
+                if len(out) >= limit:
+                    break
+        return out
 
     def count(self) -> int:
         row = self.db.query_one("SELECT COUNT(*) AS n FROM agency_knowledge")

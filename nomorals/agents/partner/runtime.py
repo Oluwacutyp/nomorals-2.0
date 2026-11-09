@@ -2931,9 +2931,14 @@ class PartnerRuntime(
                 # the existing scheduler facade + idle coordinator.
                 try:
                     from ...agency.wiring import boot_agency
+                    # context= routes the boot through the ONE agency
+                    # composition root (F09): the runtime's systems
+                    # get the same real gateway/search/organs the
+                    # scheduled shift composes, not an organ-less twin.
                     self._agency = boot_agency(
                         self.context.db,
-                        scheduler=getattr(self, "_scheduler", None))
+                        scheduler=getattr(self, "_scheduler", None),
+                        context=self.context)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("agency layer not started: %s", exc)
                     self._agency = None

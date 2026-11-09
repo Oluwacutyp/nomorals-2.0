@@ -73,6 +73,23 @@ _LEADS_DM_WAIT_MARKERS = (
     "DM send blocked:",
 )
 
+#: Draft statuses that mean NO draft artifact exists (the gigs
+#: adapter's own contract in adapters.py: ``no_applier`` /
+#: ``draft_failed``). A completion claim for drafted work requires an
+#: actual artifact — a gig id / draft text on a non-failure status —
+#: never the adapter's refusal shape (F10).
+_NO_DRAFT_STATUSES = ("", "no_applier", "draft_failed")
+
+
+def _draft_artifact(draft: Any) -> bool:
+    """True when a draft result identifies an actual draft artifact."""
+    if not isinstance(draft, dict):
+        return False
+    if str(draft.get("status", "")) in _NO_DRAFT_STATUSES:
+        return False
+    return bool(draft.get("gig_id") or draft.get("draft_text")
+                or draft.get("draft"))
+
 
 class ActiveSystems:
     def __init__(self, *, db: Any, store: InitiativeStore | None = None,
@@ -439,21 +456,34 @@ class ActiveSystems:
                 except Exception as exc:  # noqa: BLE001
                     result = {"completed": [], "failed": [str(exc)],
                               "attempts": 0}
+                completed = list(result.get("completed", []) or [])
+                failed = list(result.get("failed", []) or [])
                 self.knowledge.deposit(
                     "planner",
-                    f"plan graph executed: {len(result.get('completed', []))} "
-                    f"completed, {len(result.get('failed', []))} failed",
+                    f"plan graph executed: {len(completed)} "
+                    f"completed, {len(failed)} failed",
                     source="agency:planner")
-                return WorkResult(useful=True, work_key=f"planner:{int(now)}")
+                # Evidence-bearing lifecycle (F10): an execution whose
+                # every node failed did no useful work, however real
+                # the attempt was. Useful requires completed work.
+                return WorkResult(useful=bool(completed),
+                                  work_key=f"planner:{int(now)}")
         # Else deliberation: choose the next initiatives to work.
+        # Selection is PREPARATORY bookkeeping, not executed work
+        # (F10): the chosen initiatives are worked by their own
+        # systems' ticks, and only those ticks may report useful.
+        # The selection is still recorded (knowledge + store events)
+        # — labeled as exactly what it is.
         chosen = DeliberationLoop(self.store).choose(now=now, capacity=3)
         if chosen:
             self.knowledge.deposit(
                 "planner",
-                f"deliberation chose {len(chosen)} initiatives: "
+                f"deliberation selected {len(chosen)} initiatives for "
+                f"their systems to work (selection only — the planner "
+                f"executed nothing itself): "
                 + ", ".join(c.outcome for c in chosen)[:400],
                 source="agency:planner")
-            return WorkResult(useful=True, work_key=f"planner:{int(now)}")
+            return WorkResult(useful=False, work_key=f"planner:{int(now)}")
         return WorkResult(useful=False)
 
     def _tick_impossible(self, now: float) -> WorkResult:
@@ -552,10 +582,6 @@ class ActiveSystems:
         # changes as decision deposits. A duplicate deposits nothing
         # (no manufactured work); the action delta is reported in the
         # evidence chain, never auto-executed (NONE is valid).
-        it = sorted(active, key=lambda i: i.created_at)[0]
-        text = (it.evidence or it.outcome or "").strip()
-        if not text:
-            return WorkResult(useful=False, work_key=f"digestion:{it.id}")
         known: list[Claim] = []
         try:
             rows = self.knowledge.db.query(
@@ -567,26 +593,46 @@ class ActiveSystems:
                      for r in rows if r.get("text")]
         except Exception:  # noqa: BLE001 - unknown store = empty known set
             known = []
-        deltas = digest(
-            f"agency:{it.objective}",
-            [Claim(text=text[:1000], source=f"agency:{it.objective}",
-                   observed_at=now)],
-            known_claims=known)
-        deposited = False
-        for claim in deltas.knowledge_delta:
-            deposited = self.knowledge.deposit(
-                "digestion", claim.text,
-                source=claim.source or "agency:digestion") or deposited
-        for note_text in deltas.decision_delta:
-            deposited = self.knowledge.deposit(
-                "digestion", note_text, source="agency:digestion",
-                kind="decision") or deposited
-        if deltas.action_delta:
-            self.store.advance(
-                it.id, next_review_at=now + 3600,
-                evidence="digestion action delta: "
-                         + "; ".join(deltas.action_delta), lease_token=self._initiative_leases.get(it.id))
-        return WorkResult(useful=deposited, work_key=f"digestion:{it.id}")
+        # Fairness (F12): walk the active initiatives oldest-first and
+        # digest the first whose evidence actually produces deltas.
+        # Always starting — and stopping — at THE oldest starved every
+        # newer initiative forever: once the oldest's evidence was
+        # deposited, every later pass re-digested that same duplicate,
+        # reported "not useful", and never reached the newer evidence
+        # waiting behind it. A candidate whose deltas are empty (a
+        # duplicate, or no text) is skipped WITHIN this pass, not
+        # treated as the whole pass.
+        first_id = ""
+        for it in sorted(active, key=lambda i: i.created_at):
+            first_id = first_id or it.id
+            text = (it.evidence or it.outcome or "").strip()
+            if not text:
+                continue
+            deltas = digest(
+                f"agency:{it.objective}",
+                [Claim(text=text[:1000], source=f"agency:{it.objective}",
+                       observed_at=now)],
+                known_claims=known)
+            if not (deltas.knowledge_delta or deltas.decision_delta
+                    or deltas.action_delta):
+                continue  # already digested: nothing new — move on
+            deposited = False
+            for claim in deltas.knowledge_delta:
+                deposited = self.knowledge.deposit(
+                    "digestion", claim.text,
+                    source=claim.source or "agency:digestion") or deposited
+            for note_text in deltas.decision_delta:
+                deposited = self.knowledge.deposit(
+                    "digestion", note_text, source="agency:digestion",
+                    kind="decision") or deposited
+            if deltas.action_delta:
+                self.store.advance(
+                    it.id, next_review_at=now + 3600,
+                    evidence="digestion action delta: "
+                             + "; ".join(deltas.action_delta), lease_token=self._initiative_leases.get(it.id))
+            return WorkResult(useful=deposited, work_key=f"digestion:{it.id}")
+        return WorkResult(useful=False,
+                          work_key=f"digestion:{first_id}" if first_id else "")
 
     # ── working one trigger initiative ─────────────────────────────
     def _work_trigger(self, it: Initiative, now: float) -> WorkResult:
@@ -1097,6 +1143,21 @@ class ActiveSystems:
                 due = adapter.follow_ups_due() or []
                 gig_id = str(due[0].get("gig_id", "")) if due else ""
             draft = adapter.follow_up_draft(gig_id) if gig_id else {}
+            if not _draft_artifact(draft):
+                # No artifact, no completion (F10): the follow-up
+                # draft does not exist — record the blocker honestly.
+                status = str(draft.get("status", "")
+                             if isinstance(draft, dict) else "")
+                self.knowledge.deposit(
+                    "gigs",
+                    f"gig follow-up draft NOT created for {gig_id} "
+                    f"({status or 'no artifact'})",
+                    source="agency:gigs")
+                self.store.advance(
+                    it.id, next_review_at=now + 3600,
+                    blocker=f"gig follow-up draft not created: "
+                            f"{status or 'adapter returned no artifact'}", lease_token=self._initiative_leases.get(it.id))
+                return WorkResult(useful=False, work_key=f"gigs:{it.id}")
             self.knowledge.deposit(
                 "gigs", f"gig follow-up drafted for {gig_id}",
                 source="agency:gigs")
@@ -1114,6 +1175,31 @@ class ActiveSystems:
             return WorkResult(useful=False, work_key=f"gigs:{it.id}")
         score = adapter.score(opp)
         draft = adapter.draft(opp)
+        if not _draft_artifact(draft):
+            # Evidence-bearing lifecycle (F10): scoring happened, but
+            # the DRAFT — the artifact this initiative exists to
+            # produce — does not exist (e.g. no applier injected).
+            # The initiative must NOT complete as "scored + drafted":
+            # it advances with the concrete blocker, and the turn is
+            # not useful drafting work.
+            status = str(draft.get("status", "")
+                         if isinstance(draft, dict) else "")
+            self.knowledge.deposit(
+                "gigs",
+                f"gig scored {opp.get('title', opp.get('id', ''))}: "
+                f"expected_net {score.get('expected_net')} "
+                f"({score.get('recommendation', '')}); draft NOT "
+                f"created ({status or 'no artifact'})",
+                source="agency:gigs")
+            self.store.advance(
+                it.id, next_review_at=now + 3600,
+                blocker=f"gig draft not created: "
+                        f"{status or 'adapter returned no draft artifact'}",
+                evidence=f"scored gig {opp.get('id', '')} "
+                         f"(recommendation "
+                         f"{score.get('recommendation', '')}); drafting "
+                         f"produced no artifact", lease_token=self._initiative_leases.get(it.id))
+            return WorkResult(useful=False, work_key=f"gigs:{it.id}")
         self.knowledge.deposit(
             "gigs",
             f"gig scored {opp.get('title', opp.get('id', ''))}: "
