@@ -2485,6 +2485,12 @@ class MissionRunner:
             # A failed verification becomes a real FAILED — never a silent
             # success.
             mission, status, error = self._verify_acceptance(mission, error)
+        if status == MissionStatus.DONE:
+            # Delegation gate: a mission whose delegated work is still
+            # under open work contracts has not finished — accountable
+            # delegation (agents.delegation) refuses the DONE verdict
+            # the same way the acceptance gate does.
+            mission, status, error = self._verify_delegation(mission, error)
         mission.status = status
         final_state = {
             MissionStatus.DONE: "COMPLETED",
@@ -2517,6 +2523,7 @@ class MissionRunner:
 
         self.store.save(mission)
         self.store.checkpoint(mission, label=f"final:{status}")
+        self._post_terminal_learning(mission, status, steps, lessons)
         self._report("on_terminal", mission, status, error=error)
         self._ledger(
             "terminal", mission,
@@ -2549,6 +2556,86 @@ class MissionRunner:
             seconds=self._clock() - started,
             error=error,
         )
+
+    def _verify_delegation(
+        self, mission: Mission, error: str
+    ) -> tuple[Mission, str, str]:
+        """Delegation gate beside the acceptance gate.
+
+        When the mission carries work contracts (agents.delegation),
+        every contract must be terminal — completed, waived or refused
+        by the governing roles — before the mission may finish DONE.
+        Missions without contracts keep the historical direct path.
+        A broken delegation store never fails a mission by itself: the
+        gate is best-effort, like the other terminal organs.
+        """
+        try:
+            from ..agents.delegation import DelegationStore
+
+            db = getattr(self.context, "db", None)
+            if db is None:
+                return mission, MissionStatus.DONE, error
+            store = DelegationStore(db)
+            open_contracts = store.open_contracts(mission.id)
+        except Exception as exc:  # noqa: BLE001 - best-effort gate
+            _log.warning("mission %s delegation gate skipped: %s",
+                         mission.id, exc)
+            return mission, MissionStatus.DONE, error
+        if not open_contracts:
+            return mission, MissionStatus.DONE, error
+        ids = ", ".join(c.id for c in open_contracts[:5])
+        return mission, MissionStatus.FAILED, (
+            f"delegation incomplete: {len(open_contracts)} work "
+            f"contract(s) not completed ({ids}) — delegated work must "
+            "carry its evidence and verifier sign-off before the "
+            "mission can finish")
+
+    def _post_terminal_learning(
+        self, mission: Mission, status: str, steps: list[StepOutcome],
+        lessons: list[str],
+    ) -> None:
+        """Settle skill usage + distill a draft skill from the mission.
+
+        Best-effort throughout: learning never breaks teardown.  The
+        skillbook settle records this mission's outcome against every
+        skill it loaded (drafts auto-promote after two distinct
+        successful missions), and a mission with something to teach
+        leaves a distilled draft skill behind.
+        """
+        try:
+            from ..skills.distill_files import distill_task, should_distill
+            from ..skills.filebook import default_library
+
+            library = default_library()
+            library.settle_mission(mission.id,
+                                   success=status == MissionStatus.DONE)
+            plan = mission.state.get("plan") or {}
+            raw_steps = plan.get("steps") if isinstance(plan, dict) \
+                else plan
+            step_records = []
+            for raw in raw_steps or []:
+                if isinstance(raw, dict):
+                    step_records.append({
+                        "name": raw.get("name") or "step",
+                        "role": raw.get("role") or "",
+                        "tools": raw.get("tools") or []})
+            task = {
+                "goal": mission.goal, "mission_id": mission.id,
+                "outcome": "done" if status == MissionStatus.DONE
+                else "failed",
+                "summary": f"{status} after {mission.iterations} "
+                           "iterations",
+                "steps": step_records, "lessons": list(lessons or []),
+            }
+            if should_distill(task):
+                # The draft write is journaled in the skill usage log
+                # (the distill entry) — deliberately NOT in the
+                # autonomy ledger, whose terminal vocabulary is pinned
+                # by the finish-guard tests.
+                distill_task(library, task)
+        except Exception as exc:  # noqa: BLE001 - learning is best-effort
+            _log.debug("mission %s post-terminal learning skipped: %s",
+                       mission.id, exc)
 
     def _escalate(self, mission: Mission, error: str) -> None:
         """Owner escalation on terminal failure: what failed, what was

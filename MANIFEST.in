@@ -3,6 +3,8 @@
 # install behaves identically to a wheel install. The tournaments
 # directory is runtime-written game state and is pruned on purpose.
 recursive-include nomorals/i18n/catalogs *.tsv
+recursive-include nomorals/skills/library *.md
+recursive-include nomorals/skills/layers *.md
 recursive-include nomorals/media_edit/workflows *.json
 recursive-include nomorals/assets library.json
 recursive-include nomorals/commitments library.json

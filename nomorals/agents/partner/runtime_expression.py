@@ -1588,6 +1588,247 @@ class RuntimeExpressionMixin:
                     f"it: {pack.tagline}.")
         return self._pack_open(pack, message)
 
+    def _skillbook(self):  # type: ignore[no-untyped-def]
+        cached = getattr(self, "_skillbook_cache", None)
+        if cached is None:
+            from ...skills.filebook import default_library
+
+            cached = default_library()
+            self._skillbook_cache = cached
+        return cached
+
+    def _delegation_store(self):  # type: ignore[no-untyped-def]
+        cached = getattr(self, "_delegation_store_cache", None)
+        if cached is None:
+            db = getattr(self.context, "db", None)
+            if db is None:
+                return None
+            from ...agents.delegation import DelegationStore
+
+            cached = DelegationStore(db)
+            self._delegation_store_cache = cached
+        return cached
+
+    def _control_skillbook(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
+        """The flat-file skillbook (SKILLS system): /skills lists the
+        routed library, /skills show <id> reads one file, /skills
+        search <text> routes a task text, /skills drafts shows
+        distilled drafts with their promotion progress, /skills
+        promote <id> promotes a draft now. The list also publishes a
+        living card (family "skills") whose buttons open skills in
+        place — the same Living Chat surface as everything else."""
+        library = self._skillbook()
+        text = " ".join(str(tail or "").split()).strip()
+        parts = text.split()
+        verb = parts[0].lower() if parts else "list"
+        if verb == "show" and len(parts) >= 2:
+            doc = library.load(parts[1])
+            if doc is None:
+                return (f"no skill called {parts[1]!r} — /skills "
+                        "lists the library.")
+            body = doc.body.strip()
+            if len(body) > 3200:
+                body = body[:3200].rstrip() + "\n[truncated — the full " \
+                    "file loads into context when a task routes to it]"
+            label = " (draft — unproven)" if doc.is_draft else ""
+            return f"{doc.title} [{doc.id}]{label}\n\n{body}"
+        if verb == "search":
+            query = text[len(parts[0]):].strip()
+            if not query:
+                return "usage: /skills search <task text>"
+            routed = library.route(query, limit=5)
+            if not routed:
+                return (f"no skill routes to {query!r} yet — when a "
+                        "mission teaches one, it lands as a draft.")
+            lines = [f"skills routed for: {query}"]
+            for doc, score in routed:
+                mark = " (draft)" if doc.is_draft else ""
+                lines.append(f"• {doc.id}{mark} — {doc.title} "
+                             f"(score {score:.0f})")
+            return "\n".join(lines)
+        if verb == "drafts":
+            drafts = library.drafts()
+            if not drafts:
+                return ("no distilled drafts waiting — drafts appear "
+                        "when a mission finishes with something to "
+                        "teach.")
+            lines = ["distilled drafts (promote at 2 successful "
+                     "missions, or /skills promote <id>):"]
+            for doc in drafts:
+                progress = library.draft_progress(doc.id)
+                revises = f" revises {doc.revises}" if doc.revises else ""
+                lines.append(
+                    f"• {doc.id}{revises} — "
+                    f"{progress['successful_missions']}/"
+                    f"{progress['needed']} successful missions")
+            return "\n".join(lines)
+        if verb == "promote" and len(parts) >= 2:
+            result = library.promote(parts[1])
+            if not result.get("ok"):
+                return f"cannot promote: {result.get('reason')}"
+            return (f"promoted {result['skill_id']} to the live "
+                    f"library (v{result['version']}) — it now routes "
+                    "as a proven skill.")
+        live = library.docs(include_drafts=False)
+        drafts = library.drafts()
+        lines = [f"skill library — {len(live)} live, "
+                 f"{len(drafts)} draft(s):"]
+        for doc in sorted(live, key=lambda d: d.id):
+            lines.append(f"• {doc.id} — {doc.title}")
+        for doc in drafts:
+            lines.append(f"• {doc.id} (draft — unproven)")
+        if message is not None:
+            self._skillbook_card(library, live, message)
+            lines.append("the library card is live above — tap a "
+                         "skill to open it.")
+        return "\n".join(lines)
+
+    def _skillbook_card(self, library, live, message) -> None:  # type: ignore[no-untyped-def]
+        """Publish/revise the skills living card for this chat."""
+        try:
+            from ...social.chat.action_schema import Action
+            from ...social.chat.living_cards import Card
+            from . import runtime as _runtime_mod
+
+            if not self._group_gate(message, "skills"):
+                return
+            chat = message.chat
+            chat_key = str(getattr(chat, "key", "") or "")
+            owner_key = _runtime_mod._pick_owner_key(message)
+            rows = tuple(
+                (doc.id, doc.title)
+                for doc in sorted(live, key=lambda d: d.id)[:8])
+            actions = tuple(
+                Action(label=doc.id, intent="callback",
+                       data=f"skills show {doc.id}")
+                for doc in sorted(live, key=lambda d: d.id)[:6])
+            card = Card(
+                card_id="skills:" + chat_key, family="skills",
+                chat_key=chat_key, owner_key=owner_key,
+                platform=str(getattr(chat, "platform", "") or ""),
+                chat_id=str(getattr(chat, "chat_id", "") or ""),
+                title="Skill library",
+                body="Flat-file skills the brain routes by. Tap one "
+                     "to read it; /skills search <task> shows what a "
+                     "task would load.",
+                rows=rows, actions=actions, status="open")
+            host = self._living_card_host()
+            existing = host.store.get(card.card_id)
+            if existing is not None and not existing.terminal:
+                host.revise(card, chat, title=card.title, body=card.body,
+                            rows=rows, actions=actions, status="open")
+            else:
+                host.publish(card, chat)
+        except Exception as exc:  # noqa: BLE001 - card is garnish
+            record_failure("skills.card", exc)
+
+    def _control_delegate(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
+        """Accountable delegation cockpit (doc 6): /delegate lists
+        work contracts with their verification state, /delegate show
+        <id> renders one contract with its claim ledger, /delegate
+        claims [id] reads the ledger. State renders as text here and
+        as a living card (family "delegation") in chat — no second
+        control surface."""
+        store = self._delegation_store()
+        if store is None:
+            return ("delegation state needs the database, which this "
+                    "runtime doesn't carry — contracts are unavailable "
+                    "here, not empty.")
+        text = " ".join(str(tail or "").split()).strip()
+        parts = text.split()
+        verb = parts[0].lower() if parts else "list"
+        if verb == "show" and len(parts) >= 2:
+            contract = store.get_contract(parts[1])
+            if contract is None:
+                return f"no contract {parts[1]!r} — /delegate lists them."
+            summary = store.summary(contract)
+            lines = [
+                f"contract {contract.id} — {contract.title}",
+                f"status: {contract.status} · generation "
+                f"{contract.generation} · worker {contract.worker} · "
+                f"verifier {contract.verifier}",
+                f"goal: {contract.goal}",
+            ]
+            if contract.specialist_class:
+                lines.append(f"specialist: {contract.specialist_class}")
+            if summary["blockers"]:
+                lines.append("completion blocked by: "
+                             + "; ".join(summary["blockers"]))
+            lines.append("claim ledger:")
+            for claim in store.claims(contract.id, limit=12):
+                lines.append(
+                    f"• [{claim.kind}] {claim.claim[:90]} — "
+                    f"{claim.verdict} (by {claim.producer or '?'})")
+            return "\n".join(lines)
+        if verb == "claims":
+            contract_id = parts[1] if len(parts) >= 2 else ""
+            entries = store.claims(contract_id, limit=15)
+            if not entries:
+                return "the claim ledger is empty."
+            lines = ["claim ledger (latest first):"]
+            for claim in entries:
+                lines.append(
+                    f"• [{claim.kind}] {claim.claim[:80]} — "
+                    f"{claim.verdict} · {claim.contract_id or '—'}")
+            return "\n".join(lines)
+        contracts = store.recent_contracts(limit=12)
+        if not contracts:
+            return ("no work contracts yet — contracts are cut when a "
+                    "mission delegates a step to a specialist.")
+        lines = ["work contracts:"]
+        for contract in contracts:
+            summary = store.summary(contract)
+            verdicts = ", ".join(
+                f"{k} {v}" for k, v in sorted(
+                    summary["verdicts"].items())) or "no claims"
+            lines.append(
+                f"• {contract.id} [{contract.status}] "
+                f"{contract.title[:48]} — {summary['claims']} claims "
+                f"({verdicts})")
+        if message is not None:
+            self._delegation_card(store, contracts, message)
+            lines.append("the delegation card is live above.")
+        return "\n".join(lines)
+
+    def _delegation_card(self, store, contracts, message) -> None:  # type: ignore[no-untyped-def]
+        """Publish/revise the delegation living card for this chat."""
+        try:
+            from ...social.chat.action_schema import Action
+            from ...social.chat.living_cards import Card
+            from . import runtime as _runtime_mod
+
+            if not self._group_gate(message, "delegate"):
+                return
+            chat = message.chat
+            chat_key = str(getattr(chat, "key", "") or "")
+            owner_key = _runtime_mod._pick_owner_key(message)
+            rows = tuple(
+                (c.id, f"{c.status} · {c.title[:40]}")
+                for c in contracts[:8])
+            actions = tuple(
+                Action(label=c.id, intent="callback",
+                       data=f"delegate show {c.id}")
+                for c in contracts[:6])
+            card = Card(
+                card_id="delegation:" + chat_key, family="delegation",
+                chat_key=chat_key, owner_key=owner_key,
+                platform=str(getattr(chat, "platform", "") or ""),
+                chat_id=str(getattr(chat, "chat_id", "") or ""),
+                title="Delegation — work contracts",
+                body="Delegated work under contract: evidence, "
+                     "independent verification and the claim ledger. "
+                     "Tap a contract for its full record.",
+                rows=rows, actions=actions, status="open")
+            host = self._living_card_host()
+            existing = host.store.get(card.card_id)
+            if existing is not None and not existing.terminal:
+                host.revise(card, chat, title=card.title, body=card.body,
+                            rows=rows, actions=actions, status="open")
+            else:
+                host.publish(card, chat)
+        except Exception as exc:  # noqa: BLE001 - card is garnish
+            record_failure("delegation.card", exc)
+
     def _pack_open(self, pack, message) -> str:  # type: ignore[no-untyped-def]
         """Publish (or revise) the pack's home card in this
         chat and record the use on the action bar's memory."""

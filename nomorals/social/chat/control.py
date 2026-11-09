@@ -342,6 +342,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "style": (0, None),  # /style | /style <field> <value> [target] | /style reset [target] | /style list — inspect + tune the mined style profile (owner-only); the target is a chat NAME (any length), a phone number, or a full key, so the tail is unbounded
     "stylepin": (0, None),  # /stylepin [set <global|family> <intent|font|theme|preset|trait> <value…> | clear <global|family> [field]] — pin a style (typography intent/face, theme traits) globally or per surface family; pins outrank semantic defaults at the one selection seam (owner-only)
     "pack": (0, None),      # /pack [open <id> | on|off <id> | act <id> <verb> …] — experience packs (Living Chat P4): the 25 journeys of the pack registry as living cards over the manifest/action/operations substrate; lifecycle persists, a disabled pack's surfaces stop resolving
+    "skills": (0, None),    # /skills [show <id> | search <task> | drafts | promote <id>] — the flat-file skillbook: seed library in the repo + distilled drafts at $NM_HOME/skills; drafts promote after 2 successful missions or by this verb. Owner-only.
+    "delegate": (0, None),  # /delegate [show <id> | claims [id]] — accountable delegation cockpit: work contracts, claim ledger, verification state, on living cards. Owner-only.
     "doctor": (0, 0),  # /doctor — system health: registry + config + stores + adapters + providers (owner-only)
     "model": (0, 6),  # provider + up to 5 fallback providers
     "providers": (0, 0),  # /providers — probe the whole chain, live or why not
@@ -2006,6 +2008,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/pack  ·  /pack open <id>  ·  /pack on|off <id>  ·  /pack act <id> <verb> [args…]",
              "example": "/pack   ·   /pack open music-deck   ·   /pack act travel-board add Lagos | fly in Friday   ·   /pack off smart-digest",
              "related": "/stylepin /list /menu"},
+    "skills": {"what": "the flat-file skillbook: one Markdown file per topic, routed by an index the brain consults when it assembles task context — matching skills load on demand. The seed library ships in the repo; missions distill new drafts from what they learned, and a draft promotes after it has been loaded in two distinct missions that succeeded (or immediately, by /skills promote). /skills lists the library as a living card; show reads one file; search shows what a task text would route to; drafts shows unproven drafts with their promotion progress. Owner-only.",
+             "usage": "/skills  ·  /skills show <id>  ·  /skills search <task text>  ·  /skills drafts  ·  /skills promote <id>",
+             "example": "/skills   ·   /skills show mission-execution   ·   /skills search fix the whatsapp bridge   ·   /skills drafts",
+             "related": "/delegate /mission /pack"},
+    "delegate": {"what": "accountable delegation cockpit: delegated work runs under work contracts — goal, scope, required evidence, named worker/witness/skeptic/verifier/integration-owner/recovery-supervisor/arbiter. Evidence lands in a durable claim ledger (who claimed what, verified by whom, with what verdict); a verifier independent of the worker must sign off before completion records; artifact writes are revision-fenced so a superseded worker cannot overwrite newer work. /delegate lists contracts with their verification state as a living card; show renders one contract with its ledger; claims reads the ledger. Owner-only.",
+             "usage": "/delegate  ·  /delegate show <contract id>  ·  /delegate claims [contract id]",
+             "example": "/delegate   ·   /delegate show dc-1a2b3c4d5e6f   ·   /delegate claims",
+             "related": "/skills /mission"},
     "model": {"what": "switch the active model live (up to 5 fallbacks); no argument shows the chain.",
               "usage": "/model [provider [fallback …]]", "example": "/model local",
               "related": "/status /providers"},
@@ -4387,7 +4397,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("building for real — code & missions",
      ["code", "py", "devon", "swarm", "task", "gen", "data", "evolve",
       "upgrade", "arena", "trial", "identity", "book", "exec", "apps", "fix", "structure",
-      "deliver", "checkpoint", "checkpoints", "rewind", "novel", "books"]),
+      "deliver", "checkpoint", "checkpoints", "rewind", "novel", "books",
+      "skills", "delegate"]),
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
@@ -4815,6 +4826,8 @@ LIST_ONELINERS: dict[str, str] = {
     "notify": "recent alerts",
     "proactive": "proactive push sends: switches + delivery states",
     "mission": "mission progress + ETA + stall reasons",
+    "skills": "the flat-file skillbook: /skills lists it, /skills show <id> reads one, /skills search routes a task, drafts + promote manage distilled skills",
+    "delegate": "accountable delegation: /delegate lists work contracts + verification state, /delegate show <id> reads the claim ledger",
     "email": "mailbox (Gmail): inbox/search/read/thread + triage + draft queue; sends need your explicit 'send it'",
     "gmail": "alias of /email — the owner's mailbox over Gmail",
     "mail": "alias of /email — the owner's mailbox over Gmail",

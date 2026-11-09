@@ -87,6 +87,7 @@ include = ["nomorals*"]
 
 [tool.setuptools.package-data]
 "nomorals.i18n" = ["catalogs/*.tsv"]
+"nomorals.skills" = ["library/*.md", "layers/*.md"]
 "nomorals.media_edit" = ["workflows/*.json"]
 "nomorals.assets" = ["library.json"]
 "nomorals.commitments" = ["library.json"]

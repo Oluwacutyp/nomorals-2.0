@@ -179,6 +179,8 @@ class ContextEngine:
             raise ValueError(
                 f"unknown ordering {ordering!r} (modes: {', '.join(ORDERING_MODES)})")
         self.ordering = ordering
+        self._pending_skill_loads: list[str] = []
+        self._skillbook: Any = None
 
     # ── public API ──────────────────────────────────────────────────────────
     def build(
@@ -249,6 +251,9 @@ class ContextEngine:
             dropped=dropped,
             truncated=truncated,
         )
+        if self._pending_skill_loads:
+            built.meta["skills_loaded"] = list(self._pending_skill_loads)
+            self._pending_skill_loads = []
         built.meta["ordering"] = ordering
         built.meta["tagged"] = tagged
         built.meta["stable_fingerprint"] = stable_fingerprint(survivors)
@@ -424,6 +429,9 @@ class ContextEngine:
         sections: list[Section] = [self._system_section(system)]
         if mission is not None:
             sections.append(self._mission_section(mission))
+        skills_section = self._skills_section(mission, memory_query)
+        if skills_section is not None:
+            sections.append(skills_section)
         if memory is not None:
             sections.append(self._memory_section(memory, memory_query))
         if artifacts:
@@ -508,6 +516,67 @@ class ContextEngine:
             load_bearing=True,
             keep=(text,),
         )
+
+    def _skillbook_lazy(self) -> Any:
+        """The process skillbook, built once per engine (guarded: a
+        broken skillbook must never break context assembly)."""
+        if self._skillbook is None:
+            from ..skills.filebook import default_library
+
+            self._skillbook = default_library()
+        return self._skillbook
+
+    def _skills_section(self, mission: Any, memory_query: str = ""
+                        ) -> Section | None:
+        """Route the task text through the skill index and load the
+        matching skill files on demand (the SKILLS router seam).
+
+        Fires when a mission is being assembled (or an explicit query
+        is given).  Loads are journaled to the skill usage log against
+        the mission id, so the terminal settle/promote loop can see
+        which skills a mission actually used.  Any failure returns
+        ``None`` — skills enrich context, they never gate it.
+        """
+        goal = _get(mission, "goal") if mission is not None else ""
+        query = " ".join(p for p in (str(goal or ""), memory_query or "")
+                         if p).strip()
+        if not query:
+            return None
+        try:
+            library = self._skillbook_lazy()
+            routed = library.route(query, limit=2)
+            if not routed:
+                return None
+            mission_id = str(_get(mission, "id") or "") \
+                if mission is not None else ""
+            parts: list[str] = []
+            loaded: list[str] = []
+            budget_chars = 4000
+            for doc, _score in routed:
+                body = doc.body.strip()
+                if not body:
+                    continue
+                chunk = f"## {doc.header()}\n{body}"
+                if len(chunk) > budget_chars:
+                    chunk = chunk[:budget_chars].rstrip() \
+                        + "\n[skill truncated to context budget]"
+                parts.append(chunk)
+                loaded.append(doc.id)
+                budget_chars -= len(chunk)
+                if budget_chars <= 0:
+                    break
+            if not loaded:
+                return None
+            if mission_id:
+                library.record_load(loaded, mission_id=mission_id)
+            self._pending_skill_loads = loaded
+            return Section(
+                name="skills",
+                content="\n\n".join(parts),
+                priority=priority_for("skills"),
+            )
+        except Exception:  # noqa: BLE001 - enrichment, never a gate
+            return None
 
     def _mission_section(self, mission: Any) -> Section:
         goal = _get(mission, "goal") or ""

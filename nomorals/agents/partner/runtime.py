@@ -6062,6 +6062,12 @@ class PartnerRuntime(
         if kind == "pack":
             return self._control_pack(command.tail or "", message)
 
+        if kind == "skills":
+            return self._control_skillbook(command.tail or "", message)
+
+        if kind == "delegate":
+            return self._control_delegate(command.tail or "", message)
+
         if kind == "doctor":
             return self._control_doctor()
 

@@ -334,6 +334,31 @@ def compose_agency(context: Any, *, db: Any = None) -> dict[str, Any]:
     wisdom_organ = _try(_wisdom)
     impossible = _try(_impossible)
 
+    def _specialists():
+        from ..agents.manifests import (
+            manifest_index,
+            plan_for_steps,
+            select_specialists,
+        )
+
+        return {"index": manifest_index(),
+                "select": select_specialists,
+                "plan_for_steps": plan_for_steps}
+
+    def _skillbook():
+        from ..skills.filebook import default_library
+
+        return default_library()
+
+    def _delegation():
+        from ..agents.delegation import DelegationStore
+
+        return DelegationStore(db) if db is not None else None
+
+    specialists = _try(_specialists)
+    skillbook = _try(_skillbook)
+    delegation = _try(_delegation)
+
     gigs_adapter = adapters.get("gigs")
     readiness = {
         "gateway": ("ready" if gateway is not None else
@@ -372,11 +397,23 @@ def compose_agency(context: Any, *, db: Any = None) -> dict[str, Any]:
                       "their own schedules; source-health "
                       "re-verification runs in the shift via "
                       "run_scheduled_expansion"),
+        "specialists": ("ready: 17-class specialist manifests over the "
+                        "live roster" if specialists is not None else
+                        "unavailable: specialist manifest construction "
+                        "failed"),
+        "skillbook": ("ready: flat-file skill library routes into "
+                      "task context" if skillbook is not None else
+                      "unavailable: skillbook construction failed"),
+        "delegation": ("ready: work contracts + claim ledger on the "
+                       "agency db" if delegation is not None else
+                       "unavailable: no db for the delegation store"),
     }
     return {"db": db, "adapters": adapters, "authority": authority,
             "gateway": gateway, "search_fn": search_fn,
             "research_organ": research_organ,
             "wisdom_organ": wisdom_organ, "impossible": impossible,
+            "specialists": specialists, "skillbook": skillbook,
+            "delegation": delegation,
             "readiness": readiness}
 
 
