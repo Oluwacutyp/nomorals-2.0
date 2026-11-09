@@ -52,9 +52,11 @@ def compose_weekly_digest(context: Any) -> dict[str, Any]:
     The one canonical composition (moved verbatim from the live
     ``finance_digest`` tool): weekly digest, the overspend alert,
     safe-to-spend with its breakdown, upcoming bills, and
-    savings-goal pace flags.  Returns ``{"ok", "delivered", "text"}``
-    — ``delivered`` is False when the Notifier publish failed, never
-    silently True.
+    savings-goal pace flags.  WS2 P7 adds the finance-goals section
+    (:func:`_tracker_goals_section`) — absent when the owner has no
+    active finance-class tracker goals.  Returns
+    ``{"ok", "delivered", "text"}`` — ``delivered`` is False when
+    the Notifier publish failed, never silently True.
     """
     from .goals import GoalStore, goal_progress
     from .insights import safe_to_spend, upcoming_bills
@@ -99,6 +101,9 @@ def compose_weekly_digest(context: Any) -> dict[str, Any]:
     if off_pace:
         text += ("\n\n🎯 off pace on savings goals: "
                  + ", ".join(off_pace))
+    # Finance-class tracker goals ride along with their readings
+    # (WS2 P7) — "" (no section) when there are none.
+    text += _tracker_goals_section(context)
     try:
         from ..agents.notifier import Notifier
 
@@ -108,6 +113,45 @@ def compose_weekly_digest(context: Any) -> dict[str, Any]:
     except Exception:  # noqa: BLE001 — publish failure is reported, not hidden
         delivered = False
     return {"ok": True, "delivered": delivered, "text": text}
+
+
+def _tracker_goals_section(context: Any) -> str:
+    """The digest's finance-goals section (WS2 P7).
+
+    Active :class:`~nomorals.goals.GoalTracker` goals filed under
+    the ``finance`` class — the class registry's goals, distinct
+    from the GoalStore savings goals flagged above — each with its
+    class reading rendered through the goals surface's own label
+    (``62% (measured · savings ledger)`` / ``40% (self-reported)``)
+    so the digest can never dress a manual % up as a measured one.
+    Returns "" — no section — when the context carries no db or
+    the owner has no active finance goals.
+
+    Contained like the briefing's goal-classes provider: a tracker
+    problem logs and reads as no section; the digest never breaks
+    on its goals page.
+    """
+    try:
+        db = getattr(context, "db", None)
+        if db is None:
+            return ""
+        from ..goals import GoalTracker
+        from ..goals.surface import OWNER_USER_ID, progress_label, run_sync
+
+        tracker = GoalTracker(db)
+        goals = run_sync(tracker.list_goals(
+            OWNER_USER_ID, status="active", goal_class="finance"))
+        if not goals:
+            return ""
+        lines = ["\n\n🎯 finance goals:"]
+        for goal in goals:
+            lines.append(
+                f"\n  • {goal.title} — "
+                f"{progress_label(tracker.class_progress(goal))}")
+        return "".join(lines)
+    except Exception as exc:  # noqa: BLE001 - contained, see docstring
+        _log.warning("finance digest goals section skipped: %s", exc)
+        return ""
 
 
 async def ensure_finance_digest_job(scheduler: Any, context: Any) -> bool:

@@ -1,8 +1,9 @@
-"""Measured-progress providers for goal classes (WS2 P3–P6).
+"""Measured-progress providers for goal classes (WS2 P3–P7).
 
 P1 shipped the provider registry empty by design
 (:mod:`nomorals.goals.classes`); this module is where the real
-providers land — **finance** and **trading** (P3), **careers**
+providers land — **finance** and **trading** (P3; GoldenSwing
+bundle evidence P7), **careers**
 (P4), **productivity** and **interests** (P5), **health**,
 **learning**, **build** and **relationships** (P6) — and
 :func:`register_providers` wires them into the registry.  The wiring
@@ -38,7 +39,10 @@ the link rides the fields each store already owns:
   goal itself declares its target P&L in a tag
   ``pnl-target:<amount>`` (account currency, must be > 0).  No tag
   (or an unparsable/non-positive one) = no measurable target =
-  ``None``.
+  ``None``.  The evidence source is the desk journal unless the
+  goal also carries a ``gs-evidence`` tag, which opts it into
+  GoldenSwing bundle evidence instead (see the trading measure
+  below) — an opt-in, never a fallback chain.
 * careers: the pipeline store (:mod:`nomorals.careers.store`)
   holds applications, not goal targets, so the link rides tags
   again: an explicit ``career-app:<application-id>`` naming ONE
@@ -117,11 +121,13 @@ settings — the same resolution ``finance/commands.py`` uses for the
 ledger behind ``/goal`` — so provider and surfaces read the same
 files (in a default-home deployment these are exactly the files the
 bare ``GoalStore()`` construction in the ``/goal`` handler uses too).
-The tracker ``db`` argument is unused by the finance, trading,
-careers and productivity providers: their stores are file stores
-(JSON / JSONL) beside that directory, not tables in the context
-database.  The interests provider is the exception — its store IS
-the context database (above).
+The tracker ``db`` argument is unused by the finance, careers and
+productivity providers: their stores are file stores (JSON /
+JSONL) beside that directory, not tables in the context database.
+The interests provider's store IS the context database (above),
+and the trading provider uses ``db`` on its ``gs-evidence`` path
+only — bundle artifacts live in the context database's artifact
+store, while the desk-journal path stays a file read.
 
 Measures
 --------
@@ -139,12 +145,17 @@ Measures
   on when you looked; the decision journal
   (:mod:`nomorals.finance.trading_journal`) records reads and
   judgments, not money outcomes, so it is deliberately not the
-  measure.  GoldenSwing bundle evidence (WS1 P7 state/harvest
-  bundles imported as artifacts) is NOT read here: a bundle's
-  manifest carries member hashes, not desk stats, and parsing
-  STATE.md prose into a progress number would manufacture
-  precision.  That reader is WS2 P7's scope, where the census put
-  it; this provider ships complete over Devon's own journal.
+  measure.  A goal tagged ``gs-evidence`` is instead measured
+  from GoldenSwing bundle evidence (WS2 P7): the trade-journal
+  member of the newest GoldenSwing state bundle (WS1 P7) held in
+  the artifact store — the bundle's own journal records (GS
+  shapes: ``type`` / ``pnl_money`` / ISO-8601 ``ts``), read only
+  after the bundle passes the Archivist seam's verification, and
+  labelled ``goldenswing bundle``.  A bundle's manifest carries
+  member hashes, not desk stats, and STATE.md is prose: neither
+  is ever parsed into a number, and a tagged goal never falls
+  back to the Devon journal — an absent or unverifiable bundle
+  measures nothing rather than mixing sources under one label.
 * careers (``application_pipeline``): for a ``career-app:``-linked
   goal, the linked application's stage weight
   (:data:`nomorals.careers.store.STAGE_PROGRESS` — saved 10,
@@ -238,7 +249,10 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import struct
+import tempfile
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -266,6 +280,7 @@ __all__ = [
     "CAREER_TARGET_TAG",
     "FINANCE_GOAL_TAG",
     "FOCUS_TARGET_TAG",
+    "GS_EVIDENCE_TAG",
     "LEARN_TAG",
     "PERSON_TAG",
     "PNL_TARGET_TAG",
@@ -295,6 +310,22 @@ FINANCE_GOAL_TAG = "finance-goal:"
 #: ``pnl-target:<amount>`` — realized P&L (account currency) the
 #: goal is aiming at, e.g. ``pnl-target:1000``.
 PNL_TARGET_TAG = "pnl-target:"
+
+#: GoldenSwing evidence opt-in: a tracker-goal tag ``gs-evidence``
+#: (bare, or ``gs-evidence:<anything>``) — the goal's trading
+#: reading comes from GoldenSwing state-bundle evidence instead
+#: of Devon's desk journal (WS2 P7).  Opt-in only: without the
+#: tag the desk journal is the trading source, byte-identically
+#: to P3, and with it the bundle is the ONLY source.
+GS_EVIDENCE_TAG = "gs-evidence"
+
+#: The bundle kind GoldenSwing's state export declares in the
+#: WS1 contract manifest (``kind="journal-state"``).
+GS_BUNDLE_KIND = "journal-state"
+
+#: Source label for bundle readings — never the desk journal's,
+#: so the two evidence sources can never render alike.
+GS_BUNDLE_SOURCE = "goldenswing bundle"
 
 #: The desk's execution journal, beside the desk state file —
 #: the filename :mod:`nomorals.finance.trading_desk` writes.
@@ -480,10 +511,18 @@ def _realized_pnl(
     return realized, closes, unreadable, bad_pnl
 
 
-def _trading_progress(goal: Goal, *, now: float | None) -> ClassProgress | None:
+def _trading_progress(
+    db: Any, goal: Goal, *, now: float | None,
+) -> ClassProgress | None:
     target = _pnl_target(goal)
     if target is None:
         return None
+    if _has_tag(goal, GS_EVIDENCE_TAG):
+        # Opted into GoldenSwing bundle evidence: the bundle is
+        # this goal's ONLY source — no bundle (or a bundle that
+        # fails verification) means no reading, never a quiet
+        # fall-back to the Devon journal under the bundle's label.
+        return _gs_bundle_progress(db, goal, target=target)
     journal_path = _finance_dir() / DESK_JOURNAL_FILENAME
     since = float(getattr(goal, "created_at", 0.0) or 0.0)
     realized, closes, unreadable, bad_pnl = _realized_pnl(
@@ -523,16 +562,412 @@ def trading_progress(
     """Trading-class provider: realized P&L vs the goal's target.
 
     ``None`` when the goal declares no measurable target (no valid
-    ``pnl-target:`` tag) or when the desk journal cannot be read —
-    failures are logged with the goal named, never raised.
+    ``pnl-target:`` tag) or when the evidence cannot be read —
+    failures are logged with the goal named, never raised.  A goal
+    tagged ``gs-evidence`` reads GoldenSwing bundle evidence
+    instead of the desk journal (see :func:`_gs_bundle_progress`).
     """
     try:
-        return _trading_progress(goal, now=now)
+        return _trading_progress(db, goal, now=now)
     except Exception as exc:  # noqa: BLE001 - contained: see docstring
         _log.warning(
             "trading progress provider failed for goal %s (%r): %s",
             getattr(goal, "goal_id", "?"), getattr(goal, "title", ""), exc)
         return None
+
+
+# ── trading: GoldenSwing bundle evidence (WS2 P7) ─────────────────────
+
+#: The member names a GS state bundle carries its evidence under:
+#: the trade journal at the bundle root and the deterministic
+#: journal under ``deterministic/`` (GS packs members under
+#: data-dir-relative arcnames — see :func:`_member_named`).
+GS_JOURNAL_BASENAME = "trade_journal.jsonl"
+GS_DETERMINISTIC_BASENAME = "deterministic.gsj"
+
+#: How far back (newest first) the artifact scan looks for a state
+#: bundle — a bound on the per-reading cost, not a correctness
+#: knob: state bundles arrive rarely (one per export) while photos
+#: and downloads arrive often.
+GS_BUNDLE_SCAN_LIMIT = 100
+
+_ZIP_MAGIC = b"PK\x03\x04"
+
+# The GSJ1 deterministic-journal frame header, mirrored from
+# GoldenSwing's engine.journal (magic, length, seq, epoch, term,
+# token_version, payload_len) — a structural mirror for a read-only
+# frame walk, the same no-imports stance the desk-journal reader
+# takes toward the desk's semantics.  Devon never writes GSJ1.
+_GSJ1_HEADER = struct.Struct(">4sIQQQII")
+_GSJ1_MAGIC = b"GSJ1"
+_GSJ1_TRAILER_BYTES = 4 + 32  # crc32 + hash-chain link
+
+
+def _has_tag(goal: Goal, name: str) -> bool:
+    """True when a goal carries ``name`` (bare or ``name:<value>``)."""
+    for tag in getattr(goal, "tags", None) or []:
+        text = str(tag).strip()
+        if text == name or text.startswith(name + ":"):
+            return True
+    return False
+
+
+def _bundle_artifact_store(db: Any) -> Any | None:
+    """The artifact store over the caller's db, or None without one.
+
+    Constructed exactly as the runtime builds it
+    (``agents/partner/runtime_system._artifact_store``): blobs live
+    beside the database file.  No text extractor is wired — this
+    reader never content-searches.
+    """
+    if db is None:
+        return None
+    from ..storage.artifacts import ArtifactStore
+    from ..storage.blob import BlobStore
+
+    db_path = getattr(db, "path", None)
+    blob_dir = Path(db_path).parent / "blobs" if db_path else Path("data/blobs")
+    return ArtifactStore(db, BlobStore(db, blob_dir))
+
+
+def _member_named(
+    members: dict[str, bytes], basename: str,
+) -> tuple[str, bytes] | None:
+    """A bundle member as ``(arcname, bytes)`` by name, else basename.
+
+    GS packs members under data-dir-relative arcnames, so the trade
+    journal rides as ``trade_journal.jsonl`` at the root; the
+    basename pass covers a bundle produced from a nested layout.
+    Basename equality, never a substring match — the confluence
+    journal must not be mistaken for the trade journal.
+    """
+    for name, data in members.items():
+        if name == basename:
+            return name, data
+    for name, data in members.items():
+        if name.rsplit("/", 1)[-1] == basename:
+            return name, data
+    return None
+
+
+def _locate_gs_state_bundle(db: Any) -> dict[str, Any] | None:
+    """The newest GoldenSwing state bundle in the artifact store.
+
+    Identification is by the bundle MANIFEST — the WS1 contract
+    (format ``nomorals-bundle``, kind ``journal-state``) — reached
+    through the Archivist seam (:mod:`nomorals.archives`); a cheap
+    zip-magic sniff keeps non-archive artifacts (the common case)
+    from being materialised at all.  Returns None when no state
+    bundle is available (the normal state until one is imported or
+    arrives inbound).  A bundle that IS a state bundle but fails
+    verification comes back ``verified: False`` with the seam's
+    named problems — the caller turns that into NO reading, never
+    a skip to an older bundle: a tampered newest export is a fact
+    about the evidence, and quietly reading yesterday's bundle
+    instead would hide it.
+    """
+    store = _bundle_artifact_store(db)
+    if store is None:
+        return None
+    from ..archives import open_bundle, read_bundle_members, verify_bundle
+
+    try:
+        candidates = store.search(limit=GS_BUNDLE_SCAN_LIMIT)
+    except Exception:  # noqa: BLE001 - no artifact organ yet = no bundles
+        _log.debug("gs-evidence: artifact search failed", exc_info=True)
+        return None
+    for art in candidates:
+        try:
+            if (art.size or 0) < len(_ZIP_MAGIC):
+                continue
+            head = store.blobs.read_range(
+                art.content_hash, 0, len(_ZIP_MAGIC))
+        except Exception:  # noqa: BLE001 - broken row/blob: not a bundle
+            continue
+        if head != _ZIP_MAGIC:
+            continue
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bundle.zip"
+            try:
+                path.write_bytes(store.read(art.id))
+                info = open_bundle(path)
+            except Exception:  # noqa: BLE001 - not a readable bundle
+                continue
+            manifest = info.get("manifest") or {}
+            if manifest.get("kind") != GS_BUNDLE_KIND:
+                continue
+            verdict = verify_bundle(path)
+            if not verdict.get("ok"):
+                return {
+                    "artifact": art,
+                    "manifest": manifest,
+                    "verified": False,
+                    "problems": list(verdict.get("problems") or []),
+                }
+            return {
+                "artifact": art,
+                "manifest": manifest,
+                "verified": True,
+                "family_manifest": info.get("family_manifest") or {},
+                "members": read_bundle_members(path),
+            }
+    return None
+
+
+def _gs_record_ts(record: dict[str, Any]) -> float | None:
+    """A GS journal record's timestamp as epoch seconds.
+
+    GS writes ISO-8601 UTC text (``datetime.now(timezone.utc)``
+    ``.isoformat()``); an epoch number is accepted too.  A naive
+    ISO value is read as UTC — GS never writes one, and assuming
+    local time would silently shift the goal window.
+    """
+    raw = record.get("ts")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            pass
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        try:
+            moment = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=UTC)
+        return moment.timestamp()
+    return None
+
+
+def _gs_journal_stats(data: bytes, *, since: float) -> dict[str, Any]:
+    """Health-read a GS trade journal member for the goal's window.
+
+    Line semantics are GS's own (``TradeJournal``'s health read):
+    blank lines are skipped; lines that do not decode, parse, or
+    hold an object are unreadable and counted.  On top of that, the
+    goal-window rules, mirroring the desk reader: a close counts
+    only with a parseable timestamp at/after ``since``; a counted
+    close with a missing or non-numeric ``pnl_money`` is an
+    unreadable P&L record, never summed.  The journal span covers
+    every readable record's timestamp, opens and closes alike —
+    it describes the bundle's evidence, not the window.
+    """
+    records = 0
+    closes = 0
+    realized = 0.0
+    unreadable_lines = 0
+    unreadable_ts = 0
+    bad_pnl = 0
+    first_ts: float | None = None
+    last_ts: float | None = None
+    for raw in data.split(b"\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            unreadable_lines += 1
+            continue
+        if not isinstance(record, dict):
+            unreadable_lines += 1
+            continue
+        records += 1
+        ts = _gs_record_ts(record)
+        if ts is None:
+            unreadable_ts += 1
+        else:
+            first_ts = ts if first_ts is None else min(first_ts, ts)
+            last_ts = ts if last_ts is None else max(last_ts, ts)
+        if record.get("type") != "close":
+            continue
+        if ts is None or ts < since:
+            continue
+        pnl = record.get("pnl_money")
+        if isinstance(pnl, bool) or not isinstance(pnl, (int, float)):
+            bad_pnl += 1
+            continue
+        closes += 1
+        realized += float(pnl)
+    return {
+        "journal_records": records,
+        "closed_trades": closes,
+        "realized_pnl": realized,
+        "first_ts": first_ts,
+        "last_ts": last_ts,
+        "unreadable_lines": unreadable_lines,
+        "unreadable_ts": unreadable_ts,
+        "bad_pnl": bad_pnl,
+    }
+
+
+def _gsj1_frame_count(data: bytes) -> int | None:
+    """Count GSJ1 frames by a conservative structural walk.
+
+    Walks frame headers only — magic, the length/payload_len pair
+    (GS writes both as the payload length), and the fixed CRC +
+    chain trailer — and counts a frame only when the walk lands
+    EXACTLY on the member's end.  Anything else (torn tail, bad
+    magic, disagreeing length fields) yields None: the count is
+    evidence, so a guess is worse than an honest unknown.
+    Payloads are never decoded and the chain is never verified —
+    that is GS's own loader's job, on GS's side of the seam.
+    """
+    offset = 0
+    frames = 0
+    size = len(data)
+    header = _GSJ1_HEADER.size
+    while offset < size:
+        if size - offset < header:
+            return None
+        try:
+            magic, length, _seq, _epoch, _term, _tv, payload_len = (
+                _GSJ1_HEADER.unpack_from(data, offset))
+        except struct.error:
+            return None
+        if magic != _GSJ1_MAGIC or length != payload_len:
+            return None
+        offset += header + payload_len + _GSJ1_TRAILER_BYTES
+        if offset > size:
+            return None
+        frames += 1
+    return frames
+
+
+def _bundle_day(created_at: Any) -> str:
+    """The bundle's creation day (``YYYY-MM-DD``) for headlines.
+
+    The contract manifest carries ``created_at`` as epoch seconds
+    (the seam's ``bundle_manifest`` writes a float); an ISO string
+    is accepted too.  Anything else yields "" — the headline then
+    says "an unknown date" rather than inventing one.
+    """
+    if isinstance(created_at, bool):
+        return ""
+    if isinstance(created_at, (int, float)):
+        return datetime.fromtimestamp(
+            float(created_at), UTC).strftime("%Y-%m-%d")
+    if isinstance(created_at, str) and created_at.strip():
+        return created_at.strip()[:10]
+    return ""
+
+
+def _gs_bundle_progress(
+    db: Any, goal: Goal, *, target: float,
+) -> ClassProgress | None:
+    """Realized P&L from the newest VERIFIED GS state bundle.
+
+    Record semantics mirror the desk-journal reader, translated to
+    GS's own record shapes (GoldenSwing's ``TradeJournal``): closes
+    are ``type == "close"`` records, realized P&L is their
+    ``pnl_money``, timestamps are ISO-8601 UTC, and the window is
+    the goal's lifetime (records at/after the goal's creation).
+    Corrupt lines and unusable records are COUNTED in the evidence,
+    never silently absorbed — the same health read GS performs.
+    STATE.md prose is never read, and the family manifest's
+    declared counts ride in the evidence labelled as declared —
+    every number the reading itself uses is counted here, from
+    the members.
+    """
+    located = _locate_gs_state_bundle(db)
+    if located is None:
+        _log.warning(
+            "trading goal %s (%r) opts into gs-evidence but no "
+            "GoldenSwing state bundle is available as an artifact — "
+            "no measured reading (the desk journal is not "
+            "substituted)",
+            getattr(goal, "goal_id", "?"), getattr(goal, "title", ""))
+        return None
+    art = located["artifact"]
+    manifest = located["manifest"]
+    bundle_created = manifest.get("created_at")
+    if not located["verified"]:
+        _log.warning(
+            "trading goal %s (%r): newest GoldenSwing state bundle "
+            "%s FAILED verification — no reading taken from it: %s",
+            getattr(goal, "goal_id", "?"), getattr(goal, "title", ""),
+            art.id, "; ".join(located["problems"]) or "verification failed")
+        return None
+    found = _member_named(located["members"], GS_JOURNAL_BASENAME)
+    if found is None:
+        _log.warning(
+            "trading goal %s (%r): verified GoldenSwing state bundle "
+            "%s carries no %s member — no measured reading",
+            getattr(goal, "goal_id", "?"), getattr(goal, "title", ""),
+            art.id, GS_JOURNAL_BASENAME)
+        return None
+    journal_name, journal_bytes = found
+    since = float(getattr(goal, "created_at", 0.0) or 0.0)
+    stats = _gs_journal_stats(journal_bytes, since=since)
+    realized = stats["realized_pnl"]
+    closes = stats["closed_trades"]
+    bundle_day = _bundle_day(bundle_created) or "an unknown date"
+    if closes:
+        headline = (
+            f"realized {realized:+.2f} of {target:.2f} target across "
+            f"{closes} closed trade(s) in the GoldenSwing state "
+            f"bundle of {bundle_day}")
+    else:
+        headline = (
+            f"no closed trades at/after this goal was filed in the "
+            f"GoldenSwing state bundle of {bundle_day} — realized "
+            f"0.00 of {target:.2f} target")
+    det = _member_named(located["members"], GS_DETERMINISTIC_BASENAME)
+    frames = _gsj1_frame_count(det[1]) if det is not None else None
+    evidence: dict[str, Any] = {
+        "link": GS_EVIDENCE_TAG,
+        "artifact_id": art.id,
+        "artifact_uri": art.uri,
+        "bundle_created_at": bundle_created,
+        "bundle_kind": GS_BUNDLE_KIND,
+        "bundle_verified": True,
+        "journal_member": journal_name,
+        "journal_records": stats["journal_records"],
+        "closed_trades": closes,
+        "realized_pnl": round(realized, 2),
+        "target_pnl": target,
+        "since": since,
+        "deterministic_frames": frames,
+    }
+    if stats["first_ts"] is not None:
+        evidence["journal_span"] = {
+            "first": datetime.fromtimestamp(
+                stats["first_ts"], UTC).isoformat(),
+            "last": datetime.fromtimestamp(
+                stats["last_ts"], UTC).isoformat(),
+        }
+    if stats["unreadable_lines"]:
+        evidence["unreadable_journal_lines"] = stats["unreadable_lines"]
+    if stats["unreadable_ts"]:
+        evidence["records_with_unreadable_ts"] = stats["unreadable_ts"]
+    if stats["bad_pnl"]:
+        evidence["unreadable_pnl_records"] = stats["bad_pnl"]
+    family = located.get("family_manifest") or {}
+    declared = {
+        key: family[key]
+        for key in ("journal_records", "deterministic_frames")
+        if isinstance(family, dict) and key in family
+    }
+    if declared:
+        # GS's own export-time claims, labelled as declared — the
+        # reading's numbers above are all counted HERE, from the
+        # members; declared counts are context, never inputs.
+        evidence["gs_declared"] = declared
+    return ClassProgress(
+        percent=realized / target * 100.0,
+        basis="measured",
+        source=GS_BUNDLE_SOURCE,
+        headline=headline,
+        evidence=evidence,
+    )
 
 
 # ── careers: stage funnel from the pipeline store ─────────────────────
@@ -1809,8 +2244,9 @@ def relationships_progress(
 def register_providers() -> None:
     """Register the WS2 measured-progress providers.
 
-    Finance + trading + careers (P3/P4), productivity + interests
-    (P5), health + learning + build + relationships (P6) — every
+    Finance + trading (P3; GS bundle evidence P7) + careers (P4),
+    productivity + interests (P5), health + learning + build +
+    relationships (P6) — every
     class with a measuring organ; ``general`` stays manual by
     design.  Idempotent (re-registration replaces).  Called by
     :mod:`nomorals.goals` when the package loads — the one wiring
