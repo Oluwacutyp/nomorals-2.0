@@ -21,10 +21,27 @@ This module adds a backend abstraction *for analytics only*:
 Use :func:`open_analytics` to get the best available backend automatically.
 Nothing here changes existing behavior: when DuckDB is not installed, every
 call path degrades to SQLite and keeps working.
+
+Backend awareness (Mongo program P5): "the SQLite database" stops being
+the automatic source the day an install's primary backend is Mongo —
+for every table whose live path ported to the document seam (carry's
+``PORTED_TABLES``, plus ``kv_store`` via the KV pickup), the SQLite
+file holds only the pre-carry fossil, and analytics that synced from
+it would report stale data *silently*. The sync source is therefore
+backend-aware: :func:`analytics_source_rows` returns a table's rows
+from whichever store is its live source — the seam (as carry-v1 rows)
+when a document store is attached and the table is seam-served, or
+``None`` meaning "the SQLite tables are live; read them as before".
+Pinned tables (games, the recall core, FTS) are SQLite-served by
+design and keep the ``None`` answer on every install. DuckDB's
+``load_table`` consumes the seam rows directly; the SQLite passthrough
+counts them honestly and refuses — loudly, never silently — to run
+passthrough SQL over a seam-served table.
 """
 
 from __future__ import annotations
 
+import re
 import threading
 import time as _time
 from collections.abc import Sequence
@@ -41,6 +58,7 @@ __all__ = [
     "AnalyticsBackend",
     "DuckDBAnalytics",
     "SQLiteAnalytics",
+    "analytics_source_rows",
     "open_analytics",
     "table_row_counts",
 ]
@@ -54,6 +72,105 @@ _DUCKDB_INSTALL_HINT = (
 
 #: How many rows to move per batch when syncing a SQLite table into DuckDB.
 _SYNC_BATCH = 50_000
+
+
+def _seam_served_tables(db: Database) -> set[str]:
+    """Tables whose LIVE source is the document seam for ``db``.
+
+    Non-empty only when boot attached a document store (a Mongo or
+    shadow rung is serving). The set is exactly the tables whose live
+    path ported: carry's ``PORTED_TABLES`` plus ``kv_store`` (the KV
+    pickup routes it through the seam whenever a store is attached).
+    Pinned and residue tables keep writing their SQLite tables
+    natively on every install, so they are never in this set.
+    """
+    if getattr(db, "document_store", None) is None:
+        return set()
+    from .carry import PORTED_TABLES
+
+    return set(PORTED_TABLES) | {"kv_store"}
+
+
+def analytics_source_rows(db: Database, table: str) -> list[dict[str, Any]] | None:
+    """``table``'s rows from its live backend, or ``None`` for SQLite-live.
+
+    When a document store is attached and ``table`` is seam-served,
+    the rows are read through the seam and mapped back with the one
+    carry-v1 mapping — the same dicts the native SQL path returns
+    (primary keys restored, BLOBs decoded, JSON text still text), so
+    an analytical result cannot tell which backend served it. When
+    the table is SQLite-served (the default, pinned domains, residue)
+    the answer is ``None``: read the SQLite table, it is the truth.
+    """
+    if table not in _seam_served_tables(db):
+        return None
+    store = db.document_store
+    if table == "kv_store":
+        # kv_store's seam shape is owned by its port (carry transform):
+        # invert it directly — key ← _id, the managed expiry is the
+        # row's expires_at, and the seam's find already hides expired
+        # entries, which are logically absent.
+        return [
+            {
+                "key": doc["_id"],
+                "value": doc.get("value"),
+                "kind": doc.get("kind"),
+                "updated_at": doc.get("updated_at"),
+                "expires_at": doc.get("expires_at"),
+            }
+            for doc in store.find("kv_store")
+        ]
+    from .rowstore import attached_rows
+
+    try:
+        rows_table = attached_rows(db, table)
+    except Exception as exc:  # noqa: BLE001 - re-raised as StorageError
+        raise StorageError(
+            f"analytics: cannot derive the seam mapping for {table!r}: {exc}"
+        ) from exc
+    if rows_table is None:  # store detached between the check and here
+        return None
+    return rows_table.all()
+
+
+#: FROM/JOIN table references in analytical SQL — used only to GUARD
+#: the SQLite passthrough against seam-served tables (fail loud, never
+#: silently read a fossil), never to rewrite anyone's query.
+_SQL_TABLE_REF_RE = re.compile(
+    r"\b(?:FROM|JOIN)\s+\"?([A-Za-z_][A-Za-z0-9_]*)\"?", re.IGNORECASE)
+
+
+def _count_rows_with_where(db: Database, table: str,
+                           rows: list[dict[str, Any]], where: str,
+                           params: Sequence[Any]) -> int:
+    """COUNT seam rows under a SQL ``where`` fragment, via a scratch db.
+
+    The fragment's meaning is SQLite's own — the same dialect the
+    passthrough count used against the live table — evaluated over a
+    throwaway in-memory copy of the seam rows.
+    """
+    if not where:
+        return len(rows)
+    scratch = Database(":memory:")
+    try:
+        ddl_row = db.query_one(
+            "SELECT sql FROM sqlite_master WHERE name = ?", (table,))
+        if ddl_row is None or not ddl_row["sql"]:
+            raise StorageError(
+                f"analytics: no schema for seam-served table {table!r}")
+        scratch.execute(ddl_row["sql"])
+        names = [c["name"] for c in db.table_info(table)]
+        if rows:
+            placeholders = ", ".join("?" for _ in names)
+            cols = ", ".join(f'"{n}"' for n in names)
+            scratch.executemany(
+                f'INSERT INTO "{table}" ({cols}) VALUES ({placeholders})',
+                [tuple(row.get(n) for n in names) for row in rows])
+        return int(scratch.scalar(
+            f'SELECT COUNT(*) FROM "{table}" WHERE {where}', params,
+            default=0))
+    finally:
+        scratch.close()
 
 
 class AnalyticsBackend(Protocol):
@@ -191,28 +308,46 @@ class DuckDBAnalytics:
         ddl = ", ".join(f'"{n}" {t}' for n, t in zip(names, types, strict=True))
 
         quoted_cols = ", ".join(f'"{n}"' for n in names)
-        sql = f'SELECT {quoted_cols} FROM "{table}"'
-        if where:
-            sql += f" WHERE {where}"
-
         placeholders = ", ".join("?" for _ in names)
         insert_sql = f'INSERT INTO "{table}" VALUES ({placeholders})'
 
+        # Backend-aware sync (Mongo P5): when the document seam is
+        # this table's live source, the rows come from the seam —
+        # syncing the SQLite fossil instead would silently analyze
+        # pre-carry data. The `where` fragment is applied by the
+        # analytical engine itself, over the loaded copy, so its
+        # meaning is the engine's own either way.
+        seam_rows = analytics_source_rows(db, table)
         total = 0
         with self._lock:
             self._conn.execute(f'DROP TABLE IF EXISTS "{table}"')
             self._conn.execute(f'CREATE TABLE "{table}" ({ddl})')
-            cursor = db.execute(sql, params)
-            try:
-                while True:
-                    batch = cursor.fetchmany(_SYNC_BATCH)
-                    if not batch:
-                        break
-                    rows = [tuple(row) for row in batch]
-                    self._conn.executemany(insert_sql, rows)
-                    total += len(rows)
-            finally:
-                cursor.close()
+            if seam_rows is not None:
+                batch = [tuple(row.get(n) for n in names) for row in seam_rows]
+                if batch:
+                    self._conn.executemany(insert_sql, batch)
+                total = len(batch)
+                if where:
+                    self._conn.execute(
+                        f'DELETE FROM "{table}" WHERE NOT ({where})',
+                        list(params))
+                    total = int(self._conn.execute(
+                        f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+            else:
+                sql = f'SELECT {quoted_cols} FROM "{table}"'
+                if where:
+                    sql += f" WHERE {where}"
+                cursor = db.execute(sql, params)
+                try:
+                    while True:
+                        rows_batch = cursor.fetchmany(_SYNC_BATCH)
+                        if not rows_batch:
+                            break
+                        rows = [tuple(row) for row in rows_batch]
+                        self._conn.executemany(insert_sql, rows)
+                        total += len(rows)
+                finally:
+                    cursor.close()
             self._loaded[table] = total
         self.stats["tables_loaded"] += 1
         self.stats["rows_loaded"] += total
@@ -453,7 +588,15 @@ class SQLiteAnalytics:
     ) -> int:
         # Nothing to sync: the data already lives here. Validate the table
         # exists and return its (filtered) row count so callers get the same
-        # contract as the DuckDB backend.
+        # contract as the DuckDB backend. Backend-aware (Mongo P5): for
+        # a seam-served table the count is taken over the seam rows —
+        # counting the SQLite fossil would silently report the
+        # pre-carry count on a Mongo install. The `where` fragment is
+        # evaluated over a scratch copy of the seam rows, in SQLite,
+        # so its meaning is unchanged.
+        seam_rows = analytics_source_rows(db, table)
+        if seam_rows is not None:
+            return _count_rows_with_where(db, table, seam_rows, where, params)
         sql = f'SELECT COUNT(*) FROM "{table}"'
         if where:
             sql += f" WHERE {where}"
@@ -468,6 +611,24 @@ class SQLiteAnalytics:
         lowered = sql.lstrip().upper()
         if not lowered.startswith("SELECT") and not lowered.startswith("WITH"):
             raise StorageError("analytics backend is read-only: only SELECT/WITH allowed")
+        # Backend awareness (Mongo P5): a passthrough query reads the
+        # SQLite file. Over a seam-served table that file is a fossil
+        # on a Mongo install — refuse loudly and name the
+        # backend-aware route instead of returning stale rows.
+        seam_tables = _seam_served_tables(self.db)
+        if seam_tables:
+            referenced = {
+                m.group(1)
+                for m in _SQL_TABLE_REF_RE.finditer(sql)
+            } & seam_tables
+            if referenced:
+                raise StorageError(
+                    "analytics: table(s) "
+                    + ", ".join(sorted(referenced))
+                    + " are served by the document store on this install; "
+                    "the SQLite passthrough would read stale data. Use "
+                    "DuckDBAnalytics.load_table (backend-aware sync) or "
+                    "analytics_source_rows for these tables.")
         rows = self.db.query(sql, params)
         self.stats["queries"] += 1
         return rows

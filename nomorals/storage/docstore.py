@@ -89,8 +89,10 @@ __all__ = [
     "SQLiteDocumentStore",
     "ShadowDocumentStore",
     "StoreResolution",
+    "ambient_document_store",
     "attach_document_store",
     "mask_mongo_uri",
+    "set_ambient_document_store",
     "open_document_store",
     "resolve_document_store",
     "storage_backend_status",
@@ -970,6 +972,16 @@ def attach_document_store(db: Any, settings: Any, *,
     picks the attached store up from there, so its existing consumers route
     to Mongo with no call-site changes, while the SQLite default keeps the
     native ``kv_store`` table path byte-for-byte.
+
+    Attach deliberately does NOT publish the process *ambient* store
+    (:func:`ambient_document_store`): attaching is a per-handle act
+    (tests and tools attach throwaway resolutions freely), while the
+    ambient is a per-PROCESS commitment. The composition root that
+    owns the process (``agents/context.py`` at boot) publishes it —
+    ``set_ambient_document_store(database.document_store)`` right
+    after attaching — so sidecar organs (Mongo program P5) pick up
+    exactly the store the central handle got, and no other attach
+    can leak one into unrelated work.
     """
     resolution = resolve_document_store(settings, db, platform=platform)
     db.store_resolution = resolution
@@ -978,6 +990,39 @@ def attach_document_store(db: Any, settings: Any, *,
     if resolution.degraded:
         _log.warning("storage backend degraded at boot: %s", resolution.reason)
     return resolution
+
+
+# ── the ambient store (sidecar pickup, Mongo program P5) ───────────────────
+#
+# Boot resolves exactly one backend per process. Organs built around
+# the central Database pick the store up from their handle (the KV
+# rule); organs that own a sidecar file and never see that handle — a
+# bare-path constructor is their whole public API — pick the same
+# store up from here. The composition root publishes it at boot (see
+# attach_document_store's note): ``None`` always means "the native
+# path serves", mirroring ``db.document_store``, never "unresolved".
+
+_ambient_lock = threading.Lock()
+_ambient_store: DocumentStore | None = None
+
+
+def set_ambient_document_store(store: DocumentStore | None) -> None:
+    """Publish (or clear) the process ambient document store.
+
+    Called by the composition root at boot with the central handle's
+    attached store (``db.document_store``); tests may set it directly.
+    Passing ``None`` restores the native file paths for every ambient
+    consumer.
+    """
+    global _ambient_store
+    with _ambient_lock:
+        _ambient_store = store
+
+
+def ambient_document_store() -> DocumentStore | None:
+    """The boot-resolved document store, or ``None`` on the SQLite default."""
+    with _ambient_lock:
+        return _ambient_store
 
 
 def storage_backend_status(settings: Any, db: Any = None, *,
@@ -997,6 +1042,11 @@ def storage_backend_status(settings: Any, db: Any = None, *,
     # import time.
     from .carry import pinned_domains
 
+    # The sidecar federation (Mongo P5): every durable store beside
+    # the central database, classified. Lazy for the same reason —
+    # sidecars imports this module for the ambient store.
+    from .sidecars import sidecar_status
+
     return {
         **resolution.to_dict(),
         "profile_storage_default": getattr(caps, "storage_backend", None),
@@ -1004,4 +1054,5 @@ def storage_backend_status(settings: Any, db: Any = None, *,
             str(getattr(settings.storage, "mongo_uri", "") or DEFAULT_MONGO_URI)),
         "mongo_shadow": bool(getattr(settings.storage, "mongo_shadow", False)),
         "pinned_domains": pinned_domains(),
+        "sidecars": sidecar_status(),
     }

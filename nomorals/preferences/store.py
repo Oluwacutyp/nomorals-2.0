@@ -181,24 +181,67 @@ class PreferenceStore:
     """Learned preference weights, keyed by (domain, axis, value).
 
     ``path``: ``None`` → SQLite ``:memory:``; a ``.json`` path → JSON
-    file backend; anything else → SQLite file at that path.
+    file backend; anything else → SQLite file at that path. When the
+    composition layer injects a ``port`` (Mongo program P5 — a
+    SidecarPort built by ``storage.sidecars.sidecar_port`` and
+    registered there as "preferences") and ``path`` names a SQLite
+    file, that variant runs over the seam instead, with the file's
+    rows imported once at first construction. This module is L0 —
+    standard library only, by design and by the layering law — so
+    the port arrives injected and is used duck-typed; the module
+    never imports storage. The JSON backend and the ephemeral
+    ``:memory:`` shape are caller-chosen file/in-memory backends and
+    are never silently made persistent by the seam.
     """
 
-    def __init__(self, path: str | None = None) -> None:
+    def __init__(self, path: str | None = None, *, port: Any = None) -> None:
         self.path = path
         self._lock = threading.RLock()
+        self._port: Any = None
         self._is_json = bool(path and str(path).lower().endswith(".json"))
         if self._is_json:
             self._weights: dict[str, dict[str, dict[str, float]]] = {}
             self._signals: list[dict[str, Any]] = []
             self._load_json()
+        elif path is not None and str(path) != ":memory:":
+            if port is not None:
+                max_signal = [0]
+
+                def write_preferences(rows: list[dict[str, Any]]) -> int:
+                    table = port.tables["preferences"]
+                    for row in rows:
+                        table.put(row)
+                    return len(rows)
+
+                def write_signals(rows: list[dict[str, Any]]) -> int:
+                    table = port.tables["preference_signals"]
+                    for row in rows:
+                        table.put(row)
+                        max_signal[0] = max(max_signal[0], int(row["id"]))
+                    return len(rows)
+
+                def seed_counter(_counts: dict[str, int]) -> None:
+                    doc = port.store.get(port.meta_collection, "counters") or {}
+                    if int(doc.get("preference_signals") or 0) < max_signal[0]:
+                        port.store.put(port.meta_collection, "counters", {
+                            **doc, "preference_signals": max_signal[0]})
+
+                port.ensure_imported(
+                    {"preferences": write_preferences,
+                     "preference_signals": write_signals},
+                    after_import=seed_counter)
+                self._port = port
+            else:
+                self._open_sqlite(str(path))
         else:
-            db_path = ":memory:" if path is None else str(path)
-            self._conn = sqlite3.connect(db_path, check_same_thread=False)
-            self._conn.row_factory = sqlite3.Row
-            with self._lock:
-                self._conn.executescript(_PREFS_DDL)
-                self._conn.commit()
+            self._open_sqlite(":memory:")
+
+    def _open_sqlite(self, db_path: str) -> None:
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        with self._lock:
+            self._conn.executescript(_PREFS_DDL)
+            self._conn.commit()
 
     # ── JSON backend ─────────────────────────────────────────────
     def _load_json(self) -> None:
@@ -262,6 +305,17 @@ class PreferenceStore:
                 return {axis: dict(values)
                         for axis, values in
                         self._weights.get(domain, {}).items()}
+        if self._port is not None:
+            # The seam shape is carry-v1: the composite key
+            # (domain, axis, value) lives in the document _id, not in
+            # fields, so reads address documents by id / scan + filter
+            # on the restored rows — the weights table is small by
+            # construction (axes × observed values per domain).
+            out: dict[str, dict[str, float]] = {}
+            for row in self._port.tables["preferences"].all():
+                if row["domain"] == domain:
+                    out.setdefault(row["axis"], {})[row["value"]] = float(row["weight"])
+            return out
         with self._lock:
             rows = self._conn.execute(
                 "SELECT axis, value, weight FROM preferences WHERE domain = ?",
@@ -280,6 +334,10 @@ class PreferenceStore:
         if self._is_json:
             with self._lock:
                 return float(self._weights.get(domain, {}).get(axis, {}).get(norm, 0.0))
+        if self._port is not None:
+            row = self._port.tables["preferences"].get(
+                "\x1f".join((domain, axis, norm)))
+            return float(row["weight"]) if row else 0.0
         with self._lock:
             row = self._conn.execute(
                 "SELECT weight FROM preferences WHERE domain = ? AND axis = ? AND value = ?",
@@ -306,6 +364,12 @@ class PreferenceStore:
                 bucket[norm] = float(bucket.get(norm, 0.0)) + float(delta)
                 self._save_json()
                 return bucket[norm]
+            if self._port is not None:
+                new = self.get_weight(domain, axis, norm) + float(delta)
+                self._port.tables["preferences"].put(
+                    {"domain": domain, "axis": axis, "value": norm,
+                     "weight": new})
+                return new
             current = self.get_weight(domain, axis, norm)
             new = current + float(delta)
             self._conn.execute(
@@ -331,6 +395,13 @@ class PreferenceStore:
                     "source": source, "created_at": time.time()})
                 self._save_json()
                 return
+            if self._port is not None:
+                self._port.tables["preference_signals"].put({
+                    "id": self._port.next_id("preference_signals"),
+                    "domain": domain, "item_json": item_json,
+                    "approve": 1 if approve else 0, "delta": float(delta),
+                    "source": source, "created_at": time.time()})
+                return
             self._conn.execute(
                 "INSERT INTO preference_signals (domain, item_json, approve, delta, source, created_at)"
                 " VALUES (?, ?, ?, ?, ?, ?)",
@@ -345,6 +416,22 @@ class PreferenceStore:
             if domain is not None:
                 rows = [r for r in rows if r.get("domain") == domain]
             return rows
+        if self._port is not None:
+            found = self._port.tables["preference_signals"].find(
+                {"domain": domain} if domain is not None else None)
+            found.sort(key=lambda r: int(r["id"]))
+            out: list[dict[str, Any]] = []
+            for row in found:
+                try:
+                    item = json.loads(row["item_json"] or "{}")
+                except ValueError:
+                    item = {}
+                out.append({"domain": row["domain"], "item": item,
+                            "approve": bool(row["approve"]),
+                            "delta": float(row["delta"]),
+                            "source": row["source"],
+                            "created_at": float(row["created_at"])})
+            return out
         with self._lock:
             if domain is None:
                 rows = self._conn.execute(
@@ -417,7 +504,7 @@ class PreferenceStore:
         return store
 
     def close(self) -> None:
-        if not self._is_json:
+        if not self._is_json and self._port is None:
             try:
                 self._conn.close()
             except Exception:  # noqa: BLE001

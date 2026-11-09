@@ -21,7 +21,7 @@ from ..core.observability import Metrics, Tracer
 from ..core.policy import CapabilitySet, Policy
 from ..core.ratelimit import SemaphorePool
 from ..storage.db import Database, open_database
-from ..storage.docstore import attach_document_store
+from ..storage.docstore import attach_document_store, set_ambient_document_store
 from ..storage.kv import KVStore
 
 __all__ = ["AgentContext", "build_context", "build_router",
@@ -249,6 +249,12 @@ def build_context(
     # degraded Mongo config) nothing is attached and the native kv_store
     # path serves exactly as before. Resolution never raises.
     attach_document_store(database, settings)
+    # Sidecar federation (Mongo program P5): this composition root owns
+    # the process, so it — and only it — publishes the attached store
+    # as the ambient one for bare-path organs (challenge memory, the
+    # draft queue) to pick up. attach itself never publishes: a
+    # library-style attach must not leak a process-wide store.
+    set_ambient_document_store(database.document_store)
     event_bus = bus or EventBus().start()
 
     context = AgentContext(

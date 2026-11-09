@@ -188,15 +188,52 @@ def _db_path(explicit: str | Path | None) -> Path:
 
 
 class DraftQueue:
-    """SQLite-backed draft lifecycle. Owner-scoped, never raises on read."""
+    """Draft lifecycle over one table. Owner-scoped, never raises on read.
 
-    def __init__(self, db_path: str | Path | None = None) -> None:
+    Native path: a SQLite file (``social_drafts.db``). When a document
+    store is resolved (Mongo program P5 — an explicit ``store`` or the
+    boot ambient), the same lifecycle runs over the seam in the
+    ``social-drafts__social_drafts`` collection (registered in
+    storage.sidecars), with the file's existing drafts imported once
+    at first construction. Transitions are single-row updates either
+    way; the transition graph is identical on both paths.
+    """
+
+    def __init__(self, db_path: str | Path | None = None,
+                 *, store: Any = None) -> None:
         self._path = _db_path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._db: sqlite3.Connection | None = None
+        self._port: Any = None
+        from ..storage.sidecars import sidecar_port
+
+        port = sidecar_port("social-drafts", _SCHEMA, ("social_drafts",),
+                            self._path, store=store)
+        if port is not None:
+            table = port.tables["social_drafts"]
+
+            def write_drafts(rows: list[dict[str, Any]]) -> int:
+                for row in rows:
+                    table.put(row)
+                return len(rows)
+
+            port.ensure_imported({"social_drafts": write_drafts})
+            self._port = port
+            return
         self._db = sqlite3.connect(str(self._path))
         self._db.row_factory = sqlite3.Row
         self._db.execute(_SCHEMA)
         self._db.commit()
+
+    @staticmethod
+    def _to_draft(row: dict[str, Any]) -> Draft:
+        import json as _json
+        return Draft(
+            id=row["id"], content=row["content"],
+            platforms=_json.loads(row["platforms"] or "[]"),
+            scheduled_time=row.get("scheduled_time"), status=row["status"],
+            created_at=row["created_at"], posted_at=row.get("posted_at"),
+            metadata=_json.loads(row["metadata"] or "{}"))
 
     # -- CRUD ---------------------------------------------------------------
     def create_draft(self, content: str,
@@ -209,6 +246,14 @@ class DraftQueue:
                       metadata=dict(metadata or {}))
         if not draft.content:
             raise ValueError("draft content is empty")
+        if self._port is not None:
+            self._port.tables["social_drafts"].put({
+                "id": draft.id, "content": draft.content,
+                "platforms": _json.dumps(draft.platforms),
+                "scheduled_time": None, "status": DRAFT,
+                "created_at": draft.created_at, "posted_at": None,
+                "metadata": _json.dumps(draft.metadata)})
+            return draft
         self._db.execute(
             "INSERT INTO social_drafts (id, content, platforms, status,"
             " created_at, metadata) VALUES (?,?,?,?,?,?)",
@@ -219,6 +264,9 @@ class DraftQueue:
 
     def get(self, draft_id: str) -> Draft | None:
         import json as _json
+        if self._port is not None:
+            row = self._port.tables["social_drafts"].get(draft_id)
+            return self._to_draft(row) if row is not None else None
         row = self._db.execute(
             "SELECT * FROM social_drafts WHERE id = ?",
             (draft_id,)).fetchone()
@@ -239,10 +287,14 @@ class DraftQueue:
         if to not in allowed:
             raise ValueError(
                 f"cannot move draft {draft_id!r} from {draft.status!r} to {to!r}")
-        self._db.execute(
-            "UPDATE social_drafts SET status = ? WHERE id = ?",
-            (to, draft_id))
-        self._db.commit()
+        if self._port is not None:
+            self._port.tables["social_drafts"].update(
+                draft_id, {"status": to})
+        else:
+            self._db.execute(
+                "UPDATE social_drafts SET status = ? WHERE id = ?",
+                (to, draft_id))
+            self._db.commit()
         draft.status = to
         return draft
 
@@ -261,6 +313,13 @@ class DraftQueue:
         draft = self.get(draft_id)
         if draft is None:
             raise KeyError(f"unknown draft {draft_id!r}")
+        if self._port is not None:
+            posted_at = time.time()
+            self._port.tables["social_drafts"].update(
+                draft_id, {"status": POSTED, "posted_at": posted_at})
+            draft.status = POSTED
+            draft.posted_at = posted_at
+            return draft
         self._db.execute(
             "UPDATE social_drafts SET status = ?, posted_at = ? WHERE id = ?",
             (POSTED, time.time(), draft_id))
@@ -271,14 +330,24 @@ class DraftQueue:
 
     def schedule(self, draft_id: str, when_ts: float) -> Draft:
         draft = self._transition(draft_id, SCHEDULED)
-        self._db.execute(
-            "UPDATE social_drafts SET scheduled_time = ? WHERE id = ?",
-            (when_ts, draft_id))
-        self._db.commit()
+        if self._port is not None:
+            self._port.tables["social_drafts"].update(
+                draft_id, {"scheduled_time": when_ts})
+        else:
+            self._db.execute(
+                "UPDATE social_drafts SET scheduled_time = ? WHERE id = ?",
+                (when_ts, draft_id))
+            self._db.commit()
         draft.scheduled_time = when_ts
         return draft
 
     def pending(self) -> list[Draft]:
+        if self._port is not None:
+            rows = self._port.tables["social_drafts"].find(
+                {"status": {"$in": [DRAFT, PENDING_REVIEW, APPROVED,
+                                    SCHEDULED]}})
+            rows.sort(key=lambda r: r["created_at"], reverse=True)
+            return [self._to_draft(r) for r in rows]
         rows = self._db.execute(
             "SELECT * FROM social_drafts WHERE status IN ('draft',"
             " 'pending_review', 'approved', 'scheduled')"
@@ -286,6 +355,8 @@ class DraftQueue:
         return [self.get(r["id"]) for r in rows if self.get(r["id"])]
 
     def close(self) -> None:
+        if self._db is None:
+            return  # seam path: the store is shared, not organ-owned
         try:
             self._db.close()
         except Exception:  # noqa: BLE001
