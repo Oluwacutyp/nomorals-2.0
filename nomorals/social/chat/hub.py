@@ -47,6 +47,7 @@ __all__ = [
     "hub_keyboard",
     "hub_text",
     "keyboard_for_screen",
+    "SCREEN_NAMES",
     "is_hub_screen",
     "lookup_bin",
     "proxy_intro_text",
@@ -203,18 +204,28 @@ def help_keyboard() -> Keyboard:
     return [_row(("« Back to Hub", "toolhub"))]
 
 
+#: The hub's screens — the enumerable registry the surface
+#: manifest's drift test compares against (Living Chat P1): a new
+#: screen added here without a manifest update fails by name.
+_SCREEN_BUILDERS = {
+    "hub": hub_keyboard,
+    "proxy": proxy_keyboard,
+    "proxy_result": proxy_result_keyboard,
+    "proxy_cooldown": proxy_cooldown_keyboard,
+    "bin": bin_keyboard,
+    "bin_result": bin_result_keyboard,
+    "help": help_keyboard,
+}
+
+#: Every hub screen name, in stack order.
+SCREEN_NAMES: tuple[str, ...] = tuple(_SCREEN_BUILDERS)
+
+
 def keyboard_for_screen(screen: str) -> Keyboard:
     """Screen name → that screen's keyboard (single source of truth
     for both button-derivation hooks)."""
-    return {
-        "hub": hub_keyboard(),
-        "proxy": proxy_keyboard(),
-        "proxy_result": proxy_result_keyboard(),
-        "proxy_cooldown": proxy_cooldown_keyboard(),
-        "bin": bin_keyboard(),
-        "bin_result": bin_result_keyboard(),
-        "help": help_keyboard(),
-    }.get(screen, hub_keyboard())
+    builder = _SCREEN_BUILDERS.get(screen, hub_keyboard)
+    return builder()
 
 
 # ── cooldowns ──────────────────────────────────────────────────────────

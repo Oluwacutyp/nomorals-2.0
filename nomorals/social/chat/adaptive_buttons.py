@@ -30,7 +30,16 @@ from .tgbot_buttons import (buttons_for_text, check_callback_data,
                             grid_layout)
 from .failures import record_failure
 
-__all__ = ["adaptive_buttons_for"]
+__all__ = ["adaptive_buttons_for", "OUTPUT_KINDS"]
+
+#: The output kinds the dispatcher below routes — the enumerable
+#: registry the surface manifest's drift test compares against
+#: (Living Chat P1): a new kind handled here without a manifest
+#: update fails by name.
+OUTPUT_KINDS = frozenset({
+    "pulse_stories", "scheduled", "search", "game", "memory",
+    "music-ask", "command", "tool",
+})
 
 # Button = (label, callback_data). Rows are lists of buttons.
 Button = tuple[str, str]

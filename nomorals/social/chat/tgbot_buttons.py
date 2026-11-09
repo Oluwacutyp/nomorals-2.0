@@ -101,6 +101,11 @@ def actionable(text: str, buttons: list, *, session: str = "",
     47-byte budget (after the adapter's HMAC signature is added).
     """
     def _pair(item) -> Button:  # type: ignore[no-untyped-def]
+        # Rich actions (social.chat.action_schema.Action) lower to
+        # their legacy pair here — duck-typed so this module keeps
+        # no import of the schema that builds on it.
+        if hasattr(item, "to_legacy"):
+            item = item.to_legacy()
         label, command = item
         data = (command or "").strip()
         if data.startswith("/"):
@@ -116,7 +121,8 @@ def actionable(text: str, buttons: list, *, session: str = "",
     items = list(buttons or [])
     nested = bool(items) and isinstance(items[0], (list, tuple)) \
         and bool(items[0]) \
-        and isinstance(items[0][0], (list, tuple))
+        and (isinstance(items[0][0], (list, tuple))
+             or hasattr(items[0][0], "to_legacy"))
     rows = items if nested else ([items] if items else [])
     keyboard: Keyboard = [[_pair(pair) for pair in row]
                           for row in rows if row]

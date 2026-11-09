@@ -66,29 +66,41 @@ class PickEntry:
     candidates: list[Any] = field(default_factory=list)
     chat_key: str = ""
     expires_at: float = 0.0
+    #: The user the list was offered to ("" = chat-scoped, the
+    #: legacy binding). With an owner set, the bare-number lookup
+    #: for a DIFFERENT user in the same chat does not resolve —
+    #: one person's card never serves another person's number
+    #: (Living Chat P1 operation targeting, 2026-11-08).
+    owner_key: str = ""
 
     def expired(self) -> bool:
         return time.time() >= self.expires_at
+
+
+def _slot(chat_key: str, owner_key: str = "") -> str:
+    """The (chat, owner) slot key for the latest-token index."""
+    return f"{chat_key or ''}\x1f{owner_key or ''}"
 
 
 class PickCache:
     """Short-lived in-memory pick-list store.  All classmethods, never raises."""
 
     _by_token: dict[str, PickEntry] = {}
-    _by_chat: dict[str, str] = {}  # chat_key -> latest token
+    _by_chat: dict[str, str] = {}  # (chat, owner) slot -> latest token
 
     @classmethod
     def store(cls, candidates: list[Any], chat_key: str,
-              ttl: float = PICK_TTL) -> str:
+              ttl: float = PICK_TTL, *, owner_key: str = "") -> str:
         """Store candidates, return the short token.  Never raises."""
         try:
             token = secrets.token_hex(4)
             entry = PickEntry(candidates=list(candidates or []),
                               chat_key=chat_key or "",
-                              expires_at=time.time() + ttl)
+                              expires_at=time.time() + ttl,
+                              owner_key=owner_key or "")
             cls._by_token[token] = entry
             if chat_key:
-                cls._by_chat[chat_key] = token
+                cls._by_chat[_slot(chat_key, owner_key)] = token
             cls.prune()
             return token
         except Exception:  # noqa: BLE001 — cache must never break chat
@@ -110,19 +122,66 @@ class PickCache:
             return None
 
     @classmethod
-    def get_for_chat(cls, chat_key: str) -> tuple[str, PickEntry] | None:
-        """Latest live pick-list for a chat.  Never raises."""
+    def get_for_chat(cls, chat_key: str,
+                     owner_key: str = "") -> tuple[str, PickEntry] | None:
+        """Latest live pick-list for a chat.  Never raises.
+
+        With ``owner_key`` given, a list owned by a DIFFERENT user
+        does not resolve (the bare-number collision fix); a list
+        with no owner (the legacy chat binding) resolves for any
+        requester.
+        """
         try:
-            token = cls._by_chat.get(chat_key or "")
+            slot = _slot(chat_key, owner_key)
+            token = cls._by_chat.get(slot)
             if not token:
-                return None
+                # Fall back across the chat's slots: the requester's
+                # own slot first, then the chat-shared slot, then —
+                # for the legacy no-owner lookup — the chat's most
+                # recent list under any owner slot.
+                prefix = f"{chat_key or ''}\x1f"
+                best: tuple[str, PickEntry] | None = None
+                for s, t in cls._by_chat.items():
+                    if not s.startswith(prefix):
+                        continue
+                    e = cls.get(t)
+                    if e is not None and (best is None
+                                          or e.expires_at > best[1].expires_at):
+                        best = (t, e)
+                if best is None:
+                    return None
+                token, entry = best
+                if owner_key and entry.owner_key \
+                        and entry.owner_key != owner_key:
+                    return None
+                return token, entry
             entry = cls.get(token)
             if entry is None:
-                cls._by_chat.pop(chat_key, None)
+                cls._by_chat.pop(slot, None)
+                return None
+            if owner_key and entry.owner_key \
+                    and entry.owner_key != owner_key:
                 return None
             return token, entry
         except Exception:  # noqa: BLE001
             return None
+
+    @classmethod
+    def is_superseded(cls, token: str) -> bool:
+        """True when a NEWER list has replaced ``token``'s list in
+        its (chat, owner) slot — a tap on the old card must answer
+        "replaced", not download from a list the chat has moved
+        past.  Unknown/expired tokens are not superseded (they
+        take the expired path).  Never raises."""
+        try:
+            entry = cls._by_token.get((token or "").strip().lower())
+            if entry is None:
+                return False
+            latest = cls._by_chat.get(
+                _slot(entry.chat_key, entry.owner_key))
+            return bool(latest) and latest != (token or "").strip().lower()
+        except Exception:  # noqa: BLE001
+            return False
 
     @classmethod
     def consume(cls, token: str) -> PickEntry | None:
@@ -131,7 +190,9 @@ class PickCache:
         if entry is not None:
             cls._by_token.pop((token or "").strip().lower(), None)
             if entry.chat_key:
-                cls._by_chat.pop(entry.chat_key, None)
+                slot = _slot(entry.chat_key, entry.owner_key)
+                if cls._by_chat.get(slot) == (token or "").strip().lower():
+                    cls._by_chat.pop(slot, None)
         return entry
 
     @classmethod
@@ -143,8 +204,9 @@ class PickCache:
             for t in dead:
                 entry = cls._by_token.pop(t, None)
                 if entry and entry.chat_key:
-                    if cls._by_chat.get(entry.chat_key) == t:
-                        cls._by_chat.pop(entry.chat_key, None)
+                    slot = _slot(entry.chat_key, entry.owner_key)
+                    if cls._by_chat.get(slot) == t:
+                        cls._by_chat.pop(slot, None)
         except Exception:  # noqa: BLE001
             pass
 

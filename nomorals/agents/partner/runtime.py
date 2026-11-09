@@ -43,7 +43,7 @@ from .runtime_group import RuntimeGroupMixin
 from .runtime_expression import RuntimeExpressionMixin
 from .runtime_fun import RuntimeFunMixin
 from .runtime_system import RuntimeSystemMixin
-from .runtime_media import RuntimeMediaMixin
+from .runtime_media import RuntimeMediaMixin, play_owner_var
 from .runtime_intel import RuntimeIntelMixin
 from .runtime_search import RuntimeSearchMixin
 from .runtime_wisdom import RuntimeWisdomMixin
@@ -294,6 +294,14 @@ def _strip_button_claims(text: str) -> str:
     return "\n".join(kept).strip("\n")
 
 
+def _pick_owner_key(message: Any) -> str:
+    """The operation-slot owner for a message's cards: the stable
+    sender id when the adapter provides one, else the display
+    sender, else "" (the chat's shared slot)."""
+    return str(getattr(message, "sender_id", "")
+               or getattr(message, "sender", "") or "")
+
+
 def _numbered_button_fallback(runtime: Any, message: Any, text: str,
                               rows: list) -> str:
     """Rewrite a button claim into a numbered action list.
@@ -315,7 +323,8 @@ def _numbered_button_fallback(runtime: Any, message: Any, text: str,
     register = getattr(runtime, "_register_button_picks", None)
     if callable(register):
         try:
-            register(message.chat.key, picks)
+            register(message.chat.key, picks,
+                     owner_key=_pick_owner_key(message))
         except Exception as exc:  # noqa: BLE001 - the list still reads honestly
             _log.debug("button pick registration failed: %s", exc)
     return (body + "\n\nno buttons on this surface — reply with a "
@@ -6286,7 +6295,20 @@ class PartnerRuntime(
             return self._control_distribute(command.tail or arg,
                                            chat_key=chat_key)
         if kind == "play":
-            return self._control_play(command.tail or arg, chat_key=chat_key)
+            # The owner key binds any pick-list this play opens to
+            # the requesting user (Living Chat P1 targeting). It
+            # rides a ContextVar into _control_play rather than a
+            # new call argument: that seam is doubled in tests and
+            # downstream variants with the two-argument shape, and
+            # they must keep working unchanged.
+            _owner = _pick_owner_key(message) \
+                if message is not None else ""
+            _tok = play_owner_var.set(_owner)
+            try:
+                return self._control_play(command.tail or arg,
+                                          chat_key=chat_key)
+            finally:
+                play_owner_var.reset(_tok)
         if kind in {"anime", "manga", "anichar", "charpic", "staff",
                     "studio", "episodes", "animechars", "trailer",
                     "streaming", "animereview", "genres", "genre",
@@ -6926,8 +6948,10 @@ class PartnerRuntime(
         return store
 
     def _register_button_picks(self, chat_key: str,
-                               commands: list) -> None:
-        self._button_pick_store().register(chat_key, list(commands))
+                               commands: list, *,
+                               owner_key: str = "") -> str:
+        return self._button_pick_store().register(
+            chat_key, list(commands), owner_key=owner_key)
 
     def _button_pick_hook(self, message: ChatMessage) -> str | None:
         """Bare number reply after a numbered button fallback.
@@ -6936,21 +6960,33 @@ class PartnerRuntime(
         a live pick list executes that pick's command through the
         control dispatch (grant re-checked there); anything else
         returns None and the turn flows on untouched. Never raises.
+
+        Targeting (Living Chat P1): the pick resolves in the
+        SENDER's (chat, owner) slot — another user's card in the
+        same group is never consumed — and a pick against a card
+        that was replaced or expired answers honestly instead of
+        flowing on in silence.
         """
         text = (message.text or "").strip()
         if not text.isdigit():
             return None
+        from ...core.operations import PickStatus
+        from .button_picks import STALE_PICK_MESSAGE
         try:
-            command = self._button_pick_store().take(
-                message.chat.key, int(text))
+            res = self._button_pick_store().take_result(
+                message.chat.key, int(text),
+                owner_key=_pick_owner_key(message))
         except Exception as exc:  # noqa: BLE001 - hook never eats chat
             record_failure(
                 "runtime.PartnerRuntime._button_pick_hook", exc)
             return None
-        if not command:
+        if res.status is PickStatus.STALE:
+            return STALE_PICK_MESSAGE
+        if res.status is not PickStatus.OK or not res.command:
             return None
         return self.handle_control(
-            "/" + command.lstrip("/"), message.chat.key, message=message)
+            "/" + res.command.lstrip("/"), message.chat.key,
+            message=message)
 
     def _send_mind_reply(self, message: ChatMessage, reply: str) -> None:
         """Send a CoreMind reply through the narration scrub.

@@ -44,6 +44,16 @@ def _send_kind_for(path: str) -> str:
 _RUNNING_JOB_ACK: contextvars.ContextVar = contextvars.ContextVar(
     "devon_running_job_ack", default=None)
 
+#: The operation owner for pick-lists opened by the play turn in
+#: flight (Living Chat P1 targeting): the control dispatch in
+#: runtime.py sets it from the requesting message, and
+#: :meth:`RuntimeMediaMixin._control_play` reads it when no
+#: explicit owner was passed — so a pick-list binds to the user
+#: who asked, without changing _control_play's call shape (that
+#: seam is doubled with the two-argument signature).
+play_owner_var: contextvars.ContextVar = contextvars.ContextVar(
+    "devon_play_owner", default="")
+
 
 def _looks_like_path_or_url(ref: str) -> bool:
     """Heuristic: is this an image path/URL (lookup) or a text prompt (generate)?"""
@@ -600,7 +610,8 @@ class RuntimeMediaMixin:
             msg += f"\n{BOT_COOKIE_SHORT_HELP if chat is not None else BOT_COOKIE_HELP}"
         return msg
 
-    def _control_play(self, tail: str, chat_key: str = "") -> str:
+    def _control_play(self, tail: str, chat_key: str = "", *,
+                      owner_key: str = "") -> str:
         """Play transport.  <query> is ONE thing — a path, a URL, or a
         song title — never whitespace-split into word-paths.
 
@@ -620,6 +631,10 @@ class RuntimeMediaMixin:
         /play youtube:<query|url> → force YouTube (needs yt-dlp)
         /play queue|status|pause|…   (transport actions)
         """
+        # Pick-list owner binding (Living Chat P1): an explicit
+        # owner wins; otherwise the dispatch's in-flight owner
+        # (play_owner_var) applies; "" keeps the chat slot.
+        owner_key = owner_key or play_owner_var.get("")
         from ...media.playback import PlaybackEngine
         from ...connectors.wiring import wire_streaming_adapters
 
@@ -750,7 +765,8 @@ class RuntimeMediaMixin:
                         candidates = []
                     if candidates:
                         token = PickCache.store(
-                            candidates, chat_key or "")
+                            candidates, chat_key or "",
+                            owner_key=owner_key)
                         if token:
                             return format_picklist(
                                 candidates, rest, token)
@@ -1014,6 +1030,16 @@ class RuntimeMediaMixin:
                 "that pick-list expired (5 min) — pick fast "
                 "next time 😄",
                 [[("🎵 Search again", "play")]])
+        if PickCache.is_superseded(token):
+            # A newer list replaced this one in the chat: a tap on
+            # the stale card must not download from a list the
+            # chat has moved past (Living Chat P1 targeting).
+            from ...social.chat.tgbot_buttons import actionable
+
+            return actionable(
+                "that pick-list has been replaced by a newer one "
+                "— pick from the latest list 🙂",
+                [[("🎵 Search again", "play")]])
         cands = entry.candidates or []
         if n < 1 or n > len(cands):
             return (f"pick a number 1–{len(cands)} — “{num_s}” is out of range.")
@@ -1065,12 +1091,15 @@ class RuntimeMediaMixin:
         n = int(text)
         if n < 1 or n > PICK_LIMIT:
             return None
-        found = PickCache.get_for_chat(message.chat.key)
+        owner_key = str(getattr(message, "sender_id", "")
+                        or getattr(message, "sender", "") or "")
+        found = PickCache.get_for_chat(message.chat.key, owner_key)
         if found is None:
             return None
         token, _entry = found
         try:
-            return self._control_play(f"pick {token} {n}", message.chat.key)
+            return self._control_play(f"pick {token} {n}", message.chat.key,
+                                      owner_key=owner_key)
         except Exception as exc:  # noqa: BLE001 — _control_play
             # shouldn't raise, belt and braces
             return f"couldn't pick track {n}: {exc}"
@@ -3249,7 +3278,8 @@ class RuntimeMediaMixin:
             blocked_matches: list[tuple[dict[str, Any], str]],
             preview_finds: list[dict[str, Any]],
             query: str, chat: Any,
-            *, youtube_bot_blocked: bool = False) -> str:
+            *, youtube_bot_blocked: bool = False,
+            owner_key: str = "") -> str:
         """The no-confident-download outcome: honest report + choice.
 
         The reply carries (1) every found-but-blocked match BY NAME
@@ -3293,7 +3323,8 @@ class RuntimeMediaMixin:
             except Exception as e:
                 record_failure("runtime_media.RuntimeMediaMixin._play_picklist_offer", e)
                 chat_key = ""
-            token = PickCache.store(cands, chat_key) if chat_key else ""
+            token = PickCache.store(
+                cands, chat_key, owner_key=owner_key) if chat_key else ""
             if not token:
                 return ""
             lines = []
