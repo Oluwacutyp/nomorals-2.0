@@ -259,6 +259,15 @@ class DownloadReport:
     failure: FailureKind = FailureKind.OK
     likely_cause: str = ""
     hint: str = ""
+    #: Archive outcome when the landed file was an archive container
+    #: (WS1-P6 wire): the ``extract_for_downloader`` result dict —
+    #: ``extracted``/``dest``/``files`` on a clean pass, or
+    #: ``blocked: True`` + ``reason`` when the archive was refused
+    #: (hostile members, unreadable, unextractable).  None when the
+    #: download was not an archive at all.  The archive itself stays
+    #: at ``path`` either way — extraction is additive, never a
+    #: replacement (see ``MediaDownloader._unpack_archive``).
+    archive: dict[str, Any] | None = None
 
     def tried(self) -> list[str]:
         """Stage names attempted, in order, deduped."""
@@ -271,9 +280,18 @@ class DownloadReport:
     def summary(self) -> str:
         """Human-readable failure report.  Never a bare 'download failed'."""
         if self.ok:
-            return (f"downloaded {self.title or self.url} "
+            head = (f"downloaded {self.title or self.url} "
                     f"({self.size_bytes} bytes) via "
                     f"{' → '.join(self.tried()) or 'direct'}")
+            if self.archive is not None:
+                if self.archive.get("blocked"):
+                    head += (f"\n  archive: NOT extracted — "
+                             f"{self.archive.get('reason') or 'refused'}")
+                else:
+                    head += (f"\n  archive: extracted "
+                             f"{self.archive.get('extracted', 0)} file(s) "
+                             f"to {self.archive.get('dest', '')}")
+            return head
         from ..core.text import strip_ansi
         lines = [f"download failed: {self.url or '(no url)'}"]
         for i, s in enumerate(self.stages, 1):
@@ -515,6 +533,15 @@ def _accepts_progress(fn: Any) -> bool:
         return True
     return any(p.kind is inspect.Parameter.VAR_KEYWORD
                for p in params.values())
+
+
+#: Archive container formats a landed download is unpacked for
+#: (WS1-P6): mirrors ``nomorals.archives._CONTAINER_FORMATS`` — the
+#: formats that hold members.  Single-file compression streams
+#: (gzip/bzip2/xz of one file) are NOT unpacked: they are media
+#: payloads in this pipeline, not bundles.
+_ARCHIVE_CONTAINER_FORMATS = ("zip", "tar", "tar.gz", "tar.bz2",
+                              "tar.xz", "7z", "rar")
 
 
 class MediaDownloader:
@@ -802,7 +829,71 @@ class MediaDownloader:
                         dest=report.path)
         except Exception as e:  # bookkeeping never breaks downloads
             record_failure("_succeed", e)
+        self._unpack_archive(report)
         return self._finish(report, started)
+
+    def _unpack_archive(self, report: DownloadReport) -> None:
+        """Unpack a landed download that IS an archive (WS1-P6).
+
+        The wire ``archives.extract_for_downloader`` was built for:
+        identify by magic, pre-flight EVERY member name, extract
+        only when all are safe — a downloaded archive with one
+        traversal member is refused whole, never partially
+        extracted.  The extraction lands beside the archive in
+        ``<name>.extracted/`` under the Archivist's own bomb budgets
+        (20k files / 2 GB cumulative, nesting included).
+
+        The original archive is RETAINED at ``report.path``:
+        the downloader's contract is that the landed file is the
+        deliverable (the integrity ledger above hashes it, the
+        orchestrator's acceptance checks read it) — extraction is
+        an additive digest of it, not a replacement.  The outcome
+        rides ``report.archive`` either way: extracted (with the
+        file list) or blocked (with the reason named).  A failure
+        here never turns a landed download into a reported
+        failure — but it is never silent either: it is recorded,
+        logged, and printed by ``DownloadReport.summary()``.
+
+        One honest limit: the Archivist resolves paths inside the
+        workspace sandbox, so a download a caller deliberately
+        landed OUTSIDE the workspace gets a blocked verdict naming
+        the escape instead of an extraction.
+        """
+        if not report.ok or not report.path:
+            return
+        try:
+            from ..archives import (
+                Archivist,
+                detect_format,
+                extract_for_downloader,
+            )
+        except Exception as e:  # the wire never breaks a download
+            record_failure("download.archive_import", e)
+            return
+        try:
+            fmt = detect_format(report.path)
+        except Exception as e:  # noqa: BLE001 — sniff failure: not an archive
+            record_failure("download.archive_detect", e)
+            return
+        if fmt not in _ARCHIVE_CONTAINER_FORMATS:
+            return
+        try:
+            result = extract_for_downloader(
+                Archivist(self.context), report.path)
+        except Exception as e:  # noqa: BLE001 — named on the report
+            record_failure("download.archive_extract", e)
+            result = {"path": report.path, "format": fmt,
+                      "extracted": 0, "blocked": True,
+                      "reason": f"extraction failed: "
+                                f"{type(e).__name__}: {e}"}
+        report.archive = result
+        if result.get("blocked"):
+            _log.warning("download archive NOT extracted %s: %s",
+                         report.path, result.get("reason") or "refused")
+        else:
+            _log.info("download archive extracted %s → %s (%s files)",
+                      report.path, result.get("dest", ""),
+                      result.get("extracted", 0))
 
     # ── public API ────────────────────────────────────────────────────
 

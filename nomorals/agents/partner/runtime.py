@@ -505,6 +505,31 @@ class PartnerRuntime(
                 adapters = {"local": LocalAdapter(mood_label_provider=lambda: self.brain.mood.current().label)}
             owner_chats = _key_set(partner_cfg.owner_chats)
             us_chats = _key_set(partner_cfg.us_chats)
+            # Inbound-file artifact registration (WS1-P6): the same
+            # store construction /artifact uses (context db + blobs
+            # beside the db file + the documents body-text
+            # extractor), injected into the gateway so every file a
+            # chat surface saves also lands in the ArtifactStore.
+            # Fail-open: without a store the gateway simply does
+            # not register, exactly as before.
+            artifact_store = None
+            try:
+                from pathlib import Path as _ArtPath
+
+                from ...documents import artifact_body_text as _abt
+                from ...storage.artifacts import ArtifactStore as _AS
+                from ...storage.blob import BlobStore as _BS
+
+                _db = getattr(self.context, "db", None)
+                if _db is not None:
+                    _db_path = getattr(_db, "path", None)
+                    _blob_dir = (_ArtPath(_db_path).parent / "blobs"
+                                 if _db_path else _ArtPath("data/blobs"))
+                    artifact_store = _AS(_db, _BS(_db, _blob_dir),
+                                         text_extractor=_abt)
+            except Exception as exc:  # noqa: BLE001 — never blocks boot
+                _log.warning("chat gateway: artifact store "
+                             f"unavailable: {exc}")
             self.gateway = ChatGateway(
                 adapters,
                 db=context.db,
@@ -516,6 +541,7 @@ class PartnerRuntime(
                 # Cross-platform identity: inbound senders register in
                 # the store and carry a unified person_id downstream.
                 identity_store=IdentityStore(),
+                artifact_store=artifact_store,
                 # Ordinary chat path gets durable delivery (row first,
                 # receipt after) whenever a db exists; without a db the
                 # gateway reports durable-requested-unavailable and each

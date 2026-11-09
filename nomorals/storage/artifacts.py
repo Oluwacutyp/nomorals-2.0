@@ -378,6 +378,20 @@ class ArtifactStore:
         row = self.db.query_one("SELECT * FROM artifacts WHERE id = ?", (artifact_id,))
         return Artifact.from_row(row) if row else None
 
+    def find_by_content_hash(self, content_hash: str) -> list[Artifact]:
+        """Every artifact whose body is exactly these bytes (by the
+        SHA-256 the blob layer addresses content with), oldest
+        first.  The dedup read: callers that register externally
+        arriving content (chat inbound files, WS1-P6) check here
+        before ``put`` so identical bytes never mint a second row
+        for the same origin."""
+        if not content_hash:
+            return []
+        rows = self.db.query(
+            "SELECT * FROM artifacts WHERE content_hash = ?"
+            " ORDER BY created_at ASC", (content_hash,))
+        return [Artifact.from_row(r) for r in rows]
+
     def read(self, artifact_id: str) -> bytes:
         art = self.get(artifact_id)
         if art is None:

@@ -191,6 +191,7 @@ class ChatGateway:
         adapter_builder: Callable[[str], ChatAdapter | None] | None = None,
         session_bridge: Any = None,
         identity_store: IdentityStore | None = None,
+        artifact_store: Any = None,
         durable_outbox: bool = False,
         outbox: Outbox | None = None,
         durable_drain_sync: bool = True,
@@ -210,6 +211,20 @@ class ChatGateway:
         phone number) and the unified ``person_id`` is stamped on
         ``message.meta`` for downstream memory/relationship consumers,
         the same seam as the owner verdict and the OS session id.
+
+        ``artifact_store`` is an optional ArtifactStore (injected —
+        this module is L4 and must not import ``storage.artifacts``).
+        When present, every inbound FILE a chat surface saved to the
+        media cache is also registered as an artifact (body +
+        provenance: platform, chat, sender, message id, kind), so a
+        received file is searchable / convertible / exportable
+        through the /artifact surface like every other artifact
+        (WS1-P6).  Registration is a deliberate FAIL-OPEN side
+        index: a failure is recorded and logged, and the message
+        flows to the handler untouched — an indexing failure must
+        never drop a message.  Identical bytes register once:
+        re-sending the same file dedups against the existing
+        chat-inbound artifact instead of minting a duplicate row.
 
         ``durable_outbox`` (default OFF) routes sends through the durable
         outbox (:mod:`nomorals.social.chat.outbox`): every send becomes a
@@ -247,6 +262,9 @@ class ChatGateway:
         self._inbound: IncomingHandler | None = None
         #: Cross-platform identity store (see __init__ docstring).
         self.identity_store = identity_store
+        #: Inbound-file artifact registration (see __init__
+        #: docstring).  Duck-typed ArtifactStore or None.
+        self.artifact_store = artifact_store
         #: Optional console mirror: called with each inbound ChatMessage so
         #: the local terminal can show a rich card. Best-effort — never
         #: raises, never blocks the feed. Set by scripts/run_chat_bot.py.
@@ -635,6 +653,13 @@ class ChatGateway:
             except Exception:  # noqa: BLE001 — session attach never drops
                 _log.debug("session attach failed for %s", message.chat.key,
                            exc_info=True)
+        # Inbound-file artifact registration (WS1-P6): files a chat
+        # surface saved to the media cache also land in the
+        # ArtifactStore, so "the file you sent me yesterday" is
+        # addressable via /artifact.  Deliberately FAIL-OPEN, like
+        # the identity/session seams above: the method records its
+        # own failures and never raises into the feed.
+        self._register_inbound_artifacts(message)
         handler = self._inbound
         if handler is not None:
             _log.info("gateway: dispatching inbound %s to the brain", message.chat.key)
@@ -650,6 +675,123 @@ class ChatGateway:
                 mirror(message)
             except Exception as exc:  # noqa: BLE001 - mirror must never break the feed
                 record_failure('gateway.ChatGateway._on_inbound', exc)
+
+    # ── inbound artifact registration (WS1-P6) ──────────────────────
+    def _register_inbound_artifacts(self, message: ChatMessage) -> None:
+        """Register this message's saved files as artifacts.
+
+        Scope, deliberately: a media ref registers when it carries
+        REAL BYTES — a local path naming an existing, non-empty
+        regular file (the adapters save inbound media into the media
+        cache before the message reaches the gateway, so the path
+        IS the saved file; the artifact rides that identity, no
+        second copy of record-keeping — the blob layer holds the
+        bytes).  Two families are NOT registered here, because
+        another organ governs their preservation:
+
+        * view-once / ephemeral media — the personal vault's
+          view-once save path (owner toggles) owns those bytes;
+          indexing them into a searchable/exportable store would
+          outlive the one-look contract they arrived under.
+        * service-feed media (status posts and machine notices,
+          ``meta["service"]``) — the personal surfaces' status
+          machinery (status_saving toggle, vault saves) owns them.
+
+        Byte-less kinds (location, contact, polls) never appear as
+        file refs and are skipped by the path check regardless.
+        The registered artifact ids are stamped on
+        ``message.meta["artifact_ids"]`` for downstream consumers.
+
+        FAIL-OPEN by design (recorded, like the identity seam):
+        any failure — store down, unreadable file, db error — is
+        journaled via ``record_failure`` and the message flows on
+        untouched.  Registration is an index, never a gate.
+        """
+        store = self.artifact_store
+        if store is None or not message.incoming:
+            return
+        if (message.meta or {}).get("service"):
+            return
+        if not message.media:
+            return
+        ids: list[str] = []
+        for ref in message.media:
+            try:
+                art_id = self._register_one_inbound_file(
+                    store, message, ref)
+            except Exception as exc:  # noqa: BLE001 — fail-open, recorded
+                record_failure(
+                    "gateway.ChatGateway._register_inbound_artifacts",
+                    exc)
+                continue
+            if art_id:
+                ids.append(art_id)
+        if ids:
+            prior = (message.meta or {}).get("artifact_ids")
+            message.meta["artifact_ids"] = [
+                *(prior if isinstance(prior, list) else []), *ids]
+
+    def _register_one_inbound_file(self, store: Any,
+                                   message: ChatMessage,
+                                   ref: MediaRef) -> str:
+        """One media ref → one artifact (or the existing one).
+
+        Returns the artifact id, or "" when the ref carries no
+        registrable bytes.  Dedup is BY CONTENT within the
+        chat-inbound origin: the blob layer already dedups bytes,
+        and a re-sent identical file must not mint a duplicate
+        artifact row either — the first registration wins and its
+        id is returned (the provenance kept is the first arrival's;
+        the file is the same file)."""
+        import hashlib
+        from pathlib import Path
+
+        if ref.view_once:
+            return ""
+        path = Path(ref.path or "")
+        if not path.is_file():
+            return ""
+        data = path.read_bytes()
+        if not data:
+            return ""
+        digest = hashlib.sha256(data).hexdigest()
+        for existing in store.find_by_content_hash(digest):
+            if (existing.metadata or {}).get("origin") == "chat_inbound":
+                return str(existing.id)
+        import mimetypes
+
+        filename = ref.name or path.name
+        mime = ref.mime or mimetypes.guess_type(filename)[0] or ""
+        chat = message.chat
+        art = store.put(
+            data,
+            type=ref.kind or "file",
+            creator="chat_inbound",
+            mime=mime,
+            metadata={
+                "origin": "chat_inbound",
+                "filename": filename,
+                "name": filename,
+                "title": filename,
+                "platform": chat.platform,
+                "chat": chat.key,
+                "chat_id": chat.chat_id,
+                "chat_kind": str(chat.kind),
+                "sender": message.sender,
+                "sender_id": message.sender_id,
+                "sender_username": message.sender_username,
+                "message_id": message.message_id,
+                "kind": ref.kind,
+                "source_path": str(path),
+                "ts": message.ts,
+            },
+            provenance={
+                "source_type": "chat",
+                "source_id": chat.key,
+                "source_timestamp": message.ts,
+            },
+        )
+        return str(art.id)
 
     # ── outbound ────────────────────────────────────────────────────────────
     def _lock_for(self, chat: ChatRef) -> threading.Lock:
