@@ -72,11 +72,11 @@ def detect_format(path: str | Path) -> str:
     if len(head) >= 262 and head[257:262] == b"ustar":
         return "tar"
     if head.startswith(b"\x1f\x8b"):
-        return "gzip"
+        return _sniff_tarball(p, "gzip")
     if head.startswith(b"BZh"):
-        return "bzip2"
+        return _sniff_tarball(p, "bzip2")
     if head.startswith(b"\xfd7zXZ\x00"):
-        return "xz"
+        return _sniff_tarball(p, "xz")
     if head.startswith(b"7z\xbc\xaf\x27\x1c"):
         return "7z"
     if head.startswith(b"Rar!\x1a\x07"):
@@ -103,6 +103,27 @@ def _which(names: tuple[str, ...]) -> str:
         if p:
             return p
     return ""
+
+
+def _sniff_tarball(p: Path, fmt: str) -> str:
+    """A gzip/bzip2/xz stream may wrap a tarball: peek at the
+    decompressed head for tar's ``ustar`` marker and report the tar
+    format when it's there.  Identification by content — a tarball
+    renamed to ``.zip`` (or anything else) is still a tarball, which
+    is what the module docstring has always claimed.  An unreadable
+    stream keeps the plain container format."""
+    import gzip
+
+    openers = {"gzip": gzip.open, "bzip2": bz2.open, "xz": lzma.open}
+    try:
+        with openers[fmt](p, "rb") as fh:
+            head = fh.read(512)
+    except Exception:  # noqa: BLE001 — sniff failure is not a refusal
+        return fmt
+    if len(head) >= 262 and head[257:262] == b"ustar":
+        return {"gzip": "tar.gz", "bzip2": "tar.bz2",
+                "xz": "tar.xz"}[fmt]
+    return fmt
 
 
 class Archivist:
@@ -225,12 +246,22 @@ class Archivist:
 
     # ── create ────────────────────────────────────────────────────────────
     def create(self, paths: list[str], dest: str,
-               fmt: str = "zip") -> dict[str, Any]:
+               fmt: str = "zip", *, arc_base: str = "") -> dict[str, Any]:
+        """Create an archive from workspace paths.
+
+        Default member names: a file rides under its base name, a
+        directory under its own name (relative to its parent).  With
+        ``arc_base`` set, every member name is instead relative to
+        that base — the workspace-relative convention the chat
+        send-fusion (tools/archive) has always used, so a zipped
+        ``docs/a.txt`` extracts back as ``docs/a.txt``.
+        """
         fmt = (fmt or "zip").lower().lstrip(".")
         if fmt not in ("zip", "tar.gz", "tar", "tar.bz2", "tar.xz"):
             raise ToolError(f"unsupported create format {fmt!r} "
                             "(zip|tar|tar.gz|tar.bz2|tar.xz)")
         resolved = [self._path(p) for p in paths]
+        base = Path(arc_base).resolve() if arc_base else None
         dest_p = self._path(dest, must_exist=False)
         dest_p.parent.mkdir(parents=True, exist_ok=True)
         tmp_dest = dest_p.with_suffix(dest_p.suffix + f".{int(time.time())}")
@@ -243,15 +274,18 @@ class Archivist:
                         if p.is_dir():
                             for f in sorted(p.rglob("*")):
                                 if f.is_file():
-                                    zf.write(f, str(f.relative_to(p.parent)))
+                                    zf.write(f, str(f.relative_to(
+                                        base or p.parent)))
                         else:
-                            zf.write(p, p.name)
+                            zf.write(p, str(p.relative_to(base))
+                                     if base else p.name)
             else:
                 mode = {"tar": "w", "tar.gz": "w:gz", "tar.bz2": "w:bz2",
                         "tar.xz": "w:xz"}[fmt]
                 with tarfile.open(tmp_dest, mode) as tf:
                     for p in resolved:
-                        tf.add(p, arcname=p.name,
+                        tf.add(p, arcname=str(p.relative_to(base))
+                               if base else p.name,
                                recursive=True)
             tmp_dest.rename(dest_p)
         except Exception:
@@ -278,7 +312,19 @@ class Archivist:
         return self.info(str(dest_p))
 
     # ── extract (traversal-safe) ──────────────────────────────────────────
-    def extract(self, path: str, dest: str = "") -> dict[str, Any]:
+    def extract(self, path: str, dest: str = "", *,
+                max_files: int = _MAX_EXTRACT_FILES,
+                max_bytes: int = _MAX_EXTRACT_BYTES) -> dict[str, Any]:
+        """Extract with skip-and-report safety semantics.
+
+        A member whose name would escape the destination (absolute,
+        ``..`` — with backslashes treated as separators, so a
+        Windows-shaped traversal is caught on every host) is SKIPPED
+        and named in the result's ``skipped`` list; the good members
+        still land.  The bomb guards are the only whole-extraction
+        refusals: more than ``max_files`` members or more than
+        ``max_bytes`` live-streamed bytes aborts with ToolError.
+        """
         p = self._path(path)
         fmt = detect_format(p)
         dest_p = (self._path(dest, must_exist=False) if dest
@@ -302,40 +348,50 @@ class Archivist:
         if fmt == "zip":
             with zipfile.ZipFile(p) as zf:
                 for info in zf.infolist():
-                    target = dest_root / info.filename
-                    if not _safe(Path(info.filename)):
+                    # Backslashes are separators too: a member named
+                    # ``..\evil`` is a traversal on the Windows host
+                    # even when this process runs on POSIX, so the
+                    # safety decision (and the on-disk layout) uses
+                    # the normalized name on every platform; the
+                    # skipped report keeps the name as archived.
+                    name = info.filename.replace("\\", "/")
+                    if not _safe(Path(name)):
                         skipped.append(info.filename)
                         continue
-                    if info.filename.endswith("/"):
+                    target = dest_root / name
+                    if name.endswith("/"):
                         target.mkdir(parents=True, exist_ok=True)
                         continue
                     target.parent.mkdir(parents=True, exist_ok=True)
                     with zf.open(info) as src, open(target, "wb") as dst:
                         while chunk := src.read(1 << 20):
                             total_bytes += len(chunk)
-                            if total_bytes > _MAX_EXTRACT_BYTES:
+                            if total_bytes > max_bytes:
                                 raise ToolError(
-                                    "extraction aborted: exceeds 2 GB "
-                                    "(zip-bomb guard)")
+                                    "extraction aborted: exceeds "
+                                    f"{max_bytes} bytes (zip-bomb guard)")
                             dst.write(chunk)
                     count += 1
                     written.append(str(target.relative_to(dest_root)))
-                    if count > _MAX_EXTRACT_FILES:
-                        raise ToolError("extraction aborted: too many "
-                                        "files (zip-bomb guard)")
+                    if count > max_files:
+                        raise ToolError(
+                            "extraction aborted: more than "
+                            f"{max_files} files (zip-bomb guard)")
         elif fmt in ("tar", "tar.gz", "tar.bz2", "tar.xz"):
             with tarfile.open(p) as tf:
                 for m in tf.getmembers():
-                    if not _safe(Path(m.name)):
+                    name = m.name.replace("\\", "/")
+                    if not _safe(Path(name)):
                         skipped.append(m.name)
                         continue
-                    target = dest_root / m.name
+                    target = dest_root / name
                     if m.isdir():
                         target.mkdir(parents=True, exist_ok=True)
                         continue
                     if m.issym() or m.islnk():
                         # link targets must stay inside
-                        if m.issym() and not _safe(Path(m.linkname)):
+                        if m.issym() and not _safe(
+                                Path(m.linkname.replace("\\", "/"))):
                             skipped.append(m.name)
                             continue
                         target.parent.mkdir(parents=True, exist_ok=True)
@@ -351,12 +407,17 @@ class Archivist:
                     with open(target, "wb") as dst:
                         while chunk := fobj.read(1 << 20):
                             total_bytes += len(chunk)
-                            if total_bytes > _MAX_EXTRACT_BYTES:
-                                raise ToolError("extraction aborted: "
-                                                "exceeds 2 GB")
+                            if total_bytes > max_bytes:
+                                raise ToolError(
+                                    "extraction aborted: exceeds "
+                                    f"{max_bytes} bytes (zip-bomb guard)")
                             dst.write(chunk)
                     count += 1
                     written.append(str(target.relative_to(dest_root)))
+                    if count > max_files:
+                        raise ToolError(
+                            "extraction aborted: more than "
+                            f"{max_files} files (zip-bomb guard)")
         elif fmt == "7z" and self._bin7z:
             out = subprocess.run(
                 [self._bin7z, "x", f"-o{dest_root}", "-y", str(p)],
@@ -394,7 +455,8 @@ class Archivist:
                                else " (install 7z / unrar)"))
         return {"path": str(p), "format": fmt, "dest": str(dest_root),
                 "extracted": len(written), "bytes": total_bytes,
-                "skipped": skipped[:50], "files": written[:200]}
+                "skipped": skipped[:50], "skipped_count": len(skipped),
+                "files": written[:200]}
 
 
     def digest(self, path: str, *, max_files: int = 200,
@@ -590,7 +652,10 @@ def register(registry: Any) -> None:
             "Universal zip/unzip: identify (by magic bytes), list, create "
             "(zip/tar/tar.gz/tar.bz2/tar.xz), compress single files "
             "(gz/bz2/xz), and safely extract zip/tar*/gz/bz2/xz (+7z/rar "
-            "when the tools are installed). action=info (path) | list "
+            "when the tools are installed). Extraction skips unsafe "
+            "entries and reports them in the result (never silently); "
+            "an archive is refused only when nothing in it can be "
+            "extracted or a bomb guard trips. action=info (path) | list "
             "(path) | extract (path, dest) | digest (path) - extract an "
             "archive (or walk a whole DIRECTORY) and curate every text "
             "document into the knowledge graph + memory | create (paths, "
@@ -606,7 +671,19 @@ def register(registry: Any) -> None:
         if action == "list":
             return a.list(path)
         if action == "extract":
-            return a.extract(path, dest=dest)
+            out = a.extract(path, dest=dest)
+            if not out.get("extracted") and out.get("skipped_count"):
+                # Unified semantics (WS1-P1): unsafe entries are
+                # skipped + reported, and the whole archive is
+                # refused only when nothing in it could be
+                # extracted — the same rule the tools/archive
+                # send-fusion surface applies.
+                shown = ", ".join(repr(s) for s in out["skipped"][:5])
+                raise ToolError(
+                    "archive extract: every file entry was unsafe and "
+                    f"skipped ({out['skipped_count']}: {shown}); "
+                    "nothing could be extracted")
+            return out
         if action == "digest":
             from .tools.filesystem import safe_path
 

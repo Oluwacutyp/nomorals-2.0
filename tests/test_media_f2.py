@@ -54,7 +54,11 @@ class FakeGateway:
         self.sent: list[dict[str, Any]] = []
 
     def send_file(self, platform: str, chat_id: str, path: str,
-                  caption: str = "") -> SimpleNamespace:
+                  caption: str = "", kind: str = "",
+                  view_once: bool = False) -> SimpleNamespace:
+        # kind/view_once: filesend.send_file passes both since the
+        # parity program; the fake's older signature made every
+        # send-path test fail with an unexpected-kwarg error.
         self.sent.append({"platform": platform, "chat": chat_id,
                           "path": path, "caption": caption})
         return SimpleNamespace(ok=True, message_id="m1")

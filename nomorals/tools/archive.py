@@ -1,22 +1,35 @@
 """Zip / unzip archives plus send wiring for the social chats.
 
-Tools:
+This module is the chat send-fusion surface; the archive ENGINE is the
+Archivist (:mod:`nomorals.archives`) — the same organ behind the
+``archive`` brain tool and the ``/zip`` command (WS1-P1 unification).
+The callables here keep their long-standing signatures and result
+shapes, but create/extract ride the Archivist underneath, so there is
+exactly ONE archive semantics in the system:
 
 * ``zip_create`` — zip a file set or whole directory into
-  ``workspace/archives/<name>.zip`` (deflate, max compression).
-* ``zip_extract`` — unzip an archive back into the workspace. Extraction
-  is guarded: zip-slip traversal (``../`` / absolute entries) is rejected
-  outright, and a total-uncompressed-size cap plus a file-count cap keep a
-  zip bomb from filling the disk (``NM_ARCHIVE_MAX_EXTRACT_MB``, default
-  2048; ``NM_ARCHIVE_MAX_EXTRACT_FILES``, default 10000 — both also
-  monkeypatchable module constants for tests). Entries stream out in 1MB
-  chunks, never read() whole into memory, and the byte budget is enforced
-  live while writing since zip header sizes can be lies.
+  ``workspace/archives/<name>.zip`` (deflate, max compression; member
+  names workspace-relative, as they have always been here).
+* ``zip_extract`` — unzip an archive back into the workspace on the
+  Archivist's skip-and-report semantics: an entry whose name would
+  escape the destination (``../`` / absolute / backslash traversal)
+  is SKIPPED and named in the result's ``skipped`` list — never
+  silently, and the good entries still land. The whole archive is
+  refused only when nothing in it could be extracted, or when a
+  zip-bomb shape trips a cap: entry count / declared total size are
+  pre-flighted (``NM_ARCHIVE_MAX_EXTRACT_MB``, default 2048;
+  ``NM_ARCHIVE_MAX_EXTRACT_FILES``, default 10000 — both also
+  monkeypatchable module constants for tests) and the byte budget is
+  enforced live while streaming, since zip header sizes can be lies.
+  Entries stream in chunks, never read() whole into memory. Because
+  the engine identifies by magic bytes, a ``.zip`` path holding a
+  tarball now extracts as what it really is.
 * ``zip_send`` — zip then send the archive to a chat in one call
   (``zip → send`` works from a single chat command).
 * ``unzip_send`` — extract an archive, then send each resulting file to a
   chat (up to ``max_files`` per call; the rest is reported, not silently
-  dropped).
+  dropped; extraction-skipped entries are reported too, under
+  ``unsafe_skipped``).
 
 All paths are sandboxed to the workspace via :func:`filesystem.safe_path`;
 sending reuses :func:`filesend.send_file` — the same live-gateway path the
@@ -60,8 +73,6 @@ def _env_int(name: str, default: int) -> int:
 MAX_EXTRACT_BYTES = _env_int("NM_ARCHIVE_MAX_EXTRACT_MB", 2048) * 1024 * 1024
 #: refuse archives with more entries than this (zip-bomb guard)
 MAX_EXTRACT_FILES = _env_int("NM_ARCHIVE_MAX_EXTRACT_FILES", 10_000)
-#: stream extraction in chunks this size — never read() a whole entry
-COPY_CHUNK = 1024 * 1024
 #: how many extracted files one unzip_send call will forward
 DEFAULT_MAX_SEND_FILES = 10
 
@@ -101,7 +112,11 @@ def zip_create(context: Any, sources: list[str], *, name: str = "") -> dict[str,
 
     Returns the archive path, file count, and sizes. Fail-fast: an empty
     source list or a missing path raises instead of producing an empty zip.
+    The bytes are written by the Archivist (the one archive engine);
+    member names stay workspace-relative, as this surface has always
+    produced, via the engine's ``arc_base``.
     """
+    from ..archives import Archivist
     from ..core.text import slugify
 
     started = time.perf_counter()
@@ -113,15 +128,11 @@ def zip_create(context: Any, sources: list[str], *, name: str = "") -> dict[str,
         slug += ".zip"
     archive: Path = safe_path(context, f"archives/{slug}")
     archive.parent.mkdir(parents=True, exist_ok=True)
-    total_in = 0
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED,
-                         compresslevel=9) as zf:
-        for entry in files:
-            # sources are workspace-sandboxed, so arcnames stay relative
-            arcname = str(entry.relative_to(root))
-            zf.write(entry, arcname=arcname)
-            total_in += entry.stat().st_size
-    total_out = archive.stat().st_size
+    info = Archivist(context).create(
+        [str(f) for f in files], str(archive), fmt="zip",
+        arc_base=str(root))
+    total_in = int(info.get("total_bytes") or 0)
+    total_out = int(info.get("compressed_bytes") or archive.stat().st_size)
     _log.info("zip created: %s (%d files, %d → %d bytes)",
               archive, len(files), total_in, total_out)
     return {
@@ -134,11 +145,14 @@ def zip_create(context: Any, sources: list[str], *, name: str = "") -> dict[str,
     }
 
 
-def _guard_entries(archive: Path) -> list[zipfile.ZipInfo]:
-    """Open ``archive`` and validate every entry before anything is written.
+def _preflight_bomb_shapes(archive: Path) -> None:
+    """Refuse zip-bomb SHAPES before anything is written.
 
-    Raises :class:`ToolError` on zip-slip entries, non-zip input, or
-    zip-bomb shapes. Returns the validated entry list.
+    Only the cost shape is pre-flighted — entry count and the DECLARED
+    total uncompressed size against this module's caps. Entry SAFETY
+    is not decided here: that is the Archivist's per-entry
+    skip-and-report, applied while streaming (the live byte budget
+    still guards against headers that lie about their sizes).
     """
     if not zipfile.is_zipfile(archive):
         raise ToolError(f"unzip: {archive.name} is not a zip archive")
@@ -153,76 +167,59 @@ def _guard_entries(archive: Path) -> list[zipfile.ZipInfo]:
         raise ToolError(
             f"unzip: archive would extract {total} bytes — over the "
             f"{MAX_EXTRACT_BYTES}-byte cap (zip-bomb guard); refusing to extract")
-    for info in infos:
-        name = info.filename
-        if not name or name.startswith("/") or name.startswith("\\"):
-            raise ToolError(f"unzip: refusing zip-slip entry: {name!r}")
-        parts = [p for p in name.replace("\\", "/").split("/") if p not in ("", ".")]
-        if any(p == ".." for p in parts):
-            raise ToolError(f"unzip: refusing zip-slip entry: {name!r}")
-    return infos
 
 
 def zip_extract(context: Any, archive: str, *, destination: str = "") -> dict[str, Any]:
-    """Extract a zip archive inside the workspace (zip-slip guarded).
+    """Extract an archive inside the workspace, on the Archivist's
+    skip-and-report semantics.
 
-    Returns the destination, file count, and the extracted relative paths
-    (capped at 200 in the report — the count is always exact).
+    Unsafe entries are skipped and named in the result's ``skipped``
+    list (with ``skipped_count``); the good entries still land. The
+    whole archive is refused only when nothing in it could be
+    extracted, or a zip-bomb cap trips. Returns the destination, file
+    count, and the extracted relative paths (capped at 200 in the
+    report — the count is always exact).
     """
+    from ..archives import Archivist, detect_format
+
     started = time.perf_counter()
     src = safe_path(context, archive, must_exist=True)
     if src.is_dir():
         raise ToolError(f"unzip: {archive!r} is a directory, not a zip archive")
-    infos = _guard_entries(src)
+    if detect_format(src) == "zip":
+        _preflight_bomb_shapes(src)
 
     dest_name = destination or f"extracted/{src.stem}"
-    dest_dir = safe_path(context, dest_name)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_resolved = dest_dir.resolve()
-
-    written: list[str] = []
-    total_written = 0
-    with zipfile.ZipFile(src, "r") as zf:
-        for info in infos:
-            parts = [p for p in info.filename.replace("\\", "/").split("/")
-                     if p not in ("", ".")]
-            target = dest_resolved.joinpath(*parts).resolve()
-            try:
-                target.relative_to(dest_resolved)
-            except ValueError as exc:
-                raise ToolError(
-                    f"unzip: refusing zip-slip entry: {info.filename!r}") from exc
-            if info.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            # Stream in chunks: never read() a whole entry into memory, and
-            # enforce the byte budget live — the declared per-entry sizes in
-            # a zip header can be lies, so the pre-extraction total is not
-            # enough to stop a zip bomb.
-            with zf.open(info, "r") as src_f, target.open("wb") as dst_f:
-                while True:
-                    chunk = src_f.read(COPY_CHUNK)
-                    if not chunk:
-                        break
-                    dst_f.write(chunk)
-                    total_written += len(chunk)
-                    if total_written > MAX_EXTRACT_BYTES:
-                        dst_f.close()
-                        target.unlink(missing_ok=True)
-                        raise ToolError(
-                            f"unzip: extracted bytes exceeded the "
-                            f"{MAX_EXTRACT_BYTES}-byte cap (zip-bomb guard); "
-                            f"refusing to extract {src.name} further")
-            written.append(str(target.relative_to(dest_resolved)))
-    _log.info("zip extracted: %s → %s (%d files)",
-              src.name, dest_dir, len(written))
+    try:
+        result = Archivist(context).extract(
+            str(src), dest=dest_name,
+            max_files=MAX_EXTRACT_FILES, max_bytes=MAX_EXTRACT_BYTES)
+    except ToolError as exc:
+        msg = str(exc)
+        raise ToolError(msg if msg.startswith("unzip")
+                        else f"unzip: {msg}") from exc
+    skipped = list(result.get("skipped") or [])
+    skipped_count = int(result.get("skipped_count", len(skipped)))
+    extracted = int(result.get("extracted") or 0)
+    if extracted == 0 and skipped_count:
+        shown = ", ".join(repr(s) for s in skipped[:5])
+        raise ToolError(
+            f"unzip: refusing {src.name}: every file entry was a "
+            f"zip-slip / unsafe path ({skipped_count} skipped: {shown}); "
+            "nothing could be extracted")
+    files = list(result.get("files") or [])
+    dest_dir = Path(result.get("dest") or safe_path(context, dest_name))
+    _log.info("zip extracted: %s → %s (%d files, %d skipped)",
+              src.name, dest_dir, extracted, skipped_count)
     return {
         "archive": str(src),
         "destination": str(dest_dir),
-        "files": len(written),
-        "paths": written[:200],
-        "truncated": len(written) > 200,
+        "files": extracted,
+        "paths": files,
+        "truncated": extracted > len(files),
+        "skipped": skipped,
+        "skipped_count": skipped_count,
+        "format": result.get("format", ""),
         "seconds": round(time.perf_counter() - started, 2),
     }
 
@@ -271,7 +268,8 @@ def unzip_send(
     """Extract an archive, then send each resulting file to a chat.
 
     Sends up to ``max_files`` files; anything beyond that is listed under
-    ``skipped`` with the reason — never silently dropped.
+    ``skipped`` with the reason — never silently dropped. Entries the
+    extractor skipped as unsafe are reported under ``unsafe_skipped``.
     """
     from .filesend import send_file
 
@@ -304,6 +302,8 @@ def unzip_send(
         "archive": extracted["archive"],
         "destination": extracted["destination"],
         "extracted_files": extracted["files"],
+        "unsafe_skipped": extracted.get("skipped", []),
+        "unsafe_skipped_count": extracted.get("skipped_count", 0),
         "sent": sent,
         "failed": failed,
         "skipped": skipped,
@@ -340,9 +340,12 @@ def register(registry: Any) -> None:
     @registry.register(
         "zip_extract",
         description=(
-            "Unzip an archive into the workspace. Zip-slip entries are "
-            "rejected and zip-bomb shapes (entry count / total size caps) "
-            "refuse to extract."
+            "Unzip an archive into the workspace (the Archivist engine; "
+            "a mislabeled tarball extracts as what it really is). "
+            "Entries with unsafe paths are skipped and reported in the "
+            "result's 'skipped' list — never silently; the archive is "
+            "refused only when nothing in it can be extracted or a "
+            "zip-bomb cap (entry count / size) trips."
         ),
         capability=Capability.FS_WRITE,
         parameters={

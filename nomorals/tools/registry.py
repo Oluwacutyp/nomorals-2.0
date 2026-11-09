@@ -587,6 +587,25 @@ class ToolRegistry:
                 "module": "books",
                 "error": f"{type(exc).__name__}: {exc}",
             })
+        # The Archivist (nomorals/archives.py) is THE archive organ —
+        # an out-of-package module like books, loaded by dotted name
+        # for the same layering reason.  Its register() attaches the
+        # single `archive` tool (info / list / extract / digest /
+        # create / compress over zip + tar family + 7z/rar).  The
+        # zip-only tools/archive module above keeps the chat
+        # send-fusion verbs (zip_create / zip_extract / zip_send /
+        # unzip_send) but rides this engine underneath — one organ,
+        # one safety semantics (skip-and-report), two surfaces.
+        try:
+            _archives = _importlib.import_module("nomorals.archives")
+            _archives.register(self)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("tool module 'archives' failed to register: %s: %s",
+                         type(exc).__name__, exc)
+            self._failed_modules.append({
+                "module": "archives",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
         try:
             from ..media import music as _music, playback as _playback
             from ..media import video as _video

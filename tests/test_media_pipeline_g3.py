@@ -443,15 +443,27 @@ class ZipSlipTests(unittest.TestCase):
                 self.assertFalse((root / "absolute.txt").exists())
                 self.assertFalse((root / "win.txt").exists())
 
-    def test_zip_slip_does_not_write_before_rejecting(self) -> None:
+    def test_zip_slip_skips_bad_entries_and_extracts_the_good_ones(
+            self) -> None:
+        # DELIBERATE SEMANTICS CHANGE (WS1-P1, 2026-11-09): this pin
+        # used to assert validate-first whole-archive rejection (the
+        # good entry must NOT be written). Extraction now runs on the
+        # Archivist's unified skip-and-report semantics — the same
+        # engine behind the `archive` tool and /zip: unsafe entries
+        # are skipped and NAMED in the result, good entries land, and
+        # the whole archive is refused only when nothing in it could
+        # be extracted (see ZipSlipTests.test_zip_slip_shapes_rejected
+        # for the all-unsafe refusal).
         ctx = _context()
         root = Path(ctx.settings.workspace_dir)
         self._evil_zip(root, "evil.zip", ["good.txt", "../escape.txt"])
-        with self.assertRaises(ToolError):
-            A.zip_extract(ctx, "evil.zip")
+        out = A.zip_extract(ctx, "evil.zip")
+        self.assertEqual(out["files"], 1)
+        self.assertEqual(out["skipped"], ["../escape.txt"])
+        self.assertEqual(out["skipped_count"], 1)
+        dest = Path(out["destination"])
+        self.assertEqual((dest / "good.txt").read_text(), "pwned-0")
         self.assertFalse((root / "escape.txt").exists())
-        # the good entry must not have been written either (validate first)
-        self.assertFalse((root / "extracted").exists())
 
 
 # ── 6. zip-bomb guards ───────────────────────────────────────────────────────
