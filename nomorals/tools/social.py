@@ -715,6 +715,199 @@ def register(registry: Any) -> None:
         return _tgbot_admin(chat_key, "admin_invite_link")
 
     @registry.register(
+        "tgbot_set_chat_photo",
+        description=(
+            "Set a Telegram group/channel's photo via the bot, from a "
+            "local image file (setChatPhoto). The bot needs the "
+            "can_change_info admin right. Owner-only."
+        ),
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat_key": {"type": "string"},
+                "photo_path": {"type": "string",
+                               "description": "Local image file to upload"},
+            },
+            "required": ["chat_key", "photo_path"],
+        },
+    )
+    def tgbot_set_chat_photo(chat_key: str,
+                             photo_path: str) -> dict[str, Any]:
+        return _tgbot_admin(chat_key, "admin_set_photo",
+                            photo_path=photo_path)
+
+    @registry.register(
+        "tgbot_create_invite_link",
+        description=(
+            "Mint an ADDITIONAL invite link for a group/channel via "
+            "the bot (createChatInviteLink) — beyond the primary link. "
+            "Optional: name (≤32 chars), expire_date (unix timestamp, "
+            "0 = never), member_limit (0 = uncapped), "
+            "creates_join_request (admins approve each join; cannot "
+            "combine with member_limit). Owner-only."
+        ),
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat_key": {"type": "string"},
+                "name": {"type": "string"},
+                "expire_date": {"type": "integer"},
+                "member_limit": {"type": "integer"},
+                "creates_join_request": {"type": "boolean"},
+            },
+            "required": ["chat_key"],
+        },
+    )
+    def tgbot_create_invite_link(chat_key: str, name: str = "",
+                                 expire_date: int = 0,
+                                 member_limit: int = 0,
+                                 creates_join_request: bool = False
+                                 ) -> dict[str, Any]:
+        return _tgbot_admin(chat_key, "admin_create_invite_link",
+                            name=name, expire_date=expire_date,
+                            member_limit=member_limit,
+                            creates_join_request=creates_join_request)
+
+    @registry.register(
+        "tgbot_edit_invite_link",
+        description=(
+            "Retune an additional invite link the bot created "
+            "(editChatInviteLink): name, expiry, member limit or "
+            "join-request mode — only the fields passed change. "
+            "Owner-only."
+        ),
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat_key": {"type": "string"},
+                "invite_link": {"type": "string",
+                                "description": "The link to edit"},
+                "name": {"type": "string"},
+                "expire_date": {"type": "integer"},
+                "member_limit": {"type": "integer"},
+                "creates_join_request": {"type": "boolean"},
+            },
+            "required": ["chat_key", "invite_link"],
+        },
+    )
+    def tgbot_edit_invite_link(chat_key: str, invite_link: str,
+                               name: str = "", expire_date: int = 0,
+                               member_limit: int = 0,
+                               creates_join_request: bool = False
+                               ) -> dict[str, Any]:
+        return _tgbot_admin(chat_key, "admin_edit_invite_link",
+                            invite_link=invite_link, name=name,
+                            expire_date=expire_date,
+                            member_limit=member_limit,
+                            creates_join_request=creates_join_request)
+
+    @registry.register(
+        "tgbot_revoke_invite_link",
+        description=(
+            "Revoke an invite link via the bot (revokeChatInviteLink) "
+            "— the link dies for good. Revoking the PRIMARY link makes "
+            "Telegram mint a replacement, which is what comes back. "
+            "Owner-only."
+        ),
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat_key": {"type": "string"},
+                "invite_link": {"type": "string",
+                                "description": "The link to revoke"},
+            },
+            "required": ["chat_key", "invite_link"],
+        },
+    )
+    def tgbot_revoke_invite_link(chat_key: str,
+                                 invite_link: str) -> dict[str, Any]:
+        return _tgbot_admin(chat_key, "admin_revoke_invite_link",
+                            invite_link=invite_link)
+
+    @registry.register(
+        "tgbot_copy_message",
+        description=(
+            "Copy a message into a group/channel via the bot "
+            "(copyMessage): the duplicate stands as the bot's own "
+            "post — no 'forwarded from' header, no original author. "
+            "An optional caption REPLACES the original caption. Use "
+            "the forward tool instead when attribution should ride. "
+            "Owner-only."
+        ),
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat_key": {"type": "string",
+                             "description": "Destination telegram-bot:<chat_id>"},
+                "from_chat_key": {"type": "string",
+                                  "description": "Source telegram-bot:<chat_id>"},
+                "message_id": {"type": "string"},
+                "caption": {"type": "string"},
+            },
+            "required": ["chat_key", "from_chat_key", "message_id"],
+        },
+    )
+    def tgbot_copy_message(chat_key: str, from_chat_key: str,
+                           message_id: str,
+                           caption: str = "") -> dict[str, Any]:
+        gw = _require_gateway()
+        platform, _, rest = chat_key.partition(":")
+        fplatform, _, frest = from_chat_key.partition(":")
+        if platform != "telegram-bot" or fplatform != "telegram-bot":
+            return {"ok": False,
+                    "error": "copy needs telegram-bot: chat keys"}
+        adapter = (gw._snapshot_adapters() or {}).get("telegram-bot")
+        if adapter is None:
+            return {"ok": False, "error": "telegram bot not connected"}
+        fn = getattr(adapter, "copy_message", None)
+        if fn is None:
+            return {"ok": False,
+                    "error": "no copy_message on telegram bot"}
+        chat = ChatRef(platform=platform, chat_id=rest)
+        from_chat = ChatRef(platform=fplatform, chat_id=frest)
+        try:
+            res = fn(chat, from_chat, message_id, caption=caption)
+        except Exception as exc:  # noqa: BLE001 - honest error
+            return {"ok": False, "error": str(exc)[:200]}
+        return {"ok": res.ok, "message_id": res.message_id,
+                "error": res.error}
+
+    @registry.register(
+        "tgbot_forum_topic_create",
+        description=(
+            "Create a forum topic in a Telegram forum supergroup via "
+            "the bot (createForumTopic). Topics must be enabled and "
+            "the bot needs can_manage_topics. Returns the new topic's "
+            "thread_id. Owner-only."
+        ),
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "chat_key": {"type": "string"},
+                "name": {"type": "string",
+                         "description": "Topic name"},
+                "icon_color": {"type": "integer",
+                               "description": "Bot API topic color (optional)"},
+                "icon_custom_emoji_id": {"type": "string"},
+            },
+            "required": ["chat_key", "name"],
+        },
+    )
+    def tgbot_forum_topic_create(chat_key: str, name: str,
+                                 icon_color: int = 0,
+                                 icon_custom_emoji_id: str = ""
+                                 ) -> dict[str, Any]:
+        return _tgbot_admin(chat_key, "admin_forum_topic_create",
+                            name=name, icon_color=icon_color,
+                            icon_custom_emoji_id=icon_custom_emoji_id)
+
+    @registry.register(
         "tgbot_group_info",
         description="Show a rich info card for a Telegram group/channel. Returns rendered HTML.",
         capability=Capability.SOCIAL_READ,

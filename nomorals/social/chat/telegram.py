@@ -7457,6 +7457,37 @@ class TelegramBotAdapter(ChatAdapter):
                            message_thread_id=int(thread_id),
                            name=str(name or ""))
 
+    def admin_forum_topic_create(self, chat: ChatRef, name: str, *,
+                                 icon_color: int = 0,
+                                 icon_custom_emoji_id: str = ""
+                                 ) -> dict[str, Any]:
+        """createForumTopic: open a NEW forum topic in a forum
+        supergroup (parity bundle #15 — the bot-side create the
+        edit verb above always lacked; the userbot surface has
+        its own create, admin_forum_topic).  Topics must be
+        enabled and the bot needs can_manage_topics —
+        admin_rights is the honest check; a refusal is the
+        result.  icon_color is the Bot API's closed set of
+        topic colors, validated by the API itself.  Returns
+        the new topic's thread id."""
+        title = str(name or "").strip()
+        if not title:
+            return {"ok": False, "error": "a topic needs a name"}
+        params: dict[str, Any] = {"name": title}
+        if icon_color:
+            params["icon_color"] = int(icon_color)
+        if str(icon_custom_emoji_id or ""):
+            params["icon_custom_emoji_id"] = str(
+                icon_custom_emoji_id)
+        out = self._admin("createForumTopic", chat, **params)
+        if not out["ok"]:
+            return out
+        topic = out["result"] or {}
+        return {"ok": True,
+                "thread_id": str(topic.get("message_thread_id")
+                                 or ""),
+                "name": str(topic.get("name") or title)}
+
     def _set_command_scope(self, scope: dict[str, Any],
                            commands: list[tuple[str, str]] | None
                            ) -> dict[str, Any]:
@@ -7771,6 +7802,37 @@ class TelegramBotAdapter(ChatAdapter):
                               error=str(exc)[:200],
                               seconds=time.perf_counter() - started)
 
+    def copy_message(self, chat: ChatRef, from_chat: ChatRef,
+                     message_id: str, *,
+                     caption: str = "") -> SendResult:
+        """Copy one message into a chat via copyMessage
+        (parity bundle #15): the duplicate stands as the BOT's
+        own post — no "forwarded from" header, no original
+        author.  forward_post is the attributed sibling; this
+        is the clean re-post.  A caption, when given, REPLACES
+        the original caption (the API's own semantics);
+        media-less messages ignore it on the API side."""
+        started = time.perf_counter()
+        try:
+            params: dict[str, Any] = {
+                "chat_id": int(chat.chat_id),
+                "from_chat_id": int(from_chat.chat_id),
+                "message_id": int(message_id),
+            }
+            if str(caption or ""):
+                params["caption"] = str(caption)[:1024]
+            result = self._api("copyMessage", **params)
+            mid = ""
+            if isinstance(result, dict):
+                mid = str(result.get("message_id") or "")
+            return SendResult(
+                ok=True, platform=self.name, message_id=mid,
+                seconds=time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001
+            return SendResult(ok=False, platform=self.name,
+                              error=str(exc)[:200],
+                              seconds=time.perf_counter() - started)
+
     def edit_post(self, chat: ChatRef, message_id: str,
                   text: str) -> dict[str, Any]:
         """Edit one of the bot's own published posts
@@ -7855,6 +7917,131 @@ class TelegramBotAdapter(ChatAdapter):
                               description: str) -> dict[str, Any]:
         return self._admin("setChatDescription", chat,
                            description=description or "")
+
+    def admin_set_photo(self, chat: ChatRef, photo_path: str
+                        ) -> dict[str, Any]:
+        """setChatPhoto: replace the chat's photo with a local
+        image file, uploaded as multipart (parity bundle #15).
+        The bot needs the can_change_info admin right; without
+        it the API refuses and the refusal is the result.  A
+        missing file refuses BEFORE traffic — never an upload
+        of nothing."""
+        raw = str(photo_path or "").strip()
+        if not raw:
+            return {"ok": False, "error": "no photo file given"}
+        path = Path(raw)
+        if not path.is_file():
+            return {"ok": False,
+                    "error": f"photo file not found: {raw}"}
+        try:
+            result = self._api_upload(
+                "setChatPhoto", {"chat_id": int(chat.chat_id)},
+                "photo", path)
+            return {"ok": True, "result": result}
+        except Exception as exc:  # noqa: BLE001 - honest error
+            return {"ok": False, "error": str(exc)[:200]}
+
+    @staticmethod
+    def _invite_link_shape(out: dict[str, Any]) -> dict[str, Any]:
+        """Shape one ChatInviteLink result into the family
+        dict (admin_invite_link's keys, widened with the
+        additional-link fields)."""
+        if not out["ok"]:
+            return {"ok": False, "invite": "",
+                    "error": out.get("error", "")}
+        link = out["result"] or {}
+        return {"ok": True,
+                "invite": str(link.get("invite_link") or ""),
+                "name": str(link.get("name") or ""),
+                "expire_date": int(link.get("expire_date") or 0),
+                "member_limit": int(link.get("member_limit")
+                                    or 0),
+                "creates_join_request": bool(
+                    link.get("creates_join_request")),
+                "is_revoked": bool(link.get("is_revoked")),
+                "error": ""}
+
+    @staticmethod
+    def _invite_link_params(name: str, expire_date: int,
+                            member_limit: int,
+                            creates_join_request: bool
+                            ) -> dict[str, Any] | str:
+        """The optional createChatInviteLink/editChatInviteLink
+        fields, or the refusal string when the combination is
+        one the API itself forbids: a join-request link cannot
+        carry a member limit (each join is approved by hand)."""
+        if creates_join_request and member_limit:
+            return ("a join-request link cannot carry a member "
+                    "limit — each join is approved by hand")
+        params: dict[str, Any] = {}
+        if str(name or ""):
+            params["name"] = str(name)[:32]
+        if expire_date:
+            params["expire_date"] = int(expire_date)
+        if member_limit:
+            params["member_limit"] = int(member_limit)
+        if creates_join_request:
+            params["creates_join_request"] = True
+        return params
+
+    def admin_create_invite_link(self, chat: ChatRef, *,
+                                 name: str = "",
+                                 expire_date: int = 0,
+                                 member_limit: int = 0,
+                                 creates_join_request: bool = False
+                                 ) -> dict[str, Any]:
+        """createChatInviteLink: mint an ADDITIONAL invite link
+        for the chat (parity bundle #15) — beyond the primary
+        link admin_invite_link exports.  The additional link
+        can carry a name (≤32 chars), an expiry (unix
+        timestamp, 0 = never) and a member cap (0 = uncapped),
+        or be a join-request link admins approve one by one.
+        Only links the BOT created can be edited/revoked by
+        the bot afterwards."""
+        params = self._invite_link_params(
+            name, expire_date, member_limit, creates_join_request)
+        if isinstance(params, str):
+            return {"ok": False, "invite": "", "error": params}
+        return self._invite_link_shape(
+            self._admin("createChatInviteLink", chat, **params))
+
+    def admin_edit_invite_link(self, chat: ChatRef,
+                               invite_link: str, *,
+                               name: str = "",
+                               expire_date: int = 0,
+                               member_limit: int = 0,
+                               creates_join_request: bool = False
+                               ) -> dict[str, Any]:
+        """editChatInviteLink: retune one additional link the
+        bot created — only the fields passed change.  Editing
+        the PRIMARY link is refused by the API (it is not
+        bot-created); the refusal is the result."""
+        link = str(invite_link or "").strip()
+        if not link:
+            return {"ok": False, "invite": "",
+                    "error": "no invite link given to edit"}
+        params = self._invite_link_params(
+            name, expire_date, member_limit, creates_join_request)
+        if isinstance(params, str):
+            return {"ok": False, "invite": "", "error": params}
+        return self._invite_link_shape(self._admin(
+            "editChatInviteLink", chat, invite_link=link,
+            **params))
+
+    def admin_revoke_invite_link(self, chat: ChatRef,
+                                 invite_link: str
+                                 ) -> dict[str, Any]:
+        """revokeChatInviteLink: kill one invite link for good.
+        Telegram's own semantics: revoking the PRIMARY link
+        automatically mints its replacement, and the result
+        carries the link Telegram returns — the fresh primary
+        in that case, the revoked link itself otherwise."""
+        link = str(invite_link or "").strip()
+        if not link:
+            return {"ok": False, "invite": "",
+                    "error": "no invite link given to revoke"}
+        return self._invite_link_shape(self._admin(
+            "revokeChatInviteLink", chat, invite_link=link))
 
     def admin_invite_link(self, chat: ChatRef) -> dict[str, Any]:
         out = self._admin("exportChatInviteLink", chat)
