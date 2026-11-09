@@ -29,7 +29,8 @@ from .index import DocumentIndex
 from .model import Document, Section, Table, full_text, new_document
 from .ocr import (ocr_available, ocr_image, ocr_languages, ocr_pdf,
                   ocr_pdf_hocr, ocr_pdf_words)
-from .parsers import detect_format, parse_bytes, parse_path
+from .parsers import (artifact_body_text, detect_format, extract_text,
+                      parse_bytes, parse_path)
 from .pdf_tables import extract_text_tables, score_table
 from .summarize import (bullet_digest, keyphrases, keywords, summarize,
                         summarize_abstractive, summarize_query,
@@ -43,10 +44,12 @@ __all__ = [
     "Table",
     "DocumentError",
     "DocumentIndex",
+    "artifact_body_text",
     "bullet_digest",
     "compare_documents",
     "detect_format",
     "diff_documents",
+    "extract_text",
     "extract_text_tables",
     "full_text",
     "keyphrases",

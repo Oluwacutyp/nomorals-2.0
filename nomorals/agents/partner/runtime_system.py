@@ -837,9 +837,13 @@ class RuntimeSystemMixin:
 
         Same construction the missions runner uses: the context's database
         plus a BlobStore in a ``blobs`` directory beside the db file.
+        The documents engine's body-text extractor is wired in so the
+        store's content search indexes document-format bodies too
+        (the store is L2 and cannot import the engine itself).
         """
         from pathlib import Path
 
+        from ...documents import artifact_body_text
         from ...storage.artifacts import ArtifactStore
         from ...storage.blob import BlobStore
 
@@ -849,7 +853,8 @@ class RuntimeSystemMixin:
         db_path = getattr(db, "path", None)
         blob_dir = (Path(db_path).parent / "blobs" if db_path
                     else Path("data/blobs"))
-        return ArtifactStore(db, BlobStore(db, blob_dir))
+        return ArtifactStore(db, BlobStore(db, blob_dir),
+                             text_extractor=artifact_body_text)
 
     @staticmethod
     def _resolve_artifact(store: Any, ref: str) -> Any:
@@ -905,12 +910,102 @@ class RuntimeSystemMixin:
         base = Path(db_path).parent if db_path else Path("data")
         return base / "artifact_exports" / name
 
+    #: Send-time conversion formats for /artifact send … as <fmt>:
+    #: name → (extension, mime).  Aliases (md/txt) normalize to the
+    #: canonical name in _ARTIFACT_CONVERT_ALIASES.
+    _ARTIFACT_CONVERT_FORMATS = {
+        "markdown": (".md", "text/markdown"),
+        "text": (".txt", "text/plain"),
+        "html": (".html", "text/html"),
+        "pdf": (".pdf", "application/pdf"),
+        "json": (".json", "application/json"),
+        "csv": (".csv", "text/csv"),
+        "docx": (".docx", "application/vnd.openxmlformats-officedocument"
+                 ".wordprocessingml.document"),
+        "epub": (".epub", "application/epub+zip"),
+        "xlsx": (".xlsx", "application/vnd.openxmlformats-officedocument"
+                 ".spreadsheetml.sheet"),
+        "pptx": (".pptx", "application/vnd.openxmlformats-officedocument"
+                 ".presentationml.presentation"),
+    }
+    _ARTIFACT_CONVERT_ALIASES = {"md": "markdown", "txt": "text"}
+
+    def _artifact_convert(self, art: Any, data: bytes,
+                          fmt_raw: str) -> tuple[bytes, str, str]:
+        """Convert an artifact body through the documents engine.
+
+        Returns (converted bytes, canonical format, extension).  The
+        stored artifact is never touched — this is a derived send.
+        Raises ValueError with a user-facing message for an unknown
+        format, an unparseable body, or an engine refusal (e.g. csv
+        from a document with no table, docx without python-docx).
+        """
+        from ...documents import (
+            DocumentError,
+            parse_bytes,
+            to_csv,
+            to_docx,
+            to_epub,
+            to_html,
+            to_json,
+            to_markdown,
+            to_pdf,
+            to_pptx,
+            to_text,
+            to_xlsx,
+        )
+
+        fmt = self._ARTIFACT_CONVERT_ALIASES.get(fmt_raw, fmt_raw)
+        if fmt not in self._ARTIFACT_CONVERT_FORMATS:
+            supported = ", ".join(self._ARTIFACT_CONVERT_FORMATS)
+            raise ValueError(
+                f"unsupported format {fmt_raw!r} — supported: {supported} "
+                "(aliases: md, txt). Nothing was sent.")
+        filename = ""
+        for key in ("filename", "name", "title"):
+            value = (art.metadata or {}).get(key)
+            if isinstance(value, str) and value.strip():
+                filename = value.strip()
+                break
+        try:
+            doc = parse_bytes(data, filename=filename, mime=art.mime)
+        except DocumentError as exc:
+            raise ValueError(
+                f"couldn't convert artifact {art.id}: its body isn't a "
+                f"readable document ({exc}) — nothing was sent.") from exc
+        renderers = {
+            "markdown": lambda: to_markdown(doc).encode("utf-8"),
+            "text": lambda: to_text(doc).encode("utf-8"),
+            "html": lambda: to_html(doc).encode("utf-8"),
+            "pdf": lambda: to_pdf(doc),
+            "json": lambda: to_json(doc).encode("utf-8"),
+            "csv": lambda: to_csv(doc).encode("utf-8"),
+            "docx": lambda: to_docx(doc),
+            "epub": lambda: to_epub(doc),
+            "xlsx": lambda: to_xlsx(doc),
+            "pptx": lambda: to_pptx(doc),
+        }
+        try:
+            converted = renderers[fmt]()
+        except DocumentError as exc:
+            raise ValueError(
+                f"couldn't convert artifact {art.id} to {fmt}: {exc} "
+                "— nothing was sent.") from exc
+        ext = self._ARTIFACT_CONVERT_FORMATS[fmt][0]
+        return converted, fmt, ext
+
     def _control_artifact(self, tail: str, chat_key: str = "") -> str:
-        """Saved artifacts: list, inspect, or send one to this chat.
+        """Saved artifacts: list, inspect, search, send, or export.
 
         /artifact list                 — most recent artifacts + aliases
         /artifact info <ref>           — metadata card for one artifact
+        /artifact search <words>       — full-text search over bodies
         /artifact send <ref>           — send its file to the current chat
+        /artifact send <ref> as <fmt>  — send converted via the documents
+                                         engine (original unchanged)
+        /artifact export <ref>         — send a bundle of one artifact
+        /artifact export type:<t> | creator:<c> | mission:<id> | task:<id>
+                                       — send a bundle of a filtered set
 
         <ref> is an artifact id, an artifact:// (or artm://) URI, or an
         alias. Owner-only (the handle_control grant: /artifact is not a
@@ -955,9 +1050,93 @@ class RuntimeSystemMixin:
             if art is None:
                 return self._artifact_unknown(store, ref)
             return store.format_card(art)
-        if verb == "send":
+        if verb in ("search", "find"):
             if not ref:
-                return "usage: /artifact send <id|alias|artifact://uri>"
+                return "usage: /artifact search <words>"
+            hits = store.search_content(ref, limit=10)
+            stats = store.content_index_stats()
+            if not stats.get("available"):
+                census = ("content index unavailable on this database — "
+                          "body search is off, nothing was hidden.")
+            else:
+                kinds = ", ".join(
+                    f"{kind} ×{n}" for kind, n in
+                    sorted((stats.get("skipped_kinds") or {}).items()))
+                census = (f"content index: {stats['indexed']} indexed · "
+                          f"{stats['skipped']} skipped"
+                          + (f" ({kinds})" if kinds else "")
+                          + f" · {stats['superseded']} superseded")
+            if not hits:
+                return f"no artifact bodies match {ref!r}.\n{census}"
+            lines = [f"artifact bodies matching {ref!r}:"]
+            for hit in hits:
+                snippet = " ".join((hit.snippet or "").split())
+                lines.append(f"  {hit.artifact.id} · {hit.artifact.type}"
+                             f" · {snippet}")
+            lines.append(census)
+            return "\n".join(lines)
+        if verb == "export":
+            if not ref:
+                return ("usage: /artifact export <id|alias|uri> | "
+                        "export type:<type> | creator:<who> | "
+                        "mission:<id> | task:<id>")
+            facet_key, _, facet_value = ref.partition(":")
+            facet_fields = {"type": "type", "creator": "creator",
+                            "mission": "mission_id", "task": "task_id"}
+            if facet_key.lower() in facet_fields and facet_value.strip():
+                facet_value = facet_value.strip()
+                arts = store.search(
+                    **{facet_fields[facet_key.lower()]: facet_value},
+                    limit=500)
+                if not arts:
+                    return (f"no artifacts match "
+                            f"{facet_key.lower()}:{facet_value} — "
+                            "nothing to export.")
+                ids = [a.id for a in arts]
+                label = f"{facet_key.lower()}:{facet_value}"
+            else:
+                art = self._resolve_artifact(store, ref)
+                if art is None:
+                    return self._artifact_unknown(store, ref)
+                ids = [art.id]
+                label = art.id
+            import re
+            from pathlib import Path
+
+            db = getattr(self.context, "db", None)
+            db_path = getattr(db, "path", None)
+            base = Path(db_path).parent if db_path else Path("data")
+            safe_label = re.sub(r"[^A-Za-z0-9._-]+", "_", label)
+            dest = (base / "artifact_exports" /
+                    f"bundle-{safe_label}-{int(time.time())}.tar.gz")
+            try:
+                bundle = store.export_bundle(ids, dest)
+            except Exception as exc:  # noqa: BLE001 - honest failure
+                return (f"artifact export failed for {label}: {exc} "
+                        "— nothing was sent.")
+            chat = self._ref_from_key(chat_key)
+            outcome = self.context.tools.call(
+                "file_send", platform=chat.platform, chat_id=chat.chat_id,
+                path=str(bundle),
+                caption=(f"artifact bundle — {len(ids)} artifact(s) "
+                         f"({label})"))
+            if not outcome.ok:
+                return (f"artifact export failed ({label}): "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            # Unlike a plain send (whose file IS the whole answer),
+            # an export CREATES a new bundle file — the reply names
+            # what was made and how much it carries.
+            return (f"artifact bundle exported: {len(ids)} artifact(s) "
+                    f"({label}) — {bundle.name}")
+        if verb == "send":
+            tokens = ref.split()
+            fmt_raw = ""
+            if len(tokens) >= 3 and tokens[-2].lower() in ("as", "to"):
+                fmt_raw = tokens[-1].lower().lstrip(".")
+                ref = " ".join(tokens[:-2])
+            if not ref:
+                return ("usage: /artifact send <id|alias|artifact://uri> "
+                        "[as <format>]")
             art = self._resolve_artifact(store, ref)
             if art is None:
                 return self._artifact_unknown(store, ref)
@@ -967,21 +1146,39 @@ class RuntimeSystemMixin:
                 return (f"couldn't read artifact {art.id} "
                         f"({art.size} bytes): {exc} — nothing was sent.")
             path = self._artifact_export_path(store, art)
+            caption = f"artifact {art.id} ({art.type})"
+            converted_note = ""
+            if fmt_raw:
+                try:
+                    data, fmt_name, ext = self._artifact_convert(
+                        art, data, fmt_raw)
+                except ValueError as exc:
+                    return str(exc)
+                path = path.with_suffix(ext)
+                caption = (f"artifact {art.id} — converted to {fmt_name} "
+                           "(stored original unchanged)")
+                converted_note = (
+                    f"sent artifact {art.id} converted to {fmt_name} — "
+                    "the stored original is unchanged.")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
             chat = self._ref_from_key(chat_key)
             outcome = self.context.tools.call(
                 "file_send", platform=chat.platform, chat_id=chat.chat_id,
-                path=str(path), caption=f"artifact {art.id} ({art.type})")
+                path=str(path), caption=caption)
             if not outcome.ok:
-                return (f"artifact send failed ({art.size} bytes): "
+                return (f"artifact send failed ({len(data)} bytes): "
                         f"{getattr(outcome.error, 'message', outcome.error)}")
             # The artifact file IS the delivery — no "📎 sent …"
             # receipt beside it in the same chat (owner
-            # no-meta-narration rule, 2026-11-01).
-            return ""
+            # no-meta-narration rule, 2026-11-01).  A converted send
+            # is the one exception: the reply names the conversion,
+            # because the bytes delivered are NOT the stored bytes.
+            return converted_note
         return ("usage: /artifact list | info <id|alias|uri> | "
-                "send <id|alias|uri>")
+                "search <words> | send <id|alias|uri> [as <format>] | "
+                "export <id|alias|uri> | export type:<t> | creator:<c> | "
+                "mission:<id> | task:<id>")
 
     # ── api connectors: /api ─────────────────────────────────────────────────
     def _control_api(self, tail: str) -> str:

@@ -702,7 +702,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "look": (1, None),       # /look <path|url> [focus] — screen-reader analysis
     "schedule": (0, None),   # /schedule add|list|rm|enable|disable|run|status
     "db": (0, None),         # /db tables | schema <t> | query <sql> | counts
-    "artifact": (0, None),   # /artifact list | info <ref> | send <ref> — saved artifacts, sent to this chat
+    "artifact": (0, None),   # /artifact list | info <ref> | search <words> | send <ref> [as <fmt>] | export <ref|facet> — saved artifacts, sent to this chat
     "api": (0, None),        # /api list | <connector> [json params]
     "connectors": (0, 2),   # /connectors [list|status|connect] [name] — manage the service connectors
     "provision": (0, None),  # /provision [service] | login <service> <username> — Devon fetches missing API keys herself (owner only)
@@ -3311,9 +3311,9 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "db": {"what": "inspect the database: tables, schema, counts, or a query.",
            "usage": "/db tables | schema <t> | query <sql> | counts",
            "example": "/db counts", "related": ""},
-    "artifact": {"what": "saved artifacts — agent outputs kept in the artifact store: list them, inspect one, or send its actual file to this chat.",
-                 "usage": "/artifact list | info <id|alias|uri> | send <id|alias|uri>",
-                 "example": "/artifact send latest-report",
+    "artifact": {"what": "saved artifacts — agent outputs kept in the artifact store: list them, inspect one, full-text search their bodies, send one's actual file to this chat (optionally converted to another document format at send time — the stored original never changes), or export one or a filtered set as a bundle.",
+                 "usage": "/artifact list | info <id|alias|uri> | search <words> | send <id|alias|uri> [as <format>] | export <id|alias|uri> | export type:<t> | creator:<c> | mission:<id> | task:<id>",
+                 "example": "/artifact send latest-report as pdf",
                  "related": "/db /file"},
     "api": {"what": "external API connectors: weather, fx, github, …",
             "usage": "/api list | <connector> [json]", "example": "/api weather city=Lagos",
@@ -4953,7 +4953,7 @@ LIST_ONELINERS: dict[str, str] = {
     "lens": "reverse image search",
     "schedule": "cron-style in-process jobs",
     "db": "inspect the database (tables|schema|query|counts)",
-    "artifact": "saved artifacts: list, info, or send one to this chat",
+    "artifact": "saved artifacts: list, info, search bodies, send (or convert) one, export bundles",
     "api": "external API connectors (weather, fx, github, …)",
     "connectors": "manage the service connectors: list, status, connect",
     "shorts": "short-form content empire: make, queue, post vertical videos",

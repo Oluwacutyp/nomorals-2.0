@@ -17,6 +17,7 @@ content came from and what it was derived from, so the agent can distinguish
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -30,11 +31,145 @@ from ..core.ids import ulid_now
 from ..core.logging_setup import get_logger
 from ..core.style import active_theme, header, kv_lines
 from .failures import record_failure
+from .fts import FTSIndex
 
 _log = get_logger(__name__)
 
 ARTIFACT_URI_SCHEME = "artifact://"
 _URI_RE = re.compile(r"artifact://([A-Za-z0-9_-]+)")
+
+# ── content search (WS1 P4) ──────────────────────────────────────────────
+#
+# Artifact bodies are searchable through the repo's existing FTS organ
+# (storage/fts.py — the same FTS5 index memory and documents ride).
+# The index is DERIVED state over the artifacts table: rows are keyed
+# by the artifacts table's own rowid, maintained eagerly on put /
+# delete / supersede and reconciled lazily on every search (a store
+# instance with a stronger text extractor backfills bodies an earlier
+# instance could not read).  Text extraction is INJECTED: this layer
+# (L2) cannot import the documents engine (L4), so the store ships a
+# plain-text extractor and higher layers pass
+# ``nomorals.documents.artifact_body_text`` for document formats.
+
+CONTENT_FTS_TABLE = "artifacts_fts"
+CONTENT_FTS_COLUMNS = ("title", "body")
+
+#: Bodies larger than this are counted as skipped, never read for
+#: indexing (a search index is not a streaming reader).
+_MAX_INDEX_BODY_BYTES = 4_000_000
+#: Indexed text is capped per artifact; the tail of a huge text body
+#: is not searchable (the head, where titles/abstracts live, is).
+_MAX_INDEX_TEXT_CHARS = 1_000_000
+
+_PLAIN_TEXT_MIMES = {
+    "text/plain", "text/markdown", "text/x-markdown", "application/json",
+    "text/json", "text/csv", "text/tab-separated-values",
+    "application/xml", "text/xml",
+}
+_PLAIN_TEXT_EXTS = {
+    ".txt", ".md", ".markdown", ".json", ".csv", ".tsv", ".xml",
+    ".log", ".py", ".js", ".ts",
+}
+
+_FORMAT_BY_MIME = {
+    "application/pdf": "pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "application/vnd.ms-excel": "xls",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+    "application/rtf": "rtf", "text/rtf": "rtf",
+    "application/epub+zip": "epub",
+    "application/vnd.oasis.opendocument.text": "odt",
+    "application/vnd.oasis.opendocument.spreadsheet": "ods",
+    "text/html": "html",
+    "text/plain": "txt", "text/markdown": "markdown",
+    "text/x-markdown": "markdown",
+    "application/json": "json", "text/json": "json",
+    "application/xml": "xml", "text/xml": "xml",
+    "text/csv": "csv", "text/tab-separated-values": "tsv",
+}
+_FORMAT_BY_EXT = {
+    ".pdf": "pdf", ".docx": "docx", ".xlsx": "xlsx", ".xls": "xls",
+    ".pptx": "pptx", ".html": "html", ".htm": "html", ".md": "markdown",
+    ".markdown": "markdown", ".csv": "csv", ".tsv": "tsv",
+    ".txt": "txt", ".rtf": "rtf", ".epub": "epub", ".odt": "odt",
+    ".ods": "ods", ".json": "json", ".xml": "xml",
+}
+#: Formats whose bodies are plain text (decoded directly).
+_PLAIN_FORMATS = {"txt", "markdown", "json", "csv", "tsv", "xml"}
+#: Formats the documents engine extracts (never decodable raw).
+_DOCUMENT_FORMATS = {"pdf", "docx", "xlsx", "xls", "pptx", "html",
+                     "rtf", "epub", "odt", "ods"}
+#: Metadata keys that name an artifact's file (extension source) and
+#: its display title, in priority order.
+_FILENAME_KEYS = ("filename", "name", "title")
+_TITLE_KEYS = ("title", "name", "filename")
+
+
+def _plain_text_extractor(data: bytes, *, mime: str = "",
+                          filename: str = "") -> str | None:
+    """The store's built-in extractor: plain-text bodies only.
+
+    Document formats return None here — wire
+    ``nomorals.documents.artifact_body_text`` as the store's
+    ``text_extractor`` to index those too.  Unknown-typed bodies get
+    one honest attempt: clean UTF-8 with no NUL bytes is text.
+    """
+    if not data:
+        return None
+    ext = Path(filename).suffix.lower() if filename else ""
+    fmt = _FORMAT_BY_MIME.get((mime or "").strip().lower()) \
+        or _FORMAT_BY_EXT.get(ext)
+    if fmt in _DOCUMENT_FORMATS:
+        return None  # document formats need the documents engine
+    if (mime.startswith("text/") or mime in _PLAIN_TEXT_MIMES
+            or ext in _PLAIN_TEXT_EXTS or (not mime and not ext)):
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        if text.strip() and "\x00" not in text:
+            return text
+    return None
+
+
+def _declared_format(art: Artifact) -> str:
+    """The body's format key from its mime, else its filename's
+    extension, else "" (unknown)."""
+    fmt = _FORMAT_BY_MIME.get((art.mime or "").strip().lower())
+    if fmt:
+        return fmt
+    for key in _FILENAME_KEYS:
+        value = (art.metadata or {}).get(key)
+        if isinstance(value, str) and value.strip():
+            fmt = _FORMAT_BY_EXT.get(Path(value.strip()).suffix.lower())
+            if fmt:
+                return fmt
+    return ""
+
+
+def _body_kind(art: Artifact) -> tuple[str, str]:
+    """Classify a body for search accounting: (category, kind).
+
+    Category is ``plain`` (directly decodable text), ``document``
+    (needs the documents engine) or ``nontext``.  Kind is the name
+    the accounting reports — a format (``pdf``), a mime
+    (``image/png``), or the artifact type when nothing else is known.
+    """
+    fmt = _declared_format(art)
+    if fmt in _PLAIN_FORMATS:
+        return "plain", fmt
+    if fmt in _DOCUMENT_FORMATS:
+        return "document", fmt
+    if (art.mime or "").startswith("text/"):
+        return "plain", art.mime
+    if fmt:
+        return "nontext", fmt
+    if art.mime:
+        return "nontext", art.mime
+    if art.type in ("text", "json", "code", "report", "markdown"):
+        return "plain", art.type
+    return "nontext", art.type or "blob"
 
 
 def _emit_created(art: Artifact) -> None:
@@ -118,12 +253,31 @@ class Artifact:
         )
 
 
+@dataclass
+class ContentHit:
+    """One full-text search result over artifact bodies."""
+
+    artifact: Artifact
+    score: float                 # bm25, negated: higher is better
+    snippet: str = ""            # body window around the match
+
+
 class ArtifactStore:
     """Create, persist, and resolve artifacts on top of a BlobStore."""
 
-    def __init__(self, db: Any, blob_store: Any) -> None:
+    def __init__(self, db: Any, blob_store: Any, *,
+                 text_extractor: Any = None) -> None:
         self.db = db
         self.blobs = blob_store
+        # Body-text extraction for the content index: a callable
+        # ``(data, *, mime, filename) -> str | None``.  Defaults to
+        # plain-text bodies only; pass
+        # ``nomorals.documents.artifact_body_text`` to index document
+        # formats too (the documents engine is L4, this store is L2 —
+        # extraction is injected, never imported).
+        self.text_extractor = text_extractor or _plain_text_extractor
+        self._content_fts_cache: FTSIndex | None = None
+        self._content_fts_failed = False
 
     # ── writes ───────────────────────────────────────────────────────────────
     def put(self, data: bytes, *, type: str = "blob", creator: str = "",
@@ -153,6 +307,7 @@ class ArtifactStore:
              art.creator, art.mission_id, art.task_id, art.created_at,
              json.dumps(art.metadata), json.dumps(art.provenance.to_dict())),
         )
+        self._index_content(art, data)
         _emit_created(art)
         return art
 
@@ -174,6 +329,49 @@ class ArtifactStore:
         prov = prov or Provenance(source_type=source_type)
         prov.derived_from = list(dict.fromkeys([*prov.derived_from, *from_ids]))
         return self.put(data, provenance=prov, **kwargs)
+
+    def supersede(self, artifact_id: str, data: bytes, *,
+                  type: str = "", creator: str = "", mime: str = "",
+                  mission_id: str | None = None,
+                  task_id: str | None = None,
+                  metadata: dict[str, Any] | None = None,
+                  provenance: Provenance | dict[str, Any] | None = None,
+                  ) -> Artifact:
+        """Atomically replace ``artifact_id`` with a new version.
+
+        One operation: the new artifact is written carrying
+        ``supersedes=[artifact_id]`` (and ``derived_from`` — so
+        :meth:`lineage` and :meth:`superseded_by` both see the chain)
+        inside a single transaction, and the old body leaves the
+        content index in the same call, so full-text search surfaces
+        the new version only.  The old artifact itself is untouched —
+        its bytes and row stay readable; only its search presence and
+        its "current version" status change.  Type, mime, creator,
+        mission/task links and metadata default to the old artifact's
+        (explicit arguments and metadata keys win).
+        """
+        old = self.get(artifact_id)
+        if old is None:
+            raise KeyError(f"unknown artifact: {artifact_id}")
+        if isinstance(provenance, dict):
+            provenance = Provenance.from_dict(provenance)
+        prov = provenance or Provenance()
+        prov.supersedes = list(dict.fromkeys([*prov.supersedes, artifact_id]))
+        prov.derived_from = list(
+            dict.fromkeys([*prov.derived_from, artifact_id]))
+        merged_meta = dict(old.metadata)
+        merged_meta.update(metadata or {})
+        txn = (self.db.transaction() if hasattr(self.db, "transaction")
+               else contextlib.nullcontext())
+        with txn:
+            new = self.put(
+                data, type=type or old.type, creator=creator or old.creator,
+                mission_id=old.mission_id if mission_id is None else mission_id,
+                task_id=old.task_id if task_id is None else task_id,
+                mime=mime or old.mime, metadata=merged_meta,
+                provenance=prov)
+        self._deindex_content(artifact_id)
+        return new
 
     # ── reads ────────────────────────────────────────────────────────────────
     def get(self, artifact_id: str) -> Artifact | None:
@@ -361,6 +559,241 @@ class ArtifactStore:
             ]
         return out
 
+    # ── content search (full-text over bodies, WS1 P4) ─────────────────
+    def _content_fts(self) -> FTSIndex | None:
+        """The shared FTS organ over artifact bodies, lazily built.
+
+        None when the SQLite build lacks FTS5 or the db cannot carry
+        the index — search then degrades to no hits with the stats
+        saying so, never to an exception.
+        """
+        if self._content_fts_cache is None and not self._content_fts_failed:
+            try:
+                idx = FTSIndex(self.db, CONTENT_FTS_TABLE,
+                               columns=list(CONTENT_FTS_COLUMNS),
+                               auto_create=True)
+                if idx.available:
+                    self._content_fts_cache = idx
+                else:
+                    self._content_fts_failed = True
+            except Exception as exc:  # noqa: BLE001 - index is derived state
+                record_failure("artifacts.ArtifactStore._content_fts", exc)
+                self._content_fts_failed = True
+        return self._content_fts_cache
+
+    def _rowid_of(self, artifact_id: str) -> int | None:
+        """The artifacts table's rowid for ``artifact_id`` — the key
+        the FTS index rows carry (the store's ids are ULIDs; FTS5
+        rowids are integers)."""
+        try:
+            row = self.db.query_one(
+                "SELECT rowid AS rid FROM artifacts WHERE id = ?",
+                (artifact_id,))
+        except Exception as exc:  # noqa: BLE001 - derived state only
+            record_failure("artifacts.ArtifactStore._rowid_of", exc)
+            return None
+        if row is None or row.get("rid") is None:
+            return None
+        return int(row["rid"])
+
+    @staticmethod
+    def _content_title(art: Artifact) -> str:
+        for key in _TITLE_KEYS:
+            value = (art.metadata or {}).get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return art.type
+
+    def _extract_content_text(self, art: Artifact,
+                              data: bytes | None = None) -> str | None:
+        """Searchable text for ``art``'s body via the injected
+        extractor; None when the body is not text-bearing (binary,
+        oversized, unparseable) — the accounting names those by kind.
+        """
+        if art.size > _MAX_INDEX_BODY_BYTES:
+            return None
+        if data is None:
+            try:
+                data = self.blobs.get_bytes(art.content_hash)
+            except Exception as exc:  # noqa: BLE001 - missing blob: skip
+                record_failure(
+                    "artifacts.ArtifactStore._extract_content_text", exc)
+                return None
+        filename = ""
+        for key in _FILENAME_KEYS:
+            value = (art.metadata or {}).get(key)
+            if isinstance(value, str) and value.strip():
+                filename = value.strip()
+                break
+        try:
+            text = self.text_extractor(data, mime=art.mime,
+                                       filename=filename)
+        except Exception as exc:  # noqa: BLE001 - extractor must not break writes
+            record_failure(
+                "artifacts.ArtifactStore._extract_content_text", exc)
+            return None
+        if not text:
+            return None
+        text = text.strip()
+        return text[:_MAX_INDEX_TEXT_CHARS] if text else None
+
+    def _index_content(self, art: Artifact,
+                       data: bytes | None = None) -> bool:
+        """Index ``art``'s body text (replacing any prior entry).
+        Returns True when the body is now searchable.  Best-effort:
+        the content index is derived state and never fails a write.
+        """
+        fts = self._content_fts()
+        if fts is None:
+            return False
+        rid = self._rowid_of(art.id)
+        if rid is None:
+            return False
+        try:
+            text = self._extract_content_text(art, data)
+            if text:
+                fts.put(rid, [self._content_title(art), text])
+                return True
+            fts.delete(rid)
+        except Exception as exc:  # noqa: BLE001 - derived state only
+            record_failure("artifacts.ArtifactStore._index_content", exc)
+        return False
+
+    def _deindex_content(self, artifact_id: str) -> None:
+        """Remove ``artifact_id``'s body from the content index."""
+        fts = self._content_fts()
+        if fts is None:
+            return
+        rid = self._rowid_of(artifact_id)
+        if rid is None:
+            return
+        try:
+            fts.delete(rid)
+        except Exception as exc:  # noqa: BLE001 - derived state only
+            record_failure("artifacts.ArtifactStore._deindex_content", exc)
+
+    def _superseded_ids(self) -> set[str]:
+        """Every artifact id named in some artifact's
+        ``provenance.supersedes`` — the replaced versions."""
+        ids: set[str] = set()
+        for row in self.db.query("SELECT provenance FROM artifacts"):
+            try:
+                prov = json.loads(row.get("provenance") or "{}")
+            except (TypeError, ValueError):
+                continue
+            if isinstance(prov, dict):
+                for old_id in prov.get("supersedes") or []:
+                    if isinstance(old_id, str) and old_id:
+                        ids.add(old_id)
+        return ids
+
+    def _sync_content_index(self) -> dict[str, Any]:
+        """Reconcile the content index with the artifacts table and
+        report the accounting.
+
+        Prunes index rows whose artifact is gone or superseded,
+        backfills live artifacts an earlier store instance could not
+        index (e.g. written before a documents-backed extractor was
+        wired).  The returned dict is the honest census:
+        ``total == indexed + skipped + superseded`` — every body is
+        accounted for, and skipped bodies are named by kind.
+        """
+        rows = self.db.query("SELECT rowid AS rid, id FROM artifacts")
+        superseded = self._superseded_ids()
+        live = {int(r["rid"]): r["id"] for r in rows
+                if r["id"] not in superseded}
+        stats: dict[str, Any] = {
+            "available": False, "total": len(rows), "indexed": 0,
+            "superseded": len([r for r in rows
+                               if r["id"] in superseded]),
+            "skipped": 0, "skipped_kinds": {},
+        }
+        fts = self._content_fts()
+        if fts is None:
+            for art_id in live.values():
+                art = self.get(art_id)
+                if art is not None:
+                    _cat, kind = _body_kind(art)
+                    kinds = stats["skipped_kinds"]
+                    kinds[kind] = kinds.get(kind, 0) + 1
+            stats["skipped"] = sum(stats["skipped_kinds"].values())
+            return stats
+        stats["available"] = True
+        try:
+            indexed_rids = {
+                int(r["rowid"]) for r in self.db.query(
+                    f'SELECT rowid FROM "{CONTENT_FTS_TABLE}"')}
+        except Exception as exc:  # noqa: BLE001 - treat as empty index
+            record_failure("artifacts.ArtifactStore._sync_content_index",
+                           exc)
+            indexed_rids = set()
+        for rid in indexed_rids - set(live):
+            try:
+                fts.delete(rid)
+            except Exception as exc:  # noqa: BLE001 - derived state only
+                record_failure(
+                    "artifacts.ArtifactStore._sync_content_index", exc)
+        indexed_rids &= set(live)
+        for rid, art_id in live.items():
+            if rid in indexed_rids:
+                continue
+            art = self.get(art_id)
+            if art is not None and self._index_content(art):
+                indexed_rids.add(rid)
+        stats["indexed"] = len(indexed_rids)
+        for rid, art_id in live.items():
+            if rid in indexed_rids:
+                continue
+            art = self.get(art_id)
+            if art is None:
+                continue
+            _cat, kind = _body_kind(art)
+            kinds = stats["skipped_kinds"]
+            kinds[kind] = kinds.get(kind, 0) + 1
+        stats["skipped"] = sum(stats["skipped_kinds"].values())
+        return stats
+
+    def search_content(self, query: str, *,
+                       limit: int = 20) -> list[ContentHit]:
+        """Full-text search over artifact BODIES (bm25-ranked).
+
+        Facet :meth:`search` finds artifacts by what they are; this
+        finds them by what they SAY.  The index is reconciled first,
+        so results reflect the store as it stands now: superseded
+        versions never match (their replacements do), deleted bodies
+        never match, and bodies written by other store instances are
+        backfilled on the way in.
+        """
+        if not (query or "").strip():
+            return []
+        self._sync_content_index()
+        fts = self._content_fts()
+        if fts is None:
+            return []
+        hits = fts.search(query, limit=max(1, limit),
+                          snippet_column="body",
+                          weights={"title": 2.0, "body": 1.0})
+        if not hits:
+            return []
+        id_by_rowid = {
+            int(r["rid"]): r["id"] for r in self.db.query(
+                "SELECT rowid AS rid, id FROM artifacts")}
+        out: list[ContentHit] = []
+        for hit in hits:
+            art_id = id_by_rowid.get(hit.rowid)
+            art = self.get(art_id) if art_id else None
+            if art is not None:
+                out.append(ContentHit(artifact=art, score=hit.score,
+                                      snippet=hit.snippet))
+        return out
+
+    def content_index_stats(self) -> dict[str, Any]:
+        """The content index's census (see :meth:`_sync_content_index`):
+        how many bodies are searchable, how many are superseded, and
+        how many are skipped — named by kind, never silently absent.
+        """
+        return self._sync_content_index()
+
     # ── tags ───────────────────────────────────────────────────────────────
     def tag(self, artifact_id: str, key: str, value: Any) -> bool:
         """Set a metadata tag on an artifact (MLflow tags)."""
@@ -373,6 +806,9 @@ class ArtifactStore:
             "UPDATE artifacts SET metadata = ? WHERE id = ?",
             (json.dumps(meta), artifact_id),
         )
+        if key in _TITLE_KEYS and not self.superseded_by(artifact_id):
+            art.metadata = meta
+            self._index_content(art)  # the indexed title follows the tag
         return True
 
     def untag(self, artifact_id: str, key: str) -> bool:
@@ -385,6 +821,9 @@ class ArtifactStore:
             "UPDATE artifacts SET metadata = ? WHERE id = ?",
             (json.dumps(meta), artifact_id),
         )
+        if key in _TITLE_KEYS and not self.superseded_by(artifact_id):
+            art.metadata = meta
+            self._index_content(art)
         return True
 
     # ── delete ─────────────────────────────────────────────────────────────
@@ -397,7 +836,9 @@ class ArtifactStore:
         art = self.get(artifact_id)
         if art is None:
             return False
+        self._deindex_content(artifact_id)  # rowid dies with the row
         self.db.execute("DELETE FROM artifacts WHERE id = ?", (artifact_id,))
+        self._ensure_alias_table()
         self.db.execute(
             "DELETE FROM artifact_aliases WHERE artifact_id = ?", (artifact_id,)
         )

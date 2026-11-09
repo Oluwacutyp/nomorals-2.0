@@ -27,10 +27,11 @@ from ..core.logging_setup import get_logger
 from ..core.pdf import PdfError, read_pdf_text
 from ..tools.browser import node_to_markdown, parse_html
 from .errors import DocumentError
-from .model import Document, Section, Table, new_document
+from .model import Document, Section, Table, full_text, new_document
 from .pdf_tables import extract_text_tables
 
-__all__ = ["detect_format", "parse_bytes", "parse_path"]
+__all__ = ["artifact_body_text", "detect_format", "extract_text",
+           "parse_bytes", "parse_path"]
 
 _log = get_logger(__name__)
 
@@ -1655,6 +1656,55 @@ def parse_bytes(data: bytes, *, filename: str = "", mime: str = "") -> Document:
         "source": doc.source,
     })
     return doc
+
+
+def extract_text(data: bytes, *, filename: str = "",
+                 mime: str = "") -> str:
+    """Parse ``data`` with the engine and return its full text.
+
+    The text-extraction face of :func:`parse_bytes`: sections and
+    tables flattened by :func:`nomorals.documents.model.full_text`.
+    Raises :class:`DocumentError` on unknown or unparseable input.
+    """
+    return full_text(parse_bytes(data, filename=filename, mime=mime))
+
+
+#: Extensions whose bodies are plain text: decoding them directly is
+#: the honest extraction (the engine would produce the same words,
+#: wrapped in its section model for no gain).
+_PLAIN_TEXT_EXTENSIONS = {".txt", ".md", ".markdown", ".json"}
+
+
+def artifact_body_text(data: bytes, *, mime: str = "",
+                       filename: str = "") -> str | None:
+    """ArtifactStore text-extractor protocol, documents-backed.
+
+    Returns the searchable text of an artifact body, or ``None`` when
+    the body carries no text this engine can extract (binary formats,
+    corrupt documents, empty parses) — never raises, so an indexing
+    caller can count the body as skipped instead of failing the write
+    that produced it.  Plain-text bodies are decoded directly;
+    document formats (pdf/docx/xlsx/pptx/html/epub/odt/rtf/…) go
+    through :func:`extract_text`.
+    """
+    if not data:
+        return None
+    ext = Path(filename).suffix.lower() if filename else ""
+    if (mime in ("text/plain", "text/markdown", "text/x-markdown",
+                 "application/json", "text/json")
+            or ext in _PLAIN_TEXT_EXTENSIONS):
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = ""
+        if text.strip() and "\x00" not in text:
+            return text
+        return None
+    try:
+        text = extract_text(data, filename=filename, mime=mime)
+    except Exception:  # noqa: BLE001 - extraction is best-effort by contract
+        return None
+    return text if text.strip() else None
 
 
 def parse_path(path: str | Path) -> Document:
