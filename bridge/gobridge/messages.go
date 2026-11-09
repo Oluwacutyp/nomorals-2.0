@@ -292,6 +292,7 @@ func contextInfoOf(m *waE2E.Message) *waE2E.ContextInfo {
 		m.GetExtendedTextMessage().GetContextInfo(),
 		m.GetImageMessage().GetContextInfo(),
 		m.GetVideoMessage().GetContextInfo(),
+		m.GetPtvMessage().GetContextInfo(),
 		m.GetAudioMessage().GetContextInfo(),
 		m.GetDocumentMessage().GetContextInfo(),
 		m.GetStickerMessage().GetContextInfo(),
@@ -320,6 +321,15 @@ func mediaKindOf(m *waE2E.Message) string {
 		return "image"
 	case m.GetVideoMessage() != nil:
 		return "video"
+	case m.GetPtvMessage() != nil:
+		// A video note arrives as PtvMessage — a VideoMessage
+		// in its own field, NOT in VideoMessage — so without
+		// this case it classified as kind "" on arrival while
+		// the send side has called the same form "video_note"
+		// since bundle #10 (census re-grade gap, 2026-11-09).
+		// The PTV field is the discriminator: an ordinary
+		// video (VideoMessage set) still reads "video".
+		return "video_note"
 	case m.GetAudioMessage() != nil:
 		if m.GetAudioMessage().GetPTT() {
 			return "voice"
@@ -410,6 +420,8 @@ func mediaPartsOf(msg *waE2E.Message) (kind string,
 		dl, mime = msg.GetImageMessage(), msg.GetImageMessage().GetMimetype()
 	case "video":
 		dl, mime = msg.GetVideoMessage(), msg.GetVideoMessage().GetMimetype()
+	case "video_note":
+		dl, mime = msg.GetPtvMessage(), msg.GetPtvMessage().GetMimetype()
 	case "voice", "audio":
 		dl, mime = msg.GetAudioMessage(), msg.GetAudioMessage().GetMimetype()
 	case "file":
@@ -429,7 +441,7 @@ func mediaExtFor(kind, fileName string) string {
 		return strings.ToLower(fileName[idx:])
 	}
 	ext := map[string]string{
-		"image": ".jpg", "video": ".mp4", "voice": ".ogg",
+		"image": ".jpg", "video": ".mp4", "video_note": ".mp4", "voice": ".ogg",
 		"audio": ".ogg", "sticker": ".webp",
 	}[kind]
 	if ext == "" {

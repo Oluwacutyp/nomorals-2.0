@@ -164,6 +164,8 @@ class PartnerBrain:
                 continue
             elif media.kind == "video":
                 notes.append(f"video: {media.name or media.path}")
+            elif media.kind == "video_note":
+                notes.append(f"video note: {media.name or media.path}")
             elif media.kind == "audio" or media.kind == "voice" or media.mime.startswith("audio/"):
                 # Music voice note (non-owner path — the owner got the
                 # Find/Create ask in the runtime instead and never

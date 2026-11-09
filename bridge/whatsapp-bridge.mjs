@@ -765,6 +765,7 @@ function contextInfoOf(m) {
   return msg.extendedTextMessage?.contextInfo
     || msg.imageMessage?.contextInfo
     || msg.videoMessage?.contextInfo
+    || msg.ptvMessage?.contextInfo
     || msg.audioMessage?.contextInfo
     || msg.documentMessage?.contextInfo
     || msg.stickerMessage?.contextInfo
@@ -800,6 +801,7 @@ async function quotedPayload(m) {
   const kind = mediaKindOf({ message: quoted });
   if (kind) {
     const inner = quoted.imageMessage || quoted.videoMessage
+      || quoted.ptvMessage
       || quoted.audioMessage || quoted.documentMessage
       || quoted.stickerMessage || {};
     const mime = inner.mimetype || 'application/octet-stream';
@@ -814,7 +816,7 @@ async function quotedPayload(m) {
       return out;
     }
     try {
-      const dlType = { image: 'image', video: 'video', voice: 'audio',
+      const dlType = { image: 'image', video: 'video', video_note: 'video', voice: 'audio',
         audio: 'audio', file: 'document', sticker: 'sticker' }[kind];
       const stream = await downloadContentFromMessage(inner, dlType);
       const chunks = [];
@@ -849,6 +851,13 @@ function mediaKindOf(m) {
   const msg = m.message || {};
   if (msg.imageMessage) return 'image';
   if (msg.videoMessage) return 'video';
+  // A video note arrives as ptvMessage — a VideoMessage under
+  // its own key, NOT videoMessage — so without this line it
+  // classified as kind '' on arrival while the send side has
+  // called the same form 'video_note' since bundle #10
+  // (census re-grade gap, 2026-11-09). The ptvMessage key is
+  // the discriminator: an ordinary video still reads 'video'.
+  if (msg.ptvMessage) return 'video_note';
   if (msg.audioMessage) return msg.audioMessage.ptt ? 'voice' : 'audio';
   if (msg.documentMessage) return 'file';
   if (msg.stickerMessage) return 'sticker';
@@ -919,7 +928,7 @@ function mediaCacheName(idStr, ext) {
 function mediaExtFor(kind, inner) {
   return inner.fileName?.includes('.')
     ? '.' + inner.fileName.split('.').pop().toLowerCase()
-    : ({ image: '.jpg', video: '.mp4', voice: '.ogg', audio: '.ogg', sticker: '.webp' }[kind] || '.bin');
+    : ({ image: '.jpg', video: '.mp4', video_note: '.mp4', voice: '.ogg', audio: '.ogg', sticker: '.webp' }[kind] || '.bin');
 }
 
 function cachedMediaRow(name, mime, kind) {
@@ -955,6 +964,7 @@ async function downloadInbound(m) {
   const kind = mediaKindOf(m);
   if (!kind) return null;
   const inner = m.message?.imageMessage || m.message?.videoMessage
+    || m.message?.ptvMessage
     || m.message?.audioMessage || m.message?.documentMessage
     || m.message?.stickerMessage || {};
   const mime = inner.mimetype || 'application/octet-stream';
