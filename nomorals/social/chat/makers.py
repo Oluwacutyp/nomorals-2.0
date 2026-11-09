@@ -191,13 +191,24 @@ _PAD = 40
 
 
 def _font(size: int, *, bold: bool = False):
-    """The card font ladder: DejaVu / Noto / Liberation on
-    Linux, Arial on Windows (the EC2 host), Pillow's bundled
-    default last — a card must render on every profile."""
+    """Card faces come from the typography service (semantic
+    selection over the parsed catalogue); the legacy ladder —
+    DejaVu / Noto / Liberation on Linux, Arial on Windows (the
+    EC2 host), Pillow's bundled default last — remains the
+    fallback when the service has no face, so a card renders on
+    every profile."""
     import os
 
     from PIL import ImageFont
 
+    try:
+        from ...media.typography import get_service
+        picked = get_service().pil_font(
+            "text", size, weight=700 if bold else 400)
+    except Exception:  # noqa: BLE001 - legacy ladder below
+        picked = None
+    if picked is not None:
+        return picked
     names = (("DejaVuSans-Bold.ttf", "NotoSans-Bold.ttf",
               "LiberationSans-Bold.ttf", "arialbd.ttf")
              if bold else

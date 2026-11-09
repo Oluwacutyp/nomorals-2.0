@@ -84,6 +84,13 @@ def needs_image_render(text: str) -> bool:
 
 def _font() -> Any:
     from PIL import ImageFont
+    try:
+        from ...media.typography import get_service
+        picked = get_service().pil_font("mono", _FONT_SIZE)
+    except Exception:  # noqa: BLE001 - legacy ladder below
+        picked = None
+    if picked is not None:
+        return picked
     for candidate in ("DejaVuSansMono.ttf", "DejaVuSans.ttf"):
         try:
             return ImageFont.truetype(candidate, _FONT_SIZE)

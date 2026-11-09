@@ -184,10 +184,18 @@ def _seed_for(spec: dict[str, Any]) -> int:
 
 
 def _font(size: int):  # type: ignore[no-untyped-def]
-    """A bold font at ``size``: DejaVu where the host carries
-    it (Linux), the Windows staples on EC2, else Pillow's own
-    sized default — letter art never depends on one host."""
+    """A bold font at ``size`` from the typography service;
+    DejaVu where the host carries it (Linux), the Windows
+    staples on EC2, else Pillow's own sized default — letter
+    art never depends on one host."""
     _Image, _Draw, ImageFont = _pil()
+    try:
+        from ...media.typography import get_service
+        picked = get_service().pil_font("display", size, weight=700)
+    except Exception:  # noqa: BLE001 - legacy ladder below
+        picked = None
+    if picked is not None:
+        return picked
     candidates = (
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "C:/Windows/Fonts/arialbd.ttf",

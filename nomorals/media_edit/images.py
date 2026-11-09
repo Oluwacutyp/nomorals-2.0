@@ -338,6 +338,13 @@ def op_thumbnail(img: Any, size: int = 256) -> Any:
 
 def _load_font(size: int) -> Any:
     from PIL import ImageFont
+    try:
+        from ..media.typography import get_service
+        picked = get_service().pil_font("display", size, weight=700)
+    except Exception:  # noqa: BLE001 - legacy ladder below
+        picked = None
+    if picked is not None:
+        return picked
     candidates = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",

@@ -71,8 +71,21 @@ def composite_text(image: Any, layers: list[TextComposite] | TextComposite) -> A
     w, h = out.size
     for layer in layers:
         try:
-            font = (ImageFont.truetype(layer.font_path, layer.size)
-                    if layer.font_path else ImageFont.load_default(size=layer.size))
+            if layer.font_path:
+                font = ImageFont.truetype(layer.font_path, layer.size)
+            else:
+                # No explicit face: the typography service picks
+                # one that covers the layer's own text; PIL's
+                # bitmap default remains the last resort.
+                font = None
+                try:
+                    from ..typography import get_service
+                    font = get_service().pil_font(
+                        "text", layer.size, text=layer.text)
+                except Exception:  # noqa: BLE001 - default below
+                    font = None
+                if font is None:
+                    font = ImageFont.load_default(size=layer.size)
         except Exception as _exc:
             _log.debug("typography.composite_text failed", exc_info=True)
             font = ImageFont.load_default()

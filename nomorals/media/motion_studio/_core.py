@@ -200,10 +200,31 @@ _FONT_CANDIDATES = (
 
 
 def find_font(size: int, name: str = "") -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    """Resolve a truetype font; falls back through candidates, then PIL default."""
+    """Resolve a truetype font; falls back through candidates, then PIL default.
+
+    Resolution runs through the typography service first (named
+    faces via the parsed catalogue, unnamed via display intent);
+    the legacy candidate ladder remains the fallback."""
     key = (name or "", size)
     if key in _FONT_CACHE:
         return _FONT_CACHE[key]
+    _require_pil()
+    try:
+        from ..typography import get_service, load_font
+        service = get_service()
+        if name:
+            hits = service.catalogue().search(name)
+            if hits:
+                font = load_font(hits[0].path, size, hits[0].face_index)
+                _FONT_CACHE[key] = font
+                return font
+        else:
+            picked = service.pil_font("display", size, weight=700)
+            if picked is not None:
+                _FONT_CACHE[key] = picked
+                return picked
+    except Exception:  # noqa: BLE001 - legacy ladder below
+        pass
     candidates = ([name] if name else []) + list(_FONT_CANDIDATES)
     _require_pil()
     for cand in candidates:

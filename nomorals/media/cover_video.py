@@ -134,6 +134,13 @@ def _embedded_artwork(audio_path: str, out_png: Path,
 def _font(px: int):
     from PIL import ImageFont
 
+    try:
+        from .typography import get_service
+        picked = get_service().pil_font("display", px, weight=700)
+    except Exception:  # noqa: BLE001 - legacy ladder below
+        picked = None
+    if picked is not None:
+        return picked
     for candidate in _FONT_CANDIDATES:
         if os.path.isfile(candidate):
             try:

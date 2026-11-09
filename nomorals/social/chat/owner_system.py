@@ -456,12 +456,18 @@ def apply_media_watermark(data: bytes, text: str
     label = str(text).strip()
     font_size = max(11, min(28, width // 42))
     font = None
-    for candidate in ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf"):
-        try:
-            font = ImageFont.truetype(candidate, font_size)
-            break
-        except (OSError, IOError):
-            continue
+    try:
+        from ...media.typography import get_service
+        font = get_service().pil_font("caption", font_size, text=label)
+    except Exception:  # noqa: BLE001 - legacy ladder below
+        font = None
+    if font is None:
+        for candidate in ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf"):
+            try:
+                font = ImageFont.truetype(candidate, font_size)
+                break
+            except (OSError, IOError):
+                continue
     if font is None:
         font = ImageFont.load_default()
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))

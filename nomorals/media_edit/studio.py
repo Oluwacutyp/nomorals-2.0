@@ -102,7 +102,11 @@ def discover_fonts(*, refresh: bool = False) -> dict[str, str]:
 
 
 def find_font(query: str | None, size: int) -> Any:
-    """Resolve a font by name (fuzzy), path, or fall back to DejaVu/default."""
+    """Resolve a font by name (fuzzy), path, or fall back to DejaVu/default.
+
+    Name resolution runs through the typography service's parsed
+    catalogue first (real family names, not filename guesses);
+    the legacy filename walk remains the fallback."""
     from PIL import ImageFont
     if query:
         q = query.strip()
@@ -111,6 +115,13 @@ def find_font(query: str | None, size: int) -> Any:
                 return ImageFont.truetype(q, size)
             except OSError:  # noqa: E103 - falls through to font discovery
                 pass
+        try:
+            from ..media.typography import get_service, load_font
+            hits = get_service().catalogue().search(q)
+            if hits:
+                return load_font(hits[0].path, size, hits[0].face_index)
+        except Exception:  # noqa: BLE001 - legacy discovery below
+            pass
         fonts = discover_fonts()
         ql = q.lower()
         # exact → startswith → contains
