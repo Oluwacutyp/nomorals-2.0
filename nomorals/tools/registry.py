@@ -615,10 +615,11 @@ class ToolRegistry:
             from ..media import distribute as _distribute
             from ..media import musicgen_chain as _musicgen_chain
             from ..media import global_rhythm as _global_rhythm
+            from ..media.explore import tool as _explore_tool
 
             for _mod in (_music, _playback, _library, _video,
                          _ace_step, _vocals, _distribute,
-                         _musicgen_chain, _global_rhythm):
+                         _musicgen_chain, _global_rhythm, _explore_tool):
                 try:
                     _mod.register(self)
                 except Exception as exc:  # noqa: BLE001 — module-level opt-out

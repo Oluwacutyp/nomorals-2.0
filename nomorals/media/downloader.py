@@ -655,6 +655,23 @@ class MediaDownloader:
         except Exception as e:  # intake never breaks downloads
             record_failure("_intake_candidate", e)
 
+    def _intake_exploration(self, report: DownloadReport) -> None:
+        """Exploration intake (WS4 P1): a video the owner actually
+        landed notes its channel/title topics into the ExploreStore
+        as UNPROMOTED watching candidates — his own consumption is a
+        seed signal for the exploration loop, the content analogue
+        of :meth:`_intake_candidate`.  Best-effort bookkeeping: it
+        never turns a real download outcome into a different one."""
+        try:
+            from .explore import explore_for_context, note_owner_activity
+            store, _engine, _beats = explore_for_context(self.context)
+            note_owner_activity(
+                store, title=report.title or "",
+                url=report.resolved_url or report.url or "",
+                via="download")
+        except Exception as e:  # intake never breaks downloads
+            record_failure("_intake_exploration", e)
+
     # ── rule learning (Pass #87) ──────────────────────────────────
 
     #: Stage → the registry's extraction-rule vocabulary, for the
@@ -815,6 +832,7 @@ class MediaDownloader:
         self._record_download_outcome(
             report, ok=True, latency_s=time.perf_counter() - started)
         self._learn_from_success(report, format_facts)
+        self._intake_exploration(report)
         try:
             if report.ok and report.path:
                 digest = _sha256_of(Path(report.path))
