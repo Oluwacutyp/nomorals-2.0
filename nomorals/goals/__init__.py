@@ -2698,3 +2698,18 @@ class IdeaTracker:
             "scored": scored["n"] if scored else 0,
             "avg_ice": round(float(scored["avg_ice"]), 2) if scored else 0.0,
         }
+
+
+# ── WS2 P3: measured-progress providers ───────────────────────────────
+# The finance + trading class providers register when the goals
+# package loads — the module-end registration pattern (cf. the brain
+# `goal` tool registered at the end of agents/goals.py).  This is the
+# one wiring point every GoalTracker entry point shares (partner
+# runtime, `nm goals` CLI, morning briefing), so a provider can never
+# be test-only shelfware: import the package and the registry holds
+# them.  Imported at the bottom so providers can rely on the class
+# registry without a cycle (providers imports goals.classes +
+# finance.*, never this module at runtime).
+from . import providers as _providers  # noqa: E402
+
+_providers.register_providers()
