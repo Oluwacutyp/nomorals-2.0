@@ -556,6 +556,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "vv": (0, None),           # /vv — short form of /viewonce
     "poststatus": (0, None),   # /poststatus [text] — post a status as the owner
     "chanstory": (1, None),    # /chanstory <channel> [text] — post to a channel as the owner
+    "channeltexts": (1, None), # /channeltexts <channel> [options] — a channel's stored texts as a file
     "joinlink": (1, None),     # /joinlink <link or code> — join a WhatsApp group via its invite link
     "newgroup": (1, None),     # /newgroup <title> — create a Telegram group as the owner
     "newchannel": (1, None),   # /newchannel <title> — create a Telegram channel as the owner
@@ -2742,6 +2743,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/chanstory channel [text] · send a photo/video with /chanstory channel [caption] as its caption · reply to a photo/video with /chanstory channel [caption] — the channel as its link, JID, invite code or name on WhatsApp, its @name or id on Telegram",
               "example": "/chanstory Gold Signals building while others flex",
               "related": "/poststatus · /pair saved · /pair"},
+    "channeltexts": {"what": "pull one channel's stored texts as a FILE (owner ask, 2026-11-08): the export lands in the chat as a document — channel name, timestamps, senders, full texts, media posts as entries with their captions — and the reply carries only the coverage summary (how many posts, the span they cover, the honest limits). WhatsApp texts come from the personal vault's saved channel posts (the sweep's saves, under status_saving); Telegram texts from the vault's brain-isolated channel archive, which keeps posts from when it began — earlier Telegram posts were noted and dropped by the channel posture, and the file's header says so rather than reading as a quiet channel. Your own posted texts are in the pull too, marked as yours. Resolution spans both platforms and never guesses between two channels with the same name: prefix wa: or tg: to pick one. Owner only.",
+              "usage": "/channeltexts channel [--days N] [--since DATE] [--until DATE] [--limit N] [--format txt|md|csv] [--pull [N]] — the channel by name, its WhatsApp JID/link or its Telegram @name/id; --pull backfills a Telegram channel's archive from the userbot's history first",
+              "example": "/channeltexts Gold Signals --days 7",
+              "related": "/chanstory · /pair saved · /pair journal"},
     "joinlink": {"what": "join a WhatsApp group through its invite link, as you, from a personal surface: the bridge resolves the link first, so a dead link fails before any join attempt — a revoked link and a malformed one answer as the different facts they are. If the group files joins for admin approval, the reply says the request is in — it never claims you are a member before you are; the already-in case answers as itself and takes no action at all. A landed join (or filed request) lands in the personal journal like every act taken as you. Owner only; your standing stop halts it.",
               "usage": "/joinlink chat.whatsapp.com link or its code",
               "example": "/joinlink https://chat.whatsapp.com/AbC123xYz",
@@ -3209,7 +3214,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/provision [service] | /provision login <service> <username>",
             "example": "/provision hf",
             "related": "/connectors /browser watch"},
-    "pair": {"what": "pairing-with-code account pool (§15): pair your own WhatsApp accounts into Devon with an 8-character code — no QR — and Telegram accounts by phone + login code, all in one registry. Each account gets its own supervised session; per-account routing names a default; personal surfaces (status saving, view-once preservation, DM antidelete) toggle per account. The pool is the reach behind the group/channel tools. Owner only.",
+    "pair": {"what": "pairing-with-code account pool (§15): pair your own WhatsApp accounts into Devon with an 8-character code — no QR — and Telegram accounts by phone + login code, all in one registry. Each account gets its own supervised session; per-account routing names a default; personal surfaces (status saving, view-once preservation, DM antidelete) toggle per account. The status_saving toggle covers channel posts on both platforms too: WhatsApp followed-channel posts saved by the sweep, and Telegram channel posts kept in the brain-isolated archive /channeltexts pulls from. The pool is the reach behind the group/channel tools. Owner only.",
             "usage": "/pair | /pair whatsapp <number> [label] | /pair telegram <number> [label] | /pair tgcode <id> <code> | /pair tgpass <id> <password> | /pair code <id> | /pair start|stop|restart|remove <id> | /pair use <id> | /pair route [platform] | /pair toggle <id> <status_saving|view_once|antidelete|always_online|status_viewing> <on|off> | /pair saved [id] | /pair recovered [id] | /pair journal [kind] [count] | /pair page",
             "example": "/pair whatsapp 2348012345678 main",
             "related": "/provision /connectors"},
@@ -4441,7 +4446,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "forward",
       "unsend", "edit", "editmsg", "antiedit",
       "block", "unblock", "anticall", "disappear",
-      "statusreact", "poststatus", "chanstory", "banchecker", "gcstatus", "statusinfo",
+      "statusreact", "poststatus", "chanstory", "channeltexts", "banchecker", "gcstatus", "statusinfo",
       "pollres", "tagall", "hidetag", "antitag", "viewonce", "vv",
       "joinlink", "newgroup", "newchannel", "leave",
       "myprofile", "privacy", "makepoll", "vcf", "addcontact"]),
@@ -4700,6 +4705,7 @@ LIST_ONELINERS: dict[str, str] = {
     "vv": "short form of /viewonce — /vv [n]",
     "poststatus": "post a status/story as you — /poststatus [text]",
     "chanstory": "post to a channel you admin, as you — /chanstory channel [text]",
+    "channeltexts": "a channel's stored texts as a file — /channeltexts channel [--days N] [--format txt|md|csv] [--pull]",
     "joinlink": "join a WhatsApp group through its invite link, as you — /joinlink link or code",
     "newgroup": "create a Telegram group as you — /newgroup title",
     "newchannel": "create a Telegram channel as you — /newchannel title",

@@ -5391,8 +5391,50 @@ class RuntimeGroupMixin:
         surface.note_channel_seen(
             key, title=str(getattr(message.chat, "title", "")
                            or ""))
+        self._archive_channel_sighting(message)
         self._probe_bot_claim(surface, key, message)
         self._channel_drive(key)
+
+    def _archive_channel_sighting(self, message):  # type: ignore[no-untyped-def]
+        """Telegram channel posts also land in the owner's
+        channel-text archive (channel-texts build, 2026-11-09):
+        the personal vault's brain-isolated tg_channel_post
+        store, gated on the paired Telegram account's
+        status_saving toggle, which /channeltexts pulls from.
+        The posture is untouched — the archive is an owner-only
+        store the brain never reads; the post still feeds no
+        memory, no interest model, no reply.  WhatsApp channel
+        posts archive through the sweep's own path
+        (observe_channel_post) and never come through here.
+        Fully failure-isolated: an archive write that blows up
+        is recorded and the funnel moves on — channel handling
+        never breaks over a store."""
+        platform = str(getattr(message.chat, "platform", "")
+                       or "")
+        if not platform.startswith("telegram"):
+            return
+        try:
+            personal = self._pairing_personal()["personal"]
+            media_kind = ""
+            media = getattr(message, "media", None) or []
+            if media:
+                media_kind = str(getattr(media[0], "kind", "")
+                                 or "")
+            personal.observe_channel_text(
+                "telegram",
+                channel_id=str(getattr(message.chat, "chat_id",
+                                       "") or ""),
+                channel_name=str(getattr(message.chat, "title",
+                                         "") or ""),
+                text=str(getattr(message, "text", "") or ""),
+                media_kind=media_kind,
+                source_id=str(getattr(message, "message_id", "")
+                              or ""),
+                ts=float(getattr(message, "ts", 0.0) or 0.0))
+        except Exception as exc:  # noqa: BLE001 - archive
+            from ...social.chat.failures import record_failure
+            record_failure("runtime_group.channel_text_archive",
+                           exc)
 
     # ---- the DM admin console (DESIGN §30) ----------------------
     _CONSOLE_TTL_S = 1800

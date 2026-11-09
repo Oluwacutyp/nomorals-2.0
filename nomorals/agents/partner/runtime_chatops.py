@@ -41,6 +41,7 @@ The laws this mixin is built under:
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from .failures import record_failure
@@ -268,6 +269,8 @@ class RuntimeChatOpsMixin:
                 return self._chatops_poststatus(tail, message)
             if kind == "chanstory":
                 return self._chatops_chanstory(tail, message)
+            if kind == "channeltexts":
+                return self._chatops_channeltexts(tail, message)
             if kind == "joinlink":
                 return self._chatops_joinlink(tail, message)
             if kind in ("newgroup", "newchannel"):
@@ -1292,6 +1295,339 @@ class RuntimeChatOpsMixin:
             return (str(verdict.get("chat") or ""),
                     str(verdict.get("name") or ""), "")
         return "", "", self._chatops_verdict(verdict, "")
+
+    # ── channel texts (owner ask, 2026-11-08) ────────────────
+
+    def _chatops_channeltexts(self, tail: str,
+                               message: Any) -> str:
+        """/channeltexts — pull one channel's stored texts as
+        a FILE (owner ask 2026-11-08 01:31, file delivery per
+        his 01:34 addendum): the export lands in the chat as a
+        document — channel name, timestamps, senders, full
+        texts — and this reply carries only the coverage
+        summary.  WhatsApp texts read from the personal vault's
+        channel_post rows (the sweep's saves, captions
+        included); Telegram texts from the vault's
+        brain-isolated tg_channel_post archive (the sighting
+        funnel's writer — posts before that archive existed
+        were noted and dropped by the channel posture, and the
+        export's header says so rather than reading as a quiet
+        channel).  Resolution spans BOTH platforms' stores and
+        never guesses between two channels with the same name.
+        Owner-only by the control gate; read-only — a standing
+        stop does not block reading his own archive."""
+        from pathlib import Path
+
+        from ...social.chat import channeltexts as _ct
+        from ...social.chat.base import ChatKind, ChatRef
+        from ...social.pairing import resolve_account
+
+        usage = ("usage: /channeltexts channel [--days N] "
+                 "[--since DATE] [--until DATE] [--limit N] "
+                 "[--format txt|md|csv] [--pull [N]] — the "
+                 "channel by name, its WhatsApp JID/link or "
+                 "its Telegram @name/id; prefix wa: or tg: to "
+                 "pick a platform when a name lives on both.")
+        query, opts, error = _ct.parse_tail(tail)
+        if error:
+            return f"{error} {usage}"
+        if not query:
+            return usage
+        svc = self._pairing_personal()
+        personal = svc["personal"]
+        vault = personal.vault
+        registry = svc["registry"]
+
+        want_platform = ""
+        lowered = query.lower()
+        for prefix, plat in (("whatsapp:", "whatsapp"),
+                             ("wa:", "whatsapp"),
+                             ("telegram:", "telegram"),
+                             ("tg:", "telegram")):
+            if lowered.startswith(prefix):
+                want_platform = plat
+                query = query[len(prefix):].strip()
+                break
+        if not query:
+            return usage
+
+        # The candidate universe: channels with stored texts
+        # (the vault index) + channels Devon knows (the group
+        # registry's notes, the WhatsApp surface's channel
+        # chats) — knowing a channel and holding its texts are
+        # different facts, and the answers below keep them so.
+        candidates: dict[tuple[str, str], dict[str, Any]] = {}
+
+        def _note(platform: str, channel_id: str,
+                  name: str, stored: bool) -> None:
+            if not platform or not channel_id:
+                return
+            slot = candidates.setdefault(
+                (platform, channel_id),
+                {"platform": platform, "channel_id": channel_id,
+                 "channel_name": "", "stored": False})
+            if name:
+                slot["channel_name"] = name
+            slot["stored"] = slot["stored"] or stored
+
+        for slot in vault.channel_index():
+            _note(str(slot["platform"]), str(slot["channel_id"]),
+                  str(slot["channel_name"]), True)
+        surface_fn = getattr(self, "_group_surface", None)
+        if callable(surface_fn):
+            try:
+                surface = surface_fn()
+                for key in surface.channel_keys():
+                    plat, _, cid = str(key).partition(":")
+                    _note("telegram" if plat.startswith("telegram")
+                          else plat, cid,
+                          surface.channel_title(key), False)
+            except Exception as exc:  # noqa: BLE001 - a hint
+                record_failure("runtime_chatops.channeltexts_"
+                               "registry", exc)
+        wa_adapter = self._adapter_for("whatsapp")
+        chats_fn = getattr(wa_adapter, "chats", None)
+        if callable(chats_fn):
+            try:
+                for row in (chats_fn(limit=500) or []):
+                    if str(row.get("kind") or "") == "channel":
+                        _note("whatsapp",
+                              str(row.get("id") or ""),
+                              str(row.get("title") or ""), False)
+            except Exception as exc:  # noqa: BLE001 - a hint
+                record_failure("runtime_chatops.channeltexts_"
+                               "chats", exc)
+
+        def _scoped(slot: dict[str, Any]) -> bool:
+            return not want_platform \
+                or slot["platform"] == want_platform
+
+        matches: list[dict[str, Any]] = []
+        if query.endswith("@newsletter"):
+            matches = [s for s in candidates.values()
+                       if s["channel_id"] == query and _scoped(s)]
+            if not matches:
+                matches = [{"platform": "whatsapp",
+                            "channel_id": query,
+                            "channel_name": "", "stored": False}]
+        elif query.startswith("@") or "t.me/" in query:
+            name = query.split("t.me/")[-1].strip("/") \
+                .lstrip("@").lower()
+            matches = [s for s in candidates.values()
+                       if s["platform"] == "telegram" and _scoped(s)
+                       and (s["channel_name"].lower() == name
+                            or s["channel_id"].lower() == name)]
+            if not matches:
+                ref, _ad, err = self._chatops_target(message,
+                                                     query)
+                if not err and ref is not None:
+                    plat = str(getattr(ref, "platform", "") or "")
+                    if plat.startswith("telegram"):
+                        matches = [{
+                            "platform": "telegram",
+                            "channel_id": str(
+                                getattr(ref, "chat_id", "") or ""),
+                            "channel_name": str(
+                                getattr(ref, "title", "") or ""),
+                            "stored": False}]
+                        for s in candidates.values():
+                            if (s["platform"] == "telegram"
+                                    and s["channel_id"]
+                                    == matches[0]["channel_id"]):
+                                matches = [s]
+                                break
+        elif query.lstrip("-").isdigit():
+            matches = [s for s in candidates.values()
+                       if s["channel_id"] == query and _scoped(s)]
+            if not matches:
+                matches = [{"platform": "telegram",
+                            "channel_id": query,
+                            "channel_name": "", "stored": False}]
+        else:
+            q = query.lower()
+            exact = [s for s in candidates.values()
+                     if _scoped(s)
+                     and s["channel_name"].lower() == q]
+            matches = exact or [
+                s for s in candidates.values()
+                if _scoped(s) and q in s["channel_name"].lower()]
+
+        if len(matches) > 1:
+            listing = "; ".join(
+                f"“{s['channel_name'] or s['channel_id']}” on "
+                f"{'WhatsApp' if s['platform'] == 'whatsapp' else 'Telegram'}"
+                for s in matches)
+            return (f"more than one channel answers to "
+                    f"“{query}”: {listing} — prefix wa: or tg:, "
+                    f"or use the channel's JID/@name/id, so the "
+                    f"pull reads the right one.")
+        if not matches:
+            stored_names = sorted({
+                s["channel_name"] for s in candidates.values()
+                if s["stored"] and s["channel_name"]})
+            hint = (f" Channels with stored texts: "
+                    f"{', '.join(stored_names)}."
+                    if stored_names else
+                    " No channel has any stored texts yet.")
+            return (f"no channel here answers to “{query}”."
+                    f"{hint}")
+        target = matches[0]
+        platform = str(target["platform"])
+        channel_id = str(target["channel_id"])
+        channel_name = str(target["channel_name"] or channel_id)
+
+        pulled = 0
+        pull_note = ""
+        if opts["pull"]:
+            if platform != "telegram":
+                pull_note = (" --pull reads Telegram history; "
+                             "WhatsApp posts arrive through the "
+                             "saving sweep.")
+            else:
+                adapter = self._adapter_for("telegram")
+                history = getattr(adapter, "history", None)
+                if not callable(history):
+                    pull_note = (" --pull found no history verb "
+                                 "on this Telegram surface (the "
+                                 "bot API keeps no channel "
+                                 "history; the userbot surface "
+                                 "can pull).")
+                else:
+                    ref = ChatRef(platform="telegram",
+                                  chat_id=channel_id,
+                                  kind=ChatKind.CHANNEL,
+                                  title=channel_name)
+                    try:
+                        history_rows = history(ref,
+                                               int(opts["pull"])) \
+                            or []
+                    except Exception as exc:  # noqa: BLE001
+                        record_failure(
+                            "runtime_chatops.channeltexts_pull",
+                            exc)
+                        history_rows = []
+                        pull_note = (" --pull's history read "
+                                     "failed; the archive below "
+                                     "is what arrived live.")
+                    for hrow in history_rows:
+                        hmedia = getattr(hrow, "media", None) \
+                            or []
+                        landed = personal.observe_channel_text(
+                            "telegram", channel_id=channel_id,
+                            channel_name=channel_name,
+                            text=str(getattr(hrow, "text", "")
+                                     or ""),
+                            media_kind=str(getattr(
+                                hmedia[0], "kind", "")
+                                or "") if hmedia else "",
+                            source_id=str(getattr(
+                                hrow, "message_id", "") or ""),
+                            ts=float(getattr(hrow, "ts", 0.0)
+                                     or 0.0))
+                        pulled += len(landed)
+                    if history_rows and not pull_note:
+                        pull_note = (f" Pulled {pulled} more "
+                                     f"post(s) from the "
+                                     f"channel's history into "
+                                     f"the archive.")
+
+        rows = vault.channel_texts(platform=platform,
+                                   channel_id=channel_id,
+                                   channel_name=channel_name)
+        rec = resolve_account(registry, platform)
+        if not rows:
+            plat_name = ("WhatsApp" if platform == "whatsapp"
+                         else "Telegram")
+            if rec is None:
+                return (f"“{channel_name}” is a {plat_name} "
+                        f"channel, but no {plat_name} account is "
+                        f"paired — nothing archives its posts. "
+                        f"/pair one first.")
+            if not rec.toggle("status_saving"):
+                return (f"nothing stored for “{channel_name}” "
+                        f"— status_saving is off for {rec.id}, "
+                        f"and that switch is what saves channel "
+                        f"posts on {plat_name} (statuses and "
+                        f"channel posts share it). /pair toggle "
+                        f"{rec.id} status_saving on starts "
+                        f"saving; posts from before then were "
+                        f"never kept.")
+            depth = ("the sweep keeps the newest 50 posts per "
+                     "followed channel on each beat — a post "
+                     "older than that window when a beat ran "
+                     "was never fetched."
+                     if platform == "whatsapp" else
+                     "the archive keeps posts that arrive from "
+                     "now on; --pull backfills from the "
+                     "userbot's history.")
+            return (f"channel saving is on for {rec.id}, but "
+                    f"no posts from “{channel_name}” are stored "
+                    f"yet — {depth}")
+
+        stored_cov = _ct.coverage(rows)
+        shown = _ct.filter_rows(rows, opts)
+        if not shown:
+            return (f"“{channel_name}”: nothing in that window "
+                    f"— the store holds "
+                    f"{_ct.coverage_line(stored_cov)}. Widen "
+                    f"the window and the texts are here.")
+        body = _ct.render_export(
+            shown, channel_name=channel_name, platform=platform,
+            channel_id=channel_id, fmt=str(opts["format"]),
+            stored=stored_cov, opts=opts,
+            exported_ts=float(time.time()))
+        filename = (f"{_ct.slugify(channel_name)}-texts."
+                    f"{opts['format']}")
+        ws = Path(str(getattr(
+            getattr(getattr(self, "context", None), "settings",
+                    None), "workspace_dir", ".") or "."))
+        out_dir = ws / "data" / "exports"
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            path = out_dir / filename
+            path.write_text(body, encoding="utf-8")
+        except OSError as exc:
+            record_failure("runtime_chatops.channeltexts_write",
+                           exc)
+            return (f"the export for “{channel_name}” was "
+                    f"built but writing the file failed: {exc}")
+        windowed = _ct.filter_rows(
+            rows, {**opts, "limit": 0})
+        summary = (f"📄 “{channel_name}” "
+                   f"({'WhatsApp' if platform == 'whatsapp' else 'Telegram'})"
+                   f" — {len(shown)} post(s) in {filename}. "
+                   f"Stored coverage: "
+                   f"{_ct.coverage_line(stored_cov)}.")
+        if len(shown) < len(windowed):
+            summary += (f" Showing the latest {len(shown)} of "
+                        f"{len(windowed)} in the window — "
+                        f"raise --limit or narrow the window "
+                        f"for the rest.")
+        summary += pull_note
+        gateway = getattr(self, "gateway", None)
+        send_file = getattr(gateway, "send_file", None)
+        if gateway is None or send_file is None:
+            return (f"{summary} The file is built at {path}, "
+                    f"but this surface can't carry files back.")
+        result = send_file(
+            str(getattr(message.chat, "platform", "") or ""),
+            message.chat, str(path), caption=summary,
+            name=filename)
+        if not getattr(result, "ok", False):
+            return (f"{summary} Sending the file failed: "
+                    f"{getattr(result, 'error', '') or 'send refused'} "
+                    f"(it is kept at {path}.)")
+        try:
+            personal.note_channel_texts_exported(
+                platform,
+                account_id=str(rows[0].get("account") or ""),
+                channel_id=channel_id,
+                channel_name=channel_name, count=len(shown),
+                fmt=str(opts["format"]), filename=filename)
+        except Exception as exc:  # noqa: BLE001 - a record,
+            record_failure(  # never a gate on the delivery
+                "runtime_chatops.channeltexts_journal", exc)
+        return summary
 
     # ── join + create + leave (parity G2) ────────────────────
 

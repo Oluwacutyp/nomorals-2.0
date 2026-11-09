@@ -239,7 +239,8 @@ class PersonalVault:
     def save_media(self, account_id: str, kind: str, src_path: str, *,
                    platform: str, counterpart_id: str = "",
                    poster_name: str = "", media_kind: str = "",
-                   source_id: str = "", ts: float = 0.0) -> dict[str, Any]:
+                   source_id: str = "", ts: float = 0.0,
+                   text: str = "") -> dict[str, Any]:
         """Copy one media file into the owner's store + journal it.
 
         Raises FileNotFoundError when the source is gone — a save
@@ -264,6 +265,11 @@ class PersonalVault:
             "source_id": source_id, "path": str(dest),
             "bytes": dest.stat().st_size,
         }
+        if text:
+            # A media post's caption is text the owner may later
+            # pull (channel-texts build, G4): it rides the row
+            # instead of being dropped at the save seam.
+            entry["text"] = text
         with self._lock:
             _append_jsonl(self.journal_path, entry)
             self._prune_account(account_id)
@@ -272,13 +278,14 @@ class PersonalVault:
     def save_text(self, account_id: str, kind: str, text: str, *,
                   platform: str, counterpart_id: str = "",
                   poster_name: str = "", source_id: str = "",
-                  ts: float = 0.0) -> dict[str, Any]:
+                  ts: float = 0.0,
+                  media_kind: str = "text") -> dict[str, Any]:
         """A media-less item (text status): the journal IS the store."""
         entry = {
             "ts": float(ts or time.time()), "kind": kind,
             "account": account_id, "platform": platform,
             "counterpart_id": counterpart_id,
-            "poster_name": poster_name, "media_kind": "text",
+            "poster_name": poster_name, "media_kind": media_kind,
             "source_id": source_id, "text": text, "path": "",
             "bytes": 0,
         }
@@ -331,6 +338,91 @@ class PersonalVault:
         return [r for r in self.journal(account_id)
                 if r.get("kind") in ("status", "story", "view_once",
                                      "channel_post")]
+
+    #: The journal kinds that make up a channel's stored record:
+    #: followed-channel posts on WhatsApp (channel_post) and
+    #: Telegram (tg_channel_post — the brain-isolated archive),
+    #: WhatsApp posts whose media never landed
+    #: (channel_post_missed), and the owner's own published
+    #: posts (channel_posted).  /channeltexts reads exactly
+    #: these; nothing else in the journal is channel text.
+    CHANNEL_TEXT_KINDS = ("channel_post", "tg_channel_post",
+                          "channel_post_missed", "channel_posted")
+
+    def channel_index(self) -> list[dict[str, Any]]:
+        """Every channel the journal holds texts for, merged per
+        (platform, channel id): the newest known name, the
+        owning account(s), per-kind counts and the stored time
+        span.  This is the /channeltexts resolver's map of what
+        actually exists — a channel with no rows is not in it,
+        however well Devon knows the channel otherwise."""
+        merged: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in self.journal():
+            if row.get("kind") not in self.CHANNEL_TEXT_KINDS:
+                continue
+            platform = str(row.get("platform") or "")
+            cid = str(row.get("counterpart_id") or "")
+            if not platform or not cid:
+                continue
+            slot = merged.setdefault((platform, cid), {
+                "platform": platform, "channel_id": cid,
+                "channel_name": "", "accounts": [],
+                "text": 0, "media": 0, "missed": 0, "own": 0,
+                "first_ts": 0.0, "last_ts": 0.0})
+            name = str(row.get("poster_name") or "")
+            if name:
+                slot["channel_name"] = name
+            account = str(row.get("account") or "")
+            if account and account not in slot["accounts"]:
+                slot["accounts"].append(account)
+            kind = str(row.get("kind") or "")
+            if kind == "channel_post_missed":
+                slot["missed"] += 1
+            elif kind == "channel_posted":
+                slot["own"] += 1
+            elif str(row.get("path") or "") \
+                    or str(row.get("media_kind") or "text") \
+                    not in ("", "text"):
+                slot["media"] += 1
+            else:
+                slot["text"] += 1
+            ts = float(row.get("ts") or 0)
+            if ts:
+                if not slot["first_ts"] or ts < slot["first_ts"]:
+                    slot["first_ts"] = ts
+                if ts > slot["last_ts"]:
+                    slot["last_ts"] = ts
+        return sorted(merged.values(),
+                      key=lambda s: (s["platform"],
+                                     s["channel_name"].lower()))
+
+    def channel_texts(self, platform: str = "",
+                      channel_id: str = "",
+                      channel_name: str = "") -> list[dict[str, Any]]:
+        """One channel's stored rows, oldest → newest: followed
+        posts, missed posts and the owner's own posts to it.
+        A row matches on its channel id; a row whose stored id
+        is a reference rather than the resolved id (an own post
+        journaled under the @name it was addressed to) matches
+        on the channel name instead — the caller has already
+        disambiguated WHICH channel, so name matching inside
+        one platform cannot pull a stranger's rows."""
+        out: list[dict[str, Any]] = []
+        want_name = str(channel_name or "").strip().lower()
+        for row in self.journal():
+            if row.get("kind") not in self.CHANNEL_TEXT_KINDS:
+                continue
+            if platform and str(row.get("platform") or "") \
+                    != platform:
+                continue
+            cid = str(row.get("counterpart_id") or "")
+            if (channel_id and cid == channel_id) \
+                    or (want_name and str(row.get("poster_name")
+                                          or "").strip().lower()
+                        == want_name):
+                out.append(row)
+        out.sort(key=lambda r: float(r.get("ts") or 0))
+        return out
 
     # ── recoveries ──────────────────────────────────────────────────
     def add_recovery(self, entry: dict[str, Any]) -> dict[str, Any]:
@@ -543,6 +635,7 @@ class PersonalSurfaces:
         self._seen_status: set[tuple[str, str]] = set()
         self._missed_status: set[tuple[str, str]] = set()
         self._seen_channel_posts: set[tuple[str, str]] = set()
+        self._seen_tg_channel_posts: set[tuple[str, str]] = set()
         self._missed_channel_posts: set[tuple[str, str]] = set()
         self._viewed_channel_posts: set[tuple[str, str]] = set()
         self._view_failed_channel_posts: set[tuple[str, str]] = set()
@@ -615,6 +708,9 @@ class PersonalSurfaces:
                                         sid))
             if sid and row.get("kind") == "channel_post":
                 self._seen_channel_posts.add(
+                    (str(row.get("account") or ""), sid))
+            if sid and row.get("kind") == "tg_channel_post":
+                self._seen_tg_channel_posts.add(
                     (str(row.get("account") or ""), sid))
             if sid and row.get("kind") == "channel_post_missed":
                 self._missed_channel_posts.add(
@@ -1411,7 +1507,8 @@ class PersonalSurfaces:
                         platform=platform, counterpart_id=channel_id,
                         poster_name=channel_name,
                         media_kind=str(m.get("kind") or ""),
-                        source_id=source_id, ts=ts))
+                        source_id=source_id, ts=ts,
+                        text=text))
                 except FileNotFoundError:
                     continue
         elif text:
@@ -1464,6 +1561,51 @@ class PersonalSurfaces:
                 ts=float(post.get("ts") or 0.0)))
         return out
 
+    def observe_channel_text(self, platform: str, *, channel_id: str,
+                             channel_name: str = "", text: str = "",
+                             media_kind: str = "",
+                             source_id: str = "",
+                             account_id: str = "",
+                             ts: float = 0.0) -> list[dict[str, Any]]:
+        """One Telegram channel post, archived as TEXT only
+        (channel-texts build, 2026-11-09).  Telegram channel
+        posts reach Devon as sightings at the runtime's channel
+        funnel; the 2026-11-02 posture keeps them out of memory,
+        the interest models and the brain — and that stands.
+        What changes is only that the post's text is no longer
+        dropped on the floor: it lands in the personal vault's
+        own archive kind (``tg_channel_post``), an owner-only
+        store nothing in the brain ever reads, which
+        /channeltexts pulls from.  The gate is the account's
+        status_saving toggle — the same switch that saves
+        WhatsApp channel posts, honestly one switch for both
+        platforms' channel saving.  The same post never archives
+        twice (the seen set is journal-seeded, across restarts).
+        A media post archives its caption (or, captionless, a
+        media row naming the kind) — the media bytes themselves
+        are not fetched on this path.  Returns the entries
+        written ([] when the toggle is off or the post is a
+        duplicate)."""
+        rec = self.resolve_event_account(platform, account_id)
+        if not rec.toggle("status_saving"):
+            return []
+        text = str(text or "")
+        media_kind = str(media_kind or "")
+        if not text and not media_kind:
+            return []
+        dedupe_key = (rec.id, str(source_id or ""))
+        if source_id and dedupe_key in self._seen_tg_channel_posts:
+            return []
+        entry = self.vault.save_text(
+            rec.id, "tg_channel_post", text, platform=platform,
+            counterpart_id=channel_id, poster_name=channel_name,
+            source_id=str(source_id or ""),
+            ts=float(ts or self._clock()),
+            media_kind=media_kind or "text")
+        if source_id:
+            self._seen_tg_channel_posts.add(dedupe_key)
+        return [entry]
+
     def note_channel_posted(self, platform: str, *,
                             account_id: str = "", channel_id: str = "",
                             channel_name: str = "", text: str = "",
@@ -1473,7 +1615,10 @@ class PersonalSurfaces:
         """Journal one channel post the OWNER published through
         Devon (/chanstory): his own acts on his account are
         part of the personal record like everything the surface
-        does — an unjournaled act would be a silent one.
+        does — an unjournaled act would be a silent one.  The
+        FULL text is kept (channel-texts build: a /channeltexts
+        pull of his own channel must be able to give back what
+        he actually posted, not a 200-character receipt).
         Returns the journal entry written."""
         rec = self.resolve_event_account(platform, account_id)
         entry = {
@@ -1482,8 +1627,32 @@ class PersonalSurfaces:
             "platform": platform, "counterpart_id": channel_id,
             "poster_name": channel_name, "media_kind": media_kind,
             "source_id": str(source_id or ""), "path": "",
-            "bytes": 0, "text": str(text or "")[:200],
+            "bytes": 0, "text": str(text or ""),
             "note": "posted as the owner via /chanstory"}
+        _append_jsonl(self.vault.journal_path, entry)
+        return entry
+
+    def note_channel_texts_exported(self, platform: str, *,
+                                    account_id: str = "",
+                                    channel_id: str = "",
+                                    channel_name: str = "",
+                                    count: int = 0,
+                                    fmt: str = "txt",
+                                    filename: str = "",
+                                    ts: float = 0.0) -> dict[str, Any]:
+        """Journal one /channeltexts export: the pull is an
+        owner act on his own archive and lands in the record
+        like every other (/pair journal shows it)."""
+        rec = self.resolve_event_account(platform, account_id)
+        entry = {
+            "ts": float(ts or self._clock()),
+            "kind": "channel_texts_exported", "account": rec.id,
+            "platform": platform, "counterpart_id": channel_id,
+            "poster_name": channel_name, "media_kind": "",
+            "source_id": "", "path": "", "bytes": 0,
+            "text": "",
+            "note": f"exported {int(count)} channel post(s) as "
+                    f"{filename or fmt}"}
         _append_jsonl(self.vault.journal_path, entry)
         return entry
 
@@ -1784,8 +1953,11 @@ class PersonalSurfaces:
                         ) -> dict[str, float]:
         """Last-activity timestamps per personal toggle,
         read from the journal: view_once → the newest
-        capture; status_saving → the newest saved status or
-        story; status_viewing → the newest LANDED view (a
+        capture; status_saving → the newest saved status,
+        story or channel post (WhatsApp sweep saves and the
+        Telegram archive both answer to the same switch, so
+        both are its activity evidence); status_viewing → the
+        newest LANDED view (a
         trace whose bridge verdict is ok and not downgraded
         to read-self); status_react → the newest landed
         reaction.  A toggle with no activity ever is ABSENT
@@ -1806,7 +1978,8 @@ class PersonalSurfaces:
                 name = "view_once"
             elif kind == "status_react":
                 name = "status_react"
-            elif kind in ("status", "story"):
+            elif kind in ("status", "story", "channel_post",
+                          "tg_channel_post"):
                 name = "status_saving"
             elif kind == "status_view_trace" \
                     and row.get("view_attempted"):

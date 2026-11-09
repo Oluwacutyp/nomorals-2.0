@@ -7016,6 +7016,7 @@ class PartnerRuntime(
                 "unsend", "edit", "editmsg", "antiedit",
                 "block", "unblock", "anticall", "disappear",
                 "statusreact", "poststatus", "chanstory",
+                "channeltexts",
                 "banchecker", "gcstatus",
                 "statusinfo", "pollres", "tagall", "hidetag",
                 "antitag", "viewonce", "vv",

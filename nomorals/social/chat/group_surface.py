@@ -8117,6 +8117,13 @@ class GroupSurface:
                       "label": str(entry.get("label")
                                    or entry.get("text")
                                    or "")[:60],
+                      # The full text rides the record too
+                      # (channel-texts build, G5): the label is
+                      # the console's display line, but a pull
+                      # of his own channel's posts must be able
+                      # to give back what was actually posted,
+                      # not its first 60 characters.
+                      "text": str(text or ""),
                       "poll": bool(entry.get("poll"))}
             ring = list(extras.get("channel_posts") or [])
             ring.append(record)

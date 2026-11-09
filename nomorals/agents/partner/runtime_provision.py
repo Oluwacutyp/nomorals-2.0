@@ -953,13 +953,21 @@ class RuntimeProvisionMixin:
             — the Go engine enumerates the followed channels
             itself; the Baileys rung fetches the channels this
             surface knows).  No verb / a refused verdict reads
-            as an empty feed — absence, never invented posts."""
+            as an empty feed — absence, never invented posts.
+            Depth: the sweep asks for the adapter's full window
+            (50 per channel — channel-texts build, G2): text
+            rows cost almost nothing in the journal, and the
+            old 10-per-beat window let bursty channels scroll
+            posts past unfetched, unstored forever."""
             adapter = self._adapter_for("whatsapp")
             fn = getattr(adapter, "fetch_channel_posts", None)
             if not callable(fn):
                 return []
             try:
-                return list(fn() or [])
+                try:
+                    return list(fn(count=50) or [])
+                except TypeError:
+                    return list(fn() or [])
             except Exception as exc:  # noqa: BLE001
                 record_failure(
                     "runtime_provision.channel_fetcher", exc)
