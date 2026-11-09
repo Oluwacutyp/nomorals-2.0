@@ -202,6 +202,19 @@ def zip_extract(context: Any, archive: str, *, destination: str = "") -> dict[st
     skipped_count = int(result.get("skipped_count", len(skipped)))
     extracted = int(result.get("extracted") or 0)
     if extracted == 0 and skipped_count:
+        details = list(result.get("skipped_details") or [])
+        if details and not any(
+                "traversal" in str(d.get("reason", ""))
+                for d in details):
+            # The skips were not unsafe paths — name the real
+            # reasons (corrupt entries, unwritable names, …)
+            # instead of calling everything a zip-slip.
+            shown = "; ".join(
+                f"{d.get('name')!r}: {d.get('reason')}"
+                for d in details[:3])
+            raise ToolError(
+                f"unzip: refusing {src.name}: nothing could be "
+                f"extracted ({skipped_count} skipped: {shown})")
         shown = ", ".join(repr(s) for s in skipped[:5])
         raise ToolError(
             f"unzip: refusing {src.name}: every file entry was a "

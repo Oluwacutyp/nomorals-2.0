@@ -10,12 +10,25 @@ so a renamed ``.zip`` that's actually tar.gz still works, and ``info``
 reports what the file really is.  Extraction is traversal-safe: absolute
 paths and ``..`` escapes are skipped and reported, never followed.
 
+Depth (WS1-P2): password-protected archives open with a caller-supplied
+``password`` (never logged or persisted; a wrong/missing one fails with
+a named error, never a traceback); extraction recurses into archives
+inside archives up to a depth cap under the *same* cumulative bomb
+budgets; a corrupt member yields an honest partial (good entries land,
+bad ones are named with their reason) instead of aborting the run;
+members can be appended to / removed from existing zip and tar
+archives; and zip member names follow the spec's encoding rule (UTF-8
+flag, else the cp437 fallback) with the fallback surfaced, never
+silent.
+
     from nomorals.archives import Archivist
     a = Archivist(context)
     a.info("workspace/data.zip")        # real format + entries + sizes
     a.list("workspace/data.zip")
     a.extract("workspace/data.zip")     # → workspace/data.zip.extracted/
+    a.extract("workspace/secret.zip", password="…")
     a.create(["workspace/a.txt", "workspace/b.txt"], "bundle.tar.gz")
+    a.append("workspace/bundle.zip", ["workspace/c.txt"])
     a.compress("workspace/big.bin")     # → big.bin.gz
 
 Registered as the ``archive`` tool.
@@ -24,6 +37,7 @@ Registered as the ``archive`` tool.
 from __future__ import annotations
 
 import bz2
+import contextlib
 import glob
 import lzma
 import os
@@ -33,6 +47,7 @@ import subprocess
 import tarfile
 import time
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +62,63 @@ __all__ = ["Archivist", "detect_format", "register"]
 _MAX_LIST = 500
 _MAX_EXTRACT_FILES = 20_000
 _MAX_EXTRACT_BYTES = 2_000_000_000  # 2 GB guard against zip bombs
+#: how many levels of archive-inside-archive extraction opens before
+#: it stops and reports the rest unopened (budgets still apply at
+#: every level, cumulatively)
+_MAX_NEST_DEPTH = 3
+
+#: formats that hold members (and so can nest / be appended to)
+_CONTAINER_FORMATS = ("zip", "tar", "tar.gz", "tar.bz2", "tar.xz",
+                      "7z", "rar")
+
+
+class _BombError(ToolError):
+    """A bomb-budget trip inside extraction.  Always a whole refusal
+    — even when raised from a nested level, a bomb is a bomb at any
+    depth — so the nesting recursion re-raises it instead of folding
+    it into a per-archive error note."""
+
+
+def _scrub(text: str, *secrets: str | None) -> str:
+    """Remove secret values (passwords) from external-tool output
+    before any of it can reach an error message or a log line."""
+    for s in secrets:
+        if s:
+            text = text.replace(s, "***")
+    return text
+
+
+def _passwordish(text: str) -> bool:
+    """Does this external-tool output read as a credential failure?"""
+    low = text.lower()
+    return "password" in low or "encrypted" in low
+
+
+def _silent_unlink(path: Path) -> None:
+    """Best-effort cleanup of a partial output file.  Even unlink
+    can fail on the names this guards against (an overlong member
+    name raises ENAMETOOLONG on the unlink itself) — a cleanup
+    failure must never mask the real, named error."""
+    with contextlib.suppress(OSError):
+        path.unlink(missing_ok=True)
+
+
+def _zip_name_encoding(infos: list[zipfile.ZipInfo]) -> str:
+    """How the member names were decoded, per the zip spec: the
+    UTF-8 flag when set, else the cp437 fallback.  ``"cp437"`` in a
+    result means at least one non-ASCII name rode the legacy
+    fallback — the mojibake-risk case, surfaced rather than silent.
+    ``"ascii"`` means every name is plain ASCII (encoding moot)."""
+    fallback = False
+    utf8 = False
+    for i in infos:
+        if i.flag_bits & 0x800:
+            utf8 = True
+        elif any(ord(c) > 127 for c in i.filename):
+            fallback = True
+    if fallback:
+        return "cp437"
+    return "utf-8" if utf8 else "ascii"
 
 
 def detect_format(path: str | Path) -> str:
@@ -143,7 +215,8 @@ class Archivist:
         return safe_path(self.context, ref, must_exist=must_exist)
 
     # ── info / list ───────────────────────────────────────────────────────
-    def info(self, path: str) -> dict[str, Any]:
+    def info(self, path: str, *,
+             password: str | None = None) -> dict[str, Any]:
         p = self._path(path)
         fmt = detect_format(p)
         size = p.stat().st_size
@@ -156,6 +229,9 @@ class Archivist:
                     infos = zf.infolist()
                     out["entries"] = len(infos)
                     out["total_bytes"] = sum(i.file_size for i in infos)
+                    out["encrypted"] = any(
+                        i.flag_bits & 0x1 for i in infos)
+                    out["filename_encoding"] = _zip_name_encoding(infos)
             elif fmt in ("tar", "tar.gz", "tar.bz2", "tar.xz"):
                 with tarfile.open(p) as tf:
                     members = tf.getmembers()
@@ -164,31 +240,46 @@ class Archivist:
             elif fmt in ("gzip", "bzip2", "xz"):
                 out["entries"] = 1
             elif fmt == "7z" and self._bin7z:
-                out.update(self._list7z(p))
+                out.update(self._list7z(p, password=password))
             elif fmt == "rar" and self._bin_unrar:
-                out.update(self._list_rar(p))
+                out.update(self._list_rar(p, password=password))
             elif fmt in ("7z", "rar"):
                 out["note"] = (f"needs {'7z' if fmt == '7z' else 'unrar'} "
                                "installed to inspect")
             else:
                 out["note"] = "not a recognized archive"
-        except (OSError, EOFError, zipfile.BadZipFile,
-                tarfile.TarError, lzma.LZMAError, bz2.OSError) as exc:
+        except ToolError as exc:
+            # A named failure (e.g. password required to list a
+            # header-encrypted archive) is the honest note here —
+            # info() reports, it does not raise.
+            out["note"] = str(exc)
+        except (OSError, EOFError, UnicodeError, zipfile.BadZipFile,
+                tarfile.TarError, lzma.LZMAError) as exc:
             out["note"] = f"unreadable: {exc}"
         if out.get("total_bytes") and size > 0:
             out["ratio"] = round(out["total_bytes"] / size, 2)
         return out
 
-    def list(self, path: str, *, limit: int = _MAX_LIST) -> dict[str, Any]:
+    def list(self, path: str, *, limit: int = _MAX_LIST,
+             password: str | None = None) -> dict[str, Any]:
         p = self._path(path)
         fmt = detect_format(p)
         names: list[dict[str, Any]] = []
+        extra: dict[str, Any] = {}
         if fmt == "zip":
-            with zipfile.ZipFile(p) as zf:
-                for i in zf.infolist()[:limit]:
-                    names.append({"name": i.filename,
-                                  "size": i.file_size,
-                                  "is_dir": i.filename.endswith("/")})
+            try:
+                with zipfile.ZipFile(p) as zf:
+                    infos = zf.infolist()
+            except UnicodeDecodeError as exc:
+                raise ToolError(
+                    f"undecidable member name encoding in {p.name}: "
+                    f"{exc}") from exc
+            extra["filename_encoding"] = _zip_name_encoding(infos)
+            extra["encrypted"] = any(i.flag_bits & 0x1 for i in infos)
+            for i in infos[:limit]:
+                names.append({"name": i.filename,
+                              "size": i.file_size,
+                              "is_dir": i.filename.endswith("/")})
         elif fmt in ("tar", "tar.gz", "tar.bz2", "tar.xz"):
             with tarfile.open(p) as tf:
                 for m in tf.getmembers()[:limit]:
@@ -198,17 +289,24 @@ class Archivist:
             names.append({"name": p.stem, "size": p.stat().st_size,
                           "is_dir": False})
         elif fmt == "7z" and self._bin7z:
-            names = self._list7z(p).get("entries_list", [])[:limit]
+            names = self._list7z(p, password=password).get(
+                "entries_list", [])[:limit]
         elif fmt == "rar" and self._bin_unrar:
-            names = self._list_rar(p).get("entries_list", [])[:limit]
+            names = self._list_rar(p, password=password).get(
+                "entries_list", [])[:limit]
         else:
             raise ToolError(f"can't list a {fmt} archive here")
         return {"path": str(p), "format": fmt, "count": len(names),
-                "entries": names}
+                "entries": names, **extra}
 
-    def _list7z(self, p: Path) -> dict[str, Any]:
+    def _list7z(self, p: Path, *,
+                password: str | None = None) -> dict[str, Any]:
+        args = [self._bin7z, "l"]
+        if password is not None:
+            args.append(f"-p{password}")
+        args.append(str(p))
         out = subprocess.run(
-            [self._bin7z, "l", str(p)], capture_output=True, text=True, encoding="utf-8", errors="replace",
+            args, capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=60)
         entries = []
         for line in out.stdout.splitlines():
@@ -221,15 +319,31 @@ class Archivist:
                                     "is_dir": False})
                 except ValueError:
                     continue
+        if out.returncode != 0 and not entries:
+            blob = out.stdout + out.stderr
+            if _passwordish(blob):
+                raise ToolError(
+                    "password required to list this 7z archive"
+                    if password is None else
+                    "password incorrect for this 7z archive")
+            raise ToolError(
+                f"7z could not list {p.name}: "
+                f"{_scrub(blob, password)[:300]}")
         return {"entries": len(entries), "total_bytes":
                 sum(e["size"] for e in entries),
                 "entries_list": entries}
 
-    def _list_rar(self, p: Path) -> dict[str, Any]:
+    def _list_rar(self, p: Path, *,
+                  password: str | None = None) -> dict[str, Any]:
         if os.path.basename(self._bin_unrar) == "unar":
             args = ["-l", str(p)]
+            if password is not None:
+                args += ["-password", password]
         else:
-            args = ["lt", str(p)]
+            args = ["lt"]
+            if password is not None:
+                args.append(f"-p{password}")
+            args.append(str(p))
         out = subprocess.run(
             [self._bin_unrar, *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=60)
@@ -240,13 +354,24 @@ class Archivist:
             if m:
                 entries.append({"name": m.group(1).strip(),
                                 "size": int(m.group(4)), "is_dir": False})
+        if out.returncode not in (0, 1) and not entries:
+            blob = out.stdout + out.stderr
+            if _passwordish(blob):
+                raise ToolError(
+                    "password required to list this rar archive"
+                    if password is None else
+                    "password incorrect for this rar archive")
+            raise ToolError(
+                f"unrar could not list {p.name}: "
+                f"{_scrub(blob, password)[:300]}")
         return {"entries": len(entries), "total_bytes":
                 sum(e["size"] for e in entries),
                 "entries_list": entries}
 
     # ── create ────────────────────────────────────────────────────────────
     def create(self, paths: list[str], dest: str,
-               fmt: str = "zip", *, arc_base: str = "") -> dict[str, Any]:
+               fmt: str = "zip", *, arc_base: str = "",
+               password: str | None = None) -> dict[str, Any]:
         """Create an archive from workspace paths.
 
         Default member names: a file rides under its base name, a
@@ -255,6 +380,12 @@ class Archivist:
         that base — the workspace-relative convention the chat
         send-fusion (tools/archive) has always used, so a zipped
         ``docs/a.txt`` extracts back as ``docs/a.txt``.
+
+        ``password`` creates an AES-256-encrypted zip via the 7z
+        tool — the only encryption path (the stdlib zip writer
+        cannot encrypt, and the tar family has no encryption at
+        all); without 7z installed, or for a non-zip format, the
+        refusal is named rather than the protection faked.
         """
         fmt = (fmt or "zip").lower().lstrip(".")
         if fmt not in ("zip", "tar.gz", "tar", "tar.bz2", "tar.xz"):
@@ -264,6 +395,18 @@ class Archivist:
         base = Path(arc_base).resolve() if arc_base else None
         dest_p = self._path(dest, must_exist=False)
         dest_p.parent.mkdir(parents=True, exist_ok=True)
+        if password is not None:
+            if fmt != "zip":
+                raise ToolError(
+                    "password protection is only available for zip "
+                    "archives (the tar family has no encryption); "
+                    f"got fmt={fmt!r}")
+            if not self._bin7z:
+                raise ToolError(
+                    "encrypted zip creation needs the 7z tool "
+                    "installed (the stdlib zip writer cannot encrypt)")
+            return self._create_encrypted_zip(paths, arc_base, dest_p,
+                                              password)
         tmp_dest = dest_p.with_suffix(dest_p.suffix + f".{int(time.time())}")
         try:
             if fmt == "zip":
@@ -311,19 +454,347 @@ class Archivist:
             shutil.copyfileobj(src, dst, length=1 << 20)
         return self.info(str(dest_p))
 
-    # ── extract (traversal-safe) ──────────────────────────────────────────
+    # ── append / remove members ───────────────────────────────────────────
+
+    def _member_sources(self, paths: list[str], arc_base: str = ""
+                        ) -> list[tuple[Path, str]]:
+        """Resolve addable files to (source, member-name) pairs,
+        deduplicated by member name (last source wins), using
+        create()'s naming convention: a file rides under its base
+        name (or its path relative to ``arc_base``); a directory
+        contributes every file under its own name."""
+        resolved = [self._path(p) for p in paths]
+        base = Path(arc_base).resolve() if arc_base else None
+        by_name: dict[str, Path] = {}
+        for p in resolved:
+            if p.is_dir():
+                for f in sorted(p.rglob("*")):
+                    if f.is_file():
+                        by_name[str(f.relative_to(
+                            base or p.parent)).replace("\\", "/")] = f
+            else:
+                by_name[str(p.relative_to(base)).replace("\\", "/")
+                        if base else p.name] = p
+        return [(src, arc) for arc, src in by_name.items()]
+
+    def append(self, path: str, paths: list[str], *,
+               arc_base: str = "",
+               password: str | None = None) -> dict[str, Any]:
+        """Add files to an EXISTING zip or tar archive.
+
+        The result names exactly what happened: ``added`` (new
+        members) and ``replaced`` (members whose name already
+        existed — the old content is superseded, and it is listed
+        here, never silent).  Formats that cannot take members
+        refuse in words: a single-file stream holds exactly one
+        file, and 7z/rar are extract-only here.
+        """
+        p = self._path(path)
+        fmt = detect_format(p)
+        if fmt in ("gzip", "bzip2", "xz"):
+            raise ToolError(
+                f"can't append to {p.name}: a single-file {fmt} "
+                "stream holds exactly one file, not members — "
+                "create a zip or tar archive instead")
+        if fmt in ("7z", "rar"):
+            raise ToolError(
+                f"can't append to {p.name}: {fmt} is extract-only "
+                "here — extract it and re-create as zip or tar")
+        if fmt not in _CONTAINER_FORMATS:
+            raise ToolError(
+                f"can't append to {p.name}: not a recognized archive")
+        additions = self._member_sources(paths, arc_base)
+        if not additions:
+            raise ToolError("append needs at least one file")
+        if fmt == "zip":
+            return self._append_zip(p, additions, password=password)
+        return self._append_tar(p, fmt, additions)
+
+    def _append_zip(self, p: Path,
+                    additions: list[tuple[Path, str]], *,
+                    password: str | None) -> dict[str, Any]:
+        try:
+            with zipfile.ZipFile(p) as zf:
+                infos = zf.infolist()
+        except zipfile.BadZipFile as exc:
+            raise ToolError(
+                f"unreadable zip archive {p.name}: {exc}") from exc
+        except UnicodeDecodeError as exc:
+            raise ToolError(
+                f"undecidable member name encoding in {p.name}: "
+                f"{exc}") from exc
+        existing = {i.filename for i in infos}
+        srcmap = {arc: src for src, arc in additions}
+        replaced = sorted(set(srcmap) & existing)
+        added = sorted(set(srcmap) - existing)
+        out: dict[str, Any] = {"path": str(p), "format": "zip",
+                               "added": added, "replaced": replaced}
+        if not replaced:
+            # Native append: the archive grows in place, history
+            # untouched.
+            with zipfile.ZipFile(p, "a", zipfile.ZIP_DEFLATED,
+                                 compresslevel=9) as zf:
+                for src, arc in additions:
+                    zf.write(src, arc)
+            if any(i.flag_bits & 0x1 for i in infos):
+                out["note"] = ("existing entries are encrypted; the "
+                               "appended entries are stored "
+                               "unencrypted (the stdlib zip writer "
+                               "cannot encrypt)")
+        else:
+            # A name collision means a rebuild (zip cannot replace
+            # in place): every kept member is copied across, the
+            # replacements land where their predecessors sat, and
+            # the new file atomically replaces the old.
+            tmp = p.with_suffix(
+                p.suffix + f".append-{int(time.time())}")
+            pwd = (password.encode("utf-8")
+                   if password is not None else None)
+            try:
+                with zipfile.ZipFile(p) as zin, \
+                        zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED,
+                                        compresslevel=9) as zout:
+                    written: set[str] = set()
+                    for info in zin.infolist():
+                        if info.filename in written:
+                            continue  # duplicate name: first copy wins
+                        written.add(info.filename)
+                        if info.filename in srcmap:
+                            zout.write(srcmap[info.filename],
+                                       info.filename)
+                            continue
+                        if info.is_dir():
+                            zout.writestr(info.filename, b"")
+                            continue
+                        data = self._read_member(zin, info, pwd, p)
+                        zout.writestr(
+                            zipfile.ZipInfo(info.filename,
+                                            info.date_time),
+                            data,
+                            compress_type=zipfile.ZIP_DEFLATED)
+                    for src, arc in additions:
+                        if arc not in existing:
+                            zout.write(src, arc)
+                tmp.rename(p)
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                raise
+        out["entries"] = self.info(str(p))["entries"]
+        return out
+
+    def _append_tar(self, p: Path, fmt: str,
+                    additions: list[tuple[Path, str]]) -> dict[str, Any]:
+        """Tar archives cannot grow in place (compressed ones least
+        of all), so appending is a rebuild: every existing member is
+        copied across, replacements land where their predecessors
+        sat, additions go last, and the new file atomically replaces
+        the old."""
+        rmode = {"tar": "r", "tar.gz": "r:gz", "tar.bz2": "r:bz2",
+                 "tar.xz": "r:xz"}[fmt]
+        wmode = {"tar": "w", "tar.gz": "w:gz", "tar.bz2": "w:bz2",
+                 "tar.xz": "w:xz"}[fmt]
+        try:
+            with tarfile.open(p, rmode) as tf:
+                existing = {m.name for m in tf.getmembers()}
+        except (tarfile.TarError, EOFError, OSError,
+                lzma.LZMAError) as exc:
+            raise ToolError(
+                f"unreadable tar archive {p.name}: {exc}") from exc
+        srcmap = {arc: src for src, arc in additions}
+        replaced = sorted(set(srcmap) & existing)
+        added = sorted(set(srcmap) - existing)
+        tmp = p.with_suffix(p.suffix + f".append-{int(time.time())}")
+        try:
+            with tarfile.open(p, rmode) as tin, \
+                    tarfile.open(tmp, wmode) as tout:
+                placed: set[str] = set()
+                for m in tin.getmembers():
+                    if m.name in srcmap:
+                        if m.name not in placed:
+                            tout.add(srcmap[m.name], arcname=m.name)
+                            placed.add(m.name)
+                        continue
+                    if m.isfile():
+                        tout.addfile(m, tin.extractfile(m))
+                    else:
+                        tout.addfile(m)
+                for src, arc in additions:
+                    if arc not in existing:
+                        tout.add(src, arcname=arc)
+            tmp.rename(p)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+        return {"path": str(p), "format": fmt, "added": added,
+                "replaced": replaced,
+                "entries": self.info(str(p))["entries"]}
+
+    @staticmethod
+    def _read_member(zin: zipfile.ZipFile, info: zipfile.ZipInfo,
+                     pwd: bytes | None, archive: Path) -> bytes:
+        """Read one member during a zip rebuild, translating a
+        credential failure into its named ToolError."""
+        try:
+            return zin.read(info, pwd=pwd)
+        except RuntimeError as exc:
+            if info.flag_bits & 0x1 and pwd is None:
+                raise ToolError(
+                    f"password required to rewrite {archive.name}: "
+                    f"member {info.filename!r} is encrypted") from exc
+            if info.flag_bits & 0x1:
+                raise ToolError(
+                    f"password incorrect for {archive.name}") from exc
+            raise ToolError(
+                f"cannot copy member {info.filename!r} from "
+                f"{archive.name}: {exc}") from exc
+
+    def remove_members(self, path: str, names: list[str], *,
+                       password: str | None = None) -> dict[str, Any]:
+        """Remove named members from an existing zip or tar archive
+        (a rebuild; the file is replaced atomically).  Names that
+        are not members are reported under ``missing`` — never
+        silently ignored."""
+        p = self._path(path)
+        fmt = detect_format(p)
+        if fmt in ("gzip", "bzip2", "xz"):
+            raise ToolError(
+                f"can't remove members from {p.name}: a single-file "
+                f"{fmt} stream holds exactly one file, not members")
+        if fmt in ("7z", "rar"):
+            raise ToolError(
+                f"can't remove members from {p.name}: {fmt} is "
+                "extract-only here — extract it and re-create as "
+                "zip or tar")
+        if fmt not in _CONTAINER_FORMATS:
+            raise ToolError(
+                f"can't remove members from {p.name}: not a "
+                "recognized archive")
+        if not names:
+            raise ToolError("remove needs at least one member name")
+        drop = set(names)
+        tmp = p.with_suffix(p.suffix + f".remove-{int(time.time())}")
+        removed: list[str] = []
+        try:
+            if fmt == "zip":
+                pwd = (password.encode("utf-8")
+                       if password is not None else None)
+                try:
+                    zin = zipfile.ZipFile(p)
+                except UnicodeDecodeError as exc:
+                    raise ToolError(
+                        f"undecidable member name encoding in "
+                        f"{p.name}: {exc}") from exc
+                except zipfile.BadZipFile as exc:
+                    raise ToolError(
+                        f"unreadable zip archive {p.name}: "
+                        f"{exc}") from exc
+                with zin, zipfile.ZipFile(
+                        tmp, "w", zipfile.ZIP_DEFLATED,
+                        compresslevel=9) as zout:
+                    for info in zin.infolist():
+                        if info.filename in drop:
+                            removed.append(info.filename)
+                            continue
+                        if info.is_dir():
+                            zout.writestr(info.filename, b"")
+                            continue
+                        data = self._read_member(zin, info, pwd, p)
+                        zout.writestr(
+                            zipfile.ZipInfo(info.filename,
+                                            info.date_time),
+                            data,
+                            compress_type=zipfile.ZIP_DEFLATED)
+            else:
+                rmode = {"tar": "r", "tar.gz": "r:gz",
+                         "tar.bz2": "r:bz2", "tar.xz": "r:xz"}[fmt]
+                wmode = {"tar": "w", "tar.gz": "w:gz",
+                         "tar.bz2": "w:bz2", "tar.xz": "w:xz"}[fmt]
+                with tarfile.open(p, rmode) as tin, \
+                        tarfile.open(tmp, wmode) as tout:
+                    for m in tin.getmembers():
+                        if m.name in drop:
+                            removed.append(m.name)
+                            continue
+                        if m.isfile():
+                            tout.addfile(m, tin.extractfile(m))
+                        else:
+                            tout.addfile(m)
+            tmp.rename(p)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+        return {"path": str(p), "format": fmt, "removed": removed,
+                "missing": sorted(drop - set(removed)),
+                "entries": self.info(str(p))["entries"]}
+
+    def _create_encrypted_zip(self, paths: list[str], arc_base: str,
+                              dest_p: Path, password: str
+                              ) -> dict[str, Any]:
+        """Encrypted zip creation rides the 7z tool (AES-256): the
+        stdlib writer cannot encrypt at all, and pretending
+        otherwise would be worse than refusing.  Sources are staged
+        under their member names so the archive layout matches
+        create()'s exactly."""
+        additions = self._member_sources(paths, arc_base)
+        if not additions:
+            raise ToolError("create needs at least one file")
+        stage = dest_p.parent / \
+            f".enc-stage-{int(time.time())}-{os.getpid()}"
+        tmp_out = dest_p.with_suffix(
+            dest_p.suffix + f".enc-{int(time.time())}")
+        try:
+            for src, arc in additions:
+                staged = stage / arc
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, staged)
+            tops = sorted({arc.split("/")[0] for _, arc in additions})
+            out = subprocess.run(
+                [self._bin7z, "a", "-tzip", "-mem=AES256",
+                 f"-p{password}", str(tmp_out), *tops],
+                cwd=str(stage), capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=600)
+            if out.returncode != 0 or not tmp_out.exists():
+                raise ToolError(
+                    "7z could not create the encrypted zip: "
+                    f"{_scrub(out.stdout + out.stderr, password)[:300]}")
+            tmp_out.rename(dest_p)
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+            tmp_out.unlink(missing_ok=True)
+        return self.info(str(dest_p))
+
+    # ── extract (traversal-safe, recursive, honest partials) ─────────────
     def extract(self, path: str, dest: str = "", *,
                 max_files: int = _MAX_EXTRACT_FILES,
-                max_bytes: int = _MAX_EXTRACT_BYTES) -> dict[str, Any]:
+                max_bytes: int = _MAX_EXTRACT_BYTES,
+                password: str | None = None,
+                max_depth: int = _MAX_NEST_DEPTH) -> dict[str, Any]:
         """Extract with skip-and-report safety semantics.
 
         A member whose name would escape the destination (absolute,
         ``..`` — with backslashes treated as separators, so a
         Windows-shaped traversal is caught on every host) is SKIPPED
         and named in the result's ``skipped`` list; the good members
-        still land.  The bomb guards are the only whole-extraction
-        refusals: more than ``max_files`` members or more than
-        ``max_bytes`` live-streamed bytes aborts with ToolError.
+        still land.  The same honest-partial rule covers corrupt
+        members: a bad entry is named in ``skipped_details`` with its
+        reason while its readable siblings extract; a whole refusal
+        happens only when nothing could be extracted or a bomb guard
+        trips.  The bomb guards: more than ``max_files`` members or
+        more than ``max_bytes`` live-streamed bytes aborts with
+        ToolError.
+
+        ``password`` opens protected archives (zip natively, incl.
+        list/digest; 7z/rar via their binaries' password flags).  A
+        missing password on a fully-protected archive, and a wrong
+        password anywhere, fails with a named ToolError — never a raw
+        traceback, never a silent empty result.  The password is
+        never logged, journaled, or persisted.
+
+        Archives inside the archive are opened recursively, up to
+        ``max_depth`` levels; the bomb budgets apply CUMULATIVELY
+        across levels, and the result's ``nested`` list reports which
+        member opened into what (and which were left unopened at the
+        depth cap).
         """
         p = self._path(path)
         fmt = detect_format(p)
@@ -331,136 +802,506 @@ class Archivist:
                   else p.parent / (p.name + ".extracted"))
         dest_p.mkdir(parents=True, exist_ok=True)
         dest_root = dest_p.resolve()
-        written: list[str] = []
-        skipped: list[str] = []
-        total_bytes = 0
-        count = 0
-
-        def _safe(target: Path) -> bool:
-            resolved = (target if target.is_absolute()
-                        else dest_root / target).resolve()
-            try:
-                resolved.relative_to(dest_root)
-                return True
-            except ValueError:
-                return False
-
+        state: dict[str, Any] = {
+            "written": [], "paths": [], "skipped": [], "details": [],
+            "bytes": 0, "count": 0, "nested": [],
+        }
+        self._extract_level(p, fmt, dest_root, dest_root, state,
+                            password=password, max_files=max_files,
+                            max_bytes=max_bytes, depth=0,
+                            max_depth=max_depth)
+        skipped = state["skipped"]
+        out: dict[str, Any] = {
+            "path": str(p), "format": fmt, "dest": str(dest_root),
+            "extracted": state["count"], "bytes": state["bytes"],
+            "skipped": skipped[:50], "skipped_count": len(skipped),
+            "skipped_details": state["details"][:50],
+            "nested": state["nested"],
+            "files": state["written"][:200]}
         if fmt == "zip":
-            with zipfile.ZipFile(p) as zf:
-                for info in zf.infolist():
-                    # Backslashes are separators too: a member named
-                    # ``..\evil`` is a traversal on the Windows host
-                    # even when this process runs on POSIX, so the
-                    # safety decision (and the on-disk layout) uses
-                    # the normalized name on every platform; the
-                    # skipped report keeps the name as archived.
-                    name = info.filename.replace("\\", "/")
-                    if not _safe(Path(name)):
-                        skipped.append(info.filename)
-                        continue
-                    target = dest_root / name
-                    if name.endswith("/"):
-                        target.mkdir(parents=True, exist_ok=True)
-                        continue
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    with zf.open(info) as src, open(target, "wb") as dst:
-                        while chunk := src.read(1 << 20):
-                            total_bytes += len(chunk)
-                            if total_bytes > max_bytes:
-                                raise ToolError(
-                                    "extraction aborted: exceeds "
-                                    f"{max_bytes} bytes (zip-bomb guard)")
-                            dst.write(chunk)
-                    count += 1
-                    written.append(str(target.relative_to(dest_root)))
-                    if count > max_files:
-                        raise ToolError(
-                            "extraction aborted: more than "
-                            f"{max_files} files (zip-bomb guard)")
+            out["filename_encoding"] = state.get("encoding", "ascii")
+        return out
+
+    # ── extraction internals ─────────────────────────────────────────────
+
+    @staticmethod
+    def _within(root: Path, target: Path) -> bool:
+        resolved = (target if target.is_absolute()
+                    else root / target).resolve()
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _skip(state: dict[str, Any], name: str, reason: str) -> None:
+        state["skipped"].append(name)
+        state["details"].append({"name": name, "reason": reason})
+
+    @staticmethod
+    def _note(state: dict[str, Any], reason: str) -> None:
+        """A failure that is not one member's skip (e.g. a stream
+        dying partway) — recorded in the details only, so the
+        skipped-NAMES list stays exactly the members that did not
+        land."""
+        state["details"].append({"name": "", "reason": reason})
+
+    def _land(self, state: dict[str, Any], top_root: Path,
+              target: Path) -> None:
+        state["paths"].append(target)
+        state["written"].append(str(target.relative_to(top_root)))
+        state["count"] += 1
+
+    def _extract_level(self, p: Path, fmt: str, level_root: Path,
+                       top_root: Path, state: dict[str, Any], *,
+                       password: str | None, max_files: int,
+                       max_bytes: int, depth: int,
+                       max_depth: int) -> None:
+        """Extract ONE archive into ``level_root``, folding counts
+        into the shared ``state`` (budgets cumulative across levels),
+        then recurse into archive members while depth lasts."""
+        start = len(state["paths"])
+        if fmt == "zip":
+            self._extract_zip(p, level_root, top_root, state,
+                              password=password, max_files=max_files,
+                              max_bytes=max_bytes,
+                              top_level=depth == 0)
         elif fmt in ("tar", "tar.gz", "tar.bz2", "tar.xz"):
-            with tarfile.open(p) as tf:
-                for m in tf.getmembers():
-                    name = m.name.replace("\\", "/")
-                    if not _safe(Path(name)):
-                        skipped.append(m.name)
-                        continue
-                    target = dest_root / name
-                    if m.isdir():
-                        target.mkdir(parents=True, exist_ok=True)
-                        continue
-                    if m.issym() or m.islnk():
-                        # link targets must stay inside
-                        if m.issym() and not _safe(
-                                Path(m.linkname.replace("\\", "/"))):
-                            skipped.append(m.name)
-                            continue
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        try:
-                            tf.extract(m, dest_root, filter="data")
-                        except TypeError:  # Python < 3.12
-                            tf.extract(m, dest_root)
-                        continue
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    fobj = tf.extractfile(m)
-                    if fobj is None:
-                        continue
-                    with open(target, "wb") as dst:
-                        while chunk := fobj.read(1 << 20):
-                            total_bytes += len(chunk)
-                            if total_bytes > max_bytes:
-                                raise ToolError(
-                                    "extraction aborted: exceeds "
-                                    f"{max_bytes} bytes (zip-bomb guard)")
-                            dst.write(chunk)
-                    count += 1
-                    written.append(str(target.relative_to(dest_root)))
-                    if count > max_files:
-                        raise ToolError(
-                            "extraction aborted: more than "
-                            f"{max_files} files (zip-bomb guard)")
+            self._extract_tar(p, fmt, level_root, top_root, state,
+                              max_files=max_files, max_bytes=max_bytes)
         elif fmt == "7z" and self._bin7z:
-            out = subprocess.run(
-                [self._bin7z, "x", f"-o{dest_root}", "-y", str(p)],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
-            if out.returncode != 0:
-                raise ToolError(f"7z extraction failed: "
-                                f"{out.stderr[:300]}")
-            written = [str(f.relative_to(dest_root))
-                       for f in dest_root.rglob("*") if f.is_file()]
-            count = len(written)
+            self._extract_external(p, "7z", level_root, top_root, state,
+                                   password=password,
+                                   max_files=max_files,
+                                   max_bytes=max_bytes)
         elif fmt == "rar" and self._bin_unrar:
-            if os.path.basename(self._bin_unrar) == "unar":
-                cmd = [self._bin_unrar, "-o", str(dest_root), str(p)]
-            else:
-                cmd = [self._bin_unrar, "x", "-y", str(p), f"{dest_root}/"]
-            out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                                 timeout=600)
-            if out.returncode not in (0, 1):  # 1 = warnings (ok)
-                raise ToolError(f"rar extraction failed: "
-                                f"{out.stderr[:300]}")
-            written = [str(f.relative_to(dest_root))
-                       for f in dest_root.rglob("*") if f.is_file()]
-            count = len(written)
+            self._extract_external(p, "rar", level_root, top_root,
+                                   state, password=password,
+                                   max_files=max_files,
+                                   max_bytes=max_bytes)
         elif fmt in ("gzip", "bzip2", "xz"):
-            opener = {"gzip": gzip_open_r, "bzip2": bz2_open_r,
-                      "xz": lzma_open_r}[fmt]
-            out_p = dest_p / p.stem
-            with open(p, "rb") as src, open(out_p, "wb") as dst:
-                shutil.copyfileobj(opener(src), dst, length=1 << 20)
-            written.append(out_p.name)
-            count = 1
+            self._extract_single(p, fmt, level_root, top_root, state,
+                                 max_bytes=max_bytes)
         else:
             raise ToolError(f"can't extract format {fmt!r} here"
                             + ("" if fmt not in ("7z", "rar")
                                else " (install 7z / unrar)"))
-        return {"path": str(p), "format": fmt, "dest": str(dest_root),
-                "extracted": len(written), "bytes": total_bytes,
-                "skipped": skipped[:50], "skipped_count": len(skipped),
-                "files": written[:200]}
+        landed = list(state["paths"][start:])
+        for f in landed:
+            if not f.is_file():
+                continue
+            nfmt = detect_format(f)
+            if nfmt not in _CONTAINER_FORMATS:
+                continue
+            rel = str(f.relative_to(top_root))
+            if depth >= max_depth:
+                state["nested"].append(
+                    {"member": rel, "format": nfmt, "opened": False,
+                     "reason": f"depth cap ({max_depth}) reached"})
+                continue
+            sub = f.parent / (f.name + ".extracted")
+            sub.mkdir(parents=True, exist_ok=True)
+            rec: dict[str, Any] = {
+                "member": rel, "format": nfmt,
+                "into": str(sub.relative_to(top_root)), "opened": True,
+                "depth": depth + 1}
+            c0, s0 = state["count"], len(state["skipped"])
+            try:
+                self._extract_level(f, nfmt, sub, top_root, state,
+                                    password=password,
+                                    max_files=max_files,
+                                    max_bytes=max_bytes,
+                                    depth=depth + 1,
+                                    max_depth=max_depth)
+                rec["extracted"] = state["count"] - c0
+                rec["skipped_count"] = len(state["skipped"]) - s0
+            except _BombError:
+                raise
+            except ToolError as exc:
+                # A nested archive that refuses (password, unreadable)
+                # does not sink its parent: the member file itself
+                # landed, and the refusal is reported on its record.
+                rec["error"] = str(exc)
+            state["nested"].append(rec)
+
+    def _extract_zip(self, p: Path, level_root: Path, top_root: Path,
+                     state: dict[str, Any], *, password: str | None,
+                     max_files: int, max_bytes: int,
+                     top_level: bool) -> None:
+        try:
+            zf = zipfile.ZipFile(p)
+        except UnicodeDecodeError as exc:
+            # The central directory is parsed at construction: a
+            # name that claims UTF-8 but carries invalid bytes
+            # surfaces here, not at infolist().
+            raise ToolError(
+                f"undecidable member name encoding in {p.name}: "
+                f"{exc}") from exc
+        except zipfile.BadZipFile as exc:
+            raise ToolError(
+                f"unreadable zip archive {p.name}: {exc}") from exc
+        with zf:
+            infos = zf.infolist()
+            if top_level:
+                state["encoding"] = _zip_name_encoding(infos)
+            if any(i.compress_type == 99 for i in infos):
+                # AES-encrypted entries (method 99): the stdlib
+                # reader cannot open them at all.  With the 7z tool
+                # installed the archive is handed to it whole (it
+                # reads zip natively); without it the AES entries
+                # are skipped below, named — never silently mangled.
+                if self._bin7z:
+                    self._extract_external(
+                        p, "7z", level_root, top_root, state,
+                        password=password, max_files=max_files,
+                        max_bytes=max_bytes)
+                    return
+                aes_note = ("AES-encrypted entry — the stdlib zip "
+                            "reader cannot open AES; install 7z")
+            else:
+                aes_note = ""
+            file_infos = [i for i in infos
+                          if not i.filename.endswith("/")]
+            encrypted = [i for i in file_infos if i.flag_bits & 0x1]
+            if encrypted and password is None \
+                    and len(encrypted) == len(file_infos):
+                raise ToolError(
+                    f"password required to extract {p.name} "
+                    "(every entry is password-protected)")
+            pwd = (password.encode("utf-8")
+                   if password is not None else None)
+            for info in infos:
+                raw = info.filename
+                # Backslashes are separators too: a member named
+                # ``..\evil`` is a traversal on the Windows host even
+                # when this process runs on POSIX, so the safety
+                # decision (and the on-disk layout) uses the
+                # normalized name on every platform; the skipped
+                # report keeps the name as archived.
+                name = raw.replace("\\", "/")
+                if "\x00" in name:
+                    self._skip(state, raw,
+                               "member name contains a NUL byte — "
+                               "not writable on a filesystem")
+                    continue
+                if not self._within(level_root, Path(name)):
+                    self._skip(state, raw,
+                               "path traversal (escapes the "
+                               "destination)")
+                    continue
+                target = level_root / name
+                if name.endswith("/"):
+                    try:
+                        target.mkdir(parents=True, exist_ok=True)
+                    except OSError as exc:
+                        self._skip(state, raw,
+                                   f"cannot create directory: {exc}")
+                    continue
+                if info.compress_type == 99:
+                    self._skip(state, raw, aes_note)
+                    continue
+                is_enc = bool(info.flag_bits & 0x1)
+                if is_enc and pwd is None:
+                    self._skip(state, raw, "password required")
+                    continue
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(info, pwd=pwd) as src, \
+                            open(target, "wb") as dst:
+                        while chunk := src.read(1 << 20):
+                            state["bytes"] += len(chunk)
+                            if state["bytes"] > max_bytes:
+                                raise _BombError(
+                                    "extraction aborted: exceeds "
+                                    f"{max_bytes} bytes "
+                                    "(zip-bomb guard)")
+                            dst.write(chunk)
+                except _BombError:
+                    _silent_unlink(target)
+                    raise
+                except RuntimeError as exc:
+                    _silent_unlink(target)
+                    if is_enc and pwd is not None:
+                        raise ToolError(
+                            f"password incorrect for {p.name}: "
+                            f"{exc}") from exc
+                    self._skip(state, raw, f"unreadable entry: {exc}")
+                    continue
+                except (zipfile.BadZipFile, EOFError, zlib.error,
+                        lzma.LZMAError) as exc:
+                    _silent_unlink(target)
+                    if is_enc and pwd is not None and \
+                            isinstance(exc, zipfile.BadZipFile):
+                        # The password check-byte passed by luck,
+                        # then the integrity check failed: the
+                        # password is wrong, not the archive.
+                        raise ToolError(
+                            f"password incorrect for {p.name} "
+                            f"(entry {raw!r} failed its integrity "
+                            "check)") from exc
+                    self._skip(state, raw, f"corrupt entry: {exc}")
+                    continue
+                except (OSError, ValueError,
+                        NotImplementedError) as exc:
+                    _silent_unlink(target)
+                    self._skip(state, raw,
+                               f"cannot write entry: {exc}")
+                    continue
+                self._land(state, top_root, target)
+                if state["count"] > max_files:
+                    raise _BombError(
+                        "extraction aborted: more than "
+                        f"{max_files} files (zip-bomb guard)")
+
+    def _extract_tar(self, p: Path, fmt: str, level_root: Path,
+                     top_root: Path, state: dict[str, Any], *,
+                     max_files: int, max_bytes: int) -> None:
+        level_start = state["count"]
+        current = ""
+        try:
+            with tarfile.open(p) as tf:
+                for m in tf:
+                    current = m.name
+                    name = m.name.replace("\\", "/")
+                    if "\x00" in name:
+                        self._skip(state, m.name,
+                                   "member name contains a NUL byte — "
+                                   "not writable on a filesystem")
+                        continue
+                    if not self._within(level_root, Path(name)):
+                        self._skip(state, m.name,
+                                   "path traversal (escapes the "
+                                   "destination)")
+                        continue
+                    target = level_root / name
+                    if m.isdir():
+                        try:
+                            target.mkdir(parents=True, exist_ok=True)
+                        except OSError as exc:
+                            self._skip(state, m.name,
+                                       f"cannot create directory: {exc}")
+                        continue
+                    if m.issym() or m.islnk():
+                        # link targets must stay inside
+                        if m.issym() and not self._within(
+                                level_root,
+                                Path(m.linkname.replace("\\", "/"))):
+                            self._skip(state, m.name,
+                                       "link target escapes the "
+                                       "destination")
+                            continue
+                        try:
+                            target.parent.mkdir(parents=True,
+                                                exist_ok=True)
+                            tf.extract(m, level_root, filter="data")
+                        except TypeError:  # Python < 3.12
+                            try:
+                                tf.extract(m, level_root)
+                            except Exception as exc:  # noqa: BLE001
+                                self._skip(state, m.name,
+                                           f"link failed: {exc}")
+                        except Exception as exc:  # noqa: BLE001
+                            self._skip(state, m.name,
+                                       f"link failed: {exc}")
+                        continue
+                    try:
+                        fobj = tf.extractfile(m)
+                    except (tarfile.TarError, EOFError, OSError,
+                            zlib.error, lzma.LZMAError) as exc:
+                        self._skip(state, m.name,
+                                   f"corrupt entry: {exc}")
+                        continue
+                    if fobj is None:
+                        self._skip(state, m.name,
+                                   "member has no readable data")
+                        continue
+                    try:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with open(target, "wb") as dst:
+                            while chunk := fobj.read(1 << 20):
+                                state["bytes"] += len(chunk)
+                                if state["bytes"] > max_bytes:
+                                    raise _BombError(
+                                        "extraction aborted: exceeds "
+                                        f"{max_bytes} bytes "
+                                        "(zip-bomb guard)")
+                                dst.write(chunk)
+                    except _BombError:
+                        _silent_unlink(target)
+                        raise
+                    except (tarfile.TarError, EOFError, zlib.error,
+                            lzma.LZMAError) as exc:
+                        _silent_unlink(target)
+                        self._skip(state, m.name,
+                                   f"corrupt entry: {exc}")
+                        continue
+                    except (OSError, ValueError) as exc:
+                        _silent_unlink(target)
+                        self._skip(state, m.name,
+                                   f"cannot write entry: {exc}")
+                        continue
+                    self._land(state, top_root, target)
+                    if state["count"] > max_files:
+                        raise _BombError(
+                            "extraction aborted: more than "
+                            f"{max_files} files (zip-bomb guard)")
+                if fmt == "tar":
+                    # A corrupt header mid-file ends tarfile's
+                    # iteration SILENTLY (it reads as end-of-archive)
+                    # — but a clean tar ends on zero blocks, so for
+                    # a plain seekable tar the loss is checkable: if
+                    # the block where iteration stopped is not the
+                    # zero end-marker, members were lost, and that
+                    # is reported rather than silent.
+                    try:
+                        with open(p, "rb") as fh:
+                            fh.seek(tf.offset)
+                            block = fh.read(512)
+                    except (OSError, AttributeError):
+                        block = b""
+                    if block and any(block):
+                        self._note(
+                            state,
+                            "archive stream ended early: unread "
+                            "non-empty data after the last member "
+                            "(corrupt or truncated tail)")
+        except _BombError:
+            raise
+        except (tarfile.TarError, EOFError, OSError, zlib.error,
+                lzma.LZMAError) as exc:
+            # The stream itself died mid-iteration (a corrupt
+            # header, a truncated compressed stream): what
+            # already landed at this level stays landed and the
+            # failure is named on the member being read.  Only a
+            # level that produced nothing is a whole refusal.
+            if state["count"] == level_start:
+                raise ToolError(
+                    f"unreadable tar archive {p.name}: "
+                    f"{exc}") from exc
+            self._note(state,
+                       "archive stream failed partway (members "
+                       f"after {current!r} unread): {exc}")
+
+    def _extract_single(self, p: Path, fmt: str, level_root: Path,
+                        top_root: Path, state: dict[str, Any], *,
+                        max_bytes: int) -> None:
+        opener = {"gzip": gzip_open_r, "bzip2": bz2_open_r,
+                  "xz": lzma_open_r}[fmt]
+        out_p = level_root / p.stem
+        try:
+            with open(p, "rb") as src, open(out_p, "wb") as dst:
+                stream = opener(src)
+                while chunk := stream.read(1 << 20):
+                    state["bytes"] += len(chunk)
+                    if state["bytes"] > max_bytes:
+                        raise _BombError(
+                            "extraction aborted: exceeds "
+                            f"{max_bytes} bytes (zip-bomb guard)")
+                    dst.write(chunk)
+        except _BombError:
+            _silent_unlink(out_p)
+            raise
+        except (EOFError, OSError, lzma.LZMAError,
+                zlib.error) as exc:
+            _silent_unlink(out_p)
+            raise ToolError(
+                f"unreadable {fmt} stream {p.name}: {exc}") from exc
+        self._land(state, top_root, out_p)
+
+    def _extract_external(self, p: Path, engine: str,
+                          level_root: Path, top_root: Path,
+                          state: dict[str, Any], *,
+                          password: str | None, max_files: int,
+                          max_bytes: int) -> None:
+        """Extract through the external tool (7z / unrar) under the
+        same bomb budgets the stdlib paths enforce: the archive is
+        pre-listed and refused in words when the listing alone
+        exceeds a budget, and the landed output is re-measured
+        afterwards, since a listing can lie."""
+        if engine == "7z":
+            listing = self._list7z(p, password=password)
+        else:
+            listing = self._list_rar(p, password=password)
+        entries = listing.get("entries_list", [])
+        if state["count"] + len(entries) > max_files:
+            raise ToolError(
+                f"{engine} archive lists {len(entries)} files — over "
+                f"the {max_files} file cap (zip-bomb guard); "
+                "refusing to extract")
+        total = int(listing.get("total_bytes") or 0)
+        if state["bytes"] + total > max_bytes:
+            raise ToolError(
+                f"{engine} archive would extract {total} bytes — "
+                f"over the {max_bytes}-byte cap (zip-bomb guard); "
+                "refusing to extract")
+        before = {f for f in level_root.rglob("*")}
+        if engine == "7z":
+            cmd = [self._bin7z, "x", f"-o{level_root}", "-y"]
+            if password is not None:
+                cmd.append(f"-p{password}")
+            cmd.append(str(p))
+            ok_codes = (0,)
+        elif os.path.basename(self._bin_unrar) == "unar":
+            cmd = [self._bin_unrar, "-o", str(level_root)]
+            if password is not None:
+                cmd += ["-password", password]
+            cmd.append(str(p))
+            ok_codes = (0,)
+        else:
+            cmd = [self._bin_unrar, "x", "-y"]
+            if password is not None:
+                cmd.append(f"-p{password}")
+            cmd += [str(p), f"{level_root}/"]
+            ok_codes = (0, 1)  # 1 = warnings (ok)
+        out = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+        landed: list[Path] = []
+        for f in level_root.rglob("*"):
+            if f in before:
+                continue
+            if f.is_symlink():
+                try:
+                    f.resolve().relative_to(level_root)
+                except ValueError:
+                    f.unlink(missing_ok=True)
+                    self._skip(state, str(f.relative_to(top_root)),
+                               "symlink escapes the destination — "
+                               "removed")
+                    continue
+            if f.is_file() and not f.is_symlink():
+                landed.append(f)
+        landed_bytes = sum(f.stat().st_size for f in landed)
+        if state["count"] + len(landed) > max_files or \
+                state["bytes"] + landed_bytes > max_bytes:
+            for f in landed:
+                f.unlink(missing_ok=True)
+            raise _BombError(
+                "extraction aborted: external tool extracted "
+                f"{len(landed)} files / {landed_bytes} bytes, over "
+                "the budget (zip-bomb guard)")
+        state["bytes"] += landed_bytes
+        for f in sorted(landed):
+            self._land(state, top_root, f)
+        if out.returncode not in ok_codes:
+            blob = out.stdout + out.stderr
+            if _passwordish(blob):
+                raise ToolError(
+                    f"password required to extract this {engine} "
+                    "archive" if password is None else
+                    f"password incorrect for this {engine} archive")
+            if not landed:
+                raise ToolError(
+                    f"{engine} extraction failed: "
+                    f"{_scrub(blob, password)[:300]}")
+            self._note(state,
+                       f"{engine} reported errors; partial "
+                       f"extraction: {_scrub(blob, password)[:200]}")
 
 
     def digest(self, path: str, *, max_files: int = 200,
-               max_bytes: int = 500_000) -> dict[str, Any]:
+               max_bytes: int = 500_000,
+               password: str | None = None) -> dict[str, Any]:
         """Crack the archive open and feed every text document into the
         knowledge graph + long-term memory.  Returns counts + what was
         curated.  Binary/media files are counted but not parsed."""
@@ -482,7 +1323,7 @@ class Archivist:
                     shutil.copyfileobj(opener(src), dst, length=1 << 20)
                 extracted_root = dest
             else:
-                self.extract(str(p), dest=str(dest))
+                self.extract(str(p), dest=str(dest), password=password)
                 extracted_root = dest
             files = _extract_text_files(extracted_root, max_files=max_files,
                                         max_bytes=max_bytes)
@@ -652,37 +1493,54 @@ def register(registry: Any) -> None:
             "Universal zip/unzip: identify (by magic bytes), list, create "
             "(zip/tar/tar.gz/tar.bz2/tar.xz), compress single files "
             "(gz/bz2/xz), and safely extract zip/tar*/gz/bz2/xz (+7z/rar "
-            "when the tools are installed). Extraction skips unsafe "
-            "entries and reports them in the result (never silently); "
-            "an archive is refused only when nothing in it can be "
-            "extracted or a bomb guard trips. action=info (path) | list "
-            "(path) | extract (path, dest) | digest (path) - extract an "
-            "archive (or walk a whole DIRECTORY) and curate every text "
-            "document into the knowledge graph + memory | create (paths, "
-            "dest, fmt) | compress (path, fmt)."
+            "when the tools are installed). Extraction skips unsafe or "
+            "corrupt entries and reports them in the result with their "
+            "reasons (never silently); an archive is refused only when "
+            "nothing in it can be extracted or a bomb guard trips. "
+            "Extraction recurses into nested archives up to a depth "
+            "cap under the same cumulative budgets. Password-protected "
+            "archives open with password= (never stored); a wrong or "
+            "missing password fails with a named error. action=info "
+            "(path) | list (path) | extract (path, dest, password) | "
+            "digest (path, password) - extract an archive (or walk a "
+            "whole DIRECTORY) and curate every text document into the "
+            "knowledge graph + memory | create (paths, dest, fmt, "
+            "password) | append (path=archive, paths=files) - add "
+            "members to an existing zip/tar archive, naming what was "
+            "added and what was replaced | remove (path=archive, "
+            "paths=member names) | compress (path, fmt)."
         ),
         capability=Capability.FS_WRITE,
     )
     def archive(action: str = "info", path: str = "", dest: str = "",
-                paths: str = "", fmt: str = "zip") -> dict[str, Any]:
+                paths: str = "", fmt: str = "zip",
+                password: str = "") -> dict[str, Any]:
         a = Archivist(context)
+        pwd = password or None
         if action == "info":
-            return a.info(path)
+            return a.info(path, password=pwd)
         if action == "list":
-            return a.list(path)
+            return a.list(path, password=pwd)
         if action == "extract":
-            out = a.extract(path, dest=dest)
+            out = a.extract(path, dest=dest, password=pwd)
             if not out.get("extracted") and out.get("skipped_count"):
-                # Unified semantics (WS1-P1): unsafe entries are
+                # Unified semantics (WS1-P1): bad entries are
                 # skipped + reported, and the whole archive is
                 # refused only when nothing in it could be
                 # extracted — the same rule the tools/archive
-                # send-fusion surface applies.
-                shown = ", ".join(repr(s) for s in out["skipped"][:5])
+                # send-fusion surface applies.  The refusal names
+                # the recorded reasons, not just the entries.
+                details = out.get("skipped_details") or []
+                if details:
+                    shown = "; ".join(
+                        f"{d['name']!r}: {d['reason']}"
+                        for d in details[:5])
+                else:
+                    shown = ", ".join(
+                        repr(s) for s in out["skipped"][:5])
                 raise ToolError(
-                    "archive extract: every file entry was unsafe and "
-                    f"skipped ({out['skipped_count']}: {shown}); "
-                    "nothing could be extracted")
+                    "archive extract: nothing could be extracted "
+                    f"({out['skipped_count']} skipped: {shown})")
             return out
         if action == "digest":
             from .tools.filesystem import safe_path
@@ -690,12 +1548,26 @@ def register(registry: Any) -> None:
             p = safe_path(context, path, must_exist=True)
             if p.is_dir():
                 return a.digest_directory(path)
-            return a.digest(path)
+            return a.digest(path, password=pwd)
         if action == "create":
             items = [x for x in (path, *paths.split("|")) if x.strip()]
             if not dest:
                 raise ToolError("archive create needs dest=")
-            return a.create(items, dest, fmt=fmt)
+            return a.create(items, dest, fmt=fmt, password=pwd)
+        if action == "append":
+            items = [x for x in paths.split("|") if x.strip()]
+            if not items:
+                raise ToolError(
+                    "archive append needs paths= (files to add, "
+                    "|-separated)")
+            return a.append(path, items, password=pwd)
+        if action == "remove":
+            names = [x for x in paths.split("|") if x.strip()]
+            if not names:
+                raise ToolError(
+                    "archive remove needs paths= (member names, "
+                    "|-separated)")
+            return a.remove_members(path, names, password=pwd)
         if action == "compress":
             return a.compress(path, fmt=fmt)
         raise ToolError(f"unknown archive action {action!r}")
