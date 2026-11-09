@@ -6068,6 +6068,9 @@ class PartnerRuntime(
         if kind == "delegate":
             return self._control_delegate(command.tail or "", message)
 
+        if kind == "computer":
+            return self._control_computer(command.tail or "", message)
+
         if kind == "doctor":
             return self._control_doctor()
 

@@ -524,6 +524,7 @@ class ToolRegistry:
             "accounts",
             "build_app", "captcha", "cipher", "code_executor", "compress",
             "connectors", "code_indexer",
+            "computer",
             "database", "deals", "decoder", "decoder_agent", "deliver_report",
             "commerce", "filesend",
             "filesystem", "finance", "giftcard", "git", "hashcrack", "imagedb",

@@ -1790,6 +1790,96 @@ class RuntimeExpressionMixin:
             lines.append("the delegation card is live above.")
         return "\n".join(lines)
 
+    def _control_computer(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
+        """Devon's own computer (owner-only): /computer shows the
+        organ's state — availability, sessions, and each session's
+        control gate; open starts a persistent desktop session;
+        view perceives and sends the live frame as a photo;
+        takeover puts the agent's hands off the desktop until
+        handback; stop is the owner's STICKY stop (survives
+        restarts, cleared only by resume); close ends a session.
+        Watching is never gated; acting is — the organ enforces
+        it, this surface only speaks it."""
+        from ...computer.service import default_service
+
+        svc = default_service(context=getattr(self, "context", None))
+        text = " ".join(str(tail or "").split()).strip()
+        parts = text.split()
+        verb = parts[0].lower() if parts else "status"
+        session_id = ""
+        for part in parts[1:]:
+            if part.startswith("desk-"):
+                session_id = part
+        if verb == "status":
+            return svc.status_text()
+        if verb == "open":
+            result = svc.open(mission=" ".join(parts[1:]))
+            if not result.get("ok"):
+                return f"the computer would not open: {result.get('error')}"
+            rec = result["session"]
+            return (f"desktop session {rec['id']} is open — "
+                    f"{rec['mode']} display {rec['display']} "
+                    f"({rec['width']}x{rec['height']}). It persists "
+                    "between tasks; /computer view shows it live.")
+        if verb == "view":
+            seen = svc.perceive(session_id)
+            if not seen.get("ok"):
+                return f"nothing to view: {seen.get('error')}"
+            lines = [f"desktop {seen['session']} — "
+                     f"{seen['width']}x{seen['height']}, "
+                     f"{len(seen['windows'])} window(s):"]
+            for win in seen["windows"]:
+                mark = " *focused*" if win.get("focused") else ""
+                lines.append(f"• {win.get('title') or '(untitled)'}"
+                             f"{mark}")
+            if seen.get("frame_path"):
+                lines.append("the live frame is attached.")
+                self._computer_send_frame(message, seen["frame_path"])
+            return "\n".join(lines)
+        if verb in ("takeover", "handback", "stop", "resume", "close"):
+            handler = {"takeover": svc.takeover, "handback": svc.handback,
+                       "stop": svc.stop, "resume": svc.resume,
+                       "close": svc.close}[verb]
+            result = handler(session_id)
+            if not result.get("ok"):
+                return f"/computer {verb} failed: {result.get('error')}"
+            rec = result["session"]
+            if verb == "takeover":
+                return (f"the desktop is yours — the agent's hands are "
+                        f"off {rec['id']} until /computer handback.")
+            if verb == "handback":
+                return (f"handed back — the agent may drive "
+                        f"{rec['id']} again"
+                        + (" (the owner stop is still on — /computer "
+                           "resume clears it)."
+                           if rec.get("owner_stop") else "."))
+            if verb == "stop":
+                return ("computer stopped. The stop is sticky: it "
+                        "survives restarts and reconciles until you "
+                        "say /computer resume.")
+            if verb == "resume":
+                return f"computer resumed — {rec['id']} may be driven."
+            return f"session {rec['id']} closed."
+        return ("computer verbs: status · open · view · takeover · "
+                "handback · stop · resume · close — /computer on its "
+                "own shows the state.")
+
+    def _computer_send_frame(self, message, frame_path: str) -> None:  # type: ignore[no-untyped-def]
+        """Send a desktop frame to the owner's chat as a photo."""
+        if message is None:
+            return
+        try:
+            platform = str(getattr(message.chat, "platform", "") or "")
+            chat_key = str(getattr(message.chat, "key", "") or "")
+            if not platform or not chat_key:
+                return
+            self.gateway.send_file(
+                platform, chat_key, str(frame_path),
+                caption="the desktop, live", kind="photo",
+                name="desktop.png")
+        except Exception as exc:  # noqa: BLE001 — the text reply still lands
+            record_failure("computer view send", exc)
+
     def _delegation_card(self, store, contracts, message) -> None:  # type: ignore[no-untyped-def]
         """Publish/revise the delegation living card for this chat."""
         try:

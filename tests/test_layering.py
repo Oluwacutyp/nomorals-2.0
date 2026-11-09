@@ -61,6 +61,11 @@ LAYERS: dict[str, int] = {
     # browser/ is the Wave K browser service (sessions/tabs/downloads/
     # screenshots as artifacts): wraps tools/browser's BrowserSession, L4.
     "browser": 4,
+    # computer/ is Devon's own desktop organ (persistent sessions, the
+    # desktop bridge driver protocol, the perceive→act→verify loop): a
+    # service organ at L4 beside browser/; it reaches only downward
+    # (core) and the brain is injected by the layers above it.
+    "computer": 4,
     # triggers/ is the event-condition-action automation organ (Wave L):
     # schedule/file/price/message/webhook sources, notify/message/
     # command/mission actions.  An L5 organ beside scheduler/missions —
