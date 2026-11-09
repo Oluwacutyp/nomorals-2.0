@@ -332,6 +332,12 @@ func (b *bridge) statusPayload() map[string]any {
 	}
 	return map[string]any{
 		"type":                  "status",
+		// Program identity (orphanfix): the supervisor verifies a
+		// bridge it did not spawn by what the bridge says it is —
+		// program marker + account + the port it serves — never
+		// by spawn parentage alone.
+		"program":               bridgeVersion,
+		"port":                  b.port,
 		"state":                 b.connState,
 		"user":                  b.meJID,
 		"user_name":             b.myPushName(),

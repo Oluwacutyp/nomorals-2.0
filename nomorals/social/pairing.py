@@ -47,6 +47,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from .bridge_process import AdoptedProcess, default_inspector
+
 _ACCOUNT_ID_RE = re.compile(r"[^a-z0-9]+")
 _CODE_LINE_RE = re.compile(r"PAIRING CODE for \+(\d+):\s*(\S+)")
 #: The bridge logs a refused pairing-code request in this shape
@@ -977,10 +979,42 @@ def toggle_live_verdicts(rec: AccountRecord, *, stopped: bool,
 
 
 @dataclass
+class BridgeIdentity:
+    """The verdict on a bridge process this Devon did NOT spawn
+    (orphanfix): ownership is identity, never parentage.
+
+    ``verified`` is earned by evidence, itemized in ``via``:
+    ``protocol`` — the process on the account's port answers the
+    bridge protocol AS this account (its status payload names
+    the account's JID) and names a bridge program; ``process``
+    — the OS says the listening pid IS her bridge program (its
+    image, and where exposed its command line carrying this
+    account's ``--port``/``--creds``).  A not-yet-linked bridge
+    (no JID to check) verifies on ``process`` evidence alone.
+    When ``verified`` is False, ``reason`` says precisely which
+    check failed — the quiesce names it rather than guessing.
+    """
+
+    verified: bool = False
+    engine: str = ""
+    program: str = ""
+    user: str = ""
+    pid: int | None = None
+    via: tuple[str, ...] = ()
+    reason: str = ""
+
+
+@dataclass
 class _Live:
     proc: Any = None
     code: str = ""
     code_at: float = 0.0
+    #: True when this entry was ADOPTED (orphanfix): the process
+    #: was started by an earlier Devon (it survived a restart)
+    #: and brought under supervision after its identity verified
+    #: — ``proc`` is then an AdoptedProcess handle over its pid,
+    #: not a Popen this process owns.
+    adopted: bool = False
     #: Which bridge engine this process is ("go" | "node") —
     #: relaunches of a live account keep its engine.
     bridge_engine: str = "go"
@@ -1076,7 +1110,8 @@ class BridgeSupervisor:
                  binary_resolver: Callable[[], str | None] | None
                  = None,
                  probe_runner: Callable[..., tuple[int, str]]
-                 | None = None) -> None:
+                 | None = None,
+                 process_inspector: Any = None) -> None:
         self.registry = registry
         self.bridge_path = Path(bridge_path)
         self.sessions_root = Path(sessions_root)
@@ -1092,6 +1127,12 @@ class BridgeSupervisor:
             or "go"
         self._binary_resolver = binary_resolver
         self._probe_runner = probe_runner
+        # ── orphanfix: the OS process table (port → pid, image,
+        # stop verbs) behind identity verification and adoption.
+        # Injectable like spawn; production uses the stdlib
+        # inspector (bridge_process.ProcessInspector).
+        self._inspector = process_inspector \
+            if process_inspector is not None else default_inspector()
         self._binary_cache: str | None = None
         self._binary_probe_ok: bool | None = None
         self._binary_probe_detail = ""
@@ -1725,6 +1766,12 @@ class BridgeSupervisor:
             return False, (f"{rec.id} has no bridge port "
                            "recorded — re-pair the account")
         if self._port_listening(rec):
+            # Serving.  When the survivor's identity verifies it
+            # is also ADOPTED — supervision gains a handle (the
+            # reap path, stop(), the update quiesce) instead of
+            # a by-port shrug; an unverifiable listener keeps the
+            # passive behavior (it answers, it is left alone).
+            self.adopt(rec)
             return True, ""
         with self._lock:
             live = self._live.get(account_id)
@@ -1812,6 +1859,13 @@ class BridgeSupervisor:
                 "session is supervised by its own adapter, not the "
                 "WhatsApp bridge")
         if not self._alive(account_id):
+            # A verified survivor is ADOPTED, never double-
+            # launched (a second process could not bind the
+            # port anyway, and two bridges on one account would
+            # fight over the session).
+            if self._port_listening(rec) \
+                    and self.adopt(rec) is not None:
+                return rec
             self._launch(rec)
         return rec
 
@@ -1868,10 +1922,15 @@ class BridgeSupervisor:
         brings the bridges back.
 
         A bridge this process did NOT spawn can still be serving:
-        bridges survive a Devon restart by design and are then
-        adopted by port, with no process handle to stop. That
-        state is a BLOCKER, named per account: the update must
-        not pull while a bridge it cannot stop may be holding
+        bridges survive a Devon restart by design.  Ownership is
+        identity, not parentage (orphanfix): a survivor whose
+        identity verifies as this account's bridge (its status
+        payload names the program + the account; the OS image of
+        the listening pid agrees) is stopped like any owned
+        bridge.  Only a listener whose identity does NOT verify
+        is a BLOCKER, named per account with the failed check:
+        Devon never kills a process she cannot prove is hers,
+        and the update must not pull while one may be holding
         its program file.
 
         Returns (True, detail) when no bridge process is running,
@@ -1909,13 +1968,19 @@ class BridgeSupervisor:
         for rec in self.registry.all():
             if rec.platform != "whatsapp" or not rec.port:
                 continue
-            if not self._alive(rec.id) and self._port_listening(rec):
-                blockers.append(
-                    f"{rec.id}: a bridge is listening on port "
-                    f"{rec.port} but is not a process this Devon "
-                    "started (it survived a restart) — Devon "
-                    "cannot stop it, and it may hold its "
-                    "program file")
+            if self._alive(rec.id) or not self._port_listening(rec):
+                continue
+            # No live handle (never spawned here, or its entry
+            # is gone) but the port still serves: identity
+            # decides.  A verified survivor is stopped; an
+            # unverifiable listener is a named blocker and is
+            # NEVER signalled.
+            ok, detail = self.stop_bridge_process(
+                rec, timeout=timeout)
+            if ok:
+                stopped.append(f"{rec.id} (surviving bridge)")
+            else:
+                blockers.append(f"{rec.id}: {detail}")
         if blockers:
             return False, ("bridge processes still running: "
                            + "; ".join(blockers))
@@ -1942,11 +2007,17 @@ class BridgeSupervisor:
         return self.registry.remove(account_id)
 
     # ── health ──────────────────────────────────────────────────────
-    def probe(self, rec: AccountRecord, timeout: float = 2.0) -> str:
-        """Live session state over the bridge protocol: the bridge
-        answers a status request with its connection state."""
+    def _status_reply(self, rec: AccountRecord,
+                      timeout: float = 2.0) -> dict[str, Any] | None:
+        """One bridge-protocol status exchange with whatever is
+        on the record's port: the first status-shaped object it
+        sends (the connect broadcast, or the reply to our status
+        request), or None when nothing there speaks the bridge
+        protocol.  The full payload rides back — identity
+        verification reads the program marker, account and port
+        fields the state probe ignores."""
         if rec.platform != "whatsapp" or not rec.port:
-            return rec.status
+            return None
         try:
             with socket.create_connection(("127.0.0.1", rec.port),
                                           timeout=timeout) as sock:
@@ -1958,20 +2029,205 @@ class BridgeSupervisor:
                     if not chunk:
                         break
                     buf += chunk
-            for line in buf.decode("utf-8", "replace").splitlines():
-                try:
-                    obj = json.loads(line)
-                except ValueError:
-                    continue
-                if obj.get("type") == "status":
-                    return "linked" if obj.get("state") == "open" \
-                        else "down"
-                if obj.get("id") == "probe" and "state" in obj:
-                    return "linked" if obj.get("state") == "open" \
-                        else "down"
-            return "down"
         except OSError:
+            return None
+        for line in buf.decode("utf-8", "replace").splitlines():
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if obj.get("type") == "status":
+                return obj
+            if obj.get("id") == "probe" and "state" in obj:
+                return obj
+        return None
+
+    def probe(self, rec: AccountRecord, timeout: float = 2.0) -> str:
+        """Live session state over the bridge protocol: the bridge
+        answers a status request with its connection state."""
+        if rec.platform != "whatsapp" or not rec.port:
+            return rec.status
+        obj = self._status_reply(rec, timeout)
+        if obj is None:
             return "down"
+        return "linked" if obj.get("state") == "open" else "down"
+
+    # ── identity + adoption (orphanfix) ─────────────────────────
+    @staticmethod
+    def _jid_digits(user: Any) -> str:
+        """The digits of a JID's local part (device suffix and
+        domain stripped) — the account binding in a status
+        payload."""
+        local = str(user or "").split("@")[0].split(":")[0]
+        return re.sub(r"\D", "", local)
+
+    def _process_evidence(self, rec: AccountRecord,
+                          pid: int | None) -> tuple[str, str, bool]:
+        """(engine, cmdline, binds) from the OS's view of the
+        listening pid: the engine its image names ("" when the
+        image is not a bridge program), its command line, and
+        whether that command line carries THIS account's
+        ``--port`` and ``--creds`` (the launch shape every Devon
+        bridge runs with — account binding in OS evidence)."""
+        if pid is None:
+            return "", "", False
+        image = self._inspector.process_image(pid)
+        if not image:
+            return "", "", False
+        exe, cmdline = str(image[0] or ""), str(image[1] or "")
+        engine = ""
+        base = Path(exe).name.lower() if exe else ""
+        if base in ("whatsapp-bridge", "whatsapp-bridge.exe",
+                    "whatsapp-bridge-linux"):
+            engine = "go"
+        elif "whatsapp-bridge.mjs" in cmdline:
+            engine = "node"
+        binds = False
+        if cmdline and rec.creds_dir:
+            creds = str(Path(rec.creds_dir))
+            alt = creds.replace("\\", "/")
+            port_ok = (f"--port {rec.port}" in cmdline
+                       or f"--port={rec.port}" in cmdline)
+            binds = bool(port_ok and (creds in cmdline
+                                      or alt in cmdline))
+        return engine, cmdline, binds
+
+    def verify_bridge_identity(self, rec: AccountRecord,
+                               ) -> BridgeIdentity:
+        """Decide whether the process serving ``rec``'s port is
+        THIS account's bridge, on evidence — never on whether
+        this process spawned it.  See :class:`BridgeIdentity`
+        for the evidence rules; a refusal always names the check
+        that failed."""
+        ident = BridgeIdentity()
+        if rec.platform != "whatsapp" or not rec.port:
+            ident.reason = "not a WhatsApp bridge record"
+            return ident
+        ident.pid = self._inspector.listener_pid(rec.port)
+        reply = self._status_reply(rec)
+        if reply is None:
+            ident.reason = ("nothing on the port answers the "
+                            "bridge protocol")
+            return ident
+        ident.program = str(reply.get("program") or "")
+        ident.user = str(reply.get("user") or "")
+        program_engine = ""
+        for prefix, eng in (("gobridge/", "go"),
+                            ("nomorals-whatsapp-bridge/", "node")):
+            if ident.program.startswith(prefix):
+                program_engine = eng
+                break
+        proc_engine, _cmdline, binds = self._process_evidence(
+            rec, ident.pid)
+        account_digits = re.sub(r"\D", "", str(rec.identity or ""))
+        user_digits = self._jid_digits(ident.user)
+        if user_digits:
+            if user_digits != account_digits:
+                ident.reason = ("the bridge on the port serves a "
+                                "different account")
+                return ident
+            # The payload names this account.  Program evidence:
+            # the payload's own marker, or the OS image of the
+            # listening pid (a pre-marker bridge binary still
+            # proves itself by image).
+            if program_engine:
+                ident.verified = True
+                ident.engine = program_engine
+                ident.via = ("protocol",) + (("process",)
+                                             if proc_engine else ())
+                return ident
+            if proc_engine:
+                ident.verified = True
+                ident.engine = proc_engine
+                ident.via = ("protocol", "process")
+                return ident
+            ident.reason = ("it answers as this account but "
+                            "carries no program identity Devon "
+                            "can verify (no program marker in its "
+                            "status, and its process image is not "
+                            "readable as her bridge program)")
+            return ident
+        # Not linked (pairing, logged out): no JID to bind.  The
+        # OS evidence must carry it alone — her bridge program,
+        # launched with this account's port + session directory.
+        if binds and (program_engine or proc_engine):
+            ident.verified = True
+            ident.engine = program_engine or proc_engine
+            ident.via = ("process",)
+            return ident
+        ident.reason = ("it is not linked to any account, and "
+                        "its process does not carry this "
+                        "account's port and session directory")
+        return ident
+
+    def adopt(self, rec: AccountRecord) -> BridgeIdentity | None:
+        """Bring a surviving bridge under supervision: when the
+        process on the record's port verifies as this account's
+        bridge, it gains a live entry with an adopted-process
+        handle — health, the reap path and stop() (including
+        the update quiesce) work on it exactly as on a spawned
+        bridge.  Returns the verified identity, or None when
+        nothing verifiable is there (the caller keeps today's
+        passive by-port behavior)."""
+        if rec.platform != "whatsapp" or not rec.port:
+            return None
+        if self._alive(rec.id):
+            return None
+        ident = self.verify_bridge_identity(rec)
+        if not ident.verified or ident.pid is None:
+            return None
+        handle = AdoptedProcess(self._inspector, ident.pid)
+        live = _Live(proc=handle,
+                     bridge_engine=ident.engine
+                     or self._engine_of(rec.id),
+                     launched_at=time.time(), adopted=True)
+        with self._lock:
+            current = self._live.get(rec.id)
+            if current is not None and current.proc is not None \
+                    and not self._proc_dead(current.proc):
+                return None  # a live entry landed meanwhile
+            self._live[rec.id] = live
+        return ident
+
+    def stop_bridge_process(self, rec: AccountRecord, *,
+                            timeout: float = 5.0,
+                            ) -> tuple[bool, str]:
+        """Stop the bridge serving ``rec``'s port when this
+        process holds no handle for it — the quiesce's orphan
+        path and the owner-stop enforcement.  Identity first:
+        only a process verified as THIS account's bridge is
+        ever signalled; anything else is refused by name and
+        left running.  Graceful first (terminate), kill only on
+        timeout — the same escalation a spawned bridge gets."""
+        ident = self.verify_bridge_identity(rec)
+        if not ident.verified:
+            return False, (
+                f"a bridge is listening on port {rec.port} but "
+                f"is not a process this Devon started, and it "
+                f"does not identify as Devon's bridge for this "
+                f"account ({ident.reason}) — Devon cannot stop "
+                f"it, and it may hold its program file")
+        if ident.pid is None:
+            return False, (
+                f"the bridge on port {rec.port} verifies as "
+                f"Devon's ({ident.program or 'her bridge program'}"
+                f") but this platform cannot resolve the "
+                f"listening process to stop it — it may hold "
+                f"its program file")
+        handle = AdoptedProcess(self._inspector, ident.pid)
+        if not self._proc_dead(handle):
+            with contextlib.suppress(Exception):
+                handle.terminate()
+            if not self._wait_dead(handle, timeout):
+                with contextlib.suppress(Exception):
+                    handle.kill()
+                self._wait_dead(handle, 2.0)
+        if self._proc_dead(handle):
+            return True, (f"stopped the surviving bridge for "
+                          f"{rec.id} (identity verified via "
+                          f"{', '.join(ident.via)})")
+        return False, (f"the surviving bridge for {rec.id} is "
+                       f"still running after terminate and kill")
 
     def status_all(self, *, probe: bool = True) -> list[dict[str, Any]]:
         for rec in self.registry.all():
@@ -2072,11 +2328,34 @@ class PoolSupervision:
         sup = self.supervisor
         assert sup is not None
         if rec.status == "stopped":
+            # The owner's stop is STICKY (the personal-surface
+            # live gate): a bridge that survived its own stop —
+            # or the restart that carried the stop — is never
+            # adopted back into service.  When one is still
+            # serving on the account's port and verifies as this
+            # account's bridge, the stop is enforced again; an
+            # unverifiable listener is left alone (Devon never
+            # kills a process she cannot prove is hers — the
+            # update quiesce names it instead).
+            if sup.is_running(rec.id) \
+                    or not sup.bridge_serving(rec):
+                return None
+            ok, detail = sup.stop_bridge_process(rec)
+            if ok:
+                return {"account": rec.id,
+                        "change": "owner-stopped account's "
+                                  f"surviving bridge stopped "
+                                  f"({detail})"}
             return None
         if sup.is_running(rec.id):
             return None  # the bridge's own policy owns a live process
         probed = sup.probe(rec)
         if probed == "linked":
+            # A survivor answering as this account is ADOPTED
+            # when its identity verifies — supervision gains a
+            # handle (health, reap, stop) instead of a by-port
+            # shrug.  Unverifiable: today's passive behavior.
+            sup.adopt(rec)
             if rec.status != "linked":
                 self.registry.set_status(rec.id, "linked")
                 return {"account": rec.id,

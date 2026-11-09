@@ -10,7 +10,7 @@
  * Protocol (one JSON object per line):
  *
  *   bridge -> python
- *     {"type":"status","state":"open|closed","user":"<jid>","lid":"<lid>@lid"}
+ *     {"type":"status","program":"nomorals-whatsapp-bridge/1.0.0","port":<n>,"state":"open|closed","user":"<jid>","lid":"<lid>@lid"}
  *     {"type":"qr","data":"<qr string>"}
  *     {"type":"pairing_code","data":"<8-char code>"}   (when WA_PAIRING_CODE=1)
  *     {"type":"message","id":"<wa message id>","chat":{"id","kind","title"},
@@ -91,6 +91,10 @@ const opt = (name, def) => {
   const i = args.indexOf(name);
   return i >= 0 && args[i + 1] ? args[i + 1] : def;
 };
+// Program identity (orphanfix): the supervisor verifies a bridge
+// it did not spawn by what the bridge says it is — this marker,
+// the account JID and the port served — never by spawn parentage.
+const BRIDGE_PROGRAM = 'nomorals-whatsapp-bridge/1.0.0';
 const PORT = parseInt(opt('--port', process.env.WA_BRIDGE_PORT || '8787'), 10);
 const CREDS_DIR = path.resolve(here, opt('--creds', process.env.WA_CREDS_DIR || './.creds'));
 const MEDIA_DIR = path.resolve(here, opt('--media', process.env.WA_MEDIA_DIR || './media'));
@@ -227,6 +231,8 @@ function statusPayload(state) {
   const nextInS = nextRetryAt > Date.now() ? Math.round((nextRetryAt - Date.now()) / 1000) : 0;
   return {
     type: 'status',
+    program: BRIDGE_PROGRAM,
+    port: PORT,
     state,                 // open | closed | reconnecting | parked
     user: meJid,
     lid: meLid,            // "" when the account has no LID
@@ -1806,7 +1812,7 @@ async function handleCommand(sock, req) {
         return reply(sock, id, { ok: true, chats: list });
       }
       case 'status': {
-        return reply(sock, id, { ok: true, user: meJid, lid: meLid, state: wa ? 'open' : 'closed' });
+        return reply(sock, id, { ok: true, program: BRIDGE_PROGRAM, port: PORT, user: meJid, lid: meLid, state: wa ? 'open' : 'closed' });
       }
       // Own identity (parity G3, census bundle #5). Baileys
       // carries a first-class verb for each act; refusals

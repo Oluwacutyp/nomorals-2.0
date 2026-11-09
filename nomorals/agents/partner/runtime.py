@@ -3525,12 +3525,31 @@ class PartnerRuntime(
                            kind: str) -> Any:
         """Open the restart journey card in the requesting chat.
         Returns the card, or None when this turn has no chat
-        surface to hold it. Never raises."""
+        surface to hold it. Never raises.
+
+        Exactly once per operation (orphanfix): the card records
+        the message that asked for it, and a second opening for
+        the SAME message in the SAME boot — an own-echo or
+        redelivery of the owner's command reaching the handler
+        again — reuses that card (live or just closed) instead
+        of publishing a twin.  A genuinely new command (a new
+        message) always opens its own journey."""
         if message is None or getattr(message, "chat", None) is None:
             return None
         try:
             from ...social.chat.living_cards import build_restart_card
 
+            store = self._living_card_store()
+            origin = str(getattr(message, "message_id", "") or "")
+            if origin:
+                existing = store.latest("restart", chat_key)
+                if existing is not None:
+                    state = existing.state or {}
+                    if str(state.get("origin_message_id") or "") \
+                            == origin and str(
+                                state.get("boot_id") or "") \
+                            == self._play_dl_boot_id():
+                        return existing
             chat = message.chat
             card = build_restart_card(
                 chat_key=chat_key,
@@ -3539,8 +3558,9 @@ class PartnerRuntime(
                 chat_id=str(getattr(chat, "chat_id", "") or ""),
                 kind=kind)
             card.state = {**card.state,
-                          "boot_id": self._play_dl_boot_id()}
-            self._living_card_store().save(card)
+                          "boot_id": self._play_dl_boot_id(),
+                          "origin_message_id": origin}
+            store.save(card)
             self._living_card_host().publish(card, chat)
             return card
         except Exception as exc:  # noqa: BLE001 - journey is a surface
@@ -5993,17 +6013,25 @@ class PartnerRuntime(
                 _report = result.get("update_report")
                 if _report is not None:
                     advance_restart_card(journey, _report)
-                    journey = self._revise_restart_card(
-                        journey, message, body=journey.body,
-                        status=journey.status, state=journey.state)
                 if not result.get("restart_requested"):
+                    # The journey ENDS here (a pull, an up-to-date
+                    # tree, a refusal): exactly ONE closing
+                    # revision carries the report advance AND the
+                    # close.  This used to revise twice back to
+                    # back, and for this family the two revisions
+                    # render identically (the phase render never
+                    # shows the body) — so one refused edit turned
+                    # the second into a fresh, identical message:
+                    # the owner's 2026-11-09 /update showed its
+                    # "Devon restart" card twice.
                     if _report is None and not result.get("ok"):
                         journey = self._revise_restart_card(
                             journey, message, status="attention",
                             terminal=True,
                             body=("the update did not run: "
                                   + str(result.get("message", ""))
-                                  ))
+                                  ),
+                            state=journey.state)
                     elif _report is not None:
                         journey = self._revise_restart_card(
                             journey, message,
@@ -6011,7 +6039,12 @@ class PartnerRuntime(
                                     else "attention"),
                             terminal=True,
                             body=(str(result.get("message", ""))
-                                  ))
+                                  ),
+                            state=journey.state)
+                elif _report is not None:
+                    journey = self._revise_restart_card(
+                        journey, message, body=journey.body,
+                        status=journey.status, state=journey.state)
             if result.get("restart_requested"):
                 # Record the restart intent BEFORE this process dies:
                 # the reply below promises a restart, and only the
