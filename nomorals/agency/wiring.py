@@ -433,6 +433,12 @@ def boot_agency(db: Any, *, now: float | None = None,
     store = InitiativeStore(db)
     supervisor = BootSupervisor(store, scheduler_facade=scheduler_facade)
     report = supervisor.reconcile(now=now, watches=watches)
+    # The composition readiness map, retained on the boot result
+    # (Living Chat P2): the startup readiness card reads it as
+    # its agency tenant. Filled by the composition root below
+    # when this boot composed through it; None on the
+    # caller-supplied-organs path (no composition ran).
+    comp_readiness: dict[str, Any] | None = None
     # ALL AI systems actively working: seed one standing initiative per
     # system (idempotent via dedupe_key) so every system enters the
     # rotation with a live lifecycle on every boot.
@@ -450,6 +456,7 @@ def boot_agency(db: Any, *, now: float | None = None,
                 comp = None
             if comp is not None:
                 adapters = comp["adapters"]
+                comp_readiness = comp.get("readiness")
                 if research_organ is None:
                     research_organ = comp["research_organ"]
                 if wisdom_organ is None:
@@ -479,4 +486,4 @@ def boot_agency(db: Any, *, now: float | None = None,
         shift_job = ensure_agency_shift_job(scheduler, spec=shift_spec)
     return {"store": store, "supervisor": supervisor, "boot": report,
             "systems": systems, "seeded_initiatives": len(seeded),
-            "shift_job": shift_job}
+            "shift_job": shift_job, "readiness": comp_readiness}

@@ -123,11 +123,19 @@ class OperationStore:
     def open(self, chat_key: str, actions: list[str] | tuple[str, ...],
              *, owner_key: str = "", kind: str = "",
              ttl_s: float | None = None,
-             now: float | None = None) -> Operation | None:
+             now: float | None = None,
+             operation_id: str = "") -> Operation | None:
         """Offer a new operation in the slot, replacing the old.
 
         Returns the Operation (its id is the card's stable
         reference), or None for an empty chat key / action list.
+
+        ``operation_id`` (Living Chat P2): a caller that already
+        owns a durable identity for this card — a living card's
+        persisted id — may name it, so the operation and the
+        durable card are one identity across a restart. The id
+        keeps this store's shape (short, url-safe); an unusable
+        value falls back to a generated id.
         """
         key = (str(chat_key or ""), str(owner_key or ""))
         acts = tuple(str(a) for a in (actions or []) if str(a).strip())
@@ -144,8 +152,12 @@ class OperationStore:
                 slot.current.remember_until = ts + self._ttl_s
                 slot.tombstone = slot.current
             slot.revision += 1
+            named = str(operation_id or "").strip()
+            if not named or len(named) > 32 or not all(
+                    c.isalnum() or c in "-_" for c in named):
+                named = secrets.token_hex(4)
             op = Operation(
-                operation_id=secrets.token_hex(4),
+                operation_id=named,
                 chat_key=key[0], owner_key=key[1], kind=str(kind or ""),
                 actions=acts, revision=slot.revision,
                 opened_at=ts, expires_at=ts + ttl)

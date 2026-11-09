@@ -458,7 +458,7 @@ SURFACES: tuple[Surface, ...] = (
         id="downloads",
         title="Download jobs (measured progress cards)",
         producer="nomorals.core.progress_events:ProgressTracker",
-        card_type="progress card over a download job",
+        card_type="living card (family: progress) over a download job",
         actions=(
             ActionRef("download.cancel", "callback", "control:download",
                       "download cancel a title"),
@@ -466,14 +466,86 @@ SURFACES: tuple[Surface, ...] = (
         platforms=_ALL_CHAT,
         routes=_ALL_CHAT_ROUTES,
         operation="the download job runs the measured progress "
-                  "stream (searching→…→delivered); cancel resolves "
-                  "the job by title and stops it cooperatively",
-        receipt="the ack message id is the job's handle; terminal "
-                "state edits land on it and the delivered file is "
-                "the receipt",
-        fallback=_NUMBERED,
+                  "stream (searching→…→delivered); the progress "
+                  "card (social.chat.living_cards, family "
+                  "'progress') is the job's durable record — its "
+                  "snapshots revise the ack; cancel resolves the "
+                  "job by title and stops it cooperatively",
+        receipt="the ack message id is the job's handle AND the "
+                "card's recorded message; terminal state edits "
+                "land on it and the delivered file is the receipt",
+        fallback="living-card update forms "
+                 "(social.chat.living_cards.CARD_UPDATE_FORMS): "
+                 "edit in place where platform_limits records "
+                 "text-edit support (Telegram family, WhatsApp), "
+                 "an honest superseding send where it does not; "
+                 "the numbered action list (" + _NUMBERED + ") "
+                 "remains the buttonless form",
         tests=("tests/test_progress_events.py",
-               "tests/test_living_chat_p1.py"),
+               "tests/test_living_chat_p1.py",
+               "tests/test_living_chat_p2.py"),
+    ),
+    Surface(
+        id="startup",
+        title="Startup readiness card (doc 4 startup journey)",
+        producer="nomorals.agents.partner.runtime:"
+                 "PartnerRuntime._publish_startup_card",
+        card_type="living card (family: readiness)",
+        actions=(
+            ActionRef("startup.status", "callback", "control:status",
+                      "status"),
+            ActionRef("startup.diagnose", "callback",
+                      "control:doctor", "doctor"),
+        ),
+        platforms=_ALL_CHAT,
+        routes=_ALL_CHAT_ROUTES,
+        operation="boot produces ONE readiness card per owner "
+                  "chat from real facts (storage, update "
+                  "recovery, platforms, brain gate, scheduler, "
+                  "the Batch D composition readiness map as the "
+                  "agency tenant, mission resumption); verdict "
+                  "ready / degraded / recovery-required; the "
+                  "card is persisted before delivery and delivered "
+                  "on the first owner interaction when no "
+                  "transport was up at boot",
+        receipt="the durable living_cards row (delivered flag + "
+                "message id) is the retained startup record; "
+                "delivery edits land on the recorded message",
+        fallback="living-card update forms: edit in place on "
+                 "text-edit surfaces, superseding send elsewhere; "
+                 "an undelivered card stays persisted and is "
+                 "delivered when the transport connects",
+        tests=("tests/test_living_chat_p2.py",),
+    ),
+    Surface(
+        id="restart",
+        title="Restart journey card (doc 4 restart journey)",
+        producer="nomorals.agents.partner.runtime:"
+                 "PartnerRuntime (update branch + boot finalize)",
+        card_type="living card (family: restart)",
+        actions=(
+            ActionRef("restart.status", "refresh", "control:status",
+                      "status"),
+        ),
+        platforms=_ALL_CHAT,
+        routes=_ALL_CHAT_ROUTES,
+        operation="an update/restart opens a journey card in the "
+                  "requesting chat (preflight → swap → restart); "
+                  "the dying process advances it only to the "
+                  "handoff; the NEW process finalizes it from "
+                  "the restart-truth receipt "
+                  "(os.update.consume_restart_intent: "
+                  "restart_confirmed / restart_unconfirmed) — "
+                  "the final state is never declared by the "
+                  "process going down",
+        receipt="the card's terminal revision, written by the "
+                "new process and edited onto the original "
+                "message where the surface supports edits",
+        fallback="living-card update forms: edit in place on "
+                 "text-edit surfaces, superseding send elsewhere; "
+                 "the durable Notifier recovery report remains "
+                 "the cross-channel record beside the card",
+        tests=("tests/test_living_chat_p2.py",),
     ),
     Surface(
         id="group-boards",

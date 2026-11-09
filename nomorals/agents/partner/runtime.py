@@ -61,6 +61,11 @@ from .reply_guard import (
 from .brain_gate import BrainGate, is_personal_platform
 _log = get_logger(__name__)
 
+#: Living-card tap stamp (Living Chat P2): a card button's
+#: callback payload — "cardtap <card_id> <revision> <index>" —
+#: resolved against the durable card before anything executes.
+_CARD_TAP_RE = re.compile(r"^/cardtap ([0-9A-Za-z_-]+) (\d+) (\d+)$")
+
 
 def _update_recovery_notice(receipt: dict) -> tuple[str, str]:
     """Owner-facing (title, body) for an update crash recovery that acted.
@@ -1138,6 +1143,15 @@ class PartnerRuntime(
             self._harvest_play_downloads(message.chat.key, message.chat)
         except Exception as e:
             record_failure("runtime.PartnerRuntime._process_inner", e)
+        # Startup journey (doc 4): if boot could not deliver the
+        # readiness card (no transport was up yet), the owner's
+        # first interaction on a live transport delivers the
+        # retained record. Cheap no-op once delivered.
+        try:
+            self._deliver_pending_startup_card(message)
+        except Exception as e:  # noqa: BLE001 - a surface, not intake
+            record_failure(
+                "runtime.PartnerRuntime._process_inner:startup_card", e)
         # Housekeeping beat (§15): the supervision sweep, the
         # WhatsApp live-attach reconcile and the story sweep —
         # throttled inside _housekeeping_beat, and driven from
@@ -3205,9 +3219,22 @@ class PartnerRuntime(
         # and a failure inside recovery never blocks boot.
         if not self.dry_run:
             try:
-                self._recover_interrupted_update()
+                self._boot_update_receipt = \
+                    self._recover_interrupted_update()
             except Exception as exc:  # noqa: BLE001 - recovery is optional
                 _log.warning("update crash recovery failed: %s", exc)
+        # Startup journey (doc 4, Living Chat P2): ONE readiness
+        # card to the owner's surface, built from the facts this
+        # boot actually established and revised from the durable
+        # record — not a boot log dump. Best-effort like every
+        # boot surface: a failure here never breaks the boot, and
+        # an undelivered card stays persisted for delivery on the
+        # first owner interaction.
+        if not self.dry_run:
+            try:
+                self._publish_startup_card(started)
+            except Exception as exc:  # noqa: BLE001 - surface, not boot
+                _log.warning("startup card not published: %s", exc)
         return started
 
     def _recover_interrupted_update(
@@ -3252,11 +3279,32 @@ class PartnerRuntime(
                 _log.warning("update restart-intent check could not "
                              "run", exc_info=True)
                 intent_receipt = None
+            # The readiness facts keep the restart verdict beside
+            # the journal receipt (an unconfirmed restart is a
+            # recovery-required fact about THIS boot).
+            self._boot_intent_receipt = intent_receipt
         except Exception as exc:  # noqa: BLE001 - boot must not fail here
             _log.warning("update crash recovery could not run: %s", exc)
             return None
         if intent_receipt is not None:
             self._report_update_recovery(intent_receipt)
+            # Restart journey (doc 4): THIS process — never the
+            # one that went down — writes the journey card's final
+            # state, from the same receipt.
+            try:
+                self._finalize_restart_card(intent_receipt)
+            except Exception as exc:  # noqa: BLE001 - never blocks boot
+                _log.warning("restart card not finalized: %s", exc)
+        else:
+            # No restart intent: a PLAIN restart (or one whose
+            # intent write failed) may still have left a journey
+            # card open. This process closes it with the only
+            # witness it has — its own existence — claiming no
+            # version truth.
+            try:
+                self._finalize_restart_card({})
+            except Exception as exc:  # noqa: BLE001 - never blocks boot
+                _log.warning("restart card sweep failed: %s", exc)
         if not receipt.get("recovered"):
             return receipt
         self._report_update_recovery(receipt)
@@ -3290,6 +3338,286 @@ class PartnerRuntime(
                              {"notice": True, "subject": "self-update"}))
         except Exception as exc:  # noqa: BLE001 - reporting is best-effort
             _log.warning("update recovery notice not delivered: %s", exc)
+
+    # ── living cards (Living Chat P2) ───────────────────────────
+
+    def _living_card_store(self) -> Any:
+        """The durable living-card store over the context db
+        (in-memory fallback when the context carries no db)."""
+        store = getattr(self, "_living_card_store_obj", None)
+        if store is None:
+            from ...social.chat.living_cards import CardStore
+
+            store = CardStore(getattr(self.context, "db", None))
+            self._living_card_store_obj = store
+        return store
+
+    def _living_card_host(self) -> Any:
+        """The card host wired to this runtime's real verbs: the
+        gateway send for first delivery / superseding sends, and
+        the live-session edit verb (the same one interactive
+        flows edit through) for in-place updates."""
+        host = getattr(self, "_living_card_host_obj", None)
+        if host is None:
+            from ...social.chat.live_session import edit_session_message
+            from ...social.chat.living_cards import CardHost
+
+            def _send(platform: str, chat: Any, text: str,
+                      buttons: Any = None) -> tuple[bool, str]:
+                try:
+                    res = self.gateway.send(
+                        platform, chat, text, buttons=buttons)
+                except Exception:  # noqa: BLE001 - host degrades
+                    return (False, "")
+                if res is None or not getattr(res, "ok", False):
+                    return (False, "")
+                return (True, str(getattr(res, "message_id", "")
+                                  or ""))
+
+            def _edit(chat: Any, message_id: str, text: str,
+                      buttons: Any = None) -> bool:
+                adapter = self._chat_adapter(chat.platform)
+                if adapter is None:
+                    return False
+                return edit_session_message(
+                    adapter, chat, message_id, text, buttons=buttons)
+
+            host = CardHost(self._living_card_store(),
+                            send=_send, edit=_edit)
+            self._living_card_host_obj = host
+        return host
+
+    @staticmethod
+    def _card_chat_ref(card: Any) -> Any:
+        from ...social.chat.base import ChatRef
+
+        return ChatRef(platform=card.platform, chat_id=card.chat_id)
+
+    # ── startup journey ─────────────────────────────────────────
+
+    def _readiness_facts(self, started: list[str]) -> dict[str, Any]:
+        """The facts the startup readiness card reports — each
+        gathered from the subsystem that owns it, at boot."""
+        facts: dict[str, Any] = {
+            "storage": getattr(self.context, "db", None) is not None,
+            "recovery": None, "platforms": [], "brain": None,
+            "scheduler": None, "agency": None, "missions": None}
+        intent = getattr(self, "_boot_intent_receipt", None)
+        journal = getattr(self, "_boot_update_receipt", None)
+        if isinstance(intent, dict):
+            facts["recovery"] = intent
+        elif isinstance(journal, dict) and journal.get("recovered"):
+            facts["recovery"] = journal
+        try:
+            known = list(self.gateway.known_platforms() or [])
+        except Exception:  # noqa: BLE001 - facts never break boot
+            known = []
+        up = {str(s) for s in (started or [])}
+        seen = set()
+        for name in known:
+            seen.add(str(name))
+            facts["platforms"].append((
+                str(name), "up" if str(name) in up else "down",
+                "" if str(name) in up else "not started this boot"))
+        for name in sorted(up - seen):
+            facts["platforms"].append((name, "up", ""))
+        try:
+            from ..notifier import resolve_brain_gate
+
+            gate = resolve_brain_gate(self.context)
+            if gate is not None and gate.degraded_now():
+                facts["brain"] = (
+                    "degraded",
+                    "the brain's last observed outcome was a "
+                    "failure — personal surfaces stay observe-only "
+                    "until it answers again")
+            else:
+                facts["brain"] = ("ready", "")
+        except Exception:  # noqa: BLE001 - facts never break boot
+            facts["brain"] = None
+        scheduler = getattr(self, "_scheduler", None)
+        if scheduler is None:
+            facts["scheduler"] = ("down", "no scheduler this boot")
+        else:
+            try:
+                running = bool(scheduler.running())
+            except Exception:  # noqa: BLE001
+                running = False
+            facts["scheduler"] = (
+                ("running", "") if running else
+                ("down", "scheduler not running"))
+        agency = getattr(self, "_agency", None)
+        if isinstance(agency, dict):
+            facts["agency"] = agency.get("readiness")
+        return facts
+
+    def _publish_startup_card(self, started: list[str]) -> None:
+        """Deliver the boot's ONE readiness surface to the owner
+        chats (doc 4): persisted first (the retained record),
+        then published through the living-card machinery.
+        Never raises."""
+        from ...social.chat.living_cards import build_readiness_card
+
+        facts = self._readiness_facts(started)
+        store = self._living_card_store()
+        host = self._living_card_host()
+        for key in _key_set(self.settings.partner.owner_chats):
+            plat, _, cid = key.partition(":")
+            if not cid:
+                continue
+            card = build_readiness_card(
+                facts, chat_key=key, platform=plat, chat_id=cid)
+            store.save(card)  # the retained record, before delivery
+            host.publish(card, self._card_chat_ref(card))
+            _log.info("startup card %s for %s: verdict %s, "
+                      "delivered %s", card.card_id, key,
+                      card.status, card.delivered)
+
+    def _deliver_pending_startup_card(self, message: Any) -> None:
+        """Show the startup record when the transport actually
+        connects (doc 4): an owner chat's first interaction
+        delivers any readiness card boot could not. Never
+        raises (the caller failure-isolates it too)."""
+        chat_key = str(getattr(message.chat, "key", "") or "")
+        if not chat_key:
+            return
+        if chat_key not in _key_set(self.settings.partner.owner_chats):
+            return
+        store = self._living_card_store()
+        pending = [c for c in store.live_for_chat(chat_key)
+                   if c.family == "readiness" and not c.delivered]
+        if not pending:
+            return
+        host = self._living_card_host()
+        for card in pending:
+            host.deliver(card, message.chat)
+
+    # ── restart journey ─────────────────────────────────────────
+
+    def _open_restart_card(self, message: Any, chat_key: str,
+                           kind: str) -> Any:
+        """Open the restart journey card in the requesting chat.
+        Returns the card, or None when this turn has no chat
+        surface to hold it. Never raises."""
+        if message is None or getattr(message, "chat", None) is None:
+            return None
+        try:
+            from ...social.chat.living_cards import build_restart_card
+
+            chat = message.chat
+            card = build_restart_card(
+                chat_key=chat_key,
+                owner_key=_pick_owner_key(message),
+                platform=str(getattr(chat, "platform", "") or ""),
+                chat_id=str(getattr(chat, "chat_id", "") or ""),
+                kind=kind)
+            card.state = {**card.state,
+                          "boot_id": self._play_dl_boot_id()}
+            self._living_card_store().save(card)
+            self._living_card_host().publish(card, chat)
+            return card
+        except Exception as exc:  # noqa: BLE001 - journey is a surface
+            _log.warning("restart card not opened: %s", exc)
+            return None
+
+    def _revise_restart_card(self, card: Any, message: Any,
+                             **changes: Any) -> Any:
+        """Deliver one journey revision to the card's chat.
+        Never raises; returns the (possibly revised) card."""
+        if card is None or message is None:
+            return card
+        try:
+            return self._living_card_host().revise(
+                card, message.chat, **changes)
+        except Exception as exc:  # noqa: BLE001 - journey is a surface
+            _log.warning("restart card revision failed: %s", exc)
+            return card
+
+    def _finalize_restart_card(self, receipt: dict[str, Any]) -> None:
+        """Write the restart journey's final state — called by
+        the NEW process with the restart-truth receipt (and, for
+        a plain restart that left no receipt, by the boot sweep
+        below with the process-up witness only)."""
+        from ...social.chat.living_cards import (
+            finalize_plain_restart_card,
+            finalize_restart_card,
+        )
+
+        store = self._living_card_store()
+        card = store.latest("restart")
+        if card is None or card.terminal:
+            return
+        opened_boot = str((card.state.get("restart") or {})
+                          .get("boot_id") or card.state.get(
+                              "boot_id") or "")
+        if opened_boot and opened_boot == self._play_dl_boot_id():
+            return  # opened by THIS process; its journey is live
+        if receipt:
+            done = finalize_restart_card(card, receipt)
+        else:
+            done = finalize_plain_restart_card(
+                card, boot_id=self._play_dl_boot_id())
+        old = done.revision
+        done.revision = old + 1
+        if not store.save(done, expect_revision=old):
+            return
+        try:
+            self._living_card_host().deliver(
+                done, self._card_chat_ref(done))
+        except Exception as exc:  # noqa: BLE001 - surface, not boot
+            _log.warning("restart card final delivery failed: %s",
+                         exc)
+
+    # ── fenced card taps ────────────────────────────────────────
+
+    def _living_card_tap(self, card_id: str, revision: int,
+                         index: int, chat_key: str,
+                         message: Any = None) -> str:
+        """Resolve one ``cardtap`` tap (Living Chat P2 fencing).
+
+        Current revision → the action's command dispatches
+        through the ordinary control path (grants re-checked
+        there). Superseded revision → the honest stale answer
+        with the CURRENT card rendered, and the live card is
+        re-delivered so the current state is what is on screen.
+        Unknown card → a plain "gone" answer. Nothing stale ever
+        executes.
+        """
+        from ...social.chat.living_cards import (
+            STALE_CARD_MESSAGE,
+            TapStatus,
+            render_card,
+            resolve_card_tap,
+        )
+
+        owner = _pick_owner_key(message) if message is not None \
+            else ""
+        out = resolve_card_tap(
+            self._living_card_store(), card_id, revision, index,
+            chat_key=chat_key, owner_key=owner)
+        if out.status is TapStatus.OK and out.command:
+            return self.handle_control(
+                "/" + out.command.lstrip("/"), chat_key,
+                message=message)
+        if out.status is TapStatus.STALE and out.card is not None:
+            card = out.card
+            if message is not None:
+                try:
+                    self._living_card_host().deliver(
+                        card, message.chat)
+                except Exception as exc:  # noqa: BLE001
+                    _log.debug("stale card re-delivery failed: %s",
+                               exc)
+            platform = (chat_key or "").partition(":")[0]
+            return (STALE_CARD_MESSAGE + "\n"
+                    + render_card(card, platform).text)
+        if out.status is TapStatus.OUT_OF_RANGE and out.card is not None:
+            return (f"that card has {len(out.card.actions)} "
+                    "action(s) — the buttons on its current "
+                    "version are the ones that work.")
+        return ("that card is gone — it was replaced, expired, or "
+                "belonged to an earlier run, and nothing was run "
+                "from it.")
 
     # ── boot mission resumption ─────────────────────────────────────────
 
@@ -4903,6 +5231,21 @@ class PartnerRuntime(
                 return "that one's just for the owner."
             return self._control_review("", chat_key=chat_key)
 
+        # Living-card taps (Living Chat P2): a card button's
+        # payload is a fencing stamp, not a command —
+        # "cardtap <card_id> <revision> <index>". Checked before
+        # the catalog parse (the stamp is deliberately NOT a
+        # catalog kind): resolution reads the DURABLE card, so a
+        # tap cut at a superseded revision answers with the
+        # current card state instead of executing stale intent,
+        # and the first tap after a restart resolves exactly
+        # like the last one before it.
+        _tap = _CARD_TAP_RE.match(text.strip())
+        if _tap is not None:
+            return self._living_card_tap(
+                _tap.group(1), int(_tap.group(2)),
+                int(_tap.group(3)), chat_key, message=message)
+
         # Command stacking: one message, one command per line (see
         # split_command_stack). Checked before the single-command parse
         # so a stack whose first line would fail the whole-text arg
@@ -5596,6 +5939,12 @@ class PartnerRuntime(
                 controller = ChatUpdateController(
                     mission_store=MissionStore(self.context.db),
                     update_runner=lambda pull: updater.run(pull=pull))
+                # Restart journey (doc 4, Living Chat P2): the
+                # journey card opens BEFORE the work, at preflight,
+                # in the chat that asked — every later phase
+                # revises this one card.
+                journey = self._open_restart_card(
+                    message, chat_key, kind)
                 try:
                     result = controller.execute(kind)
                 finally:
@@ -5606,6 +5955,36 @@ class PartnerRuntime(
                     self._release_bridge_launch_hold()
             except Exception as exc:  # noqa: BLE001 - update wiring failure is a reply
                 return f"/{kind} failed to start: {type(exc).__name__}: {exc}"
+            # The journey follows the outcome: the report advances
+            # preflight/swap; a journey that ends WITHOUT a restart
+            # (a pull, an up-to-date tree, a refusal) closes here,
+            # honestly — only a restart handoff stays open, and
+            # only the NEXT process may close that.
+            if journey is not None:
+                from ...social.chat.living_cards import advance_restart_card
+
+                _report = result.get("update_report")
+                if _report is not None:
+                    advance_restart_card(journey, _report)
+                    journey = self._revise_restart_card(
+                        journey, message, body=journey.body,
+                        status=journey.status, state=journey.state)
+                if not result.get("restart_requested"):
+                    if _report is None and not result.get("ok"):
+                        journey = self._revise_restart_card(
+                            journey, message, status="attention",
+                            terminal=True,
+                            body=("the update did not run: "
+                                  + str(result.get("message", ""))
+                                  ))
+                    elif _report is not None:
+                        journey = self._revise_restart_card(
+                            journey, message,
+                            status=("applied" if result.get("ok")
+                                    else "attention"),
+                            terminal=True,
+                            body=(str(result.get("message", ""))
+                                  ))
             if result.get("restart_requested"):
                 # Record the restart intent BEFORE this process dies:
                 # the reply below promises a restart, and only the
@@ -5620,6 +5999,18 @@ class PartnerRuntime(
                     except Exception:  # noqa: BLE001 - never blocks the restart
                         _log.warning("could not record the update "
                                      "restart intent", exc_info=True)
+                # The handoff lands on the journey card BEFORE
+                # this process dies — and that is as far as this
+                # process may write: the confirmed phase belongs
+                # to the process that comes up (advance_restart_card
+                # structurally cannot write it).
+                if journey is not None:
+                    from ...social.chat.living_cards import advance_restart_card
+
+                    advance_restart_card(journey, phase="restart")
+                    self._revise_restart_card(
+                        journey, message, body=journey.body,
+                        status=journey.status, state=journey.state)
                 # The reply goes out first; the restart thread stops the
                 # runtime and re-execs the same argv. Boot resumes from
                 # the checkpoints the controller just took.

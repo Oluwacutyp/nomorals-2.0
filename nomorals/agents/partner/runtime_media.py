@@ -1834,7 +1834,35 @@ class RuntimeMediaMixin:
             tracker = ProgressTracker(
                 op_id=new_short_id("dl"), title=title or "")
 
+        # Living card (Living Chat P2): the download's durable
+        # card — family "progress", identity = the tracker's op
+        # id.  The tracker stays the measurement source; the card
+        # is the record that survives the process (its snapshots
+        # are folded in below, terminal included, even though the
+        # ack's own final state is owned by the outcome edit).
+        _dl_card_holder: dict[str, str] = {}
+
+        def _card_sync(event: Any, _tracker: Any = tracker) -> None:
+            card_id = _dl_card_holder.get("card_id") or ""
+            if not card_id:
+                return
+            try:
+                from ...social.chat.living_cards import apply_progress_snapshot
+                store = self._living_card_store()
+                card = store.get(card_id)
+                if card is None:
+                    return
+                apply_progress_snapshot(card, _tracker.snapshot())
+                old = card.revision
+                card.revision = old + 1
+                store.save(card, expect_revision=old)
+            except Exception as e:  # noqa: BLE001 - a record, not a gate
+                record_failure(
+                    "runtime_media.RuntimeMediaMixin._play_download_bg"
+                    ".card_sync", e)
+
         def _render_progress(event: Any, _tracker: Any = tracker) -> None:
+            _card_sync(event, _tracker)
             text = _tracker.render_text()
             if event.terminal is None:
                 # The ack's own text already says "working": an edit
@@ -1888,6 +1916,24 @@ class RuntimeMediaMixin:
         except Exception as e:  # noqa: BLE001 - the ack is best-effort
             record_failure(
                 "runtime_media.RuntimeMediaMixin._play_download_bg.ack", e)
+
+        # Open the download's living card on the ack: the ack
+        # message IS the card's live render (same message id), and
+        # the durable card record is what a restart rebinds to.
+        try:
+            from ...social.chat.living_cards import progress_card
+            _dl_card = progress_card(
+                tracker, chat_key=chat_key or "",
+                platform=str(getattr(chat, "platform", "") or ""),
+                chat_id=str(getattr(chat, "chat_id", "") or ""))
+            _dl_card.message_id = ack_id
+            _dl_card.delivered = bool(ack_id)
+            self._living_card_store().save(_dl_card)
+            _dl_card_holder["card_id"] = _dl_card.card_id
+        except Exception as e:  # noqa: BLE001 - a record, not a gate
+            record_failure(
+                "runtime_media.RuntimeMediaMixin._play_download_bg"
+                ".card_open", e)
 
         # The worker body needs its own job id (for the durable
         # record) before submit() returns it — a one-cell holder the
@@ -1987,6 +2033,22 @@ class RuntimeMediaMixin:
             return str(text or "")
         holder["job_id"] = job.id
         self._play_dl_record_start(job.id, chat_key, title)
+        # Link the card to its job so the restart harvester can
+        # close the exact card a lost download belonged to.
+        try:
+            _card_id = _dl_card_holder.get("card_id") or ""
+            if _card_id:
+                _store = self._living_card_store()
+                _card = _store.get(_card_id)
+                if _card is not None:
+                    _card.state = {**_card.state, "job_id": job.id}
+                    _old = _card.revision
+                    _card.revision = _old + 1
+                    _store.save(_card, expect_revision=_old)
+        except Exception as e:  # noqa: BLE001 - a record, not a gate
+            record_failure(
+                "runtime_media.RuntimeMediaMixin._play_download_bg"
+                ".card_link", e)
         return ""
 
     def _celebrate_delivery(self, chat: Any, chat_key: str,
@@ -2330,6 +2392,33 @@ class RuntimeMediaMixin:
                         "UPDATE play_download_jobs SET status = "
                         "'lost-reported' WHERE job_id = ?",
                         (row.get("job_id"),))
+                    # Close the lost download's living card with
+                    # the same honesty (Living Chat P2): the card
+                    # rebinds after a restart, and its terminal
+                    # state is this loss — never a phantom "still
+                    # downloading" left on the record.
+                    try:
+                        _store = self._living_card_store()
+                        for _card in _store.live_for_chat(
+                                chat_key or ""):
+                            if _card.family != "progress":
+                                continue
+                            if _card.state.get("job_id") != \
+                                    row.get("job_id"):
+                                continue
+                            _card.status = "lost"
+                            _card.terminal = True
+                            _card.state = {
+                                **_card.state,
+                                "restart_loss": True}
+                            _old = _card.revision
+                            _card.revision = _old + 1
+                            _store.save(
+                                _card, expect_revision=_old)
+                    except Exception as e:  # noqa: BLE001
+                        record_failure(
+                            "runtime_media.RuntimeMediaMixin"
+                            "._harvest_play_downloads.card_close", e)
                 except Exception as e:
                     record_failure("runtime_media.RuntimeMediaMixin._harvest_play_downloads:1339", e)
                     continue
@@ -3294,6 +3383,17 @@ class RuntimeMediaMixin:
         can't be stored (caller falls back to the plain failure
         report).  Never raises.
         """
+        # Owner scope (Living Chat P2, closing the P1 remainder):
+        # the offer binds to the requesting user exactly like the
+        # vague-query pick-list does — an explicit owner wins,
+        # otherwise the dispatch's in-flight owner (play_owner_var,
+        # set by the runtime's /play branch and carried into the
+        # download job's thread by the registry's context copy)
+        # applies; "" keeps the legacy chat slot. Without this,
+        # the blocked-matches offer stayed chat-scoped while every
+        # sibling pick surface was owner-scoped, so another user's
+        # bare number in a group could consume the offer.
+        owner_key = owner_key or play_owner_var.get("")
         try:
             from ...media.cookies import BOT_COOKIE_SHORT_HELP
             from ...media.picklist import (
