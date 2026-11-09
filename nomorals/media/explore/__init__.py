@@ -13,8 +13,14 @@ freshness decay, and candidate verdicts — claims are written only
 through the evaluator, in the digestion Claim shape the store
 persists. Autonomy is P3 (``jobs.py``): two durable sweeps a day
 on the owner's clock end in :func:`run_sweep_cycle` (gates →
-sweep → evaluation); the ``/explore`` board (``board.py``) and
-the morning briefing render what the loop records.
+sweep → evaluation → niche discovery); the ``/explore`` board
+(``board.py``) and the morning briefing render what the loop
+records. Niche discovery is P4 (``niches.py``): clusters of the
+field become niche PROPOSALS with evidence packs in the shared
+overlay beside the code registry; the effective niche set is
+floor ∪ adopted (:func:`effective_niches`), and adoption is the
+owner's act — it scaffold-generates a draft plugin that goes
+live only through human review, never by discovery.
 
     from nomorals.media.explore import run_exploration, explore_status
     report = run_exploration(context, trigger="manual")
@@ -41,7 +47,9 @@ from .board import (
                     PROXY_DEPENDENCY_LINE,
                     render_explore_board,
                     render_explore_candidates,
+                    render_explore_niches,
                     render_explore_trends,
+                    render_niche_act,
                     render_sweep_cycle,
 )
 from .instruments import (
@@ -59,7 +67,22 @@ from .jobs import (
                     ensure_explore_jobs,
                     run_sweep_cycle,
 )
-from .store import ExploreStore
+from .niches import (
+                    adopt_niche,
+                    discover_niches,
+                    dismiss_niche,
+                    drafts_dir,
+                    effective_niches,
+                    floor_niches,
+                    overlay_plugin,
+                    proposal_board_order,
+)
+from .store import (
+                    NICHE_ADOPTED,
+                    NICHE_DISMISSED,
+                    NICHE_PROPOSED,
+                    ExploreStore,
+)
 from .trends import (
                     CLAIM_KINDS,
                     CLAIM_SPIKE,
@@ -82,27 +105,40 @@ __all__ = [
     "ExploreStore",
     "InstrumentError",
     "MAX_SWEEPS_PER_DAY",
+    "NICHE_ADOPTED",
+    "NICHE_DISMISSED",
+    "NICHE_PROPOSED",
     "PROXY_DEPENDENCY_LINE",
     "SweepEngine",
     "VideoFinderInstrument",
     "WebSearchInstrument",
     "YouTubeSearchInstrument",
+    "adopt_niche",
     "beats_from_profile",
     "claim_standing",
     "collect_watch_topics",
     "current_claims",
     "default_explore_store",
     "default_instruments",
+    "discover_niches",
+    "dismiss_niche",
+    "drafts_dir",
+    "effective_niches",
     "ensure_explore_jobs",
     "evaluate_trends",
     "explore_for_context",
     "explore_status",
+    "floor_niches",
     "load_beats",
     "load_news_profile",
     "note_owner_activity",
+    "overlay_plugin",
+    "proposal_board_order",
     "render_explore_board",
     "render_explore_candidates",
+    "render_explore_niches",
     "render_explore_trends",
+    "render_niche_act",
     "render_sweep_cycle",
     "run_exploration",
     "run_sweep_cycle",

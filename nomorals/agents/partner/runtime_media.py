@@ -1305,6 +1305,18 @@ class RuntimeMediaMixin:
         /explore trends       → the current claims with their
                                 basis and freshness
         /explore candidates   → the candidate pool's standings
+        /explore niches       → the shared niche registry: the
+                                shipped floor + discovered niche
+                                proposals with their evidence
+        /explore adopt <ref>  → the owner's adoption act on a
+                                proposal (#n from /explore niches,
+                                or its slug): flips the overlay
+                                record + scaffold-generates a
+                                DRAFT plugin — never a production
+                                plugin, never auto-registered
+        /explore dismiss <ref> → the owner's other act: dismiss
+                                a proposal (same evidence won't
+                                re-propose it)
 
         Owner-only (CONTROL_COMMANDS, never PUBLIC_COMMANDS).
         Text-complete: no buttons anywhere on this surface.
@@ -1322,11 +1334,27 @@ class RuntimeMediaMixin:
         if verb == "candidates":
             return explore_board.render_explore_candidates(
                 self.context)
+        if verb == "niches":
+            return explore_board.render_explore_niches(self.context)
+        if verb in ("adopt", "dismiss"):
+            from ...media.explore import niches as explore_niches
+
+            ref = words[1] if len(words) > 1 else ""
+            if not ref:
+                return (f"usage: /explore {verb} <#n or slug> — "
+                        "/explore niches lists the proposals "
+                        "with their numbers")
+            store = explore_board.resolve_store(self.context)
+            act = (explore_niches.adopt_niche if verb == "adopt"
+                   else explore_niches.dismiss_niche)
+            return explore_board.render_niche_act(act(store, ref),
+                                                  verb)
         if verb == "":
             return explore_board.render_explore_board(
                 self.context,
                 scheduler=getattr(self, "_scheduler", None))
-        return ("usage: /explore [run | trends | candidates]\n"
+        return ("usage: /explore [run | trends | candidates | "
+                "niches | adopt <ref> | dismiss <ref>]\n"
                 "bare /explore is the board: last sweep, what's "
                 "moving with its basis, the candidate pool, and "
                 "when the next sweep is due.")

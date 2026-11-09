@@ -39,6 +39,11 @@ What is stored (payload ``media.explore.v1``, version 1):
   P1 stores and returns them verbatim; it authors none, and no
   vocabulary in this module calls anything a trend — a single
   observation in here is never promoted by storage.
+* **niche_proposals** — P4's discovered-niche records (slug,
+  thesis, member evidence pack, score with its inputs, lifecycle
+  status proposed / adopted / dismissed). Discovery writes them;
+  only the owner's act changes the status — the store keeps the
+  record and renders no verdict on it.
 * **delivery_log** — per-beat delivery counts (§3.4 contract 4): a
   delivery is a finding RECORDED into this store for a beat during a
   sweep. The WS2 interests ``watch_coverage`` provider measures
@@ -81,11 +86,19 @@ CANDIDATE_WATCHING = "watching"
 CANDIDATE_PROMOTED = "promoted"
 CANDIDATE_SHED = "shed"
 
+#: Niche proposal lifecycle (P4): discovery writes ``proposed``;
+#: only the owner's act moves a record to ``adopted`` or
+#: ``dismissed`` (census §3.3 — proposal, never adoption).
+NICHE_PROPOSED = "proposed"
+NICHE_ADOPTED = "adopted"
+NICHE_DISMISSED = "dismissed"
+
 _MAX_SWEEPS = 60
 _MAX_OBSERVATIONS = 500
 _MAX_CANDIDATES = 200
 _MAX_SHED = 50
 _MAX_CLAIMS = 300
+_MAX_NICHE_PROPOSALS = 100
 _MAX_DELIVERY_LOG = 2000
 _MAX_EVIDENCE_PER_CANDIDATE = 10
 #: A shed candidate is not re-intaken for a week — no flap loop
@@ -120,6 +133,7 @@ class ExploreStore:
         self._candidates: dict[str, dict[str, Any]] = {}
         self._shed: list[dict[str, Any]] = []
         self._claims: list[dict[str, Any]] = []
+        self._niche_proposals: list[dict[str, Any]] = []
         self._delivery_log: list[dict[str, Any]] = []
         self._sweep_seq = 0
         self._obs_seq = 0
@@ -158,6 +172,7 @@ class ExploreStore:
                 "candidates": list(self._candidates.values()),
                 "shed": self._shed,
                 "claims": self._claims,
+                "niche_proposals": self._niche_proposals,
                 "delivery_log": self._delivery_log,
             }
             raw = json.dumps(payload, ensure_ascii=False)
@@ -199,6 +214,12 @@ class ExploreStore:
                     if isinstance(row, dict) \
                             and row.get("claim_id") not in known_claims:
                         self._claims.append(row)
+                known_niches = {p.get("slug")
+                                for p in self._niche_proposals}
+                for row in data.get("niche_proposals") or []:
+                    if isinstance(row, dict) \
+                            and row.get("slug") not in known_niches:
+                        self._niche_proposals.append(row)
                 self._shed = (list(data.get("shed") or [])
                               + [s for s in self._shed
                                  if s not in (data.get("shed") or [])])
@@ -217,6 +238,9 @@ class ExploreStore:
                               if isinstance(r, dict)]
                 self._claims = [r for r in data.get("claims") or []
                                 if isinstance(r, dict)]
+                self._niche_proposals = [
+                    r for r in data.get("niche_proposals") or []
+                    if isinstance(r, dict) and r.get("slug")]
                 self._delivery_log = [
                     r for r in data.get("delivery_log") or []
                     if isinstance(r, dict)]
@@ -227,6 +251,8 @@ class ExploreStore:
             self._sweeps = self._sweeps[-_MAX_SWEEPS:]
             self._observations = self._observations[-_MAX_OBSERVATIONS:]
             self._claims = self._claims[-_MAX_CLAIMS:]
+            self._niche_proposals = \
+                self._niche_proposals[-_MAX_NICHE_PROPOSALS:]
             self._delivery_log = self._delivery_log[-_MAX_DELIVERY_LOG:]
             self._shed = self._shed[-_MAX_SHED:]
         except Exception:  # noqa: BLE001
@@ -537,6 +563,75 @@ class ExploreStore:
 
     def claims(self, limit: int = 50) -> list[dict[str, Any]]:
         return [dict(r) for r in reversed(self._claims[-limit:])]
+
+    # ── niche proposals (P4 writes; the store keeps the record) ───
+    def record_niche_proposal(self, record: dict[str, Any],
+                              ) -> dict[str, Any]:
+        """Store one niche proposal record (upsert by ``slug`` — a
+        re-discovery refreshes the row in place, position kept).
+        Verbatim, like :meth:`record_claim`: the discovery layer
+        (``explore.niches``) owns every verdict — what clears the
+        evidence bar, what the dismissal discipline allows — and
+        the owner's acts land through
+        :meth:`set_niche_proposal_status`. The store renders none.
+        Ring-capped; eviction drops the oldest non-adopted record
+        first (an adopted niche is production state, not cache)."""
+        row = dict(record)
+        slug = row.get("slug") or ""
+        for i, existing in enumerate(self._niche_proposals):
+            if existing.get("slug") == slug:
+                self._niche_proposals[i] = row
+                self._persist()
+                return dict(row)
+        self._niche_proposals.append(row)
+        while len(self._niche_proposals) > _MAX_NICHE_PROPOSALS:
+            drop = next(
+                (i for i, r in enumerate(self._niche_proposals)
+                 if r.get("status") != NICHE_ADOPTED), 0)
+            self._niche_proposals.pop(drop)
+        self._persist()
+        return dict(row)
+
+    def niche_proposals(self, *, status: str = "",
+                        ) -> list[dict[str, Any]]:
+        """Niche proposal records, stored order, optionally
+        filtered by lifecycle status."""
+        return [dict(r) for r in self._niche_proposals
+                if not status or r.get("status") == status]
+
+    def niche_proposal(self, slug: str) -> dict[str, Any] | None:
+        for row in self._niche_proposals:
+            if row.get("slug") == slug:
+                return dict(row)
+        return None
+
+    def set_niche_proposal_status(self, slug: str, status: str, *,
+                                  at: float = 0.0,
+                                  fields: dict[str, Any] | None = None,
+                                  ) -> bool:
+        """Move a niche proposal to ``status`` — the owner-act
+        write path (adoption / dismissal in ``explore.niches``).
+        Merges ``fields`` into the record and appends the move to
+        the record's ``history``. Returns False when the slug is
+        unknown. Never raises."""
+        try:
+            at = at or time.time()
+            for row in self._niche_proposals:
+                if row.get("slug") == slug:
+                    row["status"] = status
+                    row["updated_at"] = at
+                    if fields:
+                        row.update(fields)
+                    history = list(row.get("history") or [])
+                    history.append({"status": status, "at": at})
+                    row["history"] = history
+                    self._persist()
+                    return True
+            return False
+        except Exception as e:  # noqa: BLE001
+            record_failure(
+                "ExploreStore.set_niche_proposal_status", e)
+            return False
 
     # ── delivery log (§3.4 contract: per-beat deliveries) ──────────
     def record_delivery(self, beat: str, *, sweep_id: str = "",

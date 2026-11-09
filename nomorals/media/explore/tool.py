@@ -19,6 +19,13 @@ WS4 Pass 1 ships the manual trigger + the read actions; P3 adds
   current claim set with each claim's kind, basis and freshness —
   the render source P3's board uses. ``refresh=false`` renders
   the stored claims without re-evaluating.
+* ``niches`` — WS4 Pass 4: the shared niche registry (shipped
+  floor + discovered overlay): proposals awaiting the owner's
+  act, adopted entries, the effective set.
+* ``adopt`` / ``dismiss`` — the owner's acts on a niche proposal
+  (``slug=`` names it, by slug or board number): adoption flips
+  the overlay record and scaffold-generates a DRAFT plugin —
+  nothing discovered goes live without this act.
 
 Rendered text carries no internal record ids — beats, timestamps
 and counts only; ids ride the structured result for programmatic
@@ -183,7 +190,13 @@ def register(registry: Any) -> None:
             "re-evaluating) | sweep (the scheduled cycle the "
             "durable jobs fire: quiet-hours + per-day-cap "
             "discipline, then a sweep, then trend evaluation — "
-            "ends with fresh claims, or a deferral that says why). "
+            "ends with fresh claims, or a deferral that says why) "
+            "| niches (the shared niche registry: shipped floor "
+            "+ discovered proposals + the effective set) | "
+            "adopt / dismiss (slug= — the owner's acts on a niche "
+            "proposal: adoption flips the overlay record and "
+            "scaffold-generates a DRAFT plugin; nothing "
+            "discovered goes live without the act). "
             "Sweeps are unauthenticated public "
             "reads, metadata only — no files are downloaded."
         ),
@@ -191,7 +204,8 @@ def register(registry: Any) -> None:
     )
     def video_explore(action: str = "status", beat: str = "",
                       limit: int = 20,
-                      refresh: bool = True) -> dict[str, Any]:
+                      refresh: bool = True,
+                      slug: str = "") -> dict[str, Any]:
         if action == "sweep":
             from .board import render_sweep_cycle
             from .jobs import run_sweep_cycle
@@ -224,4 +238,21 @@ def register(registry: Any) -> None:
             return {"claims": claims, "count": len(claims),
                     "evaluation": report,
                     "text": _render_trends(claims, report)}
+        if action == "niches":
+            from .board import render_explore_niches
+            from .niches import effective_niches
+
+            return {
+                "proposals": store.niche_proposals(),
+                "effective": effective_niches(store),
+                "text": render_explore_niches(context, store=store),
+            }
+        if action in ("adopt", "dismiss"):
+            from .board import render_niche_act
+            from .niches import adopt_niche, dismiss_niche
+
+            act = adopt_niche if action == "adopt" else dismiss_niche
+            result = act(store, slug)
+            return {**result,
+                    "text": render_niche_act(result, action)}
         raise ToolError(f"unknown video_explore action {action!r}")

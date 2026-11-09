@@ -28,7 +28,13 @@ from typing import Any
 from ..failures import record_failure
 from .engine import default_explore_store
 from .jobs import next_sweep_due, owner_tz
-from .store import CANDIDATE_PROMOTED, CANDIDATE_WATCHING
+from .store import (
+    CANDIDATE_PROMOTED,
+    CANDIDATE_WATCHING,
+    NICHE_ADOPTED,
+    NICHE_DISMISSED,
+    NICHE_PROPOSED,
+)
 from .tool import render_claims_text, render_run_text
 from .trends import current_claims, evaluate_trends
 
@@ -36,7 +42,9 @@ __all__ = [
     "PROXY_DEPENDENCY_LINE",
     "render_explore_board",
     "render_explore_candidates",
+    "render_explore_niches",
     "render_explore_trends",
+    "render_niche_act",
     "render_sweep_cycle",
 ]
 
@@ -161,13 +169,22 @@ def render_explore_board(context: Any = None, *,
             f"· watching: {cand.get('name')} ({cand.get('kind')}) — "
             f"seen {cand.get('sightings')}×, last "
             f"{_when(cand.get('last_seen') or 0, tz)}")
+    proposals = store.niche_proposals(status=NICHE_PROPOSED)
+    if proposals:
+        lines.append("")
+        lines.append(
+            f"niche proposals: {len(proposals)} awaiting your tap "
+            "— /explore niches lists them with their evidence; "
+            "adoption is your act, nothing discovered goes live "
+            "on its own")
     lines.append("")
     lines.append(PROXY_DEPENDENCY_LINE)
     lines.append("")
     lines.append(
         "commands: /explore run — sweep now · /explore trends — "
         "the claims with their basis · /explore candidates — the "
-        "candidate pool")
+        "candidate pool · /explore niches — niche proposals + "
+        "the registry")
     return "\n".join(lines)
 
 
@@ -233,6 +250,104 @@ def render_explore_candidates(context: Any = None, *,
     return "\n".join(lines)
 
 
+def render_explore_niches(context: Any = None, *,
+                          store: Any = None,
+                          now: float = 0.0) -> str:
+    """``/explore niches`` — the shared niche registry (census
+    §4): the shipped code floor (production, always in force),
+    the discovered overlay's proposals (NOT live — adoption is
+    the owner's act, numbered as the act verbs read them), the
+    adopted overlay entries, and the dismissed count. A proposal
+    is rendered as a proposal everywhere; nothing here calls one
+    a live niche."""
+    from .niches import (
+        effective_niches,
+        floor_niches,
+        proposal_board_order,
+    )
+
+    store = resolve_store(context, store)
+    lines = ["🔭 **Exploration niches** — the shared registry: "
+             "the shipped floor + the discovered overlay"]
+    lines.append("\nproduction floor (hand-written, always in "
+                 "force):")
+    for row in floor_niches():
+        lines.append(
+            f"· {row['slug']} — {row['thesis']} "
+            f"({row['cadence']:g}/day)")
+    adopted = store.niche_proposals(status=NICHE_ADOPTED)
+    if adopted:
+        lines.append("\nadopted (live via the overlay — the "
+                     "draft plugin is a review artifact, not the "
+                     "thing serving):")
+        for rec in adopted:
+            lines.append(
+                f"· {rec.get('slug')} — {rec.get('thesis')} "
+                f"(draft: {rec.get('draft_path') or 'not recorded'})")
+    proposals = proposal_board_order(store)
+    lines.append("\nproposals — discovered, NOT live; adoption "
+                 "is your act:")
+    if not proposals:
+        lines.append(
+            "· none awaiting — discovery proposes only what the "
+            "evidence carries (two+ members, corroborated across "
+            "sweeps)")
+    for i, rec in enumerate(proposals, 1):
+        pack = rec.get("evidence_pack") or {}
+        member_names = ", ".join(
+            str(m.get("name") or "")
+            for m in (rec.get("members") or [])[:4])
+        lines.append(
+            f"#{i} {rec.get('slug')} — "
+            f"{len(rec.get('members') or [])} member(s) · "
+            f"{pack.get('sightings') or 0} sighting(s) across "
+            f"{len(pack.get('sweeps') or [])} sweep(s) · score "
+            f"{pack.get('score')}")
+        lines.append(f"   members: {member_names}")
+        lines.append(f"   basis: {rec.get('basis')}")
+        lines.append(
+            f"   adopt: /explore adopt {i} · dismiss: "
+            f"/explore dismiss {i}")
+    dismissed = store.niche_proposals(status=NICHE_DISMISSED)
+    if dismissed:
+        lines.append(
+            f"\ndismissed: {len(dismissed)} — the same evidence "
+            "won't re-propose them; new sightings can")
+    effective = effective_niches(store)
+    lines.append(
+        f"\neffective niche set (floor ∪ adopted): "
+        f"{len(effective)} — proposals are not in it until you "
+        "adopt them")
+    return "\n".join(lines)
+
+
+def render_niche_act(result: dict[str, Any], verb: str) -> str:
+    """An adopt/dismiss outcome as chat text: what happened, and
+    — for adoption — the draft plugin's exact standing (a review
+    artifact in the drafts folder; going live is a separate,
+    human step)."""
+    if not result.get("ok"):
+        return (f"⚠️ couldn't {verb} that niche: "
+                f"{result.get('reason') or 'unknown reason'}")
+    slug = result.get("slug") or ""
+    if verb == "adopt":
+        note = result.get("note") or ""
+        note_s = f" ({note})" if note else ""
+        return (
+            f"✅ **{slug}** adopted into the overlay — it is in "
+            "the effective niche set now, served from its "
+            f"record{note_s}.\n"
+            f"a DRAFT plugin was generated at "
+            f"{result.get('draft_path')} — it is not a production "
+            "plugin and nothing imports it: it goes live only "
+            "when it's reviewed, its TODO sections are filled, "
+            "it's moved into the niches package and its slug is "
+            "added to the shipped list in niches/registry.py.")
+    return (f"🗑 **{slug}** dismissed — recorded with its "
+            "evidence fingerprint; the same evidence won't "
+            "re-propose it. New sightings can.")
+
+
 def render_sweep_cycle(cycle: dict[str, Any]) -> str:
     """A cycle report as chat text (``/explore run`` + the sweep
     tool action): deferrals say why in plain words; a completed
@@ -263,4 +378,16 @@ def render_sweep_cycle(cycle: dict[str, Any]) -> str:
                 f"⚠️ trend evaluation hit a problem: "
                 f"{evaluation['error']} — the sweep itself "
                 "completed and its observations are on record")
+    niches = cycle.get("niches") or {}
+    if niches:
+        if niches.get("error"):
+            lines.append(
+                f"⚠️ niche discovery hit a problem: "
+                f"{niches['error']} — the sweep and its claims "
+                "are on record; discovery is a proposal layer "
+                "over them, not part of the sweep")
+        elif niches.get("proposed"):
+            lines.append(
+                f"niche discovery: {niches['proposed']} new "
+                "proposal(s) awaiting your tap — /explore niches")
     return "\n".join(lines)

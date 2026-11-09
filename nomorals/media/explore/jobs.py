@@ -30,9 +30,12 @@ freshest daily-slot sibling.
 The cycle (:func:`run_sweep_cycle`) is ONE entry point for every
 trigger: :func:`~.engine.run_exploration` (P1's sweep entry point,
 unchanged) then :func:`~.trends.evaluate_trends` (P2), so a
-scheduled sweep ends with fresh claims, not just observations.
-The durable job fires it with ``manual=False``; the owner's own
-``/explore run`` fires it with ``manual=True``.
+scheduled sweep ends with fresh claims, not just observations —
+and then niche discovery (P4, :func:`~.niches.discover_niches`)
+over the fresh field, its outcome recorded on the cycle report
+and never allowed to fail the sweep. The durable job fires it
+with ``manual=False``; the owner's own ``/explore run`` fires it
+with ``manual=True``.
 
 Discipline (census §7 — the news poll keeps its discipline inside
 the poll; the cycle keeps its inside itself):
@@ -218,6 +221,28 @@ def run_sweep_cycle(context: Any = None, *,
     }
     if evaluation.get("error"):
         cycle["evaluation"]["error"] = str(evaluation["error"])
+    # Niche discovery (P4) rides the evaluation tail: the fresh
+    # claims + candidate verdicts are its input. A discovery
+    # failure is recorded on the cycle and NEVER fails the sweep —
+    # discovery is a proposal layer over the sweep's facts, not
+    # part of the sweep.
+    niches: dict[str, Any] = {"proposed": 0, "refreshed": 0,
+                              "declined": 0}
+    try:
+        from .niches import discover_niches
+
+        found = discover_niches(store, now=time.time())
+        niches = {
+            "proposed": len(found.get("proposed") or []),
+            "refreshed": len(found.get("refreshed") or []),
+            "declined": len(found.get("declined") or []),
+        }
+        if found.get("error"):
+            niches["error"] = str(found["error"])
+    except Exception as exc:  # noqa: BLE001 — contained by design
+        record_failure("explore.run_sweep_cycle.niches", exc)
+        niches["error"] = f"{type(exc).__name__}: {exc}"
+    cycle["niches"] = niches
     return cycle
 
 
