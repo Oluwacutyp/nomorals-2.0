@@ -192,6 +192,7 @@ class ContextEngine:
         mission: Any = None,
         artifacts: Any = None,
         tools: Any = None,
+        goals: Any = None,
         history: Any = None,
         memory: Any = None,
         memory_query: str = "",
@@ -214,6 +215,7 @@ class ContextEngine:
             mission=mission,
             artifacts=artifacts,
             tools=tools,
+            goals=goals,
             history=history,
             memory=memory,
             memory_query=memory_query,
@@ -421,6 +423,7 @@ class ContextEngine:
         mission: Any = None,
         artifacts: Any = None,
         tools: Any = None,
+        goals: Any = None,
         history: Any = None,
         memory: Any = None,
         memory_query: str = "",
@@ -438,6 +441,9 @@ class ContextEngine:
             sections.append(self._artifacts_section(artifacts))
         if tools is not None:
             sections.append(self._tools_section(tools))
+        goals_section = self._goals_section(goals)
+        if goals_section is not None:
+            sections.append(goals_section)
         if project is not None:
             sections.append(self._project_section(project))
         if user_profile is not None:
@@ -702,6 +708,86 @@ class ContextEngine:
             content="Available tools:\n" + content,
             priority=priority_for("tools"),
         )
+
+    #: Hard cap on goal lines in the goals section — the snapshot
+    #: supplier (goals.surface.goals_context_snapshot) already bounds
+    #: by focus score; this cap keeps a hand-built snapshot honest.
+    _GOALS_SECTION_MAX = 8
+
+    def _goals_section(self, goals: Any) -> Section | None:
+        """The owner's user goals, grouped by class (WS2).
+
+        ``goals`` is a snapshot: an iterable of entries (mappings or
+        objects) shaped like
+        ``goals.surface.goals_context_snapshot``'s output — title,
+        goal_class / class_title, percent, basis, source, optional
+        pace verdict / overdue flag — or a zero-arg callable
+        returning one.  Entries render grouped by class with the
+        progress basis attached verbatim: a measured number names
+        its source, a manual one says self-reported — the brain
+        must never mistake one for the other.  Bounded to the top
+        ``_GOALS_SECTION_MAX`` entries.  Returns None when there
+        are no goals (the section is present only when goals
+        exist).  Any failure returns None — goals enrich context,
+        they never gate it (the _skills_section discipline).
+        """
+        if goals is None:
+            return None
+        try:
+            if callable(goals):
+                goals = goals()
+            entries = [e for e in (goals or []) if e is not None]
+            if not entries:
+                return None
+            total = len(entries)
+            shown = entries[: self._GOALS_SECTION_MAX]
+            grouped: dict[str, list[str]] = {}
+            order: list[str] = []
+            for entry in shown:
+                class_id = str(_get(entry, "goal_class")
+                               or _get(entry, "class_id") or "general")
+                class_title = str(_get(entry, "class_title") or class_id)
+                if class_title not in grouped:
+                    grouped[class_title] = []
+                    order.append(class_title)
+                title = str(_get(entry, "title") or "untitled goal")
+                basis = str(_get(entry, "basis") or "self-reported")
+                source = str(_get(entry, "source") or "")
+                percent = _get(entry, "percent")
+                if basis == "measured":
+                    if percent is None:
+                        reading = f"not measured yet (provider: {source})"
+                    else:
+                        reading = f"{float(percent):.0f}% (measured · {source})"
+                else:
+                    pct = float(percent) if percent is not None else 0.0
+                    reading = f"{pct:.0f}% (self-reported)"
+                line = f"- {title} — {reading}"
+                pace = str(_get(entry, "pace") or "")
+                if pace:
+                    line += f" · pace: {pace.replace('_', ' ')}"
+                if _get(entry, "overdue"):
+                    line += " · overdue"
+                grouped[class_title].append(line)
+            lines = [
+                "The owner's goals by class (progress basis shown: "
+                "measured = computed by the class's organ from its "
+                "real store; self-reported = the owner's own %):",
+            ]
+            for class_title in order:
+                lines.append(f"{class_title}:")
+                lines.extend(grouped[class_title])
+            if total > len(shown):
+                lines.append(f"(+{total - len(shown)} more goals not shown)")
+            return Section(
+                name="goals",
+                content="\n".join(lines),
+                priority=priority_for("goals"),
+                meta={"goal_count": total,
+                      "classes": list(order)},
+            )
+        except Exception:  # noqa: BLE001 - enrichment, never a gate
+            return None
 
     def _project_section(self, project: Any) -> Section:
         if isinstance(project, str):

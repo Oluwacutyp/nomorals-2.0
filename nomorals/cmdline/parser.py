@@ -63,6 +63,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "decode": ["dec"],
     "exec": ["e"],
     "goal": ["g"],
+    "goals": [],
     "idea": ["ideas"],
     "plugin": ["plug"],
     "hub": ["hb"],
@@ -701,6 +702,26 @@ def _parser() -> argparse.ArgumentParser:
     idea.add_argument("--limit", default="20", help="max rows to list")
     idea.add_argument("--user", default="owner", help="user id for idea storage")
     idea.add_argument("--json", action="store_true", help="Output as JSON")
+
+    goals = sub.add_parser("goals", aliases=CLI_ALIASES["goals"],
+                           help="Goal classes: board, briefing, review, "
+                                "create/re-file goals by domain class")
+    goals.add_argument("action", nargs="?", default="list",
+                       choices=["list", "board", "briefing", "review",
+                                "focus", "progress", "add", "class",
+                                "classes"],
+                       help="Action to perform")
+    goals.add_argument("arg", nargs="?", default="",
+                       help="class (list), goal ref (progress/class), "
+                            "title (add)")
+    goals.add_argument("arg2", nargs="?", default="",
+                       help="class id (class action)")
+    goals.add_argument("--title", default="", help="Goal title (add)")
+    goals.add_argument("--class", dest="goal_class", default="",
+                       help="Goal class id (add)")
+    goals.add_argument("--user", default="owner",
+                       help="user id for goal storage")
+    goals.add_argument("--json", action="store_true", help="Output as JSON")
 
     mission = sub.add_parser("mission", aliases=CLI_ALIASES["mission"],
                              help="Mission control and planning")

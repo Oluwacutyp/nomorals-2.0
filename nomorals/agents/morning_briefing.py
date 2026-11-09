@@ -1247,6 +1247,41 @@ class GoalsProvider(_Provider):
             source="goals", items=items, lines=lines)
 
 
+class GoalClassesProvider(_Provider):
+    """Goal classes (WS2): per-class one-liners from the user-goal
+    tracker — counts, average progress, overdue per domain class.
+    The GoalsProvider above triages the agent GoalSystem; this one
+    rolls up the owner's GoalTracker goals by class.  No goals (or
+    no database) → no section.  Never raises."""
+    name = "goal_classes"
+    title = "🧭 Goal classes"
+    priority = 24
+
+    def collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        try:
+            return self._collect(ctx)
+        except Exception as exc:  # noqa: BLE001 — classes never sink a briefing
+            _log.debug("goal classes provider skipped: %s", exc)
+            return None
+
+    def _collect(self, ctx: Any) -> BriefingSection | None:
+        db = getattr(ctx, "db", None)
+        if db is None:
+            return None
+        from ..goals import GoalTracker
+        from ..goals.surface import OWNER_USER_ID, class_briefing_lines
+
+        tracker = GoalTracker(db)
+        lines = class_briefing_lines(tracker, OWNER_USER_ID)
+        if not lines:
+            return None
+        items = [{"id": f"goal-class-{i}", "title": line[2:],
+                  "body": line[2:]} for i, line in enumerate(lines)]
+        return BriefingSection(
+            name=self.name, title=self.title, priority=self.priority,
+            source="goal-tracker", items=items, lines=lines)
+
+
 class DisruptionProvider(_Provider):
     """World-graph disruptions: nodes marked disrupted (flight delayed,
     blocker appeared) and what they cascade into.  The briefing's early-
@@ -1294,6 +1329,7 @@ class BriefingComposer:
             OvernightAlertsProvider(),
             DisruptionProvider(),
             GoalsProvider(),
+            GoalClassesProvider(),
             CalendarProvider(),
             PeopleProvider(),
             MarketsProvider(),

@@ -849,6 +849,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "balances": (0, None),   # /balances [rail…] — unified money view
     "alert": (0, None),       # /alert add|list|remove|check|snooze|sync-bills
     "goal": (0, None),        # /goal add|list|done|snooze|remove
+    "goals": (0, None),       # /goals [list [class]] | briefing | review | focus | progress <goal> | add <title> [in <class>] | class <goal> <class> | classes — goal classes board (owner-only)
     "insights": (0, None),    # /insights [days] — native money analytics
     "predict": (0, 3),       # /predict <stake> <over|under> <1-99> — prediction pit (progression-unlocked)
     "menu": (0, 2),          # alias of /list ([group] [page] ride the same grammar)
@@ -3315,6 +3316,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                  "usage": "/artifact list | info <id|alias|uri> | search <words> | send <id|alias|uri> [as <format>] | export <id|alias|uri> | export type:<t> | creator:<c> | mission:<id> | task:<id>",
                  "example": "/artifact send latest-report as pdf",
                  "related": "/db /file"},
+    "goals": {"what": "the goal-class board: your goals grouped by domain class (careers, productivity, finance, interests, health, learning, build, relationships, trading, general), each class with its rollup and each goal's progress shown with its basis — measured by the class's organ or self-reported, never indistinguishable. Also the goal tracker's briefing, weekly review and focus ranking, creating goals filed under a class, and re-filing goals between classes. (Different surface from /goal, which stays the finance savings goals.)",
+              "usage": "/goals [list [class]] | briefing | review | focus | progress <goal> | add <title> [in <class>] | class <goal> <class> | classes",
+              "example": "/goals add save for a house in finance",
+              "related": "/goal /skills"},
     "api": {"what": "external API connectors: weather, fx, github, …",
             "usage": "/api list | <connector> [json]", "example": "/api weather city=Lagos",
             "related": ""},
@@ -4245,7 +4250,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "benchmark", "redteam", "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible",
                            "people", "commitments", "decisions", "iddocs", "focus"]),
     ("money & spending", ["spend", "budget", "spending", "mandate",
-                          "balances", "goal", "insights", "alert"]),
+                          "balances", "goal", "goals", "insights", "alert"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -4509,7 +4514,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "proposals", "approve", "deny", "start", "stop", "quit",
       "mode", "agent", "chatmode", "style", "stylepin", "doctor", "profile", "mind",
       "spend", "budget", "spending", "mandate", "balances", "goal",
-      "insights", "alert", "cost", "heal", "tour", "pulse"]),
+      "goals", "insights", "alert", "cost", "heal", "tour", "pulse"]),
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "audit", "whois", "ports",
@@ -4954,6 +4959,7 @@ LIST_ONELINERS: dict[str, str] = {
     "schedule": "cron-style in-process jobs",
     "db": "inspect the database (tables|schema|query|counts)",
     "artifact": "saved artifacts: list, info, search bodies, send (or convert) one, export bundles",
+    "goals": "goal classes board: goals by domain class, measured vs self-reported progress, briefing/review/focus",
     "api": "external API connectors (weather, fx, github, …)",
     "connectors": "manage the service connectors: list, status, connect",
     "shorts": "short-form content empire: make, queue, post vertical videos",

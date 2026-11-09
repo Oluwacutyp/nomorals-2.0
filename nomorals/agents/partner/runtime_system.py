@@ -1180,6 +1180,131 @@ class RuntimeSystemMixin:
                 "export <id|alias|uri> | export type:<t> | creator:<c> | "
                 "mission:<id> | task:<id>")
 
+    # ── goal classes: /goals ───────────────────────────────────────────────
+    def _goal_tracker(self) -> Any:
+        """GoalTracker over the context db, or None when no db is attached.
+
+        The user-goal store (nomorals/goals) — NOT the finance
+        savings GoalStore behind /goal and NOT the agent GoalSystem
+        behind the brain's goal tool.  The owner's rows live under
+        the ``owner`` user id (the nm idea CLI default).
+        """
+        from ...goals import GoalTracker
+
+        db = getattr(self.context, "db", None)
+        if db is None:
+            return None
+        return GoalTracker(db)
+
+    def _control_goals(self, tail: str, chat_key: str = "") -> Any:
+        """/goals — the goal-class board and the tracker's briefings.
+
+        /goals                       — board: goals grouped by class
+        /goals list [class]          — the board, or one class's section
+        /goals briefing              — progress briefing (get_briefing)
+        /goals review                — weekly review (weekly_review)
+        /goals focus                 — today's focus ranking (today_focus)
+        /goals progress <goal>       — one goal: class reading + pace
+        /goals add <title> [in <class>] | add <class>: <title>
+                                     — create, filed under a class
+        /goals class <goal> <class>  — re-file a goal under another class
+        /goals classes               — the class picker as text
+
+        <goal> is a goal id (or unique prefix), #n from the board,
+        or a unique part of its title.  Owner-only (the handle_control
+        grant: /goals is not a public command).  /goal stays the
+        finance savings surface — this is the user-goal tracker.
+        Progress always renders with its basis: measured (with the
+        provider's source) or self-reported — never indistinguishable.
+        The board also returns a class-picker keyboard (grid-packed);
+        surfaces that cannot take buttons get the numbered fallback
+        from _send_control_reply, and the text alone always works.
+        """
+        import re
+
+        from ...goals import surface
+        from ...goals.classes import GoalClassError, list_classes
+
+        tracker = self._goal_tracker()
+        if tracker is None:
+            return ("goals unavailable: no database is attached to this "
+                    "chat context — goals live in the database.")
+        user = surface.OWNER_USER_ID
+        parts = (tail or "").split(None, 1)
+        verb = parts[0].lower() if parts else "list"
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        if verb in ("list", "board", ""):
+            only = None
+            if rest:
+                try:
+                    from ...goals.classes import get_class
+                    only = get_class(rest.split()[0]).id
+                except GoalClassError as exc:
+                    return str(exc)
+            text = surface.render_class_board(tracker, user, only_class=only)
+            if only is not None:
+                return text
+            from ...social.chat.tgbot_buttons import actionable, grid_layout
+            buttons = [(c.title, f"/goals list {c.id}")
+                       for c in list_classes()]
+            buttons += [("Briefing", "/goals briefing"),
+                        ("Review", "/goals review")]
+            return actionable(text, grid_layout([buttons]))
+        if verb == "briefing":
+            return surface.render_briefing(tracker, user)
+        if verb == "review":
+            return surface.render_review(tracker, user)
+        if verb == "focus":
+            return surface.render_focus(tracker, user)
+        if verb == "progress":
+            if not rest:
+                return "usage: /goals progress <goal id|#n|title part>"
+            return surface.render_goal_progress(tracker, user, rest)
+        if verb == "classes":
+            return surface.render_classes()
+        if verb == "add":
+            if not rest:
+                return ("usage: /goals add <title> [in <class>] | "
+                        "/goals add <class>: <title>")
+            title, class_arg = rest, None
+            m = re.match(r"^([A-Za-z][\w-]*)\s*:\s*(.+)$", rest)
+            if m:
+                class_arg, title = m.group(1), m.group(2).strip()
+            else:
+                m = re.search(r"\s+in\s+([A-Za-z][\w-]*)\s*$", rest)
+                if m:
+                    class_arg = m.group(1)
+                    title = rest[:m.start()].strip()
+            if not title:
+                return "a goal needs a title — /goals add <title> [in <class>]"
+            try:
+                goal, class_id, suggested = surface.create_goal_filed(
+                    tracker, user, title, class_arg)
+            except GoalClassError as exc:
+                return str(exc)
+            except ValueError as exc:
+                return f"couldn't create that goal: {exc}"
+            from ...goals.classes import get_class
+            descriptor = get_class(class_id)
+            note = (f" — filed under {descriptor.title} from the title; "
+                    f"/goals class {goal.goal_id} <class> moves it"
+                    if suggested else "")
+            return (f"filed **{goal.title}** under {descriptor.title} "
+                    f"(`{class_id}`){note}\n  goal id: {goal.goal_id}")
+        if verb == "class":
+            words = rest.rsplit(None, 1)
+            if len(words) != 2:
+                return "usage: /goals class <goal id|#n|title part> <class>"
+            ref, class_arg = words
+            try:
+                return surface.refile_goal(tracker, user, ref, class_arg)
+            except GoalClassError as exc:
+                return str(exc)
+        return ("usage: /goals [list [class]] | briefing | review | focus | "
+                "progress <goal> | add <title> [in <class>] | "
+                "class <goal> <class> | classes")
+
     # ── api connectors: /api ─────────────────────────────────────────────────
     def _control_api(self, tail: str) -> str:
         parts = (tail or "").split(None, 1)

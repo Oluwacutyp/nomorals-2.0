@@ -39,6 +39,7 @@ from .commands.exec import _cmd_apps, _cmd_exec
 from .commands.finance import _cmd_finance
 from .commands.games import _cmd_arena, _cmd_simulate, _cmd_skill, _cmd_trial
 from .commands.goal import _cmd_goal
+from .commands.goals import _cmd_goals
 from .commands.idea import _cmd_idea
 from .commands.golden import _cmd_golden
 from .commands.hub import _cmd_hub
@@ -361,6 +362,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "cards": _CommandSpec(_cmd_cards),
     "autonomy": _CommandSpec(_cmd_autonomy),
     "goal": _CommandSpec(_cmd_goal),
+    "goals": _CommandSpec(_cmd_goals),
     "idea": _CommandSpec(_cmd_idea),
     "skill": _CommandSpec(_dispatch_skill),
     "project": _CommandSpec(_cmd_project),

@@ -7482,6 +7482,9 @@ class PartnerRuntime(
         if kind == "artifact":
             return self._control_artifact(command.tail or arg,
                                           chat_key=chat_key)
+        if kind == "goals":
+            return self._control_goals(command.tail or arg,
+                                       chat_key=chat_key)
         if kind == "api":
             return self._control_api(command.tail or arg)
         if kind == "connectors":

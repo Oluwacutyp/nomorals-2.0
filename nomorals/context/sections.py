@@ -39,6 +39,7 @@ SECTION_PRIORITIES: dict[str, float] = {
     "artifacts": 70.0,
     "skills": 65.0,
     "tools": 60.0,
+    "goals": 55.0,
     "project": 40.0,
     "user_profile": 30.0,
     "memory": 25.0,
