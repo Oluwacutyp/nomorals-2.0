@@ -17,6 +17,7 @@ import gzip
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -51,6 +52,10 @@ class BackupInfo:
     created_at: float
     schema_version: int = 0
     label: str = ""
+    # Collision-proof snapshot identity (F07): the reserved base name the
+    # snapshot was created under. The timestamp+label prefix is metadata
+    # for humans; this identity is what makes the snapshot unique.
+    snapshot_id: str = ""
     # Blob sidecar (artifact blobs tarred alongside the database snapshot).
     blob_name: str = ""
     blob_sha256: str = ""
@@ -67,6 +72,7 @@ class BackupInfo:
             "created_at": self.created_at,
             "schema_version": self.schema_version,
             "label": self.label,
+            "snapshot_id": self.snapshot_id,
             "blob_name": self.blob_name,
             "blob_sha256": self.blob_sha256,
             "blob_count": self.blob_count,
@@ -154,14 +160,53 @@ class BackupManager:
 
     # ── create ───────────────────────────────────────────────────────────────
     def create(self, label: str = "") -> BackupInfo:
-        """Take a consistent snapshot of the database."""
+        """Take a consistent snapshot of the database.
+
+        Snapshot identities are collision-proof (F07): the human-readable
+        ``nomorals-<stamp>[-<label>]`` prefix is metadata, not identity —
+        a random suffix is appended and the name is *reserved* with
+        ``O_EXCL`` before any bytes are written. Two creates in the same
+        second, or two labels that sanitize to the same string, therefore
+        produce distinct snapshots instead of overwriting one path while
+        the manifest records both. The reserved base is recorded in the
+        manifest as ``snapshot_id``.
+        """
         stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
         base = f"nomorals-{stamp}"
         if label:
             safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in label)[:40]
             base = f"{base}-{safe}"
+        raw_path, base = self._reserve_snapshot(base)
+        try:
+            return self._create_at(raw_path, base, label)
+        except BaseException:
+            # A failed create must not leave a phantom snapshot behind:
+            # the reservation and any partial payloads go with it.
+            raw_path.unlink(missing_ok=True)
+            raw_path.with_suffix(".db.gz").unlink(missing_ok=True)
+            (self.directory / f"{base}-blobs.tar.gz").unlink(missing_ok=True)
+            raise
 
-        raw_path = self.directory / f"{base}.db"
+    def _reserve_snapshot(self, base: str) -> tuple[Path, str]:
+        """Atomically reserve a unique snapshot base under ``base``.
+
+        Returns ``(raw_path, unique_base)``; the raw file exists (empty)
+        on return, claimed with ``O_CREAT | O_EXCL`` so no other create —
+        thread or process — can take the same identity.
+        """
+        for _ in range(100):
+            candidate = f"{base}-{secrets.token_hex(3)}"
+            raw_path = self.directory / f"{candidate}.db"
+            try:
+                fd = os.open(raw_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
+                continue
+            os.close(fd)
+            return raw_path, candidate
+        raise StorageError(f"cannot reserve a unique snapshot name for {base!r}")
+
+    def _create_at(self, raw_path: Path, base: str, label: str) -> BackupInfo:
+        """Write the snapshot into an already-reserved identity."""
         # Checkpoint first so the snapshot is self-contained (no -wal sidecar
         # needed): everything committed is in the main database file.
         with contextlib.suppress(StorageError):  # not in WAL mode; nothing to checkpoint
@@ -197,6 +242,7 @@ class BackupManager:
             created_at=time.time(),
             schema_version=schema_version,
             label=label,
+            snapshot_id=base,
             blob_name=blob_name,
             blob_sha256=blob_sha256,
             blob_count=blob_count,
@@ -324,12 +370,41 @@ class BackupManager:
             _log.warning("backup manifest unreadable; starting fresh")
             return []
 
+    @contextlib.contextmanager
+    def _manifest_lock(self) -> Any:
+        """Serialize manifest read-modify-write across threads/processes.
+
+        The manifest is a JSON file rewritten whole on every append and
+        rotation; without a lock, two simultaneous creates can each read
+        the old manifest and one entry is silently lost — the manifest
+        then disagrees with the snapshots on disk (F07's consistency
+        half). The lock is the ``O_EXCL`` lockfile beside the manifest.
+        """
+        lock_path = self.directory / ".manifest.lock"
+        fd: int | None = None
+        deadline = time.monotonic() + 30.0
+        while fd is None:
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
+                if time.monotonic() > deadline:
+                    raise StorageError(
+                        f"backup manifest is locked by another writer: {lock_path}"
+                    ) from None
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            os.close(fd)
+            lock_path.unlink(missing_ok=True)
+
     def _append_manifest(self, info: BackupInfo) -> None:
-        entries = self._load_manifest()
-        entries.append(info.to_dict())
-        self.manifest_path.write_text(
-            json.dumps(entries, indent=2, default=str), encoding="utf-8"
-        )
+        with self._manifest_lock():
+            entries = self._load_manifest()
+            entries.append(info.to_dict())
+            self.manifest_path.write_text(
+                json.dumps(entries, indent=2, default=str), encoding="utf-8"
+            )
         self.history.append(info.to_dict())
 
     def list(self) -> list[BackupInfo]:
@@ -349,6 +424,8 @@ class BackupManager:
                     created_at=entry.get("created_at", 0.0),
                     schema_version=entry.get("schema_version", 0),
                     label=entry.get("label", ""),
+                    snapshot_id=entry.get("snapshot_id")
+                    or _snapshot_id_from_name(entry["name"]),
                     blob_name=entry.get("blob_name", ""),
                     blob_sha256=entry.get("blob_sha256", ""),
                     blob_count=entry.get("blob_count", 0),
@@ -401,11 +478,13 @@ class BackupManager:
                 (self.directory / backup.blob_name).unlink(missing_ok=True)
         if removed and not dry_run:
             removed_names = set(removed)
-            entries = [
-                e for e in self._load_manifest()
-                if e["name"] not in removed_names and Path(e["path"]).is_file()
-            ]
-            self.manifest_path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+            with self._manifest_lock():
+                entries = [
+                    e for e in self._load_manifest()
+                    if e["name"] not in removed_names and Path(e["path"]).is_file()
+                ]
+                self.manifest_path.write_text(
+                    json.dumps(entries, indent=2), encoding="utf-8")
             _log.info("rotated %d old backups", len(removed))
         return removed
 
@@ -426,6 +505,18 @@ class BackupManager:
         path = Path(target.path)
         if not path.is_file():
             return [f"missing: {path}"]
+        # Manifest consistency (F07): several entries claiming one path
+        # with different checksums means identities aliased — at most one
+        # of those entries can describe the file actually on disk.
+        siblings = [
+            e for e in self._load_manifest() if e.get("path") == target.path
+        ]
+        claimed = {e.get("sha256") for e in siblings if e.get("sha256")}
+        if len(claimed) > 1:
+            problems.append(
+                f"manifest alias: {len(siblings)} entries claim {target.name} "
+                "with different checksums — snapshot identities collided"
+            )
         if target.sha256:
             actual = _sha256_file(path)
             if actual != target.sha256:
@@ -478,12 +569,30 @@ class BackupManager:
         return report
 
     def restore(self, backup: BackupInfo | str | os.PathLike[str], *, target: str | os.PathLike[str] | None = None, overwrite: bool = False, safety_copy: bool = True) -> Path:
-        """Extract a backup to ``target`` (default: alongside the backup).
+        """Restore a backup to ``target`` (default: alongside the backup).
 
-        Refuses to overwrite an existing target unless ``overwrite=True``;
-        with ``safety_copy=True`` (default) an existing target is first copied
-        aside as ``<target>.pre-restore-<stamp>`` so a bad restore never
-        destroys the database it was meant to rescue.
+        Verify-before-publish (F06): nothing is written to the destination
+        until the snapshot has passed :meth:`verify` (archive checksum,
+        extraction, SQLite integrity, blob sidecar) *and* the payload
+        extracted into a staging directory beside the destination has
+        passed its own integrity check. Publication is an atomic
+        ``os.replace``. Any failure before publication leaves the previous
+        target untouched and raises — a damaged snapshot can never be
+        reported as a successful recovery.
+
+        WAL contract: snapshots are self-contained (checkpointed at
+        creation), and any ``-wal``/``-shm`` sidecars beside the
+        destination belong to the *previous* file generation, so
+        publication removes them — a stale WAL must never replay into the
+        restored database. The pre-restore safety copy is taken through
+        the SQLite backup API, capturing committed WAL content a plain
+        file copy would silently lose; a target that is not an openable
+        database is preserved byte-for-byte, sidecars included.
+
+        Refuses to overwrite an existing target unless ``overwrite=True``.
+        An overwrite restore is an offline operation for the target:
+        stop its writer first — the mechanics protect the file, they do
+        not coordinate with a live connection.
         """
         if isinstance(backup, (str, os.PathLike)):
             candidates = [b for b in self.list() if b.name == Path(str(backup)).name or b.path == str(backup)]
@@ -498,14 +607,96 @@ class BackupManager:
                 f"restore target exists: {destination} "
                 "(pass overwrite=True to replace it)"
             )
-        if destination.exists() and safety_copy:
-            stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-            spare = destination.with_name(f"{destination.name}.pre-restore-{stamp}")
+        problems = self.verify(backup)
+        if problems:
+            raise StorageError(
+                f"restore refused: backup {backup.name} failed verification: "
+                + "; ".join(problems)
+            )
+        if backup.blob_name and not self.blob_dir:
+            raise StorageError(
+                f"restore refused: backup {backup.name} carries a blob "
+                f"sidecar ({backup.blob_name}) but this manager has no "
+                "blob_dir to restore it into"
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(
+            prefix=f".restore-{destination.name}-", dir=destination.parent))
+        try:
+            staged = staging / destination.name
+            self._extract(backup, staged)
+            staged_problems = _database_file_problems(
+                staged, expected_pages=backup.pages)
+            if staged_problems:
+                raise StorageError(
+                    f"restore refused: staged payload of {backup.name} is "
+                    "not a sound database: " + "; ".join(staged_problems)
+                )
+            blob_stage: Path | None = None
+            if backup.blob_name:
+                blob_stage = staging / "blobs"
+                self._extract_blob_archive(
+                    self.directory / backup.blob_name, blob_stage)
+                self._publish_blobs(blob_stage, backup)
+            if destination.exists() and safety_copy:
+                spare = self._safety_copy(destination)
+                _log.info("pre-restore safety copy: %s", spare)
+            os.replace(staged, destination)
+            for suffix in ("-wal", "-shm"):
+                Path(f"{destination}{suffix}").unlink(missing_ok=True)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        _log.info("restored %s -> %s", backup.name, destination)
+        return destination
+
+    def _safety_copy(self, destination: Path) -> Path:
+        """Preserve the pre-restore target as ``<target>.pre-restore-*``.
+
+        Through the SQLite backup API when the target opens as a database
+        (a live WAL target's committed rows may exist only in its ``-wal``
+        sidecar — a plain copy of the main file would preserve an older,
+        torn state and call it a safety copy). A target that does not
+        open as a database is copied byte-for-byte, sidecars included.
+        """
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        spare = destination.with_name(
+            f"{destination.name}.pre-restore-{stamp}-{secrets.token_hex(3)}")
+        try:
+            source = sqlite3.connect(
+                f"{destination.absolute().as_uri()}?mode=ro", uri=True)
+            try:
+                out = sqlite3.connect(str(spare))
+                try:
+                    source.backup(out)
+                finally:
+                    out.close()
+            finally:
+                source.close()
+        except sqlite3.Error:
+            spare.unlink(missing_ok=True)
             shutil.copy2(destination, spare)
-            _log.info("pre-restore safety copy: %s", spare)
-        extracted = self._extract(backup, destination)
-        _log.info("restored %s -> %s", backup.name, extracted)
-        return extracted
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(f"{destination}{suffix}")
+                if sidecar.is_file():
+                    shutil.copy2(sidecar, Path(f"{spare}{suffix}"))
+        return spare
+
+    def _publish_blobs(self, staged_dir: Path, backup: BackupInfo) -> None:
+        """Copy staged blob files into ``blob_dir``, checksum-verified.
+
+        Runs before the database is published, so a blob failure aborts
+        the restore with the previous database target still untouched.
+        Files the snapshot does not carry are left alone — restore is
+        not a sync-delete.
+        """
+        blob_dir = Path(self.blob_dir).expanduser()  # type: ignore[arg-type]
+        blob_dir.mkdir(parents=True, exist_ok=True)
+        for rel, digest in sorted((backup.blob_files or {}).items()):
+            target = blob_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(staged_dir / rel, target)
+            if _sha256_file(target) != digest:
+                raise StorageError(f"restored blob failed checksum: {rel}")
 
     def _extract(self, backup: BackupInfo, destination: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -740,3 +931,47 @@ def _sha256_file(path: Path) -> str:
         while chunk := handle.read(CHUNK):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _snapshot_id_from_name(name: str) -> str:
+    """Snapshot identity for a manifest entry that predates ``snapshot_id``:
+    the file name minus its ``.db``/``.db.gz`` payload suffix."""
+    stem = name
+    if stem.endswith(".gz"):
+        stem = stem[: -len(".gz")]
+    if stem.endswith(".db"):
+        stem = stem[: -len(".db")]
+    return stem
+
+
+def _database_file_problems(path: Path, *, expected_pages: int = 0) -> list[str]:
+    """Integrity problems of an extracted database file, or ``[]``.
+
+    The restore path runs this on the *staged* bytes it is about to
+    publish — the same checks :meth:`BackupManager.verify` performs on
+    its own probe extraction (integrity, non-empty schema), plus the
+    page count the manifest recorded at creation when it is known.
+    """
+    problems: list[str] = []
+    try:
+        conn = sqlite3.connect(str(path))
+        try:
+            result = conn.execute("PRAGMA integrity_check").fetchone()
+            if result is None or result[0] != "ok":
+                problems.append(f"integrity_check failed: {result}")
+            count = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+            ).fetchone()[0]
+            if count == 0:
+                problems.append("database contains no tables")
+            if expected_pages:
+                pages = int(conn.execute("PRAGMA page_count").fetchone()[0])
+                if pages != int(expected_pages):
+                    problems.append(
+                        f"page count {pages} != manifest pages {expected_pages}"
+                    )
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        problems.append(f"cannot open as sqlite: {exc}")
+    return problems
