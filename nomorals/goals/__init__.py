@@ -46,6 +46,17 @@ from typing import Any, Optional
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..storage.db import Database
+from .classes import (
+    DEFAULT_CLASS_ID,
+    GOAL_CLASSES,
+    ClassProgress,
+    GoalClass,
+    GoalClassError,
+    class_for_template,
+    goal_progress,
+    register_progress_provider,
+    validate_class_id,
+)
 
 __all__ = [
     "GoalTracker",
@@ -67,6 +78,16 @@ __all__ = [
     "GOAL_LINK_KINDS",
     "REMINDER_RECURRENCES",
     "FOCUS_COEFFICIENTS",
+    # Goal classes (WS2): the domain axis — see goals/classes.py.
+    "GOAL_CLASSES",
+    "DEFAULT_CLASS_ID",
+    "GoalClass",
+    "GoalClassError",
+    "ClassProgress",
+    "class_for_template",
+    "goal_progress",
+    "register_progress_provider",
+    "validate_class_id",
 ]
 
 _log = get_logger(__name__)
@@ -286,6 +307,9 @@ class Goal:
     notes: str = ""
     workspace: str = "default"
     kind: str = "outcome"  # outcome, habit, project
+    # Domain axis (WS2): a goals.classes id — "general" when unclassed.
+    # Orthogonal to kind (the goal's shape).
+    goal_class: str = DEFAULT_CLASS_ID
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -305,6 +329,7 @@ class Goal:
             "notes": self.notes,
             "workspace": self.workspace,
             "kind": self.kind,
+            "goal_class": self.goal_class,
         }
 
 
@@ -644,6 +669,10 @@ class GoalTracker:
 
             # Column migrations for databases created before this sweep.
             _ensure_column(self.db, "goals", "kind", "TEXT NOT NULL DEFAULT 'outcome'")
+            # WS2: the goal-class axis. Same _ensure_column pattern —
+            # pre-WS2 rows read as the default ('general') class.
+            _ensure_column(self.db, "goals", "goal_class",
+                           f"TEXT NOT NULL DEFAULT '{DEFAULT_CLASS_ID}'")
             _ensure_column(self.db, "goal_reminders", "recurrence", "TEXT NOT NULL DEFAULT 'once'")
             tables = {r["name"] for r in
                       self.db.query("SELECT name FROM sqlite_master WHERE type = 'table'")}
@@ -682,6 +711,7 @@ class GoalTracker:
             notes=row["notes"],
             workspace=row["workspace"],
             kind=row.get("kind") or "outcome",
+            goal_class=row.get("goal_class") or DEFAULT_CLASS_ID,
         )
 
     def _attach_subgoals(self, rows: list[dict[str, Any]]) -> list[Goal]:
@@ -714,13 +744,21 @@ class GoalTracker:
         workspace: str = "default",
         notes: str = "",
         kind: str = "outcome",
+        goal_class: str | None = None,
     ) -> Goal:
-        """Create a new goal."""
+        """Create a new goal.
+
+        ``goal_class`` files the goal under a domain class (see
+        :mod:`nomorals.goals.classes`); omitted/empty means the
+        default ``general`` class.  An unknown class id is refused
+        with :class:`GoalClassError` (a ValueError).
+        """
         title = (title or "").strip()
         if not title:
             raise ValueError("goal title must not be empty")
         if kind not in GOAL_KINDS:
             raise ValueError(f"unknown goal kind {kind!r} (expected one of {GOAL_KINDS})")
+        resolved_class = validate_class_id(goal_class)
         goal_id = new_id("goal")
         now = time.time()
         tags = list(tags or [])
@@ -728,17 +766,17 @@ class GoalTracker:
         with self.db.transaction():
             self.db.execute("""
                 INSERT INTO goals (goal_id, user_id, title, description, status, progress, priority,
-                    target_date, created_at, updated_at, tags, notes, workspace, kind)
-                VALUES (?, ?, ?, ?, 'active', 0.0, ?, ?, ?, ?, ?, ?, ?, ?)
+                    target_date, created_at, updated_at, tags, notes, workspace, kind, goal_class)
+                VALUES (?, ?, ?, ?, 'active', 0.0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (goal_id, user_id, title, description, priority, target_date, now, now,
-                  json.dumps(tags), notes, workspace, kind))
+                  json.dumps(tags), notes, workspace, kind, resolved_class))
             self._record_history(goal_id, 0.0, "goal created")
 
         _log.info(f"Created goal: {title}")
         return await self.get(goal_id) or Goal(
             goal_id=goal_id, user_id=user_id, title=title, description=description,
             target_date=target_date, priority=priority, tags=tags,
-            notes=notes, workspace=workspace, kind=kind)
+            notes=notes, workspace=workspace, kind=kind, goal_class=resolved_class)
 
     async def create_from_template(
         self,
@@ -752,11 +790,19 @@ class GoalTracker:
         priority: int | None = None,
         tags: list[str] | None = None,
         workspace: str = "default",
+        goal_class: str | None = None,
     ) -> Goal:
         """Create a goal from a built-in template (see GOAL_TEMPLATES).
 
         ``{subject}`` / ``{count}`` placeholders in the template title are
         filled from the keyword arguments; pass ``title`` to override.
+
+        The goal carries the template's tags (kept for compatibility)
+        AND its class: a built-in template files under the class that
+        owns it in the registry (save-money → finance, fitness →
+        health, …; declutter → general), unless ``goal_class`` is
+        passed explicitly.  Custom templates have no registry mapping,
+        so their goals stay ``general`` unless filed explicitly.
         """
         template = self._resolve_template(user_id, template_name)
         if template is None:
@@ -767,6 +813,8 @@ class GoalTracker:
                 f"(available: {', '.join(available)})")
         filled = (title if title is not None else template["title"]).format(
             subject=subject, count=count)
+        if goal_class is None:
+            goal_class = class_for_template(template_name)
         goal = await self.create(
             user_id,
             filled,
@@ -775,6 +823,7 @@ class GoalTracker:
             priority=template["priority"] if priority is None else priority,
             tags=list(tags) if tags is not None else list(template["tags"]),
             workspace=workspace,
+            goal_class=goal_class,
         )
         for order, step in enumerate(template["subgoals"]):
             await self.add_subgoal(goal.goal_id, step.format(subject=subject, count=count),
@@ -809,8 +858,13 @@ class GoalTracker:
         notes: str | None = None,
         workspace: str | None = None,
         kind: str | None = None,
+        goal_class: str | None = None,
     ) -> Goal:
-        """Update goal fields. Raises KeyError when the goal does not exist."""
+        """Update goal fields. Raises KeyError when the goal does not exist.
+
+        ``goal_class`` re-files the goal under another class; an
+        unknown class id is refused with :class:`GoalClassError`.
+        """
         await self._require(goal_id)
         updates: dict[str, Any] = {}
         if title is not None:
@@ -836,6 +890,8 @@ class GoalTracker:
             if kind not in GOAL_KINDS:
                 raise ValueError(f"unknown goal kind {kind!r} (expected one of {GOAL_KINDS})")
             updates["kind"] = kind
+        if goal_class is not None:
+            updates["goal_class"] = validate_class_id(goal_class)
         if updates:
             updates["updated_at"] = time.time()
             set_clause = ", ".join(f"{k} = ?" for k in updates)
@@ -1069,8 +1125,13 @@ class GoalTracker:
         tags: list[str] | None = None,
         due_within_days: int | None = None,
         limit: int | None = None,
+        goal_class: str | None = None,
     ) -> list[Goal]:
-        """List goals for a user with optional filters."""
+        """List goals for a user with optional filters.
+
+        ``goal_class`` filters to one domain class (validated against
+        the registry — an unknown class is refused, not an empty list).
+        """
         query = "SELECT * FROM goals WHERE user_id = ?"
         params: list[Any] = [user_id]
 
@@ -1081,6 +1142,10 @@ class GoalTracker:
         if workspace:
             query += " AND workspace = ?"
             params.append(workspace)
+
+        if goal_class is not None:
+            query += " AND goal_class = ?"
+            params.append(validate_class_id(goal_class))
 
         if due_within_days is not None:
             query += " AND target_date IS NOT NULL AND target_date <= ?"
@@ -1135,9 +1200,30 @@ class GoalTracker:
         """, (user_id,))
         avg_days = (sum((r["completed_at"] - r["created_at"]) for r in comp_rows)
                     / len(comp_rows) / 86400.0) if comp_rows else None
+        # WS2: per-class rollup — counts + average manual progress per
+        # class, only classes the user actually has goals in.  The
+        # measured readings themselves come from the class providers
+        # (see class_progress); this is the cheap store-level census
+        # the class board renders from.
+        class_rows = self.db.query("""
+            SELECT COALESCE(goal_class, ?) AS gc, COUNT(*) AS n,
+                   COALESCE(AVG(progress), 0) AS avg_progress,
+                   SUM(CASE WHEN status = 'active' AND target_date IS NOT NULL
+                            AND target_date < ? THEN 1 ELSE 0 END) AS overdue
+            FROM goals WHERE user_id = ? GROUP BY gc
+        """, (DEFAULT_CLASS_ID, time.time(), user_id))
+        by_class = {
+            (r["gc"] or DEFAULT_CLASS_ID): {
+                "total": r["n"],
+                "avg_progress": round(float(r["avg_progress"]), 1),
+                "overdue": int(r["overdue"] or 0),
+            }
+            for r in class_rows
+        }
         return {
             "total": total,
             "by_status": {s: by_status.get(s, 0) for s in GOAL_STATUSES},
+            "by_class": by_class,
             "active_avg_progress": round(float(active_avg), 1),
             "overdue": len(due["overdue"]),
             "due_soon": len(due["due_soon"]),
@@ -1146,6 +1232,22 @@ class GoalTracker:
             "longest_streak": await self.longest_streak(user_id),
             "momentum": await self.momentum(user_id),
         }
+
+    def class_progress(self, goal: Goal, *, now: float | None = None) -> ClassProgress:
+        """Progress reading for a goal via its class provider (WS2).
+
+        Measured when the class has a provider that can measure this
+        goal; otherwise the goal's manual % labelled self-reported.
+        See :func:`nomorals.goals.classes.goal_progress`.
+        """
+        return goal_progress(self.db, goal, now=now)
+
+    async def measured_progress(
+        self, goal_id: str, *, now: float | None = None
+    ) -> ClassProgress:
+        """Class-progress reading by goal id. Raises KeyError if missing."""
+        goal = await self._require(goal_id)
+        return self.class_progress(goal, now=now)
 
     # ── reminders ─────────────────────────────────────────────────────────
 
