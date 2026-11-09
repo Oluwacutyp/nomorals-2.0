@@ -300,6 +300,10 @@ class RuntimeChatOpsMixin:
                 return self._chatops_sendcontact(tail, message)
             if kind in ("find", "findall"):
                 return self._chatops_find(kind, tail, message)
+            if kind == "statusaud":
+                return self._chatops_statusaud(tail, message)
+            if kind == "statusviewers":
+                return self._chatops_statusviewers(tail, message)
             if kind == "vcf":
                 return self._chatops_vcf(tail, message)
             if kind == "addcontact":
@@ -2767,6 +2771,200 @@ class RuntimeChatOpsMixin:
         title = str(getattr(chat, "title", "") or "")
         return format_search_results(
             verdict, scope=title or "this chat")
+
+    # ── status depth (parity #13) ───────────────────────────
+
+    def _chatops_audience_names(self, adapter: Any
+                                ) -> dict[str, str]:
+        """JID → display name from the account's own DM
+        chats, for rendering audience and viewer lists:
+        people print by the name the owner knows them by;
+        a JID with no row renders as its number (or, for a
+        LID, is worded — see chatops'
+        _audience_person_label)."""
+        names: dict[str, str] = {}
+        rows = self._chatops_call(adapter.chats, 200)
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                jid = str(row.get("id") or "")
+                title = str(row.get("title") or "").strip()
+                if jid and title:
+                    names[jid] = title
+        return names
+
+    def _chatops_resolve_people(self, adapter: Any,
+                                tokens: list[str]
+                                ) -> tuple[list[str], str]:
+        """Resolve /statusaud's people tokens to person
+        JIDs: a phone number (7–15 digits, optional + and
+        spaces) IS the JID; anything else is a name matched
+        against the account's DM chats — exact title first,
+        then a unique substring match.  An ambiguous name
+        answers with its candidates and an unknown name
+        answers plainly: neither guesses, because a wrong
+        person in an audience list is a privacy act aimed
+        at the wrong human.  Returns (jids, error)."""
+        rows = self._chatops_call(adapter.chats, 200)
+        dms = []
+        if isinstance(rows, list):
+            dms = [r for r in rows if isinstance(r, dict)
+                   and str(r.get("id") or "").endswith(
+                       "@s.whatsapp.net")]
+        jids: list[str] = []
+        for token in tokens:
+            text = str(token or "").strip()
+            digits = "".join(
+                ch for ch in text if ch.isdigit())
+            if digits and all(
+                    ch.isdigit() or ch in "+ -()"
+                    for ch in text) and 7 <= len(digits) <= 15:
+                jid = digits + "@s.whatsapp.net"
+            else:
+                low = text.lower()
+                exact = [r for r in dms
+                         if str(r.get("title") or "")
+                         .strip().lower() == low]
+                pool = exact or [
+                    r for r in dms
+                    if low in str(r.get("title") or "").lower()]
+                if not pool:
+                    return [], (
+                        f"I can't find {text} among your "
+                        f"WhatsApp chats — the audience was "
+                        f"not changed. Use the name as it "
+                        f"appears in your chats, or their "
+                        f"number.")
+                if len(pool) > 1:
+                    cands = ", ".join(
+                        str(r.get("title") or "?")
+                        for r in pool[:5])
+                    return [], (
+                        f"{text} matches more than one "
+                        f"contact ({cands}) — say which one; "
+                        f"the audience was not changed.")
+                jid = str(pool[0].get("id") or "")
+            if jid and jid not in jids:
+                jids.append(jid)
+        return jids, ""
+
+    def _chatops_statusaud(self, tail: str, message: Any
+                           ) -> str:
+        """/statusaud — the account's status audience
+        (parity #13, the census's "choose status audience"
+        ABSENT row).  Bare, it READS the current audience —
+        a read, so like /find it resolves through the
+        identity home and the standing stop does not halt
+        it.  With a mode word it SETS the audience: an act
+        as the owner, so the standing stop gates it and a
+        landed change journals (personal
+        .note_status_audience_set) with the values the
+        surface read back.  WhatsApp-only: Telegram stories
+        publish no audience list a program can read or
+        set, and the reply there says exactly that."""
+        from ...social.chat.chatops import format_status_audience, parse_statusaud_args
+
+        platform = str(getattr(message.chat, "platform", "")
+                       or "")
+        if platform.startswith("telegram"):
+            return ("status audience is a WhatsApp shape — "
+                    "Telegram stories don't publish an "
+                    "audience list a program can read or "
+                    "set. Your WhatsApp status audience "
+                    "lives behind /statusaud in your "
+                    "WhatsApp.")
+        if platform != "whatsapp":
+            return ("/statusaud reads and sets who your "
+                    "WhatsApp status goes to — run it from "
+                    "your WhatsApp.")
+        svc, rec, adapter, _p, error = \
+            self._chatops_identity_home(message, "statusaud")
+        if error:
+            return error
+        parsed = parse_statusaud_args(tail)
+        if not parsed.get("ok"):
+            return str(parsed.get("error") or "")
+        if parsed.get("action") == "show":
+            verdict = self._chatops_call(
+                adapter.status_audience)
+            return format_status_audience(
+                verdict,
+                names=self._chatops_audience_names(adapter))
+        if svc["registry"].owner_stopped("whatsapp"):
+            return ("WhatsApp is under your standing stop "
+                    "— it stays halted until you start it "
+                    "again; the audience was not changed.")
+        jids, problem = self._chatops_resolve_people(
+            adapter, list(parsed.get("people") or []))
+        if problem:
+            return problem
+        verdict = self._chatops_call(
+            adapter.set_status_audience,
+            str(parsed.get("mode") or ""), jids)
+        if isinstance(verdict, dict) and verdict.get("ok"):
+            svc["personal"].note_status_audience_set(
+                "whatsapp", account_id=rec.id,
+                mode=str(verdict.get("mode") or ""),
+                audience=[str(j) for j in
+                          (verdict.get("list") or [])])
+        return format_status_audience(
+            verdict,
+            names=self._chatops_audience_names(adapter))
+
+    def _chatops_statusviewers(self, tail: str, message: Any
+                               ) -> str:
+        """/statusviewers — who viewed the owner's status
+        (parity #13, the census's second ABSENT row).  A
+        READ: identity home, no standing-stop gate (the
+        /find doctrine).  The target is the status id when
+        given, else the newest status the journal remembers
+        the owner posting through Devon — a post made
+        elsewhere has no id here to ask about, and the
+        reply says so rather than guessing.  The count is
+        views the bridge has seen since it connected (the
+        verdict's coverage line says so in the reply);
+        WhatsApp gives a linked device no server-side
+        viewer list."""
+        from ...social.chat.chatops import format_status_viewers
+
+        platform = str(getattr(message.chat, "platform", "")
+                       or "")
+        if platform.startswith("telegram"):
+            return ("status viewers are a WhatsApp shape "
+                    "here — Telegram doesn't hand this "
+                    "surface a viewer list for your stories. "
+                    "Your WhatsApp status viewers live "
+                    "behind /statusviewers in your WhatsApp.")
+        if platform != "whatsapp":
+            return ("/statusviewers shows who viewed your "
+                    "WhatsApp status — run it from your "
+                    "WhatsApp.")
+        svc, rec, adapter, _p, error = \
+            self._chatops_identity_home(
+                message, "statusviewers")
+        if error:
+            return error
+        target = str(tail or "").strip()
+        if not target:
+            rows = svc["personal"].vault.journal(
+                account_id=rec.id, kind="status_posted")
+            for row in reversed(rows):
+                if str(row.get("platform") or "") \
+                        == "whatsapp" and \
+                        str(row.get("source_id") or ""):
+                    target = str(row["source_id"])
+                    break
+        if not target:
+            return ("I don't have a status post of yours "
+                    "to check — post one with /poststatus "
+                    "and I'll track its viewers from the "
+                    "moment it goes up.")
+        verdict = self._chatops_call(
+            adapter.status_viewers, target)
+        return format_status_viewers(
+            verdict,
+            names=self._chatops_audience_names(adapter))
 
     # ── tagging ──────────────────────────────────────────────
 

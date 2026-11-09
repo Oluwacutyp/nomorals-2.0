@@ -52,6 +52,9 @@ __all__ = [
     "parse_sendloc_args",
     "parse_sendcontact_args",
     "format_search_results",
+    "parse_statusaud_args",
+    "format_status_audience",
+    "format_status_viewers",
     "compose_group_status",
     "kind_for_chat_key",
 ]
@@ -72,6 +75,7 @@ CHATOPS_COMMANDS = frozenset({
     "joinlink", "newgroup", "newchannel", "leave",
     "myprofile", "privacy", "makepoll", "vcf", "addcontact",
     "sendloc", "sendcontact", "find", "findall",
+    "statusaud", "statusviewers",
 })
 
 #: Tagall pacing law: one message carries at most this many
@@ -509,6 +513,144 @@ def _search_hit_line(msg: Any, query: str, *,
     snippet = _search_snippet(
         str(getattr(msg, "text", "") or ""), query)
     return "• " + " · ".join(parts) + f" — {snippet}"
+
+
+# -- status depth (parity bundle #13, census "WhatsApp
+#    status depth") --
+
+def parse_statusaud_args(tail: str) -> dict[str, Any]:
+    """Parse /statusaud's tail: empty shows the current
+    audience; ``contacts`` sets everyone; ``except`` /
+    ``only`` set the list mode with the people after the
+    mode word, comma-separated — names or phone numbers,
+    resolved to person JIDs by the caller (a name is a
+    directory lookup, not a parse).  Shape problems come
+    back as ``error`` in words."""
+    text = str(tail or "").strip()
+    if not text:
+        return {"ok": True, "action": "show"}
+    head, _, rest = text.partition(" ")
+    mode = head.strip().lower()
+    if mode not in ("contacts", "except", "only"):
+        return {"ok": False, "error": (
+            "usage: /statusaud shows the audience · "
+            "/statusaud contacts · /statusaud except "
+            "Name, +234… · /statusaud only Name, +234…")}
+    people = [p.strip() for p in rest.split(",")
+              if p.strip()]
+    if mode == "contacts" and people:
+        return {"ok": False, "error": (
+            "the contacts audience takes no list — "
+            "it is everyone")}
+    if mode != "contacts" and not people:
+        return {"ok": False, "error": (
+            "an " + mode + " audience needs at least "
+            "one person — name them after the word, "
+            "comma-separated")}
+    return {"ok": True, "action": "set", "mode": mode,
+            "people": people}
+
+
+def _audience_person_label(jid: str,
+                           names: dict[str, str]) -> str:
+    """One audience/viewer JID as the owner should read
+    it: the contact's name when known, else their phone
+    number.  A raw LID never prints — an unresolvable LID
+    is worded, not dumped."""
+    name = str(names.get(jid) or "").strip()
+    if name:
+        return name
+    if jid.endswith("@s.whatsapp.net"):
+        return "+" + jid.split("@", 1)[0]
+    return "a contact whose name isn't known"
+
+
+def format_status_audience(verdict: Any, *,
+                           names: dict[str, str] | None = None
+                           ) -> str:
+    """Render one status-audience verdict (the adapters'
+    shared shape) as plain lines: the mode in words, then
+    the people by name or number.  When the surface could
+    not hand back the list itself (``list_known`` False),
+    the reply says exactly that instead of printing an
+    empty list as if nobody were on it."""
+    verdict = verdict if isinstance(verdict, dict) else {}
+    if not verdict.get("ok"):
+        return ("the status audience didn't answer — "
+                + str(verdict.get("error")
+                      or "the surface refused"))
+    names = names or {}
+    mode = str(verdict.get("mode") or "")
+    entries = [str(j) for j in (verdict.get("list") or [])]
+    labels = [_audience_person_label(j, names)
+              for j in entries]
+    written = "set: " if verdict.get("written") else ""
+    if mode == "contacts":
+        return (written + "your WhatsApp status audience "
+                "is all your contacts.")
+    if not verdict.get("list_known", True):
+        return (written + "your WhatsApp status audience "
+                "is " + ("everyone except a list"
+                         if mode == "except"
+                         else "a chosen list only")
+                + " — the list itself isn't readable on "
+                "this surface, so I won't guess the names.")
+    if mode == "except":
+        head = ("your WhatsApp status goes to all your "
+                "contacts except:")
+    elif mode == "only":
+        head = "your WhatsApp status is shared only with:"
+    else:
+        return ("the status audience came back in a form "
+                "I don't know: " + (mode or "empty"))
+    lines = [written + head]
+    lines += ["• " + label for label in labels]
+    return "\n".join(lines)
+
+
+def format_status_viewers(verdict: Any, *,
+                          names: dict[str, str] | None = None
+                          ) -> str:
+    """Render one status-viewers verdict as plain lines:
+    the count, each viewer by name or number with the
+    time they were first seen, and the coverage line —
+    the count is views the bridge has SEEN, so zero seen
+    reads "no views seen yet", never "nobody viewed".
+    No message id prints."""
+    verdict = verdict if isinstance(verdict, dict) else {}
+    if not verdict.get("ok"):
+        return ("the status viewers didn't answer — "
+                + str(verdict.get("error")
+                      or "the surface refused"))
+    names = names or {}
+    viewers = [v for v in (verdict.get("viewers") or [])
+               if isinstance(v, dict)]
+    coverage = str(verdict.get("coverage") or "")
+    if not viewers:
+        lines = ["no views seen on your status yet."]
+    else:
+        head = (f"{len(viewers)} "
+                f"{'person has' if len(viewers) == 1 else 'people have'}"
+                " viewed your status:")
+        lines = [head]
+        for row in viewers:
+            label = _audience_person_label(
+                str(row.get("jid") or ""), names)
+            when = ""
+            ts = row.get("ts")
+            if ts:
+                try:
+                    when = time.strftime(
+                        "%Y-%m-%d %H:%M",
+                        time.localtime(float(ts) / 1000.0))
+                except (TypeError, ValueError,
+                        OverflowError, OSError):
+                    when = ""
+            lines.append("• " + label
+                         + (f" · {when}" if when else ""))
+    if coverage:
+        lines.append(f"(counting {coverage})")
+    return "\n".join(lines)
 
 
 def compose_group_status(*, title: str, platform: str,

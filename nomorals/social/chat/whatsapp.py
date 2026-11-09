@@ -88,7 +88,7 @@ import uuid
 from typing import Any
 
 from ...core.logging_setup import get_logger
-from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult, contact_shape_error, location_shape_error, search_shape_error
+from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult, contact_shape_error, location_shape_error, search_shape_error, status_audience_shape_error
 from .platform_limits import for_platform
 from .failures import record_failure
 
@@ -2065,12 +2065,17 @@ class WhatsAppAdapter(ChatAdapter):
         verb. Text, or an image/video already on disk with an
         optional caption. The Go engine's whatsmeow resolves
         the audience from the account's server-side status
-        recipients; the Baileys rung needs the explicit
-        statusJidList — *audience* when given, else the
-        bridge's own session contacts, else an honest refusal
-        (a status encrypted for nobody is not a post). The
-        bridge's verdict dict comes back — ok carries the new
-        status message id, ok:false the honest reason."""
+        recipients and cannot take a per-post list — a
+        non-empty *audience* there is refused in words,
+        never silently posted wider than asked; the Baileys
+        rung needs the explicit statusJidList — *audience*
+        when given, else the account's own status privacy
+        list applied to the bridge's session contacts, else
+        an honest refusal (a status encrypted for nobody is
+        not a post). Changing the account's audience itself
+        is :meth:`set_status_audience`. The bridge's verdict
+        dict comes back — ok carries the new status message
+        id, ok:false the honest reason."""
         text = str(text or "").strip()
         media_path = str(media_path or "").strip()
         if not text and not media_path:
@@ -2084,6 +2089,75 @@ class WhatsAppAdapter(ChatAdapter):
             payload["audience"] = [str(a) for a in audience if a]
         return self._admin_cmd("status_send", payload,
                                timeout=30)
+
+    # ── status depth (parity bundle #13) ─────────────────
+    #: What a viewers count actually covers, in the
+    #: read-verdict tradition: the bridges remember views
+    #: from the read receipts the server delivers them, and
+    #: WhatsApp offers a linked device no server-side
+    #: viewer list — so the count is views THIS bridge has
+    #: seen since it connected, and zero seen is worded "no
+    #: views seen", never "nobody viewed".
+    _VIEWERS_COVERAGE = (
+        "views this bridge has seen since it connected — "
+        "WhatsApp gives a linked device no server-side "
+        "viewer list, so views from before it connected, "
+        "or while it was down, are not in this count")
+
+    def status_audience(self) -> dict[str, Any]:
+        """Read the account's status audience (parity #13):
+        the bridges' ``status_audience`` verb — the account's
+        status privacy list, normalized to the shared
+        vocabulary (contacts / except / only). Both engines
+        read the same status-namespace list the phone sets.
+        The verdict passes through; ``list_known`` False
+        means the list itself could not be handed back, so
+        the mode stands alone."""
+        return self._admin_cmd("status_audience", {},
+                               timeout=20)
+
+    def set_status_audience(self, mode: str,
+                            audience: list[str] | None = None
+                            ) -> dict[str, Any]:
+        """Set the account's status audience (parity #13):
+        the bridges' ``status_audience_set`` verb. The
+        shape rule runs BEFORE traffic
+        (:func:`status_audience_shape_error` — contacts
+        takes no list, except/only name their people, and
+        entries are person JIDs). Both bridges prove the
+        write by reading the list back, so an ok verdict
+        carries the server's values, not the requested
+        ones."""
+        entries = [str(a).strip() for a in (audience or [])
+                   if str(a).strip()]
+        problem = status_audience_shape_error(mode, entries)
+        if problem:
+            return {"ok": False, "error": problem}
+        return self._admin_cmd(
+            "status_audience_set",
+            {"mode": str(mode).strip().lower(),
+             "list": entries}, timeout=30)
+
+    def status_viewers(self, message_id: str
+                       ) -> dict[str, Any]:
+        """Who has viewed one of the account's status posts
+        (parity #13): the bridges' ``status_viewers`` verb.
+        The bridges answer from the read receipts they have
+        seen for the post (see :data:`_VIEWERS_COVERAGE`,
+        attached here like search's coverage line);
+        ``posted_here`` says whether this bridge was the
+        one that posted it."""
+        mid = str(message_id or "").strip()
+        if not mid:
+            return {"ok": False,
+                    "error": "status_viewers needs the "
+                             "status post's id"}
+        verdict = self._admin_cmd(
+            "status_viewers", {"message_id": mid}, timeout=15)
+        if verdict.get("ok"):
+            verdict = dict(verdict)
+            verdict["coverage"] = self._VIEWERS_COVERAGE
+        return verdict
 
     # ── chat & privacy ops (FEI gap wave F) ─────────────────────
     # Owner-invoked verbs on his own account, each riding a

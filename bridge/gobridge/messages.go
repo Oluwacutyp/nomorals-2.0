@@ -20,6 +20,7 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
+	waBinary "go.mau.fi/whatsmeow/binary"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -80,6 +81,26 @@ func (r request) has(key string) bool {
 	return ok
 }
 
+// strList reads a JSON array of strings (the group verbs'
+// participants shape): absent or non-array reads as empty,
+// non-string entries are dropped, entries are trimmed and
+// empties skipped.
+func (r request) strList(key string) []string {
+	raw, ok := r[key].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if s, ok := item.(string); ok {
+			if s = strings.TrimSpace(s); s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
 // ── TCP client serving + command dispatch ─────────────────────────
 
 func (b *bridge) serveClient(cc *clientConn) {
@@ -127,6 +148,12 @@ func (b *bridge) handleCommand(cc *clientConn, req request) {
 		b.cmdStatusView(ctx, cc, id, req)
 	case "status_send":
 		b.cmdStatusSend(ctx, cc, id, req)
+	case "status_audience":
+		b.cmdStatusAudience(ctx, cc, id, req)
+	case "status_audience_set":
+		b.cmdStatusAudienceSet(ctx, cc, id, req)
+	case "status_viewers":
+		b.cmdStatusViewers(cc, id, req)
 	case "status_react":
 		b.cmdStatusReact(ctx, cc, id, req)
 	case "react":
@@ -864,6 +891,26 @@ func (b *bridge) onReceipt(v *events.Receipt) {
 	}
 	if len(ids) == 0 {
 		return
+	}
+	// A read receipt on the status broadcast chat IS a status
+	// view: the receipt's sender is the viewer.  Remember it
+	// (parity #13) — the only viewer record a linked device
+	// ever gets.  The owner's own views (from another of
+	// their devices) are not views of their status.
+	if kind == "read" &&
+		v.Chat.ToNonAD() == types.StatusBroadcastJID {
+		viewer := v.Sender.ToNonAD().String()
+		own := ""
+		if b.cli != nil && b.cli.Store != nil &&
+			b.cli.Store.ID != nil {
+			own = b.cli.Store.ID.ToNonAD().String()
+		}
+		if viewer != "" && viewer != own {
+			for _, mid := range ids {
+				b.noteStatusView(mid, viewer,
+					v.Timestamp.UnixMilli())
+			}
+		}
 	}
 	b.broadcast(map[string]any{
 		"type": "receipt", "chat": v.Chat.ToNonAD().String(),
@@ -1723,6 +1770,20 @@ func (b *bridge) cmdStatusSend(ctx context.Context, cc *clientConn, id string, r
 			"error": "status_send needs text or a media path"})
 		return
 	}
+	// A per-post audience list cannot be honored on this
+	// engine: whatsmeow resolves status recipients from the
+	// ACCOUNT's status privacy list when it encrypts the
+	// broadcast, and offers no per-post list.  Refuse rather
+	// than post to a wider audience than was asked — the
+	// working route is status_audience_set, which changes
+	// the account list itself.
+	if audience := req.strList("audience"); len(audience) > 0 {
+		b.reply(cc, id, map[string]any{"ok": false, "error": "a per-post status audience can't be set on this " +
+			"engine — whatsmeow posts to your account's " +
+			"status privacy audience; change it with " +
+			"status_audience_set instead"})
+		return
+	}
 	var msg *waE2E.Message
 	if path != "" {
 		data, err := os.ReadFile(path)
@@ -1786,8 +1847,328 @@ func (b *bridge) cmdStatusSend(ctx context.Context, cc *clientConn, id string, r
 		b.fail(cc, id, err)
 		return
 	}
+	b.noteStatusSent(string(resp.ID))
 	b.reply(cc, id, map[string]any{"ok": true,
 		"message_id": string(resp.ID)})
+}
+
+// ── status depth: audience + viewers (parity #13) ─────────────────
+// The census's two ABSENT rows for WhatsApp status: choosing
+// the audience (the account's status privacy list) and seeing
+// who viewed a status.  whatsmeow reads the list
+// (GetStatusPrivacy) but exposes no setter, so the write goes
+// out as a raw status-namespace IQ through the client's
+// dangerous internals — the same wire the phone speaks, in
+// the exact node shape whatsmeow's own reader parses back —
+// and every write is proven by reading the list back: the
+// reply carries the READ-BACK values, never the requested
+// ones.  Viewers are remembered from the read receipts on
+// status@broadcast (see onReceipt): WhatsApp gives a linked
+// device no server-side viewer list, so status_viewers
+// answers from that memory and the adapter's coverage line
+// says so.
+
+// The verbs speak the shared audience vocabulary both
+// bridges and the adapter agree on — contacts / except /
+// only — and the wire words (contacts / blacklist /
+// whitelist) are translated here, never leaked upward.
+func statusPrivacyMode(t types.StatusPrivacyType) string {
+	switch t {
+	case types.StatusPrivacyTypeContacts:
+		return "contacts"
+	case types.StatusPrivacyTypeBlacklist:
+		return "except"
+	case types.StatusPrivacyTypeWhitelist:
+		return "only"
+	}
+	return ""
+}
+
+func statusPrivacyType(mode string) (types.StatusPrivacyType,
+	bool) {
+	switch mode {
+	case "contacts":
+		return types.StatusPrivacyTypeContacts, true
+	case "except":
+		return types.StatusPrivacyTypeBlacklist, true
+	case "only":
+		return types.StatusPrivacyTypeWhitelist, true
+	}
+	return "", false
+}
+
+// statusAudienceShapeError: the one shape rule for a set —
+// contacts takes no list (it is everyone); except and only
+// name the people the list applies to.  The Python adapter
+// enforces the same rule with the same words.
+func statusAudienceShapeError(mode string,
+	jids []types.JID) string {
+	if _, ok := statusPrivacyType(mode); !ok {
+		return "a status audience mode is contacts, " +
+			"except or only"
+	}
+	if mode == "contacts" && len(jids) > 0 {
+		return "the contacts audience takes no list — " +
+			"it is everyone"
+	}
+	if mode != "contacts" && len(jids) == 0 {
+		return "an " + mode + " audience needs at least " +
+			"one person"
+	}
+	return ""
+}
+
+// statusPrivacyListNode builds the wire node for one
+// audience list, in the shape GetStatusPrivacy parses: a
+// list node typed by mode and marked default, its people
+// as user children carrying jid attributes.
+func statusPrivacyListNode(mode string,
+	jids []types.JID) waBinary.Node {
+	protoType, _ := statusPrivacyType(mode)
+	users := make([]waBinary.Node, 0, len(jids))
+	for _, jid := range jids {
+		users = append(users, waBinary.Node{
+			Tag:   "user",
+			Attrs: waBinary.Attrs{"jid": jid},
+		})
+	}
+	return waBinary.Node{
+		Tag: "list",
+		Attrs: waBinary.Attrs{
+			"type":    string(protoType),
+			"default": "true",
+		},
+		Content: users,
+	}
+}
+
+// statusAudienceVerdict normalizes a GetStatusPrivacy read
+// into the verb reply: the account's active (default) list
+// in the shared vocabulary.  list_known is false when the
+// read carried no list at all — the mode then reads as the
+// protocol default (contacts) and the caller is told the
+// list itself is unknown rather than guessed.
+func statusAudienceVerdict(
+	lists []types.StatusPrivacy) map[string]any {
+	for _, entry := range lists {
+		if entry.IsDefault {
+			return statusAudienceEntry(entry)
+		}
+	}
+	if len(lists) > 0 {
+		return statusAudienceEntry(lists[0])
+	}
+	return map[string]any{"ok": true, "mode": "contacts",
+		"list": []string{}, "list_known": false}
+}
+
+func statusAudienceEntry(
+	entry types.StatusPrivacy) map[string]any {
+	jids := make([]string, 0, len(entry.List))
+	for _, jid := range entry.List {
+		jids = append(jids, jid.ToNonAD().String())
+	}
+	return map[string]any{"ok": true,
+		"mode":       statusPrivacyMode(entry.Type),
+		"list":       jids,
+		"list_known": true}
+}
+
+// statusAudienceClient is the slice of the WhatsApp client
+// the audience verbs need — whatsmeow's reader plus the
+// bridge's own IQ writer — faked in tests like the
+// status-view client above.
+type statusAudienceClient interface {
+	GetStatusPrivacy(ctx context.Context) (
+		[]types.StatusPrivacy, error)
+	SetStatusPrivacyList(ctx context.Context,
+		list waBinary.Node) error
+}
+
+// statusPrivacyWire adapts the real whatsmeow client to the
+// audience verbs: the read is whatsmeow's own; the write is
+// the raw status-namespace IQ it has no public API for.
+// sendIQ already fails on an error-type reply, so a nil
+// error here means the server accepted the write.
+type statusPrivacyWire struct {
+	cli *whatsmeow.Client
+}
+
+func (w statusPrivacyWire) GetStatusPrivacy(
+	ctx context.Context) ([]types.StatusPrivacy, error) {
+	return w.cli.GetStatusPrivacy(ctx)
+}
+
+func (w statusPrivacyWire) SetStatusPrivacyList(
+	ctx context.Context, list waBinary.Node) error {
+	_, err := w.cli.DangerousInternals().SendIQ(ctx,
+		whatsmeow.DangerousInfoQuery{
+			Namespace: "status",
+			Type:      whatsmeow.DangerousInfoQueryType("set"),
+			To:        types.ServerJID,
+			Content: []waBinary.Node{{
+				Tag:     "privacy",
+				Content: []waBinary.Node{list},
+			}},
+		})
+	return err
+}
+
+// readStatusAudience / writeStatusAudience are the verbs'
+// logic over the client seam, so tests drive them with a
+// fake exactly like markStatusViewed's client.
+func readStatusAudience(ctx context.Context,
+	cli statusAudienceClient) map[string]any {
+	lists, err := cli.GetStatusPrivacy(ctx)
+	if err != nil {
+		return map[string]any{"ok": false,
+			"error": err.Error()}
+	}
+	verdict := statusAudienceVerdict(lists)
+	if verdict["mode"] == "" {
+		return map[string]any{"ok": false, "error": "the account's status audience came back in " +
+			"a form this bridge doesn't know"}
+	}
+	return verdict
+}
+
+func writeStatusAudience(ctx context.Context,
+	cli statusAudienceClient, mode string,
+	jids []types.JID) map[string]any {
+	if shapeErr := statusAudienceShapeError(mode,
+		jids); shapeErr != "" {
+		return map[string]any{"ok": false,
+			"error": shapeErr}
+	}
+	node := statusPrivacyListNode(mode, jids)
+	if err := cli.SetStatusPrivacyList(ctx, node); err != nil {
+		return map[string]any{"ok": false,
+			"error": err.Error()}
+	}
+	// Prove the write by reading the list back; the reply
+	// carries the server's values, not the requested ones.
+	verdict := readStatusAudience(ctx, cli)
+	if verdict["ok"] == true {
+		verdict["written"] = true
+	}
+	return verdict
+}
+
+func (b *bridge) cmdStatusAudience(ctx context.Context,
+	cc *clientConn, id string, req request) {
+	if b.cli == nil {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "whatsapp bridge not connected"})
+		return
+	}
+	b.reply(cc, id, readStatusAudience(ctx,
+		statusPrivacyWire{cli: b.cli}))
+}
+
+func (b *bridge) cmdStatusAudienceSet(ctx context.Context,
+	cc *clientConn, id string, req request) {
+	if b.cli == nil {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "whatsapp bridge not connected"})
+		return
+	}
+	mode := strings.TrimSpace(req.str("mode"))
+	raw := req.strList("list")
+	jids := make([]types.JID, 0, len(raw))
+	for _, s := range raw {
+		jid, err := types.ParseJID(s)
+		if err != nil ||
+			jid.Server != types.DefaultUserServer {
+			b.reply(cc, id, map[string]any{"ok": false,
+				"error": "a status audience list holds " +
+					"people, not " + s})
+			return
+		}
+		jids = append(jids, jid.ToNonAD())
+	}
+	b.reply(cc, id, writeStatusAudience(ctx,
+		statusPrivacyWire{cli: b.cli}, mode, jids))
+}
+
+// ── status viewers memory ─────────────────────────────────────────
+// Bounded like the poll memory: the last 100 status posts
+// this bridge sent, the first 100 posts it has seen views
+// for, up to 1000 viewers remembered per post.
+
+func (b *bridge) noteStatusSent(id string) {
+	if id == "" {
+		return
+	}
+	b.statusMu.Lock()
+	defer b.statusMu.Unlock()
+	if b.statusSent == nil {
+		b.statusSent = make(map[string]bool)
+	}
+	if !b.statusSent[id] {
+		b.statusSent[id] = true
+		b.statusOrder = append(b.statusOrder, id)
+	}
+	for len(b.statusOrder) > 100 {
+		delete(b.statusSent, b.statusOrder[0])
+		b.statusOrder = b.statusOrder[1:]
+	}
+}
+
+func (b *bridge) noteStatusView(id, viewer string,
+	tsMs int64) {
+	if id == "" || viewer == "" {
+		return
+	}
+	b.statusMu.Lock()
+	defer b.statusMu.Unlock()
+	if b.statusViews == nil {
+		b.statusViews = make(map[string]map[string]int64)
+	}
+	seen, ok := b.statusViews[id]
+	if !ok {
+		seen = make(map[string]int64)
+		b.statusViews[id] = seen
+		b.statusViewOrder = append(b.statusViewOrder, id)
+	}
+	if _, dup := seen[viewer]; !dup && len(seen) < 1000 {
+		seen[viewer] = tsMs
+	}
+	for len(b.statusViewOrder) > 100 {
+		oldest := b.statusViewOrder[0]
+		b.statusViewOrder = b.statusViewOrder[1:]
+		delete(b.statusViews, oldest)
+	}
+}
+
+// statusViewers answers the verb from memory: the viewers
+// seen for one post in first-seen order, and whether this
+// bridge was the one that posted it.
+func (b *bridge) statusViewers(id string) map[string]any {
+	b.statusMu.Lock()
+	defer b.statusMu.Unlock()
+	rows := make([]map[string]any, 0)
+	for viewer, ts := range b.statusViews[id] {
+		rows = append(rows, map[string]any{
+			"jid": viewer, "ts": ts})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		return rows[i]["ts"].(int64) < rows[j]["ts"].(int64)
+	})
+	return map[string]any{"ok": true, "message_id": id,
+		"viewers": rows, "count": len(rows),
+		"posted_here": b.statusSent[id]}
+}
+
+func (b *bridge) cmdStatusViewers(cc *clientConn, id string,
+	req request) {
+	msgID := strings.TrimSpace(req.str("message_id"))
+	if msgID == "" {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "status_viewers needs the status " +
+				"post's id"})
+		return
+	}
+	b.reply(cc, id, b.statusViewers(msgID))
 }
 
 // statusReceiptMode names what a read receipt under the

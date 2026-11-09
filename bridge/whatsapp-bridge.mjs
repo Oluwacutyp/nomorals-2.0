@@ -370,6 +370,136 @@ const msgCache = new Map();     // stanzaId -> raw msg (for quoted replies)
 const pollCreations = new Map(); // `${chat}|${id}` -> { question, options, secret }
 const pollVotes = new Map(); // `${chat}|${id}` -> Map(voter -> [hashHex])
 const pollUnreadable = new Map(); // `${chat}|${id}` -> count
+
+// ── status depth (parity #13): audience + viewers ─────────────
+// The account's status privacy list lives behind raw
+// status-namespace IQs on this engine too: Baileys' privacy
+// surface covers the settings categories, not the broadcast
+// list.  sock.query awaits the server's result and throws on
+// an error IQ — the same primitive the pairing-code flow
+// uses — so reads and writes share one wire shape with the
+// Go bridge, and every write is proven by reading the list
+// back; the reply carries the read-back values.
+// The verbs speak the shared audience vocabulary both
+// bridges and the adapter agree on — contacts / except /
+// only; the wire words are translated here, never leaked.
+const STATUS_MODE_TO_PROTO = { contacts: 'contacts', except: 'blacklist', only: 'whitelist' };
+const STATUS_PROTO_TO_MODE = { contacts: 'contacts', blacklist: 'except', whitelist: 'only' };
+
+function findBinaryNode(node, tag) {
+  if (!node || typeof node !== 'object') return null;
+  if (node.tag === tag) return node;
+  const kids = Array.isArray(node.content) ? node.content : [];
+  for (const kid of kids) {
+    const hit = findBinaryNode(kid, tag);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+// The iq result → the shared audience vocabulary.  Throws
+// when the reply carries nothing readable; a reply with no
+// list at all is the protocol default (contacts) with the
+// list itself honestly unknown.
+function parseStatusPrivacyResult(res) {
+  const privacy = findBinaryNode(res, 'privacy');
+  if (!privacy) {
+    throw new Error('the status audience reply carried no privacy list');
+  }
+  const lists = (Array.isArray(privacy.content) ? privacy.content : [])
+    .filter((n) => n && n.tag === 'list');
+  if (!lists.length) return { mode: 'contacts', list: [], listKnown: false };
+  const chosen = lists.find(
+    (n) => String(n.attrs?.default) === 'true') || lists[0];
+  const mode = STATUS_PROTO_TO_MODE[String(chosen.attrs?.type || '')];
+  if (!mode) {
+    throw new Error("the account's status audience came back in a form this bridge doesn't know");
+  }
+  const list = (Array.isArray(chosen.content) ? chosen.content : [])
+    .filter((n) => n && n.tag === 'user' && n.attrs?.jid)
+    .map((n) => jidNormalizedUser(String(n.attrs.jid)) || String(n.attrs.jid));
+  return { mode, list, listKnown: true };
+}
+
+async function statusPrivacyGet(wa) {
+  if (typeof wa?.query !== 'function') {
+    throw new Error('this bridge build cannot query the status audience');
+  }
+  const res = await wa.query({
+    tag: 'iq',
+    attrs: { to: 's.whatsapp.net', type: 'get', xmlns: 'status' },
+    content: [{ tag: 'privacy', attrs: {} }],
+  });
+  return parseStatusPrivacyResult(res);
+}
+
+async function statusPrivacySet(wa, mode, list) {
+  if (typeof wa?.query !== 'function') {
+    throw new Error('this bridge build cannot set the status audience');
+  }
+  await wa.query({
+    tag: 'iq',
+    attrs: { to: 's.whatsapp.net', type: 'set', xmlns: 'status' },
+    content: [{
+      tag: 'privacy', attrs: {},
+      content: [{
+        tag: 'list',
+        attrs: { type: STATUS_MODE_TO_PROTO[mode], default: 'true' },
+        content: list.map((jid) => ({ tag: 'user', attrs: { jid } })),
+      }],
+    }],
+  });
+}
+
+// The audience shape rule, shared word for word with the
+// Go bridge and the Python adapter.
+function statusAudienceShapeError(mode, list) {
+  if (!STATUS_MODE_TO_PROTO[mode]) {
+    return 'a status audience mode is contacts, except or only';
+  }
+  if (mode === 'contacts' && list.length) {
+    return 'the contacts audience takes no list — it is everyone';
+  }
+  if (mode !== 'contacts' && !list.length) {
+    return 'an ' + mode + ' audience needs at least one person';
+  }
+  return '';
+}
+
+// Viewer memory: who has viewed the account's status posts,
+// from the read receipts on status@broadcast.  WhatsApp
+// gives a linked device no server-side viewer list, so this
+// memory (receipts seen since this process connected) is
+// the whole reach of status_viewers.  Bounded like the Go
+// bridge: the last 100 posts sent, the first 100 posts with
+// views, up to 1000 viewers remembered per post.
+const statusViewsBy = new Map(); // message_id -> Map(viewer -> first-seen ms)
+const statusViewOrder = [];
+const statusSentIds = new Set();
+const statusSentOrder = [];
+
+function noteStatusSent(id) {
+  if (!id || statusSentIds.has(id)) return;
+  statusSentIds.add(id);
+  statusSentOrder.push(id);
+  while (statusSentOrder.length > 100) {
+    statusSentIds.delete(statusSentOrder.shift());
+  }
+}
+
+function noteStatusView(id, viewer, ts) {
+  if (!id || !viewer) return;
+  let seen = statusViewsBy.get(id);
+  if (!seen) {
+    seen = new Map();
+    statusViewsBy.set(id, seen);
+    statusViewOrder.push(id);
+  }
+  if (!seen.has(viewer) && seen.size < 1000) seen.set(viewer, ts);
+  while (statusViewOrder.length > 100) {
+    statusViewsBy.delete(statusViewOrder.shift());
+  }
+}
 function remember(jid, msg) {
   let arr = recentByChat.get(jid);
   if (!arr) { arr = []; recentByChat.set(jid, arr); }
@@ -982,6 +1112,19 @@ async function connect() {
         if (!kind) continue;
         const jid = jidNormalizedUser(u?.key?.remoteJid || '');
         if (!jid) continue;
+        // A read on the status broadcast chat IS a status
+        // view (parity #13): the update key's participant
+        // is the viewer.  Remember it — the only viewer
+        // record a linked device ever gets.  The owner's
+        // own views are not views of their status.
+        if (kind === 'read' &&
+            String(u?.key?.remoteJid || '') === 'status@broadcast') {
+          const viewer = jidNormalizedUser(
+            u?.key?.participant || '');
+          if (viewer && viewer !== meJid && u.key?.id) {
+            noteStatusView(String(u.key.id), viewer, Date.now());
+          }
+        }
         let bucket = byChat.get(jid);
         if (!bucket) { bucket = { delivered: new Set(), read: new Set() }; byChat.set(jid, bucket); }
         const id = u.key?.id || '';
@@ -1553,11 +1696,14 @@ async function handleCommand(sock, req) {
         // Baileys shape: a send to status@broadcast whose
         // fan-out is the statusJidList — without one Baileys
         // encrypts for nobody, so the audience is explicit:
-        // the request's list when given, else every DM
-        // counterpart this bridge has seen this session. No
-        // audience at all is an honest refusal, never a post
-        // nobody can see. (The Go engine needs no list:
-        // whatsmeow resolves the account's server-side status
+        // the request's list when given, else the account's
+        // own status privacy list applied to the DM
+        // counterparts this bridge has seen this session
+        // (parity #13 — an unreadable account list refuses
+        // the post rather than guessing wider). No audience
+        // at all is an honest refusal, never a post nobody
+        // can see. (The Go engine needs no list: whatsmeow
+        // resolves the account's server-side status
         // recipients itself.)
         const text = String(req.text || '').trim();
         const mediaPath = String(req.path || '').trim();
@@ -1567,8 +1713,30 @@ async function handleCommand(sock, req) {
         let audience = Array.isArray(req.audience)
           ? req.audience.map(String).filter(Boolean) : [];
         if (!audience.length) {
-          audience = [...chatTitles.keys()].filter(
+          // No explicit audience: follow the ACCOUNT's
+          // status privacy list (parity #13) — the same
+          // list the phone enforces.  contacts → every DM
+          // counterpart seen this session; only → exactly
+          // the list; except → the seen counterparts minus
+          // the list.  If the account's list cannot be
+          // read, refuse rather than guess a wider audience
+          // than the owner set.
+          let privacy;
+          try {
+            privacy = await statusPrivacyGet(wa);
+          } catch (e) {
+            return reply(sock, id, { ok: false, error: 'could not read your status audience setting, so the post was not sent: ' + (e?.message || e) });
+          }
+          const sessionContacts = [...chatTitles.keys()].filter(
             (j) => j.endsWith('@s.whatsapp.net') && j !== meJid);
+          if (privacy.mode === 'only') {
+            audience = privacy.list.slice();
+          } else if (privacy.mode === 'except') {
+            const blocked = new Set(privacy.list);
+            audience = sessionContacts.filter((j) => !blocked.has(j));
+          } else {
+            audience = sessionContacts;
+          }
         }
         if (!audience.length) {
           return reply(sock, id, { ok: false, error: 'no status audience known — this bridge has not seen any contacts this session, and none was given' });
@@ -1596,7 +1764,57 @@ async function handleCommand(sock, req) {
           opts.font = 2;
         }
         const sent = await wa.sendMessage('status@broadcast', content, opts);
+        if (sent?.key?.id) noteStatusSent(String(sent.key.id));
         return reply(sock, id, { ok: true, message_id: sent?.key?.id || '' });
+      }
+      case 'status_audience': {
+        // Read the account's status privacy list (parity
+        // #13) — the raw status-namespace GET, normalized
+        // into the shared audience vocabulary.
+        try {
+          const got = await statusPrivacyGet(wa);
+          return reply(sock, id, { ok: true, mode: got.mode, list: got.list, list_known: got.listKnown });
+        } catch (e) {
+          return reply(sock, id, { ok: false, error: String(e?.message || e) });
+        }
+      }
+      case 'status_audience_set': {
+        // Set the account's status privacy list, proven by
+        // reading it back: the reply carries the server's
+        // values, never the requested ones.
+        const mode = String(req.mode || '').trim();
+        const list = Array.isArray(req.list)
+          ? req.list.map(String).map((s) => s.trim()).filter(Boolean) : [];
+        const shapeErr = statusAudienceShapeError(mode, list);
+        if (shapeErr) {
+          return reply(sock, id, { ok: false, error: shapeErr });
+        }
+        for (const jid of list) {
+          if (!jid.endsWith('@s.whatsapp.net')) {
+            return reply(sock, id, { ok: false, error: 'a status audience list holds people, not ' + jid });
+          }
+        }
+        try {
+          await statusPrivacySet(wa, mode, list);
+          const got = await statusPrivacyGet(wa);
+          return reply(sock, id, { ok: true, mode: got.mode, list: got.list, list_known: got.listKnown, written: true });
+        } catch (e) {
+          return reply(sock, id, { ok: false, error: String(e?.message || e) });
+        }
+      }
+      case 'status_viewers': {
+        // Who has viewed one status post, from this
+        // bridge's receipt memory (see noteStatusView).
+        const mid = String(req.message_id || '').trim();
+        if (!mid) {
+          return reply(sock, id, { ok: false, error: "status_viewers needs the status post's id" });
+        }
+        const seen = statusViewsBy.get(mid);
+        const viewers = seen
+          ? [...seen.entries()].map(([jid, ts]) => ({ jid, ts }))
+            .sort((a, b) => a.ts - b.ts)
+          : [];
+        return reply(sock, id, { ok: true, message_id: mid, viewers, count: viewers.length, posted_here: statusSentIds.has(mid) });
       }
       case 'status_view': {
         // Mark one contact status viewed (§15 status viewing):

@@ -555,6 +555,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "viewonce": (0, None),     # /viewonce [n] — reveal a captured view-once
     "vv": (0, None),           # /vv — short form of /viewonce
     "poststatus": (0, None),   # /poststatus [text] — post a status as the owner
+    "statusaud": (0, None),    # /statusaud [contacts|except …|only …] — the WhatsApp status audience: read or set
+    "statusviewers": (0, 1),   # /statusviewers [status id] — who viewed your WhatsApp status
     "sendonce": (0, None),     # /sendonce [caption] — send a photo/video view-once into this chat (rides/replies to media)
     "sendnote": (0, None),     # /sendnote [caption] — send a video as a round video note into this chat (rides/replies to media)
     "chanstory": (1, None),    # /chanstory <channel> [text] — post to a channel as the owner
@@ -2745,6 +2747,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/poststatus [text] · send a photo/video with /poststatus [caption] as its caption · reply to a photo/video with /poststatus [caption]",
               "example": "/poststatus building while others flex",
               "related": "/statusreact · /pair saved · /pair"},
+    "statusaud": {"what": "read or set who your WhatsApp status goes to — the account's status audience (status privacy list): everyone (contacts), everyone except named people, or only named people. Bare, it reads the current audience back from the account; a set is proven by reading the list back after the write, and the reply carries the values the account confirmed, by name where your chats know the name. People are named as they appear in your chats or by number; an ambiguous name answers with its candidates and changes nothing. It is a WhatsApp shape: Telegram stories publish no audience list a program can read or set, and from a Telegram surface the command says exactly that. Owner only; reading is free, your standing stop halts the set, and a landed change journals.",
+              "usage": "/statusaud · /statusaud contacts · /statusaud except Name, +234… · /statusaud only Name, +234…",
+              "example": "/statusaud only Ada Lovelace, Bola Ahmed",
+              "related": "/poststatus · /statusviewers · /privacy"},
+    "statusviewers": {"what": "who has viewed your WhatsApp status: the viewers of your latest /poststatus post, or of the status id you name. WhatsApp gives a linked device no server-side viewer list, so the count is the views the bridge itself has seen — read receipts on your status since it connected — and the reply's coverage line says exactly that; zero seen reads 'no views seen yet', never 'nobody viewed'. Viewers print by name where your chats know it, else by number; a hidden id is worded, never dumped. Owner only; it is a read, so the standing stop does not halt it.",
+              "usage": "/statusviewers [status id]",
+              "example": "/statusviewers",
+              "related": "/poststatus · /statusaud"},
     "sendonce": {"what": "send a photo or video into THIS chat as view-once, as you: the recipient opens it once, then it's gone — the bridges put the real view-once form on the wire (WhatsApp's flag/wrap), verified in the payload, never a permanent copy wearing the label. It is a WhatsApp form: Telegram has no view-once media outside secret chats, and from a Telegram surface the command says exactly that and sends nothing. The media is the command's own attachment or the message it replies to; the tail is the caption. The send lands in the personal journal like every act taken as you. Owner only; your standing stop halts it.",
               "usage": "/sendonce [caption] · send a photo/video with /sendonce [caption] as its caption · reply to a photo/video with /sendonce [caption]",
               "example": "/sendonce for your eyes only",
@@ -4476,7 +4486,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "forward",
       "unsend", "edit", "editmsg", "antiedit",
       "block", "unblock", "anticall", "disappear",
-      "statusreact", "poststatus", "sendonce", "sendnote", "chanstory", "channeltexts", "banchecker", "gcstatus", "statusinfo",
+      "statusreact", "poststatus", "statusaud", "statusviewers", "sendonce", "sendnote", "chanstory", "channeltexts", "banchecker", "gcstatus", "statusinfo",
       "pollres", "tagall", "hidetag", "antitag", "viewonce", "vv",
       "joinlink", "newgroup", "newchannel", "leave",
       "myprofile", "privacy", "makepoll", "vcf", "addcontact",
@@ -4735,6 +4745,8 @@ LIST_ONELINERS: dict[str, str] = {
     "viewonce": "see a view-once sent to you — it was kept in your vault; /viewonce [n]",
     "vv": "short form of /viewonce — /vv [n]",
     "poststatus": "post a status/story as you — /poststatus [text]",
+    "statusaud": "who your WhatsApp status goes to — read it or set it — /statusaud [contacts|except Name, +234…|only Name, +234…]",
+    "statusviewers": "who has viewed your WhatsApp status — /statusviewers [status id]",
     "chanstory": "post to a channel you admin, as you — /chanstory channel [text]",
     "channeltexts": "a channel's stored texts as a file — /channeltexts channel [--days N] [--format txt|md|csv] [--pull]",
     "joinlink": "join a WhatsApp group through its invite link, as you — /joinlink link or code",

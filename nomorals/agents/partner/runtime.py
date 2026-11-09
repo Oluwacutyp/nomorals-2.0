@@ -7068,6 +7068,7 @@ class PartnerRuntime(
                 "block", "unblock", "anticall", "disappear",
                 "statusreact", "poststatus", "sendonce",
                 "sendnote", "chanstory",
+                "statusaud", "statusviewers",
                 "channeltexts",
                 "banchecker", "gcstatus",
                 "statusinfo", "pollres", "tagall", "hidetag",

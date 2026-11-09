@@ -1439,6 +1439,33 @@ class PersonalSurfaces:
         _append_jsonl(self.vault.journal_path, entry)
         return entry
 
+    def note_status_audience_set(self, platform: str, *,
+                                 account_id: str = "",
+                                 mode: str = "",
+                                 audience: list[str] | None = None,
+                                 ts: float = 0.0) -> dict[str, Any]:
+        """Journal one status-audience change the OWNER made
+        through Devon (/statusaud, parity #13): who his
+        status goes to is part of the personal record, and
+        the change was read back from the account before it
+        was journaled, so the entry carries the values the
+        surface confirmed — mode plus the list as JIDs.
+        Returns the journal entry written."""
+        rec = self.resolve_event_account(platform, account_id)
+        entry = {
+            "ts": float(ts or self._clock()),
+            "kind": "status_audience_set", "account": rec.id,
+            "platform": platform, "counterpart_id": "",
+            "poster_name": "", "media_kind": "",
+            "source_id": "", "path": "", "bytes": 0,
+            "text": "",
+            "mode": str(mode or ""),
+            "audience": [str(j) for j in (audience or [])],
+            "note": "status audience set as the owner via "
+                    "/statusaud"}
+        _append_jsonl(self.vault.journal_path, entry)
+        return entry
+
     # ── channel posts (channel stories build, 2026-11-07) ──────
 
     def observe_channel_post(self, platform: str, *, channel_id: str,

@@ -135,6 +135,20 @@ type bridge struct {
 	pollsMu   sync.Mutex
 	polls     map[string]*pollState
 	pollOrder []string
+
+	// status depth (parity #13): which status posts this
+	// bridge sent, and who has viewed the account's status
+	// posts — read back from the read receipts the server
+	// delivers for status@broadcast.  WhatsApp offers a
+	// linked device no server-side viewer list, so this
+	// memory (receipts seen since this process connected)
+	// is the whole reach of the status_viewers verb, and
+	// its replies say so.  Bounded like the poll memory.
+	statusMu        sync.Mutex
+	statusSent      map[string]bool
+	statusOrder     []string
+	statusViews     map[string]map[string]int64
+	statusViewOrder []string
 }
 
 type clientConn struct {
@@ -250,6 +264,8 @@ func main() {
 		titles:        make(map[string]string),
 		msgCache:      make(map[string]*cachedMsg),
 		polls:         make(map[string]*pollState),
+		statusSent:    make(map[string]bool),
+		statusViews:   make(map[string]map[string]int64),
 	}
 
 	// whatsmeow's own logger stays OFF stdout: the supervisor drain

@@ -41,6 +41,8 @@ __all__ = [
     "location_shape_error",
     "contact_shape_error",
     "search_shape_error",
+    "STATUS_AUDIENCE_MODES",
+    "status_audience_shape_error",
 ]
 
 _log = get_logger(__name__)
@@ -130,6 +132,49 @@ def search_shape_error(query: Any) -> str:
     history dump wearing search's clothes."""
     if not str(query or "").strip():
         return "a search needs the words to look for"
+    return ""
+
+
+#: The status-audience modes every surface speaks (parity
+#: bundle #13): the account's status posts go to all its
+#: contacts, to its contacts except a named list, or only
+#: to a named list.  The wire words (WhatsApp's contacts /
+#: blacklist / whitelist) are translated inside the bridges
+#: and never leak above them.
+STATUS_AUDIENCE_MODES = ("contacts", "except", "only")
+
+
+def status_audience_shape_error(mode: Any,
+                                audience: Any) -> str:
+    """Why this (mode, list) pair cannot be a status
+    audience, or "" when it can (parity bundle #13 — the
+    one shape rule every surface checks BEFORE traffic,
+    mirrored word for word in both bridges).
+
+    ``contacts`` is everyone, so it takes no list; the
+    other two modes ARE their list — an ``except`` with
+    nobody named excludes nobody and an ``only`` with
+    nobody named shares with nobody, and neither is a
+    set anyone meant to make.  Entries must be person
+    JIDs (``…@s.whatsapp.net``): a group or a channel in
+    an audience list is a category error, not a wider
+    audience."""
+    mode = str(mode or "").strip().lower()
+    if mode not in STATUS_AUDIENCE_MODES:
+        return "a status audience mode is contacts, " \
+               "except or only"
+    entries = [str(j).strip() for j in (audience or [])
+               if str(j).strip()]
+    if mode == "contacts" and entries:
+        return "the contacts audience takes no list — " \
+               "it is everyone"
+    if mode != "contacts" and not entries:
+        return ("an " + mode + " audience needs at least "
+                "one person")
+    for jid in entries:
+        if not jid.endswith("@s.whatsapp.net"):
+            return ("a status audience list holds people, "
+                    "not " + jid)
     return ""
 
 
@@ -673,6 +718,53 @@ class ChatAdapter(ABC):
         search_messages."""
         return {"ok": False,
                 "error": "message search not supported "
+                         "on this adapter"}
+
+    # ── status depth (parity bundle #13) ─────────────────
+    def status_audience(self) -> dict[str, Any]:
+        """Read the account's status audience — who its
+        status posts go to.  Returns a verdict dict:
+
+        ``{"ok": True, "mode": "contacts" | "except" |
+        "only", "list": [person jids], "list_known": bool}``
+        — ``list_known`` False means the surface could not
+        hand back the list itself, so the mode stands alone
+        and nobody invents the names.  Failure is
+        ``{"ok": False, "error": "…"}`` with the specific
+        reason.  The base adapter reports the truth — this
+        platform path carries no status-audience list —
+        and adapters that can read one override."""
+        return {"ok": False,
+                "error": "a status audience list is not "
+                         "supported on this adapter"}
+
+    def set_status_audience(self, mode: str,
+                            audience: list[str] | None = None
+                            ) -> dict[str, Any]:
+        """Set the account's status audience.  Same verdict
+        shape as :meth:`status_audience`, carrying the
+        values read back after the write (a set that cannot
+        be read back is reported, never assumed).  Shape
+        rules are :func:`status_audience_shape_error`,
+        checked before traffic by every override."""
+        return {"ok": False,
+                "error": "a status audience list is not "
+                         "supported on this adapter"}
+
+    def status_viewers(self, message_id: str
+                       ) -> dict[str, Any]:
+        """Who has viewed one of the account's status
+        posts.  Returns a verdict dict:
+
+        ``{"ok": True, "message_id": …, "viewers":
+        [{"jid": …, "ts": ms}], "count": n, "posted_here":
+        bool, "coverage": "…"}`` — ``coverage`` names in
+        words what the count actually covers, because no
+        surface hands a program the server-side viewer
+        list and a count that hides its reach overstates
+        itself.  The base adapter reports the truth."""
+        return {"ok": False,
+                "error": "status viewers are not supported "
                          "on this adapter"}
 
     # ── health ───────────────────────────────────────────────────────────────
