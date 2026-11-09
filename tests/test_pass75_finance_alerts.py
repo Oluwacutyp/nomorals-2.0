@@ -297,7 +297,10 @@ INLINE_RUNTIME_BINDINGS = {
     "mining session": ("train_mine", {}),
     "research organ tick": ("research_organ_tick", {}),
     "wisdom organ tick": ("wisdom_organ_tick", {}),
-    "memory consolidation (organ loop)": ("memory_consolidate", {}),
+    # NOTE: there is deliberately no "memory consolidation (organ loop)"
+    # entry — that duplicate registration was removed; consolidation has
+    # exactly one registration, the cadence job, collected above via
+    # ensure_consolidation_job (tool "memory", action "consolidate").
     "cognitive loop": ("autonomy", {"action": "tick"}),
     "monitor tick": ("monitor", {"action": "tick"}),
 }

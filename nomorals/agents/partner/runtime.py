@@ -2710,16 +2710,20 @@ class PartnerRuntime(
                 # "system works together without tripping commands" wiring.
                 # Research tick is light (due-check + gaps); wisdom tick is
                 # heavy (fetch + parse + index).
+                # NOTE: memory consolidation is deliberately NOT in
+                # this loop. It has exactly ONE registration — the
+                # cadence job ("memory-consolidation", configured
+                # interval) registered via ensure_consolidation_job
+                # below. A second entry here ("memory consolidation",
+                # every 12h, memory_consolidate) double-ran the same
+                # additive tick on a hardcoded cadence, ignored the
+                # configured interval (including disable), and bypassed
+                # the cadence bookkeeping (last run / run count).
                 for _name, _spec, _tool, _heavy, _routine in (
                     ("research organ tick", "every 30m",
                      "research_organ_tick", False, True),
                     ("wisdom organ tick", "every 6h",
                      "wisdom_organ_tick", True, True),
-                    # Memory consolidation: additive distillation on a
-                    # schedule. She reviews and distills without being asked.
-                    # Never deletes — consolidation is additive only.
-                    ("memory consolidation", "every 12h",
-                     "memory_consolidate", False, False),
                 ):
                     try:
                         _have = [j for j in self._scheduler.list_jobs()
@@ -3001,11 +3005,14 @@ class PartnerRuntime(
                     ensure_research_job(self.context)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("research loop job not registered: %s", exc)
-                # Memory consolidation cadence: one durable
+                # Memory consolidation cadence: THE single durable
                 # "memory-consolidation" job (every
                 # consolidation_interval_seconds, default 1h) running the
                 # *additive* consolidation tick.  Idempotent; the tick
-                # itself never deletes anything.
+                # itself never deletes anything.  This is the only
+                # consolidation registration — the registrar also removes
+                # the legacy duplicate ("memory consolidation", every
+                # 12h) from databases that still carry it.
                 try:
                     from ...memory.cadence import ensure_consolidation_job
                     from ..scheduler import Scheduler

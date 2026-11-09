@@ -31,6 +31,7 @@ _log = get_logger(__name__)
 
 __all__ = [
     "CONSOLIDATION_JOB_NAME",
+    "LEGACY_CONSOLIDATION_JOB_NAME",
     "consolidate_now",
     "ensure_consolidation_job",
     "interval_seconds",
@@ -41,6 +42,14 @@ __all__ = [
 ]
 
 CONSOLIDATION_JOB_NAME = "memory-consolidation"
+
+#: The duplicate registration this module replaces: the partner runtime's
+#: organ loop used to also register a "memory consolidation" job (every
+#: 12h, tool ``memory_consolidate``) running the same additive tick on a
+#: hardcoded cadence.  The name is kept here only so the registrar can
+#: remove the persisted row from databases that still carry it — exactly
+#: one consolidation job may exist, and it is CONSOLIDATION_JOB_NAME.
+LEGACY_CONSOLIDATION_JOB_NAME = "memory consolidation"
 
 _META_TABLE = "memory_meta"
 _KEY_LAST_RUN = "consolidation.last_run_at"
@@ -212,6 +221,27 @@ def status(manager: Any) -> dict[str, Any]:
 
 # ── scheduler registration ───────────────────────────────────────────────
 
+def _remove_legacy_duplicates(sched: Any, jobs: list[dict[str, Any]]) -> int:
+    """Remove persisted legacy-duplicate consolidation jobs.
+
+    ``jobs`` is a ``list_jobs()`` snapshot.  A row is the legacy duplicate
+    iff its name is exactly LEGACY_CONSOLIDATION_JOB_NAME — that name was
+    only ever minted by the removed organ-loop registration.  Best-effort:
+    a failed removal is logged by the caller path staying alive; the count
+    of rows actually removed is returned.  Never raises.
+    """
+    removed = 0
+    for job in jobs:
+        if job.get("name") != LEGACY_CONSOLIDATION_JOB_NAME:
+            continue
+        try:
+            sched.remove(job["id"])
+            removed += 1
+        except Exception:  # noqa: BLE001 — cleanup never breaks boot
+            pass
+    return removed
+
+
 def ensure_consolidation_job(
     context: Any,
     *,
@@ -223,6 +253,13 @@ def ensure_consolidation_job(
     3600).  Payload is the ``memory`` tool's ``consolidate`` action — the
     same tick ``/memory consolidate`` runs by hand.  Safe to call on every
     boot; a changed interval replaces the job.  Never raises.
+
+    This is the ONLY consolidation registration.  The registrar also
+    removes the legacy duplicate (LEGACY_CONSOLIDATION_JOB_NAME, the
+    removed organ-loop job) from the snapshot on every call — including
+    the already-scheduled path, which is exactly the state a database
+    carrying both rows boots into — and reports the count removed as
+    ``legacy_removed``.
 
     ``scheduler_factory`` builds the scheduler (``Scheduler(context)``,
     injected — memory is L3 and may not import agents L5). None means
@@ -242,14 +279,22 @@ def ensure_consolidation_job(
         spec = f"every {int(interval)}s"
         sched = scheduler_factory(context)
         try:
-            have = [j for j in sched.list_jobs()
-                    if j.get("name") == CONSOLIDATION_JOB_NAME]
+            jobs = sched.list_jobs()
         except Exception:  # noqa: BLE001 — scheduler table may not exist yet
-            have = []
+            jobs = []
+        legacy_removed = _remove_legacy_duplicates(sched, jobs)
+        if legacy_removed:
+            _log.info("removed %d legacy duplicate consolidation job(s)",
+                      legacy_removed)
+        have = [j for j in jobs
+                if j.get("name") == CONSOLIDATION_JOB_NAME]
         if have and have[0].get("spec") == spec:
-            return {"name": CONSOLIDATION_JOB_NAME,
-                    "already_scheduled": True,
-                    "job_id": have[0].get("id")}
+            out: dict[str, Any] = {"name": CONSOLIDATION_JOB_NAME,
+                                   "already_scheduled": True,
+                                   "job_id": have[0].get("id")}
+            if legacy_removed:
+                out["legacy_removed"] = legacy_removed
+            return out
         for job in have:  # stale interval → replace
             try:
                 sched.remove(job["id"])
@@ -258,8 +303,11 @@ def ensure_consolidation_job(
         job = sched.add(CONSOLIDATION_JOB_NAME, spec, "tool",
                         {"tool": "memory", "args": {"action": "consolidate"}})
         _log.info("scheduled memory-consolidation job: %s", spec)
-        return {"name": CONSOLIDATION_JOB_NAME, "scheduled": True,
-                "job_id": job.get("id"), "spec": spec}
+        out = {"name": CONSOLIDATION_JOB_NAME, "scheduled": True,
+               "job_id": job.get("id"), "spec": spec}
+        if legacy_removed:
+            out["legacy_removed"] = legacy_removed
+        return out
     except Exception as exc:  # noqa: BLE001 — optional wiring never breaks boot
         _log.warning("consolidation job not registered: %s", exc)
         return {"name": CONSOLIDATION_JOB_NAME, "scheduled": False,

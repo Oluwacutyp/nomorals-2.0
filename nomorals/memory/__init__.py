@@ -12,6 +12,8 @@ from .base import (
     score_memory,
 )
 from .cadence import (
+    CONSOLIDATION_JOB_NAME,
+    LEGACY_CONSOLIDATION_JOB_NAME,
     consolidate_now,
     ensure_consolidation_job,
     maybe_run as maybe_consolidate,
@@ -67,6 +69,8 @@ from .vector_backends import (
 
 __all__ = [
     "BACKEND_NAMES",
+    "CONSOLIDATION_JOB_NAME",
+    "LEGACY_CONSOLIDATION_JOB_NAME",
     "Community",
     "Contradiction",
     "CoreBlocks",
