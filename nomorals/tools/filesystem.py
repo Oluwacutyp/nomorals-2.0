@@ -8,8 +8,11 @@ not a hypothetical: it is the first thing a prompt-injected agent tries.
 
 from __future__ import annotations
 
+import errno
 import fnmatch
+import hashlib
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -26,6 +29,27 @@ TEXT_SUFFIXES = {
     ".c", ".h", ".cpp", ".java", ".rb", ".php", ".sql", ".env", ".log", ".rst",
 }
 MAX_READ_BYTES = 8 * 1024 * 1024
+DEFAULT_RANGE_BYTES = 64 * 1024
+MAX_RANGE_LINES = 5000
+DEFAULT_SEARCH_MATCHES = 100
+MAX_SEARCH_MATCHES = 1000
+SEARCH_SNIFF_BYTES = 8192
+SNIPPET_CHARS = 240
+HASH_ALGORITHMS = ("sha256", "sha1", "md5")
+
+
+def _tree_bytes(target: Path) -> int:
+    """Total bytes of a file, or of every file under a directory."""
+    if target.is_file():
+        return target.stat().st_size
+    total = 0
+    for entry in target.rglob("*"):
+        try:
+            if entry.is_file():
+                total += entry.stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def safe_path(context: Any, path: str | os.PathLike[str], *, must_exist: bool = False) -> Path:
@@ -212,4 +236,314 @@ def register(registry: Any) -> None:
             "modified": stat.st_mtime,
             "suffix": target.suffix,
             "is_text": target.suffix.lower() in TEXT_SUFFIXES,
+        }
+
+    @registry.register(
+        "fs_move",
+        description=(
+            "Move or rename a file or directory inside the workspace. "
+            "Refuses to overwrite an existing destination unless "
+            "overwrite=True; a directory destination receives the source "
+            "under its own name."
+        ),
+        capability=Capability.FS_WRITE,
+    )
+    def fs_move(source: str, destination: str, *, overwrite: bool = False) -> dict[str, Any]:
+        src = safe_path(context, source, must_exist=True)
+        root = safe_path(context, ".")
+        if src == root:
+            raise ToolError("refusing to move the workspace root")
+        dst = safe_path(context, destination)
+        if dst.is_dir():
+            # mv semantics: an existing directory destination receives
+            # the source under the source's own name.
+            dst = dst / src.name
+        if dst == src:
+            return {
+                "from": str(src), "to": str(dst), "moved": False,
+                "note": "source and destination are the same path",
+            }
+        if src.is_dir() and dst.is_relative_to(src):
+            raise ToolError(f"cannot move {src} into its own subtree at {dst}")
+        overwrote = False
+        if dst.exists():
+            if not overwrite:
+                raise ToolError(
+                    f"destination exists: {dst} "
+                    "(pass overwrite=True to replace it)"
+                )
+            overwrote = True
+        is_dir = src.is_dir()
+        size = _tree_bytes(src)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        cross_device = False
+        try:
+            os.replace(src, dst) if overwrote else os.rename(src, dst)
+        except OSError as exc:
+            if exc.errno != errno.EXDEV:
+                raise ToolError(f"move failed: {exc}") from exc
+            # Cross-device: copy, then remove the source.  With
+            # overwrite, the old destination goes first — this path
+            # is not atomic, and the result says so.
+            cross_device = True
+            try:
+                if overwrote:
+                    if dst.is_dir():
+                        shutil.rmtree(dst)
+                    else:
+                        dst.unlink()
+                if is_dir:
+                    shutil.copytree(src, dst)
+                    shutil.rmtree(src)
+                else:
+                    shutil.copy2(src, dst)
+                    src.unlink()
+            except OSError as copy_exc:
+                raise ToolError(
+                    f"cross-device move failed: {copy_exc}"
+                ) from copy_exc
+        return {
+            "from": str(src),
+            "to": str(dst),
+            "moved": True,
+            "is_dir": is_dir,
+            "bytes": size,
+            "overwrote": overwrote,
+            "cross_device": cross_device,
+        }
+
+    @registry.register(
+        "fs_mkdir",
+        description="Create a directory inside the workspace.",
+        capability=Capability.FS_WRITE,
+    )
+    def fs_mkdir(path: str, *, parents: bool = True) -> dict[str, Any]:
+        target = safe_path(context, path)
+        if target.exists():
+            if target.is_dir():
+                return {
+                    "path": str(target), "created": False,
+                    "note": "directory already exists",
+                }
+            raise ToolError(f"{target} exists and is not a directory")
+        try:
+            target.mkdir(parents=parents, exist_ok=False)
+        except OSError as exc:
+            raise ToolError(f"mkdir failed: {exc}") from exc
+        return {"path": str(target), "created": True}
+
+    @registry.register(
+        "fs_hash",
+        description="Hash a workspace file (sha256/sha1/md5), streamed.",
+        capability=Capability.FS_READ,
+    )
+    def fs_hash(path: str, *, algorithm: str = "sha256") -> dict[str, Any]:
+        target = safe_path(context, path, must_exist=True)
+        if target.is_dir():
+            raise ToolError(f"{target} is a directory")
+        if algorithm not in HASH_ALGORITHMS:
+            raise ValidationError(
+                f"unsupported hash algorithm {algorithm!r}; "
+                f"use one of {', '.join(HASH_ALGORITHMS)}",
+                field="algorithm",
+            )
+        digest = hashlib.new(algorithm)
+        total = 0
+        with target.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+                total += len(chunk)
+        return {
+            "path": str(target),
+            "algorithm": algorithm,
+            "hexdigest": digest.hexdigest(),
+            "bytes": total,
+        }
+
+    @registry.register(
+        "fs_read_range",
+        description=(
+            "Read part of a workspace file too big for fs_read: a byte "
+            "range (offset/length) or a line range (start_line/"
+            "line_count). Reports the file's total size so the caller "
+            "can page deliberately."
+        ),
+        capability=Capability.FS_READ,
+    )
+    def fs_read_range(path: str, *, offset: int = 0,
+                      length: int = DEFAULT_RANGE_BYTES,
+                      start_line: int | None = None,
+                      line_count: int | None = None,
+                      encoding: str = "utf-8") -> dict[str, Any]:
+        target = safe_path(context, path, must_exist=True)
+        if target.is_dir():
+            raise ToolError(f"{target} is a directory")
+        total = target.stat().st_size
+        if start_line is not None:
+            if start_line < 1:
+                raise ValidationError("start_line is 1-based", field="start_line")
+            wanted = line_count if line_count is not None else 200
+            if wanted < 1:
+                raise ValidationError("line_count must be positive", field="line_count")
+            capped = wanted > MAX_RANGE_LINES
+            wanted = min(wanted, MAX_RANGE_LINES)
+            picked: list[str] = []
+            total_lines = 0
+            with target.open("r", encoding=encoding, errors="replace") as handle:
+                for number, line in enumerate(handle, start=1):
+                    total_lines = number
+                    if start_line <= number < start_line + wanted:
+                        picked.append(line.rstrip("\n"))
+            beyond = start_line > total_lines
+            result: dict[str, Any] = {
+                "path": str(target),
+                "mode": "lines",
+                "total_bytes": total,
+                "total_lines": total_lines,
+                "start_line": start_line,
+                "lines_returned": len(picked),
+                "line_count_capped": capped,
+                "eof": start_line + len(picked) - 1 >= total_lines,
+                "content": "\n".join(picked),
+            }
+            if beyond:
+                result["note"] = (
+                    f"start_line {start_line} is beyond the end of the "
+                    f"file ({total_lines} lines)"
+                )
+            return result
+        if offset < 0:
+            raise ValidationError("offset must be >= 0", field="offset")
+        if length < 1:
+            raise ValidationError("length must be positive", field="length")
+        capped = length > MAX_READ_BYTES
+        length = min(length, MAX_READ_BYTES)
+        if offset >= total:
+            return {
+                "path": str(target),
+                "mode": "bytes",
+                "total_bytes": total,
+                "offset": offset,
+                "returned_bytes": 0,
+                "length_capped": capped,
+                "eof": True,
+                "next_offset": None,
+                "content": "",
+                "note": (
+                    f"offset {offset} is at or beyond the end of the "
+                    f"file ({total} bytes)"
+                ),
+            }
+        with target.open("rb") as handle:
+            handle.seek(offset)
+            raw = handle.read(length)
+        try:
+            content = raw.decode(encoding)
+            lossy = False
+        except UnicodeDecodeError:
+            content = raw.decode(encoding, errors="replace")
+            lossy = True
+        end = offset + len(raw)
+        return {
+            "path": str(target),
+            "mode": "bytes",
+            "total_bytes": total,
+            "offset": offset,
+            "returned_bytes": len(raw),
+            "length_capped": capped,
+            "eof": end >= total,
+            "next_offset": None if end >= total else end,
+            "lossy_decode": lossy,
+            "content": content,
+        }
+
+    @registry.register(
+        "fs_search",
+        description=(
+            "Search file contents under a workspace path (literal or "
+            "regex), with line numbers. Binary and oversized files are "
+            "skipped and counted; the match cap is stated when hit."
+        ),
+        capability=Capability.FS_READ,
+    )
+    def fs_search(pattern: str, *, path: str = ".", glob: str = "*",
+                  regex: bool = False, case_sensitive: bool = True,
+                  max_matches: int = DEFAULT_SEARCH_MATCHES,
+                  max_file_bytes: int = MAX_READ_BYTES) -> dict[str, Any]:
+        if not pattern:
+            raise ValidationError("pattern must not be empty", field="pattern")
+        root = safe_path(context, path, must_exist=True)
+        if max_matches < 1:
+            raise ValidationError("max_matches must be positive", field="max_matches")
+        cap = min(max_matches, MAX_SEARCH_MATCHES)
+        matcher: Any
+        if regex:
+            flags = 0 if case_sensitive else re.IGNORECASE
+            try:
+                compiled = re.compile(pattern, flags)
+            except re.error as exc:
+                raise ValidationError(f"invalid regex: {exc}", field="pattern") from exc
+            matcher = compiled.search
+        else:
+            needle = pattern if case_sensitive else pattern.lower()
+            if case_sensitive:
+                matcher = lambda line: needle in line  # noqa: E731
+            else:
+                matcher = lambda line: needle in line.lower()  # noqa: E731
+        if root.is_file():
+            candidates = [root]
+            display_root = root.parent
+        else:
+            display_root = root
+            candidates = []
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames.sort()
+                for name in sorted(filenames):
+                    if fnmatch.fnmatch(name, glob):
+                        candidates.append(Path(dirpath) / name)
+        matches: list[dict[str, Any]] = []
+        searched = skipped_binary = skipped_large = skipped_unreadable = 0
+        truncated = False
+        for candidate in candidates:
+            if truncated:
+                break
+            try:
+                if candidate.stat().st_size > max_file_bytes:
+                    skipped_large += 1
+                    continue
+                raw = candidate.read_bytes()
+            except OSError:
+                skipped_unreadable += 1
+                continue
+            if b"\x00" in raw[:SEARCH_SNIFF_BYTES]:
+                skipped_binary += 1
+                continue
+            searched += 1
+            text = raw.decode("utf-8", errors="replace")
+            for number, line in enumerate(text.splitlines(), start=1):
+                if matcher(line):
+                    snippet = line.strip()
+                    if len(snippet) > SNIPPET_CHARS:
+                        snippet = snippet[:SNIPPET_CHARS] + "…"
+                    matches.append({
+                        "file": str(candidate.relative_to(display_root)),
+                        "line": number,
+                        "text": snippet,
+                    })
+                    if len(matches) >= cap:
+                        truncated = True
+                        break
+        return {
+            "pattern": pattern,
+            "root": str(root),
+            "regex": regex,
+            "case_sensitive": case_sensitive,
+            "matches": matches,
+            "count": len(matches),
+            "truncated": truncated,
+            "cap": cap,
+            "files_searched": searched,
+            "files_skipped_binary": skipped_binary,
+            "files_skipped_large": skipped_large,
+            "files_skipped_unreadable": skipped_unreadable,
         }

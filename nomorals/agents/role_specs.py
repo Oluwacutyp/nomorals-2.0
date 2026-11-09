@@ -222,7 +222,8 @@ BUILTIN_ROLES: dict[str, RoleSpec] = {
         tool_allowlist=(
             "fs_read", "edit_file", "apply_patch", "shell_run", "run_tests",
             "lint", "git_status", "git_diff", "search_code", "index_repo",
-            "show_diff", "fs_list", "fs_glob", "fs_info", "get_symbol",
+            "show_diff", "fs_list", "fs_glob", "fs_info", "fs_search",
+            "fs_read_range", "fs_hash", "get_symbol",
             "repo_map", "symbol_search",
         ),
         budget=_budget(1200, 500_000),

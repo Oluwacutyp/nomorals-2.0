@@ -147,12 +147,16 @@ CODING_TOOLS: tuple[str, ...] = (
     "fs_list",       # workspace navigation (fs.read)
     "fs_glob",
     "fs_info",
+    "fs_search",     # content grep over the workspace (fs.read)
+    "fs_read_range", # paged read of large files (fs.read)
+    "fs_hash",       # streamed file hash (fs.read)
     "get_symbol",    # one symbol's source from the code index (mem.read)
 )
 
 #: Capability grant covering exactly the allowlisted tools' capabilities:
-#: fs.read (fs_read, fs_list, fs_glob, fs_info, git_status, git_diff,
-#: show_diff, index_repo, repo_map, symbol_search),
+#: fs.read (fs_read, fs_list, fs_glob, fs_info, fs_search, fs_read_range,
+#: fs_hash, git_status, git_diff, show_diff, index_repo, repo_map,
+#: symbol_search),
 #: fs.write (edit_file, apply_patch),
 #: exec.shell (shell_run, run_tests, lint),
 #: mem.read (search_code, get_symbol — read the code index).
