@@ -650,7 +650,12 @@ class RuntimeSystemMixin:
                           _m=message_id) -> None:
                     _a.edit_progress(_c, _m, text)
 
-                progress = ProgressReporter(_emit)
+                # Titled → the status grammar (design absorption
+                # #1): the trace folds into one ✓/✗ line at the
+                # end; steps below are bare step labels, the
+                # reporter owns the title + glyph + elapsed.
+                progress = ProgressReporter(
+                    _emit, title="🌐 Proxy lab", tick_s=5.0)
         except Exception as exc:  # noqa: BLE001 - progress best-effort
             record_failure("runtime_system._hub_proxy_flow", exc)
             progress = None
@@ -658,34 +663,33 @@ class RuntimeSystemMixin:
         lab = ProxyLab(self.context)
         try:
             if progress is not None:
-                progress.milestone("🌐 Proxy lab — scraping free lists…")
+                progress.milestone("scraping free lists…")
 
             def _on_source(name: str, added: int, err: str) -> None:
                 if progress is None:
                     return
                 if err:
                     progress.milestone(
-                        f"🌐 Proxy lab — {name} failed ({err[:60]})")
+                        f"{name} failed ({err[:60]})")
                 else:
                     progress.milestone(
-                        f"🌐 Proxy lab — scraped {name}: "
-                        f"{added} candidates")
+                        f"scraped {name}: {added} candidates")
 
             def _on_test(done: int, total: int, _p: Any) -> None:
                 if progress is not None:
-                    progress.count(done, total, "🌐 Proxy lab — testing")
+                    progress.count(done, total, "testing")
 
             report = lab.refresh(on_scrape_source=_on_source,
                                  on_test_progress=_on_test)
         except Exception as exc:  # noqa: BLE001 - named, not swallowed
             if progress is not None:
-                progress.finish(f"🌐 Proxy lab — failed: {exc}")
+                progress.fail(f"failed: {exc}")
             return f"🌐 Proxy lab — refresh failed: {exc}"
 
         file_out = lab.active_file()
         if not file_out.get("written"):
             if progress is not None:
-                progress.finish("🌐 Proxy lab — no working proxies")
+                progress.finish("no working proxies")
             return ("🌐 Proxy lab — no working proxies right now\n"
                     f"({file_out.get('note', 'refresh found nothing alive')})\n"
                     "Free proxies rot fast — try again later.")
@@ -700,7 +704,7 @@ class RuntimeSystemMixin:
             record_failure("runtime_system._hub_proxy_flow", exc)
             sent = False
         if progress is not None:
-            progress.finish("🌐 Proxy lab — ✅ done")
+            progress.finish("done")
 
         schemes = ", ".join(
             f"{s}×{n}" for s, n in

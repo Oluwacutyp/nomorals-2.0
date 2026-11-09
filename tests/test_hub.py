@@ -471,11 +471,18 @@ class ControlHubTests(unittest.TestCase):
         self.assertEqual(len(gw.sent), 1)
         self.assertTrue(gw.sent[0].startswith(PROXY_HEADER))
         edits = gw.adapter.edits
-        self.assertIn("🌐 Proxy lab — scraping free lists…", edits)
-        self.assertTrue(any("scraped src1: 5 candidates" in e for e in edits))
+        # Status grammar (design absorption #1): the live message
+        # opens with glyph + title + elapsed, steps fold to ✓
+        # lines as they complete, and the finish COLLAPSES the
+        # trace into one ✓ line.
+        self.assertTrue(edits[0].startswith("⠋ 🌐 Proxy lab · "))
+        self.assertTrue(any("scraping free lists…" in e for e in edits))
+        self.assertTrue(any("✓ scraped src1: 5 candidates" in e for e in edits))
         self.assertTrue(any("src2 failed" in e for e in edits))
         self.assertTrue(any("testing: 2/2" in e for e in edits))
-        self.assertEqual(edits[-1], "🌐 Proxy lab — ✅ done")
+        self.assertTrue(edits[-1].startswith("✓ 🌐 Proxy lab — done"))
+        self.assertNotIn("\n", edits[-1])  # collapsed to ONE line
+        self.assertIn("· 4 steps", edits[-1])
 
     def test_proxy_run_cooldown_returns_wait_not_run(self):
         self._patch_lab()

@@ -4405,7 +4405,13 @@ class RuntimeGroupMixin:
         pattern): a lazily-opened progress message edited at
         REAL pipeline milestones.  Best-effort throughout —
         a chat that cannot carry progress simply gets the
-        final reply.  Returns (on_step, finish)."""
+        final reply.  Returns (on_step, finish, fail).
+
+        The reporter is TITLED with the job label, so the live
+        message renders the status grammar (design absorption
+        #1): glyph + label + elapsed header, the step trace,
+        and ONE collapsed ✓/✗ line at the end — step texts are
+        passed bare, the reporter owns the framing."""
         from contextlib import suppress
 
         state: dict = {"reporter": None, "tried": False}
@@ -4429,7 +4435,8 @@ class RuntimeGroupMixin:
                           _m=message_id):  # type: ignore[no-untyped-def]
                     _a.edit_progress(_c, _m, text)
 
-                state["reporter"] = ProgressReporter(_emit)
+                state["reporter"] = ProgressReporter(
+                    _emit, title=label, tick_s=5.0)
             except Exception:  # noqa: BLE001 - progress never
                 _log.debug("nav progress unavailable",
                            exc_info=True)
@@ -4439,7 +4446,7 @@ class RuntimeGroupMixin:
             reporter = _ensure()
             if reporter is not None:
                 with suppress(Exception):
-                    reporter.milestone(f"{label} — {text}")
+                    reporter.milestone(text)
 
         def finish(text):  # type: ignore[no-untyped-def]
             reporter = state["reporter"]
@@ -4447,7 +4454,13 @@ class RuntimeGroupMixin:
                 with suppress(Exception):
                     reporter.finish(text)
 
-        return on_step, finish
+        def fail(text):  # type: ignore[no-untyped-def]
+            reporter = state["reporter"]
+            if reporter is not None:
+                with suppress(Exception):
+                    reporter.fail(text)
+
+        return on_step, finish, fail
 
     def _webshot_deliver(self, message, data: bytes, *,
                          caption: str, pdf: bool) -> str:
@@ -4554,7 +4567,7 @@ class RuntimeGroupMixin:
             + (f" · clip {opts.clip}" if opts.clip else "")
             + (" · pdf" if opts.pdf else ""))
         db = getattr(getattr(self, "context", None), "db", None)
-        on_step, finish = self._nav_progress(message, "📸 shot")
+        on_step, finish, fail = self._nav_progress(message, "📸 shot")
         try:
             result = shot_organ.capture(
                 url, opts, db=db,
@@ -4566,7 +4579,7 @@ class RuntimeGroupMixin:
             book.record(url=url, ok=False, error=str(exc),
                         scope=scope, requester=requester,
                         options=options_line)
-            finish(f"📸 couldn't shoot {url}")
+            fail(f"couldn't shoot {url}")
             return (f"📸 couldn't shoot {url} — every rung "
                     f"failed: {exc}")
         book.record(url=url, ok=True, rung=result.rung,
@@ -4706,8 +4719,8 @@ class RuntimeGroupMixin:
             f"webrec · {opts.seconds:.0f}s · "
             f"{opts.device if opts.device_chosen else 'auto'}"
             f" · {opts.scheme}")
-        on_step, finish = self._nav_progress(message,
-                                             "🎬 recording")
+        on_step, finish, fail = self._nav_progress(message,
+                                                   "🎬 recording")
         out_dir = Path(book.root) / "webrec_out"
         try:
             outcome = shot_organ.record_video(
@@ -4720,7 +4733,7 @@ class RuntimeGroupMixin:
             book.record(url=url, ok=False, error=str(exc),
                         scope=scope, requester=requester,
                         options=options_line)
-            finish(f"🎬 couldn't record {url}")
+            fail(f"couldn't record {url}")
             return f"🎬 couldn't record {url} — {exc}"
         size = 0
         with suppress(OSError):

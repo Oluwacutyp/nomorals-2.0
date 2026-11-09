@@ -4607,6 +4607,13 @@ class PartnerRuntime(
         architecture — an ActionableMessage, no longer derived from
         the ``⚠️ confirm: /<kind>`` text by the adapter); typed
         ``/<kind> confirm`` / ``/<kind> cancel`` resolve identically.
+        The prompt also carries a visible countdown rendered from
+        the stored ``expires_at`` (design absorption #4 — see
+        :mod:`...social.chat.confirm_live`): the send channel
+        registers the sent prompt with the countdown ticker, which
+        edits the countdown down as the window burns and settles
+        the message (expired / confirmed / cancelled, buttons
+        removed) when the pending resolves or the window closes.
         """
         from ...social.chat.control import CONFIRM_TTL_S
         import time as _time
@@ -4628,9 +4635,13 @@ class PartnerRuntime(
             _, original_tail, expires_at = stored
             if expires_at < _time.time():
                 pending.pop(chat_key, None)
+                self._mark_confirm_live(chat_key, kind, expires_at,
+                                        "expired")
                 return (f"that confirmation expired — send /{kind} … again "
                         f"if you still want it.", False, "")
             pending.pop(chat_key, None)
+            self._mark_confirm_live(chat_key, kind, expires_at,
+                                    "confirmed")
             return (None, True, original_tail)
         if verb == "cancel":
             stored = pending.get(chat_key)
@@ -4638,25 +4649,218 @@ class PartnerRuntime(
                 return (f"nothing to cancel — no pending /{kind}.",
                         False, "")
             pending.pop(chat_key, None)
+            self._mark_confirm_live(chat_key, kind, stored[2],
+                                    "cancelled")
             return (f"cancelled — /{kind} did not run.", False, "")
         # Fresh request: /quit takes no arguments, so a non-verb tail is
         # a usage error, not a confirmable request.
         if kind == "quit" and tail.strip():
             return ("usage: /quit — no arguments (confirm with "
                     "/quit confirm).", False, "")
-        pending[chat_key] = (kind, tail, _time.time() + CONFIRM_TTL_S)
+        now = _time.time()
+        expires_at = now + CONFIRM_TTL_S
+        pending[chat_key] = (kind, tail, expires_at)
         if kind == "quit":
             what = "shut Devon down"
         else:
             what = f"forget {tail.strip()!r}"
+        from ...social.chat.confirm_live import prompt_text
         from ...social.chat.tgbot_buttons import actionable
 
+        # The prompt carries the countdown from birth (design
+        # absorption #4): the visible window is rendered from the
+        # SAME expires_at stored above — the gate's real expiry,
+        # never a second timer. The send channel registers the
+        # sent message with the countdown ticker, which edits this
+        # line down as the window burns (confirm_live).
         return (
             actionable(
-                f"⚠️ confirm: /{kind} — this will {what}.",
+                prompt_text(kind, what, expires_at, now),
                 [[("❌ Cancel", f"{kind} cancel"),
                   ("✅ Confirm", f"{kind} confirm")]]),
             False, "")
+
+    # ── confirm countdown (design absorption #4) ─────────────────
+    #
+    # The live half of social/chat/confirm_live: when the send
+    # channel delivers a confirm prompt, it registers the sent
+    # message here; a daemon ticker re-renders the prompt's
+    # countdown line from the pending's REAL expires_at as the
+    # window burns, and settles the message — expired (the action
+    # did NOT run), confirmed, or cancelled, keyboard removed —
+    # when the pending resolves or the window closes. Everything
+    # degrades silently: a surface that cannot edit text never
+    # registers, a refused edit drops the registration, and the
+    # typed /<kind> confirm path is untouched throughout — the
+    # countdown is presentation, never a second enforcement.
+
+    def _confirm_live_map(self) -> dict:  # type: ignore[no-untyped-def]
+        live = getattr(self, "_confirm_live", None)
+        if live is None:
+            live = self._confirm_live = {}
+        return live
+
+    def _mark_confirm_live(self, chat_key: str, kind: str,
+                           expires_at: float, resolved: str) -> None:
+        """Record how a pending resolved (called by the gate at
+        the moment it consumes/expires the pending) so the ticker
+        settles the prompt message with the true outcome."""
+        entry = self._confirm_live_map().get(chat_key)
+        if entry is not None and entry.get("kind") == kind \
+                and entry.get("expires_at") == expires_at:
+            entry["resolved"] = resolved
+
+    def _register_confirm_live(self, message, result, text,  # type: ignore[no-untyped-def]
+                               buttons) -> None:
+        """Register a just-sent confirm prompt for countdown
+        edits. Called by the send channel after a successful
+        send; registers only when the sent text IS the prompt of
+        the pending staged for this chat and the surface can
+        edit text. Never raises."""
+        try:
+            from ...social.chat.confirm_live import is_confirm_prompt
+            from ...social.chat.platform_limits import for_platform
+
+            chat = getattr(message, "chat", None)
+            chat_key = str(getattr(chat, "key", "") or "")
+            if not chat_key or result is None \
+                    or not getattr(result, "ok", False):
+                return
+            message_id = str(getattr(result, "message_id", "") or "")
+            if not message_id:
+                return
+            pending = getattr(self, "_pending_confirms", None) or {}
+            stored = pending.get(chat_key)
+            if not stored:
+                return
+            kind, _tail, expires_at = stored
+            if not is_confirm_prompt(text, kind):
+                return
+            limits = for_platform(getattr(chat, "platform", ""))
+            if limits is None or not limits.supports_text_edit:
+                return
+            import time as _time
+
+            if expires_at <= _time.time():
+                return
+            self._confirm_live_map()[chat_key] = {
+                "kind": kind,
+                "expires_at": expires_at,
+                "chat": chat,
+                "message_id": message_id,
+                "text": str(text),
+                "buttons": buttons,
+                "resolved": "",
+            }
+            self._ensure_confirm_ticker()
+        except Exception as e:  # noqa: BLE001 - countdown is best-effort
+            record_failure(
+                "runtime.PartnerRuntime._register_confirm_live", e)
+
+    def _ensure_confirm_ticker(self) -> None:
+        """Start the countdown daemon thread (once per runtime)."""
+        if getattr(self, "_confirm_ticker_on", False):
+            return
+        self._confirm_ticker_on = True
+        import threading
+        import time as _time
+
+        from ...social.chat.confirm_live import DEFAULT_TICK_S
+
+        def _loop() -> None:
+            while True:
+                _time.sleep(DEFAULT_TICK_S)
+                try:
+                    self._confirm_live_tick()
+                except Exception as e:  # noqa: BLE001 - never dies
+                    record_failure(
+                        "runtime.PartnerRuntime._confirm_ticker", e)
+
+        threading.Thread(target=_loop, name="confirm-countdown",
+                         daemon=True).start()
+
+    def _edit_confirm_live(self, entry: dict, text: str,  # type: ignore[no-untyped-def]
+                           buttons) -> bool:
+        """One countdown/settled edit through the surface's own
+        edit verb (the live-session seam). True only when the
+        edit landed."""
+        try:
+            from ...social.chat.live_session import edit_session_message
+
+            chat = entry["chat"]
+            adapter = (getattr(self.gateway, "adapters", {})
+                       or {}).get(getattr(chat, "platform", ""))
+            if adapter is None:
+                return False
+            return bool(edit_session_message(
+                adapter, chat, entry["message_id"], text,
+                buttons=buttons))
+        except Exception as e:  # noqa: BLE001 - degrade to no countdown
+            record_failure(
+                "runtime.PartnerRuntime._edit_confirm_live", e)
+            return False
+
+    def _confirm_live_tick(self, now: float | None = None) -> None:
+        """One pass over the registered live prompts: burn the
+        countdown down, settle resolved prompts, expire closed
+        windows (popping the pending exactly as the gate's own
+        late-confirm path would). Driven by the ticker thread in
+        production and directly by tests."""
+        import time as _time
+
+        from ...social.chat import confirm_live as _cl
+
+        if now is None:
+            now = _time.time()
+        live = self._confirm_live_map()
+        pending: dict = getattr(self, "_pending_confirms", None) or {}
+        for chat_key, entry in list(live.items()):
+            try:
+                kind = entry["kind"]
+                expires_at = entry["expires_at"]
+                resolved = entry.get("resolved") or ""
+                stored = pending.get(chat_key)
+                live_pending = stored is not None \
+                    and stored[0] == kind and stored[2] == expires_at
+                if not resolved and not live_pending:
+                    # Superseded by a newer staged prompt, or the
+                    # pending vanished without a gate mark: this
+                    # message is not the live window anymore. Drop
+                    # it silently — never invent an outcome for it.
+                    live.pop(chat_key, None)
+                    continue
+                if resolved:
+                    text = (_cl.expired_text(kind)
+                            if resolved == "expired"
+                            else _cl.settled_text(kind, resolved))
+                    self._edit_confirm_live(entry, text, [])
+                    live.pop(chat_key, None)
+                    continue
+                if now >= expires_at:
+                    # The window closed unused: the pending dies
+                    # here exactly as it would at a late confirm,
+                    # and the prompt settles in the open — the
+                    # action did NOT run.
+                    pending.pop(chat_key, None)
+                    self._edit_confirm_live(
+                        entry, _cl.expired_text(kind), [])
+                    live.pop(chat_key, None)
+                    continue
+                new_text = _cl.with_countdown(
+                    entry["text"], kind, expires_at, now)
+                if new_text != entry["text"]:
+                    if self._edit_confirm_live(
+                            entry, new_text, entry.get("buttons")):
+                        entry["text"] = new_text
+                    else:
+                        # The surface refused the edit (window,
+                        # reach): stop tracking rather than edit
+                        # at a dead message forever.
+                        live.pop(chat_key, None)
+            except Exception as e:  # noqa: BLE001 - one bad entry
+                record_failure(
+                    "runtime.PartnerRuntime._confirm_live_tick", e)
+                live.pop(chat_key, None)
 
     def _run_command_stack(self, segments: list[str], chat_key: str,
                            message: Any = None) -> str:
@@ -5057,6 +5261,11 @@ class PartnerRuntime(
             if _mid:
                 self._live_session_registry().record(
                     str(message.chat.key or ""), session, _mid)
+        # Confirm countdown (design absorption #4): if this send
+        # was a confirm gate prompt, register the delivered
+        # message so the ticker can burn its countdown down and
+        # settle it at resolution/expiry (confirm_live).
+        self._register_confirm_live(message, result, text, buttons)
         return result
 
     def _live_session_registry(self):  # type: ignore[no-untyped-def]
