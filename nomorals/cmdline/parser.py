@@ -686,7 +686,7 @@ def _parser() -> argparse.ArgumentParser:
                           help="Capture and manage ideas")
     idea.add_argument("action", nargs="?", default="list",
                       choices=["list", "create", "get", "update", "dismiss",
-                               "promote", "delete", "search", "stats"],
+                               "promote", "develop", "delete", "search", "stats"],
                       help="Action to perform")
     idea.add_argument("arg", nargs="?", default="",
                       help="idea title (create), idea id (most actions), query (search)")
@@ -697,6 +697,12 @@ def _parser() -> argparse.ArgumentParser:
                       help="Comma-separated tags (create/update, or filter for list)")
     idea.add_argument("--source", default="", help="Where the idea came from")
     idea.add_argument("--reason", default="", help="why to dismiss (dismiss action)")
+    idea.add_argument("--exit", dest="exit_override", default="",
+                      help="develop exit: goal|draft|mission|park (default: the verdict policy decides)")
+    idea.add_argument("--class", dest="goal_class", default="",
+                      help="goal class to file a promotion under (develop action)")
+    idea.add_argument("--trigger", default="",
+                      help="revival trigger in words (develop action, park exit)")
     idea.add_argument("--status", dest="filter_status", default="",
                       help="filter list by status")
     idea.add_argument("--limit", default="20", help="max rows to list")

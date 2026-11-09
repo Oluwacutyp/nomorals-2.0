@@ -852,6 +852,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "goals": (0, None),       # /goals [list [class]] | briefing | review | focus | progress <goal> | add <title> [in <class>] | class <goal> <class> | classes — goal classes board (owner-only)
     "careers": (0, None),     # /careers [list] | add <company> | <role> | move <app> <stage> | next <app> | <action> [by <date>] | note <app> | <text> | attach <app> <artifact> | remove <app> | stages — career pipeline (owner-only)
     "drafts": (0, None),      # /drafts [list] | show <n> | post <n> | discard <n> — post-draft review board (owner-only)
+    "ideas": (0, None),       # /ideas [list] | add <title> [| <detail>] | show <n> | develop <n> [as goal|draft|mission|park] [in <class>] [when <trigger>] — raw ideas + the development cell (owner-only)
     "insights": (0, None),    # /insights [days] — native money analytics
     "predict": (0, 3),       # /predict <stake> <over|under> <1-99> — prediction pit (progression-unlocked)
     "menu": (0, 2),          # alias of /list ([group] [page] ride the same grammar)
@@ -3330,6 +3331,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/drafts [list] | show <n> | post <n> | discard <n>",
               "example": "/drafts show 2",
               "related": "/goals /careers"},
+    "ideas": {"what": "your raw ideas, and the development cell that grows them: capture an idea in your own words (stored verbatim — development never rewrites the raw capture), list the pile, and develop one: it is expanded into a shaped proposal, connected to its goal class, existing goals and kin ideas, researched with provenanced findings, then a verified verdict promotes it to a goal in its class, queues a content draft for your review, spawns a mission, or parks it with a named revival trigger. The development record reads end-to-end on show. Idea numbers (#n) are the handles — internal ids never print.",
+              "usage": "/ideas [list] | add <title> [| <detail>] | show <n> | develop <n> [as goal|draft|mission|park] [in <class>] [when <trigger>]",
+              "example": "/ideas develop 1 as goal in careers",
+              "related": "/goals /careers /drafts"},
     "api": {"what": "external API connectors: weather, fx, github, …",
             "usage": "/api list | <connector> [json]", "example": "/api weather city=Lagos",
             "related": ""},
@@ -4260,7 +4265,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "benchmark", "redteam", "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible",
                            "people", "commitments", "decisions", "iddocs", "focus"]),
     ("money & spending", ["spend", "budget", "spending", "mandate",
-                          "balances", "goal", "goals", "careers", "insights", "alert"]),
+                          "balances", "goal", "goals", "careers", "ideas", "insights", "alert"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -4524,7 +4529,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "proposals", "approve", "deny", "start", "stop", "quit",
       "mode", "agent", "chatmode", "style", "stylepin", "doctor", "profile", "mind",
       "spend", "budget", "spending", "mandate", "balances", "goal",
-      "goals", "careers", "insights", "alert", "cost", "heal", "tour", "pulse"]),
+      "goals", "careers", "ideas", "insights", "alert", "cost", "heal", "tour", "pulse"]),
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "audit", "whois", "ports",
@@ -4972,6 +4977,7 @@ LIST_ONELINERS: dict[str, str] = {
     "goals": "goal classes board: goals by domain class, measured vs self-reported progress, briefing/review/focus",
     "careers": "career pipeline: applications by stage, next actions with due dates, stale/overdue called out",
     "drafts": "post drafts awaiting your review: the batch board, per-draft cards, post/discard the one you name",
+    "ideas": "raw ideas, grown: capture verbatim, develop into a goal, a draft, a mission, or park with a trigger",
     "api": "external API connectors (weather, fx, github, …)",
     "connectors": "manage the service connectors: list, status, connect",
     "shorts": "short-form content empire: make, queue, post vertical videos",

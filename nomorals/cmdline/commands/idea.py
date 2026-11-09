@@ -27,7 +27,7 @@ def _drive(coro: Any) -> Any:
 
 
 def _cmd_idea(args: argparse.Namespace, context: Any) -> int:
-    """Ideas CLI: create/list/get/update/dismiss/promote/delete/search/stats."""
+    """Ideas CLI: create/list/get/update/dismiss/promote/develop/delete/search/stats."""
     from ...goals import GoalTracker, IdeaTracker
 
     db = context.db
@@ -127,5 +127,42 @@ def _cmd_idea(args: argparse.Namespace, context: Any) -> int:
             return 0
         print(f"idea: unknown action {action}", file=sys.stderr)
         return 2
+
+    if action == "develop":
+        # WS3 P5: the development cell is synchronous (it drives the
+        # tracker coroutines itself via goals.surface.run_sync), so
+        # it runs here at sync level, not inside _run's loop.  The
+        # CLI attaches no brain expander and no research seam — the
+        # record says both, in words; chat and the brain's idea tool
+        # carry the full rungs.
+        from ...agents.idea_development import (
+            EXIT_ALIASES,
+            IdeaDevelopment,
+            render_record,
+        )
+        from ...missions.mission import MissionStore
+        from ...social.drafts import DraftQueue
+
+        raw_exit = (getattr(args, "exit_override", "") or "").strip().lower()
+        cell = IdeaDevelopment(db)
+        try:
+            record = cell.develop(
+                idea_id, user_id=user,
+                exit_override=EXIT_ALIASES.get(raw_exit, raw_exit),
+                class_arg=getattr(args, "goal_class", "") or "",
+                trigger=getattr(args, "trigger", "") or "",
+                expand_fn=None, research_fn=None,
+                draft_queue=DraftQueue(),
+                mission_store=MissionStore(db))
+        except KeyError:
+            _emit(args, {"idea_id": idea_id, "developed": False},
+                  f"idea not found: {idea_id}")
+            return 1
+        except ValueError as exc:
+            _emit(args, {"idea_id": idea_id, "developed": False},
+                  f"cannot develop: {exc}")
+            return 1
+        _emit(args, {"record": record}, render_record(record))
+        return 0 if record["status"] == "completed" else 1
 
     return _drive(_run())

@@ -2514,11 +2514,16 @@ class IdeaTracker:
             self.db.execute("DELETE FROM ideas WHERE idea_id = ?", (idea_id,))
         return True
 
-    async def promote_to_goal(self, idea_id: str, goal_tracker: GoalTracker) -> Optional[str]:
+    async def promote_to_goal(self, idea_id: str, goal_tracker: GoalTracker,
+                              *, goal_class: str | None = None) -> Optional[str]:
         """Promote an idea to a goal.
 
         Records the created goal id back onto the idea's metadata and
         returns it. Returns None when the idea does not exist.
+
+        ``goal_class`` (WS3 P5) files the goal under a WS2 domain
+        class through the tracker's real create path; omitted, the
+        goal files under ``general`` exactly as before.
         """
         idea = await self.get(idea_id)
         if idea is None:
@@ -2529,10 +2534,13 @@ class IdeaTracker:
             title=idea.title,
             description=idea.description,
             tags=list(idea.tags),
+            goal_class=goal_class,
         )
 
         metadata = dict(idea.metadata)
         metadata["promoted_goal_id"] = goal.goal_id
+        if goal_class is not None:
+            metadata["promoted_goal_class"] = goal.goal_class
         with self.db.transaction():
             self.db.execute("""
                 UPDATE ideas SET status = 'promoted_to_goal', metadata = ? WHERE idea_id = ?

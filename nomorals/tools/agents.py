@@ -43,6 +43,7 @@ AGENT_TOOL_MODULES = (
     "exporter",
     "failure",
     "goals",
+    "idea_development",
     "improvement",
     "integrations.naija_deals",
     "investigate",

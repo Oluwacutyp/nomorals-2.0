@@ -1487,6 +1487,150 @@ class RuntimeSystemMixin:
                 "note <app> | <text> | attach <app> <artifact> | "
                 "remove <app> | stages")
 
+    # ── ideas: /ideas (WS3 P5) ────────────────────────────────────────
+    def _idea_tracker(self) -> Any:
+        """IdeaTracker over the context db, or None when no db is
+        attached — the same store the ``nm idea`` CLI drives."""
+        from ...goals import IdeaTracker
+
+        db = getattr(self.context, "db", None)
+        if db is None:
+            return None
+        return IdeaTracker(db)
+
+    def _control_ideas(self, tail: str, chat_key: str = "") -> Any:
+        """/ideas — raw ideas, captured verbatim, and the development
+        cell that grows them (expansion → connections → provenanced
+        research → verified verdict: promote-in-class / draft /
+        mission / park-with-trigger).
+
+        The raw capture never changes: development lives in its own
+        record beside the idea.  Handles are #n in list order —
+        internal ids never print.
+        """
+        import re as _re
+
+        from ...goals.surface import OWNER_USER_ID, run_sync
+        from ..idea_development import (
+            EXIT_ALIASES,
+            IdeaDevelopment,
+            make_brain_expand_fn,
+            make_research_fn,
+            render_record,
+            resolve_idea,
+        )
+
+        tracker = self._idea_tracker()
+        if tracker is None:
+            return ("ideas unavailable: no database is attached to "
+                    "this chat context — ideas live in the database.")
+        user = OWNER_USER_ID
+        text = (tail or "").strip()
+        verb, _, rest = text.partition(" ")
+        verb = verb.lower()
+        rest = rest.strip()
+
+        def _board() -> str:
+            ideas = run_sync(tracker.list_ideas(user, limit=100))
+            cell = IdeaDevelopment(self.context.db)
+            lines = ["💡 your ideas — " + str(len(ideas)) + " captured"]
+            for pos, idea in enumerate(ideas[:15], start=1):
+                record = cell.latest_for(idea.idea_id)
+                grown = ""
+                if record:
+                    exit_name = (record.get("verdict") or {}).get(
+                        "exit", "")
+                    grown = (" · developed → " + exit_name
+                             if exit_name else " · developed")
+                ice = (" · ICE " + str(idea.ice_score)
+                       if idea.ice_score is not None else "")
+                lines.append("#" + str(pos) + " " + idea.title
+                             + " (" + idea.status + ")" + ice + grown)
+            if len(ideas) > 15:
+                lines.append("…and " + str(len(ideas) - 15) + " more")
+            lines.append("grow one: /ideas develop <#> — the raw "
+                         "words never change")
+            return "\n".join(lines)
+
+        if verb in ("", "list"):
+            return _board()
+        if verb == "add":
+            if not rest:
+                return ("usage: /ideas add <title> [| <detail>] — the "
+                        "words are stored exactly as you give them")
+            title, sep, description = rest.partition("|")
+            title = title.strip()
+            if not title:
+                return "the idea needs at least a title"
+            created = run_sync(tracker.create(
+                user, title,
+                description=description.strip() if sep else "",
+                source="chat"))
+            ideas = run_sync(tracker.list_ideas(user, limit=100))
+            pos = next((n for n, i in enumerate(ideas, start=1)
+                        if i.idea_id == created.idea_id), 1)
+            return ("💡 idea #" + str(pos) + " captured: "
+                    + created.title
+                    + "\ngrow it when ready: /ideas develop "
+                    + str(pos))
+        if verb == "show":
+            idea, problem = resolve_idea(tracker, user, rest)
+            if idea is None:
+                return problem
+            cell = IdeaDevelopment(self.context.db)
+            record = cell.latest_for(idea.idea_id)
+            head = ("💡 " + idea.title + " (" + idea.status + ")"
+                    + (("\n" + idea.description)
+                       if idea.description else ""))
+            if record is None:
+                return (head + "\n\nnot developed yet — /ideas develop "
+                        "grows it (expansion, connections, research, "
+                        "a verdict)")
+            return head + "\n\n" + render_record(record)
+        if verb == "develop":
+            trigger = ""
+            match = _re.search(r"\bwhen\s+(.+)$", rest,
+                               flags=_re.IGNORECASE)
+            if match:
+                trigger = match.group(1).strip()
+                rest = rest[:match.start()].strip()
+            class_arg = ""
+            match = _re.search(r"\bin\s+([a-z0-9_-]+)\s*$", rest,
+                               flags=_re.IGNORECASE)
+            if match:
+                class_arg = match.group(1)
+                rest = rest[:match.start()].strip()
+            exit_arg = ""
+            match = _re.search(
+                r"\bas\s+(goal|draft|mission|park)\s*$", rest,
+                flags=_re.IGNORECASE)
+            if match:
+                exit_arg = EXIT_ALIASES.get(match.group(1).lower(),
+                                            match.group(1).lower())
+                rest = rest[:match.start()].strip()
+            idea, problem = resolve_idea(tracker, user, rest)
+            if idea is None:
+                return problem
+            from ...missions.mission import MissionStore
+
+            cell = IdeaDevelopment(self.context.db)
+            try:
+                record = cell.develop(
+                    idea.idea_id, exit_override=exit_arg,
+                    class_arg=class_arg, trigger=trigger,
+                    expand_fn=make_brain_expand_fn(self.context),
+                    research_fn=make_research_fn(
+                        self.context.db,
+                        getattr(self.context, "tools", None)),
+                    draft_queue=self._draft_queue(),
+                    mission_store=MissionStore(self.context.db))
+            except (KeyError, ValueError) as exc:
+                return "couldn't develop that idea: " + str(exc)
+            return render_record(record)
+        return ("usage: /ideas [list] | add <title> [| <detail>] | "
+                "show <#> | develop <#> [as goal|draft|mission|park] "
+                "[in <class>] [when <trigger>]")
+
     # ── post drafts: /drafts + draft: button taps ─────────────────────
     def _draft_queue(self) -> Any:
         """The post DraftQueue — the same default store the #43

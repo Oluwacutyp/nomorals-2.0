@@ -7523,6 +7523,9 @@ class PartnerRuntime(
             return self._control_drafts(command.tail or arg,
                                         chat_key=chat_key,
                                         message=message)
+        if kind == "ideas":
+            return self._control_ideas(command.tail or arg,
+                                       chat_key=chat_key)
         if kind == "api":
             return self._control_api(command.tail or arg)
         if kind == "connectors":
