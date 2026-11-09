@@ -163,12 +163,18 @@ class RunDeliverTests(unittest.TestCase):
         # quiet and the fallback note never fired. Production is
         # behaving as designed (the store is home-scoped on purpose);
         # the test's isolation was incomplete.
+        # WS3 P2 (2026-11-09): DraftReviewProvider is the same shape —
+        # it reads the home-scoped draft queue (DraftQueue() default
+        # path), which on any real machine holds drafts awaiting
+        # review, so it is stubbed here too, same reasoning.
         from nomorals.agents import weather as _wx
         with patch.object(_wx.WeatherProvider, "collect",
                           return_value=None), \
              patch.object(_wx.USASituationsProvider, "collect",
                           return_value=None), \
              patch.object(mb.FromYourPastProvider, "collect",
+                          return_value=None), \
+             patch.object(mb.DraftReviewProvider, "collect",
                           return_value=None), \
              patch("nomorals.agents.notifier.Notifier", FakeNotifier):
             res = mb.run_briefing(self.ctx)
@@ -200,10 +206,14 @@ class FollowupTests(unittest.TestCase):
                              for i in range(4)])
         # keep this fixture news-only: the ambient weather/USA providers
         # are live-network and would shift item numbering.
+        # WS3 P2: DraftReviewProvider reads the home-scoped draft
+        # queue and would shift numbering the same way — stubbed too.
         from nomorals.agents import weather as _wx
         with patch.object(_wx.WeatherProvider, "collect",
                           return_value=None), \
              patch.object(_wx.USASituationsProvider, "collect",
+                          return_value=None), \
+             patch.object(mb.DraftReviewProvider, "collect",
                           return_value=None):
             b = mb.BriefingComposer().compose(self.ctx, "2026-10-01")
         mb.store_briefing(self.ctx, b)

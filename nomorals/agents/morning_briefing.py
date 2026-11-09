@@ -1327,6 +1327,51 @@ class GoalClassesProvider(_Provider):
             return []
 
 
+class DraftReviewProvider(_Provider):
+    """Draft review (WS3 P2): the post drafts awaiting the owner's
+    decision, rendered by the drafts organ's own batch digest — the
+    same text (and the same numbering) as the /drafts board, so a
+    draft's number names the same draft in both places.  Unposted
+    drafts resurface here every morning instead of evaporating.
+    Nothing waiting (or the queue unreadable) → no section.  Never
+    raises."""
+    name = "draft_review"
+    title = "📝 Drafts to review"
+    priority = 23
+
+    def collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        try:
+            return self._collect(ctx)
+        except Exception as exc:  # noqa: BLE001 — drafts never sink a briefing
+            _log.debug("draft review provider skipped: %s", exc)
+            return None
+
+    def _collect(self, ctx: Any) -> BriefingSection | None:
+        from ..social.drafts import DraftQueue, render_review_batch, reviewable_drafts
+
+        queue = DraftQueue()
+        try:
+            drafts = reviewable_drafts(queue)
+        finally:
+            queue.close()
+        if not drafts:
+            return None
+        batch = render_review_batch(drafts)
+        raw = [ln for ln in batch.splitlines() if ln.strip()]
+        # raw[0] is the batch's own header (the section title says
+        # it) and raw[-1] its tap/"post them all" instruction — on
+        # this text surface the /drafts board is the way in.
+        body = raw[1:-1] if len(raw) > 2 else []
+        lines = [f"• {ln}" for ln in body]
+        lines.append("• review: /drafts — open a card, post or "
+                     "discard by number")
+        items = [{"id": f"draft-review-{i}", "title": ln[2:],
+                  "body": ln[2:]} for i, ln in enumerate(lines)]
+        return BriefingSection(
+            name=self.name, title=self.title, priority=self.priority,
+            source="draft-queue", items=items, lines=lines)
+
+
 class DisruptionProvider(_Provider):
     """World-graph disruptions: nodes marked disrupted (flight delayed,
     blocker appeared) and what they cascade into.  The briefing's early-
@@ -1375,6 +1420,7 @@ class BriefingComposer:
             DisruptionProvider(),
             GoalsProvider(),
             GoalClassesProvider(),
+            DraftReviewProvider(),
             CalendarProvider(),
             PeopleProvider(),
             MarketsProvider(),

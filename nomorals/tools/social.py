@@ -993,19 +993,40 @@ def register(registry: Any) -> None:
         rctx = ResearchContext(
             db=getattr(context, "db", None),
             registry=getattr(context, "tools", None))
-        result = _run(
-            niche or "",
-            db=getattr(context, "db", None),
-            queue=DraftQueue(),
-            rctx=rctx,
-            llm_fn=_llm,
-        )
+        queue = DraftQueue()
+        try:
+            result = _run(
+                niche or "",
+                db=getattr(context, "db", None),
+                queue=queue,
+                rctx=rctx,
+                llm_fn=_llm,
+            )
+            text = result.message
+            # The run's report carries the review batch (WS3 P2):
+            # the drafts this run just queued — plus anything still
+            # awaiting a decision — rendered by the drafts organ's
+            # own digest, in the same numbering the /drafts board
+            # uses. Contained: a batch failure never fails the run.
+            try:
+                from ..social.drafts import render_review_batch, reviewable_drafts
+                waiting = reviewable_drafts(queue)
+                if waiting:
+                    text += (
+                        "\n\n" + render_review_batch(waiting)
+                        + "\n\nreview one: /drafts show <n> · post it: "
+                        "/drafts post <n> · discard: "
+                        "/drafts discard <n>")
+            except Exception:  # noqa: BLE001 — report garnish only
+                pass
+        finally:
+            queue.close()
         return {"ok": True, "niche": result.niche,
                 "drafts": len(result.drafts),
                 "windows_from_data": result.windows_from_data,
                 "seconds": round(result.seconds, 1),
-                "text": result.message,
-                "message": result.message}
+                "text": text,
+                "message": text}
 
     @registry.register(
         "social_metrics_refresh",

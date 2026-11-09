@@ -44,6 +44,7 @@ __all__ = [
     "render_review_batch",
     "add_variant",
     "review_buttons",
+    "reviewable_drafts",
 ]
 
 # ── statuses ────────────────────────────────────────────────────────────────
@@ -364,6 +365,22 @@ class DraftQueue:
 
 
 # ── review UI ─────────────────────────────────────────────────────────────────
+
+def reviewable_drafts(queue: DraftQueue) -> list[Draft]:
+    """Drafts awaiting a review decision, in the queue's pending order.
+
+    The one definition every review surface shares — the batch digest,
+    the /drafts board, the morning briefing, the weekly report — so a
+    draft's number (#n) names the same draft on all of them. A draft
+    still in ``draft`` was never proposed; ``pending_review`` is
+    mid-question; ``scheduled`` was queued at a window by the weekly
+    pipeline but never decided (the #43 rule: scheduling is not
+    approval). ``approved`` is decided and ``posted``/``discarded``
+    are terminal, so none of those are reviewable.
+    """
+    return [d for d in queue.pending()
+            if d.status in (DRAFT, PENDING_REVIEW, SCHEDULED)]
+
 
 def propose_post(draft: Draft) -> tuple[str, list[tuple[str, str]]]:
     """Build the review message: draft preview + the standing question.

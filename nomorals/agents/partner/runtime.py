@@ -66,6 +66,15 @@ _log = get_logger(__name__)
 #: resolved against the durable card before anything executes.
 _CARD_TAP_RE = re.compile(r"^/cardtap ([0-9A-Za-z_-]+) (\d+) (\d+)$")
 
+#: Draft-review button taps (social/drafts.py): a review card's
+#: buttons carry ``draft:<action>:<id>`` callback data, which the
+#: adapters re-enter as the text ``/draft:<action>:<id>`` — routed
+#: to :func:`...social.drafts.handle_draft_callback`, the same
+#: pre-catalog interception shape as cardtap (the payload is a
+#: button stamp, not a catalog command).
+_DRAFT_CALLBACK_RE = re.compile(
+    r"^/draft:(post|schedule|discard|edit|variants):([0-9A-Za-z_-]+)$")
+
 
 def _update_recovery_notice(receipt: dict) -> tuple[str, str]:
     """Owner-facing (title, body) for an update crash recovery that acted.
@@ -5547,6 +5556,18 @@ class PartnerRuntime(
                 _tap.group(1), int(_tap.group(2)),
                 int(_tap.group(3)), chat_key, message=message)
 
+        # Draft-review taps (WS3 P2): a review card's button payload
+        # — "draft:<action>:<id>" — is a button stamp, not a catalog
+        # command (same shape as cardtap above). The tap routes to
+        # the drafts organ's own callback router with the runtime's
+        # queue/publisher/scheduler. Owner-only: a tap never grants
+        # more than typing would, and posting is the owner's act.
+        if _DRAFT_CALLBACK_RE.match(text.strip()):
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._draft_callback(
+                text.strip(), chat_key, message=message)
+
         # Command stacking: one message, one command per line (see
         # split_command_stack). Checked before the single-command parse
         # so a stack whose first line would fail the whole-text arg
@@ -7498,6 +7519,10 @@ class PartnerRuntime(
         if kind == "careers":
             return self._control_careers(command.tail or arg,
                                          chat_key=chat_key)
+        if kind == "drafts":
+            return self._control_drafts(command.tail or arg,
+                                        chat_key=chat_key,
+                                        message=message)
         if kind == "api":
             return self._control_api(command.tail or arg)
         if kind == "connectors":

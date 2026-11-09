@@ -851,6 +851,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "goal": (0, None),        # /goal add|list|done|snooze|remove
     "goals": (0, None),       # /goals [list [class]] | briefing | review | focus | progress <goal> | add <title> [in <class>] | class <goal> <class> | classes — goal classes board (owner-only)
     "careers": (0, None),     # /careers [list] | add <company> | <role> | move <app> <stage> | next <app> | <action> [by <date>] | note <app> | <text> | attach <app> <artifact> | remove <app> | stages — career pipeline (owner-only)
+    "drafts": (0, None),      # /drafts [list] | show <n> | post <n> | discard <n> — post-draft review board (owner-only)
     "insights": (0, None),    # /insights [days] — native money analytics
     "predict": (0, 3),       # /predict <stake> <over|under> <1-99> — prediction pit (progression-unlocked)
     "menu": (0, 2),          # alias of /list ([group] [page] ride the same grammar)
@@ -3325,6 +3326,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/careers [list] | add <company> | <role> [| <source or link>] | move <app> <stage> [note] | next <app> | <action> [by YYYY-MM-DD | in Nd] | note <app> | <text> | attach <app> <artifact> | remove <app> | stages",
               "example": "/careers add Acme | Senior Developer | linkedin",
               "related": "/goals /artifact"},
+    "drafts": {"what": "the post-draft review board: every draft Devon has queued for you — the weekly content batch, scheduled drafts, anything awaiting a decision — with its virality score, hook type and pillar on a styled card. Reviewing is per-draft: you see the exact draft, then post or discard THAT one (a tap or /drafts post <n> posts the draft you named, never a blind oldest-first pick). Nothing here posts on its own: a draft goes out only on your tap, your /drafts post, or your explicit 'post this' (build-map #43, unchanged). Draft numbers (#n) are the handles from the board — internal ids never print.",
+              "usage": "/drafts [list] | show <n> | post <n> | discard <n>",
+              "example": "/drafts show 2",
+              "related": "/goals /careers"},
     "api": {"what": "external API connectors: weather, fx, github, …",
             "usage": "/api list | <connector> [json]", "example": "/api weather city=Lagos",
             "related": ""},
@@ -4281,7 +4286,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
-                           "exness", "stripe", "content",
+                           "exness", "stripe", "content", "drafts",
                            "tempmail", "checkmail", "vnumber", "checksms",
                            "browser", "paper", "backup"]),
     ("platform control", ["start", "stop", "profile", "chatmode", "style",
@@ -4600,7 +4605,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion", "gcal", "trello", "exness", "stripe",
-      "guardrails", "content",
+      "guardrails", "content", "drafts",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
     ("platform control — updates & restarts",
      ["update", "pull", "deploy", "restart"]),
@@ -4966,6 +4971,7 @@ LIST_ONELINERS: dict[str, str] = {
     "artifact": "saved artifacts: list, info, search bodies, send (or convert) one, export bundles",
     "goals": "goal classes board: goals by domain class, measured vs self-reported progress, briefing/review/focus",
     "careers": "career pipeline: applications by stage, next actions with due dates, stale/overdue called out",
+    "drafts": "post drafts awaiting your review: the batch board, per-draft cards, post/discard the one you name",
     "api": "external API connectors (weather, fx, github, …)",
     "connectors": "manage the service connectors: list, status, connect",
     "shorts": "short-form content empire: make, queue, post vertical videos",

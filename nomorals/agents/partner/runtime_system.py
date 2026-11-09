@@ -1487,6 +1487,168 @@ class RuntimeSystemMixin:
                 "note <app> | <text> | attach <app> <artifact> | "
                 "remove <app> | stages")
 
+    # ── post drafts: /drafts + draft: button taps ─────────────────────
+    def _draft_queue(self) -> Any:
+        """The post DraftQueue — the same default store the #43
+        override path opens (social/drafts.py)."""
+        from ...social.drafts import DraftQueue
+
+        return DraftQueue()
+
+    def _draft_callback(self, data: str, chat_key: str = "",
+                        message: Any = None) -> str:
+        """Route one ``draft:<action>:<id>`` review-button tap.
+
+        The tap re-entered as the text ``/draft:<action>:<id>`` (the
+        adapters' callback convention) and ``handle_control`` stripped
+        it to here. The drafts organ's own router
+        (:func:`...social.drafts.handle_draft_callback`) does the
+        act; this method only supplies the runtime's queue, publisher
+        and scheduler. A not-yet-decided draft (still ``draft``, or
+        ``scheduled`` by the weekly pipeline at an audience window)
+        is re-presented for review first — the queue's graph sends
+        both back to pending_review, where the callback's approve is
+        legal — because a card tap on it means "post it now", not
+        "wait for the window". Never raises: a tap always answers.
+        """
+        from ...social.drafts import (
+            DRAFT,
+            SCHEDULED,
+            handle_draft_callback,
+        )
+
+        payload = (data or "").strip().lstrip("/")
+        parts = payload.split(":")
+        if len(parts) != 3 or parts[0] != "draft":
+            return ""
+        _, action, draft_id = parts
+        queue = self._draft_queue()
+        try:
+            draft = queue.get(draft_id)
+            if draft is not None and action == "post" \
+                    and draft.status in (DRAFT, SCHEDULED):
+                queue.propose(draft_id)
+            manager = None
+            if action == "post":
+                try:
+                    from ...social import SocialManager
+                    manager = SocialManager(
+                        self.context).register_builtins()
+                except Exception as exc:  # noqa: BLE001
+                    return f"can't post — no publisher wired: {exc}"
+            scheduler = getattr(self, "_scheduler", None) or \
+                self.context.extras.get("scheduler")
+            return handle_draft_callback(
+                queue, payload, manager=manager, scheduler=scheduler)
+        except Exception as exc:  # noqa: BLE001 — a tap must answer
+            return f"draft action failed: {exc}"
+        finally:
+            queue.close()
+
+    def _control_drafts(self, tail: str, chat_key: str = "",
+                        message: Any = None) -> Any:
+        """/drafts — the post-draft review board (WS3 P2).
+
+        /drafts                — the review batch: every draft
+                                 awaiting a decision, numbered; tap a
+                                 number to open its card, or use the
+                                 text verbs below
+        /drafts show <n>       — one draft's review card + buttons
+        /drafts post <n>       — post THAT draft (the one named)
+        /drafts discard <n>    — discard THAT draft
+
+        <n> is the number from the board (a full draft id also
+        resolves). The text path is complete without buttons: every
+        button action has a verb above, and verbs and taps run the
+        same callback route. Owner-only (the handle_control grant:
+        /drafts is not a public command). Nothing posts without the
+        owner's tap, verb, or explicit 'post this' — the #43 rule,
+        unchanged.
+        """
+        from ...social.drafts import (
+            DRAFT,
+            propose_post,
+            render_review_batch,
+            review_buttons,
+            review_card,
+            reviewable_drafts,
+        )
+
+        queue = self._draft_queue()
+        target: tuple[str, str] | None = None
+        try:
+            drafts = reviewable_drafts(queue)
+            parts = (tail or "").split(None, 1)
+            verb = parts[0].lower() if parts else "list"
+            rest = parts[1].strip() if len(parts) > 1 else ""
+
+            if verb in ("list", ""):
+                if not drafts:
+                    return "📝 no drafts waiting for review."
+                text = render_review_batch(drafts)
+                text += ("\n\nopen one: /drafts show <n> · post it: "
+                         "/drafts post <n> · discard: "
+                         "/drafts discard <n>")
+                from ...social.chat.tgbot_buttons import actionable, grid_layout
+                buttons = []
+                for i, d in enumerate(drafts[:8], 1):
+                    label = d.content[:24].replace("\n", " ")
+                    if len(d.content) > 24:
+                        label += "…"
+                    buttons.append((f"{i}. {label}", f"drafts show {i}"))
+                return actionable(text, grid_layout([buttons]))
+
+            if verb in ("show", "post", "discard"):
+                if not rest:
+                    return (f"usage: /drafts {verb} <n> — the number "
+                            "from /drafts")
+                token = rest.split()[0]
+                probe = token[1:] if token.startswith("#") else token
+                picked: tuple[int, Any] | None = None
+                if probe.isdigit():
+                    idx = int(probe)
+                    if 1 <= idx <= len(drafts):
+                        picked = (idx, drafts[idx - 1])
+                else:
+                    for i, d in enumerate(drafts, 1):
+                        if d.id == token:
+                            picked = (i, d)
+                            break
+                if picked is None:
+                    if not drafts:
+                        return "📝 no drafts waiting for review."
+                    return (f"no draft {token} on the board — "
+                            f"{len(drafts)} waiting; /drafts lists them.")
+                idx, draft = picked
+                if verb in ("post", "discard"):
+                    # Act through the callback route — but only after
+                    # this queue closes (the route opens its own).
+                    target = (verb, draft.id)
+                else:
+                    from ...social.chat.tgbot_buttons import actionable, grid_layout
+                    if draft.status == DRAFT:
+                        # Opening an unproposed draft IS proposing
+                        # it: the standing-question form is its card.
+                        queue.propose(draft.id)
+                        draft = queue.get(draft.id) or draft
+                        text, buttons = propose_post(draft)
+                    else:
+                        text = review_card(draft)
+                        buttons = review_buttons(draft)
+                    text += (f"\n\nor type: /drafts post {idx} · "
+                             f"/drafts discard {idx}")
+                    return actionable(text, grid_layout([buttons]))
+            else:
+                return ("usage: /drafts [list] | show <n> | post <n> | "
+                        "discard <n> — <n> is the number from /drafts")
+        finally:
+            queue.close()
+        if target is not None:
+            action, draft_id = target
+            return self._draft_callback(
+                f"draft:{action}:{draft_id}", chat_key, message=message)
+        return "📝 no drafts waiting for review."
+
     # ── api connectors: /api ─────────────────────────────────────────────────
     def _control_api(self, tail: str) -> str:
         parts = (tail or "").split(None, 1)
