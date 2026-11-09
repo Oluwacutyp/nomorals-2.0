@@ -78,6 +78,11 @@ PLATFORM_PROFILES: dict[str, PlatformProfile] = {
     "telegram": PlatformProfile("telegram", 4096, "strip",
                                 "plain, direct, announcement-style",
                                 hook_len=200, cta_style="none"),
+    "whatsapp-status": PlatformProfile(
+        "whatsapp-status", 700, "strip",
+        "a WhatsApp status line: short, warm and personal, one idea, "
+        "no link bait — his contacts read it on their phones",
+        hook_len=120, cta_style="none"),
     "pinterest": PlatformProfile("pinterest", 500, "keep",
                                  "descriptive, keyword-rich, helpful",
                                  hook_len=100, cta_style="link"),

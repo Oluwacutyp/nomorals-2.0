@@ -101,9 +101,23 @@ class SocialManager:
     def register_builtins(self) -> "SocialManager":
         """Wire up the shipped adapters. Returns self so it can be chained."""
         from .adapters import bluesky, mastodon
+        from .adapters.linkedin import LinkedInAdapter
+        from .adapters.personal import (
+            TelegramChannelAdapter,
+            WhatsAppStatusAdapter,
+        )
+        from .adapters.x import XAdapter
 
         for module in (mastodon, bluesky):
             self.register_adapter(module.Adapter())
+        # WS3 P3 — his real surfaces as draft platforms: LinkedIn over
+        # the native connector (builder wired by the composition
+        # root), X native beside the Postiz route, and the paired
+        # personal surfaces (WhatsApp status, Telegram channel).
+        self.register_adapter(LinkedInAdapter())
+        self.register_adapter(XAdapter())
+        self.register_adapter(WhatsAppStatusAdapter(context=self.context))
+        self.register_adapter(TelegramChannelAdapter(context=self.context))
         self.register_postiz()
         return self
 

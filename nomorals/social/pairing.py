@@ -808,16 +808,18 @@ class PairingRegistry:
             return rec
 
 
-def resolve_account(registry: PairingRegistry, platform: str,
-                    account_id: str = "") -> AccountRecord | None:
-    """The routing primitive (§15 slice 3): which account speaks for
-    a platform.  An explicit id wins (and must belong to the
-    platform); otherwise the account the owner named primary;
-    otherwise the earliest-created LINKED account (first-connected);
-    otherwise the earliest-registered account; otherwise None — the
-    platform has no paired account and callers must say so, never
-    silently borrow another platform's session."""
-    rows = registry.accounts_for(platform)
+def select_account(rows: list[AccountRecord],
+                   account_id: str = "") -> AccountRecord | None:
+    """Pick the speaking account from one platform's records.
+
+    The selection every routing consumer shares: an explicit id wins
+    (and must be among ``rows``); otherwise the account the owner
+    named primary; otherwise the earliest-created LINKED account
+    (first-connected); otherwise the earliest-registered account;
+    otherwise None — the platform has no paired account and callers
+    must say so, never silently borrow another platform's session.
+    ``rows`` must arrive in registry order (created_at ascending).
+    """
     if not rows:
         return None
     if account_id:
@@ -832,6 +834,78 @@ def resolve_account(registry: PairingRegistry, platform: str,
         if rec.status == "linked":
             return rec
     return rows[0]
+
+
+def resolve_account(registry: PairingRegistry, platform: str,
+                    account_id: str = "") -> AccountRecord | None:
+    """The routing primitive (§15 slice 3): which account speaks for
+    a platform — see :func:`select_account` for the order."""
+    return select_account(registry.accounts_for(platform), account_id)
+
+
+def registry_path_for(workspace_dir: str | Path) -> Path:
+    """Where the durable registry lives under a workspace — the one
+    path derivation, shared with :func:`default_supervisor`."""
+    return (Path(workspace_dir) / "data" / "social"
+            / "paired_accounts.json")
+
+
+@dataclass(frozen=True)
+class RegistrySnapshot:
+    """One read-only pass over the registry file (WS3 P3).
+
+    For consumers that must consult pairing truth — is an account
+    paired? is the platform under the owner's standing stop? —
+    WITHOUT constructing a :class:`PairingRegistry`: a second live
+    instance would hold a stale in-memory copy of the stop state and
+    its load path quarantines an unreadable file aside. A snapshot is
+    fresh bytes on every read and never writes anything.
+
+    ``error`` is non-empty when the file exists but could not be
+    read as a registry: consumers must fail CLOSED on it (an
+    unreadable registry is never read as "no stops, no accounts").
+    A MISSING file is not an error — it is the registry's own empty
+    state, exactly as :meth:`PairingRegistry._load` treats it.
+    """
+
+    accounts: tuple[AccountRecord, ...] = ()
+    owner_stopped: frozenset[str] = frozenset()
+    error: str = ""
+
+    def records(self, platform: str) -> list[AccountRecord]:
+        key = (platform or "").strip().lower()
+        rows = [r for r in self.accounts if r.platform == key]
+        rows.sort(key=lambda r: r.created_at)
+        return rows
+
+
+def read_registry_snapshot(path: str | Path) -> RegistrySnapshot:
+    """Read the registry file read-only into a :class:`RegistrySnapshot`.
+
+    Never constructs a registry, never writes, never quarantines.
+    Structural damage (bad JSON, no accounts list, an unparseable
+    row) yields an error snapshot — the same fail-closed posture the
+    registry itself takes, minus the file move.
+    """
+    p = Path(path)
+    if not p.exists():
+        return RegistrySnapshot()
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        rows = data.get("accounts") if isinstance(data, dict) else None
+        if not isinstance(rows, list):
+            raise ValueError("registry has no accounts list")
+        accounts = tuple(AccountRecord.from_dict(row) for row in rows)
+        stopped: set[str] = set()
+        raw_stops = data.get("owner_stopped")
+        if isinstance(raw_stops, dict):
+            for platform in raw_stops:
+                stopped.add(str(platform).strip().lower())
+        return RegistrySnapshot(accounts=accounts,
+                                owner_stopped=frozenset(stopped))
+    except Exception as exc:  # noqa: BLE001 - verdict, not crash
+        return RegistrySnapshot(
+            error=f"the paired-account registry could not be read ({exc})")
 
 
 #: /pair verdict evidence (2026-11-08): for these toggles a

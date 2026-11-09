@@ -18,7 +18,8 @@ from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
 
-__all__ = ["wire_streaming_adapters", "spotify_linked", "spotify_connector"]
+__all__ = ["wire_streaming_adapters", "spotify_linked", "spotify_connector",
+           "wire_linkedin_social_adapter"]
 
 
 def wire_streaming_adapters(context: Any) -> dict[str, str]:
@@ -79,6 +80,36 @@ def spotify_connector(context: Any) -> Any | None:
         return create_connector("spotify", vault)
     except Exception:  # noqa: BLE001 - best-effort
         return None
+
+
+def wire_linkedin_social_adapter(context: Any) -> bool:
+    """Install the SocialManager LinkedIn adapter's connector builder
+    (WS3 P3).
+
+    The adapter lives at L4 (``social``) and may not import this L5
+    layer, so the composition root hands it a builder here: each call
+    opens the vault from the context's db and returns a fresh native
+    LinkedIn connector — the connector owns the OAuth credential and
+    the API surface; the adapter never sees a secret. Installing the
+    builder never opens the vault itself, so a locked vault degrades
+    at post time (the adapter refuses in words), not at startup.
+    Returns True when the builder was installed.
+    """
+    try:
+        from ..social.adapters.linkedin import set_connector_builder
+        from .registry import create_connector
+
+        def _builder() -> Any:
+            from ..accounts.vault import open_vault
+            vault = open_vault(getattr(context, "db", None),
+                               context=context, actor="social-linkedin")
+            return create_connector("linkedin", vault)
+
+        set_connector_builder(_builder)
+        return True
+    except Exception as exc:  # noqa: BLE001 - social wiring is optional
+        _log.debug("linkedin social adapter wiring failed: %s", exc)
+        return False
 
 
 def spotify_linked(context: Any) -> bool:

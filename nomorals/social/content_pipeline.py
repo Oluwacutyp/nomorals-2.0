@@ -16,6 +16,7 @@ Nothing posts without the owner's explicit override (#43 rule).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -33,6 +34,7 @@ __all__ = [
     "install_weekly_content_job",
     "FALLBACK_WINDOWS",
     "CONTENT_MIX",
+    "DEFAULT_PLATFORMS",
     "classify_pillar",
     "mix_report",
 ]
@@ -54,6 +56,16 @@ _ENGAGEMENT_KEYS = (
 #: Default research budget for one weekly run (USD). Bounded, always.
 DEFAULT_RESEARCH_BUDGET_USD = 1.0
 
+#: The weekly run's default platform set (WS3 P3): the owner's REAL
+#: surfaces, LinkedIn first — the surfaces his accounts actually post
+#: to — replacing the old x-only default. Every production caller
+#: (the social tool, the weekly job) passes no platform set, so this
+#: tuple IS the production default. The fan-out queues one review
+#: draft per platform per text, each carrying that platform's own
+#: adapt_tone-shaped text (see the queue loop in weekly_content).
+DEFAULT_PLATFORMS: tuple[str, ...] = (
+    "linkedin", "x", "telegram", "whatsapp-status")
+
 
 @dataclass
 class PipelineDraft:
@@ -69,6 +81,11 @@ class PipelineDraft:
     draft_id: str = ""
     weak: bool = False  # flagged, never silently dropped
     pillar: str = ""  # content-mix pillar: educate|proof|engage|promo
+    #: WS3 P3 fan-out: the per-platform adapt_tone text queued for
+    #: review, and the queued DraftQueue draft id per platform.
+    #: ``draft_id`` stays the primary (first platform's) id.
+    platform_texts: dict[str, str] = field(default_factory=dict)
+    draft_ids: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -416,7 +433,7 @@ def weekly_content(
     db: Any = None,
     queue: Any = None,
     voice_profile: Any = None,
-    platforms: Sequence[str] = ("x",),
+    platforms: Sequence[str] = DEFAULT_PLATFORMS,
     llm_fn: Callable[[str], str] | None = None,
     findings: list[dict[str, Any]] | None = None,
     rctx: Any = None,
@@ -431,8 +448,18 @@ def weekly_content(
     Drafts are queued for REVIEW (default per #43) — never auto-posted.
     ``findings`` injects research (tests); otherwise a bounded ResearchJob
     runs when ``rctx`` is given; otherwise honest generic templates.
+
+    Fan-out (WS3 P3): each scored text is queued ONCE PER PLATFORM in
+    ``platforms`` (default: the owner's real surfaces,
+    :data:`DEFAULT_PLATFORMS`), and every queued draft carries that
+    platform's own text — :func:`...tone.adapt_tone` applied at the
+    fan-out, so the owner reviews the exact words each surface will
+    post. The returned ``PipelineResult.drafts`` still holds one
+    entry per source text (primary platform first), with the
+    per-platform texts and draft ids on it.
     """
     from .drafts import DraftQueue, schedule_post
+    from .tone import adapt_tone
     from .voice import VoiceProfile, virality_score
 
     started = time.perf_counter()
@@ -496,42 +523,58 @@ def weekly_content(
     mix = mix_report(scored)
     _log.info("weekly content mix for %s: %s", niche, mix["verdict"])
 
-    # Queue for review + schedule at the windows (round-robin).
+    # ═══ WS3 P3 FAN-OUT REGION (flagged for the parent's stack) ═══
+    # Queue for review + schedule at the windows (round-robin). Each
+    # source text fans out to ONE queued draft PER PLATFORM, and each
+    # queued draft carries that platform's own adapt_tone text — the
+    # owner reviews the exact words each surface will post. Every
+    # platform draft of one text shares the text's window and carries
+    # a common fanout_group stamp in its metadata. The per-draft
+    # schedule fallback semantics are unchanged from the single-draft
+    # loop this replaces (schedule_post queues before it touches the
+    # scheduler; a scheduler-side failure falls back to q.schedule
+    # only when the queue does not already show the draft scheduled).
     q = queue or DraftQueue()
+    fan_platforms = list(platforms) if platforms else ["x"]
     for i, d in enumerate(scored):
         win = windows[i % len(windows)]
         win_ts = win.timestamp()
         try:
-            draft = q.create_draft(
-                d.content, platforms=list(platforms),
-                metadata={"niche": niche, "virality": round(d.virality, 1),
-                          "grade": d.virality_grade,
-                          "finding_url": d.finding_url,
-                          "pillar": d.pillar or classify_pillar(d.content),
-                          "pipeline": "weekly_content"})
-            q.propose(draft.id)  # → pending_review: Devon asks, never auto-posts
-            d.draft_id = draft.id
-            if scheduler is not None:
-                try:
-                    schedule_post(scheduler, q, draft.id, win_ts,
-                                  platforms=list(platforms))
-                except Exception as exc:  # noqa: BLE001 - scheduler optional
-                    # schedule_post queues the draft BEFORE touching the
-                    # scheduler, so a scheduler-side failure (e.g. no
-                    # schedule_once) leaves the draft already scheduled:
-                    # a blind re-schedule raises on the scheduled ->
-                    # scheduled transition and the outer handler would
-                    # report a scheduled draft as failed/unscheduled.
-                    _log.debug("schedule_post failed (%s); "
-                               "checking queue state", exc)
-                    current = q.get(draft.id)
-                    if current is None or current.status != "scheduled":
-                        q.schedule(draft.id, win_ts)
-            else:
-                q.schedule(draft.id, win_ts)
+            d.platform_texts = {
+                p: adapt_tone(d.content, p, llm_fn=llm_fn)
+                for p in fan_platforms}
+            group = "ws3fan:" + hashlib.sha256(
+                d.content.encode("utf-8")).hexdigest()[:12]
+            for p in fan_platforms:
+                draft = q.create_draft(
+                    d.platform_texts[p], platforms=[p],
+                    metadata={"niche": niche,
+                              "virality": round(d.virality, 1),
+                              "grade": d.virality_grade,
+                              "finding_url": d.finding_url,
+                              "pillar": d.pillar or classify_pillar(d.content),
+                              "pipeline": "weekly_content",
+                              "platform": p,
+                              "fanout_group": group})
+                q.propose(draft.id)  # → pending_review: Devon asks, never auto-posts
+                d.draft_ids[p] = draft.id
+                if scheduler is not None:
+                    try:
+                        schedule_post(scheduler, q, draft.id, win_ts,
+                                      platforms=[p])
+                    except Exception as exc:  # noqa: BLE001 - scheduler optional
+                        _log.debug("schedule_post failed (%s); "
+                                   "checking queue state", exc)
+                        current = q.get(draft.id)
+                        if current is None or current.status != "scheduled":
+                            q.schedule(draft.id, win_ts)
+                else:
+                    q.schedule(draft.id, win_ts)
+            d.draft_id = d.draft_ids.get(fan_platforms[0], "")
             d.scheduled_for = win_ts
         except Exception as exc:  # noqa: BLE001 - one bad draft ≠ dead pipeline
             _log.warning("pipeline draft %d failed: %s", i, exc)
+    # ═══ END WS3 P3 FAN-OUT REGION ═══
 
     message = _batch_message(niche, scored, windows, windows_from_data)
     return PipelineResult(

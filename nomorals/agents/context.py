@@ -427,6 +427,18 @@ def build_context(
     except Exception as exc:  # noqa: BLE001 — tool factories are optional
         _log.debug("tool service factories not wired: %s", exc)
 
+    # Social platform factories (WS3 P3): the LinkedIn SocialManager
+    # adapter (L4) may not import the L5 connector it posts through —
+    # the composition root installs its connector builder here, same
+    # inversion pattern as the factories above. Best-effort: unwired,
+    # the adapter refuses in words naming the missing wire.
+    try:
+        from ..connectors.wiring import wire_linkedin_social_adapter
+
+        wire_linkedin_social_adapter(context)
+    except Exception as exc:  # noqa: BLE001 — social wiring is optional
+        _log.debug("linkedin social adapter not wired: %s", exc)
+
     if db_recovered:
         # Surfaced in status/diagnostics: the owner should know their data
         # was quarantined, and where the old file went.
