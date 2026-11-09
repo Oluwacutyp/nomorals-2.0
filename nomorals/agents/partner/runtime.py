@@ -551,6 +551,10 @@ class PartnerRuntime(
                 # the store and carry a unified person_id downstream.
                 identity_store=IdentityStore(),
                 artifact_store=artifact_store,
+                # WS3-P7: a GoldenSwing desk bundle arriving as a
+                # chat file lands its one review draft (recognition
+                # rides the bundle contract, in agents/desk_drafts).
+                inbound_artifact_hook=self._desk_bundle_hook(),
                 # Ordinary chat path gets durable delivery (row first,
                 # receipt after) whenever a db exists; without a db the
                 # gateway reports durable-requested-unavailable and each
@@ -7572,6 +7576,9 @@ class PartnerRuntime(
         if kind == "calendar":
             return self._control_calendar(command.tail or arg,
                                           chat_key=chat_key)
+        if kind == "repurpose":
+            return self._control_repurpose(command.tail or arg,
+                                           chat_key=chat_key)
         if kind == "api":
             return self._control_api(command.tail or arg)
         if kind == "connectors":

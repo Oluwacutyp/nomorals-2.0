@@ -2067,6 +2067,160 @@ class RuntimeSystemMixin:
         finally:
             queue.close()
 
+    # ── repurposing: /repurpose ──────────────────────────────────────────────
+    def _control_repurpose(self, tail: str, chat_key: str = "") -> Any:
+        """/repurpose — one asset, other forms (WS3 P7).
+
+        A posted draft spawns a short script or a thread; a day
+        record spawns an adapted draft; a short spawns a text
+        post.  Every adaptation runs through the content cell
+        (source as evidence, the skeptic number-traces the draft
+        against the source) and lands as a NEW draft at
+        pending_review on /drafts — the source is never mutated
+        and nothing posts (#43).  The board numbers its own
+        sources; the verbs resolve against the same lists the
+        board shows.  Owner-only via CONTROL_COMMANDS.
+        """
+        from ..dayrecord import brain_llm_fn, today_key
+        from ..repurpose import (
+            FORM_POST, FORM_SHORT_SCRIPT, FORM_THREAD,
+            day_source, posted_draft_sources, repurpose_source,
+            short_sources)
+
+        db = self.context.db
+        queue = self._draft_queue()
+        form_words = {"short": FORM_SHORT_SCRIPT,
+                      "thread": FORM_THREAD, "post": FORM_POST}
+
+        def _run(source, form: str) -> str:
+            result = repurpose_source(
+                db, queue, source, form,
+                llm_fn=brain_llm_fn(self.context))
+            label = {"short_script": "short script",
+                     "thread": "thread",
+                     "post": "text post"}[form]
+            if result.get("ok"):
+                draft = queue.get(result["draft_id"])
+                preview = (" ".join(draft.content.split())[:70]
+                           if draft else "")
+                return (f"♻️ repurposed {source.label} → {label}"
+                        " draft, waiting on /drafts for your"
+                        f" review:\n{preview}")
+            if result.get("objection"):
+                return ("🛑 the skeptic stopped that adaptation —"
+                        f" {result['objection']}  Nothing was"
+                        " queued; the source stands as it was.")
+            return (f"repurposing failed: "
+                    f"{result.get('error') or 'unknown error'}")
+
+        try:
+            text = (tail or "").strip()
+            low = text.lower()
+            if not text or low == "list":
+                posted = posted_draft_sources(queue)
+                shorts = short_sources()
+                lines = ["♻️ **repurpose — one asset, other forms**",
+                         ""]
+                lines.append("📤 **posted drafts** (→ short script"
+                             " or thread)")
+                if posted:
+                    for i, s in enumerate(posted, 1):
+                        lines.append(f"  {i}. {s.label}")
+                else:
+                    lines.append("  (nothing posted yet)")
+                lines.append("")
+                lines.append("🎬 **shorts** (→ text post)")
+                if shorts:
+                    for i, s in enumerate(shorts, 1):
+                        lines.append(f"  {i}. {s.label}")
+                else:
+                    lines.append("  (no shorts planned yet)")
+                lines.append("")
+                lines.append("📔 **day record** — /repurpose day"
+                             " [YYYY-MM-DD] short|thread|post"
+                             " (today if no date)")
+                lines.append("")
+                lines.append("verbs: /repurpose post <n>"
+                             " short|thread · /repurpose short <n>"
+                             " post · every result lands on"
+                             " /drafts for review — nothing posts"
+                             " itself.")
+                return "\n".join(lines)
+            parts = text.split()
+            head = parts[0].lower()
+            if head == "post" and len(parts) == 3:
+                if not parts[1].isdigit():
+                    return "usage: /repurpose post <n> short|thread"
+                form = form_words.get(parts[2].lower())
+                if form not in (FORM_SHORT_SCRIPT, FORM_THREAD):
+                    return ("a posted draft repurposes into a"
+                            " short script or a thread:"
+                            " /repurpose post <n> short|thread")
+                posted = posted_draft_sources(queue)
+                n = int(parts[1])
+                if not 1 <= n <= len(posted):
+                    return (f"there are {len(posted)} posted"
+                            " draft(s) on the board — pick one of"
+                            " those numbers.")
+                return _run(posted[n - 1], form)
+            if head == "short" and len(parts) == 3:
+                if not parts[1].isdigit():
+                    return "usage: /repurpose short <n> post"
+                if parts[2].lower() != "post":
+                    return ("a short repurposes into a text post:"
+                            " /repurpose short <n> post")
+                shorts = short_sources()
+                n = int(parts[1])
+                if not 1 <= n <= len(shorts):
+                    return (f"there are {len(shorts)} short(s) on"
+                            " the board — pick one of those"
+                            " numbers.")
+                return _run(shorts[n - 1], FORM_POST)
+            if head == "day":
+                day = today_key()
+                form_word = "short"
+                for token in parts[1:]:
+                    if token.lower() in form_words:
+                        form_word = token.lower()
+                    elif len(token) == 10 and token[4] == "-":
+                        day = token
+                source = day_source(db, day)
+                if source is None:
+                    return (f"the {day} day record is empty —"
+                            " nothing to repurpose yet.")
+                return _run(source, form_words[form_word])
+            return ("usage: /repurpose [list] | post <n>"
+                    " short|thread | short <n> post |"
+                    " day [YYYY-MM-DD] short|thread|post")
+        finally:
+            queue.close()
+
+    def _desk_bundle_hook(self) -> Any:
+        """The gateway's inbound-artifact hook (WS3 P7): when a
+        file Devon just stored is a GoldenSwing desk bundle, land
+        its one draft.  Recognition rides the bundle contract
+        inside agents/desk_drafts — this builder only wires the
+        live stores.  None when there is no context db (no
+        contracts, no landing)."""
+        db = getattr(self.context, "db", None)
+        if db is None:
+            return None
+
+        def _hook(art: Any, data: bytes) -> Any:
+            from ..desk_drafts import land_desk_draft
+
+            store = self._artifact_store()
+            if store is None:
+                return None
+            queue = self._draft_queue()
+            try:
+                return land_desk_draft(
+                    db, queue, store, data, source="chat_inbound")
+            finally:
+                queue.close()
+
+        return _hook
+
     def _calendar_piece_label(self, member: dict, *, queue: Any,
                               shorts: list, db: Any) -> str:
         """One member of a series, named by what it IS — never by

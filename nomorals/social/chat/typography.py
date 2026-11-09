@@ -111,19 +111,41 @@ STAMP_CLASSES: tuple[str, ...] = (
 STAMP_HTML = f"<i>{DEFAULT_STAMP_TEXT}</i>"
 
 
+def _closes_with_stamp(body: str) -> bool:
+    """True when *body* already ENDS with the stamp as a footer.
+
+    The stamp is a footer, and a footer is a position, not a
+    substring: it counts only as the message's trailing block —
+    the exact stamp line standing alone at the end of the text
+    (in any of the forms the surfaces render it: the HTML span,
+    the ``_…_`` dialect line, or the bare line).  The stamp text
+    quoted, mentioned or argued about anywhere else in the body
+    is content, not a footer, and never suppresses the real one.
+    """
+    tail = body.rstrip()
+    if not tail:
+        return False
+    for form in (STAMP_HTML, f"_{DEFAULT_STAMP_TEXT}_",
+                 DEFAULT_STAMP_TEXT):
+        if tail == form or tail.endswith("\n" + form):
+            return True
+    return False
+
+
 def apply_stamp(text: str, *, light: bool = False) -> str:
     """Append the stamp to outbound *text* unless already there.
 
     Full form (presented output): a blank line, then the stamp.
     Light form (conversational replies): a single newline, then
     the stamp — a signature line, never a block.  Idempotent: a
-    text already carrying the stamp text (a Card stamped by
-    :func:`render_card`, a Doc footer) passes through unchanged.
-    Empty text stays empty — the stamp never manufactures a
-    message out of silence.
+    text already CLOSING with the stamp as its footer (a Card
+    stamped by :func:`render_card`, a Doc footer) passes through
+    unchanged; a text merely quoting the stamp text mid-body
+    still receives its footer.  Empty text stays empty — the
+    stamp never manufactures a message out of silence.
     """
     body = str(text or "")
-    if not body.strip() or DEFAULT_STAMP_TEXT in body:
+    if not body.strip() or _closes_with_stamp(body):
         return body
     return body + ("\n" if light else "\n\n") + STAMP_HTML
 

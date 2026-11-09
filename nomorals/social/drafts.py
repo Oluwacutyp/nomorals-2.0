@@ -358,6 +358,26 @@ class DraftQueue:
             " ORDER BY created_at DESC").fetchall()
         return [self.get(r["id"]) for r in rows if self.get(r["id"])]
 
+    def list_by_status(self, status: str, *, limit: int = 20) -> list[Draft]:
+        """Drafts in one exact status, newest first.
+
+        The read :meth:`pending` cannot give: terminal states
+        (``posted``, ``discarded``) are invisible to it, and the
+        repurpose surface (WS3-P7) sources its material from what
+        already posted.  Same dual-backend shape as pending().
+        """
+        status = str(status or "")
+        if self._port is not None:
+            rows = self._port.tables["social_drafts"].find(
+                {"status": status})
+            rows.sort(key=lambda r: r["created_at"], reverse=True)
+            return [self._to_draft(r) for r in rows[: int(limit)]]
+        rows = self._db.execute(
+            "SELECT * FROM social_drafts WHERE status = ?"
+            " ORDER BY created_at DESC LIMIT ?",
+            (status, int(limit))).fetchall()
+        return [self.get(r["id"]) for r in rows if self.get(r["id"])]
+
     def close(self) -> None:
         if self._db is None:
             return  # seam path: the store is shared, not organ-owned

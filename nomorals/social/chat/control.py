@@ -856,6 +856,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "day": (0, None),         # /day [show] | tell <text> | yesterday | make | skip | unskip | export — the day record + derivation (owner-only)
     "explore": (0, None),     # /explore [run | trends | candidates] — the video-exploration board: sweeps, trend claims with their basis, candidate standings (owner-only)
     "calendar": (0, None),    # /calendar [list] | series [<name>] | new <name> [| <objective>] | add <series> draft|short|post <n> — unified content calendar + series (owner-only)
+    "repurpose": (0, None),   # /repurpose [list] | post <n> short|thread | short <n> post | day [YYYY-MM-DD] short|thread|post — one asset, other forms, through the content cell (owner-only)
     "insights": (0, None),    # /insights [days] — native money analytics
     "predict": (0, 3),       # /predict <stake> <over|under> <1-99> — prediction pit (progression-unlocked)
     "menu": (0, 2),          # alias of /list ([group] [page] ride the same grammar)
@@ -3350,6 +3351,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/calendar [list] | series [<name>] | new <name> [| <objective>] | add <series> draft|short|post <n>",
               "example": "/calendar new launch week | get the first 100 users",
               "related": "/drafts /day /shorts"},
+    "repurpose": {"what": "one asset, other forms: a posted draft becomes a short script or a thread, a day record becomes an adapted draft, a short becomes a text post. Every adaptation runs through the content cell — the source is the evidence, the skeptic checks the new draft's numbers against it — and lands as a fresh draft on /drafts carrying its provenance. The source is never changed and nothing posts itself.",
+              "usage": "/repurpose [list] | post <n> short|thread | short <n> post | day [YYYY-MM-DD] short|thread|post",
+              "example": "/repurpose post 1 thread",
+              "related": "/drafts /day /calendar /shorts"},
     "api": {"what": "external API connectors: weather, fx, github, …",
             "usage": "/api list | <connector> [json]", "example": "/api weather city=Lagos",
             "related": ""},
@@ -4307,7 +4312,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
                            "exness", "stripe", "content", "drafts", "day",
-                           "calendar",
+                           "calendar", "repurpose",
                            "tempmail", "checkmail", "vnumber", "checksms",
                            "browser", "paper", "backup"]),
     ("platform control", ["start", "stop", "profile", "chatmode", "style",
@@ -4626,7 +4631,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion", "gcal", "trello", "exness", "stripe",
-      "guardrails", "content", "drafts", "day", "calendar",
+      "guardrails", "content", "drafts", "day", "calendar", "repurpose",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
     ("platform control — updates & restarts",
      ["update", "pull", "deploy", "restart"]),
@@ -4997,6 +5002,7 @@ LIST_ONELINERS: dict[str, str] = {
     "day": "your day record: tell it what you did, see the day whole, and make draft posts from it",
     "explore": "video exploration: the field she fetches from, watched — sweeps, trend claims with their basis, candidate standings",
     "calendar": "the unified content calendar: drafts waiting, what's due, and your series in order",
+    "repurpose": "one asset, other forms: posted drafts, day records and shorts re-drafted through the cell",
     "api": "external API connectors (weather, fx, github, …)",
     "connectors": "manage the service connectors: list, status, connect",
     "shorts": "short-form content empire: make, queue, post vertical videos",

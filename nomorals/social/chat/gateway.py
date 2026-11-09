@@ -192,6 +192,7 @@ class ChatGateway:
         session_bridge: Any = None,
         identity_store: IdentityStore | None = None,
         artifact_store: Any = None,
+        inbound_artifact_hook: Callable[[Any, bytes], Any] | None = None,
         durable_outbox: bool = False,
         outbox: Outbox | None = None,
         durable_drain_sync: bool = True,
@@ -225,6 +226,15 @@ class ChatGateway:
         never drop a message.  Identical bytes register once:
         re-sending the same file dedups against the existing
         chat-inbound artifact instead of minting a duplicate row.
+
+        ``inbound_artifact_hook`` is an optional callable
+        ``(artifact, data) -> object`` (injected, like the store
+        itself — the L5 composition wires the WS3-P7 desk-bundle
+        landing here).  When present, it is offered every file
+        that inbound registration just stored, bytes in hand; it
+        decides by content (the bundle contract), never by name.
+        Fail-open exactly like registration: a hook failure is
+        journaled and the message flows on.
 
         ``durable_outbox`` (default OFF) routes sends through the durable
         outbox (:mod:`nomorals.social.chat.outbox`): every send becomes a
@@ -265,6 +275,9 @@ class ChatGateway:
         #: Inbound-file artifact registration (see __init__
         #: docstring).  Duck-typed ArtifactStore or None.
         self.artifact_store = artifact_store
+        #: Optional post-registration hook over stored inbound
+        #: files (see __init__ docstring).  Callable or None.
+        self.inbound_artifact_hook = inbound_artifact_hook
         #: Optional console mirror: called with each inbound ChatMessage so
         #: the local terminal can show a rich card. Best-effort — never
         #: raises, never blocks the feed. Set by scripts/run_chat_bot.py.
@@ -757,6 +770,7 @@ class ChatGateway:
         digest = hashlib.sha256(data).hexdigest()
         for existing in store.find_by_content_hash(digest):
             if (existing.metadata or {}).get("origin") == "chat_inbound":
+                self._offer_inbound_hook(existing, data)
                 return str(existing.id)
         import mimetypes
 
@@ -791,7 +805,22 @@ class ChatGateway:
                 "source_timestamp": message.ts,
             },
         )
+        self._offer_inbound_hook(art, data)
         return str(art.id)
+
+    def _offer_inbound_hook(self, art: Any, data: bytes) -> None:
+        """Offer one stored inbound file to the injected hook
+        (WS3-P7 desk-bundle landing).  Fail-open, like everything
+        on the registration path: a hook failure is journaled and
+        never reaches the message flow."""
+        hook = self.inbound_artifact_hook
+        if hook is None:
+            return
+        try:
+            hook(art, data)
+        except Exception as exc:  # noqa: BLE001 — fail-open, recorded
+            record_failure(
+                "gateway.ChatGateway._offer_inbound_hook", exc)
 
     # ── outbound ────────────────────────────────────────────────────────────
     def _lock_for(self, chat: ChatRef) -> threading.Lock:
