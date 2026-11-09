@@ -191,12 +191,22 @@ def download(
     progress: Callable[[str], None] | None = None,
     timeout: float = 1800.0,
     cookies_file: str = "",
+    progress_event: Callable[[int, int | None], None] | None = None,
+    progress_segments: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     """Download media, preferring yt-dlp and falling back to direct HTTP.
 
     ``cookies_file`` pins the Netscape cookies file yt-dlp should use;
     empty means per-URL discovery (user-provided file, then Devon's
     own browser-profile export — see :mod:`nomorals.media.cookies`).
+
+    ``progress_event`` / ``progress_segments`` (Play & Downloads P1)
+    are the STRUCTURED siblings of the string ``progress`` callback:
+    ``progress_event(downloaded_bytes, total_bytes_or_None)`` fed from
+    the backends' real counters — an estimate never becomes a total —
+    and ``progress_segments(done, total)`` for fragmented media.  The
+    CLI backend runs a subprocess and cannot stream structured
+    figures; it keeps the string callback only.
     """
     target_dir = Path(destination).expanduser()
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -207,10 +217,10 @@ def download(
 
     module = load_optional("yt_dlp")
     if module is not None:
-        return _download_python_api(module, url, target_dir, format_spec, audio_only, progress, started, cookies_file)
+        return _download_python_api(module, url, target_dir, format_spec, audio_only, progress, started, cookies_file, progress_event, progress_segments)
     if which("yt-dlp"):
         return _download_cli(url, target_dir, format_spec, audio_only, timeout, started, cookies_file)
-    return _download_direct(url, target_dir, progress, started)
+    return _download_direct(url, target_dir, progress, started, progress_event)
 
 
 def _download_python_api(
@@ -222,6 +232,8 @@ def _download_python_api(
     progress: Callable[[str], None] | None,
     started: float,
     cookies_file: str = "",
+    progress_event: Callable[[int, int | None], None] | None = None,
+    progress_segments: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     options: dict[str, Any] = {
         "outtmpl": str(target_dir / "%(title).120B [%(id)s].%(ext)s"),
@@ -249,6 +261,25 @@ def _download_python_api(
             raise MediaError(CANCELLED_MESSAGE)
         if progress is not None and state.get("status") == "downloading":
             progress(f"{state.get('_percent_str', '?').strip()} of {state.get('_total_bytes_str', '?')}")
+        if state.get("status") == "downloading":
+            # Structured figures (P1): the hook's REAL counters, not
+            # the formatted strings.  ``total_bytes`` only — an
+            # estimate (``total_bytes_estimate``) is not a total and
+            # never becomes one here.
+            if progress_event is not None:
+                done = state.get("downloaded_bytes")
+                if isinstance(done, (int, float)):
+                    total_b = state.get("total_bytes")
+                    progress_event(
+                        int(done),
+                        int(total_b) if isinstance(total_b, (int, float))
+                        and total_b > 0 else None)
+            if progress_segments is not None:
+                frag_i = state.get("fragment_index")
+                frag_c = state.get("fragment_count")
+                if isinstance(frag_i, int) and isinstance(frag_c, int) \
+                        and frag_c > 0:
+                    progress_segments(frag_i, frag_c)
 
     # Always installed (not only when a progress callback was given):
     # the hook is also the cancellation checkpoint for this backend.
@@ -416,6 +447,7 @@ def _download_direct(
     target_dir: Path,
     progress: Callable[[str], None] | None,
     started: float,
+    progress_event: Callable[[int, int | None], None] | None = None,
 ) -> dict[str, Any]:
     """Plain HTTP download with resume — no site extraction."""
     from ..core.http import HttpClient, url_filename
@@ -428,6 +460,10 @@ def _download_direct(
             raise MediaError(CANCELLED_MESSAGE)
         if progress is not None and total:
             progress(f"{done * 100 // total}% ({done}/{total} bytes)")
+        if progress_event is not None:
+            # The client's real counters; a missing/zero total stays
+            # unknown (None), never a fabricated denominator.
+            progress_event(done, total if total else None)
 
     if _cancel_requested():
         raise MediaError(CANCELLED_MESSAGE)

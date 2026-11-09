@@ -502,6 +502,21 @@ def _proxy_env(proxy_url: str):
                 os.environ[k] = saved[k]
 
 
+def _accepts_progress(fn: Any) -> bool:
+    """True when *fn* can take a ``progress`` keyword — the real
+    kit downloader can; injected test doubles with the historical
+    two-argument shape keep being called exactly as before."""
+    try:
+        import inspect
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    if "progress" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD
+               for p in params.values())
+
+
 class MediaDownloader:
     """Four-stage download orchestrator.  ``download()`` never raises."""
 
@@ -688,6 +703,17 @@ class MediaDownloader:
         """Dispatch one chain stage by name (the chain's real stage
         vocabulary).  Used for the canonical order and for the
         learned-path-first attempt (Pass #87)."""
+        tracker = self._tracker()
+        if tracker is not None:
+            from ..core.progress_events import CONNECTING
+            count = getattr(self, "_chain_stage_count", 0)
+            if count > 0:
+                # A route switch is a new attempt of this source: the
+                # previous route's percentage never pretends to
+                # describe the new transfer.
+                tracker.begin_attempt(note=f"route: {stage}")
+            self._chain_stage_count = count + 1
+            tracker.set_stage(CONNECTING, note=f"via {stage}")
         if stage == "direct":
             return self._stage_direct(report, url, target_dir,
                                       audio_only, format_spec, timeout,
@@ -755,6 +781,10 @@ class MediaDownloader:
         teach the registry the rule that worked (Pass #87), then
         finish.  Bookkeeping is best-effort — a ledger failure never
         turns a real download into a reported failure."""
+        tracker = self._tracker()
+        if tracker is not None:
+            from ..core.progress_events import VERIFYING
+            tracker.set_stage(VERIFYING, note="checking the landed file")
         self._record_download_outcome(
             report, ok=True, latency_s=time.perf_counter() - started)
         self._learn_from_success(report, format_facts)
@@ -790,6 +820,20 @@ class MediaDownloader:
             return report
         target_dir = self._dest_dir(dest_dir)
         budget = {"deadline": started + min(timeout, self.stage_timeout * 3)}
+
+        # Measured progress (P1): the resolving stage covers link
+        # expansion, the descriptor gate and preflight.  When no
+        # caller already opened a source for this operation (the chat
+        # fall-through loop does, per candidate), this download IS the
+        # first source.  This layer never marks delivery — retrieval
+        # complete is not delivered.
+        self._chain_stage_count = 0
+        tracker = self._tracker()
+        if tracker is not None:
+            from ..core.progress_events import RESOLVING
+            if tracker.source_index == 0:
+                tracker.begin_source("")
+            tracker.set_stage(RESOLVING, note="resolving the source")
 
         _log.info("download start url=%s profile=%s audio_only=%s",
                   url, self.profile, audio_only)
@@ -961,9 +1005,12 @@ class MediaDownloader:
         """Current behavior, with retry + backoff on network failures."""
         from ..tools.media import download as direct_download
 
+        tracker = self._tracker()
         attempt = 0
         while attempt < max(1, self.direct_retries):
             attempt += 1
+            if attempt > 1 and tracker is not None:
+                tracker.begin_attempt(note="retrying the direct route")
             if time.perf_counter() > budget["deadline"]:
                 break
             t0 = time.perf_counter()
@@ -972,7 +1019,8 @@ class MediaDownloader:
                     url, target_dir, format_spec=format_spec,
                     audio_only=audio_only, timeout=timeout,
                     cookies_file=self._cookies_file(url),
-                    progress=self._job_progress("direct"))
+                    progress=self._job_progress("direct"),
+                    **self._progress_kwargs(tracker))
             except Exception as exc:  # noqa: BLE001
                 kind = classify_failure(exc)
                 lat = time.perf_counter() - t0
@@ -1043,7 +1091,15 @@ class MediaDownloader:
         dest = target_dir / _safe_name(url, audio_only)
         t0 = time.perf_counter()
         try:
-            result = self._kit().download(url, dest)
+            kit = self._kit()
+            tracker = self._tracker()
+            if tracker is not None and _accepts_progress(kit.download):
+                result = kit.download(
+                    url, dest,
+                    progress=lambda received, expected:
+                        tracker.report_bytes(received, expected))
+            else:
+                result = kit.download(url, dest)
         except Exception as exc:  # noqa: BLE001 - a stage reports, never raises
             result = None
             error = _err_text(exc)
@@ -1214,7 +1270,8 @@ class MediaDownloader:
                         url, target_dir, format_spec=format_spec,
                         audio_only=audio_only, timeout=timeout,
                         cookies_file=self._cookies_file(url),
-                        progress=self._job_progress("proxy"))
+                        progress=self._job_progress("proxy"),
+                        **self._progress_kwargs(self._tracker()))
             except Exception as exc:  # noqa: BLE001 — demote, don't die
                 kind = classify_failure(exc)
                 lat = time.perf_counter() - t0
@@ -1724,6 +1781,30 @@ class MediaDownloader:
             except Exception as e:  # progress is best-effort
                 record_failure("_cb", e)
         return _cb
+
+    @staticmethod
+    def _tracker() -> Any | None:
+        """The measured-progress tracker bound to this call, if any
+        (Play & Downloads P1 — ``core.progress_events``; unbound
+        downloads are exactly as before)."""
+        try:
+            from ..core.progress_events import current_tracker
+            return current_tracker()
+        except Exception as e:  # progress never breaks a download
+            record_failure("downloader._tracker", e)
+            return None
+
+    @staticmethod
+    def _progress_kwargs(tracker: Any | None) -> dict[str, Any]:
+        """Structured byte/segment callbacks for the tools-media
+        backends, fed from the bound tracker (empty when unbound)."""
+        if tracker is None:
+            return {}
+        return {
+            "progress_event": lambda done, total: tracker.report_bytes(
+                done, total),
+            "progress_segments": lambda d, t: tracker.report_segments(d, t),
+        }
 
     @staticmethod
     def _fill_success(report: DownloadReport,

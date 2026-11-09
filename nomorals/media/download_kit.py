@@ -434,6 +434,15 @@ class ResumeReport:
     sha256: str = ""
 
 
+def _call_progress(progress: Callable[[int, int | None], None],
+                   received: int, expected: int | None) -> None:
+    """Invoke a progress sink; a broken sink never kills a download."""
+    try:
+        progress(received, expected)
+    except Exception as e:  # noqa: BLE001 — reporting is not the payload
+        record_failure("ResumeDownloader.progress", e)
+
+
 class ResumeDownloader:
     """Resume with ETag / Last-Modified verification.
 
@@ -447,9 +456,19 @@ class ResumeDownloader:
 
     def __init__(self, *,
                  head: Callable[[str], dict[str, Any]] | None = None,
-                 get_range: Callable[..., bytes] | None = None) -> None:
+                 get_range: Callable[..., bytes] | None = None,
+                 get_range_stream: Callable[..., Any] | None = None) -> None:
         self._head = head or self._default_head
         self._get_range = get_range or self._default_get_range
+        # Streaming transport (Play & Downloads P1): yields the body in
+        # pieces so progress reports bytes AS THEY LAND.  An explicitly
+        # injected stream wins; a caller who injected only the legacy
+        # one-shot ``get_range`` keeps that exact behaviour (its bytes
+        # arrive as a single piece); everyone else gets the streaming
+        # urllib default below.
+        self._get_range_stream = get_range_stream
+        self._legacy_range_only = get_range is not None \
+            and get_range_stream is None
 
     # ── default transports (urllib) ──
     @staticmethod
@@ -477,9 +496,54 @@ class ResumeDownloader:
         with urllib.request.urlopen(req, timeout=60.0) as resp:
             return resp.read()
 
+    @staticmethod
+    def _default_get_range_stream(url: str, start: int, end: int | None,
+                                  headers: dict[str, str] | None = None):
+        """Streaming sibling of :meth:`_default_get_range`: same Range
+        contract, but the body is yielded in bounded pieces as it
+        arrives instead of one whole-body ``read()`` at the end — the
+        difference between measured progress and none."""
+        hdrs = {"User-Agent": "DevonBot/1.0"}
+        if start or end is not None:
+            if end is None:
+                hdrs["Range"] = f"bytes={start}-"
+            else:
+                hdrs["Range"] = f"bytes={start}-{end}"
+        hdrs.update(headers or {})
+        req = urllib.request.Request(url, headers=hdrs)
+        with urllib.request.urlopen(req, timeout=120.0) as resp:
+            while True:
+                chunk = resp.read(1 << 18)
+                if not chunk:
+                    break
+                yield chunk
+
+    def _iter_range(self, url: str, start: int):
+        """Yield the body from *start* in pieces, via the streaming
+        transport when one is in play, else the legacy one-shot."""
+        if self._get_range_stream is not None:
+            yield from self._get_range_stream(url, start, None)
+        elif self._legacy_range_only:
+            data = self._get_range(url, start, None)
+            if data:
+                yield data
+        else:
+            yield from self._default_get_range_stream(url, start, None)
+
     # ── main path ──
     def download(self, url: str, dest: str | Path,
-                 *, chunk_size: int = 1 << 20) -> ResumeReport:
+                 *, chunk_size: int = 1 << 20,
+                 progress: Callable[[int, int | None], None] | None = None
+                 ) -> ResumeReport:
+        """Fetch *url* to *dest*, resuming a validated partial.
+
+        ``progress`` (Play & Downloads P1) is called as each piece
+        lands with ``(bytes_on_disk, expected_total_or_None)`` — the
+        on-disk count includes any resumed prefix, so a percentage
+        derived from it describes the whole file, honestly.  The
+        validator contract is unchanged: a changed validator (or a
+        partial with no saved validators) discards the partial and
+        restarts from byte 0 — never a splice."""
         try:
             dest_p = Path(dest)
             dest_p.parent.mkdir(parents=True, exist_ok=True)
@@ -495,7 +559,8 @@ class ResumeDownloader:
                 total = int(head.get("content_length") or 0)
             except (TypeError, ValueError):
                 total = 0
-            partial = dest_p.read_bytes() if dest_p.is_file() else b""
+            expected = total or None
+            partial_size = dest_p.stat().st_size if dest_p.is_file() else 0
             saved: dict[str, Any] = {}
             if meta_p.is_file():
                 try:
@@ -503,52 +568,75 @@ class ResumeDownloader:
                 except Exception as e:
                     record_failure("ResumeDownloader.download:meta_read", e)
                     saved = {}
-            validators_changed = bool(partial) and bool(saved) and (
+            validators_changed = bool(partial_size) and bool(saved) and (
                 saved.get("etag") != validators["etag"]
                 or saved.get("last_modified") != validators["last_modified"])
             # No saved validators + a partial = cannot prove the partial
             # matches the current file → restart (never splice blind).
-            if partial and not saved:
+            if partial_size and not saved:
                 validators_changed = True
             report = ResumeReport(validators=validators)
             if validators_changed:
                 _log.info("resume: validators changed for %s — restarting, "
                           "not splicing", url[:80])
-                partial = b""
+                partial_size = 0
                 report.restarted = True
-            start = len(partial)
-            if total and start >= total and partial:
-                # Already complete — verify hash only if we stored one.
-                digest = hashlib.sha256(partial).hexdigest()
-                dest_p.write_bytes(partial)
+            start = partial_size
+            if total and start >= total and partial_size:
+                # Already complete — hash what is on disk.
+                digest = hashlib.sha256()
+                with dest_p.open("rb") as fh:
+                    for block in iter(lambda: fh.read(1 << 20), b""):
+                        digest.update(block)
+                if progress is not None:
+                    _call_progress(progress, partial_size, expected)
                 return ResumeReport(ok=True, path=str(dest_p),
-                                    size_bytes=len(partial), resumed=False,
-                                    validators=validators, sha256=digest)
+                                    size_bytes=partial_size, resumed=False,
+                                    validators=validators,
+                                    sha256=digest.hexdigest())
+            digest = hashlib.sha256()
+            if start:
+                # Seed the digest with the validated prefix so the
+                # final hash covers the whole file, not just the tail.
+                with dest_p.open("rb") as fh:
+                    for block in iter(lambda: fh.read(1 << 20), b""):
+                        digest.update(block)
+            on_disk = start
             try:
-                chunk = self._get_range(url, start, None)
+                with dest_p.open("ab" if start else "wb") as fh:
+                    for chunk in self._iter_range(url, start):
+                        if not chunk:
+                            continue
+                        fh.write(chunk)
+                        digest.update(chunk)
+                        on_disk += len(chunk)
+                        if progress is not None:
+                            _call_progress(progress, on_disk, expected)
             except Exception as exc:  # noqa: BLE001
-                # Save the partial + validators so the NEXT attempt can
-                # resume honestly.
+                # The bytes already on disk ARE the partial now — they
+                # stay, with the validators, so the NEXT attempt can
+                # resume honestly from exactly this point.  A failure
+                # to persist that resume state is recorded, never
+                # swallowed (the partial without its validators would
+                # be discarded as unprovable on the next attempt).
                 try:
-                    dest_p.write_bytes(partial)
-                    meta_p.write_text(json.dumps(validators), encoding="utf-8")
+                    meta_p.write_bytes(
+                        json.dumps(validators).encode("utf-8"))
                 except OSError as e:
                     record_failure("ResumeDownloader.download:partial_save", e)
                 return ResumeReport(error=f"fetch failed: {exc}",
                                     validators=validators,
-                                    size_bytes=len(partial))
-            data = partial + (chunk or b"")
-            dest_p.write_bytes(data)
+                                    size_bytes=on_disk)
             try:
                 meta_p.unlink(missing_ok=True)
             except OSError as e:
                 record_failure("ResumeDownloader.download:meta_unlink", e)
-            digest = hashlib.sha256(data).hexdigest()
             return ResumeReport(ok=True, path=str(dest_p),
-                                size_bytes=len(data),
+                                size_bytes=on_disk,
                                 resumed=start > 0 and not report.restarted,
                                 restarted=report.restarted,
-                                validators=validators, sha256=digest)
+                                validators=validators,
+                                sha256=digest.hexdigest())
         except Exception as exc:  # noqa: BLE001 — never raises
             return ResumeReport(error=f"resume download failed: {exc}")
 

@@ -768,6 +768,19 @@ class RuntimeMediaMixin:
                         search_q)["search"] or search_q
                 except Exception as e:
                     record_failure("runtime_media.RuntimeMediaMixin._control_play:599", e)
+                # Measured progress (P1): in chat, the search is the
+                # first stage of the operation the owner is about to
+                # watch — the tracker created here rides into the
+                # background job below, so the ack edits continue
+                # this same event stream end to end.
+                _play_tracker = None
+                if action == "play" and chat is not None:
+                    from ...core.ids import new_short_id
+                    from ...core.progress_events import SEARCHING, ProgressTracker
+                    _play_tracker = ProgressTracker(
+                        op_id=new_short_id("dl"), title=rest)
+                    _play_tracker.set_stage(
+                        SEARCHING, note="looking for the track")
                 resolution = SourceResolver(self.context).resolve(search_q)
                 if not resolution.ok:
                     # Step 6: never a dead end — tried + why + hint via
@@ -889,7 +902,8 @@ class RuntimeMediaMixin:
                         lambda: self._play_send_with_fallthrough(
                             engine, first_item, fallbacks, merged,
                             chat, match=(title_q, artist_q), query=rest),
-                        title=str(added[0].get("title") or "audio"))
+                        title=str(added[0].get("title") or "audio"),
+                        tracker=_play_tracker)
                 # The tried trail goes to the journal only
                 # (presentation law, 2026-11-05) — attempts record
                 # every strategy in order (failed + the winner), and
@@ -901,7 +915,7 @@ class RuntimeMediaMixin:
                         chat, chat_key, f"⏳ {play_title or 'audio'}",
                         lambda: self._play_send_in_chat_result(
                             engine, added[0], chat),
-                        title=play_title)
+                        title=play_title, tracker=_play_tracker)
                 if action == "play":
                     st = engine.play()
                     if st.get("status") == "playing":
@@ -1134,6 +1148,8 @@ class RuntimeMediaMixin:
         emoji = "🎵" if audio_only else "🎬"
         if chat is not None:
             try:
+                from ...core.progress_events import UPLOADING, emit_stage
+                emit_stage(UPLOADING, note="sending the file")
                 self.gateway.send_file(
                     chat.platform, f"{chat.platform}:{chat.chat_id}",
                     path, caption=f"{emoji} {title}"[:1024],
@@ -1732,7 +1748,8 @@ class RuntimeMediaMixin:
 
     def _play_download_bg(self, chat: Any, chat_key: str,
                           ack: str, produce: Any, *,
-                          on_sent: Any = None, title: str = "") -> str:
+                          on_sent: Any = None, title: str = "",
+                          tracker: Any = None) -> str:
         """Start a chat download+send as a background job behind ONE
         ack message, edited in place (presentation law, 2026-11-05).
 
@@ -1760,6 +1777,41 @@ class RuntimeMediaMixin:
         """
         from ...core.jobs import (
             current_job, report_progress, shared_registry)
+
+        # Measured progress (Play & Downloads P1): ONE tracker per
+        # download operation.  Its renders ride the EXISTING ack
+        # progress seam (adapter-throttled) and mirror into the job's
+        # progress line — no second progress surface.  The tracker's
+        # terminal state is recorded for other consumers but NOT
+        # rendered onto the ack: the outcome edit at the end of the
+        # body owns the ack's final state, promptly and exactly once.
+        if tracker is None:
+            from ...core.ids import new_short_id
+            from ...core.progress_events import ProgressTracker
+
+            tracker = ProgressTracker(
+                op_id=new_short_id("dl"), title=title or "")
+
+        def _render_progress(event: Any, _tracker: Any = tracker) -> None:
+            text = _tracker.render_text()
+            if event.terminal is None:
+                # The ack's own text already says "working": an edit
+                # carrying no stage and no measurement yet would only
+                # flash noise — and a job that fails before any stage
+                # must land as exactly ONE edit, the outcome.  A new
+                # source taking over IS news and renders at once.
+                snap = _tracker.snapshot()
+                if snap["stage"] or snap["bytes_received"] \
+                        or snap["source_index"] > 1:
+                    self._job_ack_progress(text)
+            try:
+                report_progress(text)
+            except Exception as e:  # noqa: BLE001 - a mirror, not a gate
+                record_failure(
+                    "runtime_media.RuntimeMediaMixin._play_download_bg"
+                    ".progress_mirror", e)
+
+        tracker.on_event = _render_progress
 
         # Duplicate guard: the same chat asking for the same title
         # while it is already downloading is told so in plain words —
@@ -1801,18 +1853,28 @@ class RuntimeMediaMixin:
         holder: dict[str, str] = {}
 
         def _body() -> dict[str, Any]:
+            from ...core.progress_events import (
+                reset_current_tracker,
+                set_current_tracker,
+            )
+
             token = _RUNNING_JOB_ACK.set(
                 (chat, ack_id) if ack_id else None)
+            ttoken = set_current_tracker(tracker)
             try:
                 report_progress("download started")
                 text, sent = produce()
             except Exception as exc:  # noqa: BLE001 - failure is data
+                tracker.finish(
+                    "failed",
+                    error=f"{type(exc).__name__}: {exc}"[:300])
                 self._play_dl_mark_finished(holder)
                 return {"ok": False, "delivered": False, "sent": False,
                         "title": title, "text": "", "ack_id": ack_id,
                         "error": f"{type(exc).__name__}: {exc}"[:300]}
             finally:
                 _RUNNING_JOB_ACK.reset(token)
+                reset_current_tracker(ttoken)
             if sent and on_sent is not None:
                 try:
                     on_sent()
@@ -1853,6 +1915,9 @@ class RuntimeMediaMixin:
                 delivered = True
             if sent:
                 self._celebrate_delivery(chat, chat_key, title)
+            # The operation's terminal truth for the progress stream:
+            # delivered only when the file actually went out.
+            tracker.finish("delivered" if sent else "failed")
             self._play_dl_mark_finished(holder)
             return {"ok": True, "delivered": delivered,
                     "sent": bool(sent), "title": title, "text": final,
@@ -1866,7 +1931,17 @@ class RuntimeMediaMixin:
                         "title": (title or "")[:80]})
         except Exception as e:
             record_failure("runtime_media.RuntimeMediaMixin._play_download_bg:1118", e)
-            text, _sent = produce()
+            from ...core.progress_events import (
+                reset_current_tracker,
+                set_current_tracker,
+            )
+
+            ttoken = set_current_tracker(tracker)
+            try:
+                text, _sent = produce()
+            finally:
+                reset_current_tracker(ttoken)
+            tracker.finish("delivered" if _sent else "failed")
             return str(text or "")
         holder["job_id"] = job.id
         self._play_dl_record_start(job.id, chat_key, title)
@@ -2211,6 +2286,8 @@ class RuntimeMediaMixin:
         send_path = self._delivery_path(path, title, artist)
         send_path = self._tag_delivery_copy(send_path, title, artist)
         try:
+            from ...core.progress_events import UPLOADING, emit_stage
+            emit_stage(UPLOADING, note="sending the file")
             res = self.gateway.send_file(
                 chat.platform, f"{chat.platform}:{chat.chat_id}",
                 send_path, caption=line[:1024],
@@ -2242,6 +2319,8 @@ class RuntimeMediaMixin:
         # background job; a no-op on the synchronous path.
         report_progress(
             f"downloading {item.get('title') or 'audio'}")
+        from ...core.progress_events import emit_source
+        emit_source(str(item.get("title") or "audio"))
         try:
             dl = engine.download(item)
         except Exception as exc:  # noqa: BLE001 - download() shouldn't raise, belt and braces
@@ -2265,6 +2344,8 @@ class RuntimeMediaMixin:
         # the line claims the track's identity, never a verification
         # the state doesn't support.  Surfaces that REPORT the
         # journey (the registry path) label the state explicitly.
+        from ...core.progress_events import VERIFYING, emit_stage
+        emit_stage(VERIFYING, note="checking the landed file")
         verify_state, verify_why = self._play_verify_full_track_state(
             path, item)
         if verify_state == "rejected":
@@ -2282,6 +2363,8 @@ class RuntimeMediaMixin:
         if note:
             line += f"\n{note}"
         try:
+            from ...core.progress_events import UPLOADING, emit_stage
+            emit_stage(UPLOADING, note="sending the file")
             res = self.gateway.send_file(
                 chat.platform, f"{chat.platform}:{chat.chat_id}",
                 send_path, caption=line[:1024], kind=_send_kind_for(send_path))
@@ -2920,6 +3003,11 @@ class RuntimeMediaMixin:
             self._job_ack_progress(
                 f"⏳ {title} — trying "
                 f"{name.removesuffix('-search')}…")
+            # A new source takes over the measurement (P1): attempt
+            # restarts at 1 and the previous source's percentage is
+            # gone — it never described this transfer.
+            from ...core.progress_events import emit_source
+            emit_source(name)
             try:
                 dl = engine.download(item)
             except Exception as exc:  # noqa: BLE001
@@ -2933,6 +3021,8 @@ class RuntimeMediaMixin:
                 # Three-valued verdict (doc 7): only REJECTED fails
                 # the route; UNVERIFIED delivers under the plain
                 # identity line, which claims no verification.
+                from ...core.progress_events import VERIFYING, emit_stage
+                emit_stage(VERIFYING, note="checking the landed file")
                 verify_state, verify_why = \
                     self._play_verify_full_track_state(path, item)
                 if verify_state == "rejected":
@@ -2987,6 +3077,8 @@ class RuntimeMediaMixin:
                 if note:
                     line += f"\n({note})"
                 try:
+                    from ...core.progress_events import UPLOADING, emit_stage
+                    emit_stage(UPLOADING, note="sending the file")
                     self.gateway.send_file(
                         chat.platform, f"{chat.platform}:{chat.chat_id}",
                         send_path, caption=line[:1024], kind=_send_kind_for(send_path))
