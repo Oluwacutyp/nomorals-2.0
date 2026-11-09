@@ -37,6 +37,9 @@ __all__ = [
     "DraftQueue",
     "detect_explicit_post",
     "execute_post",
+    "post_scheduled_draft",
+    "make_draft_post_fn",
+    "wire_draft_poster",
     "propose_post",
     "parse_post_time",
     "EXPLICIT_POST_PATTERNS",
@@ -572,6 +575,94 @@ def execute_post(
     return outcome
 
 
+# ── the scheduled-post poster (WS3 P6 remainder) ─────────────────────────────
+#
+# schedule_post's fire path used to resolve its poster from a
+# ``_draft_post_fn`` attribute on the scheduler object — an
+# attribute NOTHING in the repository ever set (present in exactly
+# one commit: its own introduction). A scheduled draft therefore
+# reached its hour, the fire ran, the poster lookup found nothing,
+# and the draft silently stayed scheduled forever. The poster is
+# now a module-level wire the composition root installs at boot
+# (:func:`wire_draft_poster`), built from the live context
+# (:func:`make_draft_post_fn`), and a scheduled fire with NO
+# poster wired fails LOUDLY — the draft stays scheduled and the
+# miss is on the record — instead of evaporating.
+
+_DEFAULT_DRAFT_POST_FN: Callable[[str], Any] | None = None
+
+
+def post_scheduled_draft(
+    draft_id: str,
+    *,
+    queue: DraftQueue | None = None,
+    manager: Any = None,
+) -> dict[str, Any]:
+    """Post one due scheduled draft — the fire-time action.
+
+    A draft in POSTED is ``already`` (a duplicate fire is a no-op);
+    SCHEDULED or APPROVED drafts execute through the same
+    :func:`execute_post` the review surface uses; any other state
+    is named, never forced. With no publisher wired the result
+    says so in words — never a silent pass.
+    """
+    q = queue or DraftQueue()
+    try:
+        draft = q.get(draft_id)
+    finally:
+        if queue is None:
+            q.close()
+    if draft is None:
+        return {"ok": False, "error": f"draft {draft_id} is gone"}
+    if draft.status == POSTED:
+        return {"ok": True, "already": True, "posted": 0, "failed": 0}
+    if draft.status not in (SCHEDULED, APPROVED):
+        return {"ok": False,
+                "error": f"draft is {draft.status}, not scheduled —"
+                         " it was never armed to post"}
+    if manager is None:
+        return {"ok": False,
+                "error": "no publisher wired — wire_draft_poster("
+                         "context) at boot is the missing wire"}
+    outcome = execute_post(
+        manager, draft.content,
+        platforms=draft.platforms or None, draft_id=draft_id, queue=q)
+    posted = len(getattr(outcome, "posted", []) or [])
+    failed = len(getattr(outcome, "failed", []) or [])
+    return {"ok": posted > 0, "posted": posted, "failed": failed,
+            "draft_id": draft_id}
+
+
+def make_draft_post_fn(context: Any) -> Callable[[str], Any]:
+    """Build the real poster for a context: a SocialManager over
+    the context's accounts, posting through the default queue.
+    The manager is built lazily at fire time (the accounts and
+    registry may not exist at wire time)."""
+    from .manager import SocialManager
+
+    def _post(draft_id: str) -> Any:
+        q = DraftQueue()
+        try:
+            manager = SocialManager(context, queue=q)
+            manager.register_builtins()
+            return post_scheduled_draft(draft_id, queue=q,
+                                        manager=manager)
+        finally:
+            q.close()
+
+    return _post
+
+
+def wire_draft_poster(context: Any) -> bool:
+    """Install the module-level scheduled-draft poster from a
+    context. Called by the composition root at boot. Returns True
+    — the wire is a factory, not a live check; the poster's own
+    failures surface at fire time with their reasons."""
+    global _DEFAULT_DRAFT_POST_FN
+    _DEFAULT_DRAFT_POST_FN = make_draft_post_fn(context)
+    return True
+
+
 def schedule_post(
     scheduler: Any,
     queue: DraftQueue,
@@ -582,14 +673,37 @@ def schedule_post(
 ) -> Any:
     """Schedule a draft via the scheduler. Auto-posts at ``when_ts`` with
     zero further interaction. Registers the ``social.post_draft`` action
-    handler if the scheduler supports it."""
-    draft = queue.schedule(draft_id, when_ts)
+    handler if the scheduler supports it.
 
-    def _fire(parameters: dict[str, Any]) -> None:
-        # Resolved lazily at fire time so the app wires its own manager.
+    A scheduler without ``schedule_once`` is refused BEFORE the
+    draft's state moves — scheduling is either real (armed to
+    fire) or it does not happen; the durable runtime scheduler
+    does not offer schedule_once, and its drafts stay in review,
+    which is the correct posture for them."""
+    if not hasattr(scheduler, "schedule_once"):
+        raise RuntimeError("scheduler does not support schedule_once")
+    queue.schedule(draft_id, when_ts)
+
+    def _fire(parameters: dict[str, Any]) -> Any:
+        # Resolve the poster at fire time: a per-scheduler override
+        # first (tests, alternate stacks), then the module-level
+        # wire the composition root installed. No poster anywhere
+        # is a LOUD failure now — the old shape silently skipped
+        # the post and the draft hung scheduled forever.
         fire = getattr(scheduler, "_draft_post_fn", None)
-        if callable(fire):
-            fire(parameters.get("draft_id", draft_id))
+        if not callable(fire):
+            fire = _DEFAULT_DRAFT_POST_FN
+        if not callable(fire):
+            _log.warning(
+                "scheduled draft %s fired with no poster wired —"
+                " wire_draft_poster(context) at boot is the"
+                " missing wire; the draft stays scheduled",
+                parameters.get("draft_id", draft_id))
+            return {"ok": False,
+                    "error": "no draft poster wired —"
+                             " wire_draft_poster(context) at boot"
+                             " is the missing wire"}
+        return fire(parameters.get("draft_id", draft_id))
 
     if hasattr(scheduler, "register_action"):
         try:
@@ -597,20 +711,18 @@ def schedule_post(
         except Exception:  # noqa: BLE001
             _log.debug("register_action failed", exc_info=True)
     task_id = f"post-draft-{draft_id}"
-    if hasattr(scheduler, "schedule_once"):
-        import asyncio
-        import inspect
-        coro = scheduler.schedule_once(task_id, when_ts, "social.post_draft",
-                                       {"draft_id": draft_id,
-                                        "platforms": platforms or []})
-        if inspect.isawaitable(coro):
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
-                asyncio.run(coro)
-                coro = None
-        return coro
-    raise RuntimeError("scheduler does not support schedule_once")
+    import asyncio
+    import inspect
+    coro = scheduler.schedule_once(task_id, when_ts, "social.post_draft",
+                                   {"draft_id": draft_id,
+                                    "platforms": platforms or []})
+    if inspect.isawaitable(coro):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(coro)
+            coro = None
+    return coro
 
 
 def handle_draft_callback(

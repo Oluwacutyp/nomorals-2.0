@@ -7,6 +7,7 @@
 
 - `accountable-delegation` — Accountable delegation — contracts, claims, fencing: How work is delegated so it can be trusted: work contracts, independent verification, a claim ledger, revision fencing. (topics: delegation, contracts, verification, claims, specialists)
 - `coding-loop` — The coding loop — inspect, change, prove: How code changes are made in this repo: read first, smallest real change, tests as proof. (topics: coding, editing, tests, verification)
+- `content-cell` — The content delivery cell — research, draft, fact-check, deliver, receipt: Every cooperative content job runs as one delegation contract — researcher, drafter, skeptic, verifier, delivery steward — with a readable receipt per piece. (topics: content, drafts, shorts, weekly, publishing, receipts, series, calendar)
 - `failure-triage` — Failure triage — evidence before verdicts: How failures are diagnosed: read the real record, suspect the environment first, never guess a cause. (topics: debugging, failures, triage, incidents)
 ## browser
 

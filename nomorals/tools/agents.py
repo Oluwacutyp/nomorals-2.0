@@ -72,6 +72,7 @@ AGENT_TOOL_MODULES = (
     "reverse",
     "router_select",
     "search.engine",
+    "shorts_publisher",
     "simulation",
     "skill_canary",
     "skill_evolution",

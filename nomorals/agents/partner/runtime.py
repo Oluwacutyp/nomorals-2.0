@@ -2887,6 +2887,19 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("exploration jobs not registered: %s",
                                  exc)
+                # Shorts publisher (WS3 P6): the contentops
+                # calendar's due posts finally fire — every 30
+                # minutes the sweep renders and delivers them
+                # through the factory's publishers, as a delivery
+                # cell. Routine: outcomes live on the calendar, the
+                # publish ledger and /calendar, not job alerts.
+                try:
+                    from ..shorts_publisher import (
+                        ensure_shorts_publisher_job)
+                    ensure_shorts_publisher_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("shorts publisher job not registered:"
+                                 " %s", exc)
                 # Price sources: the quote-provider health loop
                 # (every 6h — one bounded real quote probe per
                 # keyless provider; keyed providers never probed;
@@ -7556,6 +7569,9 @@ class PartnerRuntime(
         if kind == "explore":
             return self._control_explore(command.tail or arg,
                                          chat_key=chat_key)
+        if kind == "calendar":
+            return self._control_calendar(command.tail or arg,
+                                          chat_key=chat_key)
         if kind == "api":
             return self._control_api(command.tail or arg)
         if kind == "connectors":

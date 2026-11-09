@@ -31,6 +31,7 @@ __all__ = [
     "PipelineResult",
     "optimal_windows",
     "weekly_content",
+    "set_cell_factory",
     "install_weekly_content_job",
     "FALLBACK_WINDOWS",
     "CONTENT_MIX",
@@ -66,6 +67,25 @@ DEFAULT_RESEARCH_BUDGET_USD = 1.0
 DEFAULT_PLATFORMS: tuple[str, ...] = (
     "linkedin", "x", "telegram", "whatsapp-status")
 
+#: The delivery-cell factory (WS3 P6). The composition root
+#: (``agents/context.py``) installs a factory that builds a content
+#: delivery cell (``agents/content_cell.py`` — an L5 organ this L4
+#: module may not import) for a weekly run. Without a factory (CLI,
+#: tests) the pipeline runs exactly as it always has — research →
+#: drafts → review queue, no contract — and with one, the run is a
+#: contract: findings enter a claim ledger with their provenance,
+#: a skeptic gate keeps untraced numbers out of the queue, and
+#: every queued draft gets a receipt (contract → draft → post →
+#: metrics). The factory is called ``factory(db, niche)`` and
+#: returns a cell object or None.
+_CELL_FACTORY: Callable[..., Any] | None = None
+
+
+def set_cell_factory(factory: Callable[..., Any] | None) -> None:
+    """Install (or clear, with None) the weekly run's cell factory."""
+    global _CELL_FACTORY
+    _CELL_FACTORY = factory
+
 
 @dataclass
 class PipelineDraft:
@@ -99,6 +119,12 @@ class PipelineResult:
     windows_from_data: bool = False
     message: str = ""
     seconds: float = 0.0
+    #: WS3 P6 delivery-cell record: the run's contract ("" when no
+    #: cell was wired), the drafts the skeptic gate blocked (each
+    #: {"content", "reason"}), and one receipt per queued draft.
+    contract_id: str = ""
+    blocked: list[dict[str, Any]] = field(default_factory=list)
+    receipts: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ── 1. optimal windows from real engagement data ────────────────────────────
@@ -442,6 +468,7 @@ def weekly_content(
     min_drafts: int = 5,
     max_drafts: int = 7,
     weak_threshold: float = 40.0,
+    cell: Any = None,
 ) -> PipelineResult:
     """Run the full loop: research → draft → score → queue → schedule.
 
@@ -469,6 +496,31 @@ def weekly_content(
     found = list(findings) if findings is not None else []
     if findings is None and rctx is not None:
         found = _default_research(niche, rctx, budget_usd=research_budget_usd)
+
+    # Delivery cell (WS3 P6): with a cell wired — injected here, or
+    # built by the composition-installed factory when a database is
+    # present — the run is a contract. Findings enter the claim
+    # ledger with their provenance before anything is drafted from
+    # them. A cell failure degrades that step, never the batch.
+    run_cell = cell
+    if run_cell is None and db is not None and _CELL_FACTORY is not None:
+        try:
+            run_cell = _CELL_FACTORY(db, niche)
+        except Exception as exc:  # noqa: BLE001 - cell never gates
+            _log.warning("content cell factory failed: %s", exc)
+            run_cell = None
+
+    def _cell_do(fn: Callable[[Any], Any], default: Any = None) -> Any:
+        if run_cell is None:
+            return default
+        try:
+            return fn(run_cell)
+        except Exception as exc:  # noqa: BLE001 - degrade, not die
+            _log.warning("content cell step failed: %s", exc)
+            return default
+
+    if run_cell is not None:
+        _cell_do(lambda c: (c.begin(), c.research(found)))
 
     # Voice profile.
     profile = voice_profile
@@ -505,6 +557,29 @@ def weekly_content(
         if found and idx < len(found):
             d.finding_title = str(found[idx].get("title", ""))
             d.finding_url = str(found[idx].get("url", ""))
+
+    # Skeptic gate (WS3 P6): with a cell wired, every drafted text
+    # is challenged against the run's evidence base before it can
+    # queue — a number the research never stated blocks the draft.
+    # Blocked drafts are recorded on the result, never silently
+    # dropped and never queued.
+    blocked: list[dict[str, Any]] = []
+    if run_cell is not None:
+        basis = "\n".join(
+            f"{f.get('title') or ''}\n{f.get('snippet') or ''}\n"
+            f"{f.get('url') or ''}" for f in found)
+        survivors: list[PipelineDraft] = []
+        for d in scored:
+            objection = _cell_do(
+                lambda c, d=d: c.review(
+                    d.content, basis=basis,
+                    fit=f"virality {d.virality:.0f} ({d.virality_grade})"))
+            if objection:
+                blocked.append({"content": d.content,
+                                "reason": str(objection)})
+            else:
+                survivors.append(d)
+        scored = survivors
 
     # Optimal windows from real engagement data.
     windows: list[datetime] = []
@@ -543,9 +618,30 @@ def weekly_content(
             d.platform_texts = {
                 p: adapt_tone(d.content, p, llm_fn=llm_fn)
                 for p in fan_platforms}
+            if run_cell is not None:
+                # The skeptic gate covers the text that actually
+                # QUEUES (WS3 P6): adapt_tone may rewrite through
+                # the model, so each platform text is challenged
+                # on its own before it can become a draft. A
+                # blocked platform text never queues; the block is
+                # recorded beside the source-level ones.
+                kept_texts: dict[str, str] = {}
+                for p, text_p in d.platform_texts.items():
+                    fit_text = (f"virality {d.virality:.0f}"
+                                f" ({d.virality_grade}) · {p}")
+                    objection = _cell_do(
+                        lambda c, t=text_p, f=fit_text: c.review(
+                            t, basis=basis, fit=f))
+                    if objection:
+                        blocked.append({
+                            "content": text_p, "platform": p,
+                            "reason": str(objection)})
+                    else:
+                        kept_texts[p] = text_p
+                d.platform_texts = kept_texts
             group = "ws3fan:" + hashlib.sha256(
                 d.content.encode("utf-8")).hexdigest()[:12]
-            for p in fan_platforms:
+            for p in list(d.platform_texts):
                 draft = q.create_draft(
                     d.platform_texts[p], platforms=[p],
                     metadata={"niche": niche,
@@ -576,11 +672,40 @@ def weekly_content(
             _log.warning("pipeline draft %d failed: %s", i, exc)
     # ═══ END WS3 P3 FAN-OUT REGION ═══
 
+    # Delivery steward's closing record (WS3 P6): one receipt per
+    # queued draft, the delivery claim, sign-off + completion — the
+    # chain contract → draft ids → post ids → metric rows, readable
+    # per piece through agents/content_cell.receipt_chain.
+    contract_id = ""
+    receipts: list[dict[str, Any]] = []
+    cell_note = ""
+    if run_cell is not None:
+        pieces: list[dict[str, Any]] = []
+        for d in scored:
+            for p, did in (d.draft_ids or {}).items():
+                pieces.append({
+                    "platform": p, "draft_id": did,
+                    "text": d.platform_texts.get(p, d.content)})
+        outcome = _cell_do(lambda c: c.landed(pieces)) or {}
+        contract_id = str(
+            outcome.get("contract_id")
+            or getattr(run_cell, "contract_id", "") or "")
+        receipts = list(outcome.get("receipts") or [])
+        cell_note = str(outcome.get("note") or "")
+
     message = _batch_message(niche, scored, windows, windows_from_data)
+    if blocked:
+        message += (
+            f"\n\n🚫 {len(blocked)} draft(s) blocked by the"
+            " fact-check — they stated numbers this week's research"
+            " never gave. They were not queued.")
+    if cell_note:
+        message += f"\n🧾 {cell_note}"
     return PipelineResult(
         niche=niche, findings=found, drafts=scored, windows=windows,
         windows_from_data=windows_from_data, message=message,
-        seconds=time.perf_counter() - started)
+        seconds=time.perf_counter() - started,
+        contract_id=contract_id, blocked=blocked, receipts=receipts)
 
 
 class _NullDB:

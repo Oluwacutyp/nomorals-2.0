@@ -1912,6 +1912,189 @@ class RuntimeSystemMixin:
         return ("usage: /day [show] | tell <text> | yesterday |"
                 " make | skip | unskip | export")
 
+    # ── content calendar: /calendar ─────────────────────────────────────
+    def _control_calendar(self, tail: str, chat_key: str = "") -> Any:
+        """/calendar — the unified content calendar + series (WS3 P6).
+
+        One board: drafts awaiting a decision, the forward timeline
+        (scheduled drafts + due shorts + scheduled posts together)
+        and the series — a series is a named, ordered run of pieces
+        (a campaign is a series with an objective). Pieces attach by
+        the numbers the boards show; internal ids never print.
+        Owner-only via CONTROL_COMMANDS, like /drafts and /day.
+        """
+        from ...social.drafts import reviewable_drafts
+        from ...social.series import (
+            KIND_DRAFT, KIND_POST, KIND_SHORT, SeriesStore,
+            render_calendar, stamp_draft)
+
+        db = self.context.db
+        queue = self._draft_queue()
+        store = SeriesStore(db)
+
+        def _shorts() -> list:
+            # The planned shorts, read lazily and contained — a
+            # broken calendar file never breaks the board.
+            try:
+                from ...media.contentops.pipeline import ShortPipeline
+
+                return ShortPipeline().calendar.list()
+            except Exception:  # noqa: BLE001
+                return []
+
+        def _series_named(name: str):
+            for s in store.list_series():
+                if s["name"].lower() == name.strip().lower():
+                    return s
+            return None
+
+        try:
+            text = (tail or "").strip()
+            low = text.lower()
+            if not text or low == "list":
+                return render_calendar(db, queue, shorts=_shorts(),
+                                       store=store)
+            if low == "series":
+                series = store.list_series()
+                if not series:
+                    return ("no series yet — start one:"
+                            " /calendar new <name> [| <objective>]")
+                lines = ["📚 **your series**", ""]
+                for s in series:
+                    members = store.members(s["id"])
+                    obj = (f" — 🎯 {s['objective']}"
+                           if s.get("objective") else "")
+                    lines.append(
+                        f"  • **{s['name']}**{obj} —"
+                        f" {len(members)} piece(s)")
+                return "\n".join(lines)
+            if low.startswith("series "):
+                name = text[len("series "):].strip()
+                s = _series_named(name)
+                if s is None:
+                    return f"no series named {name!r}."
+                members = store.members(s["id"])
+                lines = [f"📚 **{s['name']}**"
+                         + (f" — 🎯 {s['objective']}"
+                            if s.get("objective") else "")]
+                if not members:
+                    lines.append("  (no pieces yet — attach with"
+                                 " /calendar add)")
+                for i, m in enumerate(members, 1):
+                    label = self._calendar_piece_label(
+                        m, queue=queue, shorts=_shorts(), db=db)
+                    lines.append(f"  {i}. {label}")
+                return "\n".join(lines)
+            if low.startswith("new "):
+                body = text[len("new "):].strip()
+                name, _, objective = body.partition("|")
+                name = name.strip()
+                if not name:
+                    return ("usage: /calendar new <name>"
+                            " [| <objective>]")
+                try:
+                    s = store.create_series(
+                        name, objective=objective.strip())
+                except ValueError as exc:
+                    return str(exc)
+                kind_word = ("campaign" if s["objective"]
+                             else "series")
+                return (f"📚 {kind_word} **{s['name']}** started"
+                        + (f" — 🎯 {s['objective']}"
+                           if s["objective"] else "")
+                        + "\nattach pieces: /calendar add"
+                          f" {s['name']} draft|short|post <n>")
+            if low.startswith("add "):
+                parts = text.split()
+                # add <series words…> <kind> <n> — the kind is the
+                # second-to-last token, the number the last.
+                if len(parts) < 4:
+                    return ("usage: /calendar add <series>"
+                            " draft|short|post <n>")
+                kind_word = parts[-2].lower()
+                num_word = parts[-1]
+                name = " ".join(parts[1:-2])
+                s = _series_named(name)
+                if s is None:
+                    return f"no series named {name!r}."
+                if not num_word.isdigit():
+                    return "the piece number must be a number — the"
+                    " boards show them."
+                n = int(num_word)
+                if kind_word == "draft":
+                    waiting = reviewable_drafts(queue)
+                    if not 1 <= n <= len(waiting):
+                        return (f"there are {len(waiting)} draft(s)"
+                                " on the board — pick one of those"
+                                " numbers (see /drafts).")
+                    draft = waiting[n - 1]
+                    store.attach(s["id"], KIND_DRAFT, draft.id)
+                    stamp_draft(queue, draft, s["name"])
+                    preview = " ".join(draft.content.split())[:60]
+                    return (f"📚 added draft #{n} to"
+                            f" **{s['name']}**: {preview}")
+                if kind_word == "short":
+                    shorts = _shorts()
+                    if not 1 <= n <= len(shorts):
+                        return (f"there are {len(shorts)} planned"
+                                " short(s) — pick one of those"
+                                " numbers (see /shorts calendar).")
+                    post = shorts[n - 1]
+                    store.attach(s["id"], KIND_SHORT, post.id)
+                    return (f"📚 added short #{n} to"
+                            f" **{s['name']}**: {post.topic}")
+                if kind_word == "post":
+                    rows = db.query(
+                        "SELECT id, platform, content FROM"
+                        " social_posts WHERE status = 'scheduled'"
+                        " ORDER BY scheduled_at LIMIT 20")
+                    if not 1 <= n <= len(rows):
+                        return (f"there are {len(rows)} scheduled"
+                                " post(s) — see /calendar for the"
+                                " timeline.")
+                    row = rows[n - 1]
+                    store.attach(s["id"], KIND_POST, str(row["id"]))
+                    preview = " ".join(
+                        str(row["content"]).split())[:60]
+                    return (f"📚 added scheduled post #{n} to"
+                            f" **{s['name']}**:"
+                            f" [{row['platform']}] {preview}")
+                return ("kind must be draft, short or post:"
+                        " /calendar add <series> draft|short|post <n>")
+            return ("usage: /calendar [list] | series [<name>] |"
+                    " new <name> [| <objective>] |"
+                    " add <series> draft|short|post <n>")
+        finally:
+            queue.close()
+
+    def _calendar_piece_label(self, member: dict, *, queue: Any,
+                              shorts: list, db: Any) -> str:
+        """One member of a series, named by what it IS — never by
+        its internal id. A piece that no longer exists is named
+        honestly as gone."""
+        kind, ref = member["kind"], member["ref"]
+        if kind == "draft":
+            draft = queue.get(ref)
+            if draft is None:
+                return "📝 draft — gone"
+            preview = " ".join(draft.content.split())[:60]
+            return f"📝 draft [{draft.status}] — {preview}"
+        if kind == "short":
+            for p in shorts:
+                if p.id == ref:
+                    return f"🎬 short [{p.status}] — {p.topic}"
+            return "🎬 short — gone"
+        if kind == "post":
+            rows = db.query(
+                "SELECT platform, content, status FROM social_posts"
+                " WHERE id = ?", (ref,))
+            if not rows:
+                return "📤 post — gone"
+            r = rows[0]
+            preview = " ".join(str(r["content"]).split())[:60]
+            return f"📤 {r['platform']} [{r['status']}] — {preview}"
+        return f"{kind} — gone"
+
     # ── api connectors: /api ─────────────────────────────────────────────────
     def _control_api(self, tail: str) -> str:
         parts = (tail or "").split(None, 1)

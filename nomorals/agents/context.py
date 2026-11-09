@@ -439,6 +439,25 @@ def build_context(
     except Exception as exc:  # noqa: BLE001 — social wiring is optional
         _log.debug("linkedin social adapter not wired: %s", exc)
 
+    # Content cell wires (WS3 P6): the weekly pipeline (L4) runs its
+    # drafting through the delivery cell (agents/content_cell.py,
+    # L5) — the composition root installs the cell factory here, the
+    # same inversion as the factories above — and the scheduled-
+    # draft poster finally gets its real wire (social/drafts.py's
+    # fire path resolved a hook nothing set for its whole life).
+    # Best-effort: unwired, the pipeline runs exactly as before and
+    # a scheduled fire fails loudly naming this wire.
+    try:
+        from ..social.content_pipeline import (
+            set_cell_factory as _set_cell_factory)
+        from ..social.drafts import wire_draft_poster as _wire_poster
+        from .content_cell import make_weekly_cell as _make_weekly_cell
+
+        _set_cell_factory(_make_weekly_cell)
+        _wire_poster(context)
+    except Exception as exc:  # noqa: BLE001 — cell wiring is optional
+        _log.debug("content cell not wired: %s", exc)
+
     if db_recovered:
         # Surfaced in status/diagnostics: the owner should know their data
         # was quarantined, and where the old file went.
