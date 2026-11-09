@@ -302,6 +302,55 @@ def test_page_renders_the_pool_and_round_trips_a_toggle(tmp_path):
         api.close()
 
 
+def test_page_wears_the_absorbed_presentation(tmp_path):
+    """Design absorption (Uiverse kit + Magic UI recipes, vanilla):
+    glass tiles, state-wired loaders, switch toggles on the same
+    form, the border beam on the primary card, ticker-hooked
+    counts and the flash as a toast — all in the served HTML."""
+    api = StubAPI()
+    page = PageServer(api.port, tmp_path)
+    try:
+        cookie = _login(page)
+        status, _, html = page.request("GET", "/", cookie=cookie)
+        assert status == 200
+        # Glass account tiles with a blur-fade stagger index.
+        assert 'class="card" data-pair-state="waiting"' in html
+        assert 'style="--i:0"' in html
+        assert "backdrop-filter:blur(10px)" in html
+        # The canned account is mid-pairing with a live code: the
+        # waiting loader rides it, worded for the phone step.
+        assert 'class="loader"' in html
+        assert "waiting for this code to be typed on the phone" in html
+        # Toggles are real switches (role=switch, state as
+        # aria-checked) submitting the page's existing toggle form.
+        assert 'class="switch" role="switch" aria-checked="true"' in html
+        assert 'class="switch" role="switch" aria-checked="false"' in html
+        # The border beam accents the one primary card only.
+        assert '<fieldset class="beam">' in html
+        assert "@keyframes beamspin" in html
+        # Counts carry the ticker's data hooks; values unchanged.
+        assert 'data-registered="1"' in html
+        assert 'data-connected="1"' in html
+        assert 'data-dropped="0"' in html
+
+        # A landed action's flash renders as a toast.
+        csrf = _csrf(html)
+        status, headers, _ = page.request(
+            "POST", "/action", cookie=cookie,
+            form={"csrf": csrf, "action": "toggle",
+                  "id": "whatsapp:2348012345678",
+                  "name": "view_once", "on": "1"})
+        assert status == 302
+        status, _, html = page.request("GET", headers["Location"],
+                                       cookie=cookie)
+        assert status == 200
+        assert 'class="toast ok"' in html
+        assert "view_once on for whatsapp:2348012345678" in html
+    finally:
+        page.close()
+        api.close()
+
+
 def test_page_without_a_gate_token_refuses_everything(tmp_path):
     api = StubAPI()
     page = PageServer(api.port, tmp_path, page_token="")
