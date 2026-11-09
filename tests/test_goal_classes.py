@@ -304,8 +304,11 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             "finance",
             lambda db_, g, *, now=None: ClassProgress(
                 percent=80.0, basis="measured", source="ledger"))
-        health_goal = await gt.create(UID, "Run", goal_class="health")
-        reading = goal_progress(db, health_goal)
+        # The probe class is `general`: since WS2 P6 every other
+        # class carries a real provider, and general is manual by
+        # design — a finance provider must never leak into it.
+        other_goal = await gt.create(UID, "Run", goal_class="general")
+        reading = goal_progress(db, other_goal)
         self.assertEqual(reading.basis, "self-reported")
 
     def test_register_provider_validates(self):

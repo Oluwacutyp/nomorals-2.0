@@ -1,9 +1,10 @@
-"""Measured-progress providers for goal classes (WS2 P3 + P4 + P5).
+"""Measured-progress providers for goal classes (WS2 P3–P6).
 
 P1 shipped the provider registry empty by design
 (:mod:`nomorals.goals.classes`); this module is where the real
 providers land — **finance** and **trading** (P3), **careers**
-(P4), **productivity** and **interests** (P5) — and
+(P4), **productivity** and **interests** (P5), **health**,
+**learning**, **build** and **relationships** (P6) — and
 :func:`register_providers` wires them into the registry.  The wiring
 runs when the goals package loads (see the module-end registration
 at the bottom of :mod:`nomorals.goals`, the ``agents/goals.py``
@@ -13,7 +14,7 @@ classes from their real stores with zero surface changes: the P2
 board/progress/brain renders read through
 ``GoalTracker.class_progress``, which consults the registry.
 
-Both providers are read-only and failure-contained: any store
+The providers are read-only and failure-contained: any store
 problem (missing file, corrupt bytes, unreadable home) is logged
 with the goal named and answered ``None`` — the goal falls back to
 its self-reported % and no board ever breaks on a progress reading.
@@ -72,6 +73,43 @@ the link rides the fields each store already owns:
   beats in that profile (see :func:`register_interest_beats`) —
   the census's settled behaviour change: a watch that watches
   nothing is a label, not a class.
+* health: the health organ is L5 (it imports agents), above
+  goals' L4, so — the interests pattern — the provider reads its
+  store directly: the ``health_events`` table of the timeline
+  database (:mod:`nomorals.health.timeline`) at the settings home,
+  opened read-only via sqlite3.  The timeline is the owner's one
+  health record, so there is no per-goal link: the goal's window
+  (its own creation) is the scope, exactly the productivity
+  stance.  The table/column names and event vocabulary here are
+  a mirror of the timeline's DDL, pinned against the real store
+  by the P6 suite seeding through ``HealthTimeline`` itself.
+* learning: the tutor's persisted session files
+  (``<home>/learn/sessions/*.json``, the files
+  :meth:`nomorals.learn.tutor.TutorSession.save` writes).  Scope
+  is a ``learn:<topic>`` tag, else the goal's title matching a
+  session topic exactly after normalisation (the P3 finance
+  name-match rule — deterministic, never fuzzy).  Each file's
+  ``mastery`` payload is read with ``MasteryModel.bkt()``
+  semantics: a skill's P(knows) is its ``bkt`` entry, or the BKT
+  prior for a skill the session named but never observed.  The
+  prior is a local mirror of ``BKT_DEFAULTS["p_init"]``, pinned
+  against the real constant by the P6 suite.
+* build: execution records the tracker ecosystem itself keeps.
+  An explicit ``agent-goal:<id>`` tag links the goal to one of
+  the brain's agent goals in the SAME context database (the
+  tracker and ``agents/goals.py`` share ``context.db``) and
+  measures its step table; a present-but-stale tag measures
+  nothing.  Otherwise the goal's own ``subgoals`` rows in the
+  tracker store are the steps.  No other link exists on a tracker
+  goal today — there is no mission foreign key to read, and none
+  is invented here.
+* relationships: the commitments ledger again, read from the
+  other side — owner promises TO one person.  Scope is a
+  ``person:<name>`` tag, else the goal's title matching a
+  promisee exactly after normalisation (unique match only, the
+  finance rule).  The people index/memory is NOT a measure
+  source: no kept-promise records live there; the ledger is the
+  only record of promises and their verdicts.
 
 The finance directory is resolved through
 :func:`nomorals.finance.budgets.finance_paths` over the process
@@ -149,12 +187,57 @@ Measures
   scope" (no usable topic) is the only ``None``.  Rows whose
   timestamps cannot be read are counted in the evidence, never
   silently absorbed into the flow.
+* health (``health_adherence``): check-in adherence — the days
+  in the goal's window carrying at least one timeline event,
+  divided by the days in the window (the filing day through the
+  reading day, inclusive).  The timeline records what the owner
+  actually logged (symptoms, sleep, mood, measurements,
+  medications, visits, notes) — a day with an entry is a day the
+  health record was kept up; a day without one was not.  The
+  challenges streak table cannot carry this measure (it stores
+  only each member's last check-in, no day history) and the
+  training store's completed/incomplete workout logs are one
+  plan's record, not the class's — the timeline is the
+  class-wide check-in record.  A window with no events reads a
+  measured 0% saying so (the organ has simply not been fed);
+  only an unreadable store is ``None``.
+* learning (``mastery``): mean BKT P(knows) over the scoped
+  topic's skills, each skill read from the most recent session
+  that covered it (mastery is a state, like the careers linked
+  application's stage — the newest record of the state is the
+  current state).  Sessions are not windowed by the goal's
+  creation: knowledge gained before the goal was filed is still
+  knowledge, and the evidence discloses how many sessions
+  predate the goal.  A declared topic with no sessions yet reads
+  a measured 0% — no demonstrated mastery — with that headline.
+  The FSRS mistake notebook is deliberately NOT read: it is one
+  global deck with no topic attribution, so its due/cleared
+  counts cannot honestly measure one goal's topic.
+* build (``execution_steps``): completed steps ÷ total steps —
+  the linked agent goal's step rows (``done`` over all steps
+  except ``skipped``: a skipped step was deliberately dropped
+  from the plan, the cancelled-commitment rule; skipped counts
+  land in the evidence), or the tracker goal's own subgoal rows
+  (``is_completed`` ÷ total).  A goal with no steps recorded
+  anywhere measures nothing (``None``) — there is no execution
+  record to read, and the manual % would be a guess dressed as
+  a measurement if the provider invented one.
+* relationships (``person_commitments``): kept ÷ due for owner
+  promises to the scoped person over the goal's window — the
+  productivity counting loop with a promisee filter: same due
+  semantics (deadline in [goal creation, now]; open past
+  deadline is due and not kept), same exclusions (cancelled /
+  superseded are not misses), plus owner promises to OTHER
+  people counted as their own exclusion class.  Nothing due to
+  that person measures nothing (``None``) — a 0/0 rate would be
+  fabricated, the productivity rule.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -178,20 +261,27 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, avoids a cycle
 _log = get_logger(__name__)
 
 __all__ = [
+    "AGENT_GOAL_TAG",
     "CAREER_APP_TAG",
     "CAREER_TARGET_TAG",
     "FINANCE_GOAL_TAG",
     "FOCUS_TARGET_TAG",
+    "LEARN_TAG",
+    "PERSON_TAG",
     "PNL_TARGET_TAG",
     "WATCH_TAG",
     "WATCH_TARGET_TAG",
+    "build_progress",
     "careers_progress",
     "finance_progress",
+    "health_progress",
     "interest_topics",
     "interests_progress",
+    "learning_progress",
     "productivity_progress",
     "register_interest_beats",
     "register_providers",
+    "relationships_progress",
     "remove_interest_beats",
     "trading_progress",
 ]
@@ -680,23 +770,36 @@ def _focus_progress(goal: Goal, *, raw_target: str,
     )
 
 
-def _reliability_progress(goal: Goal, *,
-                          now: float | None) -> ClassProgress | None:
-    """The reliability measure: kept ÷ due over the goal's window."""
-    path = _data_file(_COMMITMENTS_FILENAME)
-    raw_rows = _raw_store_rows(path, "entries")
-    ledger = CommitmentLedger(str(path))
-    since = float(getattr(goal, "created_at", 0.0) or 0.0)
-    until = time.time() if now is None else float(now)
+def _commitment_counts(
+    ledger: CommitmentLedger, *, since: float, until: float,
+    promisee_norm: str | None = None,
+) -> tuple[int, int, int, dict[str, int], int]:
+    """Kept/broken/overdue counts + exclusions over a window.
+
+    The one counting loop behind the productivity (whole-ledger)
+    and relationships (per-person) measures — the ledger's own
+    semantics, shared: cancelled and superseded are not misses,
+    and an open commitment past its deadline is due and not kept.
+    With ``promisee_norm`` set, only owner promises TO that person
+    (normalised) are in scope; owner promises to anyone else are
+    counted as the ``other_promisee`` exclusion.  Returns
+    ``(kept, broken, overdue_open, excluded, unreadable_rows)``.
+    """
     kept = broken = overdue_open = 0
     unreadable_rows = 0
     excluded = {
         "cancelled": 0, "superseded": 0, "no_deadline": 0,
         "due_before_window": 0, "not_yet_due": 0, "other_promisor": 0,
     }
+    if promisee_norm is not None:
+        excluded["other_promisee"] = 0
     for commitment in ledger.commitments.values():
         if str(commitment.promisor or "owner") != "owner":
             excluded["other_promisor"] += 1
+            continue
+        if (promisee_norm is not None
+                and _normalise_name(commitment.promisee) != promisee_norm):
+            excluded["other_promisee"] += 1
             continue
         if commitment.status == "cancelled":
             excluded["cancelled"] += 1
@@ -729,6 +832,19 @@ def _reliability_progress(goal: Goal, *,
             broken += 1
         elif commitment.status == "open":
             overdue_open += 1
+    return kept, broken, overdue_open, excluded, unreadable_rows
+
+
+def _reliability_progress(goal: Goal, *,
+                          now: float | None) -> ClassProgress | None:
+    """The reliability measure: kept ÷ due over the goal's window."""
+    path = _data_file(_COMMITMENTS_FILENAME)
+    raw_rows = _raw_store_rows(path, "entries")
+    ledger = CommitmentLedger(str(path))
+    since = float(getattr(goal, "created_at", 0.0) or 0.0)
+    until = time.time() if now is None else float(now)
+    kept, broken, overdue_open, excluded, unreadable_rows = \
+        _commitment_counts(ledger, since=since, until=until)
     due = kept + broken + overdue_open
     if due == 0:
         return None
@@ -1149,6 +1265,544 @@ def interests_progress(
         return None
 
 
+# ── P6 shared store resolution ────────────────────────────────────────
+
+
+def _settings_home() -> Path:
+    """The settings home when one is in force, else ``~/.nomorals``
+    — the ``careers_path`` pattern the P6 file/SQLite stores use."""
+    settings = get_settings()
+    home = getattr(settings, "home_path", None)
+    if home is not None:
+        return Path(home)
+    return Path.home() / ".nomorals"
+
+
+# ── health: check-in adherence from the timeline store ────────────────
+
+#: The timeline database under the health home — the file
+#: :func:`nomorals.health.timeline.health_db_path` names in a
+#: default deployment (``<home>/health/timeline.db``).
+_HEALTH_DB_PARTS = ("health", "timeline.db")
+
+
+def _health_event_rows(
+    path: Path,
+) -> tuple[list[tuple[str, float]], int, int]:
+    """``(event_type, ts)`` rows from the timeline store.
+
+    Returns ``(rows, unreadable)``: rows carry only readable
+    timestamps, and ``unreadable`` counts the rows whose ``ts``
+    could not be read as a number.  A missing file or a
+    missing table reads as no events (the organ has not run);
+    a corrupt database raises (contained by the caller).  The
+    database is opened read-only: a progress reading must never
+    create the owner's health store as a side effect.
+    """
+    if not path.exists():
+        return [], 0
+    con = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    try:
+        try:
+            raw = con.execute(
+                "SELECT event_type, ts FROM health_events").fetchall()
+        except sqlite3.Error as exc:
+            if "no such table" in str(exc).lower():
+                return [], 0
+            raise
+    finally:
+        con.close()
+    rows: list[tuple[str, float]] = []
+    unreadable = 0
+    for event_type, ts in raw:
+        try:
+            stamp = float(ts)
+        except (TypeError, ValueError):
+            unreadable += 1
+            continue
+        rows.append((str(event_type or ""), stamp))
+    return rows, unreadable
+
+
+def _health_progress(goal: Goal, *, now: float | None) -> ClassProgress:
+    path = _settings_home().joinpath(*_HEALTH_DB_PARTS)
+    rows, unreadable = _health_event_rows(path)
+    since = float(getattr(goal, "created_at", 0.0) or 0.0)
+    until = time.time() if now is None else float(now)
+    if until < since:
+        until = since
+    days_in_window = int((until - since) // 86400) + 1
+    active_days: set[tuple[int, int, int]] = set()
+    by_type: dict[str, int] = {}
+    in_window = 0
+    pre_window = 0
+    after_window = 0
+    last_event_at: float | None = None
+    for event_type, stamp in rows:
+        if stamp < since:
+            pre_window += 1
+            continue
+        if stamp > until:
+            after_window += 1
+            continue
+        in_window += 1
+        day = time.localtime(stamp)
+        active_days.add((day.tm_year, day.tm_mon, day.tm_mday))
+        if event_type:
+            by_type[event_type] = by_type.get(event_type, 0) + 1
+        if last_event_at is None or stamp > last_event_at:
+            last_event_at = stamp
+    active = len(active_days)
+    percent = active / days_in_window * 100.0
+    if in_window:
+        headline = (
+            f"health logged on {active} of {days_in_window} day(s) "
+            f"since this goal was filed ({in_window} entries)")
+    else:
+        headline = (
+            f"nothing logged in the health timeline since this "
+            f"goal was filed — 0 of {days_in_window} day(s)")
+    evidence: dict[str, Any] = {
+        "measure": "checkin_adherence",
+        "active_days": active,
+        "days_in_window": days_in_window,
+        "events_in_window": in_window,
+        "events_by_type": by_type,
+        "since": since,
+    }
+    if last_event_at is not None:
+        evidence["last_event_at"] = last_event_at
+    if pre_window:
+        evidence["events_before_window"] = pre_window
+    if after_window:
+        evidence["events_after_reading"] = after_window
+    if unreadable:
+        evidence["unreadable_event_rows"] = unreadable
+    return ClassProgress(
+        percent=percent,
+        basis="measured",
+        source="health timeline",
+        headline=headline,
+        evidence=evidence,
+    )
+
+
+def health_progress(
+    db: Any, goal: Goal, *, now: float | None = None,
+) -> ClassProgress | None:
+    """Health-class provider: check-in adherence, measured.
+
+    Days carrying at least one timeline event ÷ days in the
+    goal's window.  A window with no events is a measured 0%
+    (the organ has not been fed); ``None`` only when the
+    timeline store cannot be read — logged with the goal named,
+    never raised into a board.
+    """
+    try:
+        return _health_progress(goal, now=now)
+    except Exception as exc:  # noqa: BLE001 - contained: see docstring
+        _log.warning(
+            "health progress provider failed for goal %s (%r): %s",
+            getattr(goal, "goal_id", "?"), getattr(goal, "title", ""), exc)
+        return None
+
+
+# ── learning: BKT mastery from the tutor session files ────────────────
+
+#: Learning scope declaration: a tracker-goal tag
+#: ``learn:<topic>`` naming the tutor topic the goal is about,
+#: e.g. ``learn:Yoruba greetings``.  Without one, the goal's
+#: title must match a session topic exactly (normalised).
+LEARN_TAG = "learn:"
+
+#: Mirror of ``learn.tutor.BKT_DEFAULTS["p_init"]`` — the P(knows)
+#: a skill carries before any observation, which is what
+#: ``MasteryModel.bkt()`` returns for a named-but-unobserved
+#: skill.  The P6 test suite pins this mirror against the real
+#: constant so it cannot drift silently.
+_BKT_P_INIT = 0.10
+
+
+def _learn_session_records(
+    sessions_dir: Path,
+) -> tuple[list[dict[str, Any]], int]:
+    """Readable tutor session records + an unreadable-file count.
+
+    A record is one persisted session file's measuring payload:
+    its topic, start time, turn count, and per-skill mastery
+    numbers (``skills`` names, ``bkt`` posteriors) as floats.
+    Files that are not JSON objects with a mastery object are
+    counted unreadable, never absorbed silently.
+    """
+    records: list[dict[str, Any]] = []
+    unreadable = 0
+    if not sessions_dir.is_dir():
+        return records, unreadable
+    for path in sorted(sessions_dir.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            unreadable += 1
+            continue
+        if not isinstance(data, dict):
+            unreadable += 1
+            continue
+        mastery = data.get("mastery")
+        if not isinstance(mastery, dict):
+            unreadable += 1
+            continue
+        skills_raw = mastery.get("skills")
+        bkt_raw = mastery.get("bkt")
+        if not isinstance(skills_raw, dict) and not isinstance(bkt_raw, dict):
+            unreadable += 1
+            continue
+        skills: dict[str, float] = {}
+        bad_values = 0
+        for name, value in (skills_raw or {}).items():
+            try:
+                skills[str(name)] = float(value)
+            except (TypeError, ValueError):
+                bad_values += 1
+        bkt: dict[str, float] = {}
+        for name, value in (bkt_raw or {}).items():
+            try:
+                bkt[str(name)] = float(value)
+            except (TypeError, ValueError):
+                bad_values += 1
+        try:
+            started_at = float(data.get("started_at") or 0.0)
+        except (TypeError, ValueError):
+            started_at = 0.0
+        try:
+            turns = int(data.get("turns") or 0)
+        except (TypeError, ValueError):
+            turns = 0
+        records.append({
+            "topic": str(data.get("topic") or "").strip(),
+            "started_at": started_at,
+            "turns": turns,
+            "skills": skills,
+            "bkt": bkt,
+            "bad_values": bad_values,
+        })
+    return records, unreadable
+
+
+def _learning_progress(goal: Goal, *, now: float | None) -> ClassProgress | None:
+    sessions_dir = _settings_home() / "learn" / "sessions"
+    records, unreadable_files = _learn_session_records(sessions_dir)
+    tagged = _tag_value(goal, LEARN_TAG)
+    scope: str | None = None
+    link = ""
+    if tagged is not None:
+        scope = tagged
+        link = "learn-tag"
+    else:
+        wanted = _normalise_name(getattr(goal, "title", ""))
+        if wanted:
+            matches = {r["topic"] for r in records
+                       if r["topic"]
+                       and _normalise_name(r["topic"]) == wanted}
+            if len(matches) == 1:
+                scope = matches.pop()
+                link = "title"
+    if scope is None:
+        return None  # no declared or exactly-matching topic: no scope
+    scope_norm = _normalise_name(scope)
+    scoped = [r for r in records
+              if r["topic"] and _normalise_name(r["topic"]) == scope_norm]
+    evidence: dict[str, Any] = {
+        "measure": "mastery",
+        "topic": scope,
+        "link": link,
+        "sessions": len(scoped),
+    }
+    if unreadable_files:
+        evidence["unreadable_session_files"] = unreadable_files
+    if not scoped:
+        return ClassProgress(
+            percent=0.0,
+            basis="measured",
+            source="tutor mastery",
+            headline=(
+                f"no tutor sessions on {scope!r} yet — no mastery "
+                "demonstrated"),
+            evidence=evidence,
+        )
+    # Mastery is a state: per skill, the most recent session that
+    # covered it carries the current P(knows) — its bkt entry, or
+    # the prior for a skill named but never observed
+    # (MasteryModel.bkt() semantics).
+    since = float(getattr(goal, "created_at", 0.0) or 0.0)
+    latest: dict[str, float] = {}
+    total_turns = 0
+    predating = 0
+    bad_values = 0
+    for record in sorted(scoped, key=lambda r: r["started_at"]):
+        total_turns += record["turns"]
+        bad_values += record["bad_values"]
+        if record["started_at"] < since:
+            predating += 1
+        for skill in set(record["skills"]) | set(record["bkt"]):
+            latest[skill] = record["bkt"].get(skill, _BKT_P_INIT)
+    if not latest:
+        return ClassProgress(
+            percent=0.0,
+            basis="measured",
+            source="tutor mastery",
+            headline=(
+                f"tutor sessions on {scope!r} recorded no skills "
+                "yet — no mastery demonstrated"),
+            evidence=evidence,
+        )
+    percent = sum(latest.values()) / len(latest) * 100.0
+    headline = (
+        f"mastery averages {percent:.0f}% across {len(latest)} "
+        f"skill(s) in {len(scoped)} tutor session(s) on {scope}")
+    evidence["skills"] = {k: round(v, 4) for k, v in
+                          sorted(latest.items())}
+    evidence["skill_count"] = len(latest)
+    evidence["total_turns"] = total_turns
+    if predating:
+        evidence["sessions_predating_goal"] = predating
+    if bad_values:
+        evidence["unreadable_mastery_values"] = bad_values
+    return ClassProgress(
+        percent=percent,
+        basis="measured",
+        source="tutor mastery",
+        headline=headline,
+        evidence=evidence,
+    )
+
+
+def learning_progress(
+    db: Any, goal: Goal, *, now: float | None = None,
+) -> ClassProgress | None:
+    """Learning-class provider: BKT mastery over the goal's topic.
+
+    ``None`` when the goal declares no topic (no ``learn:`` tag
+    and no exact title match against a session topic) or when
+    the session store cannot be read — failures are logged with
+    the goal named, never raised into a board.  A declared topic
+    with no sessions yet reads a measured 0%.
+    """
+    try:
+        return _learning_progress(goal, now=now)
+    except Exception as exc:  # noqa: BLE001 - contained: see docstring
+        _log.warning(
+            "learning progress provider failed for goal %s (%r): %s",
+            getattr(goal, "goal_id", "?"), getattr(goal, "title", ""), exc)
+        return None
+
+
+# ── build: execution steps from the tracker / agent-goal stores ───────
+
+#: Explicit build link: a tracker-goal tag ``agent-goal:<id>``
+#: naming one of the brain's agent goals (``agents/goals.py``) in
+#: the same context database.  The linked goal's step completion
+#: IS this goal's measured progress.  A present-but-stale tag
+#: measures nothing (the P3 rule).
+AGENT_GOAL_TAG = "agent-goal:"
+
+
+def _build_progress(db: Any, goal: Goal, *,
+                    now: float | None) -> ClassProgress | None:
+    linked_id = _tag_value(goal, AGENT_GOAL_TAG)
+    if linked_id is not None:
+        if db is None:
+            return None  # the agent store lives in the shared db
+        found = db.query_one(
+            "SELECT id FROM agent_goals WHERE id = ?", (linked_id,))
+        if found is None:
+            return None  # stale deliberate link: never fall through
+        rows = db.query(
+            "SELECT status FROM agent_goal_steps WHERE goal_id = ?",
+            (linked_id,))
+        by_status: dict[str, int] = {}
+        for row in rows or []:
+            status = str((row or {}).get("status") or "")
+            by_status[status] = by_status.get(status, 0) + 1
+        done = by_status.get("done", 0)
+        skipped = by_status.get("skipped", 0)
+        total = sum(by_status.values()) - skipped
+        if total <= 0:
+            return None  # no executable steps recorded to measure
+        percent = done / total * 100.0
+        headline = (
+            f"{done} of {total} step(s) done on the linked agent "
+            "goal")
+        evidence: dict[str, Any] = {
+            "measure": "execution_steps",
+            "link": "agent-goal",
+            "agent_goal_id": linked_id,
+            "steps_done": done,
+            "steps_total": total,
+            "steps_by_status": by_status,
+        }
+        if skipped:
+            evidence["steps_skipped"] = skipped
+        return ClassProgress(
+            percent=percent,
+            basis="measured",
+            source="agent goal steps",
+            headline=headline,
+            evidence=evidence,
+        )
+    if db is not None:
+        rows = db.query(
+            "SELECT is_completed FROM subgoals WHERE goal_id = ?",
+            (getattr(goal, "goal_id", ""),))
+        total = len(rows or [])
+        done = sum(1 for row in rows or []
+                   if (row or {}).get("is_completed"))
+    else:
+        subgoals = getattr(goal, "subgoals", None) or []
+        total = len(subgoals)
+        done = sum(1 for sub in subgoals
+                   if getattr(sub, "is_completed", False))
+    if total == 0:
+        return None  # no execution steps recorded anywhere
+    percent = done / total * 100.0
+    return ClassProgress(
+        percent=percent,
+        basis="measured",
+        source="goal subgoals",
+        headline=f"{done} of {total} step(s) completed",
+        evidence={
+            "measure": "execution_steps",
+            "link": "subgoals",
+            "steps_done": done,
+            "steps_total": total,
+        },
+    )
+
+
+def build_progress(
+    db: Any, goal: Goal, *, now: float | None = None,
+) -> ClassProgress | None:
+    """Build-class provider: execution steps, measured.
+
+    The linked agent goal's steps when an ``agent-goal:`` tag
+    declares one, else the goal's own tracker subgoals.
+    ``None`` when a deliberate link is stale, or when no steps
+    are recorded anywhere — failures are logged with the goal
+    named, never raised into a board.
+    """
+    try:
+        return _build_progress(db, goal, now=now)
+    except Exception as exc:  # noqa: BLE001 - contained: see docstring
+        _log.warning(
+            "build progress provider failed for goal %s (%r): %s",
+            getattr(goal, "goal_id", "?"), getattr(goal, "title", ""), exc)
+        return None
+
+
+# ── relationships: kept promises to one person ────────────────────────
+
+#: Person scope declaration: a tracker-goal tag ``person:<name>``
+#: naming the promisee the goal is about, e.g. ``person:Mum``.
+#: Without one, the goal's title must match a promisee exactly
+#: (normalised, unique — the finance name-match rule).
+PERSON_TAG = "person:"
+
+
+def _relationships_progress(goal: Goal, *,
+                            now: float | None) -> ClassProgress | None:
+    path = _data_file(_COMMITMENTS_FILENAME)
+    raw_rows = _raw_store_rows(path, "entries")
+    ledger = CommitmentLedger(str(path))
+    tagged = _tag_value(goal, PERSON_TAG)
+    link = ""
+    person_norm = ""
+    person_display = ""
+    if tagged is not None:
+        person_norm = _normalise_name(tagged)
+        person_display = tagged
+        link = "person-tag"
+        if not person_norm:
+            return None
+    else:
+        wanted = _normalise_name(getattr(goal, "title", ""))
+        if not wanted:
+            return None
+        spellings: dict[str, str] = {}
+        for commitment in ledger.commitments.values():
+            if str(commitment.promisor or "owner") != "owner":
+                continue
+            norm = _normalise_name(commitment.promisee)
+            if norm and norm not in spellings:
+                spellings[norm] = str(commitment.promisee).strip()
+        if wanted not in spellings:
+            return None  # no promisee carries this goal's name
+        person_norm = wanted
+        person_display = spellings[wanted]
+        link = "title"
+    since = float(getattr(goal, "created_at", 0.0) or 0.0)
+    until = time.time() if now is None else float(now)
+    kept, broken, overdue_open, excluded, unreadable_rows = \
+        _commitment_counts(ledger, since=since, until=until,
+                           promisee_norm=person_norm)
+    due = kept + broken + overdue_open
+    if due == 0:
+        return None
+    percent = kept / due * 100.0
+    headline = (
+        f"kept {kept} of {due} promise(s) to {person_display} "
+        "due since this goal was filed")
+    misses = []
+    if broken:
+        misses.append(f"{broken} broken")
+    if overdue_open:
+        misses.append(f"{overdue_open} overdue")
+    if misses:
+        headline += " (" + ", ".join(misses) + ")"
+    evidence: dict[str, Any] = {
+        "measure": "person_commitments",
+        "person": person_display,
+        "link": link,
+        "kept": kept,
+        "broken": broken,
+        "overdue_open": overdue_open,
+        "due": due,
+        "since": since,
+        "excluded": {k: v for k, v in excluded.items() if v},
+    }
+    unreadable = len(raw_rows or []) - len(ledger.entries)
+    if unreadable > 0:
+        evidence["unreadable_ledger_entries"] = unreadable
+    if unreadable_rows:
+        evidence["unreadable_commitment_rows"] = unreadable_rows
+    return ClassProgress(
+        percent=percent,
+        basis="measured",
+        source="commitment ledger",
+        headline=headline,
+        evidence=evidence,
+    )
+
+
+def relationships_progress(
+    db: Any, goal: Goal, *, now: float | None = None,
+) -> ClassProgress | None:
+    """Relationships-class provider: promises to one person, kept.
+
+    ``None`` when the goal names no measurable person (no
+    ``person:`` tag and no exact title-to-promisee match), when
+    nothing has come due to that person in the goal's window,
+    or when the ledger cannot be read — failures are logged
+    with the goal named, never raised into a board.
+    """
+    try:
+        return _relationships_progress(goal, now=now)
+    except Exception as exc:  # noqa: BLE001 - contained: see docstring
+        _log.warning(
+            "relationships progress provider failed for goal %s "
+            "(%r): %s",
+            getattr(goal, "goal_id", "?"), getattr(goal, "title", ""), exc)
+        return None
+
+
 # ── registration ──────────────────────────────────────────────────────
 
 
@@ -1156,7 +1810,9 @@ def register_providers() -> None:
     """Register the WS2 measured-progress providers.
 
     Finance + trading + careers (P3/P4), productivity + interests
-    (P5).  Idempotent (re-registration replaces).  Called by
+    (P5), health + learning + build + relationships (P6) — every
+    class with a measuring organ; ``general`` stays manual by
+    design.  Idempotent (re-registration replaces).  Called by
     :mod:`nomorals.goals` when the package loads — the one wiring
     point every GoalTracker entry point shares.
     """
@@ -1165,3 +1821,7 @@ def register_providers() -> None:
     register_progress_provider("careers", careers_progress)
     register_progress_provider("productivity", productivity_progress)
     register_progress_provider("interests", interests_progress)
+    register_progress_provider("health", health_progress)
+    register_progress_provider("learning", learning_progress)
+    register_progress_provider("build", build_progress)
+    register_progress_provider("relationships", relationships_progress)

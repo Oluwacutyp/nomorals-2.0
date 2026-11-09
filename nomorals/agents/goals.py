@@ -27,6 +27,7 @@ from typing import Any, Optional
 
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
+from ..goals.classes import DEFAULT_CLASS_ID, validate_class_id
 from .failures import record_failure
 
 _log = get_logger(__name__)
@@ -87,6 +88,10 @@ class Goal:
     depends_on: list[str] = field(default_factory=list)
     #: how many times the cognitive loop has self-healed this goal
     heals: int = 0
+    #: WS2 goal class (a goals.classes id): the domain axis the
+    #: tracker goals carry, so agent-executed goals roll up under
+    #: the same classes.  "general" when unclassed.
+    goal_class: str = DEFAULT_CLASS_ID
     #: epoch seconds the goal is due (0 = no deadline)
     deadline: float = 0.0
     created_at: float = 0.0
@@ -110,6 +115,7 @@ class Goal:
             "next_action": self.next_action, "strategy": self.strategy,
             "project_id": self.project_id, "priority": self.priority,
             "depends_on": list(self.depends_on), "heals": self.heals,
+            "goal_class": self.goal_class,
             "deadline": self.deadline,
             "done": self.done_steps, "total": self.total_steps,
             "steps": [s.to_dict() for s in self.steps],
@@ -139,6 +145,8 @@ class Goal:
                    priority=int(row.get("priority", 0) or 0),
                    depends_on=deps,
                    heals=int(row.get("heals", 0) or 0),
+                   goal_class=str(row.get("goal_class")
+                                  or DEFAULT_CLASS_ID),
                    deadline=float(row.get("deadline", 0) or 0.0),
                    created_at=float(row.get("created_at", 0)),
                    updated_at=float(row.get("updated_at", 0)),
@@ -199,6 +207,8 @@ class GoalSystem:
 
         ``deadline`` on agent_goals and ``est_minutes`` on agent_goal_steps
         are Phase-9 additions; old databases get them on first use.
+        ``goal_class`` on agent_goals is the WS2 P6 addition (the
+        domain axis, same pattern — migrations.py stays frozen).
         """
         try:
             cols = {r.get("name") for r in
@@ -207,6 +217,10 @@ class GoalSystem:
                 self.db.execute(
                     "ALTER TABLE agent_goals ADD COLUMN deadline "
                     "REAL NOT NULL DEFAULT 0")
+            if "goal_class" not in cols:
+                self.db.execute(
+                    "ALTER TABLE agent_goals ADD COLUMN goal_class "
+                    "TEXT NOT NULL DEFAULT 'general'")
         except Exception:  # noqa: BLE001 - table may not exist yet
             pass
         try:
@@ -222,15 +236,19 @@ class GoalSystem:
     # ── create ──────────────────────────────────────────────────────────────
     def create(self, title: str, description: str = "", *,
                plan: list[str] | None = None, strategy: str = "",
-               priority: int = 0) -> Goal:
+               priority: int = 0,
+               goal_class: str | None = None) -> Goal:
         """Create a goal and decompose it into an executable plan.
 
         ``plan`` may be supplied directly; otherwise the reasoning engine's
         ``decompose`` strategy is used when a model is available, with a
         heuristic fallback so a goal can always be created (offline-safe).
         ``priority`` feeds mission control: the cognitive loop works
-        higher-priority goals first.
+        higher-priority goals first.  ``goal_class`` files the goal
+        under a WS2 goal class (validated against the registry;
+        ``None`` = the ``general`` default).
         """
+        resolved_class = validate_class_id(goal_class)
         now = time.time()
         goal_id = new_short_id("goal")
         title = (title or "").strip() or "untitled goal"
@@ -247,11 +265,12 @@ class GoalSystem:
                     f"Verify the result against {title[:60]}"]
         self.db.execute(
             "INSERT INTO agent_goals (id, title, description, status, progress, "
-            "next_action, strategy, created_at, updated_at, priority) "
-            "VALUES (?,?,?,?,0.0,?,?,?,?,?)",
+            "next_action, strategy, created_at, updated_at, priority, "
+            "goal_class) "
+            "VALUES (?,?,?,?,0.0,?,?,?,?,?,?)",
             (goal_id, title, (description or "")[:2000], "active",
              (plan[0] or "")[:300], (strategy or "")[:300], now, now,
-             int(priority)))
+             int(priority), resolved_class))
         for i, step in enumerate(plan[:24]):
             self._add_step(goal_id, i, str(step)[:400])
         goal = self.get(goal_id) or Goal(id=goal_id, title=title)
@@ -454,6 +473,24 @@ class GoalSystem:
         self.db.execute(
             "UPDATE agent_goals SET priority=?, updated_at=? WHERE id=?",
             (int(priority), time.time(), goal_id))
+        return self.get(goal_id)
+
+    def set_goal_class(self, goal_id: str,
+                       goal_class: str | None) -> Goal | None:
+        """Re-file a goal under another WS2 goal class.
+
+        Validated against the class registry (an unknown class
+        raises GoalClassError, a ValueError); ``None``/empty files
+        under ``general``.  Returns the updated goal, or None when
+        the goal does not exist.
+        """
+        goal = self.get(goal_id)
+        if goal is None:
+            return None
+        resolved = validate_class_id(goal_class)
+        self.db.execute(
+            "UPDATE agent_goals SET goal_class=?, updated_at=? WHERE id=?",
+            (resolved, time.time(), goal_id))
         return self.get(goal_id)
 
     def add_dependency(self, goal_id: str, dep_id: str) -> Goal | None:
@@ -1140,6 +1177,8 @@ def register(registry: Any) -> None:
             "action": "str — create|advance|adapt|status|list|get|pause|resume|abandon|complete|tick|spawn_project|priority|depends|next|deadline|due|estimate|graph|reflect",
             "title": "str — goal title (create)",
             "description": "str — goal detail (create)",
+            "goal_class": "str — WS2 goal class to file under (create; "
+                          "e.g. build, finance — default general)",
             "goal_id": "str — for most actions",
             "reason": "str — why to adapt",
             "status": "str — filter for list",
@@ -1159,7 +1198,7 @@ def register(registry: Any) -> None:
         reason: str = "", status: str = "", limit: str = "20",
         priority: str = "", depends_on: str = "", remove: str = "",
         deadline: str = "", clear: str = "", within_hours: str = "24",
-        minutes: str = "", step_id: str = "",
+        minutes: str = "", step_id: str = "", goal_class: str = "",
     ) -> dict[str, Any]:
         system = GoalSystem(context)
         action = (action or "list").strip().lower()
@@ -1168,7 +1207,11 @@ def register(registry: Any) -> None:
         except ValueError:
             n = 20
         if action == "create":
-            g = system.create(title, description)
+            try:
+                g = system.create(title, description,
+                                  goal_class=goal_class or None)
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
             return {"ok": True, "goal": g.to_dict()}
         if action == "spawn_project":
             if not goal_id:
