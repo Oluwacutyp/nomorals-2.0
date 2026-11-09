@@ -1,10 +1,14 @@
 """The ``video_explore`` tool — the exploration substrate's surface.
 
-WS4 Pass 1 ships the manual trigger + the read actions; the
-``/explore`` board and the scheduler are P3 (census §6). Actions:
+WS4 Pass 1 ships the manual trigger + the read actions; P3 adds
+``sweep`` (the scheduled cycle the durable jobs fire) and the
+``/explore`` board (``board.py``). Actions:
 
 * ``run`` — one sweep over the resolved beats (NewsAgent interest
   profile + interests watches) through the production instruments.
+* ``sweep`` — the autonomous cycle (``jobs.run_sweep_cycle``):
+  discipline gates, sweep, trend evaluation. What the durable
+  morning/evening jobs call; a deferred cycle says why.
 * ``status`` — the substrate summary: sweeps, observations,
   candidates being watched, per-beat baselines.
 * ``observations`` — recent observation rows with provenance.
@@ -31,7 +35,20 @@ from ...core.policy import Capability
 from .engine import explore_for_context, explore_status, run_exploration
 from .trends import current_claims, evaluate_trends
 
-__all__ = ["register"]
+__all__ = ["register", "render_claims_text", "render_run_text"]
+
+
+def render_claims_text(claims: list[dict[str, Any]],
+                       report: dict[str, Any] | None) -> str:
+    """The claims render (P2's seam, made public for P3's board):
+    kind, basis in plain words, freshness — no internal ids."""
+    return _render_trends(claims, report)
+
+
+def render_run_text(report: dict[str, Any]) -> str:
+    """A sweep report as text (the ``run`` action's render, made
+    public for the board's cycle render)."""
+    return _render_run(report, report.get("beats") or [])
 
 
 def _when(ts: float) -> str:
@@ -163,7 +180,11 @@ def register(registry: Any) -> None:
             "candidates | beats | trends (evaluate observations into "
             "trend/spike/unverified claims with their evidence basis "
             "and freshness; refresh=false renders without "
-            "re-evaluating). Sweeps are unauthenticated public "
+            "re-evaluating) | sweep (the scheduled cycle the "
+            "durable jobs fire: quiet-hours + per-day-cap "
+            "discipline, then a sweep, then trend evaluation — "
+            "ends with fresh claims, or a deferral that says why). "
+            "Sweeps are unauthenticated public "
             "reads, metadata only — no files are downloaded."
         ),
         capability=Capability.NET_OUT,
@@ -171,6 +192,12 @@ def register(registry: Any) -> None:
     def video_explore(action: str = "status", beat: str = "",
                       limit: int = 20,
                       refresh: bool = True) -> dict[str, Any]:
+        if action == "sweep":
+            from .board import render_sweep_cycle
+            from .jobs import run_sweep_cycle
+
+            cycle = run_sweep_cycle(context)
+            return {**cycle, "text": render_sweep_cycle(cycle)}
         if action == "run":
             store, _engine, beats = explore_for_context(context)
             report = run_exploration(context, store=store, beats=beats,

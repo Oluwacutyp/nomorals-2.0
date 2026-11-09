@@ -1372,6 +1372,99 @@ class DraftReviewProvider(_Provider):
             source="draft-queue", items=items, lines=lines)
 
 
+def _explore_claim_line(claim: dict[str, Any]) -> str:
+    """One briefing line for a trend claim: its text + its basis
+    in plain words, built from the claim's STRUCTURED basis (P2's
+    own render seam) — sweep counts and source classes, never the
+    record ids the authored basis prose enumerates.  The fallback
+    (no structured basis) strips id-shaped tokens defensively:
+    internal ids never print in briefing text."""
+    import re as _re
+
+    legs = claim.get("basis") or {}
+    bits: list[str] = []
+    if legs:
+        bits.append(f"{len(legs.get('sweeps') or [])} sweep(s)")
+        classes = legs.get("source_classes") or []
+        if classes:
+            bits.append("classes: " + " + ".join(str(c) for c in classes))
+        velocity = legs.get("velocity") or {}
+        if isinstance(velocity, dict):
+            if velocity.get("from_zero"):
+                bits.append("velocity: burst from a zero baseline")
+            elif velocity.get("ratio") is not None:
+                bits.append(f"velocity {velocity['ratio']}x baseline")
+        if legs.get("single_source"):
+            bits.append("single-source (seed signal only)")
+    basis = "; ".join(bits)
+    if not basis:
+        basis = _re.sub(r"\b(?:sweep|obs|claim)-\d+\b", "…",
+                        str(claim.get("confidence_basis") or ""))
+    text = str(claim.get("text") or "")
+    return f"{text} — basis: {basis}" if basis else text
+
+
+class ExploreTrendsProvider(_Provider):
+    """Exploration trends (WS4 P3): what is moving in the video
+    field Devon fetches from.  Renders ONLY when there is news:
+    a FRESH trend claim the sweeps corroborated since the last
+    briefing (claims carry P2's authored basis — a trend states
+    its legs here or does not surface), or a sweep that FAILED
+    (a dead watcher is news; a quiet field is not).  No sweeps,
+    no fresh claims, no failure → no section — absence of
+    exploration activity never renders filler.  Never raises."""
+    name = "explore_trends"
+    title = "🔭 Moving in your field"
+    priority = 26  # after the day bookend (25): the field, after his day
+
+    def collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        try:
+            return self._collect(ctx, since)
+        except Exception as exc:  # noqa: BLE001 — trends never sink a briefing
+            _log.debug("explore trends provider skipped: %s", exc)
+            return None
+
+    def _collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        import time as _time
+
+        from ..media.explore import default_explore_store
+        from ..media.explore.trends import CLAIM_TREND, current_claims
+
+        # The bind step explore_for_context performs — board,
+        # briefing and tool read one persisted state.
+        store = default_explore_store()
+        db = getattr(ctx, "db", None)
+        if db is not None:
+            from ..storage.kv import KVStore
+
+            store.bind_store(KVStore(db))
+        now = _time.time()
+        window = since if since and since > 0 else now - 86400.0
+        lines: list[str] = []
+        fresh = [c for c in current_claims(store, now=now)
+                 if c.get("kind") == CLAIM_TREND
+                 and c.get("standing") == "fresh"
+                 and float(c.get("observed_at") or 0) >= window]
+        for claim in fresh[:3]:
+            lines.append(f"• {_explore_claim_line(claim)}")
+        latest = store.latest_sweep()
+        if latest and latest.get("status") == "failed":
+            failed_at = float(latest.get("finished_at")
+                              or latest.get("started_at") or 0)
+            if failed_at >= window:
+                lines.append(
+                    "• ⚠️ the last exploration sweep failed before "
+                    "finishing — /explore has the record")
+        if not lines:
+            return None
+        lines.append("• more: /explore — sweeps, claims, candidates")
+        items = [{"title": ln[2:] if ln.startswith("• ") else ln,
+                  "kind": "explore_trends"} for ln in lines]
+        return BriefingSection(
+            name=self.name, title=self.title, priority=self.priority,
+            source="explore-store", items=items, lines=lines)
+
+
 class DisruptionProvider(_Provider):
     """World-graph disruptions: nodes marked disrupted (flight delayed,
     blocker appeared) and what they cascade into.  The briefing's early-
@@ -1421,6 +1514,7 @@ class BriefingComposer:
             GoalsProvider(),
             GoalClassesProvider(),
             DraftReviewProvider(),
+            ExploreTrendsProvider(),
             CalendarProvider(),
             PeopleProvider(),
             MarketsProvider(),

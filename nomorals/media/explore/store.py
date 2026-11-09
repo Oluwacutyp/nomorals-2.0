@@ -464,6 +464,13 @@ class ExploreStore:
         row = self._candidates.get(key)
         return dict(row) if row else None
 
+    def shed_records(self) -> list[dict[str, Any]]:
+        """Shed candidate records (key, name, reason, at), oldest
+        first — the audit trail :meth:`note_candidate`'s re-intake
+        window reads, and the board's shed count/section renders
+        from (P3)."""
+        return [dict(r) for r in self._shed]
+
     def shed_candidate(self, key: str, reason: str = "",
                        now: float = 0.0) -> bool:
         """Move a candidate out of the watched pool, recording why.

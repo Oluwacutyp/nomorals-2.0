@@ -854,6 +854,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "drafts": (0, None),      # /drafts [list] | show <n> | post <n> | discard <n> — post-draft review board (owner-only)
     "ideas": (0, None),       # /ideas [list] | add <title> [| <detail>] | show <n> | develop <n> [as goal|draft|mission|park] [in <class>] [when <trigger>] — raw ideas + the development cell (owner-only)
     "day": (0, None),         # /day [show] | tell <text> | yesterday | make | skip | unskip | export — the day record + derivation (owner-only)
+    "explore": (0, None),     # /explore [run | trends | candidates] — the video-exploration board: sweeps, trend claims with their basis, candidate standings (owner-only)
     "insights": (0, None),    # /insights [days] — native money analytics
     "predict": (0, 3),       # /predict <stake> <over|under> <1-99> — prediction pit (progression-unlocked)
     "menu": (0, 2),          # alias of /list ([group] [page] ride the same grammar)
@@ -3340,6 +3341,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/day [show] | tell <text> | yesterday | show <YYYY-MM-DD> | make | skip | unskip | export",
               "example": "/day tell shipped the market-situation close-out and pulled the GS update",
               "related": "/drafts /goals /artifact"},
+    "explore": {"what": "the exploration board: Devon watches the video field she fetches from. Sweeps run morning + evening on the durable scheduler (and on /explore run) over your interest beats, recording every observation with its provenance; channels and topics that keep surfacing are noted as candidates and promoted or shed on evidence. A topic is called a trend only when two or more sweeps — or two source classes in one sweep — corroborate it, and every claim carries its basis; anything less is labelled a spike or unverified, and stale claims say so. The board shows the last sweep's truth (failures named as failures), when the next sweep is due, the current claims and the candidate standings. Sweeps run direct + the existing proxy pool — the proxy-source refresh has no production caller yet, and the board says so.",
+              "usage": "/explore [run | trends | candidates]",
+              "example": "/explore trends",
+              "related": "/download /video"},
     "api": {"what": "external API connectors: weather, fx, github, …",
             "usage": "/api list | <connector> [json]", "example": "/api weather city=Lagos",
             "related": ""},
@@ -4288,7 +4293,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                         "translate", "tl"]),
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate"]),
-    ("media system", ["music", "distribute", "play", "video", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
+    ("media system", ["music", "distribute", "play", "video", "explore", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
                       "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "caption", "imggen", "sham", "musicnote",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
@@ -4547,7 +4552,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "deliver", "checkpoint", "checkpoints", "rewind", "novel", "books",
       "skills", "delegate", "computer"]),
     ("media system — music · playback · video · podcast",
-     ["music", "play", "video", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
+     ["music", "play", "video", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
       "shorts", "caption", "imggen", "sham", "musicnote",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
@@ -4984,6 +4989,7 @@ LIST_ONELINERS: dict[str, str] = {
     "drafts": "post drafts awaiting your review: the batch board, per-draft cards, post/discard the one you name",
     "ideas": "raw ideas, grown: capture verbatim, develop into a goal, a draft, a mission, or park with a trigger",
     "day": "your day record: tell it what you did, see the day whole, and make draft posts from it",
+    "explore": "video exploration: the field she fetches from, watched — sweeps, trend claims with their basis, candidate standings",
     "api": "external API connectors (weather, fx, github, …)",
     "connectors": "manage the service connectors: list, status, connect",
     "shorts": "short-form content empire: make, queue, post vertical videos",

@@ -2874,6 +2874,19 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("day derivation job not registered: %s",
                                  exc)
+                # Exploration (WS4 P3): two durable sweeps a day
+                # (08:30 + 18:30 owner-local) watch the video field
+                # and re-evaluate trends — routine bookkeeping;
+                # findings reach him through the morning briefing
+                # and the /explore board, never job alerts.
+                # Idempotent by name.
+                try:
+                    from ...media.explore.jobs import (
+                        ensure_explore_jobs)
+                    ensure_explore_jobs(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("exploration jobs not registered: %s",
+                                 exc)
                 # Price sources: the quote-provider health loop
                 # (every 6h — one bounded real quote probe per
                 # keyless provider; keyed providers never probed;
@@ -7540,6 +7553,9 @@ class PartnerRuntime(
         if kind == "day":
             return self._control_day(command.tail or arg,
                                      chat_key=chat_key)
+        if kind == "explore":
+            return self._control_explore(command.tail or arg,
+                                         chat_key=chat_key)
         if kind == "api":
             return self._control_api(command.tail or arg)
         if kind == "connectors":

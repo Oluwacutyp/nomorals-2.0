@@ -11,8 +11,10 @@ differencing, velocity against each beat's own baseline, the
 promotion rule (observation → spike → corroborated trend claim),
 freshness decay, and candidate verdicts — claims are written only
 through the evaluator, in the digestion Claim shape the store
-persists. Autonomy (the durable scheduler) and the ``/explore``
-board are P3; both call the entry points defined here unchanged.
+persists. Autonomy is P3 (``jobs.py``): two durable sweeps a day
+on the owner's clock end in :func:`run_sweep_cycle` (gates →
+sweep → evaluation); the ``/explore`` board (``board.py``) and
+the morning briefing render what the loop records.
 
     from nomorals.media.explore import run_exploration, explore_status
     report = run_exploration(context, trigger="manual")
@@ -35,12 +37,27 @@ from .engine import (
                     note_owner_activity,
                     run_exploration,
 )
+from .board import (
+                    PROXY_DEPENDENCY_LINE,
+                    render_explore_board,
+                    render_explore_candidates,
+                    render_explore_trends,
+                    render_sweep_cycle,
+)
 from .instruments import (
                     InstrumentError,
                     VideoFinderInstrument,
                     WebSearchInstrument,
                     YouTubeSearchInstrument,
                     default_instruments,
+)
+from .jobs import (
+                    EXPLORE_SWEEP_JOB_EVENING,
+                    EXPLORE_SWEEP_JOB_MORNING,
+                    EXPLORE_SWEEP_JOBS,
+                    MAX_SWEEPS_PER_DAY,
+                    ensure_explore_jobs,
+                    run_sweep_cycle,
 )
 from .store import ExploreStore
 from .trends import (
@@ -59,8 +76,13 @@ __all__ = [
     "CLAIM_TREND",
     "CLAIM_UNVERIFIED",
     "EXPLORE_SEED_BEATS",
+    "EXPLORE_SWEEP_JOB_EVENING",
+    "EXPLORE_SWEEP_JOB_MORNING",
+    "EXPLORE_SWEEP_JOBS",
     "ExploreStore",
     "InstrumentError",
+    "MAX_SWEEPS_PER_DAY",
+    "PROXY_DEPENDENCY_LINE",
     "SweepEngine",
     "VideoFinderInstrument",
     "WebSearchInstrument",
@@ -71,11 +93,17 @@ __all__ = [
     "current_claims",
     "default_explore_store",
     "default_instruments",
+    "ensure_explore_jobs",
     "evaluate_trends",
     "explore_for_context",
     "explore_status",
     "load_beats",
     "load_news_profile",
     "note_owner_activity",
+    "render_explore_board",
+    "render_explore_candidates",
+    "render_explore_trends",
+    "render_sweep_cycle",
     "run_exploration",
+    "run_sweep_cycle",
 ]

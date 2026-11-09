@@ -1288,6 +1288,49 @@ class RuntimeMediaMixin:
         reg = MediaDownloader(self.context).source_registry()
         return render_status_text(reg.status())
 
+    def _control_explore(self, tail: str, chat_key: str = "") -> str:
+        """/explore — the exploration board (WS4 P3): Devon
+        watches the video field she fetches from.
+
+        /explore              → the board: last sweep's truth
+                                (failures named as failures), the
+                                next sweep due, current claims,
+                                candidate standings, and the proxy
+                                dependency stated plainly
+        /explore run          → one sweep NOW through the same
+                                cycle entry point the durable jobs
+                                fire (the owner's hand is ungated
+                                by the quiet-hours / daily-cap
+                                discipline), ending in fresh claims
+        /explore trends       → the current claims with their
+                                basis and freshness
+        /explore candidates   → the candidate pool's standings
+
+        Owner-only (CONTROL_COMMANDS, never PUBLIC_COMMANDS).
+        Text-complete: no buttons anywhere on this surface.
+        """
+        from ...media.explore import board as explore_board
+        from ...media.explore.jobs import run_sweep_cycle
+
+        words = (tail or "").strip().split()
+        verb = words[0].lower() if words else ""
+        if verb == "run":
+            cycle = run_sweep_cycle(self.context, manual=True)
+            return explore_board.render_sweep_cycle(cycle)
+        if verb == "trends":
+            return explore_board.render_explore_trends(self.context)
+        if verb == "candidates":
+            return explore_board.render_explore_candidates(
+                self.context)
+        if verb == "":
+            return explore_board.render_explore_board(
+                self.context,
+                scheduler=getattr(self, "_scheduler", None))
+        return ("usage: /explore [run | trends | candidates]\n"
+                "bare /explore is the board: last sweep, what's "
+                "moving with its basis, the candidate pool, and "
+                "when the next sweep is due.")
+
     # ── dedicated platform downloaders (FEI gap wave A) ─────────────
     #
     # /tiktok, /instagram, /spotify and /aio are entry points into
