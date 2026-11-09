@@ -38,6 +38,7 @@ AGENT_TOOL_MODULES = (
     "bisect",
     "cipher",
     "cognition",
+    "dayrecord",
     "decoder",
     "evolution",
     "exporter",

@@ -1793,6 +1793,125 @@ class RuntimeSystemMixin:
                 f"draft:{action}:{draft_id}", chat_key, message=message)
         return "📝 no drafts waiting for review."
 
+    # ── the day record: /day ─────────────────────────────────────────────
+    def _control_day(self, tail: str, chat_key: str = "") -> Any:
+        """/day — the day record + evening derivation (WS3 P4).
+
+        /day                   — today, whole: your words, then what
+                                 the organs saw (goals, trading,
+                                 missions, files), then what was made
+        /day tell <text>       — add a note to today, in your words
+        /day yesterday         — yesterday's record
+        /day show <YYYY-MM-DD> — any day's record
+        /day make              — make something of today: draft
+                                 posts land in /drafts for review
+        /day skip              — tonight's automatic derivation
+                                 leaves today alone (recorded on the
+                                 record; /day unskip undoes it)
+        /day export            — file today's record as an artifact
+
+        Owner-only (not a public command).  Narration in ordinary
+        chat reaches the same record through the brain's ``day``
+        tool — this surface is the deliberate case.  Nothing here
+        posts: drafts land in the review queue, and the automatic
+        19:00 run is the same derivation, fired by the durable job.
+        """
+        from datetime import datetime as _dt
+
+        from ..dayrecord import (
+            DayStore,
+            brain_llm_fn,
+            derive_day,
+            export_day,
+            render_day,
+            today_key,
+            yesterday_key,
+        )
+
+        db = getattr(self.context, "db", None)
+        if db is None:
+            return ("🌅 the day record is unavailable — no database"
+                    " attached to this chat")
+        store = DayStore(db)
+        parts = (tail or "").split(None, 1)
+        verb = parts[0].lower() if parts else "show"
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        def _day_arg() -> str | None:
+            if not rest:
+                return today_key()
+            try:
+                _dt.strptime(rest, "%Y-%m-%d")
+            except ValueError:
+                return None
+            return rest
+
+        if verb == "tell":
+            if not rest:
+                return ("usage: /day tell <what you did> — it goes"
+                        " into today's record, in your words")
+            frag = store.add_fragment(text=rest, source="chat")
+            count = len(store.fragments(frag["day"]))
+            return (f"🗣 kept in today's record ({count} note(s) so"
+                    " far). /day shows the day; /day make turns it"
+                    " into drafts.")
+        if verb in ("show", "list", ""):
+            day = _day_arg()
+            if day is None:
+                return "usage: /day show <YYYY-MM-DD>"
+            return render_day(self.context, day,
+                              tracker=self._goal_tracker(),
+                              artifact_store=self._artifact_store())
+        if verb == "yesterday":
+            return render_day(self.context, yesterday_key(),
+                              tracker=self._goal_tracker(),
+                              artifact_store=self._artifact_store())
+        if verb in ("make", "derive"):
+            day = _day_arg()
+            if day is None:
+                return "usage: /day make [YYYY-MM-DD]"
+            queue = self._draft_queue()
+            try:
+                result = derive_day(
+                    self.context, day, queue=queue,
+                    llm_fn=brain_llm_fn(self.context),
+                    tracker=self._goal_tracker(),
+                    artifact_store=self._artifact_store())
+            finally:
+                queue.close()
+            if result.drafts:
+                return f"✍️ {result.note}\nreview them: /drafts"
+            return f"🌅 {result.note}"
+        if verb == "skip":
+            day = _day_arg()
+            if day is None:
+                return "usage: /day skip [YYYY-MM-DD]"
+            store.set_skip(day, skip=True,
+                           note="skipped at the owner's word")
+            return (f"⏭ tonight's automatic derivation will skip"
+                    f" {day}. /day unskip undoes it; /day make still"
+                    " works whenever you ask.")
+        if verb == "unskip":
+            day = _day_arg()
+            if day is None:
+                return "usage: /day unskip [YYYY-MM-DD]"
+            store.set_skip(day, skip=False)
+            return f"▶️ {day} is back on for the evening derivation."
+        if verb == "export":
+            day = _day_arg()
+            if day is None:
+                return "usage: /day export [YYYY-MM-DD]"
+            art = export_day(self.context, day,
+                             tracker=self._goal_tracker(),
+                             artifact_store=self._artifact_store())
+            if art is None:
+                return ("the day could not be filed — no artifact"
+                        " store attached")
+            return (f"📎 {day} is filed as an artifact ({art.uri})"
+                    " — /artifact can send it anywhere")
+        return ("usage: /day [show] | tell <text> | yesterday |"
+                " make | skip | unskip | export")
+
     # ── api connectors: /api ─────────────────────────────────────────────────
     def _control_api(self, tail: str) -> str:
         parts = (tail or "").split(None, 1)

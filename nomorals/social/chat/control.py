@@ -853,6 +853,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "careers": (0, None),     # /careers [list] | add <company> | <role> | move <app> <stage> | next <app> | <action> [by <date>] | note <app> | <text> | attach <app> <artifact> | remove <app> | stages — career pipeline (owner-only)
     "drafts": (0, None),      # /drafts [list] | show <n> | post <n> | discard <n> — post-draft review board (owner-only)
     "ideas": (0, None),       # /ideas [list] | add <title> [| <detail>] | show <n> | develop <n> [as goal|draft|mission|park] [in <class>] [when <trigger>] — raw ideas + the development cell (owner-only)
+    "day": (0, None),         # /day [show] | tell <text> | yesterday | make | skip | unskip | export — the day record + derivation (owner-only)
     "insights": (0, None),    # /insights [days] — native money analytics
     "predict": (0, 3),       # /predict <stake> <over|under> <1-99> — prediction pit (progression-unlocked)
     "menu": (0, 2),          # alias of /list ([group] [page] ride the same grammar)
@@ -3335,6 +3336,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/ideas [list] | add <title> [| <detail>] | show <n> | develop <n> [as goal|draft|mission|park] [in <class>] [when <trigger>]",
               "example": "/ideas develop 1 as goal in careers",
               "related": "/goals /careers /drafts"},
+    "day": {"what": "your day record: an append-only log of what you did today — told in your own words, by /day tell or just by narrating your day in chat (voice notes included) — with the day derived whole from the organs that watch it: goal-class progress with its real basis, the trading day read from the verified GoldenSwing bundle, missions finished, files that arrived. On /day make — or automatically at 19:00 — the day becomes per-platform draft posts in your voice (LinkedIn first), fact-checked against the record (a number with no receipt never lands), and queued in /drafts for your decision. Nothing posts on its own. /day skip records your word on the day itself and the evening run honours it.",
+              "usage": "/day [show] | tell <text> | yesterday | show <YYYY-MM-DD> | make | skip | unskip | export",
+              "example": "/day tell shipped the market-situation close-out and pulled the GS update",
+              "related": "/drafts /goals /artifact"},
     "api": {"what": "external API connectors: weather, fx, github, …",
             "usage": "/api list | <connector> [json]", "example": "/api weather city=Lagos",
             "related": ""},
@@ -4291,7 +4296,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
-                           "exness", "stripe", "content", "drafts",
+                           "exness", "stripe", "content", "drafts", "day",
                            "tempmail", "checkmail", "vnumber", "checksms",
                            "browser", "paper", "backup"]),
     ("platform control", ["start", "stop", "profile", "chatmode", "style",
@@ -4610,7 +4615,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion", "gcal", "trello", "exness", "stripe",
-      "guardrails", "content", "drafts",
+      "guardrails", "content", "drafts", "day",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
     ("platform control — updates & restarts",
      ["update", "pull", "deploy", "restart"]),
@@ -4978,6 +4983,7 @@ LIST_ONELINERS: dict[str, str] = {
     "careers": "career pipeline: applications by stage, next actions with due dates, stale/overdue called out",
     "drafts": "post drafts awaiting your review: the batch board, per-draft cards, post/discard the one you name",
     "ideas": "raw ideas, grown: capture verbatim, develop into a goal, a draft, a mission, or park with a trigger",
+    "day": "your day record: tell it what you did, see the day whole, and make draft posts from it",
     "api": "external API connectors (weather, fx, github, …)",
     "connectors": "manage the service connectors: list, status, connect",
     "shorts": "short-form content empire: make, queue, post vertical videos",

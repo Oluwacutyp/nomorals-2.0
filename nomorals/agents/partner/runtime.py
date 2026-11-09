@@ -2863,6 +2863,17 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("social metrics job not registered: %s",
                                  exc)
+                # Day derivation (WS3 P4): at 19:00 owner-local the
+                # day record turns itself into review drafts —
+                # drafts only, the review queue owns every outward
+                # step. Idempotent by name; honours a per-day skip
+                # recorded on the record itself.
+                try:
+                    from ..dayrecord import ensure_day_derivation_job
+                    ensure_day_derivation_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("day derivation job not registered: %s",
+                                 exc)
                 # Price sources: the quote-provider health loop
                 # (every 6h — one bounded real quote probe per
                 # keyless provider; keyed providers never probed;
@@ -7526,6 +7537,9 @@ class PartnerRuntime(
         if kind == "ideas":
             return self._control_ideas(command.tail or arg,
                                        chat_key=chat_key)
+        if kind == "day":
+            return self._control_day(command.tail or arg,
+                                     chat_key=chat_key)
         if kind == "api":
             return self._control_api(command.tail or arg)
         if kind == "connectors":

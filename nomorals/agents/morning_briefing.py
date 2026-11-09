@@ -1439,6 +1439,14 @@ class BriefingComposer:
             self.providers.append(USASituationsProvider())
         except Exception as exc:  # noqa: BLE001
             record_failure("morning_briefing.BriefingComposer.__init__.weather_import", exc)
+        # Day bookend (agents/dayrecord.py, WS3 P4): appended lazily
+        # for the same cycle reason (dayrecord imports _Provider
+        # from here).  Absent whenever there is no yesterday record.
+        try:
+            from .dayrecord import DayBookendProvider
+            self.providers.append(DayBookendProvider())
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.BriefingComposer.__init__.dayrecord_import", exc)
         # Research (upgrade-queue) provider: local class, but constructed
         # defensively anyway — a broken research section never sinks the
         # briefing (collect() itself also swallows everything).
