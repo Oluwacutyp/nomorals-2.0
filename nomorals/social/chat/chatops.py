@@ -51,6 +51,8 @@ __all__ = [
     "parse_makepoll_args",
     "parse_sendloc_args",
     "parse_sendcontact_args",
+    "parse_schedule_args",
+    "format_schedule_instant",
     "format_search_results",
     "parse_statusaud_args",
     "format_status_audience",
@@ -76,6 +78,7 @@ CHATOPS_COMMANDS = frozenset({
     "myprofile", "privacy", "makepoll", "vcf", "addcontact",
     "sendloc", "sendcontact", "find", "findall",
     "statusaud", "statusviewers",
+    "sendlater", "deletechat", "clearhistory",
 })
 
 #: Tagall pacing law: one message carries at most this many
@@ -408,6 +411,78 @@ def parse_sendcontact_args(tail: str) -> dict[str, Any]:
     if problem:
         return {"ok": False, "error": problem}
     return {"ok": True, "name": name, "phone": phone}
+
+
+# -- scheduled sends + chat deletion (parity bundle #14) --
+
+_SCHEDULE_SCALES = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def parse_schedule_args(tail: str, now: float) -> dict[str, Any]:
+    """Parse /sendlater's tail: ``<when> <words…>`` — the
+    pure half of the scheduled-send grammar.  (The kind is
+    sendlater, not schedule: /schedule is the cron surface,
+    the makepoll-vs-/poll precedent.)
+
+    Two when-forms, one vocabulary: a RELATIVE offset
+    (``+45s``, ``+30m``, ``+2h``, ``+1d`` — the codebase's
+    duration token with a leading plus) or an ABSOLUTE UTC
+    instant (``2026-11-10 14:30`` — every surface here
+    speaks UTC, and the reply restates the parsed instant
+    so nothing lands at a silent guess).  Returns
+    ``{ok, at, text}`` with ``at`` an epoch float, or
+    ``{ok: False, error}`` — a misshapen when and a past
+    instant both refuse in words here, before any traffic.
+
+    The words may come back EMPTY: /sendlater can ride
+    attached or replied-to media, whose caption is
+    optional — whether an empty text is a usage error is
+    the handler's call, not the parser's."""
+    import calendar
+    import re
+
+    usage = ("usage: /sendlater +2h the words to send — "
+             "or an absolute UTC time: /sendlater "
+             "2026-11-10 14:30 the words to send")
+    text = str(tail or "").strip()
+    if not text:
+        return {"ok": False, "error": usage}
+    head, _, rest = text.partition(" ")
+    rest = rest.strip()
+    match = re.fullmatch(r"\+(\d+)([smhd])", head.lower())
+    if match:
+        at = float(now) + int(match.group(1)) * \
+            _SCHEDULE_SCALES[match.group(2)]
+    else:
+        # an absolute instant is TWO tokens: the date,
+        # then the clock — everything after is the message
+        clock, _, remainder = rest.partition(" ")
+        stamp = f"{head} {clock}".strip()
+        parsed = None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                parsed = time.strptime(stamp, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            return {"ok": False, "error": (
+                f"“{head}” isn't a when I speak — {usage}")}
+        at = float(calendar.timegm(parsed))
+        rest = remainder.strip()
+    if at <= float(now):
+        return {"ok": False, "error": (
+            "that time is already past — a scheduled "
+            "message needs a future when")}
+    return {"ok": True, "at": at, "text": rest}
+
+
+def format_schedule_instant(at: float) -> str:
+    """One scheduled instant the way the surfaces speak
+    instants: ``2026-11-10 14:30 UTC`` (gmtime — the
+    codebase's one clock face for owner-visible times)."""
+    return time.strftime("%Y-%m-%d %H:%M UTC",
+                         time.gmtime(float(at)))
 
 
 # -- message search (parity bundle #11, census "search depth") --

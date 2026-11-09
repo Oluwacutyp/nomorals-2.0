@@ -672,6 +672,34 @@ class ChatAdapter(ABC):
                           error="contact cards not supported "
                                 "on this adapter")
 
+    # ── scheduled sends (parity bundle #14) ──────────────
+    def send_scheduled(self, chat: ChatRef, text: str,
+                       when: float, *,
+                       reply_to: str = "") -> SendResult:
+        """Queue one text message to land at ``when``
+        (epoch seconds) instead of now — the platform's
+        native scheduled send where the platform HAS one
+        (Telegram's MTProto schedule date).  The base
+        adapter reports the truth — this platform path
+        carries no schedule verb — and each adapter that
+        CAN schedule overrides.  Never a fake success, and
+        never a silent downgrade to sending now."""
+        return SendResult(ok=False, platform=self.name,
+                          error="scheduled messages not "
+                                "supported on this adapter")
+
+    def send_scheduled_media(self, chat: ChatRef,
+                             media: MediaRef, when: float, *,
+                             caption: str = "") -> SendResult:
+        """The media form of :meth:`send_scheduled`: one
+        attachment queued to land at ``when`` (epoch
+        seconds), ``caption`` riding as its caption.  Same
+        truth rule as the text form — the base reports the
+        absence, capable adapters override."""
+        return SendResult(ok=False, platform=self.name,
+                          error="scheduled media not "
+                                "supported on this adapter")
+
     def typing(self, chat: ChatRef, seconds: float = 3.0,
              action: str = "typing") -> bool:
         """Show a typing indicator. Best-effort; adapters without one return False."""

@@ -304,6 +304,11 @@ class RuntimeChatOpsMixin:
                 return self._chatops_statusaud(tail, message)
             if kind == "statusviewers":
                 return self._chatops_statusviewers(tail, message)
+            if kind == "sendlater":
+                return self._chatops_schedule(tail, message)
+            if kind in ("deletechat", "clearhistory"):
+                return self._chatops_deletechat(kind, tail,
+                                                 message)
             if kind == "vcf":
                 return self._chatops_vcf(tail, message)
             if kind == "addcontact":
@@ -2965,6 +2970,161 @@ class RuntimeChatOpsMixin:
         return format_status_viewers(
             verdict,
             names=self._chatops_audience_names(adapter))
+    # ── scheduled sends + chat deletion (bundle #14) ─────
+
+    def _chatops_schedule(self, tail: str, message: Any) -> str:
+        """/sendlater — queue a message to land in THIS chat
+        later, AS the owner (parity bundle #14: the census
+        graded Telegram-personal scheduled messages ABSENT —
+        the send path carried no schedule date).  The kind
+        is sendlater because /schedule is the cron surface.
+
+        Telegram's own scheduled send does the holding:
+        the message goes out now with a schedule date and
+        Telegram delivers it at the instant — no timer is
+        parked here, nothing re-sends later.  The when is a
+        relative offset (+45s/+30m/+2h/+1d) or an absolute
+        UTC instant, parsed by chatops.parse_schedule_args;
+        the reply restates the exact instant it parsed.
+        Attached or replied-to media is what gets scheduled
+        (the /poststatus extraction), the words riding as
+        its caption.  Personal Telegram only: the Bot API
+        has no schedule parameter and neither WhatsApp
+        bridge library exposes a scheduled send — asked on
+        those surfaces, the command says exactly that.
+        Owner-only; the standing stop gates it; a landed
+        schedule journals message_scheduled."""
+        from ...social.chat.base import MediaRef
+        from ...social.chat.chatops import format_schedule_instant, parse_schedule_args
+
+        chat = message.chat
+        platform = str(getattr(chat, "platform", "") or "")
+        if platform == "telegram-bot":
+            return ("the bot surface can't schedule messages "
+                    "— the Bot API has no schedule parameter; "
+                    "a scheduled send is a personal-account "
+                    "act. Run /sendlater from your personal "
+                    "Telegram, in the chat it should land in.")
+        if platform == "whatsapp":
+            return ("WhatsApp has no scheduled send — "
+                    "neither bridge library exposes one, so "
+                    "there is nothing honest to queue behind. "
+                    "Scheduled sends live on your personal "
+                    "Telegram.")
+        if platform not in ("telegram", "telegram-personal"):
+            return ("/sendlater sends later from your "
+                    "personal Telegram — run it from there.")
+        parsed = parse_schedule_args(tail, time.time())
+        if not parsed.get("ok"):
+            return str(parsed.get("error")
+                       or "bad schedule shape")
+        media_path, media_kind = self._chatops_media_of(
+            message)
+        text = str(parsed.get("text") or "")
+        if not text and not media_path:
+            return ("usage: /sendlater +2h the words to "
+                    "send — or attach a photo/video (or "
+                    "reply to one) with /sendlater +2h "
+                    "[caption] to schedule the media.")
+        svc, rec, error = self._chatops_gated_account(
+            "telegram", "sendlater")
+        if error:
+            return error
+        adapter = self._adapter_for(platform)
+        if adapter is None:
+            adapter = self._adapter_for("telegram")
+        if adapter is None:
+            return ("no live Telegram surface here to "
+                    "schedule from.")
+        when = float(parsed["at"])
+        stamp = format_schedule_instant(when)
+        if media_path:
+            media = MediaRef(path=media_path,
+                             kind=media_kind)
+            result = self._chatops_call(
+                adapter.send_scheduled_media, chat, media,
+                when, caption=text)
+            what = "that media"
+        else:
+            result = self._chatops_call(
+                adapter.send_scheduled, chat, text, when)
+            what = "your message"
+        ok, why, message_id = self._send_verdict(result)
+        if not ok:
+            return (f"couldn't schedule it — "
+                    f"{why or 'the surface refused'}")
+        svc["personal"].note_message_acted(
+            "telegram", kind="message_scheduled",
+            account_id=rec.id,
+            chat_id=str(getattr(chat, "chat_id", "") or ""),
+            source_id=message_id,
+            note=f"scheduled for {stamp} via /sendlater")
+        return (f"scheduled — {what} lands here {stamp}.")
+
+    def _chatops_deletechat(self, kind: str, tail: str,
+                            message: Any) -> str:
+        """/deletechat + /clearhistory — the chat-lifecycle
+        half of parity bundle #14: the census graded
+        Telegram-personal delete-a-chat / clear-history
+        ABSENT (no DeleteHistory verb anywhere).
+
+        The target follows the chatops grammar (the chat it
+        was sent in, or another named the way chats are
+        named).  /deletechat removes the conversation
+        outright — a DM for both sides, a group/channel
+        from the owner's side; /clearhistory wipes the
+        messages and keeps the chat in his list.  Both are
+        acts as the owner on his personal Telegram: the
+        standing stop gates them, a landed act journals
+        (chat_deleted / history_cleared), and Telegram's
+        own refusals come back in Telegram's words.  The
+        bot surface gets the family absence line; WhatsApp
+        has no delete-chat verb wired on either bridge."""
+        ref, adapter, error = self._chatops_target(
+            message, tail)
+        if error:
+            return error
+        platform = str(getattr(ref, "platform", "") or "")
+        name = str(getattr(ref, "title", "")
+                   or getattr(ref, "chat_id", "")
+                   or "that chat")
+        if platform == "telegram-bot":
+            return self._chatops_bot_absence(kind)
+        if platform == "whatsapp":
+            return ("WhatsApp has no delete-chat verb "
+                    "wired on this surface — chat deletion "
+                    "here rides your personal Telegram.")
+        if platform not in ("telegram", "telegram-personal"):
+            return (f"/{kind} lives on your personal "
+                    f"Telegram — run it from there.")
+        svc, rec, error = self._chatops_gated_account(
+            "telegram", kind)
+        if error:
+            return error
+        if adapter is None:
+            return "no live Telegram surface here."
+        verb = ("delete_chat" if kind == "deletechat"
+                else "clear_history")
+        fn = getattr(adapter, verb, None)
+        if not callable(fn):
+            return ("this Telegram surface has no "
+                    "delete-chat verb wired.")
+        verdict = self._chatops_call(fn, ref)
+        if not (isinstance(verdict, dict)
+                and verdict.get("ok")):
+            return self._chatops_verdict(verdict, "")
+        svc["personal"].note_message_acted(
+            "telegram",
+            kind=("chat_deleted" if kind == "deletechat"
+                  else "history_cleared"),
+            account_id=rec.id,
+            chat_id=str(getattr(ref, "chat_id", "") or ""),
+            note=f"{kind} as the owner via /{kind}")
+        if kind == "deletechat":
+            return (f"deleted {name} — the conversation "
+                    f"is gone.")
+        return (f"cleared the history of {name} — the "
+                f"chat itself stays.")
 
     # ── tagging ──────────────────────────────────────────────
 

@@ -2645,6 +2645,57 @@ class TelegramAdapter(ChatAdapter):
             return SendResult(ok=False, platform=self.name, error=str(exc),
                               seconds=time.perf_counter() - started)
 
+    def send_scheduled(self, chat: ChatRef, text: str,
+                       when: float, *,
+                       reply_to: str = "") -> SendResult:
+        """Queue one text message to land at ``when`` (epoch
+        seconds) — MTProto's native scheduled send (parity
+        bundle #14: the census graded scheduled messages
+        ABSENT; the send path carried no schedule date).
+
+        The message is composed exactly like :meth:`send` —
+        same chunking, same flood-retry — with Telethon's
+        ``schedule`` date riding every chunk, so Telegram
+        itself holds and delivers it; nothing here parks a
+        timer or re-sends later.  A past instant and an
+        empty text refuse BEFORE any traffic: Telegram
+        rejects the first, and a wordless schedule is a
+        shape error, not a message."""
+        client = self._client
+        if client is None:
+            return SendResult(ok=False, platform=self.name,
+                              error="not connected")
+        if not str(text or "").strip():
+            return SendResult(
+                ok=False, platform=self.name,
+                error="a scheduled message needs its words")
+        try:
+            at = float(when or 0)
+        except (TypeError, ValueError):
+            at = 0.0
+        if at <= time.time():
+            return SendResult(
+                ok=False, platform=self.name,
+                error="a scheduled message needs a future time")
+        from datetime import UTC, datetime
+
+        started = time.perf_counter()
+        try:
+            result = self._run_on_loop(self._send_async(
+                client, chat, text, reply_to, "",
+                schedule=datetime.fromtimestamp(
+                    at, tz=UTC)))
+            return SendResult(
+                ok=True, platform=self.name,
+                message_id=str(getattr(result, "id", "")),
+                seconds=time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001 - report as result
+            self.stats["send_errors"] += 1
+            return SendResult(ok=False, platform=self.name,
+                              error=str(exc),
+                              seconds=time.perf_counter()
+                              - started)
+
     def _thread_kwargs(self, chat: ChatRef) -> dict[str, Any]:
         """Forum-topic routing: replies land inside the topic, not the group."""
         if not getattr(chat, "thread_id", ""):
@@ -2724,7 +2775,8 @@ class TelegramAdapter(ChatAdapter):
     async def _send_async(self, client: Any, chat: ChatRef, text: str, reply_to: str,
                           parse_mode: str = "",
                           reply_keyboard: list[list[str]] | None = None,
-                          buttons: list[list[tuple[str, str]]] | None = None) -> Any:
+                          buttons: list[list[tuple[str, str]]] | None = None,
+                          schedule: Any = None) -> Any:
         # Try to use cached input entity first (most reliable for DMs)
         entity = self._input_entity_cache.get(chat.chat_id)
         if entity is None:
@@ -2735,6 +2787,11 @@ class TelegramAdapter(ChatAdapter):
             kwargs["reply_to"] = int(reply_to)
         if parse_mode in ("html", "HTML", "md", "markdown"):
             kwargs["parse_mode"] = parse_mode
+        if schedule is not None:
+            # A scheduled send (parity bundle #14): the date
+            # rides EVERY chunk — a long message lands whole
+            # at the instant, never half now, half later.
+            kwargs["schedule"] = schedule
         kwargs.update(self._thread_kwargs(chat))
         # Persistent bottom reply keyboard (Telethon ReplyKeyboardMarkup).
         # Guarded import + best-effort: if Telethon lacks the type, the
@@ -2907,6 +2964,81 @@ class TelegramAdapter(ChatAdapter):
             self.stats["send_errors"] += 1
             return SendResult(ok=False, platform=self.name, error=str(exc),
                               seconds=time.perf_counter() - started)
+
+    def send_scheduled_media(self, chat: ChatRef,
+                             media: MediaRef, when: float, *,
+                             caption: str = "") -> SendResult:
+        """Queue one attachment to land at ``when`` (epoch
+        seconds) — the media form of :meth:`send_scheduled`
+        (parity bundle #14): Telethon's send_file carries
+        the same native ``schedule`` date, and the media
+        form flags (voice note, round video note) ride
+        unchanged, so a scheduled video note still lands
+        AS a video note.  View-once gets send_media's own
+        honest refusal — MTProto has no view-once media
+        outside secret chats, scheduled or not."""
+        client = self._client
+        if client is None:
+            return SendResult(ok=False, platform=self.name,
+                              error="not connected")
+        if getattr(media, "view_once", False):
+            return SendResult(
+                ok=False, platform=self.name,
+                error="view-once is a WhatsApp form — Telegram has "
+                      "no view-once media outside secret chats")
+        try:
+            at = float(when or 0)
+        except (TypeError, ValueError):
+            at = 0.0
+        if at <= time.time():
+            return SendResult(
+                ok=False, platform=self.name,
+                error="a scheduled message needs a future time")
+        from datetime import UTC, datetime
+
+        started = time.perf_counter()
+
+        async def _do() -> Any:
+            entity = self._input_entity_cache.get(chat.chat_id)
+            if entity is None:
+                entity = await self._resolve(chat)
+            kwargs = self._thread_kwargs(chat)
+            if getattr(media, "voice_note", False):
+                kwargs["voice_note"] = True
+            if (media.kind or "") == "video_note":
+                kwargs["video_note"] = True
+            kwargs["schedule"] = datetime.fromtimestamp(
+                at, tz=UTC)
+
+            async def _one() -> Any:
+                call_kwargs = dict(kwargs)
+                try:
+                    result = await client.send_file(
+                        entity, media.path,
+                        caption=caption or None, **call_kwargs)
+                except TypeError:  # older Telethon, no thread kwarg
+                    call_kwargs.pop("message_thread_id", None)
+                    result = await client.send_file(
+                        entity, media.path,
+                        caption=caption or None, **call_kwargs)
+                self._remember_sent(getattr(result, "id", None))
+                return result
+
+            return await self._send_with_flood_retry(
+                _one, "send_file")
+
+        try:
+            result = self._run_on_loop(_do())
+            return SendResult(
+                ok=True, platform=self.name,
+                message_id=str(getattr(result, "id", "")),
+                seconds=time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001
+            self.stats["send_errors"] += 1
+            return SendResult(ok=False, platform=self.name,
+                              error=str(exc),
+                              seconds=time.perf_counter()
+                              - started)
 
     def edit_media(self, chat: ChatRef, message_id: str, media: MediaRef,
                    *, caption: str = "") -> SendResult:
@@ -3234,6 +3366,69 @@ class TelegramAdapter(ChatAdapter):
             await client(DeleteChatUserRequest(
                 chat_id=abs(int(raw)), user_id="me"))
             return {"ok": True, "chat_id": raw}
+
+        try:
+            return dict(self._run_on_loop(_do(), timeout=60.0))
+        except Exception as exc:  # noqa: BLE001 - Telegram's
+            # own words are the answer
+            return {"ok": False, "error": str(exc)[:300]}
+
+    def clear_history(self, chat: ChatRef, *,
+                      revoke: bool = False) -> dict[str, Any]:
+        """Wipe a chat's history, keeping the chat itself
+        (parity bundle #14: the census graded delete-chat /
+        clear-history ABSENT — no DeleteHistory verb existed
+        anywhere in the adapter).
+
+        ``messages.DeleteHistoryRequest`` with
+        ``just_clear=True``: the conversation stays in the
+        dialog list, its messages go.  ``revoke=True`` asks
+        Telegram to wipe the other side too — honored for
+        DMs; for groups and channels the server decides,
+        and its refusal returns verbatim in the verdict."""
+        return self._delete_history(chat, just_clear=True,
+                                    revoke=bool(revoke))
+
+    def delete_chat(self, chat: ChatRef) -> dict[str, Any]:
+        """Delete a conversation outright, as the account
+        owner (parity bundle #14): ``DeleteHistoryRequest``
+        with ``just_clear=False`` — the dialog itself goes,
+        with its history.
+
+        The revoke flag follows the chat kind, the Telegram
+        client's own delete-chat semantics: a DM is deleted
+        for BOTH sides; a group or channel is removed from
+        this account's side (leaving a room other people
+        stay in is /leave's verb — a different act, already
+        built).  The server's own refusals (a channel whose
+        history only its creator can purge, say) return
+        verbatim — never dressed as success."""
+        revoke = str(getattr(chat, "kind", "") or "") \
+            == ChatKind.DM
+        return self._delete_history(chat, just_clear=False,
+                                    revoke=revoke)
+
+    def _delete_history(self, chat: ChatRef, *,
+                        just_clear: bool,
+                        revoke: bool) -> dict[str, Any]:
+        """The one DeleteHistory ride both verbs share."""
+        client = self._client
+        if client is None or self._loop is None:
+            return {"ok": False,
+                    "error": "telegram userbot not connected"}
+
+        async def _do() -> dict[str, Any]:
+            from telethon.tl.functions.messages import DeleteHistoryRequest
+
+            entity = self._input_entity_cache.get(
+                chat.chat_id)
+            if entity is None:
+                entity = await self._resolve(chat)
+            await client(DeleteHistoryRequest(
+                peer=entity, max_id=0,
+                just_clear=just_clear, revoke=revoke))
+            return {"ok": True,
+                    "chat_id": str(chat.chat_id or "")}
 
         try:
             return dict(self._run_on_loop(_do(), timeout=60.0))
