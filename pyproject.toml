@@ -52,6 +52,10 @@ voice = ["edge-tts>=6.1", "openai-whisper>=20231117", "sounddevice>=0.4"]
 chat = ["telethon>=1.36", "discord.py>=2.3"]
 # Cloud connectors.
 cloud = ["boto3>=1.34", "paramiko>=3.4"]
+# MongoDB document-store backend (storage/docstore.py). Optional by the
+# zero-dependency law: without it, Devon serves the SQLite rung and the
+# backend status reports "driver_missing" instead of failing.
+mongo = ["pymongo>=4.6"]
 # Image generation.
 genimg = ["diffusers>=0.27", "rembg>=2.0"]
 # Browser automation.
@@ -64,7 +68,7 @@ apk = ["androguard>=4.0", "apkid>=2.1"]
 # Development / test tooling.
 dev = ["pytest>=7.4", "ruff>=0.3"]
 # Everything.
-all = ["nomorals[fast,media,media-edit,train,finetune,hub,ta,datasci,docs,voice,chat,cloud,genimg,browser,config,apk,dev]"]
+all = ["nomorals[fast,media,media-edit,train,finetune,hub,ta,datasci,docs,voice,chat,cloud,mongo,genimg,browser,config,apk,dev]"]
 
 # Everything. Install this and Devon just works — no pip-hint chasing.
 

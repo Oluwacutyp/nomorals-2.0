@@ -417,51 +417,124 @@ class LiveVerifier:
                 message=f"Bridge unreachable at {host}:{port} - {e}",
             )
     
+    def _storage_settings(self) -> Optional[Any]:
+        """The install's StorageSettings, from config or process settings."""
+        cfg = self.config
+        storage = getattr(cfg, "storage", None) if cfg is not None else None
+        if storage is None and isinstance(cfg, dict):
+            storage = cfg.get("storage")
+        if storage is None:
+            try:
+                from .config import get_settings
+                storage = get_settings().storage
+            except Exception:  # noqa: BLE001 - doctor reports, never bricks
+                storage = None
+        return storage
+
     async def verify_database(self) -> VerificationCheck:
-        """Verify database integrity."""
+        """Verify database integrity — and report the configured backend.
+
+        The SQLite file is always checked (it is the offline rung and the
+        shadow target). When ``storage.backend`` is ``mongo``, the Mongo
+        endpoint is probed too: a configured-but-unreachable Mongo fails
+        this check with that reason named, so "mongo off" (sqlite by
+        choice) is never confused with "mongo broken" (configured, down).
+        Deep backend health (driver presence, resolution state) lives in
+        ``nomorals.storage.docstore.storage_backend_status``.
+        """
         db_path = Path.home() / ".nomorals/nomorals.db"
-        
+        storage = self._storage_settings()
+        backend = str(getattr(storage, "backend", "sqlite") or "sqlite").lower()
+
+        sqlite_check: Optional[VerificationCheck] = None
         if not db_path.exists():
-            return VerificationCheck(
+            sqlite_check = VerificationCheck(
                 name="Database",
                 passed=False,
                 message=f"Database not found at {db_path}",
             )
-        
-        try:
-            import sqlite3
-            conn = sqlite3.connect(str(db_path))
-            cursor = conn.cursor()
-            
-            # Check integrity
-            cursor.execute("PRAGMA integrity_check")
-            result = cursor.fetchone()[0]
-            
-            # Get table count
-            cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'")
-            table_count = cursor.fetchone()[0]
-            
-            conn.close()
-            
-            if result == "ok":
-                return VerificationCheck(
-                    name="Database",
-                    passed=True,
-                    message=f"Healthy, {table_count} tables",
-                    details={"path": str(db_path), "tables": table_count},
-                )
-            else:
-                return VerificationCheck(
+        else:
+            try:
+                import sqlite3
+                conn = sqlite3.connect(str(db_path))
+                cursor = conn.cursor()
+
+                # Check integrity
+                cursor.execute("PRAGMA integrity_check")
+                result = cursor.fetchone()[0]
+
+                # Get table count
+                cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'")
+                table_count = cursor.fetchone()[0]
+
+                conn.close()
+
+                if result == "ok":
+                    sqlite_check = VerificationCheck(
+                        name="Database",
+                        passed=True,
+                        message=f"Healthy, {table_count} tables",
+                        details={"path": str(db_path), "tables": table_count},
+                    )
+                else:
+                    sqlite_check = VerificationCheck(
+                        name="Database",
+                        passed=False,
+                        message=f"Integrity check failed: {result}",
+                    )
+            except Exception as e:
+                sqlite_check = VerificationCheck(
                     name="Database",
                     passed=False,
-                    message=f"Integrity check failed: {result}",
+                    message=f"Failed to check: {e}",
                 )
-        except Exception as e:
+
+        if backend != "mongo":
+            sqlite_check.details.setdefault("backend", "sqlite")
+            sqlite_check.details.setdefault("mongo_state", "off")
+            return sqlite_check
+
+        # Mongo is the configured document backend: probe its endpoint.
+        from urllib.parse import urlparse
+        uri = str(getattr(storage, "mongo_uri", "") or "mongodb://127.0.0.1:27017")
+        parsed = urlparse(uri)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 27017
+        try:
+            import socket
+            sock = socket.create_connection((host, port), timeout=3)
+            sock.close()
+            mongo_state = "reachable"
+        except Exception as e:  # noqa: BLE001 - the reason is the report
             return VerificationCheck(
                 name="Database",
                 passed=False,
-                message=f"Failed to check: {e}",
+                message=(
+                    f"MongoDB backend configured but endpoint unreachable at "
+                    f"{host}:{port} ({e}); boot degrades to the SQLite rung. "
+                    f"SQLite file: {sqlite_check.message}"
+                ),
+                details={
+                    "backend": "mongo",
+                    "mongo_state": "unreachable",
+                    "mongo_endpoint": f"{host}:{port}",
+                    "sqlite": sqlite_check.details,
+                },
             )
+        return VerificationCheck(
+            name="Database",
+            passed=sqlite_check.passed,
+            message=(
+                f"{sqlite_check.message}; mongo backend configured, "
+                f"endpoint reachable at {host}:{port}"
+            ),
+            details={
+                **sqlite_check.details,
+                "backend": "mongo",
+                "mongo_state": mongo_state,
+                "mongo_endpoint": f"{host}:{port}",
+            },
+        )
     
     async def verify_disk_space(self) -> VerificationCheck:
         """Verify sufficient disk space."""

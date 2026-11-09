@@ -21,6 +21,7 @@ from ..core.observability import Metrics, Tracer
 from ..core.policy import CapabilitySet, Policy
 from ..core.ratelimit import SemaphorePool
 from ..storage.db import Database, open_database
+from ..storage.docstore import attach_document_store
 from ..storage.kv import KVStore
 
 __all__ = ["AgentContext", "build_context", "build_router",
@@ -241,6 +242,13 @@ def build_context(
     else:
         database = db
         database.migrate()
+    # Document-store seam (Mongo program P0/P1): resolve the configured
+    # storage backend once at boot and attach it to the Database. KVStore
+    # picks an attached Mongo store up from there, so its consumers route
+    # backends with no call-site changes; on the SQLite default (or a
+    # degraded Mongo config) nothing is attached and the native kv_store
+    # path serves exactly as before. Resolution never raises.
+    attach_document_store(database, settings)
     event_bus = bus or EventBus().start()
 
     context = AgentContext(

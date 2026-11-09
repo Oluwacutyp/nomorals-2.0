@@ -68,6 +68,21 @@ class StorageSettings:
     synchronous: str = "NORMAL"
     blob_dir: str = "data/blobs"
     fts: bool = True
+    # Document-store backend (Mongo program): "sqlite" keeps every domain
+    # on the SQLite rung; "mongo" makes the document-store seam
+    # (storage/docstore.py) serve ported domains — KV first — from MongoDB
+    # when it is reachable, degrading loudly to SQLite when it is not.
+    # Pinned per install by config; never auto-flapped per boot.
+    backend: str = "sqlite"
+    # Mongo endpoint (env NM_MONGO_URI). Empty = local default
+    # mongodb://127.0.0.1:27017. On Termux/Android-class profiles an
+    # explicit URI is required before Mongo is honored at all.
+    mongo_uri: str = ""
+    mongo_db: str = "nomorals"
+    # Dual-write shadow mode: while Mongo serves, also write the SQLite
+    # rung and parity-check the two (storage/parity.py). Reads stay on
+    # Mongo; the shadow is proof + hot spare, never a second primary.
+    mongo_shadow: bool = False
 
 
 @dataclass
@@ -1001,6 +1016,10 @@ _ENV_MAP: dict[str, str] = {
     "NM_LOG_FILE": "log.file",
     "NM_DB_PATH": "storage.path",
     "NM_DB_WAL": "storage.wal",
+    "NM_DB_BACKEND": "storage.backend",
+    "NM_MONGO_URI": "storage.mongo_uri",
+    "NM_MONGO_DB": "storage.mongo_db",
+    "NM_MONGO_SHADOW": "storage.mongo_shadow",
     "NM_BACKUP_DIR": "backup.dir",
     "NM_BACKUP_KEEP": "backup.keep",
     "NM_BACKUP_GIT_REPO": "backup.git_repo",
@@ -1728,6 +1747,8 @@ def _validate(settings: Settings) -> None:
         problems.append("budget.retries must be >= 0")
     if settings.storage.busy_timeout_ms < 0:
         problems.append("storage.busy_timeout_ms must be >= 0")
+    if settings.storage.backend not in {"sqlite", "mongo"}:
+        problems.append("storage.backend must be sqlite|mongo")
     if settings.backup.interval_seconds < 60:
         problems.append("backup.interval_seconds must be >= 60")
     if settings.memory.recall_limit < 1:
