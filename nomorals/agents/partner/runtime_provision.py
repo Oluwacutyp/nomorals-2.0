@@ -2316,6 +2316,8 @@ class RuntimeProvisionMixin:
             from collections import Counter
             from datetime import datetime
 
+            from ...social.chat.present import state_line
+
             svc = self._pairing_personal()
             vault = svc["personal"].vault
             kind = ""
@@ -2390,6 +2392,14 @@ class RuntimeProvisionMixin:
                     record_failure(
                         "runtime_provision.pair_journal_buttons",
                         exc)
+                    # Partial honesty (design absorption #6):
+                    # a section that could not be read is marked
+                    # on the board, never silently dropped.
+                    lines.append(
+                        "  " + state_line(
+                            "unavailable",
+                            "the button-degradation count could "
+                            "not be read just now"))
             return "\n".join([head] + lines)
         if sub == "buttons":
             return self._pair_buttons(parts[1:])

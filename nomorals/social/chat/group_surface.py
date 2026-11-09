@@ -463,6 +463,43 @@ def _chat_id_match(a: Any, b: Any) -> bool:
     return da == "100" + db or db == "100" + da
 
 
+def _board_empty_fill(parsed: dict[str, Any]) -> str:
+    """What fills an empty board, per scope (design absorption
+    #6: a designed empty state names the action that fills it,
+    not just the absence)."""
+    scope = parsed["scope"]
+    if scope == "group":
+        return ("Standings land as members earn, play and post "
+                "in this group.")
+    if scope == "community":
+        return ("Standings land as members of the groups "
+                "carrying this community tag earn, play and "
+                "post.")
+    if scope in ("game", "games"):
+        return "Standings land as games are played."
+    if scope == "gangs":
+        return ("Standings land as gangs form, recruit and "
+                "hold chapters.")
+    return ("Standings land as members earn, play and post in "
+            "the groups Devon runs.")
+
+
+def _board_unavailable_detail(parsed: dict[str, Any]) -> str:
+    """Why a board's rows cannot be read in this call/process
+    (design absorption #6: unavailable renders as unavailable,
+    with the reason — never as an empty board)."""
+    if parsed["scope"] in ("game", "games"):
+        return ("the games spine is not feeding this process, "
+                "so this board's rows cannot be read here — "
+                "the board exists; its standings return with "
+                "the games provider.")
+    if parsed["scope"] == "group":
+        return ("this board reads one group's standings — ask "
+                "for it inside the group.")
+    return ("this board's rows cannot be read in this process "
+            "right now.")
+
+
 def _slug(group_key: str) -> str:
     return str(group_key).replace(":", "_").replace("/", "_")
 
@@ -9203,17 +9240,46 @@ class GroupSurface:
         movement markers read the last published snapshot.
         ``publish=True`` records the rendered ranking as the
         new baseline AFTER the text is composed — a peek never
-        advances it."""
+        advances it.
+
+        State coverage (design absorption #6): the board answers
+        in present's state grammar. Empty rows render the
+        designed empty state (what fills this board); a peek
+        whose rows this process cannot supply (a games board
+        with no games provider) renders the unavailable board;
+        a read that raises renders the error board — a board
+        never surfaces as a raw exception or a silent nothing.
+        ``None`` means exactly one thing: the id names no board.
+        Under ``publish=True`` (the cycle beat) the unavailable
+        and error cases return None instead, so the cycle audits
+        a skipped publish and never posts a state board as a
+        scheduled board."""
         from .typography import Card, render_card, sparks
 
         parsed = _parse_board_id(board_id)
         if parsed is None:
             return None
-        rows = self.board_rows(board_id, group_key=group_key,
-                               games_rows=games_rows,
-                               limit=_BOARD_LIMIT)
+        try:
+            rows = self.board_rows(board_id, group_key=group_key,
+                                   games_rows=games_rows,
+                                   limit=_BOARD_LIMIT)
+        except Exception as exc:  # noqa: BLE001 - a board read
+            # fails as a board state, never as a raw exception
+            record_failure("group_surface.render_board", exc)
+            if publish:
+                return None
+            detail = ("the standings could not be read just now "
+                      f"({type(exc).__name__}) — asking again "
+                      "re-reads them.")
+            return self._board_state_text(
+                parsed, "error", group_key=group_key,
+                detail=detail)
         if rows is None:
-            return None
+            if publish:
+                return None
+            return self._board_state_text(
+                parsed, "unavailable", group_key=group_key,
+                detail=_board_unavailable_detail(parsed))
         book = self._board_book()
         marks = _board_movement(book.latest(parsed["id"]), rows)
         meta_fmt = _board_metric_format(parsed)
@@ -9229,8 +9295,10 @@ class GroupSurface:
                     else "leaderboard",
                     title=_board_title(parsed), icon="🏆")
         if not rows:
-            card.line("no standings yet — nothing honest to "
-                      "rank.")
+            card.state_section(
+                "empty",
+                detail=("no standings yet — nothing honest to "
+                        "rank. " + _board_empty_fill(parsed)))
         else:
             medals = ["🥇", "🥈", "🥉"]
             stats = []
@@ -9258,6 +9326,25 @@ class GroupSurface:
                 self._audit(group_key, "board_published",
                             board=parsed["id"])
         return text
+
+    def _board_state_text(self, parsed: dict[str, Any],
+                          state: str, *, group_key: str = "",
+                          detail: str = "") -> str:
+        """A board in a non-ready state, rendered as a board
+        (design absorption #6): the board's own title and frame
+        carrying present's designed state line — the reader sees
+        WHICH board answered and why it has no rows, never a
+        blank or a bare error."""
+        from .typography import Card, render_card
+
+        card = Card("game" if _board_game_flavored(parsed)
+                    else "leaderboard",
+                    title=_board_title(parsed), icon="🏆")
+        card.state_section(state, detail=detail)
+        if group_key:
+            return self._card_render(group_key, card)
+        return render_card(card, platform="telegram-bot",
+                           settings=None).text
 
     def boards_cycle(self, group_key: str, *,
                      now: float | None = None) -> list[str]:

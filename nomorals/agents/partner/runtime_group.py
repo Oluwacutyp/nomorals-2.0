@@ -4319,9 +4319,12 @@ class RuntimeGroupMixin:
             board_id, group_key=key or "",
             games_rows=self._board_games_rows())
         if text is None:
+            # render_board returns None only for an id that
+            # names no board — unavailable and failed boards
+            # render their designed state boards instead
+            # (design absorption #6).
             return (f"no board called {name!r} — /boards lists "
-                    "what exists (a games board also needs the "
-                    "games spine in this process).")
+                    "what exists.")
         return text
 
     # ---- webshot (§18/§20): the capture surface --------------

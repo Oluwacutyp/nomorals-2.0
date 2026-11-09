@@ -420,6 +420,22 @@ class Card:
             ("board", str(title or ""), str(text or "")))
         return self
 
+    def state_section(self, state: Any, *, title: str = "",
+                      detail: str = "") -> Card:
+        """A designed board-state block (design absorption #6):
+        this part of the card has no readable data — ``empty``
+        (nothing yet; ``detail`` names what fills it),
+        ``unavailable`` (``detail`` says why it can't be read
+        here) or ``error`` (``detail`` carries the reason and
+        the next step). Renders through present's Section
+        states, so every card surface answers in the same
+        grammar and a card mixing real blocks with state
+        blocks is the honest partial board."""
+        self._blocks.append(
+            ("state", str(title or ""),
+             (str(state or "ready"), str(detail or ""))))
+        return self
+
     def flavor(self, text: Any) -> "Card":
         """Flavor / fine print: rendered as a quote block,
         expandable on Telegram when long."""
@@ -469,6 +485,10 @@ class Card:
             elif kind == "board":
                 add(Section(title=title,
                             pre=tuple(str(payload).splitlines())))
+            elif kind == "state":
+                state, detail = payload
+                add(Section(title=title, state=state,
+                            state_detail=detail))
             elif kind == "flavor":
                 text = str(payload)
                 add(Section(

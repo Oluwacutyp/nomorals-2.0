@@ -97,7 +97,18 @@ def build_telegram_menu(is_owner: bool) -> dict[str, list[str]]:
 
 
 def menu_text(is_owner: bool) -> str:
-    """Render the registry-derived menu as chat text."""
+    """Render the registry-derived menu as chat text.
+
+    State coverage (design absorption #6): the menu renders
+    synchronously from the in-process registry, so it has NO
+    loading state and can never be empty — the registry is code,
+    and :func:`validate_menu` pins that every registered command
+    appears. A registry failure is a boot failure, not a menu
+    state, so there is no error render either. The menu's
+    partial answer is omission: a group with no commands visible
+    to this caller does not render at all (never a blank group),
+    and ungrouped kinds collect under "more".
+    """
     from .control import COMMAND_DETAILS
 
     menu = build_telegram_menu(is_owner)

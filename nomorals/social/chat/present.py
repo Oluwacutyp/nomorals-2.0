@@ -70,6 +70,28 @@ so producers inherit them instead of re-inventing them per surface):
   what happens next, or the policy line that escalated it — set by
   the producer (or the Notifier's policy seam), rendered last and
   quiet (italic on rich transports).
+
+Board states (design absorption #6 — state coverage). Every board
+or menu surface answers for the states it can reach in ONE
+vocabulary, defined here so boards inherit it instead of
+hand-rolling per surface:
+
+* a :class:`Section` is ``ready`` (renders its content),
+  ``empty`` (no data yet — the render names what would land
+  there and what fills it), ``unavailable`` (the data exists in
+  principle but this surface/process cannot read it now — the
+  render says why) or ``error`` (the read failed — the render
+  carries the reason and the next step);
+* a Doc mixing ready sections with empty/unavailable ones IS
+  the **partial** state: the good sections render, the missing
+  ones are marked in place — never silently dropped, never
+  rendered as zero or blank;
+* **loading** is not a section state. Boards render
+  synchronously from local stores, so they never fake one; the
+  one async shape — a placeholder message edited into the board
+  when the data lands — is :func:`board_placeholder`;
+* :func:`state_line` is the same grammar as one plain-text line
+  for the board surfaces that compose strings instead of Docs.
 """
 
 from __future__ import annotations
@@ -87,10 +109,10 @@ _log = logging.getLogger(__name__)
 
 __all__ = [
     "Doc", "Section", "KV", "Field", "Rendered",
-    "TONE_ICONS", "TONES", "SIGNPOSTS",
+    "TONE_ICONS", "TONES", "SIGNPOSTS", "SECTION_STATES",
     "render", "render_text", "chunks", "body_text", "canonical_text",
     "actions_rows", "doc_to_json", "doc_from_json",
-    "from_dict", "humanize_key",
+    "from_dict", "humanize_key", "board_placeholder", "state_line",
 ]
 
 #: tone → banner icon. The same status vocabulary as
@@ -115,6 +137,54 @@ SIGNPOSTS: dict[str, str] = {
 }
 
 _TONE_ALIASES = {"fail": "error"}
+
+#: The board/section states (design absorption #6; see the module
+#: docstring). ``ready`` renders content; the other three render
+#: the designed state line instead of content. A board's partial
+#: state is a composition of ready + non-ready sections, not a
+#: fifth state.
+SECTION_STATES = ("ready", "empty", "unavailable", "error")
+
+#: state → (icon, lead words) for the designed state line. The
+#: icons extend the tone vocabulary (⚠️/❌) with the empty board's
+#: own signpost (🗒 — a blank page, not a status claim).
+_STATE_LEADS: dict[str, tuple[str, str]] = {
+    "empty": ("🗒", "nothing here yet"),
+    "unavailable": ("⚠️", "unavailable"),
+    "error": ("❌", "couldn't load"),
+}
+
+
+def state_line(state: Any, detail: str = "") -> str:
+    """The designed one-line answer for a board (or one section
+    of one) in ``state`` — house dialect, converted per platform
+    by the gateway like any producer string. ``detail`` is the
+    human reason: for ``empty``, what fills the board; for
+    ``unavailable``, why the data can't be read here; for
+    ``error``, what failed and the next step. An unknown state
+    is a producer bug and raises, like an unknown tone."""
+    name = str(state or "").strip().lower()
+    if name not in _STATE_LEADS:
+        raise ValueError(
+            f"board state must be one of {sorted(_STATE_LEADS)}, "
+            f"got {state!r}")
+    icon, lead = _STATE_LEADS[name]
+    text = str(detail or "").strip()
+    if text:
+        return f"{icon} {lead} — {text}"
+    return f"{icon} {lead}"
+
+
+def board_placeholder(title: str = "") -> str:
+    """The ONE loading shape for a board: the title over a bare
+    ellipsis. Sent only by a producer that will EDIT the same
+    message into the finished board when its data lands — a
+    board that renders synchronously never sends it, because a
+    fake loading state is worse than none."""
+    head = str(title or "").strip()
+    if head:
+        return f"{head}\n…"
+    return "…"
 
 #: The output_style divider — the plain renderer's header rule.
 _DIVIDER = "━━━━━━━━━━━━━━━"
@@ -159,7 +229,15 @@ class Section:
     excerpts): escaped literally per dialect like structural text —
     never dialect-converted, so a ``<b>`` inside a pre line can
     neither inject markup nor break a marker pair — and rendered
-    as a monospace block (``<pre>`` / fenced) so columns align."""
+    as a monospace block (``<pre>`` / fenced) so columns align.
+
+    ``state`` is the board-state vocabulary (design absorption
+    #6): ``ready`` renders the content above; ``empty`` /
+    ``unavailable`` / ``error`` render the designed state line
+    (``state_detail`` carries the reason in prose) INSTEAD of the
+    content — a producer that knows a section has no readable
+    data says so in the section's place, so the board is partial
+    honestly rather than silently short."""
 
     title: str = ""
     rows: tuple[KV, ...] = ()
@@ -167,8 +245,18 @@ class Section:
     quote: tuple[str, ...] = ()
     expandable: bool = False
     pre: tuple[str, ...] = ()
+    state: str = "ready"
+    state_detail: str = ""
 
     def __post_init__(self) -> None:
+        state = str(self.state or "ready").strip().lower()
+        if state not in SECTION_STATES:
+            raise ValueError(
+                f"Section state must be one of "
+                f"{sorted(SECTION_STATES)}, got {self.state!r}")
+        object.__setattr__(self, "state", state)
+        object.__setattr__(
+            self, "state_detail", str(self.state_detail or ""))
         object.__setattr__(
             self, "rows", tuple(_coerce_kv(r) for r in self.rows or ()))
         object.__setattr__(
@@ -177,6 +265,26 @@ class Section:
             self, "quote", tuple(str(x) for x in self.quote or ()))
         object.__setattr__(
             self, "pre", tuple(str(x) for x in self.pre or ()))
+
+    @classmethod
+    def empty(cls, title: str = "", *, detail: str = "") -> Section:
+        """A section with no data yet: ``detail`` names what
+        would land there and what fills it."""
+        return cls(title=title, state="empty", state_detail=detail)
+
+    @classmethod
+    def unavailable(cls, title: str = "", *,
+                    detail: str = "") -> Section:
+        """A section whose data this surface cannot read now:
+        ``detail`` says why, in words."""
+        return cls(title=title, state="unavailable",
+                   state_detail=detail)
+
+    @classmethod
+    def error(cls, title: str = "", *, detail: str = "") -> Section:
+        """A section whose read failed: ``detail`` carries the
+        reason and the next step."""
+        return cls(title=title, state="error", state_detail=detail)
 
 
 @dataclass(frozen=True)
@@ -553,18 +661,36 @@ def _kv_line(kv: KV, dialect: str) -> str:
     return f"{label}: {value}"
 
 
-def _section_lines(section: Section, dialect: str) -> list[str]:
+def _section_title_line(title: str, dialect: str) -> str:
+    """One section's head line, shaped per dialect."""
+    head = _literal(title, dialect)
+    if dialect == "html":
+        return f"<b>{head}</b>"
+    if dialect == "whatsapp":
+        return f"*{head}*"
+    if dialect in ("markdown", "canonical"):
+        return f"**{head}**"
+    return head
+
+
+def _state_lines(section: Section, dialect: str) -> list[str]:
+    """A non-ready section's render: its title (if any) over the
+    designed state line — the section is marked in its place on
+    the board, never dropped and never rendered as blank/zero."""
     lines: list[str] = []
     if section.title:
-        head = _literal(section.title, dialect)
-        if dialect == "html":
-            lines.append(f"<b>{head}</b>")
-        elif dialect == "whatsapp":
-            lines.append(f"*{head}*")
-        elif dialect in ("markdown", "canonical"):
-            lines.append(f"**{head}**")
-        else:
-            lines.append(head)
+        lines.append(_section_title_line(section.title, dialect))
+    lines.append(_prose(
+        state_line(section.state, section.state_detail), dialect))
+    return lines
+
+
+def _section_lines(section: Section, dialect: str) -> list[str]:
+    if section.state != "ready":
+        return _state_lines(section, dialect)
+    lines: list[str] = []
+    if section.title:
+        lines.append(_section_title_line(section.title, dialect))
     for kv in section.rows:
         line = _kv_line(kv, dialect)
         lines.append(f"  {line}" if dialect == "plain" else line)
@@ -778,6 +904,8 @@ def doc_to_json(doc: Doc) -> str:
                 "quote": list(s.quote),
                 "expandable": bool(s.expandable),
                 "pre": list(s.pre),
+                "state": s.state,
+                "state_detail": s.state_detail,
             }
             for s in doc.sections
         ],
@@ -825,6 +953,11 @@ def doc_from_json(text: Any) -> Doc | None:
                 quote=tuple(str(x) for x in raw.get("quote") or []),
                 expandable=bool(raw.get("expandable")),
                 pre=tuple(str(x) for x in raw.get("pre") or []),
+                # Board states ride the stored form additively:
+                # a payload written before they existed has no
+                # keys and reads back as a ready section.
+                state=str(raw.get("state") or "ready"),
+                state_detail=str(raw.get("state_detail") or ""),
             ))
         actions = []
         for row in payload.get("actions") or []:
