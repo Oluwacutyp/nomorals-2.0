@@ -186,6 +186,18 @@ func (b *bridge) handleCommand(cc *clientConn, req request) {
 		b.cmdSendLocation(ctx, cc, id, req)
 	case "send_contact":
 		b.cmdSendContact(ctx, cc, id, req)
+	case "labels":
+		b.cmdLabels(ctx, cc, id, req)
+	case "label_edit":
+		b.cmdLabelEdit(ctx, cc, id, req)
+	case "label_chat":
+		b.cmdLabelChat(ctx, cc, id, req)
+	case "label_message":
+		b.cmdLabelMessage(ctx, cc, id, req)
+	case "catalog":
+		b.cmdCatalog(cc, id, req)
+	case "catalog_product":
+		b.cmdCatalogProduct(cc, id, req)
 	case "check_number":
 		b.cmdCheckNumber(ctx, cc, id, req)
 	case "chats":

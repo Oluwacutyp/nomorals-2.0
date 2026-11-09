@@ -647,6 +647,89 @@ function pollResultsPayload(chat, messageId) {
 }
 
 // ── Baileys helpers ──────────────────────────────────────────────────────────
+// ── label memory (parity bundle #17) ─────────────────────
+// The account's label definitions and associations, as the
+// app-state sync shows them (labels.edit / labels.association
+// events) plus this bridge's own accepted writes.  WhatsApp
+// gives a linked device no label query endpoint — the sync
+// is the read, so this memory is what the labels verb
+// answers from, and its coverage line says exactly that.
+const labelDefs = new Map();   // id -> {id, name, color?, deleted, predefined_id?}
+const labelChatAssoc = new Map();  // label id -> Map(chat jid -> bool)
+const labelMsgAssoc = new Map();   // "label|chat|message" -> bool
+
+function noteLabelEdit(label) {
+  if (!label || !label.id) return;
+  const id = String(label.id);
+  const def = labelDefs.get(id) || { id, deleted: false };
+  if (label.name !== undefined) def.name = String(label.name || '');
+  if (label.color !== undefined && label.color !== null) def.color = Number(label.color);
+  def.deleted = !!label.deleted;
+  if (label.predefinedId !== undefined && label.predefinedId !== null && label.predefinedId !== '') {
+    def.predefined_id = Number(label.predefinedId);
+  }
+  labelDefs.set(id, def);
+}
+
+function noteLabelAssociation(association, type) {
+  if (!association || !association.labelId) return;
+  const labelId = String(association.labelId);
+  const chat = String(association.chatId || '');
+  const labeled = type === 'add';
+  if (association.type === 'label_message') {
+    labelMsgAssoc.set(`${labelId}|${chat}|${String(association.messageId || '')}`, labeled);
+  } else {
+    if (!labelChatAssoc.has(labelId)) labelChatAssoc.set(labelId, new Map());
+    labelChatAssoc.get(labelId).set(chat, labeled);
+  }
+}
+
+const LABELS_COVERAGE = "labels and associations this bridge has seen in the account's app-state sync since it connected — a linked device gets no label query endpoint; the sync is the read";
+
+function labelsPayload() {
+  const defs = [...labelDefs.values()]
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)))
+    .map((d) => {
+      const row = { id: d.id, name: d.name || '', deleted: !!d.deleted };
+      if (d.color !== undefined) row.color = d.color;
+      if (d.predefined_id !== undefined) row.predefined_id = d.predefined_id;
+      return row;
+    });
+  const chatLabels = {};
+  for (const [labelId, chats] of labelChatAssoc) {
+    const on = [...chats.entries()].filter(([, v]) => v).map(([k]) => k).sort();
+    if (on.length) chatLabels[labelId] = on;
+  }
+  const msgLabels = [];
+  for (const [key, labeled] of labelMsgAssoc) {
+    if (!labeled) continue;
+    const i1 = key.indexOf('|');
+    const i2 = key.indexOf('|', i1 + 1);
+    if (i1 < 0 || i2 < 0) continue;
+    msgLabels.push({ label_id: key.slice(0, i1),
+                     chat: key.slice(i1 + 1, i2),
+                     message_id: key.slice(i2 + 1) });
+  }
+  return { ok: true, labels: defs, chat_labels: chatLabels,
+           message_labels: msgLabels, coverage: LABELS_COVERAGE };
+}
+
+// The catalog product shape both catalog verbs share on
+// the wire: Baileys' Product record, flattened to the
+// fields a chat reply can carry (image urls as a list).
+function productRow(p) {
+  return {
+    id: String(p?.id || ''), name: String(p?.name || ''),
+    description: String(p?.description || ''),
+    price: typeof p?.price === 'number' ? p.price : Number(p?.price || 0),
+    currency: String(p?.currency || ''),
+    retailer_id: String(p?.retailerId || ''),
+    url: String(p?.url || ''), hidden: !!p?.isHidden,
+    availability: String(p?.availability || ''),
+    image_urls: Object.values(p?.imageUrls || {}),
+  };
+}
+
 const kindOf = (jid) => (jid.endsWith('@g.us') ? 'group'
   : jid.endsWith('@newsletter') ? 'channel' : 'dm');
 
@@ -1176,6 +1259,24 @@ async function connect() {
       }
     } catch (e) {
       log('call handler error:', e?.message || e);
+    }
+  });
+
+  // Labels (parity bundle #17): Baileys surfaces the
+  // account's label state as app-state events — definitions
+  // on labels.edit, chat/message associations on
+  // labels.association.  There is no label query endpoint
+  // for a linked device; the bridge records what the sync
+  // shows it, and the labels verb answers from that memory.
+  wa.ev.on('labels.edit', (label) => {
+    try { noteLabelEdit(label); } catch (e) {
+      log('labels.edit handler error:', e?.message || e);
+    }
+  });
+  wa.ev.on('labels.association', ({ association, type }) => {
+    try { noteLabelAssociation(association, type); }
+    catch (e) {
+      log('labels.association handler error:', e?.message || e);
     }
   });
 
@@ -2315,6 +2416,161 @@ async function handleCommand(sock, req) {
           return reply(sock, id, { ok: false, error: 'that poll is not in bridge memory — results live on polls this bridge has seen since it started' });
         }
         return reply(sock, id, { ok: true, ...payload });
+      }
+      // Labels (parity bundle #17): Baileys' label family —
+      // addLabel rides chatModify (an app-state patch) with
+      // the account's own jid as the patch address, exactly
+      // the addressing the label edits themselves use; the
+      // associations ride addChatLabel / addMessageLabel.
+      // Shape rules refuse BEFORE traffic with the same
+      // words the Go engine uses.
+      case 'labels': {
+        return reply(sock, id, labelsPayload());
+      }
+      case 'label_edit': {
+        // the label's id rides as label_id: the wire's
+        // bare "id" is the request's correlation id.
+        const labelId = String(req.label_id || '').trim();
+        const name = String(req.name || '').trim();
+        const deleted = !!req.deleted;
+        const hasColor = req.color !== undefined && req.color !== null;
+        const color = hasColor ? Number(req.color) : 0;
+        const bad = deleted && !labelId ? "deleting a label needs the label's id"
+          : !deleted && !name ? 'a label needs a name'
+          : hasColor && (!Number.isInteger(color) || color < 0 || color > 19)
+            ? "label colors run 0 to 19 — WhatsApp's twenty label colors"
+          : '';
+        if (bad) return reply(sock, id, { ok: false, error: bad });
+        const newId = labelId || String(Date.now());
+        try {
+          await wa.addLabel(meJid, { id: newId, name, color, deleted });
+          noteLabelEdit({ id: newId, name, color, deleted });
+          return reply(sock, id, { ok: true, label_id: newId, name, color, deleted });
+        } catch (e) {
+          return reply(sock, id, { ok: false, error: String(e.message || e) });
+        }
+      }
+      case 'label_chat': {
+        const chat = String(req.chat || '');
+        const labelId = String(req.label_id || '').trim();
+        const labeled = req.labeled === undefined ? true : !!req.labeled;
+        const bad = !chat.trim() ? 'labeling needs the chat'
+          : !labelId ? "labeling needs the label's id" : '';
+        if (bad) return reply(sock, id, { ok: false, error: bad });
+        try {
+          if (labeled) await wa.addChatLabel(chat, labelId);
+          else await wa.removeChatLabel(chat, labelId);
+          noteLabelAssociation({ type: 'label_jid', chatId: chat, labelId },
+                               labeled ? 'add' : 'remove');
+          return reply(sock, id, { ok: true, chat, label_id: labelId, labeled });
+        } catch (e) {
+          return reply(sock, id, { ok: false, error: String(e.message || e) });
+        }
+      }
+      case 'label_message': {
+        const chat = String(req.chat || '');
+        const labelId = String(req.label_id || '').trim();
+        const messageId = String(req.message_id || '').trim();
+        const labeled = req.labeled === undefined ? true : !!req.labeled;
+        const bad = !chat.trim() ? 'labeling needs the chat'
+          : !labelId ? "labeling needs the label's id"
+          : !messageId ? "labeling a message needs the message's id" : '';
+        if (bad) return reply(sock, id, { ok: false, error: bad });
+        try {
+          if (labeled) await wa.addMessageLabel(chat, messageId, labelId);
+          else await wa.removeMessageLabel(chat, messageId, labelId);
+          noteLabelAssociation({ type: 'label_message', chatId: chat,
+                                 messageId, labelId },
+                               labeled ? 'add' : 'remove');
+          return reply(sock, id, { ok: true, chat, label_id: labelId,
+                                   message_id: messageId, labeled });
+        } catch (e) {
+          return reply(sock, id, { ok: false, error: String(e.message || e) });
+        }
+      }
+      // Product catalog (parity bundle #17): Baileys'
+      // business socket carries the whole surface —
+      // getCatalog / getCollections read it, productCreate /
+      // productUpdate / productDelete write it.  The Go
+      // engine has no equivalent (whatsmeow implements no
+      // catalog API) and refuses these verbs in words.
+      case 'catalog': {
+        const jid = String(req.jid || '').trim() || meJid;
+        const limit = Math.min(100, Math.max(1, Number(req.limit) || 10));
+        const cursor = String(req.cursor || '');
+        try {
+          const res = await wa.getCatalog({ jid, limit,
+            ...(cursor ? { cursor } : {}) });
+          let collections = [];
+          let collectionsError = '';
+          try {
+            const c = await wa.getCollections(jid);
+            collections = (c?.collections || []).map((col) => ({
+              id: String(col?.id || ''), name: String(col?.name || ''),
+              product_ids: (col?.products || []).map(
+                (p) => String(p?.id || '')),
+            }));
+          } catch (e) {
+            collectionsError = String(e.message || e);
+          }
+          return reply(sock, id, {
+            ok: true, jid,
+            products: (res?.products || []).map(productRow),
+            collections,
+            ...(collectionsError
+              ? { collections_error: collectionsError } : {}),
+            next_cursor: res?.nextPageCursor || '',
+          });
+        } catch (e) {
+          return reply(sock, id, { ok: false, error: String(e.message || e) });
+        }
+      }
+      case 'catalog_product': {
+        const action = String(req.action || '').trim();
+        const productId = String(req.product_id || '').trim();
+        const name = String(req.name || '').trim();
+        const price = Number(req.price);
+        const currency = String(req.currency || '').trim().toUpperCase();
+        const fieldBad = !name ? 'a product needs a name'
+          : req.price === undefined || req.price === null
+            || Number.isNaN(price) || price < 0
+            ? 'a product price must be a number, 0 or more'
+          : !/^[A-Z]{3}$/.test(currency)
+            ? 'a product needs its currency as a three-letter code, e.g. NGN'
+          : '';
+        try {
+          if (action === 'delete') {
+            if (!productId) return reply(sock, id, { ok: false, error: "deleting a product needs the product's id" });
+            const res = await wa.productDelete([productId]);
+            const deleted = Number(res?.deleted || 0);
+            if (!deleted) {
+              return reply(sock, id, { ok: false, error: 'WhatsApp deleted 0 products — that product is not in the catalog as the server holds it' });
+            }
+            return reply(sock, id, { ok: true, deleted });
+          }
+          if (action !== 'create' && action !== 'update') {
+            return reply(sock, id, { ok: false, error: 'catalog_product action must be create, update or delete' });
+          }
+          if (fieldBad) return reply(sock, id, { ok: false, error: fieldBad });
+          if (action === 'update' && !productId) {
+            return reply(sock, id, { ok: false, error: "changing a product needs the product's id" });
+          }
+          const body = {
+            name, description: String(req.description || ''),
+            price, currency, images: [],
+          };
+          if (req.retailer_id) body.retailerId = String(req.retailer_id);
+          if (req.url) body.url = String(req.url);
+          if (action === 'create') {
+            const created = await wa.productCreate(
+              { ...body, originCountryCode: undefined });
+            return reply(sock, id, { ok: true, product: productRow(created) });
+          }
+          const updated = await wa.productUpdate(productId, body);
+          return reply(sock, id, { ok: true, product: productRow(updated) });
+        } catch (e) {
+          return reply(sock, id, { ok: false, error: String(e.message || e) });
+        }
       }
       default:
         // workstream 3: group/community commands (read-only) before "unknown cmd",

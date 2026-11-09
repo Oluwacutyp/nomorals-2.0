@@ -1726,6 +1726,68 @@ class PersonalSurfaces:
         _append_jsonl(self.vault.journal_path, entry)
         return entry
 
+    def note_label_changed(self, platform: str, *,
+                           account_id: str = "",
+                           action: str = "",
+                           label_id: str = "",
+                           label_name: str = "",
+                           chat_key: str = "",
+                           source_id: str = "",
+                           ts: float = 0.0) -> dict[str, Any]:
+        """Journal one label act AS the owner (parity bundle
+        #17, /labels): a definition created, renamed or
+        deleted, or a label applied to / lifted from a chat
+        or a message.  Kind ``label_changed``; ``action``
+        names which of those moved, the entry's text carries
+        the label's name (what the owner reads), the target
+        chat rides in ``chat_key`` and a labeled message's
+        id in ``source_id`` — the act changes the owner's
+        own organization of his account, so it belongs in
+        the personal record like every act taken as him."""
+        rec = self.resolve_event_account(platform, account_id)
+        entry = {
+            "ts": float(ts or self._clock()),
+            "kind": "label_changed", "account": rec.id,
+            "platform": platform, "counterpart_id": rec.id,
+            "poster_name": "", "media_kind": "",
+            "source_id": str(source_id or ""), "path": "",
+            "bytes": 0,
+            "text": str(label_name or "")[:200],
+            "field": str(action or ""),
+            "label_id": str(label_id or ""),
+            "chat_key": str(chat_key or ""),
+            "note": "label change as the owner via /labels"}
+        _append_jsonl(self.vault.journal_path, entry)
+        return entry
+
+    def note_catalog_changed(self, platform: str, *,
+                             account_id: str = "",
+                             action: str = "",
+                             product_id: str = "",
+                             product_name: str = "",
+                             ts: float = 0.0) -> dict[str, Any]:
+        """Journal one catalog write AS the owner (parity
+        bundle #17, /catalog): a product created, updated
+        or deleted on the account's own WhatsApp Business
+        catalog.  Kind ``catalog_changed``; ``action`` names
+        the write, the entry's text carries the product's
+        name (what the owner reads) and its id rides in
+        ``source_id``, the journal's internal-id field —
+        the id never prints in chat, the name does."""
+        rec = self.resolve_event_account(platform, account_id)
+        entry = {
+            "ts": float(ts or self._clock()),
+            "kind": "catalog_changed", "account": rec.id,
+            "platform": platform, "counterpart_id": rec.id,
+            "poster_name": "", "media_kind": "",
+            "source_id": str(product_id or ""), "path": "",
+            "bytes": 0,
+            "text": str(product_name or "")[:200],
+            "field": str(action or ""),
+            "note": "catalog change as the owner via /catalog"}
+        _append_jsonl(self.vault.journal_path, entry)
+        return entry
+
     def note_contact_added(self, platform: str, *,
                            account_id: str = "",
                            counterpart_id: str = "",

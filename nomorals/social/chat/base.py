@@ -43,6 +43,9 @@ __all__ = [
     "search_shape_error",
     "STATUS_AUDIENCE_MODES",
     "status_audience_shape_error",
+    "label_edit_shape_error",
+    "label_assoc_shape_error",
+    "catalog_product_shape_error",
 ]
 
 _log = get_logger(__name__)
@@ -231,6 +234,83 @@ def invoice_shape_error(title: Any, description: Any,
                 "(⭐ XTR has no fractional unit)")
     if amount <= 0:
         return "a Stars price must be at least 1 ⭐"
+    return ""
+
+
+def label_edit_shape_error(name: Any = "", color: Any = None,
+                           *, deleted: bool = False,
+                           label_id: Any = "") -> str:
+    """Why this label-definition write cannot go out, or ""
+    when it can (parity bundle #17 — the one shape rule
+    every surface checks BEFORE traffic, mirrored word for
+    word in both bridges).
+
+    A label definition is a whole record — name, color and
+    the deleted flag travel together in one app-state
+    mutation — so a create or rename needs the name it will
+    carry, a delete needs the id of the label it tombstones,
+    and a color, when one is carried, is an index into
+    WhatsApp's own palette of twenty."""
+    if deleted:
+        if not str(label_id or "").strip():
+            return "deleting a label needs the label's id"
+        return ""
+    if not str(name or "").strip():
+        return "a label needs a name"
+    if color is not None:
+        try:
+            value = int(color)
+        except (TypeError, ValueError):
+            return ("label colors run 0 to 19 — WhatsApp's "
+                    "twenty label colors")
+        if value != color or not 0 <= value <= 19:
+            return ("label colors run 0 to 19 — WhatsApp's "
+                    "twenty label colors")
+    return ""
+
+
+def label_assoc_shape_error(chat: Any, label_id: Any,
+                            message_id: Any = "", *,
+                            need_message: bool = False
+                            ) -> str:
+    """Why this label association cannot go out, or "" when
+    it can (parity bundle #17, same before-traffic law):
+    labeling acts on a chat and a label, and the message
+    form names the message too."""
+    if not str(chat or "").strip():
+        return "labeling needs the chat"
+    if not str(label_id or "").strip():
+        return "labeling needs the label's id"
+    if need_message and not str(message_id or "").strip():
+        return "labeling a message needs the message's id"
+    return ""
+
+
+def catalog_product_shape_error(name: Any = "",
+                                price: Any = None,
+                                currency: Any = "") -> str:
+    """Why this catalog product write cannot go out, or ""
+    when it can (parity bundle #17, same before-traffic
+    law, mirrored in the Baileys bridge — the one engine
+    whose library carries catalog writes).
+
+    A product needs its name, a price that is a number at
+    zero or above (a free product is a real shape; a
+    negative or non-numeric price is not a price), and its
+    currency as the three-letter code the catalog itself
+    speaks."""
+    if not str(name or "").strip():
+        return "a product needs a name"
+    try:
+        value = float(price)
+    except (TypeError, ValueError):
+        return "a product price must be a number, 0 or more"
+    if value != value or value < 0:  # NaN or negative
+        return "a product price must be a number, 0 or more"
+    code = str(currency or "").strip().upper()
+    if len(code) != 3 or not code.isalpha():
+        return ("a product needs its currency as a "
+                "three-letter code, e.g. NGN")
     return ""
 
 
@@ -920,6 +1000,108 @@ class ChatAdapter(ABC):
         send_invoice."""
         return {"ok": False,
                 "error": "invoices not supported "
+                         "on this adapter"}
+
+    # ── commerce: labels + catalog (parity bundle #17) ──
+    def get_labels(self) -> dict[str, Any]:
+        """The account's WhatsApp labels — definitions and
+        chat/message associations — as a verdict dict:
+        ``{"ok": True, "labels": […], "chat_labels": {…},
+        "message_labels": […], "coverage": "…"}``, where
+        ``coverage`` names in words what the read actually
+        reached (each engine's label reach differs, and a
+        result that hides its reach overstates itself).
+        Labels are a WhatsApp Business surface; the base
+        adapter reports the truth — this platform path
+        carries no label state — and the WhatsApp adapter
+        overrides.  Shape rules are
+        :func:`label_edit_shape_error` /
+        :func:`label_assoc_shape_error`, checked before
+        traffic by every override."""
+        return {"ok": False,
+                "error": "labels not supported on this adapter"}
+
+    def edit_label(self, name: str = "", *,
+                   label_id: str = "", color: Any = None,
+                   deleted: bool = False) -> dict[str, Any]:
+        """Create, rename/recolor, or delete one label
+        definition.  The definition is a whole record —
+        name, color and the deleted flag travel together —
+        so a rename carries the label's current color, which
+        the caller resolves from a fresh :meth:`get_labels`
+        read.  The base adapter reports the truth like
+        get_labels."""
+        return {"ok": False,
+                "error": "labels not supported on this adapter"}
+
+    def label_chat(self, chat: ChatRef, label_id: str, *,
+                   labeled: bool = True) -> dict[str, Any]:
+        """Apply a label to a whole chat (or lift it, with
+        ``labeled=False``).  The base adapter reports the
+        truth like get_labels."""
+        return {"ok": False,
+                "error": "labels not supported on this adapter"}
+
+    def label_message(self, chat: ChatRef, message_id: str,
+                      label_id: str, *,
+                      labeled: bool = True) -> dict[str, Any]:
+        """Apply a label to one message (or lift it).  The
+        base adapter reports the truth like get_labels."""
+        return {"ok": False,
+                "error": "labels not supported on this adapter"}
+
+    def get_catalog(self, jid: str = "", *, limit: int = 10,
+                    cursor: str = "") -> dict[str, Any]:
+        """Read a product catalog — the account's own when
+        ``jid`` is empty, another business's when it names
+        one — as a verdict dict: ``{"ok": True, "products":
+        […], "collections": […], "next_cursor": "…"}``.
+        A catalog is a WhatsApp Business surface and only
+        one bridge engine's library carries it; the base
+        adapter reports the truth and the WhatsApp adapter
+        overrides, surfacing the engine's own refusal when
+        the engine cannot.  Shape rules for the writes are
+        :func:`catalog_product_shape_error`."""
+        return {"ok": False,
+                "error": "product catalog not supported "
+                         "on this adapter"}
+
+    def create_product(self, name: str, price: Any,
+                       currency: str, *,
+                       description: str = "",
+                       retailer_id: str = "",
+                       url: str = "") -> dict[str, Any]:
+        """Add one product to the account's own catalog.
+        The base adapter reports the truth like
+        get_catalog."""
+        return {"ok": False,
+                "error": "product catalog not supported "
+                         "on this adapter"}
+
+    def update_product(self, product_id: str, *,
+                       name: Any = None, price: Any = None,
+                       currency: Any = None,
+                       description: Any = None,
+                       retailer_id: Any = None,
+                       url: Any = None) -> dict[str, Any]:
+        """Change one product in the account's own catalog.
+        The write is a whole record, so the WhatsApp
+        adapter read-modify-writes: it resolves the current
+        product from a fresh catalog read and sends the
+        merged record — a field the caller leaves as None
+        keeps the value the catalog already carries.  The
+        base adapter reports the truth like get_catalog."""
+        return {"ok": False,
+                "error": "product catalog not supported "
+                         "on this adapter"}
+
+    def delete_product(self, product_id: str
+                       ) -> dict[str, Any]:
+        """Remove one product from the account's own
+        catalog.  The base adapter reports the truth like
+        get_catalog."""
+        return {"ok": False,
+                "error": "product catalog not supported "
                          "on this adapter"}
 
     # ── health ───────────────────────────────────────────────────────────────

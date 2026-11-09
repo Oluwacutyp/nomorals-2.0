@@ -583,6 +583,10 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "clearhistory": (0, None), # /clearhistory [chat name] — wipe a chat's history, keep the chat (personal Telegram)
     "botprofile": (0, None),  # /botprofile [name|description|short] … — a Telegram bot's own identity (bot surfaces)
     "invoice": (1, None),     # /invoice [link] Title | Description | Stars — a Telegram Stars invoice (bot surfaces)
+    "labels": (0, None),      # /labels [new|rename|delete|chat|msg …] — the WhatsApp account's labels
+    "catalog": (0, None),     # /catalog [add|edit|del …] — the WhatsApp account's product catalog
+    "broadcast": (0, None),   # /broadcast — broadcast lists: the honest platform answer
+    "wpay": (0, None),        # /wpay — WhatsApp Pay: the honest platform answer
     "tagall": (0, None),      # /tagall [text] — mention all (capped)
     "hidetag": (0, None),     # /hidetag [text] — mention all, hidden
     "antitag": (0, 1),        # /antitag [on|off] — mass-tag DM flags
@@ -2860,6 +2864,22 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/invoice Title | Description | Stars · /invoice link Title | Description | Stars",
               "example": "/invoice Signal pack | One month of premium signals | 50",
               "related": "/botprofile"},
+    "labels": {"what": "your WhatsApp account's labels — the Business organizing tool that tags chats and messages (Needs reply, Paid, VIP…). Read them bare: the list comes back numbered, with each label's color and how many chats wear it, and the reply states what the read actually reached — a linked device gets no label query endpoint on either engine, so the read is the account's app-state sync itself. Manage by the list's numbers, never by ids: create (with one of WhatsApp's twenty colors), rename, delete, tag this chat, or tag the message you reply to. Both engines carry the writes (the Go bridge through WhatsApp's own app-state label patches, Baileys through its label calls). WhatsApp itself allows labels only on Business accounts, so on a consumer account the platform's refusal is the answer, relayed in its own words — never a fake success. Every landed change lands in the personal journal. Owner only; your standing stop halts the writes, the list still reads.",
+              "usage": "/labels · /labels new Name [| color] · /labels rename N New Name · /labels delete N · /labels chat N [off] · /labels msg N [off] (as a reply)",
+              "example": "/labels new Needs reply | 3",
+              "related": "/catalog · /myprofile · /privacy"},
+    "catalog": {"what": "your WhatsApp account's product catalog — the Business storefront customers browse from your profile. Read it bare: products come back numbered with prices, and collections when the read carries them; another business's catalog reads by its number. Write by the list's numbers: add a product with the pipe grammar, edit one field (name, price, currency, description), or delete. The writes ride the Baileys engine's business socket — the Go bridge's library (whatsmeow) implements no catalog API at all, so on that engine the bridge itself refuses in words and that refusal is the answer. WhatsApp allows catalog writes only on Business accounts; the platform's refusal relays verbatim, never a fake success. Every landed change lands in the personal journal. Owner only; your standing stop halts the writes, the reads still run.",
+              "usage": "/catalog · /catalog <number> · /catalog add Name | price | CUR [| description] · /catalog edit N field value · /catalog del N",
+              "example": "/catalog add Ankara Gown | 45000 | NGN | Hand-dyed, size M",
+              "related": "/labels · /myprofile"},
+    "broadcast": {"what": "WhatsApp broadcast lists — and the honest answer: they live on your phone only. A linked device can't read them, create them, or send to them: the Go bridge's library refuses non-status broadcast sends outright at the library level ('sending to non-status broadcast lists is not yet supported'), and the Baileys engine has no broadcast-list support at all, so there is no bridge verb for Devon to ride on either engine — and inventing one would fake a send that never lands. The one-to-many reach Devon does have on your account is your status: /poststatus posts to it and /statusaud shapes who sees it. Owner only.",
+              "usage": "/broadcast",
+              "example": "/broadcast",
+              "related": "/poststatus · /statusaud"},
+    "wpay": {"what": "WhatsApp Pay — and the honest answer: it can't be reached from a linked device. Neither bridge library exposes payments: whatsmeow and Baileys can each read an order's details off an order message, but neither can send or request a payment, and WhatsApp Pay isn't offered in Nigeria on top of that. Nothing is sent or requested; this command exists so the surface answers the question truthfully instead of pretending. Owner only.",
+              "usage": "/wpay",
+              "example": "/wpay",
+              "related": "/catalog · /labels"},
     "vcf": {"what": "export a group's people as one import-ready contacts (.vcf) file — every person a card, their own number with their own name. The roster is assembled from every route Devon has and merged: on WhatsApp the bridge's group roster (its contact-store names included) plus her member ledger; on Telegram her member ledger, the bot's admin list, and the personal surface's member fetch — no single route is a gate. WhatsApp members addressed only by an anonymous LID whose number no store can resolve, and Telegram members whose number their own privacy settings hide, are counted in the reply and left out — a number is never invented, and a Telegram id is never dressed up as one. The reply counts people, cards written and people left out, and names the sources used. The manual shape (/vcf Name | +number, one person per line) makes cards for people who share no group with her. Owner anywhere; inside a group, the owner or a group admin — it hands out people's numbers, so it is never a public command. An export taken on a personal surface lands in the personal journal.",
               "usage": "/vcf (inside the group) · /vcf Group Name · /vcf Name | +number [| +number]",
               "example": "/vcf",
@@ -4517,7 +4537,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "myprofile", "privacy", "makepoll", "vcf", "addcontact",
       "sendloc", "sendcontact", "find", "findall",
       "sendlater", "deletechat", "clearhistory",
-      "botprofile", "invoice"]),
+      "botprofile", "invoice",
+      "labels", "catalog", "broadcast", "wpay"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
@@ -4797,6 +4818,10 @@ LIST_ONELINERS: dict[str, str] = {
     "clearhistory": "wipe a chat's history but keep the chat (personal Telegram) — /clearhistory [chat name]",
     "botprofile": "a Telegram bot's own name and descriptions — read or set them in the bot's chat — /botprofile [name|description|short] …",
     "invoice": "charge Telegram Stars through the bot — an invoice in this chat or a pay link — /invoice Title | Description | 50",
+    "labels": "your WhatsApp labels — read them, or manage by number — /labels [new|rename|delete|chat|msg …]",
+    "catalog": "your WhatsApp product catalog — read it, or write by number — /catalog [add|edit|del …]",
+    "broadcast": "WhatsApp broadcast lists — the honest answer on what a linked device can do — /broadcast",
+    "wpay": "WhatsApp Pay — the honest answer on what a linked device can do — /wpay",
     "vcf": "export this group's people as a contacts file, each number with its name — /vcf",
     "tagall": "mention every member (chunked, capped at 100) — /tagall [text]",
     "hidetag": "mention every member, names hidden — /hidetag [text]",

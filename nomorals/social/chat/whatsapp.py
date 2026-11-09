@@ -88,7 +88,7 @@ import uuid
 from typing import Any
 
 from ...core.logging_setup import get_logger
-from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult, contact_shape_error, location_shape_error, search_shape_error, status_audience_shape_error
+from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult, catalog_product_shape_error, contact_shape_error, label_assoc_shape_error, label_edit_shape_error, location_shape_error, search_shape_error, status_audience_shape_error
 from .platform_limits import for_platform
 from .failures import record_failure
 
@@ -2434,6 +2434,226 @@ class WhatsAppAdapter(ChatAdapter):
                              "a value"}
         return self._admin_cmd("privacy_set", {
             "category": category, "value": value}, timeout=20)
+
+    # -- commerce: labels + catalog (parity bundle #17) --
+
+    def get_labels(self) -> dict[str, Any]:
+        """The account's label definitions and associations
+        (bridges' ``labels``): {"ok", "labels", "chat_labels",
+        "message_labels", "coverage"} — the coverage line
+        names the reach in words: a linked device gets no
+        label query endpoint on either engine, so the read
+        is the account's app-state sync itself (the Go
+        bridge fetches it for the read; the Baileys bridge
+        answers from the sync it has seen since it
+        connected)."""
+        return self._admin_cmd("labels", {}, timeout=45)
+
+    def edit_label(self, name: str = "", *,
+                   label_id: str = "", color: Any = None,
+                   deleted: bool = False) -> dict[str, Any]:
+        """Create, rename/recolor, or delete one label
+        definition (bridges' ``label_edit``: whatsmeow
+        app-state label patch / Baileys addLabel).  The
+        definition is a whole record — name, color and the
+        deleted flag travel together — so a rename carries
+        the label's current color, resolved by the caller
+        from a fresh read.  Shape refuses BEFORE traffic;
+        a reply without the label's id is unproven, never
+        success."""
+        name = str(name or "").strip()
+        label_id = str(label_id or "").strip()
+        problem = label_edit_shape_error(
+            name, color, deleted=deleted, label_id=label_id)
+        if problem:
+            return {"ok": False, "error": problem}
+        # the label's id rides as label_id both ways: the
+        # wire's bare "id" is the request's correlation id
+        # and _send_cmd overwrites it on every command.
+        payload: dict[str, Any] = {
+            "label_id": label_id, "name": name,
+            "deleted": bool(deleted)}
+        if color is not None:
+            payload["color"] = int(color)
+        verdict = self._admin_cmd("label_edit", payload,
+                                  timeout=20)
+        if verdict.get("ok") and not deleted \
+                and not str(verdict.get("label_id") or ""):
+            return {"ok": False, "error": (
+                "the bridge accepted the label but returned "
+                "no id for it — the write is unproven")}
+        return verdict
+
+    def label_chat(self, chat: ChatRef, label_id: str, *,
+                   labeled: bool = True) -> dict[str, Any]:
+        """Apply a label to a whole chat, or lift it
+        (bridges' ``label_chat``).  Shape refuses BEFORE
+        traffic."""
+        jid = self._jid(chat)
+        label_id = str(label_id or "").strip()
+        problem = label_assoc_shape_error(jid, label_id)
+        if problem:
+            return {"ok": False, "error": problem}
+        return self._admin_cmd("label_chat", {
+            "chat": jid, "label_id": label_id,
+            "labeled": bool(labeled)}, timeout=20)
+
+    def label_message(self, chat: ChatRef, message_id: str,
+                      label_id: str, *,
+                      labeled: bool = True) -> dict[str, Any]:
+        """Apply a label to one message, or lift it
+        (bridges' ``label_message``).  Shape refuses BEFORE
+        traffic."""
+        jid = self._jid(chat)
+        label_id = str(label_id or "").strip()
+        message_id = str(message_id or "").strip()
+        problem = label_assoc_shape_error(
+            jid, label_id, message_id, need_message=True)
+        if problem:
+            return {"ok": False, "error": problem}
+        return self._admin_cmd("label_message", {
+            "chat": jid, "message_id": message_id,
+            "label_id": label_id,
+            "labeled": bool(labeled)}, timeout=20)
+
+    def get_catalog(self, jid: str = "", *, limit: int = 10,
+                    cursor: str = "") -> dict[str, Any]:
+        """Read a product catalog (bridges' ``catalog``):
+        the account's own when ``jid`` is empty, another
+        business's when it names one.  Baileys' business
+        socket carries the read; the Go bridge answers its
+        own refusal in words (whatsmeow implements no
+        catalog API) and that verdict rides through
+        untouched."""
+        payload: dict[str, Any] = {
+            "limit": max(1, min(100, int(limit or 10)))}
+        if str(jid or "").strip():
+            payload["jid"] = str(jid).strip()
+        if str(cursor or "").strip():
+            payload["cursor"] = str(cursor).strip()
+        return self._admin_cmd("catalog", payload,
+                               timeout=30)
+
+    def create_product(self, name: str, price: Any,
+                       currency: str, *,
+                       description: str = "",
+                       retailer_id: str = "",
+                       url: str = "") -> dict[str, Any]:
+        """Add one product to the account's own catalog
+        (bridges' ``catalog_product`` action=create).
+        Shape refuses BEFORE traffic; a reply without the
+        new product's id is unproven, never success."""
+        name = str(name or "").strip()
+        currency = str(currency or "").strip().upper()
+        problem = catalog_product_shape_error(
+            name, price, currency)
+        if problem:
+            return {"ok": False, "error": problem}
+        payload: dict[str, Any] = {
+            "action": "create", "name": name,
+            "price": float(price), "currency": currency,
+            "description": str(description or "")}
+        if str(retailer_id or "").strip():
+            payload["retailer_id"] = str(retailer_id).strip()
+        if str(url or "").strip():
+            payload["url"] = str(url).strip()
+        verdict = self._admin_cmd("catalog_product", payload,
+                                  timeout=30)
+        product = verdict.get("product") or {}
+        if verdict.get("ok") and not str(
+                product.get("id") or ""):
+            return {"ok": False, "error": (
+                "the bridge accepted the product but "
+                "returned no id for it — the write is "
+                "unproven")}
+        return verdict
+
+    def update_product(self, product_id: str, *,
+                       name: Any = None, price: Any = None,
+                       currency: Any = None,
+                       description: Any = None,
+                       retailer_id: Any = None,
+                       url: Any = None) -> dict[str, Any]:
+        """Change one product in the account's own catalog,
+        read-modify-write: the catalog write is a whole
+        record, so the current product is resolved from a
+        fresh catalog read (paged, bounded) and the merged
+        record goes out — a field left as None keeps the
+        value the catalog already carries.  A product the
+        read cannot find refuses in words; nothing is
+        written on a guess."""
+        product_id = str(product_id or "").strip()
+        if not product_id:
+            return {"ok": False,
+                    "error": "changing a product needs "
+                             "the product's id"}
+        current = None
+        cursor = ""
+        for _page in range(5):
+            verdict = self.get_catalog(limit=50,
+                                       cursor=cursor)
+            if not verdict.get("ok"):
+                return verdict
+            for row in verdict.get("products") or []:
+                if str(row.get("id") or "") == product_id:
+                    current = row
+                    break
+            cursor = str(verdict.get("next_cursor") or "")
+            if current is not None or not cursor:
+                break
+        if current is None:
+            return {"ok": False, "error": (
+                "that product is not in your catalog as "
+                "the bridge reads it — nothing was changed")}
+        merged = {
+            "name": (str(name).strip() if name is not None
+                     else str(current.get("name") or "")),
+            "price": (price if price is not None
+                      else current.get("price")),
+            "currency": (str(currency).strip().upper()
+                         if currency is not None
+                         else str(current.get("currency")
+                                  or "")),
+            "description": (
+                str(description) if description is not None
+                else str(current.get("description") or "")),
+            "retailer_id": (
+                str(retailer_id) if retailer_id is not None
+                else str(current.get("retailer_id") or "")),
+            "url": (str(url) if url is not None
+                    else str(current.get("url") or "")),
+        }
+        problem = catalog_product_shape_error(
+            merged["name"], merged["price"],
+            merged["currency"])
+        if problem:
+            return {"ok": False, "error": problem}
+        payload: dict[str, Any] = {
+            "action": "update", "product_id": product_id,
+            "name": merged["name"],
+            "price": float(merged["price"]),
+            "currency": merged["currency"],
+            "description": merged["description"]}
+        if merged["retailer_id"]:
+            payload["retailer_id"] = merged["retailer_id"]
+        if merged["url"]:
+            payload["url"] = merged["url"]
+        return self._admin_cmd("catalog_product", payload,
+                               timeout=30)
+
+    def delete_product(self, product_id: str
+                       ) -> dict[str, Any]:
+        """Remove one product from the account's own
+        catalog (bridges' ``catalog_product``
+        action=delete)."""
+        product_id = str(product_id or "").strip()
+        if not product_id:
+            return {"ok": False,
+                    "error": "deleting a product needs "
+                             "the product's id"}
+        return self._admin_cmd("catalog_product", {
+            "action": "delete", "product_id": product_id},
+            timeout=30)
 
     # -- polls (§/parity G3, census bundle #6) ----------------
 

@@ -59,6 +59,10 @@ __all__ = [
     "parse_statusaud_args",
     "format_status_audience",
     "format_status_viewers",
+    "visible_labels",
+    "visible_products",
+    "format_labels",
+    "format_catalog",
     "compose_group_status",
     "kind_for_chat_key",
 ]
@@ -82,6 +86,7 @@ CHATOPS_COMMANDS = frozenset({
     "statusaud", "statusviewers",
     "sendlater", "deletechat", "clearhistory",
     "botprofile", "invoice",
+    "labels", "catalog", "broadcast", "wpay",
 })
 
 #: Tagall pacing law: one message carries at most this many
@@ -772,6 +777,152 @@ def format_status_viewers(verdict: Any, *,
                          + (f" · {when}" if when else ""))
     if coverage:
         lines.append(f"(counting {coverage})")
+    return "\n".join(lines)
+
+
+def visible_labels(verdict: Any) -> list[dict[str, Any]]:
+    """The label definitions a /labels listing shows, in
+    listing order (parity bundle #17): tombstones — the
+    deleted definitions the sync still carries — drop out,
+    and the rest sort by name (id as tiebreak), so the
+    number the owner reads off the list resolves against
+    this same order in the command handlers.  The ids
+    themselves never print; the ordinal is the handle."""
+    verdict = verdict if isinstance(verdict, dict) else {}
+    rows = [r for r in (verdict.get("labels") or [])
+            if isinstance(r, dict) and not r.get("deleted")]
+    rows.sort(key=lambda r: (
+        str(r.get("name") or "").lower(),
+        str(r.get("id") or "")))
+    return rows
+
+
+def visible_products(verdict: Any) -> list[dict[str, Any]]:
+    """The products a /catalog listing shows, in the
+    order the catalog itself returned them (parity bundle
+    #17) — the ordinal the owner reads off the list is
+    the position here, and the product ids never print."""
+    verdict = verdict if isinstance(verdict, dict) else {}
+    return [r for r in (verdict.get("products") or [])
+            if isinstance(r, dict)]
+
+
+def format_labels(verdict: Any) -> str:
+    """Render one labels verdict (the WhatsApp adapter's
+    get_labels shape) as plain lines for the owner.
+
+    Numbered, because the number is the handle every
+    /labels write takes; a row carries its color and how
+    many chats wear it.  An account with no labels says
+    so, with the reason labels may be absent at all.  The
+    closing line names the coverage — what the read
+    actually reached — because the sync is the read and a
+    result that hides its reach overstates itself."""
+    verdict = verdict if isinstance(verdict, dict) else {}
+    if not verdict.get("ok"):
+        return ("the labels didn't load — "
+                + str(verdict.get("error")
+                      or "the surface refused"))
+    rows = visible_labels(verdict)
+    chat_labels = verdict.get("chat_labels") or {}
+    msg_labels = verdict.get("message_labels") or []
+    if not rows:
+        lines = ["no labels on this account — labels are "
+                 "a WhatsApp Business feature, so a "
+                 "consumer account has none to show; on a "
+                 "Business account they live here."]
+    else:
+        lines = ["🏷 Your WhatsApp labels:"]
+        for i, row in enumerate(rows, 1):
+            bits = [str(row.get("name") or "(unnamed)")]
+            if row.get("color") is not None:
+                bits.append(f"color {row.get('color')}")
+            if row.get("predefined_id") is not None:
+                bits.append("one of WhatsApp's own")
+            lid = str(row.get("id") or "")
+            worn = sum(1 for lst in chat_labels.values()
+                       if isinstance(lst, list)
+                       and lid in lst)
+            if worn:
+                bits.append(
+                    f"{worn} chat"
+                    f"{'' if worn == 1 else 's'} labeled")
+            lines.append(f"{i}. " + " · ".join(bits))
+        if msg_labels:
+            lines.append(
+                f"({len(msg_labels)} message"
+                f"{'' if len(msg_labels) == 1 else 's'} "
+                "carrying a label)")
+    coverage = str(verdict.get("coverage") or "")
+    if coverage:
+        lines.append(f"(read {coverage})")
+    return "\n".join(lines)
+
+
+def _price_text(value: Any) -> str:
+    """One catalog price as it should print: the number
+    the catalog carries, whole numbers whole (a price of
+    5000 is "5000", not "5000.0"), fractions untouched."""
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return str(value or "")
+    if num == int(num):
+        return str(int(num))
+    return str(num)
+
+
+def format_catalog(verdict: Any, *, own: bool = True) -> str:
+    """Render one catalog verdict (the WhatsApp adapter's
+    get_catalog shape) as plain lines for the owner.
+
+    Numbered like /labels — the number is the handle the
+    writes take, and product ids never print.  A page
+    that was cut by the catalog's own cursor says so
+    rather than reading as the whole catalog; a
+    collections read that failed is named, never papered
+    over with an empty list."""
+    verdict = verdict if isinstance(verdict, dict) else {}
+    if not verdict.get("ok"):
+        return ("the catalog didn't load — "
+                + str(verdict.get("error")
+                      or "the surface refused"))
+    products = visible_products(verdict)
+    whose = "Your catalog" if own else "Their catalog"
+    if not products:
+        lines = [f"{whose} is empty — no products on it. "
+                 "A catalog is a WhatsApp Business surface; "
+                 "products added land here."]
+    else:
+        lines = [f"🛍 {whose}:"]
+        for i, p in enumerate(products, 1):
+            bits = [str(p.get("name") or "(unnamed)")]
+            price = _price_text(p.get("price"))
+            currency = str(p.get("currency") or "")
+            if price:
+                bits.append(f"{currency} {price}".strip())
+            if p.get("hidden"):
+                bits.append("hidden")
+            lines.append(f"{i}. " + " · ".join(bits))
+            desc = str(p.get("description") or "").strip()
+            if desc:
+                lines.append(f"   {desc[:100]}")
+        if verdict.get("next_cursor"):
+            lines.append(
+                f"(showing the first {len(products)} — "
+                "the catalog has more beyond this page)")
+    collections = verdict.get("collections") or []
+    if collections:
+        named = ", ".join(
+            f"{c.get('name') or '(unnamed)'} "
+            f"({len(c.get('product_ids') or [])})"
+            for c in collections if isinstance(c, dict))
+        if named:
+            lines.append(f"Collections: {named}")
+    if verdict.get("collections_error"):
+        lines.append(
+            "(the collections read failed: "
+            f"{verdict.get('collections_error')})")
     return "\n".join(lines)
 
 

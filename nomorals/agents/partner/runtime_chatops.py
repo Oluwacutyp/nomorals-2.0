@@ -313,6 +313,14 @@ class RuntimeChatOpsMixin:
             if kind in ("deletechat", "clearhistory"):
                 return self._chatops_deletechat(kind, tail,
                                                  message)
+            if kind == "labels":
+                return self._chatops_labels(tail, message)
+            if kind == "catalog":
+                return self._chatops_catalog(tail, message)
+            if kind == "broadcast":
+                return self._chatops_broadcast(tail, message)
+            if kind == "wpay":
+                return self._chatops_wpay(tail, message)
             if kind == "vcf":
                 return self._chatops_vcf(tail, message)
             if kind == "addcontact":
@@ -2254,6 +2262,88 @@ class RuntimeChatOpsMixin:
                 f"no live {label} surface here to act from.")
         return svc, rec, adapter, platform, ""
 
+    def _chatops_commerce_home(self, message: Any, kind: str
+                               ) -> tuple[Any, Any, Any, str]:
+        """The shared gate for the commerce family
+        (/labels + /catalog, parity bundle #17):
+        (svc, rec, adapter, error).  WhatsApp is the only
+        home — labels and product catalogs are WhatsApp
+        Business surfaces — and Telegram answers that
+        truth in words rather than pretending an
+        equivalent exists there.  Setters additionally
+        honor the owner's standing stop (checked by the
+        caller, since reads are not acts as him)."""
+        platform = str(getattr(message.chat, "platform", "")
+                       or "")
+        if platform == "telegram":
+            return None, None, None, (
+                f"/{kind} is a WhatsApp Business surface "
+                f"— Telegram has no labels or product "
+                f"catalog for Devon to reach. Run it from "
+                f"your WhatsApp.")
+        if platform != "whatsapp":
+            return None, None, None, (
+                f"/{kind} lives on your personal WhatsApp "
+                f"— run it from there.")
+        svc, rec = self._chatops_personal_account(platform)
+        if rec is None:
+            return None, None, None, (
+                f"no paired WhatsApp account — /pair one "
+                f"first; /{kind} acts on the personal "
+                f"account.")
+        adapter = self._adapter_for(platform)
+        if adapter is None:
+            return None, None, None, (
+                "no live WhatsApp surface here to act "
+                "from.")
+        return svc, rec, adapter, ""
+
+    def _chatops_label_row(self, adapter: Any, token: str
+                           ) -> tuple[Any, str]:
+        """Resolve one /labels listing number to its
+        definition row: (row, error) — the number is the
+        handle the listing printed, resolved against a
+        fresh read in the listing's own order."""
+        from ...social.chat.chatops import visible_labels
+
+        try:
+            n = int(str(token or "").strip())
+        except (TypeError, ValueError):
+            return None, ("name the label by its number "
+                          "from /labels.")
+        verdict = self._chatops_call(adapter.get_labels)
+        if not (isinstance(verdict, dict)
+                and verdict.get("ok")):
+            return None, self._chatops_verdict(verdict, "")
+        rows = visible_labels(verdict)
+        if n < 1 or n > len(rows):
+            return None, (f"there is no label {n} — "
+                          f"/labels lists {len(rows)}.")
+        return rows[n - 1], ""
+
+    def _chatops_product_row(self, adapter: Any, token: str
+                             ) -> tuple[Any, str]:
+        """Resolve one /catalog listing number to its
+        product row: (row, error), the labels resolver's
+        twin over the catalog's own order."""
+        from ...social.chat.chatops import visible_products
+
+        try:
+            n = int(str(token or "").strip())
+        except (TypeError, ValueError):
+            return None, ("name the product by its number "
+                          "from /catalog.")
+        verdict = self._chatops_call(
+            adapter.get_catalog, limit=50)
+        if not (isinstance(verdict, dict)
+                and verdict.get("ok")):
+            return None, self._chatops_verdict(verdict, "")
+        rows = visible_products(verdict)
+        if n < 1 or n > len(rows):
+            return None, (f"there is no product {n} — "
+                          f"/catalog lists {len(rows)}.")
+        return rows[n - 1], ""
+
     def _chatops_myprofile(self, tail: str, message: Any) -> str:
         """/myprofile — read and set the paired personal
         account's own identity: WhatsApp (parity G3, census
@@ -2643,6 +2733,362 @@ class RuntimeChatOpsMixin:
             line += (f" It reads back as {back} — {label} "
                      f"kept its own value.")
         return line
+
+    def _chatops_labels(self, tail: str, message: Any) -> str:
+        """/labels — the paired WhatsApp account's labels
+        (parity bundle #17): read them bare; manage them by
+        the numbers the listing prints — the label ids
+        themselves never travel through chat.  The writes
+        (new / rename / delete / chat / msg) are acts as
+        the owner: the standing stop gates them and every
+        landed one journals.  The list itself is a read,
+        and reads are not acts."""
+        from ...social.chat.chatops import format_labels
+
+        svc, rec, adapter, error = \
+            self._chatops_commerce_home(message, "labels")
+        if error:
+            return error
+        personal = svc["personal"]
+        parts = tail.split(None, 1)
+        head = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        if not head:
+            verdict = self._chatops_call(adapter.get_labels)
+            if not (isinstance(verdict, dict)
+                    and verdict.get("ok")):
+                return self._chatops_verdict(verdict, "")
+            return format_labels(verdict)
+        if head not in ("new", "rename", "delete", "chat",
+                        "msg"):
+            return ("usage: /labels — or /labels new Name "
+                    "[| color], /labels rename N New Name, "
+                    "/labels delete N, /labels chat N [off] "
+                    "(this chat), /labels msg N [off] (the "
+                    "message you reply to). N is the number "
+                    "from the /labels list.")
+        if svc["registry"].owner_stopped("whatsapp"):
+            return ("WhatsApp is under your standing stop "
+                    "— it stays halted until you start it "
+                    "again; nothing was changed.")
+        if head == "new":
+            name, _, color_word = rest.partition("|")
+            name = name.strip()
+            color = None
+            if color_word.strip():
+                try:
+                    color = int(color_word.strip())
+                except ValueError:
+                    return ("the color after | must be a "
+                            "number from 0 to 19 — "
+                            "WhatsApp's twenty label colors.")
+            if not name:
+                return ("usage: /labels new Name — the "
+                        "name the label will carry.")
+            verdict = self._chatops_call(
+                adapter.edit_label, name, color=color)
+            if isinstance(verdict, dict) \
+                    and verdict.get("ok"):
+                personal.note_label_changed(
+                    "whatsapp", account_id=rec.id,
+                    action="created",
+                    label_id=str(verdict.get("label_id")
+                                 or ""),
+                    label_name=name)
+                return (f"done — label “{name}” is "
+                        f"created. /labels lists them "
+                        f"numbered.")
+            return self._chatops_verdict(verdict, "")
+        if head == "rename":
+            words = rest.split(None, 1)
+            if len(words) != 2:
+                return ("usage: /labels rename N New Name")
+            row, problem = self._chatops_label_row(
+                adapter, words[0])
+            if problem:
+                return problem
+            new_name = words[1].strip()
+            verdict = self._chatops_call(
+                adapter.edit_label, new_name,
+                label_id=str(row.get("id") or ""),
+                color=row.get("color"))
+            if isinstance(verdict, dict) \
+                    and verdict.get("ok"):
+                personal.note_label_changed(
+                    "whatsapp", account_id=rec.id,
+                    action="renamed",
+                    label_id=str(row.get("id") or ""),
+                    label_name=new_name)
+                return (f"done — that label is now "
+                        f"“{new_name}”.")
+            return self._chatops_verdict(verdict, "")
+        if head == "delete":
+            row, problem = self._chatops_label_row(
+                adapter, rest)
+            if problem:
+                return problem
+            verdict = self._chatops_call(
+                adapter.edit_label,
+                label_id=str(row.get("id") or ""),
+                deleted=True)
+            if isinstance(verdict, dict) \
+                    and verdict.get("ok"):
+                personal.note_label_changed(
+                    "whatsapp", account_id=rec.id,
+                    action="deleted",
+                    label_id=str(row.get("id") or ""),
+                    label_name=str(row.get("name") or ""))
+                return (f"done — label "
+                        f"“{row.get('name') or ''}” is "
+                        f"deleted.")
+            return self._chatops_verdict(verdict, "")
+        # chat / msg: "<N> [off]" against this chat, or the
+        # replied message in this chat.
+        words = rest.split()
+        if not words:
+            return (f"usage: /labels {head} N [off] — N "
+                    f"is the number from /labels.")
+        off = len(words) > 1 and words[1].lower() == "off"
+        row, problem = self._chatops_label_row(
+            adapter, words[0])
+        if problem:
+            return problem
+        chat = getattr(message, "chat", None)
+        label_id = str(row.get("id") or "")
+        name = str(row.get("name") or "")
+        if head == "chat":
+            verdict = self._chatops_call(
+                adapter.label_chat, chat, label_id,
+                labeled=not off)
+            if isinstance(verdict, dict) \
+                    and verdict.get("ok"):
+                personal.note_label_changed(
+                    "whatsapp", account_id=rec.id,
+                    action=("chat_unlabeled" if off
+                            else "chat_labeled"),
+                    label_id=label_id, label_name=name,
+                    chat_key=str(getattr(chat, "key", "")
+                                 or ""))
+                if off:
+                    return (f"done — the “{name}” label "
+                            f"is off this chat.")
+                return (f"done — this chat is labeled "
+                        f"“{name}”.")
+            return self._chatops_verdict(verdict, "")
+        mid = self._chatops_reply_target(message)
+        if not mid:
+            return ("reply to the message with /labels "
+                    "msg N — the label lands on the message "
+                    "you reply to.")
+        verdict = self._chatops_call(
+            adapter.label_message, chat, mid, label_id,
+            labeled=not off)
+        if isinstance(verdict, dict) and verdict.get("ok"):
+            personal.note_label_changed(
+                "whatsapp", account_id=rec.id,
+                action=("message_unlabeled" if off
+                        else "message_labeled"),
+                label_id=label_id, label_name=name,
+                chat_key=str(getattr(chat, "key", "") or ""),
+                source_id=mid)
+            if off:
+                return (f"done — the “{name}” label is "
+                        f"off that message.")
+            return (f"done — that message is labeled "
+                    f"“{name}”.")
+        return self._chatops_verdict(verdict, "")
+
+    def _chatops_catalog(self, tail: str,
+                         message: Any) -> str:
+        """/catalog — the paired WhatsApp account's
+        product catalog (parity bundle #17): read it bare,
+        read another business's by its number, and write
+        by the numbers the listing prints — create with
+        the pipe grammar, edit one field, delete.  The
+        writes are acts as the owner: the standing stop
+        gates them and every landed one journals.  Reads
+        are not acts.  The catalog rides the Baileys
+        engine's business socket; on the Go engine the
+        bridge's own refusal (whatsmeow has no catalog
+        API) is the verdict, in its words."""
+        from ...social.chat.chatops import format_catalog
+
+        svc, rec, adapter, error = \
+            self._chatops_commerce_home(message, "catalog")
+        if error:
+            return error
+        personal = svc["personal"]
+        parts = tail.split(None, 1)
+        head = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        if not head:
+            verdict = self._chatops_call(
+                adapter.get_catalog, limit=50)
+            if not (isinstance(verdict, dict)
+                    and verdict.get("ok")):
+                return self._chatops_verdict(verdict, "")
+            return format_catalog(verdict, own=True)
+        if head.isdigit() and not rest:
+            verdict = self._chatops_call(
+                adapter.get_catalog,
+                f"{head}@s.whatsapp.net", limit=50)
+            if not (isinstance(verdict, dict)
+                    and verdict.get("ok")):
+                return self._chatops_verdict(verdict, "")
+            return format_catalog(verdict, own=False)
+        if head not in ("add", "edit", "del"):
+            return ("usage: /catalog — or /catalog "
+                    "<number> for another business's "
+                    "catalog, /catalog add Name | price | "
+                    "CUR [| description], /catalog edit N "
+                    "name|price|currency|description "
+                    "value, /catalog del N. N is the number "
+                    "from the /catalog list.")
+        if svc["registry"].owner_stopped("whatsapp"):
+            return ("WhatsApp is under your standing stop "
+                    "— it stays halted until you start it "
+                    "again; nothing was changed.")
+        if head == "add":
+            fields = [f.strip() for f in rest.split("|")]
+            if len(fields) not in (3, 4) or not fields[0]:
+                return ("usage: /catalog add Name | "
+                        "price | CUR [| description] — "
+                        "e.g. /catalog add Ankara Gown | "
+                        "45000 | NGN | Hand-dyed, size M")
+            try:
+                price = float(fields[1])
+            except ValueError:
+                return ("the price must be a number — "
+                        "/catalog add Name | price | CUR.")
+            verdict = self._chatops_call(
+                adapter.create_product, fields[0], price,
+                fields[2],
+                description=(fields[3]
+                             if len(fields) == 4 else ""))
+            if isinstance(verdict, dict) \
+                    and verdict.get("ok"):
+                product = verdict.get("product") or {}
+                personal.note_catalog_changed(
+                    "whatsapp", account_id=rec.id,
+                    action="created",
+                    product_id=str(product.get("id")
+                                   or ""),
+                    product_name=fields[0])
+                return (f"done — “{fields[0]}” is in "
+                        f"your catalog. /catalog lists "
+                        f"them numbered.")
+            return self._chatops_verdict(verdict, "")
+        if head == "del":
+            row, problem = self._chatops_product_row(
+                adapter, rest)
+            if problem:
+                return problem
+            verdict = self._chatops_call(
+                adapter.delete_product,
+                str(row.get("id") or ""))
+            if isinstance(verdict, dict) \
+                    and verdict.get("ok"):
+                personal.note_catalog_changed(
+                    "whatsapp", account_id=rec.id,
+                    action="deleted",
+                    product_id=str(row.get("id") or ""),
+                    product_name=str(row.get("name")
+                                     or ""))
+                return (f"done — “{row.get('name') or ''}” "
+                        f"is out of your catalog.")
+            return self._chatops_verdict(verdict, "")
+        words = rest.split(None, 2)
+        if len(words) != 3:
+            return ("usage: /catalog edit N "
+                    "name|price|currency|description "
+                    "value")
+        field = words[1].lower()
+        if field not in ("name", "price", "currency",
+                         "description"):
+            return ("the editable fields are name, price, "
+                    "currency and description.")
+        row, problem = self._chatops_product_row(
+            adapter, words[0])
+        if problem:
+            return problem
+        value: Any = words[2].strip()
+        if field == "price":
+            try:
+                value = float(value)
+            except ValueError:
+                return "the new price must be a number."
+        verdict = self._chatops_call(
+            adapter.update_product,
+            str(row.get("id") or ""), **{field: value})
+        if isinstance(verdict, dict) and verdict.get("ok"):
+            personal.note_catalog_changed(
+                "whatsapp", account_id=rec.id,
+                action="updated",
+                product_id=str(row.get("id") or ""),
+                product_name=str(row.get("name") or ""))
+            return (f"done — “{row.get('name') or ''}” "
+                    f"now has {field} {words[2].strip()}.")
+        return self._chatops_verdict(verdict, "")
+
+    def _chatops_broadcast(self, tail: str,
+                           message: Any) -> str:
+        """/broadcast — the broadcast-list row of the
+        commerce bundle, closed honestly in words (parity
+        bundle #17).  WhatsApp broadcast lists are a
+        phone-side object: neither bridge library exposes
+        them to a linked device — whatsmeow refuses
+        non-status broadcast sends outright at the library
+        level, and Baileys has no broadcast-list support
+        at all — so there is no verb for any surface to
+        ride, and inventing one would fake a send that
+        never lands.  Nothing is read or sent here, so no
+        account gate stands in front of the answer: the
+        answer IS the platform truth."""
+        platform = str(getattr(message.chat, "platform", "")
+                       or "")
+        if platform == "telegram":
+            return ("broadcast lists are a WhatsApp "
+                    "shape — and on WhatsApp itself a "
+                    "linked device can't reach them "
+                    "either; the /broadcast answer there "
+                    "carries the whole truth.")
+        if platform != "whatsapp":
+            return ("/broadcast concerns your WhatsApp "
+                    "broadcast lists — run it from there.")
+        return ("WhatsApp broadcast lists live on your "
+                "phone only: a linked device can't read "
+                "them, create them, or send to them. The "
+                "Go bridge's library refuses non-status "
+                "broadcast sends outright (“sending to "
+                "non-status broadcast lists is not yet "
+                "supported”), and the Baileys engine has "
+                "no broadcast-list support at all — there "
+                "is no bridge verb for Devon to ride, on "
+                "either engine. Nothing was sent. The "
+                "one-to-many reach Devon does have here "
+                "is your status — /poststatus posts to "
+                "it, and /statusaud shapes who sees it.")
+
+    def _chatops_wpay(self, tail: str,
+                      message: Any) -> str:
+        """/wpay — the WhatsApp Pay row of the commerce
+        bundle, closed honestly in words (parity bundle
+        #17).  Neither bridge library exposes payments:
+        whatsmeow and Baileys can each read an order's
+        details off an order message, but neither can
+        send or request a payment, and WhatsApp Pay is
+        not offered in the owner's region on top of that.
+        Nothing is attempted, so — like /broadcast — the
+        answer is the platform truth itself, no gate in
+        front of it."""
+        return ("WhatsApp Pay can't be reached from a "
+                "linked device: neither of Devon's "
+                "bridge libraries exposes payments — "
+                "they can read an order's details off an "
+                "order message, but neither can send or "
+                "request a payment — and WhatsApp Pay "
+                "isn't offered in Nigeria. Nothing was "
+                "sent or requested.")
 
     def _chatops_addcontact(self, tail: str, message: Any) -> str:
         """/addcontact Name | +number — add a person to the

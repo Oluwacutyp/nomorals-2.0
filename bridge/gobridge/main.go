@@ -149,6 +149,18 @@ type bridge struct {
 	statusOrder     []string
 	statusViews     map[string]map[string]int64
 	statusViewOrder []string
+
+	// label memory (parity bundle #17): the account's label
+	// definitions and chat/message associations, recorded
+	// from app-state sync (noteAppState) and from this
+	// bridge's own accepted writes — WhatsApp exposes no
+	// label query to a linked device, so the sync is the
+	// read and this memory is what the labels verb answers.
+	labelsMu       sync.Mutex
+	labelDefs      map[string]*labelDef
+	labelChatAssoc map[string]map[string]bool
+	labelMsgAssoc  map[string]bool
+	labelsFullSync bool
 }
 
 type clientConn struct {
@@ -266,6 +278,10 @@ func main() {
 		polls:         make(map[string]*pollState),
 		statusSent:    make(map[string]bool),
 		statusViews:   make(map[string]map[string]int64),
+		labelDefs:     make(map[string]*labelDef),
+		labelChatAssoc: make(
+			map[string]map[string]bool),
+		labelMsgAssoc: make(map[string]bool),
 	}
 
 	// whatsmeow's own logger stays OFF stdout: the supervisor drain
@@ -547,6 +563,11 @@ func (b *bridge) handleEvent(evt any) {
 		b.onPairError(v)
 	case *events.QR:
 		b.onQR(v)
+	case *events.AppState:
+		// The label slice of app-state sync feeds the
+		// label memory (bundle #17); everything else in
+		// the collections is whatsmeow's own bookkeeping.
+		b.noteAppState(v)
 	case *events.Message:
 		b.onMessage(v)
 	case *events.Receipt:
