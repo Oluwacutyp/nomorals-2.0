@@ -589,14 +589,34 @@ function capturePollMessage(jid, m, mm) {
       || update.pollCreationMessageKey.remoteJid || jid);
     const voter = m.key.fromMe ? meJid
       : (m.key.participant ? jidNormalizedUser(m.key.participant) : jid);
-    const decoded = decryptPollVoteMirror(update.vote, {
-      pollCreatorJid: creator, pollMsgId: pollId,
-      pollEncKey: state.secret, voterJid: voter,
-    });
+    let decoded;
+    try {
+      decoded = decryptPollVoteMirror(update.vote, {
+        pollCreatorJid: creator, pollMsgId: pollId,
+        pollEncKey: state.secret, voterJid: voter,
+      });
+    } catch (e) {
+      // A vote that arrived but would not decrypt is an
+      // UNREADABLE vote — counted as such, exactly like the
+      // Go engine counts a DecryptPollVote failure, so the
+      // tally's "not counted" note can fire.  Before parity
+      // #16 this fell into the outer catch and vanished.
+      pollUnreadable.set(key, (pollUnreadable.get(key) || 0) + 1);
+      log(`poll vote on ${pollId} not tallied: decryption ` +
+        `failed: ${e.message}`);
+      return;
+    }
     let votes = pollVotes.get(key);
     if (!votes) { votes = new Map(); pollVotes.set(key, votes); }
-    votes.set(voter, (decoded.selectedOptions || [])
-      .map((h) => Buffer.from(h).toString('hex')));
+    const selected = (decoded.selectedOptions || [])
+      .map((h) => Buffer.from(h).toString('hex'));
+    // A poll update carries the voter's WHOLE current
+    // selection, so an empty one is a retraction: the phone's
+    // tally drops the voter entirely, and so does this one —
+    // storing the empty selection would keep them counted in
+    // total_voters with no vote anywhere (parity #16).
+    if (selected.length === 0) votes.delete(voter);
+    else votes.set(voter, selected);
   } catch (e) {
     log(`poll capture error: ${e.message}`);
   }

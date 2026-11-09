@@ -528,6 +528,16 @@ func (b *bridge) recordPollVote(chat types.JID, pollID,
 	if st == nil {
 		return false
 	}
+	// A poll update carries the voter's WHOLE current
+	// selection, so an empty one is a retraction: the phone's
+	// tally drops the voter entirely, and so does this one —
+	// storing the empty selection would keep them counted in
+	// total_voters with no vote anywhere (parity #16 truth
+	// pass: the tally now proves this end-to-end).
+	if len(selected) == 0 {
+		delete(st.votes, voter)
+		return true
+	}
 	hashes := make([]string, 0, len(selected))
 	for _, h := range selected {
 		hashes = append(hashes, hex.EncodeToString(h))
