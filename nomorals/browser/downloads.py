@@ -92,6 +92,12 @@ class DownloadJob:
     job_id: str = ""
     url: str = ""
     dest: str = ""
+    #: The download type whose acceptance contract the finished
+    #: file must pass before the job may read ``done`` (Play &
+    #: Downloads Phase 2): song/video/image/document/book/archive/
+    #: software/web_capture — "" means the generic file contract
+    #: (exists, non-zero bytes).
+    kind: str = ""
     status: str = JOB_QUEUED
     bytes_downloaded: int = 0
     total_bytes: int = 0
@@ -184,10 +190,12 @@ class DownloadQueue:
 
     # -- queue ops --------------------------------------------------------------
     def enqueue(self, url: str, dest: str | Path,
-                *, expected_sha256: str = "") -> DownloadJob:
+                *, expected_sha256: str = "",
+                kind: str = "") -> DownloadJob:
         job = DownloadJob(
             job_id=ulid_now(), url=(url or "").strip(),
             dest=str(dest), expected_sha256=(expected_sha256 or "").strip().lower(),
+            kind=(kind or "").strip().lower(),
             created_at=time.time(), updated_at=time.time())
         errs = job.validate()
         if errs:
@@ -371,6 +379,29 @@ class DownloadQueue:
             job.status = JOB_FAILED
             job.error = ("integrity_mismatch: sha256 of finished file "
                          f"{actual[:16]}… != expected {job.expected_sha256[:16]}…")
+            job.updated_at = time.time()
+            self._persist()
+            return job
+        # Acceptance (Play & Downloads Phase 2): a finished file
+        # that fails its type's contract — zero bytes, an HTML error
+        # page for a media job, a corrupt archive — is a FAILED job,
+        # never a done one.  The hash matching only proves the bytes
+        # are the bytes that arrived; the contract proves they are
+        # the thing that was asked for.
+        try:
+            from ..media.download_orchestrator import accept_artifact
+
+            acc = accept_artifact(str(path), job.kind or "file")
+        except Exception as exc:  # noqa: BLE001 - a contract crash is data
+            acc = None
+            job.status = JOB_FAILED
+            job.error = f"acceptance check crashed: {exc}"
+            job.updated_at = time.time()
+            self._persist()
+            return job
+        if acc is not None and not acc.ok:
+            job.status = JOB_FAILED
+            job.error = f"acceptance: {acc.reason}"
             job.updated_at = time.time()
             self._persist()
             return job

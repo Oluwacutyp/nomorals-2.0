@@ -4465,6 +4465,17 @@ class RuntimeGroupMixin:
         suffix = ".pdf" if pdf else ".png"
         path = out_dir / f"shot-{int(_time.time() * 1000)}{suffix}"
         path.write_bytes(data)
+        # Acceptance (Play & Downloads Phase 2): a capture is a
+        # download of the web — the bytes must BE the capture format
+        # before they are sent as one.  A zero-byte or wrong-format
+        # capture raises here and the caller reports it as the
+        # failure it is, instead of sending an empty/broken photo.
+        from ...media.download_orchestrator import accept_artifact
+
+        acc = accept_artifact(str(path), "web_capture",
+                              expected_format="pdf" if pdf else "png")
+        if not acc.ok:
+            raise ValueError(f"capture rejected: {acc.reason}")
         self.gateway.send_file(
             message.chat.platform, str(message.chat.key),
             str(path), caption=caption,
@@ -4627,6 +4638,15 @@ class RuntimeGroupMixin:
         """Send a recording as a native inline video (the
         gateway's video kind rides the platform's inline
         player) with a clean presented name."""
+        # Acceptance (Play & Downloads Phase 2): the recording
+        # file must positively be a video before it is sent as
+        # one — a failed/empty recording raises, honestly.
+        from ...media.download_orchestrator import accept_artifact
+
+        acc = accept_artifact(str(path), "web_capture",
+                              expected_format="video")
+        if not acc.ok:
+            raise ValueError(f"recording rejected: {acc.reason}")
         self.gateway.send_file(
             message.chat.platform, str(message.chat.key),
             str(path), caption=caption, kind="video",

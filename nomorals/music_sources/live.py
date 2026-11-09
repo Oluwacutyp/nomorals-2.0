@@ -114,7 +114,7 @@ class _LiveJourney:
 
     def download(self, source: MusicSource,
                  query: str) -> DownloadResult:
-        from ..media.library import full_track_verdict
+        from ..media.download_orchestrator import DownloadOrchestrator
 
         if self._candidates is None:
             # Explicit --source pick (the helper never ran search):
@@ -137,6 +137,7 @@ class _LiveJourney:
         ordered = preferred + [c for c in cands if c not in preferred]
         engine = self._engine_or_none()
         failures: List[str] = []
+        fetchable = []
         for cand in ordered:
             if getattr(cand, "preview_only", False) \
                     or getattr(cand, "downloadable", True) is False:
@@ -144,6 +145,14 @@ class _LiveJourney:
                     f"{cand.kind or 'source'}: preview/protected — "
                     "not a deliverable track")
                 continue
+            fetchable.append(cand)
+        # The candidate loop itself is the shared orchestrator
+        # (Phase 2): retrieve → per-type acceptance (the song
+        # contract carries the full-track verdict) → next candidate
+        # on any failure, reasons journaled in its attempt story.
+        landed: dict[int, dict[str, Any]] = {}
+
+        def _retrieve(cand: Any) -> tuple[str | None, str]:
             item = {
                 "kind": cand.kind or "",
                 "path": cand.path_or_url or "",
@@ -154,24 +163,33 @@ class _LiveJourney:
             try:
                 dl = engine.download(item)
             except Exception as exc:  # noqa: BLE001 - a route failure
-                failures.append(f"{item['kind']}: {exc}")
-                continue
+                return None, str(exc)
             if not dl.get("ok"):
-                failures.append(
-                    f"{item['kind']}: {dl.get('reason', 'download failed')}")
-                continue
-            path = str(dl.get("path") or "")
-            state, why = full_track_verdict(
-                path, float(cand.duration or 0.0))
-            if state == "rejected":
-                failures.append(f"{item['kind']}: {why}")
-                continue
-            served = (getattr(cand, "source_name", "") or item["kind"]
+                return None, str(dl.get("reason", "download failed"))
+            landed[id(cand)] = dl
+            return str(dl.get("path") or ""), ""
+
+        result = DownloadOrchestrator().run(
+            fetchable, _retrieve, kind="song",
+            label_of=lambda c: str(c.kind or "source"),
+            expected_duration_of=lambda c: float(c.duration or 0.0),
+            manage_sources=False)
+        failures.extend(
+            f"{a.label}: {a.reason}" for a in result.attempts if not a.ok)
+        if result.ok and result.candidate is not None:
+            cand = result.candidate
+            dl = landed.get(id(cand), {})
+            acc = result.acceptance
+            state = str((acc.facts.get("verify_state") if acc else None)
+                        or "unverified")
+            why = str((acc.facts.get("verify_why") if acc else None)
+                      or "")
+            served = (getattr(cand, "source_name", "") or cand.kind
                       or "a wired source")
             payload = {
-                "path": path,
-                "title": str(dl.get("title") or item["title"] or ""),
-                "artist": str(dl.get("artist") or item["artist"] or ""),
+                "path": result.path,
+                "title": str(dl.get("title") or cand.title or ""),
+                "artist": str(dl.get("artist") or cand.artist or ""),
                 "duration": float(cand.duration or 0.0),
                 "served_via": served,
                 "verify_state": state,

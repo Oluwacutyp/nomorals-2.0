@@ -1145,6 +1145,19 @@ class RuntimeMediaMixin:
 
         path = report.path
         title = report.title or "download"
+        # Acceptance (Phase 2): the chain landing a file is not the
+        # file being what was asked for.  The per-type contract for
+        # the inferred kind runs BEFORE anything is sent — a chain
+        # that "succeeded" with an HTML error page or a zero-byte
+        # stub is reported as the failure it is, never delivered.
+        from ...media.download_orchestrator import DownloadOrchestrator, infer_kind
+
+        kind = infer_kind(path, url=url, audio_only=audio_only)
+        acc = DownloadOrchestrator().verify(path, kind)
+        if not acc.ok:
+            return (f"downloaded “{title}” but it isn't a usable "
+                    f"{kind}: {acc.reason} — not sent (the file is "
+                    f"saved on the server at {path})"), False
         emoji = "🎵" if audio_only else "🎬"
         if chat is not None:
             try:
@@ -1984,6 +1997,54 @@ class RuntimeMediaMixin:
     # only mean the process that owned it died — the harvester says
     # so, once, instead of the download vanishing.
 
+    def _maybe_cover_video(self, chat: Any, path: str, title: str,
+                           artist: str) -> None:
+        """Procedural animated cover for a delivered song (doc 8,
+        demonstrator 1 second half): rendered from the track's real
+        audio envelope + artwork by :mod:`nomorals.media.cover_video`
+        — no generation model — and sent as a native video AFTER the
+        track itself.
+
+        Gated by the ``media_cover_video`` setting (default OFF —
+        doc 7 §5: no decorative messages by default for every song).
+        strictly best-effort: a render or send failure is recorded
+        and changes nothing about the delivery that already landed.
+        Never raises."""
+        try:
+            settings = getattr(self.context, "settings", None)
+            enabled = False
+            if isinstance(settings, dict):
+                enabled = bool(settings.get("media_cover_video"))
+            elif settings is not None:
+                enabled = bool(getattr(settings, "media_cover_video",
+                                       False))
+            if not enabled or not path or not os.path.isfile(path):
+                return
+            import time
+
+            from ...media.cover_video import render_cover_video
+
+            stem = os.path.splitext(os.path.basename(path))[0]
+            out = os.path.join(
+                os.path.dirname(path),
+                f"{stem}.cover-{time.time_ns() % 10**8}.mp4")
+            report = render_cover_video(path, out, title=title,
+                                        artist=artist)
+            if not report.ok:
+                record_failure(
+                    "runtime_media.RuntimeMediaMixin._maybe_cover_video",
+                    RuntimeError(report.error or "cover render failed"))
+                return
+            from ...core.progress_events import UPLOADING, emit_stage
+            emit_stage(UPLOADING, note="sending the animated cover")
+            self.gateway.send_file(
+                chat.platform, f"{chat.platform}:{chat.chat_id}",
+                out, caption=f"🎬 {title} — animated cover"[:1024],
+                kind="video")
+        except Exception as e:  # noqa: BLE001 - decoration, never fatal
+            record_failure(
+                "runtime_media.RuntimeMediaMixin._maybe_cover_video", e)
+
     def _play_dl_boot_id(self) -> str:
         """This process's boot id (one per runtime instance)."""
         bid = getattr(self, "_play_dl_boot", "")
@@ -2336,22 +2397,24 @@ class RuntimeMediaMixin:
                 msg += f"\n{BOT_COOKIE_SHORT_HELP}"
             return msg, False
         path = dl["path"]
-        # Verify what arrived: a preview-length file for a full-length
-        # track is a failed download, never the song — don't send it.
-        # The verdict is three-valued (doc 7): only REJECTED refuses
-        # delivery; an UNVERIFIED file is delivered (absence of
-        # evidence is not a failure) under its plain identity line —
-        # the line claims the track's identity, never a verification
-        # the state doesn't support.  Surfaces that REPORT the
-        # journey (the registry path) label the state explicitly.
-        from ...core.progress_events import VERIFYING, emit_stage
-        emit_stage(VERIFYING, note="checking the landed file")
-        verify_state, verify_why = self._play_verify_full_track_state(
-            path, item)
-        if verify_state == "rejected":
+        # Verify what arrived, via the shared acceptance contract
+        # (Phase 2): a preview-length file for a full-length track —
+        # or a positively wrong file, like an HTML error page — is a
+        # failed download, never the song; don't send it.  Only a
+        # REJECTION refuses delivery; an UNVERIFIED file is delivered
+        # (absence of evidence is not a failure) under its plain
+        # identity line — the line claims the track's identity, never
+        # a verification the state doesn't support.  Surfaces that
+        # REPORT the journey (the registry path) label the state
+        # explicitly.
+        from ...media.download_orchestrator import DownloadOrchestrator
+        acc = DownloadOrchestrator().verify(
+            path, "song",
+            expected_duration=float(item.get("duration") or 0))
+        if not acc.ok:
             self._drop_matching_queued(engine, item)
             return (f"that download wasn't the song — "
-                    f"{verify_why}. I won't pass it off as the "
+                    f"{acc.reason}. I won't pass it off as the "
                     "track."), False
         title = str(dl.get("title") or item.get("title", "audio"))
         artist = str(dl.get("artist") or item.get("artist", "") or "")
@@ -2455,6 +2518,12 @@ class RuntimeMediaMixin:
                 return path
             import shutil
 
+            # Real post-processing is happening (a staged copy is
+            # being tagged): the progress stream hears about it as
+            # PROCESSING — stage time measured from here, not from
+            # the download (Phase 2 processing emitters).
+            from ...core.progress_events import PROCESSING, emit_stage
+            emit_stage(PROCESSING, note="tagging the delivery copy")
             stem, ext = os.path.splitext(path)
             target = f"{stem}.del{ext or '.mp3'}"
             if os.path.abspath(target) != os.path.abspath(path):
@@ -3015,23 +3084,30 @@ class RuntimeMediaMixin:
             if dl.get("ok"):
                 path = dl["path"]
                 dl_title = dl.get("title") or item.get("title", "audio")
-                # Verify what arrived before anything is sent: a
-                # preview-length file for a full-length track is a
-                # failed download — record it, keep falling through.
-                # Three-valued verdict (doc 7): only REJECTED fails
-                # the route; UNVERIFIED delivers under the plain
-                # identity line, which claims no verification.
-                from ...core.progress_events import VERIFYING, emit_stage
-                emit_stage(VERIFYING, note="checking the landed file")
-                verify_state, verify_why = \
-                    self._play_verify_full_track_state(path, item)
-                if verify_state == "rejected":
-                    outcomes[name] = (
-                        f"downloaded a clip, not the track "
-                        f"({verify_why})")
-                    verify_notes.append(verify_why)
+                # Verify what arrived before anything is sent, via
+                # the shared per-type acceptance contract (Phase 2):
+                # a preview-length file for a full-length track is a
+                # failed download, and so is a positively wrong file
+                # (an HTML error page renamed .mp3) — record either,
+                # keep falling through.  Only a REJECTION fails the
+                # route; an UNVERIFIED property rides the facts and
+                # the plain identity line claims no verification.
+                from ...media.download_orchestrator import DownloadOrchestrator
+                acc = DownloadOrchestrator().verify(
+                    path, "song",
+                    expected_duration=float(item.get("duration") or 0))
+                if not acc.ok:
+                    if acc.facts.get("verify_state") == "rejected":
+                        outcomes[name] = (
+                            f"downloaded a clip, not the track "
+                            f"({acc.reason})")
+                    else:
+                        outcomes[name] = (
+                            f"downloaded the wrong file "
+                            f"({acc.reason})")
+                    verify_notes.append(acc.reason)
                     if gated:
-                        blocked_matches.append((item, verify_why))
+                        blocked_matches.append((item, acc.reason))
                     continue
                 outcomes[name] = "downloaded ✓"
                 # The tried trail's only home is the journal now —
@@ -3090,6 +3166,13 @@ class RuntimeMediaMixin:
                             (str(first_item.get("kind", "")),
                              str(first_item.get("path", ""))):
                         self._replace_queued_with(engine, first_item, item)
+                    # Expression follow-on (doc 8 demonstrator 1,
+                    # second half): the procedural animated cover,
+                    # when the owner enabled it — after the track,
+                    # never instead of it, never blocking it.
+                    self._maybe_cover_video(
+                        chat, send_path, str(dl_title),
+                        str(item.get("artist", "") or ""))
                     return line, True
                 except Exception as exc:  # noqa: BLE001
                     return (f"had the file but couldn't send it: {exc} "

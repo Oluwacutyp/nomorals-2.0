@@ -390,7 +390,7 @@ KNOWN_VIOLATIONS: frozenset[tuple[str, str]] = frozenset({
     ("nomorals.museum", "nomorals.agents.apkforge.museum"),
     ("nomorals.museum", "nomorals.characters.store"),
     ("nomorals.museum_failures", "nomorals.core"),
-    ("nomorals.music_sources.live", "nomorals.media.library"),
+    ("nomorals.music_sources.live", "nomorals.media.download_orchestrator"),
     ("nomorals.music_sources.live", "nomorals.media.playback"),
     ("nomorals.music_sources.live", "nomorals.media.resolver"),
     ("nomorals.music_sources.registry_bridge",

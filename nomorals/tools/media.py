@@ -12,6 +12,7 @@ as such.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import shutil
@@ -284,6 +285,24 @@ def _download_python_api(
     # Always installed (not only when a progress callback was given):
     # the hook is also the cancellation checkpoint for this backend.
     options["progress_hooks"] = [hook]
+
+    def _pp_hook(state: dict[str, Any]) -> None:
+        # Post-processing is real work with real duration (audio
+        # extraction, merging, embedding): it enters the shared
+        # progress stream as a PROCESSING stage (Play & Downloads
+        # P2).  No byte counters exist for it — the stage renders
+        # indeterminate, honestly.  A no-op without a bound tracker.
+        if state.get("status") != "started":
+            return
+        with contextlib.suppress(Exception):
+            from ..core.progress_events import PROCESSING, emit_stage
+
+            emit_stage(
+                PROCESSING,
+                note=f"post-processing: "
+                     f"{state.get('postprocessor') or 'media'}")
+
+    options["postprocessor_hooks"] = [_pp_hook]
     if _cancel_requested():
         raise MediaError(CANCELLED_MESSAGE)
     before = _snapshot_dir(target_dir)
