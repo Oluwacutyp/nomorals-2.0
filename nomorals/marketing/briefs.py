@@ -804,6 +804,45 @@ class BriefStore:
             record_failure("briefs.BriefStore.get_draft", exc)
             return None
 
+    def find_by_content(self, content: str,
+                        platform: str = "") -> list[BriefDraft]:
+        """Drafts whose content matches exactly (optionally per platform).
+
+        The measurement spine's join: a posted social_posts row carries
+        no brief-draft id anywhere (publishing never writes one), so
+        content identity is the only deterministic link back to the
+        brief draft a post came from. Callers must treat anything
+        other than exactly one match as unlinkable. Never raises.
+        """
+        try:
+            if self._db is None or not content:
+                return []
+            import json
+
+            if platform:
+                rows = self._db.execute(
+                    "SELECT * FROM drafts WHERE content = ? AND platform = ?",
+                    (content, platform)).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT * FROM drafts WHERE content = ?",
+                    (content,)).fetchall()
+            return [
+                BriefDraft(
+                    draft_id=r["draft_id"], topic=r["topic"] or "",
+                    content=r["content"] or "", brief_id=r["brief_id"] or "",
+                    platform=r["platform"] or "x", score=r["score"] or 0.0,
+                    predicted_engagement=r["predicted_engagement"] or 0.0,
+                    scheduled_for=r["scheduled_for"] or 0.0,
+                    published_at=r["published_at"] or 0.0,
+                    outcome_metrics=json.loads(r["outcome_metrics"] or "{}"),
+                    created_at=r["created_at"] or 0.0)
+                for r in rows
+            ]
+        except Exception as exc:  # noqa: BLE001
+            record_failure("briefs.BriefStore.find_by_content", exc)
+            return []
+
     # ── 4. pre-publish prediction (Anyword pattern) ──
 
     def predict_performance(self, draft: str, brief: ContentBrief,

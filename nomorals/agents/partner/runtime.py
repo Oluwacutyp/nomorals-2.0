@@ -2844,6 +2844,16 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("weekly content job not registered: %s",
                                  exc)
+                # Social measurement spine (WS3 P1): posted rows get
+                # their real metrics refreshed every 6h, so posting
+                # windows and brief outcomes learn from measured data
+                # instead of fallbacks. Idempotent by name.
+                try:
+                    from ...social.jobs import ensure_social_metrics_jobs
+                    ensure_social_metrics_jobs(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("social metrics job not registered: %s",
+                                 exc)
                 # Price sources: the quote-provider health loop
                 # (every 6h — one bounded real quote probe per
                 # keyless provider; keyed providers never probed;

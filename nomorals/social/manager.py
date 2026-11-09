@@ -642,6 +642,47 @@ class SocialManager:
                 pass
         self.posts.update(post_id, changes)
 
+    def update_post_metrics(
+        self,
+        post_id: str,
+        *,
+        metrics: dict[str, Any] | None = None,
+        fetched_at: float | None = None,
+        outcome: str = "",
+    ) -> None:
+        """Write measured engagement back onto a posted row (WS3 P1).
+
+        ``metrics`` replaces the row's metrics JSON with the adapter's
+        own measured dict, verbatim — the spine never invents numbers,
+        and ``None`` leaves the stored metrics untouched (an empty or
+        failed fetch must never zero out real data). The fetch time and
+        the one-shot outcome-feed verdict ride in the row's metadata
+        JSON, merged over whatever is already there — the same place
+        structured error codes live, so no schema change is needed.
+        """
+        changes: dict[str, Any] = {}
+        if metrics is not None:
+            changes["metrics"] = dict(metrics)
+        if fetched_at is not None or outcome:
+            meta: dict[str, Any] = {}
+            try:
+                row = self.posts.get(post_id) or {}
+                raw = row.get("metadata") or {}
+                if isinstance(raw, str):
+                    raw = json.loads(raw or "{}")
+                if isinstance(raw, dict):
+                    meta = dict(raw)
+            except Exception:  # noqa: BLE001 - metadata is best-effort
+                meta = {}
+            if fetched_at is not None:
+                meta["metrics_fetched_at"] = fetched_at
+            if outcome:
+                meta["metrics_outcome"] = outcome
+                meta["metrics_outcome_at"] = self._clock()
+            changes["metadata"] = meta
+        if changes:
+            self.posts.update(post_id, changes)
+
     def _check_capability(self, capability: str, actor: str, *, confirmation: str = "") -> None:
         """Ask the policy layer.
 

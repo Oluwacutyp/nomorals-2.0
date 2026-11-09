@@ -1006,3 +1006,35 @@ def register(registry: Any) -> None:
                 "seconds": round(result.seconds, 1),
                 "text": result.message,
                 "message": result.message}
+
+    @registry.register(
+        "social_metrics_refresh",
+        description=(
+            "Refresh REAL engagement metrics for already-posted social "
+            "posts: re-reads each recent post's numbers from its own "
+            "platform adapter and writes them back with the fetch "
+            "time, and feeds first outcomes into the briefs "
+            "calibration loop. Platforms whose adapter cannot produce "
+            "metrics are reported as unavailable — never zeroed. This "
+            "is what the durable 'social metrics refresh' job runs "
+            "every 6h; call directly only when the owner asks for "
+            "fresh numbers now. Args: limit (optional, max posts per "
+            "run)."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer",
+                          "description": "Max posted rows to refresh "
+                                         "in this run (default 200)"},
+            },
+        },
+    )
+    def social_metrics_refresh(limit: int = 200) -> dict[str, Any]:
+        from ..social.manager import SocialManager
+        from ..social.metrics import refresh_post_metrics
+
+        context = registry.context
+        manager = SocialManager(context).register_builtins()
+        return refresh_post_metrics(manager, limit=int(limit or 200))
