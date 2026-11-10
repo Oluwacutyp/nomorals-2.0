@@ -50,6 +50,294 @@ class RuntimeLiveMixin:
         res = convert_time(raw, from_zone, to_zone)
         return res.get("text") or f"couldn't parse that: {res.get('error','')}"
 
+    # ── Devon Atlas ─────────────────────────────────────────────────────
+    def _map_packs_dir(self):
+        """Where Atlas packs live: ``NM_MAPS_PACKS_DIR``, else
+        ``<home>/maps/packs`` (the M1 settings' own shape)."""
+        from pathlib import Path
+
+        from ...maps.settings import map_settings
+
+        configured = map_settings().packs_dir
+        if configured:
+            return Path(configured).expanduser()
+        settings = getattr(self.context, "settings", None)
+        home = getattr(settings, "home_path", None)
+        base = Path(home) if home else Path.home() / ".nomorals"
+        return base / "maps" / "packs"
+
+    def _map_receipt_store(self):
+        from ...maps.receipts import MapReceiptStore
+
+        settings = getattr(self.context, "settings", None)
+        home = getattr(settings, "home_path", None)
+        return MapReceiptStore(
+            db=getattr(self.context, "db", None),
+            home=str(home) if home else "")
+
+    def _map_installed(self):
+        """Installed packs as ``(dir, manifest|None, error)`` triples —
+        a directory whose manifest will not load is carried as a
+        named corrupt entry, never silently skipped."""
+        from ...maps.manifest import PackError, load_manifest
+
+        root = self._map_packs_dir()
+        found = []
+        if not root.is_dir():
+            return found
+        for entry in sorted(root.iterdir()):
+            if not entry.is_dir():
+                continue
+            try:
+                found.append((entry, load_manifest(entry), ""))
+            except PackError as exc:
+                found.append((entry, None, str(exc)))
+        return found
+
+    def _control_map(self, tail: str, chat_key: str = "",
+                     message=None) -> str:
+        """/map packs | /map view <lat,lon> [zoom] | /map view <west,south,east,north> [zoom]
+
+        Devon Atlas on chat: renders the owner's installed packs —
+        Devon's own basemap data — into a photo, the attribution
+        riding the caption (it is manifest data, a license fact).
+
+        Gating: owner-only.  A render spends the owner's host on
+        the owner's installed data, and every other Atlas surface
+        is an owner surface; the platform distinguishes the owner
+        here (:meth:`_is_operator`), and a message-less internal
+        call runs as the owner, exactly as /decode's gate reads
+        it.  There is no provider fallback behind this verb: when
+        no installed pack covers the view, the reply names what is
+        installed and what is missing — local-first is the Atlas
+        doctrine (doc 21 S1), providers are owner-policy
+        federation territory (M4/M5), never a silent substitute."""
+        from ...maps.settings import map_settings
+
+        tail = (tail or "").strip()
+        if not tail:
+            return ("usage: /map packs  |  /map view <lat,lon> [zoom]  |  "
+                    "/map view <west,south,east,north> [zoom]")
+        is_owner = True if message is None else self._is_operator(message)
+        if not is_owner:
+            return ("owner-only: Atlas renders the owner's installed "
+                    "map packs on the owner's host.")
+        if not map_settings().enabled:
+            return ("Devon Atlas is off on this host — set "
+                    "NM_MAPS_ENABLED=1 to light the map surfaces "
+                    "(packs live under NM_MAPS_PACKS_DIR, or "
+                    "<home>/maps/packs).")
+        verb, _, rest = tail.partition(" ")
+        verb = verb.lower()
+        if verb == "packs":
+            return self._map_packs_text()
+        if verb == "view":
+            return self._map_view(rest.strip(), chat_key)
+        return (f"unknown /map verb {verb!r} — /map packs | "
+                "/map view <lat,lon> [zoom]")
+
+    def _map_packs_text(self) -> str:
+        from ...maps.packs import verify_pack_dir
+
+        installed = self._map_installed()
+        root = self._map_packs_dir()
+        if not installed:
+            return (f"no map packs installed — Atlas packs live in "
+                    f"{root} (built by the basemap pipeline; each pack "
+                    "is a directory holding a manifest.json).")
+        store = self._map_receipt_store()
+        lines = [f"🗺 Devon Atlas — {len(installed)} pack(s):"]
+        for entry, manifest, error in installed:
+            if manifest is None:
+                lines.append(f"  ✗ {entry.name} — corrupt: manifest "
+                             f"unreadable ({error})")
+                continue
+            verdict, _receipt = verify_pack_dir(entry, store=store)
+            state = "✓ verified" if verdict.ok else "✗ corrupt"
+            lines.append(
+                f"  {state} · {manifest.name} ({manifest.pack_id}) · "
+                f"z{manifest.zoom_min}–{manifest.zoom_max} · "
+                f"{manifest.tile_format} · signature "
+                f"{verdict.signature_state}")
+            if not verdict.ok:
+                bad = list(verdict.missing) + list(verdict.mismatched)
+                lines.append("      defective members: "
+                             + ", ".join(bad[:6]))
+            lines.append(f"      {manifest.attribution}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _map_zoom_for(bbox) -> int:
+        """The deepest zoom whose tile count for ``bbox`` stays
+        modest — the /map view default when no zoom is given."""
+        import math
+
+        from ...maps.coords import lat_to_y_float, lon_to_x_float
+
+        for z in range(0, 19):
+            n = 1 << z
+            cols = lon_to_x_float(bbox.east, z) \
+                - lon_to_x_float(bbox.west, z)
+            if bbox.crosses_antimeridian:
+                cols += n
+            rows = lat_to_y_float(bbox.south, z) \
+                - lat_to_y_float(bbox.north, z)
+            if math.ceil(cols) * math.ceil(rows) > 64:
+                return max(0, z - 1)
+        return 18
+
+    def _map_view(self, spec: str, chat_key: str) -> str:
+        import os
+        import tempfile
+        from pathlib import Path
+
+        from ...maps.coords import (
+            BBox,
+            TileCoord,
+            tile_x_to_lon,
+            tile_y_to_lat,
+        )
+        from ...maps.render import FixtureRenderer
+        from ...maps.vector_render import VectorRenderer
+
+        usage = ("usage: /map view <lat,lon> [zoom]  |  "
+                 "/map view <west,south,east,north> [zoom]")
+        toks = spec.split()
+        if not toks:
+            return usage
+        try:
+            nums = [float(v) for v in toks[0].split(",")]
+        except ValueError:
+            return (f"couldn't parse coordinates {toks[0]!r} — "
+                    + usage)
+        zoom = None
+        if len(toks) > 1:
+            try:
+                zoom = int(toks[1])
+            except ValueError:
+                return f"zoom must be a whole number, got {toks[1]!r}"
+        if len(nums) == 2:
+            lat, lon = nums
+            zoom = 13 if zoom is None else zoom
+            try:
+                tile = TileCoord.from_latlon(lat, lon, zoom)
+            except ValueError as exc:
+                return f"bad view point: {exc}"
+            n = 1 << zoom
+            x0, x1 = max(0, tile.x - 1), min(n - 1, tile.x + 1)
+            y0, y1 = max(0, tile.y - 1), min(n - 1, tile.y + 1)
+            bbox = BBox(west=tile_x_to_lon(x0, zoom),
+                        south=tile_y_to_lat(y1 + 1, zoom),
+                        east=tile_x_to_lon(x1 + 1, zoom),
+                        north=tile_y_to_lat(y0, zoom))
+            view_desc = f"{lat:.4f},{lon:.4f}"
+        elif len(nums) == 4:
+            try:
+                bbox = BBox(west=nums[0], south=nums[1],
+                            east=nums[2], north=nums[3])
+            except ValueError as exc:
+                return f"bad view box: {exc}"
+            if zoom is None:
+                zoom = self._map_zoom_for(bbox)
+            view_desc = (f"{nums[0]:.2f},{nums[1]:.2f} → "
+                         f"{nums[2]:.2f},{nums[3]:.2f}")
+        else:
+            return usage
+
+        installed = [(d, m) for d, m, err in self._map_installed()
+                     if m is not None]
+        if not installed:
+            return ("no map packs installed — /map packs shows the "
+                    "shelf, and it is empty. Atlas renders installed "
+                    "packs only; there is no provider fallback.")
+
+        def _contains(outer, inner) -> bool:
+            if outer.crosses_antimeridian or inner.crosses_antimeridian:
+                return False
+            return (outer.south <= inner.south
+                    and inner.north <= outer.north
+                    and outer.west <= inner.west
+                    and inner.east <= outer.east)
+
+        def _intersects(outer, inner) -> bool:
+            if inner.south > outer.north or inner.north < outer.south:
+                return False
+            if outer.crosses_antimeridian or inner.crosses_antimeridian:
+                return True
+            return not (inner.east < outer.west
+                        or inner.west > outer.east)
+
+        def _pick(pool):
+            return sorted(pool, key=lambda dm: (-dm[1].zoom_max,
+                                                dm[1].name))[0]
+
+        in_zoom = [(d, m) for d, m in installed
+                   if m.zoom_min <= zoom <= m.zoom_max]
+        full = [(d, m) for d, m in in_zoom if _contains(m.bbox, bbox)]
+        partial = [(d, m) for d, m in in_zoom
+                   if _intersects(m.bbox, bbox)]
+        if full:
+            entry, manifest = _pick(full)
+        elif partial:
+            entry, manifest = _pick(partial)
+        else:
+            shelf = "; ".join(
+                f"{m.name} (z{m.zoom_min}–{m.zoom_max}, "
+                f"{m.bbox.west:.1f},{m.bbox.south:.1f} → "
+                f"{m.bbox.east:.1f},{m.bbox.north:.1f})"
+                for _d, m in installed)
+            return (f"no installed pack covers {view_desc} at "
+                    f"z{zoom} — installed: {shelf}. Atlas is "
+                    "local-first: nothing was fetched from a "
+                    "provider.")
+        store = self._map_receipt_store()
+        if manifest.tile_format == "mvt":
+            renderer = VectorRenderer(entry, manifest, store=store)
+        elif manifest.tile_format == "png":
+            renderer = FixtureRenderer(entry, manifest, store=store)
+        else:
+            return (f"pack {manifest.name} uses tile format "
+                    f"{manifest.tile_format!r}, which no shipped "
+                    "renderer draws yet (mvt and png packs render).")
+        result = renderer.render(bbox, zoom, size=(768, 768))
+        if result.image is None:
+            return (f"Atlas could not render {view_desc} from "
+                    f"{manifest.name}: {result.receipt.detail}")
+        caption = f"🗺 {manifest.name} · z{zoom}"
+        if result.missing_tiles:
+            caption += (f" · {len(result.missing_tiles)} tile(s) "
+                        "with no data")
+        if "labels skipped" in result.receipt.detail:
+            caption += " · place labels unavailable on this host"
+        caption += f"\n{manifest.attribution}"
+        chat = self._ref_from_key(chat_key)
+        tmp_path = ""
+        try:
+            fd, tmp_path = tempfile.mkstemp(prefix="atlas-",
+                                            suffix=".png")
+            os.close(fd)
+            Path(tmp_path).write_bytes(result.image)
+            res = self.gateway.send_file(
+                chat.platform, chat, tmp_path, caption=caption,
+                kind="image", name=f"{manifest.pack_id}-z{zoom}.png")
+            if getattr(res, "ok", False):
+                # The photo landing IS the confirmation — no
+                # narration appended (owner no-meta-narration rule).
+                return ""
+            return (f"(the map rendered from {manifest.name} but "
+                    "the photo couldn't be sent on this surface)")
+        except Exception as exc:  # noqa: BLE001
+            record_failure("runtime_live._control_map", exc)
+            return (f"(the map rendered from {manifest.name} but "
+                    "the photo couldn't be sent on this surface)")
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError as exc:  # transient send copy
+                    record_failure(
+                        "runtime_live._control_map.unlink", exc)
+
     # ── translate ────────────────────────────────────────────────────
     def _control_translate(self, tail: str, message=None) -> str:
         """/translate [to <lang>] <text> | <url> | (as a reply) |

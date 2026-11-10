@@ -13,10 +13,13 @@ MapReceipt + its store (:mod:`nomorals.maps.receipts`), the
 renderer boundary proven by an offline fixture renderer
 (:mod:`nomorals.maps.render`), pack operations
 (:mod:`nomorals.maps.packs`) and settings
-(:mod:`nomorals.maps.settings`).  The basemap pipeline (M2), the
-web renderer and surfaces (M3), geocoder (M4), routing (M5), the
-live-location broker (M6, on ``location/``'s ConsentStore) and the
-MapAgent (M7) build on these contracts in later passes.
+(:mod:`nomorals.maps.settings`).  M3 adds the vector plane: the
+MVT decoder (:mod:`nomorals.maps.mvt`), the Devon Style document
+(:mod:`nomorals.maps.style`) and the vector renderer behind the
+same boundary (:mod:`nomorals.maps.vector_render`).  The basemap
+pipeline (M2), geocoder (M4), routing (M5), the live-location
+broker (M6, on ``location/``'s ConsentStore) and the MapAgent
+(M7) build on these contracts in their own passes.
 """
 
 from __future__ import annotations
@@ -52,22 +55,35 @@ from .manifest import (
                      verify_signature,
                      write_manifest,
 )
+from .mvt import (
+    MvtError,
+    MvtFeature,
+    MvtLayer,
+    MvtPath,
+    MvtTile,
+    decode_mvt,
+)
 from .packs import render_pack_preview, verify_pack_dir
 from .receipts import OPERATIONS, MapReceipt, MapReceiptStore, new_receipt_id
 from .render import FixtureRenderer, MapRenderer, RenderResult, StdlibPngBackend
 from .settings import MapSettings, map_settings
+from .style import DEFAULT_STYLE, MapStyle, StyleError, StyleLayer, style_hash
+from .vector_render import LabelSpec, PilTextBackend, TextBackend, VectorRenderer
 
 __all__ = [
-    "FORMAT_VERSION", "MANIFEST_NAME", "MAX_ZOOM", "MERCATOR_MAX_LAT",
-    "OPERATIONS", "BBox", "FixtureRenderer", "GeoValidation",
-    "MapReceipt", "MapRenderer", "MapReceiptStore", "MapSettings",
-    "PackError", "PackManifest", "PackMember", "PackVerification",
-    "RenderResult", "StdlibPngBackend", "TileCoord", "build_manifest",
-    "clamp_mercator_lat", "hash_bytes", "lat_to_tile_y",
+    "DEFAULT_STYLE", "FORMAT_VERSION", "MANIFEST_NAME", "MAX_ZOOM",
+    "MERCATOR_MAX_LAT", "OPERATIONS", "BBox", "FixtureRenderer",
+    "GeoValidation", "LabelSpec", "MapReceipt", "MapRenderer",
+    "MapReceiptStore", "MapSettings", "MapStyle", "MvtError",
+    "MvtFeature", "MvtLayer", "MvtPath", "MvtTile", "PackError",
+    "PackManifest", "PackMember", "PackVerification", "PilTextBackend",
+    "RenderResult", "StdlibPngBackend", "StyleError", "StyleLayer",
+    "TextBackend", "TileCoord", "VectorRenderer", "build_manifest",
+    "clamp_mercator_lat", "decode_mvt", "hash_bytes", "lat_to_tile_y",
     "lat_to_y_float", "load_manifest", "lon_to_tile_x",
     "lon_to_x_float", "map_settings", "new_receipt_id",
-    "render_pack_preview", "tile_relpath", "tile_x_to_lon",
-    "tile_y_to_lat", "validate_geojson", "validate_lat", "validate_lon",
-    "verify_pack", "verify_pack_dir", "verify_signature",
-    "write_manifest",
+    "render_pack_preview", "style_hash", "tile_relpath",
+    "tile_x_to_lon", "tile_y_to_lat", "validate_geojson",
+    "validate_lat", "validate_lon", "verify_pack", "verify_pack_dir",
+    "verify_signature", "write_manifest",
 ]

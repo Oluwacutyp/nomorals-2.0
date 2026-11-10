@@ -823,6 +823,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "finance": (0, None),    # /finance quote|analyze|signal|idea|backtest|strategies|compare|watch|doctor
     "weather": (0, None),    # /weather [place] — live conditions + forecast + alerts
     "tz": (0, None),         # /tz [time] — timezone conversion, labeled in owner tz
+    "map": (0, None),        # /map packs | /map view <lat,lon> [zoom] | /map view <w,s,e,n> [zoom] — Devon Atlas: renders the owner's installed packs as photos (owner-only)
     "task": (1, None),       # /task add <instruction>|run [id]|list
     "notify": (0, None),     # /notify [n] | decisions [n] | why [<n>|decision <n>] | coverage — recent alerts + the decision chain behind them
     "proactive": (0, 0),     # /proactive — push-send switches + delivery states
@@ -993,6 +994,10 @@ _HELP_TEXT = "\n".join(
         "       [--webhook URL] [--min-gap 60]     POST alerts as JSON; throttle",
         "  /monitor alert <ref> [--webhook … --min-gap N]  change a watch's delivery",
         "  /monitor list | tick | rm <ref>          manage watches",
+        "  — Devon Atlas (her own basemap) —",
+        "  /map packs                               installed map packs + verify state",
+        "  /map view <lat,lon> [zoom]               render a pack view as a photo",
+        "  /map view <west,south,east,north> [zoom] render a boxed view as a photo",
         "  — she speaks first (owner DMs only, never anyone else) —",
         "  /proactive                            push-send switches + delivery states",
         "  /notify [n]                           recent alerts with delivery states",
@@ -3853,6 +3858,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
            "usage": "/tz | /tz 2026-10-02 14:00 [from-zone] [to-zone]",
            "example": "/tz 2026-10-02 14:00 America/New_York Africa/Lagos",
            "related": "/weather /briefing"},
+    "map": {"what": "Devon Atlas: Devon's own basemap — renders installed, hash-pinned map packs (Devon-built releases, never a provider's tiles) as photos in the Devon style, attribution riding the caption.",
+            "usage": "/map packs | /map view <lat,lon> [zoom] | /map view <west,south,east,north> [zoom]",
+            "example": "/map view 7.6211,5.2214 12",
+            "related": "/weather /sendloc"},
     "notify": {"what": ("recent alerts, with delivery states — plus the "
                         "inspection verbs: decisions shows every recent "
                         "publish decision with its verdict and reason "
@@ -4333,7 +4342,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
+                            "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
                            "exness", "stripe", "content", "drafts", "day",
                            "calendar", "repurpose", "engage", "cases", "read",
                            "tempmail", "checkmail", "vnumber", "checksms",
@@ -4652,7 +4661,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "artifact", "api", "proxy", "toolhub", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
-      "monitor", "investigate", "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
+      "monitor", "investigate", "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion", "gcal", "trello", "exness", "stripe",
       "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage", "cases", "read",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
@@ -5010,6 +5019,7 @@ LIST_ONELINERS: dict[str, str] = {
     "pump": "pump.fun intelligence desk: dossiers, de-rug gate, self-graded signal calls",
     "weather": "live weather, alerts, USA situations overview",
     "tz": "timezone conversion + your labeled local time",
+    "map": "Devon Atlas: render installed map packs as photos — /map packs | /map view <lat,lon> [zoom]",
     "stt": "transcribe an audio file",
     "look": "screen-reader analysis of a screenshot (sees pixels)",
     "imggen": "Devon's own image studio: native diffusion, upscale, training",
