@@ -574,10 +574,20 @@ class StoryReader:
                 f"unknown export format {fmt!r} — use pdf, epub or html")
         slug = self.resolve_slug(slug)
         story = self._load(slug)
+        from ..core.branding import resolve_brand_mark
         from ..core.edition import completeness_line
         from .manifest import manifest_from_story, story_content_resolver
 
         manifest = manifest_from_story(self, slug)
+        # one brand resolution for the whole export (the
+        # public-surface watermark pass): the caller's policy wins,
+        # the manifest's hint is the fallback — the same precedence
+        # the HTML edition has always used.  PDF pages carry the
+        # designed watermark; the EPUB title page carries the
+        # visible brand line; "off" marks neither.
+        mark = resolve_brand_mark(
+            brand_policy or manifest.presentation.brand_policy,
+            brand_text)
         comp = manifest.completeness
         if comp.present_count == 0:
             raise ReaderError(
@@ -616,11 +626,14 @@ class StoryReader:
                     chapters.append(
                         (n, f"Chapter {n}", None,
                          _STORY_MISSING_NOTE.format(n=n)))
+            front_note = line
+            if mark is not None:
+                front_note = f"{line} {mark.text}."
             data = epub_from_chapters(
                 slug=slug, title=story.title, author=story.author,
                 description=story.synopsis,
                 subjects=tuple(story.genres or ()),
-                chapters=chapters, front_note=line,
+                chapters=chapters, front_note=front_note,
                 extra_meta=_epub_stamp_meta(manifest))
             path.write_bytes(data)
         else:
@@ -646,7 +659,8 @@ class StoryReader:
                           "author": story.author or "",
                           "subject": line.replace("—", "-"),
                           "keywords": "nomorals-longdoc "
-                                      + manifest.revision_ref})
+                                      + manifest.revision_ref},
+                watermark=mark)
             path.write_bytes(data)
         return {"slug": slug, "title": story.title, "format": fmt,
                 "path": str(path), "bytes": len(data),

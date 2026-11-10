@@ -256,6 +256,7 @@ def to_pdf(doc: Document) -> bytes:
     revision of the document.  ``to_markdown`` itself is untouched —
     the stamp lands only in the copy rendered here."""
     markdown = to_markdown(doc)  # raises DocumentError when there is no content
+    from ..core.branding import resolve_brand_mark
     from ..core.edition import completeness_line
     from .manifest import manifest_from_document
 
@@ -273,7 +274,12 @@ def to_pdf(doc: Document) -> bytes:
                                     "author": doc.author or "",
                                     "subject": line.replace("—", "-"),
                                     "keywords": "nomorals-longdoc "
-                                                + manifest.revision_ref})
+                                                + manifest.revision_ref},
+                          # a document export is public-bound: the
+                          # designed watermark rides every page,
+                          # resolved from the manifest's brand policy.
+                          watermark=resolve_brand_mark(
+                              manifest.presentation.brand_policy))
     except PdfError as exc:
         raise DocumentError(f"PDF rendering failed: {exc}", kind="write") from exc
 

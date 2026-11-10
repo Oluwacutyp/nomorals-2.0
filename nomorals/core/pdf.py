@@ -19,6 +19,8 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Iterable
 
+from .branding import BrandMark
+
 __all__ = ["PdfError", "PdfPage", "render_pdf", "pdf_write", "read_pdf_text",
            "pdf_read", "render_pdf_embedded"]
 
@@ -145,13 +147,83 @@ def _paginate(paragraphs: Iterable[str], *, width_chars: int) -> list[list[str]]
     return pages
 
 
+# ── the designed watermark ──────────────────────────────────────────
+#
+# A real on-page watermark, drawn FIRST in every page's content
+# stream (so it sits UNDER the content) as page furniture: the
+# brand text tiled diagonally across the page at 32 degrees, in a
+# mid gray under an ExtGState alpha — visible as a deliberate mark,
+# subordinate to everything printed over it.  It is part of the
+# page, not the text flow: extractors meet it as furniture ops,
+# printers print it, and cropping one instance still leaves two.
+
+_WATERMARK_ANGLE_DEG = 32.0
+_WATERMARK_SIZE = 34
+_WATERMARK_GRAY = 0.30
+_WATERMARK_ROWS = (0.27, 0.50, 0.73)
+
+
+def _coerce_watermark(watermark: object) -> BrandMark | None:
+    """Normalize a render_pdf watermark argument: None → no mark;
+    a BrandMark → itself; a non-empty string → a mark with that
+    text; anything else is a caller error worth naming."""
+    if watermark is None:
+        return None
+    if isinstance(watermark, BrandMark):
+        return watermark
+    if isinstance(watermark, str):
+        text = watermark.strip()
+        return BrandMark(text=text) if text else None
+    raise PdfError(
+        f"watermark must be a BrandMark, a string, or None — "
+        f"got {type(watermark).__name__}")
+
+
+def _num(value: float) -> str:
+    """Compact PDF number: 4 decimals, no trailing zeros."""
+    return f"{value:.4f}".rstrip("0").rstrip(".")
+
+
+def _watermark_ops(mark: BrandMark, *, page_width: int,
+                   page_height: int) -> str:
+    """The watermark op block for one page (empty for no mark)."""
+    text = _pdf_escape(_to_pdf_text(mark.text))
+    if not text:
+        return ""
+    angle = math.radians(_WATERMARK_ANGLE_DEG)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    # Helvetica advances average ~0.52 em for mixed-case brand text
+    text_w = len(mark.text) * _WATERMARK_SIZE * 0.52
+    ops = ["q /GSW gs"]
+    for frac in _WATERMARK_ROWS:
+        cx, cy = page_width / 2, page_height * frac
+        x = cx - (text_w / 2) * cos_a
+        y = cy - (text_w / 2) * sin_a
+        ops.append(
+            f"BT /F1 {_WATERMARK_SIZE} Tf {_WATERMARK_GRAY:.2f} g "
+            f"{_num(cos_a)} {_num(sin_a)} {_num(-sin_a)} {_num(cos_a)} "
+            f"{x:.1f} {y:.1f} Tm ({text}) Tj ET"
+        )
+    ops.append("Q")
+    return "\n".join(ops)
+
+
+def _extgstate_body(mark: BrandMark) -> bytes:
+    alpha = _num(mark.opacity)
+    return (f"<< /Type /ExtGState /CA {alpha} /ca {alpha} >>"
+            ).encode("latin-1")
+
+
 def _content_stream(lines: list[str], *, page_width: int, page_height: int,
-                    font_size: int = 10, header: str = "", footer: str = "") -> bytes:
+                    font_size: int = 10, header: str = "", footer: str = "",
+                    watermark_ops: str = "") -> bytes:
     """Build one page's content stream (BT/Tf/Tm/Tj/ET)."""
     left = 56  # ~1cm margin
     top = page_height - 56
     leading = font_size + 4
     ops: list[str] = []
+    if watermark_ops:
+        ops.append(watermark_ops)
     if header:
         ops.append(
             f"BT /F2 {font_size - 2} Tf 1 0 0 1 {left} {top - 14} Tm "
@@ -341,6 +413,7 @@ def _content_stream_styled(
     font_size: int = 10,
     header: str = "",
     footer: str = "",
+    watermark_ops: str = "",
 ) -> bytes:
     """One page of styled lines: F3 (bold) for headings, F1 for body,
     F4 (Courier) for table rows."""
@@ -348,6 +421,8 @@ def _content_stream_styled(
     top = page_height - 56
     leading = font_size + 4
     ops: list[str] = []
+    if watermark_ops:
+        ops.append(watermark_ops)
     if header:
         ops.append(
             f"BT /F2 {font_size - 2} Tf 1 0 0 1 {left} {top - 14} Tm "
@@ -407,6 +482,7 @@ def _assemble(
     footer: str,
     has_bold: bool,
     metadata: dict | None = None,
+    mark: BrandMark | None = None,
 ) -> bytes:
     """Object assembly for styled pages (mirrors the legacy numbering)."""
     n_pages = len(pages)
@@ -437,6 +513,17 @@ def _assemble(
     if metadata:
         catalog += f" /Info {info_id} 0 R"
         slots[info_id] = _info_dict(metadata)
+    extgs_id = info_id + 1 if metadata else info_id
+    extgs_entry = ""
+    wm_ops = ""
+    if mark is not None:
+        wm_ops = _watermark_ops(mark, page_width=page_width,
+                                page_height=page_height)
+        if wm_ops:
+            slots[extgs_id] = _extgstate_body(mark)
+            extgs_entry = f" /ExtGState << /GSW {extgs_id} 0 R >>"
+        else:
+            wm_ops = ""
     slots[1] = (catalog + " >>").encode()
     slots[2] = f"<< /Type /Pages /Kids [{children}] /Count {n_pages} >>".encode()
     slots[3] = (b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica "
@@ -449,6 +536,7 @@ def _assemble(
             pages[i], page_width=page_width, page_height=page_height,
             font_size=font_size, header=header,
             footer=footer.replace("N", str(i + 1)).replace("{total}", str(n_pages)),
+            watermark_ops=wm_ops,
         )
         compressed = zlib.compress(stream)
         slots[content_obj_ids[i]] = (
@@ -457,7 +545,7 @@ def _assemble(
         )
         slots[page_obj_ids[i]] = (
             f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width} {page_height}] "
-            f"/Resources << /Font << {font_map} >> >> "
+            f"/Resources << /Font << {font_map} >>{extgs_entry} >> "
             f"/Contents {content_obj_ids[i]} 0 R >>".encode()
         )
 
@@ -492,6 +580,7 @@ def _render_structured(
     chapter_break: bool,
     toc: bool,
     metadata: dict | None = None,
+    mark: BrandMark | None = None,
 ) -> bytes:
     """Book layout: styled blocks, optional chapter page breaks, and a
     two-pass table of contents whose page numbers converge on the true
@@ -554,7 +643,7 @@ def _render_structured(
         footer = f"{title} — page N — {now}"
     return _assemble(pages, page_width=page_width, page_height=page_height,
                      font_size=font_size, header=header, footer=footer,
-                     has_bold=has_bold, metadata=metadata)
+                     has_bold=has_bold, metadata=metadata, mark=mark)
 
 
 def render_pdf(
@@ -569,6 +658,7 @@ def render_pdf(
     chapter_break: bool = False,
     toc: bool = False,
     metadata: dict | None = None,
+    watermark: BrandMark | str | None = None,
 ) -> bytes:
     """Render ``text`` (markdown-ish plain text) into a complete PDF file.
 
@@ -587,15 +677,24 @@ def render_pdf(
     honored.  ``metadata`` sets the document info dictionary (title,
     author, subject, keywords, creator).  Footers may use ``N`` for the
     page number and ``{total}`` for the page count.
+
+    ``watermark`` draws the designed brand watermark on EVERY page,
+    under the content: a :class:`~nomorals.core.branding.BrandMark`
+    (resolve one from a policy with
+    :func:`~nomorals.core.branding.resolve_brand_mark`), or a plain
+    string for its text.  ``None`` (the default) draws no mark —
+    producers of public-bound PDFs pass the resolved mark; personal
+    documents simply don't.
     """
     if page_size not in {"A4", "Letter"}:
         raise PdfError(f"unknown page size {page_size!r}; use A4 or Letter")
+    mark = _coerce_watermark(watermark)
     if headings:
         return _render_structured(
             text, title=title, page_size=page_size, font_size=font_size,
             header=header, footer=footer,
             chapter_break=chapter_break and headings, toc=toc,
-            metadata=metadata,
+            metadata=metadata, mark=mark,
         )
     page_width, page_height = (595, 842) if page_size == "A4" else (612, 792)
 
@@ -654,6 +753,17 @@ def render_pdf(
     if metadata:
         catalog += f" /Info {info_id} 0 R"
         slots[info_id] = _info_dict(metadata)
+    extgs_id = info_id + 1 if metadata else info_id
+    extgs_entry = ""
+    wm_ops = ""
+    if mark is not None:
+        wm_ops = _watermark_ops(mark, page_width=page_width,
+                                page_height=page_height)
+        if wm_ops:
+            slots[extgs_id] = _extgstate_body(mark)
+            extgs_entry = f" /ExtGState << /GSW {extgs_id} 0 R >>"
+        else:
+            wm_ops = ""
     slots[1] = (catalog + " >>").encode()
     children = " ".join(f"{pid} 0 R" for pid in page_obj_ids)
     slots[2] = (
@@ -672,6 +782,7 @@ def render_pdf(
             pages[i], page_width=page_width, page_height=page_height,
             font_size=font_size, header=header,
             footer=footer.replace("N", str(i + 1)).replace("{total}", str(n_pages)),
+            watermark_ops=wm_ops,
         )
         compressed = zlib.compress(stream)
         slots[content_obj_ids[i]] = (
@@ -682,7 +793,7 @@ def render_pdf(
         )
         slots[page_obj_ids[i]] = (
             f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width} {page_height}] "
-            f"/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> "
+            f"/Resources << /Font << /F1 3 0 R /F2 4 0 R >>{extgs_entry} >> "
             f"/Contents {content_obj_ids[i]} 0 R >>".encode()
         )
 

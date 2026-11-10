@@ -1984,7 +1984,8 @@ class MakerService:
         return path
 
     def _deliver(self, data: bytes, ext: str, mime: str,
-                 caption: str, send) -> dict[str, Any]:
+                 caption: str, send, *, audience: str = ""
+                 ) -> dict[str, Any]:
         from .base import MediaRef
 
         try:
@@ -1992,7 +1993,7 @@ class MakerService:
         except MakerError as exc:
             return {"sent": False, "reason": str(exc)}
         ref = MediaRef(path=str(path), mime=mime, kind="image",
-                       name=path.name)
+                       name=path.name, audience=audience)
         try:
             result = send(ref, caption)
         except Exception as exc:  # noqa: BLE001 - send failed
@@ -2036,6 +2037,7 @@ class MakerService:
              reply_text: str = "", sender_name: str = "",
              avatars: dict[int, Any] | None = None,
              backdrop: Any = None,
+             audience: str = "",
              send) -> dict[str, Any]:
         """Render + deliver one card.  ``avatars`` maps an
         entry index to the avatar the surface handed over
@@ -2043,7 +2045,13 @@ class MakerService:
         else the design's placeholder disc stands in.
         ``backdrop`` feeds the feature designs; when none
         rides, one is resolved best-effort (photo pool, then
-        her studio, then the design's gradient)."""
+        her studio, then the design's gradient).
+        ``audience`` is the artifact's public/personal
+        classification, carried on the MediaRef: the runtime
+        passes "public" when the card is made in a group chat
+        (the send seam then burns the brand mark in), "personal"
+        in the owner's own DM.  The card bytes at rest are never
+        marked — the mark is a property of the send."""
         try:
             style, entries = parse_card_request(
                 kind, tail, reply_name=reply_name,
@@ -2073,7 +2081,8 @@ class MakerService:
         else:
             caption = f"💬 quote card — {names[0] if names else ''}"
         out = self._deliver(data, ".png", "image/png",
-                            _trim_caption(caption), send)
+                            _trim_caption(caption), send,
+                            audience=audience)
         out.update({"style": style, "drawn": drawn})
         return out
 

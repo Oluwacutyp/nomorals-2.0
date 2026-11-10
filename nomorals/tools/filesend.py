@@ -154,18 +154,22 @@ def create_file(
     elif ext == "html":
         data = md_to_html(content, title=base_title).encode("utf-8")
     elif ext == "pdf":
+        from ..core.branding import resolve_brand_mark
         from ..core.pdf import render_pdf
 
         # content with multiple top-level sections (a book) gets the real
         # book layout: bold headings, chapter page breaks, a TOC with true
         # page numbers.  A plain report (≤1 top heading) keeps the classic
-        # flat rendering.
+        # flat rendering.  Either way the file is made to be sent on, so
+        # the designed watermark rides every page (default policy).
         n_h1 = len(re.findall(r"(?m)^#\s+\S", content))
         if n_h1 >= 2:
             data = render_pdf(content, title=base_title, headings=True,
-                              chapter_break=True, toc=True)
+                              chapter_break=True, toc=True,
+                              watermark=resolve_brand_mark())
         else:
-            data = render_pdf(content, title=base_title)
+            data = render_pdf(content, title=base_title,
+                              watermark=resolve_brand_mark())
     elif ext == "txt":
         data = md_to_text(content).encode("utf-8")
     else:  # md

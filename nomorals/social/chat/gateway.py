@@ -1303,6 +1303,7 @@ class ChatGateway:
         name: str = "",
         buttons: list[list[tuple[str, str]]] | None = None,
         view_once: bool = False,
+        audience: str = "",
     ) -> SendResult:
         """Send a file, auto-compressing when it would exceed ``max_send_mb``.
 
@@ -1340,6 +1341,14 @@ class ChatGateway:
         that is not a photo/video — the send refuses with that
         reason instead of silently delivering a different shape
         than the caller asked for.
+
+        ``audience="public"`` classifies the file as bound for a
+        public surface: an image then leaves with the designed
+        Peacethefirst brand mark burned into its corner (a derived
+        copy is sent; the caller's file is never mutated).  The
+        default "" is unclassified and sends unmarked — images made
+        for the owner himself are personal and stay unmarked, and
+        only a caller that knows the surface opts in.
         """
         chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
         adapter = self._adapter_for(chat.platform)
@@ -1359,6 +1368,21 @@ class ChatGateway:
                                   path, target, report.get("ratio"))
             except Exception as exc:  # noqa: BLE001 - never block the send on compression
                 _log.debug("send_file compression failed: %s", exc)
+        if audience == "public" and str(kind or "") in ("image", "photo"):
+            try:
+                from pathlib import Path
+
+                from .brandmark import burn_brand_mark
+
+                src = Path(target)
+                marked = src.with_name(
+                    f"{src.stem}.brandmarked{src.suffix}")
+                marked.write_bytes(burn_brand_mark(src.read_bytes()))
+                target = str(marked)
+                _log.info("send_file: brand mark burned for public "
+                          "send: %s", target)
+            except Exception as exc:  # noqa: BLE001 - never block the send on the mark
+                _log.warning("send_file brand mark failed: %s", exc)
         limits = for_platform(chat.platform)
         try:
             size_bytes = os.path.getsize(target)

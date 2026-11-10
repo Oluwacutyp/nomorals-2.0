@@ -143,6 +143,32 @@ class RuntimeExpressionMixin:
         return person_key(platform, user_id)
 
     # ---- sending -------------------------------------------------
+    def _brand_marked_ref(self, ref):  # type: ignore[no-untyped-def]
+        """The ref to actually send for a PUBLIC-classified image:
+        a sibling file with the designed brand mark burned into
+        its corner (social/chat/brandmark.py).  Personal and
+        unclassified refs pass through untouched — the owner's own
+        media is never marked.  A marking failure degrades
+        honestly: the failure is recorded and the original goes
+        out; a delivery never dies on its watermark."""
+        if (str(getattr(ref, "audience", "") or "") != "public"
+                or str(getattr(ref, "kind", "") or "") != "image"
+                or not getattr(ref, "path", "")):
+            return ref
+        try:
+            from dataclasses import replace as _replace
+
+            from ...social.chat.brandmark import burn_brand_mark
+
+            src = Path(str(ref.path))
+            marked = src.with_name(
+                f"{src.stem}.brandmarked{src.suffix}")
+            marked.write_bytes(burn_brand_mark(src.read_bytes()))
+            return _replace(ref, path=str(marked))
+        except Exception as exc:  # noqa: BLE001 - degrade, never block
+            record_failure("expression.brandmark", exc)
+            return ref
+
     def _expression_send(self, message, ref, caption: str = "", buttons=None):  # type: ignore[no-untyped-def]
         """Send one MediaRef through the room's own adapter
         (native media path — Telegram stickers/animations,
@@ -165,6 +191,11 @@ class RuntimeExpressionMixin:
         adapter = self._group_adapter(platform)
         fn = getattr(adapter, "send_media", None) if adapter else None
         if fn is not None:
+            # the adapter path takes the ref itself, so a
+            # public-classified image is burned HERE; the gateway
+            # fallback below burns at its own seam instead — a ref
+            # is marked exactly once, on whichever path sends it.
+            ref = self._brand_marked_ref(ref)
             kwargs: dict = {}
             if caption:
                 kwargs["caption"] = caption
@@ -178,11 +209,16 @@ class RuntimeExpressionMixin:
         gateway = getattr(self, "gateway", None)
         send_file = getattr(gateway, "send_file", None)
         if send_file is not None and ref.path:
+            extra: dict = {}
+            if str(getattr(ref, "audience", "") or "") == "public":
+                # only a public-classified ref changes the call
+                # shape; every other send is byte-historical.
+                extra["audience"] = "public"
             return send_file(platform, message.chat, ref.path,
                              caption=caption,
                              kind=str(getattr(ref, "kind", "") or ""),
                              name=str(getattr(ref, "name", "") or ""),
-                             buttons=buttons)
+                             buttons=buttons, **extra)
         return SimpleNamespace(
             ok=False, platform=platform, message_id="",
             media_file_id="",

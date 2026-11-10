@@ -393,6 +393,15 @@ class MediaRef:
     # from ``voice_note`` (outbound send-as-voice-bubble flag) — this
     # one records what the attachment WAS on arrival.
     is_voice: bool = False
+    # The artifact's audience classification (public-surface
+    # watermark pass): "public" = this image is bound for a public
+    # surface, and the send seam burns the designed Peacethefirst
+    # brand mark into its corner before it leaves; "personal" =
+    # made for the owner himself — never marked.  The default ""
+    # is unclassified and reads as personal: only a seam that KNOWS
+    # the surface (e.g. the makers runtime in a group chat) sets
+    # "public", so ambiguity never marks the owner's own media.
+    audience: str = ""
     # Platform file handle (a Telegram file_id): set on inbound media
     # the platform already hosts, and on outbound refs to RE-SEND by
     # handle instead of uploading bytes again.
@@ -402,7 +411,8 @@ class MediaRef:
         return {"path": self.path, "mime": self.mime, "kind": self.kind,
                 "name": self.name, "voice_note": self.voice_note,
                 "view_once": self.view_once,
-                "is_voice": self.is_voice, "file_id": self.file_id}
+                "is_voice": self.is_voice, "audience": self.audience,
+                "file_id": self.file_id}
 
 
 @dataclass

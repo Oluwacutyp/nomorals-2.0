@@ -177,12 +177,21 @@ class RuntimeMakersMixin:
         avatar = self._makers_avatar(
             message, replied=bool(reply_text))
         service = self._makers_service()
+        # the card's audience is KNOWN here: made in a group chat
+        # it leaves to a public surface and carries the brand
+        # mark; in a DM it is the owner's own — personal, unmarked.
+        from ...social.chat.base import ChatKind
+
+        audience = ("public"
+                    if getattr(message.chat, "kind", None)
+                    == ChatKind.GROUP else "personal")
         out = service.card(
             kind, tail, reply_name=reply_name,
             reply_text=reply_text,
             sender_name=str(getattr(message, "sender", "")
                             or ""),
             avatars={0: avatar} if avatar is not None else None,
+            audience=audience,
             send=lambda ref, caption: self._expression_send(
                 message, ref, caption=caption))
         if out.get("sent"):

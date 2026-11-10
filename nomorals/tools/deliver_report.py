@@ -509,11 +509,15 @@ def generate_report(
     pdf_note = ""
     if include_pdf:
         try:
+            from ..core.branding import resolve_brand_mark
             from ..core.pdf import render_pdf
 
             md = compose_markdown(topic, norm, title=doc_title, generated=stamp)
+            # a generated report is a public-bound deliverable: the
+            # designed watermark rides every page (default policy).
             data = render_pdf(md, title=doc_title, headings=True,
-                              chapter_break=True, toc=True)
+                              chapter_break=True, toc=True,
+                              watermark=resolve_brand_mark())
             pdf_file.write_bytes(data)
             pdf_bytes = len(data)
         except Exception as exc:  # noqa: BLE001 - PDF is a bonus; say so, keep the HTML

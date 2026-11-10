@@ -674,6 +674,7 @@ class BookForge:
         }
         want = {f.lower() for f in formats} or {"pdf"}
         if "pdf" in want:
+            from ..core.branding import resolve_brand_mark
             from ..core.edition import completeness_line
             from ..core.pdf import render_pdf
             from .manifest import manifest_from_book
@@ -702,6 +703,11 @@ class BookForge:
                           "subject": edition_line.replace("—", "-"),
                           "keywords": "nomorals-longdoc "
                                       + manifest.revision_ref},
+                # a built book is a public-bound artifact: the
+                # designed watermark rides every page, resolved
+                # from the manifest's own brand policy.
+                watermark=resolve_brand_mark(
+                    manifest.presentation.brand_policy),
             )
             pdf_path = d / f"{slug}.pdf"
             pdf_path.write_bytes(data)
@@ -1141,15 +1147,23 @@ def epub_bytes(book: Book, *, cover_path: str = "") -> bytes:
     the OPF metadata records the manifest revision_ref it was built
     from, and a chapter that is declared in the outline but not
     written yet appears as a declared-absent page — listed, never
-    silently dropped, never filled with invented text."""
+    silently dropped, never filled with invented text.  The title
+    page also carries the visible brand line under the same brand
+    policy as every other edition format (the public-surface
+    watermark pass) — a mark a reader sees, not only metadata."""
     written = [c for c in book.chapters
                if c.status == STATUS_WRITTEN and c.text.strip()]
     if not written:
         raise BookError(f"book {book.slug!r} has no written chapters yet")
+    from ..core.branding import resolve_brand_mark
     from ..core.edition import completeness_line
     from .manifest import manifest_from_book
 
     manifest = manifest_from_book(book)
+    front_note = completeness_line(manifest)
+    mark = resolve_brand_mark(manifest.presentation.brand_policy)
+    if mark is not None:
+        front_note = f"{front_note} {mark.text}."
     chapters: list[tuple[int, str, str | None, str]] = []
     for c in book.chapters:
         ch_title = c.title or f"Chapter {c.number}"
@@ -1168,7 +1182,7 @@ def epub_bytes(book: Book, *, cover_path: str = "") -> bytes:
         description=book.description,
         subjects=(book.genre,) if book.genre else (),
         series=book.series, series_index=book.series_index,
-        chapters=chapters, front_note=completeness_line(manifest),
+        chapters=chapters, front_note=front_note,
         extra_meta=_epub_stamp_meta(manifest),
         cover_path=cover_path or book.cover_image or "")
 

@@ -17,19 +17,26 @@ books is L5), stdlib only.
 
 The brand (the typography law, extended from chat text to file
 editions): an edition carries the Peacethefirst mark structurally —
-a brand line in the cover header, the closing footer, and a subtle
-print-only mark in the page's bottom safe area.  It never lands
-inside content: code blocks and prose stay byte-faithful, and the
-screen rendering carries no watermark over the text at all.
-``brand_policy`` follows the manifest's
+a brand line in the cover header, the closing footer, a subtle
+print-only mark in the page's bottom safe area, AND a designed
+on-page watermark: a fixed, translucent brand layer sitting BEHIND
+the content, on screen and in print alike, so the mark is on the
+artifact itself and not only in its furniture lines.  It never
+lands inside content: code blocks and prose stay byte-faithful —
+the watermark is a separate layer under them, never woven into
+their bytes.  ``brand_policy`` follows the manifest's
 :class:`~nomorals.core.longdoc.PresentationHints` and mirrors
 ``social.chat.typography.resolve_style`` semantics exactly —
 ``default`` stamps the house mark, ``off`` stamps nothing (no brand
-string anywhere in the file), ``custom`` stamps the caller's custom
-text and falls back to the house mark when none is supplied, the
-same way a group ``stamp_text`` of "" resolves to the default.
-The constants are mirrored here because core cannot import social;
-a test pins them equal so the two homes cannot drift.
+string anywhere in the file, watermark included), ``custom`` stamps
+the caller's custom text and falls back to the house mark when
+none is supplied, the same way a group ``stamp_text`` of ""
+resolves to the default.  Resolution itself lives in
+:mod:`nomorals.core.branding` — one home shared with the PDF
+watermark and every other artifact renderer, so the semantics
+cannot drift between artifact kinds.  The brand constants are
+mirrored from social.chat.typography because core cannot import
+social; a test pins them equal so the two homes cannot drift.
 
 Self-containment: an edition is one HTML file — embedded CSS, one
 small trusted inline script (theme / text-size / measure controls
@@ -56,6 +63,7 @@ import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from .branding import BRAND_NAME, BRAND_TEXT, resolve_brand_mark
 from .longdoc import LongDocumentManifest, ManifestSegment
 from .text import slugify
 
@@ -65,11 +73,11 @@ __all__ = [
     "render_edition_from_map", "treatment_for",
 ]
 
-#: The brand, mirrored from social.chat.typography (whose
-#: DEFAULT_STAMP_TEXT is the canonical chat form) — core cannot
-#: import social, and a test pins the two equal.
-BRAND_NAME = "Peacethefirst"
-BRAND_TEXT = "Powered by peacethefirst"
+# BRAND_NAME / BRAND_TEXT are re-exported from core.branding (the
+# one resolution home); branding mirrors them from
+# social.chat.typography, whose DEFAULT_STAMP_TEXT is the canonical
+# chat form — core cannot import social, and a test pins the two
+# equal.
 
 #: A content resolver: manifest segment → its readable text, or
 #: None when the segment's content is not held (the Pass-2 seam —
@@ -123,20 +131,17 @@ def _brand_for(manifest: LongDocumentManifest, brand_policy: str,
                brand_text: str) -> str:
     """Resolve the brand line for one edition ("" = no brand).
 
-    Mirrors typography.resolve_style: an unknown policy is data,
-    not an error, and reads as the default; ``custom`` with no
-    custom text falls back to the house mark, exactly as a group
-    ``stamp_text`` of "" does.
+    The precedence is the historical one — an explicit policy
+    parameter wins, the manifest's hint is the fallback — and the
+    resolution itself is core.branding's, shared with the PDF
+    watermark: an unknown policy is data, not an error, and reads
+    as the default; ``custom`` with no custom text falls back to
+    the house mark, exactly as a group ``stamp_text`` of "" does.
     """
-    policy = (brand_policy or manifest.presentation.brand_policy
-              or "default").strip().lower()
-    if policy == "off":
-        return ""
-    if policy == "custom":
-        custom = (brand_text or "").strip()
-        if custom:
-            return custom
-    return BRAND_TEXT
+    mark = resolve_brand_mark(
+        brand_policy or manifest.presentation.brand_policy,
+        brand_text)
+    return mark.text if mark else ""
 
 
 def _theme_for(manifest: LongDocumentManifest, theme: str) -> str:
@@ -553,7 +558,13 @@ html[data-theme="minimal"]{--bg:#ffffff;--ink:#222222;--muted:#777777;
 body{margin:0;background:var(--bg);color:var(--ink);
 font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
 line-height:1.65}
-.page{max-width:var(--measure);margin:0 auto;padding:0 1.25rem 4rem}
+.page{max-width:var(--measure);margin:0 auto;padding:0 1.25rem 4rem;
+position:relative;z-index:1}
+.watermark{position:fixed;inset:0;display:flex;align-items:center;
+justify-content:center;z-index:0;pointer-events:none;overflow:hidden}
+.watermark span{transform:rotate(-28deg);font-size:4rem;font-weight:700;
+letter-spacing:.28em;text-transform:uppercase;color:var(--ink);
+opacity:.06;white-space:nowrap}
 body.wide .page{max-width:64rem}
 a{color:var(--accent)}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
@@ -626,6 +637,7 @@ border-bottom:2px solid var(--rule)}
 @media print{
 @page{margin:18mm}
 .controlbar,.progress{display:none}
+.watermark span{opacity:.08}
 .page{max-width:none;padding:0}
 .treatment-book .kind-chapter{page-break-before:always}
 .print-mark{display:block;position:fixed;bottom:0;left:0;right:0;
@@ -789,6 +801,9 @@ def render_edition(manifest: LongDocumentManifest, resolve: Resolver,
             body_parts.append(
                 f'<div class="print-mark" aria-hidden="true">'
                 f"{_esc(brand)}</div>")
+            body_parts.append(
+                f'<div class="watermark" aria-hidden="true">'
+                f"<span>{_esc(brand)}</span></div>")
     lang = manifest.presentation.locale or "en"
     direction = manifest.presentation.direction or "auto"
     dir_attr = f' dir="{_esc(direction)}"' if direction in (
