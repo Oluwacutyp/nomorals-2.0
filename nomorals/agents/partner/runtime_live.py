@@ -129,7 +129,18 @@ class RuntimeLiveMixin:
         its reason (snap failure, disconnected graph, corridor
         bound) — never a provider substitute; routing federation
         is the same owner policy (NM_MAPS_ROUTING_FEDERATION),
-        off by default, and no provider ships."""
+        off by default, and no provider ships.
+
+        /map share (M6) runs the LiveLocationBroker over
+        location/'s ConsentStore: the owner's command IS the
+        opt-in grant (scope "live-share"), a session is a
+        time-boxed share of the owner's own SUPPLIED location
+        updates to one chat at a declared precision, the
+        recipient gets one card naming the precision + TTL up
+        front, and every supplied update is evaluated — and its
+        decision recorded — by the broker.  A second owner
+        policy (NM_MAPS_LIVE_SHARE) gates the whole surface,
+        off by default: Atlas on is not share on."""
         from ...maps.settings import map_settings
 
         tail = (tail or "").strip()
@@ -137,7 +148,9 @@ class RuntimeLiveMixin:
             return ("usage: /map packs  |  /map view <lat,lon> [zoom]  |  "
                     "/map view <west,south,east,north> [zoom]  |  "
                     "/map find <place name>  |  /map near <lat,lon>  |  "
-                    "/map route <place or lat,lon> to <place or lat,lon>")
+                    "/map route <place or lat,lon> to <place or lat,lon>  |  "
+                    "/map share <chat> <minutes> [exact|neighborhood|city]  |  "
+                    "/map share stop [chat]  |  /map share status")
         is_owner = True if message is None else self._is_operator(message)
         if not is_owner:
             return ("owner-only: Atlas renders the owner's installed "
@@ -159,10 +172,14 @@ class RuntimeLiveMixin:
             return self._map_near(rest.strip())
         if verb == "route":
             return self._map_route(rest.strip(), chat_key)
+        if verb == "share":
+            return self._map_share(rest.strip())
         return (f"unknown /map verb {verb!r} — /map packs | "
                 "/map view <lat,lon> [zoom] | /map find <place name> | "
                 "/map near <lat,lon> | "
-                "/map route <place or lat,lon> to <place or lat,lon>")
+                "/map route <place or lat,lon> to <place or lat,lon> | "
+                "/map share <chat> <minutes> [precision] | "
+                "/map share stop [chat] | /map share status")
 
     def _map_packs_text(self) -> str:
         from ...maps.packs import verify_pack_dir
@@ -551,6 +568,241 @@ class RuntimeLiveMixin:
                 except OSError as exc:  # transient send copy
                     record_failure(
                         "runtime_live._map_route_photo.unlink", exc)
+
+    # ── live location sharing (M6) ──────────────────────────────
+
+    def _live_broker(self):
+        """The LiveLocationBroker over the location root, wired to
+        the platform adapters as its sender.  State lives under
+        ``<home>/location`` when a home is configured, else the
+        location foundation's own root."""
+        from pathlib import Path
+
+        from ...location.live import LiveLocationBroker
+        from ...location.privacy import ConsentStore, default_location_root
+
+        broker = getattr(self, "_live_broker_obj", None)
+        if broker is not None:
+            return broker
+        settings = getattr(self.context, "settings", None)
+        home = getattr(settings, "home_path", None)
+        root = (Path(home) / "location") if home \
+            else default_location_root()
+        broker = LiveLocationBroker(
+            root, consent=ConsentStore(root),
+            sender=self._live_share_send)
+        self._live_broker_obj = broker
+        return broker
+
+    def _live_share_send(self, chat_key: str, loc) -> bool:
+        """The broker's sender: one location pin to one chat via
+        its platform adapter.  False when no adapter serves the
+        platform or the send does not land — the broker records
+        the failure; a pin is never claimed sent unproven."""
+        from ...social.chat.base import ChatRef
+
+        platform, _, _ = chat_key.partition(":")
+        adapter = self._adapter_for(platform)
+        if adapter is None:
+            return False
+        try:
+            chat = ChatRef.parse(chat_key)
+        except ValueError:
+            chat = self._ref_from_key(chat_key)
+        result = adapter.send_location(chat, loc.lat, loc.lon)
+        return bool(getattr(result, "ok", result))
+
+    def _live_share_card(self, chat_key: str, session) -> bool:
+        """The recipient's one up-front card: that a live share
+        started, at what precision, and when it stops — visible
+        on the share itself, never a silent feed."""
+        import time as _time
+
+        platform, _, _ = chat_key.partition(":")
+        adapter = self._adapter_for(platform)
+        if adapter is None:
+            return False
+        from ...social.chat.base import ChatRef
+
+        try:
+            chat = ChatRef.parse(chat_key)
+        except ValueError:
+            chat = self._ref_from_key(chat_key)
+        minutes = max(1, round(
+            (session.expires_at - session.started_at) / 60))
+        until = _time.strftime(
+            "%H:%M", _time.localtime(session.expires_at))
+        card = (
+            "📍 live location sharing started — the owner is "
+            "sharing their live location with this chat for the "
+            f"next {minutes} min (until {until}).\n"
+            f"precision: {session.precision} · updates arrive "
+            "here as location pins when they move · the share "
+            "stops on its own at the end of the window, or the "
+            "moment the owner stops it.")
+        result = adapter.send(chat, card)
+        return bool(getattr(result, "ok", result))
+
+    def _map_share(self, spec: str) -> str:
+        """/map share <chat> <minutes> [precision] | stop [chat] |
+        status — the owner verbs over the LiveLocationBroker."""
+        import time as _time
+
+        from ...location.live import PRECISIONS, SCOPE_LIVE_SHARE, LiveLocationError
+        from ...maps.settings import map_settings
+
+        usage = ("usage: /map share <chat> <minutes> "
+                 "[exact|neighborhood|city]  |  /map share stop "
+                 "[chat]  |  /map share status")
+        if not map_settings().live_share_enabled:
+            return ("live location sharing is off on this host — "
+                    "set NM_MAPS_LIVE_SHARE=1 to light it (Atlas "
+                    "being on is not share being on; a share also "
+                    "needs your consent grant, which the start "
+                    "command itself records).")
+        toks = spec.split()
+        if not toks:
+            return usage
+        head = toks[0].lower()
+        broker = self._live_broker()
+        if head == "status":
+            return self._map_share_status(broker)
+        if head == "stop":
+            return self._map_share_stop(broker, toks[1:])
+        # start: <chat-key> <minutes> [precision]
+        if len(toks) < 2:
+            return usage
+        chat_key = toks[0]
+        try:
+            minutes = float(toks[1])
+        except ValueError:
+            return (f"minutes must be a number, got {toks[1]!r} — "
+                    + usage)
+        precision = toks[2].lower() if len(toks) > 2 else "exact"
+        if precision not in PRECISIONS:
+            return ("precision must be one of "
+                    + "|".join(PRECISIONS)
+                    + f", got {toks[2]!r}")
+        from ...location.privacy import ConsentStore
+
+        # The owner's own start command IS the opt-in act: record
+        # the grant the session rides, then open the session.  A
+        # ConsentStore over the broker's root writes the same
+        # consent.json the broker's own store reads per call.
+        ConsentStore(broker.root).grant("owner", SCOPE_LIVE_SHARE)
+        try:
+            session = broker.start_session(
+                "owner", (chat_key,), ttl_s=minutes * 60.0,
+                precision=precision)
+        except LiveLocationError as exc:
+            return f"couldn't start the share: {exc}"
+        card_ok = self._live_share_card(chat_key, session)
+        until = _time.strftime(
+            "%H:%M", _time.localtime(session.expires_at))
+        lines = [
+            f"📍 live share started → {chat_key} · "
+            f"{precision} precision · until {until} "
+            f"({minutes:g} min).",
+            "updates you send Devon as a location share are "
+            "forwarded as pins; every decision is recorded "
+            "(/map share status).",
+        ]
+        if not card_ok:
+            lines.append(
+                "(the recipient's share card couldn't be sent on "
+                "that surface — the share itself is live; they "
+                "will simply start seeing pins.)")
+        return "\n".join(lines)
+
+    def _map_share_stop(self, broker, args) -> str:
+        """stop [chat] — end the owner's live sessions (all, or
+        the ones feeding one chat).  The stop is durable: ended
+        sessions never resume.  (A consent revoke recorded in the
+        ConsentStore by any surface halts forwarding just as
+        finally — the broker re-checks consent on every update —
+        it just leaves the session record to expire on its own
+        clock rather than ending it here.)"""
+        targets = [s for s in broker.sessions("owner")]
+        if args:
+            chat_key = args[0]
+            targets = [s for s in targets
+                       if chat_key in s.recipients]
+            if not targets:
+                return (f"no live share is feeding {chat_key} — "
+                        "nothing to stop.")
+        if not targets:
+            return "no live share is running — nothing to stop."
+        stopped = []
+        for session in targets:
+            broker.stop_session(session.id)
+            stopped.extend(session.recipients)
+        return ("⏹ live share stopped → "
+                + ", ".join(sorted(set(stopped)))
+                + ". Ended shares stay ended; a new share is a "
+                  "new /map share command.")
+
+    def _map_share_status(self, broker) -> str:
+        """Active shares (recipients + precision + time left) and
+        the broker's most recent decisions."""
+        import time as _time
+
+        now = _time.time()
+        active = broker.sessions("owner")
+        lines: list[str] = []
+        if active:
+            lines.append("📍 live shares running:")
+            for session in active:
+                left = max(0, int(session.expires_at - now))
+                until = _time.strftime(
+                    "%H:%M", _time.localtime(session.expires_at))
+                lines.append(
+                    f"  • → {', '.join(session.recipients)} · "
+                    f"{session.precision} · {left // 60}m "
+                    f"{left % 60:02d}s left (until {until})")
+        else:
+            lines.append("📍 no live share is running.")
+        recent = broker.recent_decisions(limit=5, subject="owner")
+        if recent:
+            lines.append("recent decisions:")
+            for rec in recent:
+                when = _time.strftime(
+                    "%H:%M", _time.localtime(float(rec.get("at", 0))))
+                who = ", ".join(rec.get("recipients") or []) or "—"
+                lines.append(
+                    f"  • {when} {rec.get('decision', '')} → {who}"
+                    f" ({rec.get('reason', '')})")
+        return "\n".join(lines)
+
+    def _maybe_live_share_update(self, message) -> None:
+        """The supplied-update intake for the LiveLocationBroker.
+
+        Runs only when ALL of these hold: live sharing is enabled
+        (NM_MAPS_LIVE_SHARE — the hook is dark otherwise, and the
+        message flows on untouched), the message is the OWNER's
+        (only the owner's supplied position is ever brokered —
+        anyone else's location share is their own business, left
+        to ordinary chat), and meta carries a location an adapter
+        surfaced from the message itself.  The broker evaluates;
+        this hook never replies and never raises (the caller also
+        guards it)."""
+        from ...location.primitives import LatLon
+        from ...maps.settings import map_settings
+
+        settings = map_settings()
+        if not settings.enabled or not settings.live_share_enabled:
+            return
+        if not self._is_operator(message):
+            return
+        supplied = (message.meta or {}).get("location") or {}
+        try:
+            loc = LatLon(lat=float(supplied["lat"]),
+                         lon=float(supplied["lon"]))
+        except (KeyError, TypeError, ValueError):
+            return  # meta claimed a location it cannot back
+        platform = str(getattr(message.chat, "platform", "") or "")
+        self._live_broker().evaluate(
+            "owner", loc, ts=float(getattr(message, "ts", 0.0) or 0.0)
+            or None, source=platform)
 
     @staticmethod
     def _map_zoom_for(bbox) -> int:

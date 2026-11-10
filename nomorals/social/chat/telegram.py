@@ -6000,6 +6000,29 @@ class TelegramBotAdapter(ChatAdapter):
                 "provider_payment_charge_id": str(
                     payment.get("provider_payment_charge_id")
                     or "")}
+        # A supplied location share (a static pin, a venue, or a
+        # live location the sender started): the Bot API carries it
+        # as data, and until M6 it was dropped on the floor here.
+        # Surface it in meta — the position the SENDER supplied,
+        # never anything this adapter went and got.  The partner
+        # runtime's live-share hook reads it; nothing else changes.
+        supplied_loc = msg.get("location")
+        venue = msg.get("venue")
+        if not isinstance(supplied_loc, dict) and isinstance(
+                venue, dict):
+            supplied_loc = venue.get("location")
+        if isinstance(supplied_loc, dict) and supplied_loc:
+            supplied_lat = supplied_lon = None
+            try:
+                supplied_lat = float(supplied_loc["latitude"])
+                supplied_lon = float(supplied_loc["longitude"])
+            except (KeyError, TypeError, ValueError):
+                supplied_lat = supplied_lon = None
+            if supplied_lat is not None and supplied_lon is not None:
+                meta["location"] = {
+                    "lat": supplied_lat, "lon": supplied_lon,
+                    "live": supplied_loc.get("live_period")
+                    is not None}
         if replied_audio_file_id:
             meta["replied_audio_file_id"] = replied_audio_file_id
         # /steal support (§21): the replied message's visual media

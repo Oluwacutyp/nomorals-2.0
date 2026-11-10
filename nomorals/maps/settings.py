@@ -17,6 +17,11 @@ M5 mirrors it for routing: ``NM_MAPS_ROUTING_FEDERATION`` — OFF
 by default; when ON a local no-route may fall to a wired
 RouteProvider.  No provider ships in M5 either; the setting and
 the honest unconfigured result are the seam.
+
+M6 adds the live-share posture: ``NM_MAPS_LIVE_SHARE`` — OFF by
+default; the LiveLocationBroker's verbs and its inbound supplied-
+update hook stay dark until the owner turns it on, on top of Atlas
+itself being enabled and a live ConsentStore grant per share.
 """
 
 from __future__ import annotations
@@ -44,6 +49,10 @@ class MapSettings:
     #: local answer fall through to a wired provider?  Default
     #: False — the local road graph's answer is final (doc 21 S3).
     routing_federation: bool = False
+    #: Owner policy for live sharing (M6): may the broker's verbs
+    #: and inbound hook run at all?  Default False — consent alone
+    #: does not light the surface; this flag is the second gate.
+    live_share_enabled: bool = False
 
 
 def map_settings(env: Mapping[str, str] | None = None) -> MapSettings:
@@ -55,4 +64,6 @@ def map_settings(env: Mapping[str, str] | None = None) -> MapSettings:
         geocode_federation=source.get(
             "NM_MAPS_GEOCODE_FEDERATION", "").strip().lower() in _TRUE,
         routing_federation=source.get(
-            "NM_MAPS_ROUTING_FEDERATION", "").strip().lower() in _TRUE)
+            "NM_MAPS_ROUTING_FEDERATION", "").strip().lower() in _TRUE,
+        live_share_enabled=source.get(
+            "NM_MAPS_LIVE_SHARE", "").strip().lower() in _TRUE)

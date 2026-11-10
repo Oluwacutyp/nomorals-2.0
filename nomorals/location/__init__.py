@@ -24,8 +24,13 @@ not being in Nigeria.
 
 from __future__ import annotations
 
-from . import geofence, privacy, primitives, reminders, triggers
+from . import geofence, live, primitives, privacy, reminders, triggers
 from .geofence import Geofence, circle_fence, polygon_fence
+from .live import (
+    LiveLocationBroker,
+    LiveLocationError,
+    ShareSession,
+)
 from .primitives import (
     DEFAULT_PLACE,
     NIGERIA_LAGOS,
@@ -39,8 +44,9 @@ from .reminders import LocationReminder, check_reminders
 from .triggers import FenceState, evaluate_update
 
 __all__ = [
-    "geofence", "privacy", "primitives", "reminders", "triggers",
+    "geofence", "live", "privacy", "primitives", "reminders", "triggers",
     "Geofence", "circle_fence", "polygon_fence",
+    "LiveLocationBroker", "LiveLocationError", "ShareSession",
     "DEFAULT_PLACE", "NIGERIA_LAGOS", "LatLon", "Place",
     "default_place", "haversine_m",
     "ConsentError", "ConsentStore", "require_consent",
