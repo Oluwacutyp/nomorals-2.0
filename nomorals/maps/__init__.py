@@ -13,7 +13,11 @@ MapReceipt + its store (:mod:`nomorals.maps.receipts`), the
 renderer boundary proven by an offline fixture renderer
 (:mod:`nomorals.maps.render`), pack operations
 (:mod:`nomorals.maps.packs`) and settings
-(:mod:`nomorals.maps.settings`).  M3 adds the vector plane: the
+(:mod:`nomorals.maps.settings`).  M2 adds the basemap pipeline
+(:mod:`nomorals.maps.pipeline` over the source/pack definitions
+in :mod:`nomorals.maps.definitions`, the release registry in
+:mod:`nomorals.maps.registry`, and the Planetiler/MBTiles +
+Natural Earth raster builders).  M3 adds the vector plane: the
 MVT decoder (:mod:`nomorals.maps.mvt`), the Devon Style document
 (:mod:`nomorals.maps.style`) and the vector renderer behind the
 same boundary (:mod:`nomorals.maps.vector_render`).  M4 adds the
@@ -25,9 +29,8 @@ extracted from a pack's own tiles, Dijkstra over it, route
 receipts, and the same federation posture for the router; the
 renderer gains the overlay seam routes draw through
 (:class:`~nomorals.maps.vector_render.MapOverlay`).  The
-basemap pipeline (M2), the live-location broker (M6, on
-``location/``'s ConsentStore) and the MapAgent (M7) build on
-these contracts in their own passes.
+live-location broker (M6, on ``location/``'s ConsentStore) and
+the MapAgent (M7) build on these contracts in their own passes.
 """
 
 from __future__ import annotations
@@ -47,6 +50,7 @@ from .coords import (
                      validate_lat,
                      validate_lon,
 )
+from .definitions import PACKS, SOURCES, MapSource, PackDefinition, get_pack, get_source
 from .gazetteer import (
     GAZETTEER_MAX_ZOOM,
     INDEX_FILENAME,
@@ -91,7 +95,9 @@ from .mvt import (
     decode_mvt,
 )
 from .packs import render_pack_preview, verify_pack_dir
+from .pipeline import BuildReport, PipelineError, run_build
 from .receipts import OPERATIONS, MapReceipt, MapReceiptStore, new_receipt_id
+from .registry import ReleaseEntry, ReleaseRegistry
 from .render import FixtureRenderer, MapRenderer, RenderResult, StdlibPngBackend
 from .routing import (
     GRAPH_FILENAME,
@@ -113,24 +119,28 @@ __all__ = [
     "DEFAULT_STYLE", "FORMAT_VERSION", "GAZETTEER_MAX_ZOOM",
     "GRAPH_FILENAME", "INDEX_FILENAME", "KIND_WEIGHTS",
     "MANIFEST_NAME", "MAX_CORRIDOR_TILES", "MAX_ZOOM",
-    "MERCATOR_MAX_LAT", "OPERATIONS", "POSTURE_FEDERATED",
-    "POSTURE_LOCAL", "REVERSE_LADDER_KM", "ROUTE_ZOOM", "BBox",
+    "MERCATOR_MAX_LAT", "OPERATIONS", "PACKS", "POSTURE_FEDERATED",
+    "POSTURE_LOCAL", "REVERSE_LADDER_KM", "ROUTE_ZOOM", "SOURCES",
+    "BBox", "BuildReport",
     "FixtureRenderer", "Gazetteer", "GazetteerEntry", "GeoValidation",
     "GeocodeCandidate", "GeocodeProvider", "GeocodeResult",
     "GraphStats", "IndexBuildResult", "LabelSpec", "MapOverlay",
     "MapReceipt", "MapRenderer", "MapReceiptStore", "MapSettings",
-    "MapStyle", "MvtError", "MvtFeature", "MvtLayer", "MvtPath",
-    "MvtTile", "PackError", "PackIndexResult", "PackManifest",
-    "PackMember", "PackVerification", "PilTextBackend", "RenderResult",
+    "MapSource", "MapStyle", "MvtError", "MvtFeature", "MvtLayer",
+    "MvtPath", "MvtTile", "PackDefinition", "PackError",
+    "PackIndexResult", "PackManifest", "PackMember",
+    "PackVerification", "PilTextBackend", "PipelineError",
+    "ReleaseEntry", "ReleaseRegistry", "RenderResult",
     "ReverseCandidate", "ReverseResult", "RouteProvider",
     "RouteResult", "RouteStep", "Router", "SNAP_MAX_M", "SPEED_KMH",
     "StdlibPngBackend", "StyleError", "StyleLayer", "TextBackend",
     "TileCoord", "VectorRenderer", "build_manifest",
-    "clamp_mercator_lat", "decode_mvt", "hash_bytes", "lat_to_tile_y",
+    "clamp_mercator_lat", "decode_mvt", "get_pack", "get_source",
+    "hash_bytes", "lat_to_tile_y",
     "lat_to_y_float", "load_manifest", "lon_to_tile_x",
     "lon_to_x_float", "map_settings", "match_rank", "new_receipt_id",
-    "normalize_name", "render_pack_preview", "style_hash",
-    "tile_relpath", "tile_x_to_lon", "tile_y_to_lat",
+    "normalize_name", "render_pack_preview", "run_build",
+    "style_hash", "tile_relpath", "tile_x_to_lon", "tile_y_to_lat",
     "validate_geojson", "validate_lat", "validate_lon",
     "verify_pack", "verify_pack_dir", "verify_signature",
     "write_manifest",

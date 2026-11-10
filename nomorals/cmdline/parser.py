@@ -20,6 +20,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "memory": ["mem"],
     "power": ["pw"],
     "proxy": [],
+    "maps": [],
     "pulse": [],
     "run": ["r"],
     "ask": ["a"],
@@ -3229,6 +3230,33 @@ def _parser() -> argparse.ArgumentParser:
     p_receipts.add_argument("--source", default="",
                             help="only this source (e.g. proxypool, proxylab)")
     p_receipts.add_argument("--json", action="store_true", help="Output as JSON")
+
+    maps = sub.add_parser("maps", aliases=CLI_ALIASES["maps"],
+        help="Devon Atlas basemap pipeline: build Devon-built map packs (acquire, build, package, verify, install), list packs and sources, re-verify an installed pack",
+        description=("nm maps build <pack> [--packs-dir D] [--build-dir D] [--xmx 2g] [--threads N]\n"
+                     "nm maps packs [--packs-dir D]\n"
+                     "nm maps verify <pack|dir> [--packs-dir D]\n"
+                     "nm maps sources"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    maps_sub = maps.add_subparsers(dest="maps_action", required=True)
+    m_build = maps_sub.add_parser("build", help="run the whole pipeline for a registered pack definition and install the verified pack")
+    m_build.add_argument("pack", help="pack definition id (see nm maps packs)")
+    m_build.add_argument("--packs-dir", default="", help="where verified packs install (default: NM_MAPS_PACKS_DIR or <home>/maps/packs)")
+    m_build.add_argument("--build-dir", default="", help="build scratch root (default: <home>/maps/build)")
+    m_build.add_argument("--xmx", default="2g", help="Java heap for the Planetiler builder (default 2g)")
+    m_build.add_argument("--threads", type=int, default=2, help="builder threads (default 2)")
+    m_build.add_argument("--timeout", type=float, default=7200.0, help="build-stage timeout in seconds (default 7200)")
+    m_build.add_argument("--json", action="store_true", help="Output as JSON")
+    m_packs = maps_sub.add_parser("packs", help="registered pack definitions + what this host holds (the release registry)")
+    m_packs.add_argument("--packs-dir", default="", help="packs directory to read (default as for build)")
+    m_packs.add_argument("--json", action="store_true", help="Output as JSON")
+    m_verify = maps_sub.add_parser("verify", help="re-verify an installed pack (or a pack directory) against its manifest")
+    m_verify.add_argument("pack", help="pack id under the packs dir, or a pack directory path")
+    m_verify.add_argument("--packs-dir", default="", help="packs directory (default as for build)")
+    m_verify.add_argument("--json", action="store_true", help="Output as JSON")
+    m_sources = maps_sub.add_parser("sources", help="the registered sources: hash discipline, licence, attribution")
+    m_sources.add_argument("--json", action="store_true", help="Output as JSON")
 
     swarm = sub.add_parser("swarm", aliases=CLI_ALIASES["swarm"],
         help="Agent swarm: specialist roles, debate, fan-out/fan-in",

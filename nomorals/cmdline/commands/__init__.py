@@ -48,6 +48,7 @@ from .media import (
     _media_call,
     _media_tools,
 )
+from .maps import _cmd_maps
 from .memory import _cmd_memory, _cmd_memory_action
 from .meta import (
     _cli_command_help,
@@ -175,6 +176,7 @@ __all__ = [
     "_VIDEO_EXTS",
     "_media_tools",
     "_media_call",
+    "_cmd_maps",
     "_cmd_media",
     "_cmd_studio",
     "_is_video_file",
