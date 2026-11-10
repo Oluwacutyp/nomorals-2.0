@@ -53,6 +53,8 @@ __all__ = [
     "OutcomeCaseStore",
     "CaseError",
     "StaleCaseGeneration",
+    "ack_snapshot",
+    "ack_changed",
 ]
 
 #: The standing verdict of every case until evidence says otherwise —
@@ -154,6 +156,33 @@ class CaseReceipt:
     evidence: dict[str, Any] = field(default_factory=dict)
     generation: int = 0
     created_at: float = 0.0
+
+
+def ack_snapshot(case: OutcomeCase) -> dict[str, Any] | None:
+    """The owner's acknowledgement snapshot on a case, if any.
+
+    P6: acknowledgement is a recorded act on the case's detail —
+    ``{"at", "by", "state", "verdict"}`` captured at ack time.  It is
+    NOT a state: the case's own state/verdict only ever move through
+    :meth:`OutcomeCaseStore.resolve` / ``close_unknown``.
+    """
+    ack = (case.detail or {}).get("acknowledged")
+    if not isinstance(ack, dict):
+        return None
+    if "state" not in ack or "verdict" not in ack:
+        return None
+    return ack
+
+
+def ack_changed(case: OutcomeCase) -> bool:
+    """True when a case was acknowledged and has since materially
+    changed (state or verdict differ from the ack snapshot) — the
+    condition under which an acknowledged case resurfaces."""
+    ack = ack_snapshot(case)
+    if ack is None:
+        return False
+    return (case.state != ack.get("state")
+            or case.verdict != ack.get("verdict"))
 
 
 def _loads(raw: Any) -> dict[str, Any]:
@@ -463,6 +492,44 @@ class OutcomeCaseStore:
         return case
 
     # -- reads (the inspection API P6 puts clothes on) ------------------------
+
+    def acknowledge(self, case_id: str, *, actor: str = "",
+                    note: str = "") -> OutcomeCase:
+        """Record the owner's acknowledgement of a case (P6).
+
+        Acknowledgement is a recorded act, NEVER a resolution: the
+        case's state and verdict are untouched, its generation is not
+        bumped (an in-flight investigation is not fenced by an ack),
+        and the case may still only reach a verdict through
+        :meth:`resolve`'s evidence path or :meth:`close_unknown`.
+        What the ack records: an ``acknowledged`` receipt on the
+        trail, plus a snapshot in the case detail — the state and
+        verdict the owner saw — which is what lets the steward's
+        sweep quiet an acknowledged case until it materially changes
+        (:func:`ack_changed`).  Any state may be acknowledged,
+        including a terminal one (marking it seen).
+        """
+        case = self._case_or_raise(case_id)
+        now = time.time()
+        detail = dict(case.detail or {})
+        detail["acknowledged"] = {
+            "at": now, "by": actor or "owner",
+            "state": case.state, "verdict": case.verdict,
+        }
+        detail["ack_count"] = int(detail.get("ack_count") or 0) + 1
+        self.db.execute(
+            "UPDATE outcome_cases SET detail = ?, updated_at = ? "
+            "WHERE id = ?", (json.dumps(detail), now, case.id))
+        case.detail = detail
+        case.updated_at = now
+        self._append(
+            case, kind="acknowledged", source="outcome-cases",
+            actor=actor or "owner",
+            note=note or (f"owner acknowledged the case as seen — "
+                           f"state {case.state}, verdict "
+                           f"{case.verdict}; acknowledgement does not "
+                           f"resolve it"))
+        return case
 
     def list_cases(self, *, state: str = "", domain: str = "",
                    verdict: str = "", limit: int = 100

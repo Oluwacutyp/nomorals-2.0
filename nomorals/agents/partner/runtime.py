@@ -7711,9 +7711,11 @@ class PartnerRuntime(
         if kind == "mind":
             return self._control_mind(command.tail or arg, chat_key=chat_key)
         if kind == "notify":
-            return self._control_notify(arg)
+            return self._control_notify(command.tail or arg)
         if kind == "proactive":
             return self._control_proactive(arg)
+        if kind == "cases":
+            return self._control_cases(command.tail or arg)
         if kind == "mission":
             return self._control_mission(command.tail or arg, chat_key=chat_key)
         if kind == "image":

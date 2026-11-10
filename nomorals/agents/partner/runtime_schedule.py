@@ -406,10 +406,40 @@ class RuntimeScheduleMixin:
 
     # ── notifications ────────────────────────────────────────────────────────
     def _control_notify(self, arg: str) -> str:
+        """notifications — recent alerts, with delivery states.
+
+        /notify [n]            — the board above (unchanged)
+        /notify decisions [n]  — every recent publish decision with
+                                 its verdict + reason; suppressed and
+                                 held included (doc 15 P6)
+        /notify why <n>        — the full chain behind board row <n>:
+                                 producer, fact asserted, decision,
+                                 routing, release checks, delivery ack
+        /notify why decision <n> — the same chain for decisions-
+                                 board row <n> (how a suppressed or
+                                 held alert is explained)
+        /notify coverage       — candidate coverage in owner terms
+        """
         from ..notifier import Notifier
 
         notifier = Notifier(self.context, self.gateway)
-        limit = int(arg) if arg.isdigit() else 10
+        text = (arg or "").strip()
+        low = text.lower()
+        if low == "coverage":
+            from .. import inspection
+
+            return inspection.render_coverage(
+                notifier.candidate_coverage())
+        if low == "decisions" or low.startswith("decisions "):
+            from .. import inspection
+
+            tail = text[len("decisions"):].strip()
+            limit = int(tail) if tail.isdigit() else 15
+            return inspection.render_decisions(
+                notifier.decision_journal(limit=limit))
+        if low == "why" or low.startswith("why "):
+            return self._notify_why(notifier, text[3:].strip())
+        limit = int(text) if text.isdigit() else 10
         rows = notifier.recent(limit)
         if not rows:
             return "no notifications yet — arena builds, research, news and tasks land here."
@@ -456,6 +486,69 @@ class RuntimeScheduleMixin:
                      "(alert policy: digest = batched here, logged = "
                      "silent housekeeping) — see `nm briefing status`")
         return "\n".join(lines)
+
+    def _notify_why(self, notifier: Any, rest: str) -> str:
+        """The /notify why grammar (doc 15 P6):
+
+        why              — the most recent decision, explained
+        why decision <n> — decisions-board row <n>, explained
+        why <n>          — /notify board row <n>, explained via the
+                           decision record it came from (or the
+                           honest no-record answer when it has none)
+        """
+        from .. import inspection
+
+        db = self.context.db
+        parts = rest.split()
+        if parts and parts[0].lower() == "decision":
+            entries = notifier.decision_journal(limit=50)
+            if not entries:
+                return "no decisions recorded yet — nothing to explain."
+            n = 1
+            if len(parts) > 1:
+                if not parts[1].isdigit():
+                    return ("usage: /notify why decision <n> — <n> is "
+                            "a row on /notify decisions")
+                n = int(parts[1])
+            if not 1 <= n <= len(entries):
+                return (f"decision #{n} isn't on the board — "
+                        f"{len(entries)} decision(s) recorded")
+            row = inspection.candidate_row_for(
+                db, entries[n - 1].get("event_id", ""))
+            if row is None:
+                return ("that decision's evidence record has aged "
+                        "out of the journal — the decision itself is "
+                        "on /notify decisions")
+            return inspection.render_why(row)
+        if parts and not parts[0].isdigit():
+            return ("usage: /notify why <n> (a /notify board row) · "
+                    "/notify why decision <n> (a /notify decisions "
+                    "row) · /notify why (the latest decision)")
+        rows = notifier.recent(50)
+        if not rows:
+            return ("no notifications yet — nothing to explain. "
+                    "/notify decisions shows what the gate decided "
+                    "even when nothing was sent")
+        n = int(parts[0]) if parts else 0
+        if n == 0:
+            entries = notifier.decision_journal(limit=1)
+            if not entries:
+                return "no decisions recorded yet — nothing to explain."
+            row = inspection.candidate_row_for(
+                db, entries[0].get("event_id", ""))
+            if row is None:
+                return ("the latest decision's evidence record has "
+                        "aged out of the journal")
+            return inspection.render_why(row)
+        if not 1 <= n <= len(rows):
+            return (f"notification #{n} isn't in the recent list — "
+                    f"{len(rows)} row(s) on record")
+        notification = rows[n - 1]
+        row = inspection.why_for_notification(
+            db, str(notification.get("id") or ""))
+        if row is None:
+            return inspection.render_why_missing(notification)
+        return inspection.render_why(row)
 
     def _control_proactive(self, arg: str) -> str:
         """Owner-only: show the proactive push-send switches and the

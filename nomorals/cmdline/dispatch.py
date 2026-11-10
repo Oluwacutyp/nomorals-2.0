@@ -24,6 +24,8 @@ from .commands.book import _cmd_book
 from .commands.account import _cmd_account
 from .commands.books import _cmd_books
 from .commands.briefing import _cmd_briefing
+from .commands.notify import _cmd_notify
+from .commands.outcomes import _cmd_outcomes
 from .commands.audio import _cmd_audio
 from .commands.builders import _cmd_build
 from .commands.captcha import _cmd_captcha
@@ -409,6 +411,8 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "audio": _CommandSpec(_cmd_audio),
     "room": _CommandSpec(_cmd_room),
     "briefing": _CommandSpec(_cmd_briefing),
+    "outcomes": _CommandSpec(_cmd_outcomes),
+    "notify": _CommandSpec(_cmd_notify),
     "benchmark": _CommandSpec(_cmd_benchmark),
 }
 

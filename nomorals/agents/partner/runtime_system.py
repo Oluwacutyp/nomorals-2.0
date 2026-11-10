@@ -2312,6 +2312,115 @@ class RuntimeSystemMixin:
         finally:
             queue.close()
 
+    def _control_cases(self, tail: str) -> str:
+        """/cases — outcome stewardship, owner surface (doc 15 P6).
+
+        /cases              — the board: cases needing attention
+                              first (oldest first), closed cases,
+                              then acknowledged ones quiet at the
+                              tail. Numbers are case_board()'s —
+                              the one ordering every surface shares
+        /cases <n>          — one case in full, with its evidence
+                              trail (who checked, from which source,
+                              what the evidence established)
+        /cases verify <n>   — re-check case <n> NOW: the steward's
+                              real investigation cycle for that case,
+                              through the delegation substrate — not
+                              a shortcut around it
+        /cases ack <n>      — mark case <n> seen/accepted: the ack
+                              is recorded on the case and the sweep
+                              stops re-running it while it is
+                              unchanged; acknowledgement NEVER
+                              resolves a case — only cited evidence
+                              does (P4's resolve path, unchanged)
+
+        Owner-only via CONTROL_COMMANDS (never PUBLIC_COMMANDS).
+        Internal ids never print — ordinals and subjects only.
+        """
+        from ..delegation import DelegationStore
+        from ..outcome_cases import OutcomeCaseStore
+        from ..outcome_steward import (
+            OutcomeSteward,
+            case_board,
+            render_case_board,
+            render_case_detail,
+        )
+
+        db = self.context.db
+        store = OutcomeCaseStore(db)
+        parts = (tail or "").split(None, 1)
+        verb = parts[0].lower() if parts else "list"
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        def resolve_ordinal(word: str):
+            board = case_board(store)
+            if not word.isdigit():
+                return None, ("usage: /cases [list] | <n> | "
+                              "verify <n> | ack <n> — <n> is the "
+                              "number from /cases")
+            n = int(word)
+            if not 1 <= n <= len(board):
+                return None, (f"case #{n} isn't on the board — "
+                              f"{len(board)} case(s) listed")
+            return board[n - 1], ""
+
+        def detail(case) -> str:
+            contract = None
+            if case.contract_id:
+                record = DelegationStore(db).get_contract(
+                    case.contract_id)
+                if record is not None:
+                    contract = DelegationStore(db).summary(record)
+            return render_case_detail(
+                case, store.receipts(case.id), contract)
+
+        if verb in ("list", ""):
+            return render_case_board(store)
+        if verb == "show" or verb.isdigit():
+            case, err = resolve_ordinal(rest if verb == "show"
+                                        else verb)
+            if case is None:
+                return err
+            return detail(case)
+        if verb == "verify":
+            case, err = resolve_ordinal(rest)
+            if case is None:
+                return err
+            if case.state in ("resolved", "closed-unknown"):
+                return (f"that case is already closed ({case.state}"
+                        f"{', verdict ' + case.verdict if case.state == 'resolved' else ''})"
+                        " — a closed-unknown case reopens on its own "
+                        "when the work is seen again; nothing to "
+                        "re-check by hand.\n" + detail(case))
+            result = OutcomeSteward(db).run_case(case.id)
+            outcome = result.get("outcome", "")
+            if outcome == "resolved":
+                head = (f"re-checked — resolved: "
+                        f"{result.get('verdict', '')} on the cited "
+                        "evidence")
+            elif outcome == "closed-unknown":
+                head = ("re-checked — the outcome is still honestly "
+                        "unknown; the checks are recorded on the case")
+            else:
+                shown = outcome or "incomplete"
+                head = (f"re-check ran — outcome: {shown}; the case "
+                        "stays open")
+            return head + "\n" + detail(store.get(case.id))
+        if verb == "ack":
+            case, err = resolve_ordinal(rest)
+            if case is None:
+                return err
+            before = (case.state, case.verdict)
+            store.acknowledge(case.id, actor="owner")
+            after = store.get(case.id)
+            assert (after.state, after.verdict) == before
+            return (f"acknowledged — {after.subject} recorded as "
+                    f"seen ({after.state}). The sweep will leave it "
+                    "quiet unless it changes; acknowledgement does "
+                    "not resolve it.")
+        return ("usage: /cases [list] | <n> | verify <n> | ack <n> "
+                "— <n> is the number from /cases")
+
     def _desk_bundle_hook(self) -> Any:
         """The gateway's inbound-artifact hook (WS3 P7): when a
         file Devon just stored is a GoldenSwing desk bundle, land

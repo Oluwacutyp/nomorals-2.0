@@ -824,7 +824,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "weather": (0, None),    # /weather [place] — live conditions + forecast + alerts
     "tz": (0, None),         # /tz [time] — timezone conversion, labeled in owner tz
     "task": (1, None),       # /task add <instruction>|run [id]|list
-    "notify": (0, 1),        # /notify [n] — recent alerts
+    "notify": (0, None),     # /notify [n] | decisions [n] | why [<n>|decision <n>] | coverage — recent alerts + the decision chain behind them
     "proactive": (0, 0),     # /proactive — push-send switches + delivery states
     "email": (0, None),        # /email triage|inbox|search|read|thread|drafts|compose|reply|send|approve|discard|followups — full mailbox (owner only)
     "gmail": (0, None),        # alias of /email
@@ -858,6 +858,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "calendar": (0, None),    # /calendar [list] | series [<name>] | new <name> [| <objective>] | add <series> draft|short|post <n> — unified content calendar + series (owner-only)
     "repurpose": (0, None),   # /repurpose [list] | post <n> short|thread | short <n> post | day [YYYY-MM-DD] short|thread|post — one asset, other forms, through the content cell (owner-only)
     "engage": (0, None),      # /engage [list] | show <n> | reply <n> | ignore <n> | done <n> — replies & comments on his posts, read back and triaged (owner-only)
+    "cases": (0, None),       # /cases [list] | <n> | verify <n> | ack <n> — outcome cases for forgotten work, with their evidence trails (owner-only)
     "insights": (0, None),    # /insights [days] — native money analytics
     "predict": (0, 3),       # /predict <stake> <over|under> <1-99> — prediction pit (progression-unlocked)
     "menu": (0, 2),          # alias of /list ([group] [page] ride the same grammar)
@@ -3360,6 +3361,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/engage [list] | show <n> | reply <n> | ignore <n> | done <n>",
               "example": "/engage reply 1",
               "related": "/drafts /content"},
+    "cases": {"what": ("outcome stewardship: when long-running or forgotten work — a mission, a background job, a contract, a scheduled job, a queued send — ends overdue, stalled, orphaned or with its outcome unknown, the steward opens a reconciliation case and investigates it under an accountable contract. A case resolves only on evidence cited from the domain's own records; anything else closes as honestly unknown, with the checks recorded. The board lists what needs attention first; show reads one case's whole evidence trail; verify re-runs its investigation now; ack records that you saw it — the sweep then leaves it quiet unless it changes, and acknowledgement never resolves anything by itself."),
+              "usage": "/cases [list] | <n> | verify <n> | ack <n>",
+              "example": "/cases verify 1",
+              "related": "/notify /mission"},
     "api": {"what": "external API connectors: weather, fx, github, …",
             "usage": "/api list | <connector> [json]", "example": "/api weather city=Lagos",
             "related": ""},
@@ -3843,9 +3848,17 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
            "usage": "/tz | /tz 2026-10-02 14:00 [from-zone] [to-zone]",
            "example": "/tz 2026-10-02 14:00 America/New_York Africa/Lagos",
            "related": "/weather /briefing"},
-    "notify": {"what": "recent alerts, with delivery states.",
-               "usage": "/notify [n]",
-               "example": "/notify 10", "related": "/proactive"},
+    "notify": {"what": ("recent alerts, with delivery states — plus the "
+                        "inspection verbs: decisions shows every recent "
+                        "publish decision with its verdict and reason "
+                        "(suppressed and held included), why walks one "
+                        "alert's whole chain (producer, fact asserted, "
+                        "decision, routing, release checks, delivery "
+                        "ack), coverage totals what the gate decided."),
+               "usage": ("/notify [n] | /notify decisions [n] | "
+                         "/notify why [<n> | decision <n>] | "
+                         "/notify coverage"),
+               "example": "/notify why 1", "related": "/cases /proactive"},
     "proactive": {"what": ("she speaks first: the morning briefing and watcher "
                            "alerts are pushed to your DMs. Owner-only, never "
                            "sent to anyone else."),
@@ -4317,7 +4330,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
                            "exness", "stripe", "content", "drafts", "day",
-                           "calendar", "repurpose", "engage",
+                           "calendar", "repurpose", "engage", "cases",
                            "tempmail", "checkmail", "vnumber", "checksms",
                            "browser", "paper", "backup"]),
     ("platform control", ["start", "stop", "profile", "chatmode", "style",
@@ -4636,7 +4649,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion", "gcal", "trello", "exness", "stripe",
-      "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage",
+      "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage", "cases",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
     ("platform control — updates & restarts",
      ["update", "pull", "deploy", "restart"]),
@@ -5009,6 +5022,7 @@ LIST_ONELINERS: dict[str, str] = {
     "calendar": "the unified content calendar: drafts waiting, what's due, and your series in order",
     "repurpose": "one asset, other forms: posted drafts, day records and shorts re-drafted through the cell",
     "engage": "replies & comments on your posts, read back and triaged: what needs you, reply drafts through /drafts",
+    "cases": "outcome cases for forgotten work — evidence trails, re-checks, acknowledgements",
     "api": "external API connectors (weather, fx, github, …)",
     "connectors": "manage the service connectors: list, status, connect",
     "shorts": "short-form content empire: make, queue, post vertical videos",

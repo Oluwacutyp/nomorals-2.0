@@ -69,6 +69,8 @@ from .outcome_cases import (
     RESOLVABLE_VERDICTS,
     OutcomeCase,
     OutcomeCaseStore,
+    ack_changed,
+    ack_snapshot,
 )
 
 __all__ = [
@@ -86,6 +88,9 @@ __all__ = [
     "ensure_outcome_steward_job",
     "inspect_case",
     "render_case",
+    "case_board",
+    "render_case_board",
+    "render_case_detail",
     "register",
 ]
 
@@ -1021,9 +1026,24 @@ class OutcomeSteward:
             + self.cases.list_cases(state="investigating", limit=200)
         pool.sort(key=lambda c: c.opened_at)
         results = []
+        held = 0
         for case in pool[: int(limit)]:
+            # P6: a case the owner acknowledged, unchanged since, is
+            # not re-run by the sweep — re-investigating it every
+            # cycle would re-surface it in its own record.  An
+            # explicit run_case (the owner's verify request) always
+            # runs; a case whose state/verdict moved since the ack
+            # (ack_changed) runs and resurfaces.
+            if ack_snapshot(case) is not None and not ack_changed(case):
+                held += 1
+                results.append({"case_id": case.id,
+                                "outcome": "acknowledged-held",
+                                "subject": case.subject})
+                continue
             results.append(self.run_case(case.id, now=now))
-        report: dict[str, Any] = {"ran": len(results), "results": results}
+        report: dict[str, Any] = {"ran": len(results) - held,
+                                  "results": results,
+                                  "acknowledged_held": held}
         for key in ("resolved", "closed-unknown", "incomplete"):
             report[key] = sum(1 for r in results
                               if r.get("outcome") == key)
@@ -1096,6 +1116,150 @@ def render_case(case: OutcomeCase,
     return "\n".join(lines)
 
 
+def case_board(cases: OutcomeCaseStore, *,
+               limit: int = 50) -> list[OutcomeCase]:
+    """The ONE ordering every owner surface numbers cases by (P6).
+
+    Needs-attention first: open/investigating cases that are not
+    acknowledged-quiet, oldest first (the order the sweep works
+    them).  Then closed cases the owner has not acknowledged,
+    newest first.  Acknowledged-and-unchanged cases ride at the
+    tail — they keep their board numbers so show/verify/ack resolve
+    against exactly the board the owner saw, but they sit quiet
+    until :func:`ack_changed` says they moved.
+    """
+    pool: list[OutcomeCase] = []
+    for state in ("open", "investigating", "resolved", "closed-unknown"):
+        pool.extend(cases.list_cases(state=state, limit=200))
+
+    def quiet(case: OutcomeCase) -> bool:
+        return ack_snapshot(case) is not None and not ack_changed(case)
+
+    attention = sorted(
+        (c for c in pool if c.state in ("open", "investigating")
+         and not quiet(c)),
+        key=lambda c: c.opened_at)
+    closed = sorted(
+        (c for c in pool if c.state in ("resolved", "closed-unknown")
+         and not quiet(c)),
+        key=lambda c: -(c.closed_at or c.opened_at))
+    tail = sorted((c for c in pool if quiet(c)),
+                  key=lambda c: c.opened_at)
+    return (attention + closed + tail)[: max(1, int(limit))]
+
+
+def _case_line(case: OutcomeCase) -> str:
+    verdict = case.verdict if case.state == "resolved" \
+        else "outcome unknown"
+    line = (f"{case.subject} ({case.domain}) — opened for "
+            f"{case.reason} · {case.state} · {verdict}")
+    ack = ack_snapshot(case)
+    if ack is not None:
+        if ack_changed(case):
+            line += " · ⚠ changed since you acknowledged it"
+        else:
+            line += " · acknowledged"
+    return line
+
+
+def render_case_board(cases: OutcomeCaseStore, *,
+                      limit: int = 50) -> str:
+    """The /cases board: needs-attention first, acknowledged cases
+    quiet at the tail. Ordinals are :func:`case_board`'s — the same
+    numbers show/verify/ack take."""
+    board = case_board(cases, limit=limit)
+    counts = cases.counts()
+    header = (f"outcome cases — {counts.get('open', 0)} open · "
+              f"{counts.get('investigating', 0)} investigating · "
+              f"{counts.get('resolved', 0)} resolved · "
+              f"{counts.get('closed-unknown', 0)} closed unknown")
+    if not board:
+        return (header + "\nno cases — nothing forgotten is waiting "
+                "on an answer.")
+    lines = [header]
+    quiet_from = None
+    for idx, case in enumerate(board, 1):
+        if (ack_snapshot(case) is not None and not ack_changed(case)
+                and quiet_from is None):
+            quiet_from = idx
+            lines.append("— acknowledged (quiet unless they change) —")
+        lines.append(f"{idx}. {_case_line(case)}")
+    lines.append("/cases <n> shows the evidence · /cases verify <n> "
+                 "re-checks now · /cases ack <n> marks seen")
+    return "\n".join(lines)
+
+
+#: Detail keys that are identity handles, never owner text.
+_DETAIL_HIDDEN_KEYS = frozenset({
+    "mission_id", "job_id", "contract_id", "subject_key",
+    "acknowledged", "ack_count",
+})
+
+
+def _detail_facts(case: OutcomeCase) -> list[str]:
+    facts = []
+    for key in sorted(case.detail or {}):
+        if key in _DETAIL_HIDDEN_KEYS or key.endswith("_id"):
+            continue
+        value = case.detail[key]
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value)
+        text = str(value)
+        if len(text) > 120:
+            text = text[:117] + "..."
+        facts.append(f"{key.replace('_', ' ')}: {text}")
+    return facts
+
+
+def render_case_detail(case: OutcomeCase,
+                       receipts: list[Any],
+                       contract: dict[str, Any] | None = None) -> str:
+    """One case in full: what it is, what the records say, and the
+    evidence trail — who checked, from which source, and what each
+    piece of evidence established. No internal ids anywhere."""
+    lines = [f"Outcome case — {case.subject} ({case.domain})"]
+    opened = time.strftime("%H:%M %d %b",
+                           time.localtime(case.opened_at))
+    verdict_line = case.verdict if case.state == "resolved" \
+        else "outcome unknown"
+    lines.append(f"opened {opened} for: {case.reason} · "
+                 f"state: {case.state} · verdict: {verdict_line}")
+    for fact in _detail_facts(case):
+        lines.append(f"· {fact}")
+    ack = ack_snapshot(case)
+    if ack is not None:
+        when = time.strftime("%H:%M %d %b",
+                             time.localtime(float(ack.get("at") or 0)))
+        state_note = "changed since" if ack_changed(case) else "as seen"
+        lines.append(f"· acknowledged {when} ({state_note}) — "
+                     "acknowledgement records that you saw it; it "
+                     "never resolves the case")
+    if contract:
+        lines.append(f"· investigation: {contract.get('status', '')} "
+                     f"— worker {contract.get('worker', '')}, "
+                     f"verifier {contract.get('verifier', '')}")
+    if receipts:
+        lines.append("evidence trail:")
+        for receipt in receipts:
+            when = time.strftime(
+                "%H:%M", time.localtime(receipt.created_at))
+            note = receipt.note
+            if len(note) > 300:
+                note = note[:297] + "..."
+            establishes = (receipt.evidence or {}).get("establishes")
+            suffix = f" [establishes: {establishes}]" if establishes \
+                else ""
+            lines.append(f"• {when} {receipt.kind} — "
+                         f"{receipt.source} ({receipt.actor}): "
+                         f"{note}{suffix}")
+    else:
+        lines.append("evidence trail: nothing gathered yet")
+    if case.state in ("open", "investigating"):
+        lines.append("ask for a fresh check any time: "
+                     "/cases verify re-runs the investigation")
+    return "\n".join(lines)
+
+
 # ── durable job + tool wiring ────────────────────────────────────────────
 
 
@@ -1123,7 +1287,10 @@ def register(registry: Any) -> None:
     """The ``outcome_steward`` tool — the durable job's payload and
     the brain's route to the steward. action=sweep runs one full
     stewardship cycle (discovery + investigations); action=status
-    reports case counts without running anything."""
+    reports case counts without running anything; action=inspect /
+    show / verify / ack are the P6 inspection surface at parity with
+    the chat /cases verbs and the nm outcomes CLI (internal ids are
+    fine here — this is the machine consumer)."""
     context = registry.context
 
     @registry.register(
@@ -1141,16 +1308,26 @@ def register(registry: Any) -> None:
             "what the durable 'outcome steward sweep' job fires "
             "every 6h); action=status reports case counts and "
             "per-domain adapter health (domains without a durable "
-            "record are named unavailable, never silently absent). "
-            "Call directly when the owner asks what became of work "
-            "that was left running."
+            "record are named unavailable, never silently absent); "
+            "action=inspect lists cases on the shared board order; "
+            "action=show returns one case with its evidence trail; "
+            "action=verify runs that case's investigation now, "
+            "through the same delegation substrate; action=ack "
+            "records the owner's acknowledgement of a case — it "
+            "quiets the sweep for that case until it changes, and it "
+            "never resolves anything. Call directly when the owner "
+            "asks what became of work that was left running."
         ),
         capability="memory.write",
         parameters={
-            "action": "str — sweep | status",
+            "action": "str — sweep | status | inspect | show | "
+                      "verify | ack",
+            "case_id": "str — the case id for show / verify / ack",
+            "note": "str — optional note recorded with an ack",
         },
     )
-    def _outcome_steward(action: str = "sweep") -> dict[str, Any]:
+    def _outcome_steward(action: str = "sweep", case_id: str = "",
+                         note: str = "") -> dict[str, Any]:
         action = (action or "sweep").strip().lower()
         db = getattr(context, "db", None)
         if db is None:
@@ -1164,4 +1341,33 @@ def register(registry: Any) -> None:
         if action == "sweep":
             report = run_stewardship_cycle(db)
             return {"ok": True, **report}
+        cases = OutcomeCaseStore(db)
+        if action == "inspect":
+            board = case_board(cases)
+            return {"ok": True,
+                    "counts": cases.counts(),
+                    "adapters": adapter_health(),
+                    "cases": [
+                        inspect_case(cases, DelegationStore(db), c.id)
+                        for c in board]}
+        if action in ("show", "verify", "ack"):
+            if not case_id:
+                return {"ok": False,
+                        "error": f"action {action} needs a case_id"}
+            if cases.get(case_id) is None:
+                return {"ok": False,
+                        "error": f"no case {case_id!r}"}
+            if action == "show":
+                return {"ok": True,
+                        **inspect_case(cases, DelegationStore(db),
+                                       case_id)}
+            if action == "verify":
+                result = OutcomeSteward(db).run_case(case_id)
+                return {"ok": True, **result,
+                        **inspect_case(cases, DelegationStore(db),
+                                       case_id)}
+            case = cases.acknowledge(case_id, actor="owner",
+                                     note=note)
+            return {"ok": True, "acknowledged": case.id,
+                    "state": case.state, "verdict": case.verdict}
         return {"ok": False, "error": f"unknown action {action!r}"}

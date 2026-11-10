@@ -36,6 +36,8 @@ CLI_ALIASES: dict[str, list[str]] = {
     "project": ["proj"],
     "simulate": ["sim"],
     "briefing": ["br"],
+    "outcomes": [],
+    "notify": [],
     "train": ["tr"],
     "benchmark": ["bm"],
     "braineval": ["be"],
@@ -2897,6 +2899,59 @@ def _parser() -> argparse.ArgumentParser:
                                          help="expand a briefing item")
     b_followup.add_argument("n", type=int, help="1-based item number")
     b_followup.add_argument("--json", action="store_true",
+                            help="Output as JSON")
+
+    outcomes = sub.add_parser(
+        "outcomes",
+        aliases=CLI_ALIASES["outcomes"],
+        help="Outcome stewardship: cases for forgotten work",
+        description=("nm outcomes status          case counts + per-domain adapter health\n"
+                     "nm outcomes list            the case board (needs attention first)\n"
+                     "nm outcomes show <n>        one case with its evidence trail\n"
+                     "nm outcomes verify <n>      re-run that case's investigation now\n"
+                     "nm outcomes ack <n>         record the owner's acknowledgement\n"
+                     "<n> is the board number — the same ordering as chat /cases"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    outcomes_sub = outcomes.add_subparsers(dest="outcomes_action",
+                                           required=True)
+    for _name in ("status", "list"):
+        _p = outcomes_sub.add_parser(_name, help=f"outcomes {_name}")
+        _p.add_argument("--json", action="store_true",
+                        help="Output as JSON")
+    for _name in ("show", "verify", "ack"):
+        _p = outcomes_sub.add_parser(_name, help=f"outcomes {_name}")
+        _p.add_argument("n", type=int, help="board number from "
+                                            "nm outcomes list")
+        _p.add_argument("--json", action="store_true",
+                        help="Output as JSON")
+
+    notify = sub.add_parser(
+        "notify",
+        aliases=CLI_ALIASES["notify"],
+        help="Notification decisions: what the gate decided, and why",
+        description=("nm notify decisions [n]     recent publish decisions with verdicts + reasons\n"
+                     "nm notify why <n>           the full chain behind decision <n>\n"
+                     "nm notify coverage          candidate coverage in owner terms\n"
+                     "The same inspection as chat /notify decisions | why | coverage"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    notify_sub = notify.add_subparsers(dest="notify_action",
+                                       required=False)
+    n_decisions = notify_sub.add_parser("decisions",
+                                        help="recent decisions")
+    n_decisions.add_argument("n", type=int, nargs="?", default=15,
+                             help="how many decisions to show")
+    n_decisions.add_argument("--json", action="store_true",
+                             help="Output as JSON")
+    n_why = notify_sub.add_parser("why", help="explain one decision")
+    n_why.add_argument("n", type=int,
+                       help="decision number from nm notify decisions")
+    n_why.add_argument("--json", action="store_true",
+                       help="Output as JSON")
+    n_coverage = notify_sub.add_parser("coverage",
+                                       help="candidate coverage")
+    n_coverage.add_argument("--json", action="store_true",
                             help="Output as JSON")
     timeline = sub.add_parser("timeline", aliases=CLI_ALIASES["timeline"],
                               help="event timeline: what happened, newest first")
