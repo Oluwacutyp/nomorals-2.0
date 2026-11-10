@@ -31,6 +31,38 @@ along that segment; a ``oneway`` edge arcs in its permitted
 direction only (digitized direction for ``1``/``yes``, against
 it for ``-1``), and an untagged edge arcs both ways.
 
+**Seam bridging (the routing-design pass).**  Exact joins alone
+shatter the real graph: planetiler's simplification drops shared
+junction vertices — the through road loses the vertex where a
+side road joins — so the side road's END is left dangling a few
+metres from the segment it should meet.  Measured on real
+corridors before this pass (Kano: 963 components over 19,784
+nodes), most dangling ends sit ≤5 m from a through *segment*
+while the nearest surviving vertex is tens of metres away —
+which is why the bridge attaches an end to a segment, not only
+to a node.  At graph build, each way END whose nearest
+attachment — a node, or the interior of a segment — lies within
+:data:`SEAM_JOIN_MAX_M` **in a different component** is joined
+to it: a segment attachment first splits the segment at the
+projected point (a real node on the road, on the same global
+pixel grid as every other node; the split lengths are
+haversine and sum to the original segment's), and the end is
+then joined by a **zero-length seam arc** (road class
+:data:`SEAM_CLASS`).  The guards are conservative: only way
+ends initiate, each end bridges at most once and only to its
+*nearest* attachment (an end already at its junction — nearest
+attachment in its own component — bridges nothing), and the
+tolerance is small (10 m) beside real separations.  A seam arc
+is a digitization repair, never a road: it contributes **zero**
+distance and zero duration, it never appears as a route step,
+and every route that crosses one counts it
+(``RouteResult.seam_joins``, named in the route's detail and
+its receipt) — the same labelled-honesty discipline the snap
+distances follow.  Crossings still do not connect: a bridge
+deck's segment is an attachment only for a way END that stops
+within the tolerance of it, and way ends do not occur at
+grade-separated crossings in the source.
+
 **Corridor discipline (the gazetteer's zoom-band lesson).**  A
 country graph is never materialized: the graph builds for one
 route's *corridor* — the endpoints' bounding box padded by
@@ -50,10 +82,16 @@ cap keeps the graph small enough that A*'s bookkeeping buys
 nothing; duration is then a stated *estimate*: each arc's length
 over the speed its road class carries in :data:`SPEED_KMH`
 (defaults in km/h, data in this module, not measurements of any
-real road).  Endpoints snap to their nearest graph node; the
-snap distances ride the result, and an endpoint whose nearest
-node lies beyond :data:`SNAP_MAX_M` is a typed no-route naming
-the snap failure — never a silent teleport.  A disconnected
+real road).  Endpoints snap *multi-candidate*: each endpoint
+offers its :data:`SNAP_CANDIDATES` nearest nodes inside the
+snap bound and a multi-source Dijkstra takes the pair that
+routes best — a place label anchored a few metres from a stub
+vertex (the M8 finding: Ado Ekiti's nearest node was a 3-node
+stub while the town network ran just beyond it) is no longer
+stranded by its single nearest node.  The snap distances that
+ride the result are the *chosen* pair's, and an endpoint with
+no node at all inside :data:`SNAP_MAX_M` is a typed no-route
+naming the nearest distance — never a silent teleport.  A disconnected
 graph answers "disconnected" just as plainly.  Every attempt —
 success and no-route alike — mints an ``OP_ROUTE`` MapReceipt:
 ``ok`` when the plane answered (a route, or the truthful
@@ -72,12 +110,13 @@ import json
 import math
 import sqlite3
 import time
+from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from ..core.failures import record_failure
-from ..location.primitives import LatLon, haversine_m
+from ..location.primitives import EARTH_RADIUS_M, LatLon, haversine_m
 from .coords import BBox
 from .gazetteer import POSTURE_FEDERATED, POSTURE_LOCAL
 from .manifest import PackManifest, tile_relpath
@@ -98,7 +137,8 @@ __all__ = [
     "NON_ROAD_CLASSES", "REASON_CORRIDOR_TOO_LARGE",
     "REASON_DISCONNECTED", "REASON_NO_ROAD_DATA",
     "REASON_NOT_VECTOR", "REASON_SNAP_FROM", "REASON_SNAP_TO",
-    "ROUTE_ZOOM", "SNAP_MAX_M", "SPEED_KMH", "TRANSPORT_LAYERS",
+    "ROUTE_ZOOM", "SEAM_CLASS", "SEAM_JOIN_MAX_M",
+    "SNAP_CANDIDATES", "SNAP_MAX_M", "SPEED_KMH", "TRANSPORT_LAYERS",
     "GraphStats", "RouteProvider", "RouteResult", "RouteStep",
     "Router",
 ]
@@ -123,6 +163,31 @@ CORRIDOR_PAD_MIN_DEG = 0.01
 #: An endpoint farther than this from the nearest road node is
 #: not snapped — the route refuses, naming the distance.
 SNAP_MAX_M = 500.0
+
+#: Seam bridging: a way END whose nearest attachment (a node, or
+#: the interior of a segment) lies within this many metres, in a
+#: different component, is joined to it by a zero-length seam
+#: arc.  Sized from the measured digitization gaps on real
+#: corridors: the dangling-end gap mass sits at ≤5 m, and 10 m
+#: stays well under real separations (parallel carriageways,
+#: frontage roads).  See the module docstring.
+SEAM_JOIN_MAX_M = 10.0
+
+#: The road class synthetic seam arcs carry — never a real
+#: road's class (the transportation vocabulary has no "seam"),
+#: and the marker that keeps them labelled through the graph
+#: cache: a loaded arc of this class is a seam, not a road.
+SEAM_CLASS = "seam"
+
+#: Snap candidates per endpoint: the nearest this many nodes
+#: inside SNAP_MAX_M are offered to the router, which takes the
+#: pair that routes best (multi-source Dijkstra).
+SNAP_CANDIDATES = 8
+
+#: The graph-build version riding the cache key: a graph built
+#: by an older builder (exact joins only, no seam bridging) is
+#: never served for a corridor the new builder would bridge.
+_GRAPH_BUILD_TAG = "seamjoin-v1"
 
 #: Source layers the graph reads: the style's transportation
 #: vocabulary and its aliases.
@@ -200,6 +265,9 @@ class RouteResult:
     Snap distances are the endpoint→node gaps the route actually
     bridged (None when no snap happened); ``distance_m`` is road
     distance only — snap legs are reported, never folded in.
+    ``seam_joins`` counts the zero-length synthetic seam arcs
+    the path crossed: labelled like the snaps, contributing no
+    distance, and named in ``detail`` whenever nonzero.
     """
 
     ok: bool
@@ -211,6 +279,7 @@ class RouteResult:
     distance_m: float = 0.0
     duration_s: float = 0.0
     steps: tuple[RouteStep, ...] = ()
+    seam_joins: int = 0
     from_snap_m: float | None = None
     to_snap_m: float | None = None
     reason: str = ""
@@ -231,6 +300,7 @@ class GraphStats:
     tiles_present: int
     corrupt_tiles: int
     cached: bool
+    seam_arcs: int = 0
 
 
 class RouteProvider(Protocol):
@@ -250,14 +320,26 @@ class RouteProvider(Protocol):
 
 @dataclass
 class _Graph:
-    """One built corridor graph, in memory."""
+    """One built corridor graph, in memory.
+
+    Adjacency arcs are (node, length_m, road_class, name,
+    synthetic) — the flag marks seam arcs (road class
+    :data:`SEAM_CLASS`, length zero) so routing, steps and
+    statistics can keep them labelled as repairs, never roads.
+    ``terminals`` (way-end node keys) and ``extent`` are build
+    scratch for the seam bridger; a cache-loaded graph needs
+    neither.
+    """
 
     nodes: dict[str, tuple[float, float]] = field(default_factory=dict)
-    adj: dict[str, list[tuple[str, float, str, str]]] = field(
+    adj: dict[str, list[tuple[str, float, str, str, bool]]] = field(
         default_factory=dict)
     tiles_present: int = 0
     corrupt_tiles: int = 0
     cached: bool = False
+    seam_arcs: int = 0
+    terminals: set[str] = field(default_factory=set)
+    extent: int = 0
 
 
 # ── geometry helpers ──────────────────────────────────────────────
@@ -394,7 +476,8 @@ class Router:
         payload = "|".join((
             manifest.pack_id, manifest.digest, str(int(zoom)),
             format(corridor.west, ".6f"), format(corridor.south, ".6f"),
-            format(corridor.east, ".6f"), format(corridor.north, ".6f")))
+            format(corridor.east, ".6f"), format(corridor.north, ".6f"),
+            _GRAPH_BUILD_TAG, format(SEAM_JOIN_MAX_M, ".1f")))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
     def _load_cached(self, cache_key: str,
@@ -419,8 +502,12 @@ class Router:
                     "SELECT a, b, road_class, name, length_m"
                     " FROM routing_arcs WHERE cache_key = ?",
                     (cache_key,)):
+                synthetic = str(klass) == SEAM_CLASS
                 graph.adj.setdefault(str(a), []).append(
-                    (str(b), float(length), str(klass), str(name)))
+                    (str(b), float(length), str(klass), str(name),
+                     synthetic))
+                if synthetic:
+                    graph.seam_arcs += 1
             return graph
         finally:
             conn.close()
@@ -475,7 +562,7 @@ class Router:
                 " VALUES (?, ?, ?, ?, ?, ?)",
                 [(cache_key, a, b, klass, name, length)
                  for a, arcs in graph.adj.items()
-                 for (b, length, klass, name) in arcs])
+                 for (b, length, klass, name, _syn) in arcs])
             conn.commit()
         finally:
             conn.close()
@@ -516,7 +603,9 @@ class Router:
                     self._harvest(graph, arcs, feature, layer.extent,
                                   zoom, unit_x, tile.y)
         for (a, b, klass, name), length in arcs.items():
-            graph.adj.setdefault(a, []).append((b, length, klass, name))
+            graph.adj.setdefault(a, []).append(
+                (b, length, klass, name, False))
+        self._bridge_seams(graph, zoom)
         return graph
 
     def _harvest(self, graph: _Graph, arcs: dict, feature,
@@ -531,6 +620,8 @@ class Router:
             return
         name = str(feature.tags.get("name") or "")
         oneway = _oneway(feature.tags)
+        if not graph.extent:
+            graph.extent = extent
         for path in feature.paths:
             keys: list[str] = []
             for px, py in path.points:
@@ -541,6 +632,11 @@ class Router:
                     graph.nodes[key] = _global_px_to_latlon(
                         gx, gy, zoom, extent)
                 keys.append(key)
+            if keys:
+                # a way's ends are the seam bridger's candidates:
+                # simplification breaks joins at way ends
+                graph.terminals.add(keys[0])
+                graph.terminals.add(keys[-1])
             for at in range(len(keys) - 1):
                 a, b = keys[at], keys[at + 1]
                 if a == b:
@@ -562,6 +658,206 @@ class Router:
         key = (a, b, klass, name)
         if key not in arcs or length < arcs[key]:
             arcs[key] = length
+
+    # ── seam bridging ───────────────────────────────────────────
+
+    @staticmethod
+    def _px(key: str) -> tuple[int, int]:
+        """A node key's global-pixel coordinates."""
+        gx, _, gy = key.partition(",")
+        return int(gx), int(gy)
+
+    def _bridge_seams(self, graph: _Graph, zoom: int) -> None:
+        """Join dangling way ends to the network they stop short
+        of (the routing-design pass; the module docstring states
+        the law).  Runs once per fresh graph build, before the
+        graph is cached: bridges are baked into the stored arcs
+        (seam arcs under :data:`SEAM_CLASS`, split segments as
+        ordinary arcs through a real new node), so a cache-loaded
+        graph bridges identically.
+
+        Method: components over the real arcs; every way END
+        (harvest-recorded terminal with at least one real arc)
+        finds its nearest attachment — node or segment interior,
+        in global-pixel space — inside :data:`SEAM_JOIN_MAX_M`;
+        an attachment in the end's own component means the end is
+        already at its junction and bridges nothing; a segment
+        attachment is recorded as a split at the projected point;
+        the join itself is a zero-length seam arc each way.
+        """
+        if not graph.terminals or not graph.adj:
+            return
+        extent = graph.extent or 4096
+        world = float(extent) * (1 << zoom)
+        neighbors: dict[str, set[str]] = {k: set() for k in graph.nodes}
+        segments: set[tuple[str, str]] = set()
+        for a, arcs in graph.adj.items():
+            for b, _len, _k, _n, syn in arcs:
+                if syn:
+                    continue
+                neighbors[a].add(b)
+                neighbors.setdefault(b, set()).add(a)
+                segments.add((a, b) if a < b else (b, a))
+        comp: dict[str, int] = {}
+        for key in graph.nodes:
+            if key in comp:
+                continue
+            cid = max(comp.values(), default=-1) + 1
+            queue = deque([key])
+            comp[key] = cid
+            while queue:
+                node = queue.popleft()
+                for nxt in neighbors[node]:
+                    if nxt not in comp:
+                        comp[nxt] = cid
+                        queue.append(nxt)
+        terminals = sorted(k for k in graph.terminals
+                           if neighbors.get(k))
+        if not terminals:
+            return
+        px = {k: self._px(k) for k in graph.nodes}
+        min_cos = min(
+            math.cos(math.radians(lat))
+            for lat, _lon in graph.nodes.values())
+        cell = int(SEAM_JOIN_MAX_M * world
+                   / (2.0 * math.pi * EARTH_RADIUS_M * min_cos)) + 1
+
+        def cell_of(pt: tuple[int, int]) -> tuple[int, int]:
+            return (pt[0] // cell, pt[1] // cell)
+
+        node_cells: dict[tuple[int, int], list[str]] = {}
+        for key, pt in px.items():
+            node_cells.setdefault(cell_of(pt), []).append(key)
+        seg_cells: dict[tuple[int, int], list[tuple[str, str]]] = {}
+        for seg in sorted(segments):
+            a, b = seg
+            ax, ay = px[a]
+            bx, by = px[b]
+            steps = max(1, math.ceil(
+                math.hypot(bx - ax, by - ay) / cell))
+            seen_cells: set[tuple[int, int]] = set()
+            for i in range(steps + 1):
+                c = cell_of((round(ax + (bx - ax) * i / steps),
+                             round(ay + (by - ay) * i / steps)))
+                if c not in seen_cells:
+                    seen_cells.add(c)
+                    seg_cells.setdefault(c, []).append(seg)
+
+        splits: dict[tuple[str, str], dict[str, float]] = {}
+        seams: set[tuple[str, str]] = set()
+        for t in terminals:
+            tx, ty = px[t]
+            lat_t = graph.nodes[t][0]
+            metres_per_unit = (2.0 * math.pi * EARTH_RADIUS_M
+                               / world) * math.cos(
+                                   math.radians(lat_t))
+            tol_units = SEAM_JOIN_MAX_M / metres_per_unit
+            ci, cj = cell_of((tx, ty))
+            best: tuple[float, str, Any] | None = None
+            seen_segs: set[tuple[str, str]] = set()
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    for u in node_cells.get((ci + di, cj + dj), ()):
+                        if u == t or u in neighbors[t]:
+                            continue
+                        dist = math.hypot(px[u][0] - tx,
+                                          px[u][1] - ty)
+                        if dist <= tol_units and (
+                                best is None or dist < best[0]):
+                            best = (dist, "node", u)
+                    for seg in seg_cells.get((ci + di, cj + dj), ()):
+                        if seg in seen_segs or t in seg:
+                            continue
+                        seen_segs.add(seg)
+                        a, b = seg
+                        ax, ay = px[a]
+                        bx, by = px[b]
+                        dx, dy = bx - ax, by - ay
+                        span = dx * dx + dy * dy
+                        if span == 0:
+                            continue
+                        frac = ((tx - ax) * dx
+                                + (ty - ay) * dy) / span
+                        frac = min(1.0, max(0.0, frac))
+                        dist = math.hypot(tx - (ax + frac * dx),
+                                          ty - (ay + frac * dy))
+                        if dist <= tol_units and (
+                                best is None or dist < best[0]):
+                            best = (dist, "seg", (a, b, frac))
+            if best is None:
+                continue
+            _dist, kind, payload = best
+            if kind == "node":
+                u = payload
+                if comp[u] != comp[t]:
+                    seams.add((t, u) if t < u else (u, t))
+                continue
+            a, b, frac = payload
+            if comp[a] == comp[t]:
+                continue    # already at its junction; bridge nothing
+            if frac <= 0.02:
+                if a not in neighbors[t]:
+                    seams.add((t, a) if t < a else (a, t))
+                continue
+            if frac >= 0.98:
+                if b not in neighbors[t]:
+                    seams.add((t, b) if t < b else (b, t))
+                continue
+            ax, ay = px[a]
+            bx, by = px[b]
+            pkey = (str(round(ax + frac * (bx - ax))) + ","
+                    + str(round(ay + frac * (by - ay))))
+            if pkey in (a, b):
+                if pkey not in neighbors[t]:
+                    seams.add((t, pkey) if t < pkey else (pkey, t))
+                continue
+            seg = (a, b) if a < b else (b, a)
+            splits.setdefault(seg, {})[pkey] = (
+                frac if seg[0] == a else 1.0 - frac)
+            if pkey != t:
+                seams.add((t, pkey) if t < pkey else (pkey, t))
+
+        for seg, proj in splits.items():
+            a, b = seg
+            chain = [a] + [k for k, _f in sorted(
+                proj.items(), key=lambda kv: kv[1])] + [b]
+            for key in proj:
+                if key not in graph.nodes:
+                    pgx, pgy = self._px(key)
+                    graph.nodes[key] = _global_px_to_latlon(
+                        pgx, pgy, zoom, extent)
+            fwd = [(length, klass, name)
+                   for (dst, length, klass, name, syn)
+                   in graph.adj.get(a, []) if dst == b and not syn]
+            rev = [(length, klass, name)
+                   for (dst, length, klass, name, syn)
+                   in graph.adj.get(b, []) if dst == a and not syn]
+            if a in graph.adj:
+                graph.adj[a] = [
+                    e for e in graph.adj[a]
+                    if not (e[0] == b and not e[4])]
+            if b in graph.adj:
+                graph.adj[b] = [
+                    e for e in graph.adj[b]
+                    if not (e[0] == a and not e[4])]
+            for arcs_dir, nodes_seq in ((fwd, chain),
+                                        (rev, chain[::-1])):
+                for _len, klass, name in arcs_dir:
+                    for i in range(len(nodes_seq) - 1):
+                        u, v = nodes_seq[i], nodes_seq[i + 1]
+                        graph.adj.setdefault(u, []).append((
+                            v,
+                            haversine_m(LatLon(*graph.nodes[u]),
+                                        LatLon(*graph.nodes[v])),
+                            klass, name, False))
+        for t, u in sorted(seams):
+            if t == u:
+                continue
+            graph.adj.setdefault(t, []).append(
+                (u, 0.0, SEAM_CLASS, "", True))
+            graph.adj.setdefault(u, []).append(
+                (t, 0.0, SEAM_CLASS, "", True))
+            graph.seam_arcs += 2
 
     def _graph(self, pack_dir: Path, manifest: PackManifest,
                corridor: BBox, zoom: int) -> _Graph:
@@ -595,7 +891,8 @@ class Router:
             zoom=zoom, node_count=len(graph.nodes),
             arc_count=sum(len(v) for v in graph.adj.values()),
             tiles_present=graph.tiles_present,
-            corrupt_tiles=graph.corrupt_tiles, cached=graph.cached)
+            corrupt_tiles=graph.corrupt_tiles, cached=graph.cached,
+            seam_arcs=graph.seam_arcs)
 
     # ── routing ─────────────────────────────────────────────────
 
@@ -612,47 +909,99 @@ class Router:
         return best_key, best
 
     @staticmethod
+    def _snap_candidates(
+            graph: _Graph, point: LatLon, *,
+            limit: int = SNAP_CANDIDATES,
+            max_m: float = SNAP_MAX_M,
+            ) -> tuple[list[tuple[str, float]], float]:
+        """The endpoint's snap candidates: the ``limit`` nearest
+        node keys inside ``max_m``, nearest first, each with its
+        snap distance — plus the single nearest distance overall
+        (the refusal's number when no candidate is in bounds)."""
+        scored: list[tuple[float, str]] = []
+        nearest = math.inf
+        for key, (lat, lon) in graph.nodes.items():
+            dist = haversine_m(point, LatLon(lat=lat, lon=lon))
+            if dist < nearest:
+                nearest = dist
+            if dist <= max_m:
+                scored.append((dist, key))
+        scored.sort()
+        return ([(key, dist) for dist, key in scored[:limit]],
+                nearest)
+
+    @staticmethod
     def _dijkstra(graph: _Graph, start_key: str, goal_key: str):
         """Shortest path by road distance: (node keys, arcs) or
         None when the goal is unreachable.  Arcs ride along as
         (length, class, name) triples parallel to the node list's
         steps."""
-        dist: dict[str, float] = {start_key: 0.0}
-        prev: dict[str, tuple[str, float, str, str]] = {}
-        heap: list[tuple[float, str]] = [(0.0, start_key)]
+        found = Router._dijkstra_multi(
+            graph, [start_key], [goal_key])
+        if found is None:
+            return None
+        keys, arcs, _root, _goal = found
+        return keys, [(length, klass, name)
+                      for length, klass, name, _syn in arcs]
+
+    @staticmethod
+    def _dijkstra_multi(graph: _Graph, sources: list[str],
+                        goals: list[str]):
+        """Multi-source Dijkstra: the shortest path from any of
+        ``sources`` to any of ``goals`` — (node keys, arcs, the
+        source key used, the goal key reached) or None when no
+        goal is reachable.  Arcs ride along as (length, class,
+        name, synthetic) tuples parallel to the node list's
+        steps.  This is what lets a snap take the candidate pair
+        that actually routes, not only the nearest pair."""
+        source_set = set(sources)
+        goal_set = set(goals)
+        dist: dict[str, float] = {key: 0.0 for key in sources}
+        prev: dict[str, tuple[str, float, str, str, bool]] = {}
+        heap: list[tuple[float, str]] = [(0.0, key) for key in sources]
+        heapq.heapify(heap)
         settled: set[str] = set()
+        goal: str | None = None
         while heap:
             at_dist, node = heapq.heappop(heap)
             if node in settled:
                 continue
             settled.add(node)
-            if node == goal_key:
+            if node in goal_set:
+                goal = node
                 break
-            for nxt, length, klass, name in graph.adj.get(node, ()):
+            for nxt, length, klass, name, syn in graph.adj.get(
+                    node, ()):
                 cand = at_dist + length
                 if cand < dist.get(nxt, math.inf):
                     dist[nxt] = cand
-                    prev[nxt] = (node, length, klass, name)
+                    prev[nxt] = (node, length, klass, name, syn)
                     heapq.heappush(heap, (cand, nxt))
-        if goal_key not in dist:
+        if goal is None:
             return None
-        keys = [goal_key]
-        arcs: list[tuple[float, str, str]] = []
-        node = goal_key
-        while node != start_key:
-            prior, length, klass, name = prev[node]
-            arcs.append((length, klass, name))
+        keys = [goal]
+        arcs: list[tuple[float, str, str, bool]] = []
+        node = goal
+        while node not in source_set:
+            prior, length, klass, name, syn = prev[node]
+            arcs.append((length, klass, name, syn))
             keys.append(prior)
             node = prior
         keys.reverse()
         arcs.reverse()
-        return keys, arcs
+        return keys, arcs, node, goal
 
     @staticmethod
-    def _steps(arcs: list[tuple[float, str, str]]) -> tuple[RouteStep, ...]:
-        """Merge consecutive arcs of the same road into steps."""
+    def _steps(arcs: list[tuple[float, str, str, bool]],
+               ) -> tuple[RouteStep, ...]:
+        """Merge consecutive arcs of the same road into steps.
+        Seam arcs are skipped: a synthetic join is not a road and
+        never becomes a step (its zero length would add nothing;
+        hiding it here keeps the step list a list of roads)."""
         merged: list[list] = []
-        for length, klass, name in arcs:
+        for length, klass, name, syn in arcs:
+            if syn:
+                continue
             if merged and merged[-1][0] == name \
                     and merged[-1][1] == klass:
                 merged[-1][2] += length
@@ -713,50 +1062,64 @@ class Router:
                 base, manifest, REASON_NO_ROAD_DATA,
                 "no roads in the route corridor of pack "
                 + manifest.name, OUTCOME_UNAVAILABLE)
-        from_key, from_snap = self._nearest(graph, start)
-        if from_snap > SNAP_MAX_M:
+        from_cands, from_nearest = self._snap_candidates(graph, start)
+        if not from_cands:
             return self._no_route(
                 base, manifest, REASON_SNAP_FROM,
                 "the start point cannot snap to the road network:"
                 " its nearest road node is "
-                + format(from_snap, ",.0f") + " m away, beyond the "
+                + format(from_nearest, ",.0f") + " m away, beyond the "
                 + format(SNAP_MAX_M, ",.0f") + " m snap bound",
                 OUTCOME_UNAVAILABLE)
-        to_key, to_snap = self._nearest(graph, end)
-        if to_snap > SNAP_MAX_M:
+        to_cands, to_nearest = self._snap_candidates(graph, end)
+        if not to_cands:
             return self._no_route(
                 base, manifest, REASON_SNAP_TO,
                 "the end point cannot snap to the road network:"
                 " its nearest road node is "
-                + format(to_snap, ",.0f") + " m away, beyond the "
+                + format(to_nearest, ",.0f") + " m away, beyond the "
                 + format(SNAP_MAX_M, ",.0f") + " m snap bound",
                 OUTCOME_UNAVAILABLE)
-        found = self._dijkstra(graph, from_key, to_key)
+        found = self._dijkstra_multi(
+            graph, [key for key, _d in from_cands],
+            [key for key, _d in to_cands])
         if found is None:
             return self._no_route(
                 base, manifest, REASON_DISCONNECTED,
                 "the road graph has no connected path between the"
                 " two points — the roads near each end do not"
                 " meet in pack " + manifest.name,
-                OUTCOME_OK, from_snap=from_snap, to_snap=to_snap)
-        keys, arcs = found
-        distance = sum(length for length, _k, _n in arcs)
+                OUTCOME_OK, from_snap=from_cands[0][1],
+                to_snap=to_cands[0][1])
+        keys, arcs, from_key, to_key = found
+        from_snap = dict(from_cands)[from_key]
+        to_snap = dict(to_cands)[to_key]
+        seam_joins = sum(1 for _l, _k, _n, syn in arcs if syn)
+        distance = sum(length for length, _k, _n, _s in arcs)
         duration = sum(
-            length / _speed_ms(klass) for length, klass, _n in arcs)
+            length / _speed_ms(klass)
+            for length, klass, _n, _s in arcs)
         points: list[tuple[float, float]] = [(start.lat, start.lon)]
         points.extend(graph.nodes[key] for key in keys)
         points.append((end.lat, end.lon))
         geometry = tuple(
             point for at, point in enumerate(points)
             if at == 0 or point != points[at - 1])
+        detail = ("route over pack " + manifest.name + ": "
+                  + format(distance, ",.0f") + " m by road, ~"
+                  + str(int(round(duration)))
+                  + " s at class speeds (estimates)")
+        if seam_joins:
+            detail += (
+                " · crosses " + str(seam_joins) + " seam join"
+                + ("s" if seam_joins != 1 else "")
+                + " (zero-distance digitization repairs, labelled,"
+                " never counted as road)")
         result = replace(
             base, ok=True, geometry=geometry, distance_m=distance,
             duration_s=duration, steps=self._steps(arcs),
             from_snap_m=from_snap, to_snap_m=to_snap,
-            detail=("route over pack " + manifest.name + ": "
-                    + format(distance, ",.0f") + " m by road, ~"
-                    + str(int(round(duration)))
-                    + " s at class speeds (estimates)"))
+            seam_joins=seam_joins, detail=detail)
         receipt = self._mint(manifest, OUTCOME_OK, POSTURE_LOCAL,
                              "local", result.detail)
         return replace(result, receipt=receipt)

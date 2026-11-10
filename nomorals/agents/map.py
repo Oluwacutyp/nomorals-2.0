@@ -542,6 +542,7 @@ class MapAgent:
             "geometry": [[p[0], p[1]] for p in result.geometry],
             "from_snap_m": result.from_snap_m,
             "to_snap_m": result.to_snap_m,
+            "seam_joins": result.seam_joins,
             "reason": result.reason, "detail": result.detail,
             "pack_id": manifest.pack_id,
             "posture": result.posture, "provider": result.provider,

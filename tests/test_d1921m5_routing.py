@@ -15,6 +15,17 @@ Pins, in order:
   unnamed segments are named by class; duration comes off the
   class-speed table; cross-tile joins connect (a road split at a
   tile boundary routes through);
+* seam bridging (the routing-design pass): a way end stopping
+  one pixel (~9.5 m) short of a through segment is joined to it
+  — the segment splits at the projected point and a zero-length
+  seam arc joins the end; the seam contributes ZERO distance
+  (asserted numerically against the real arcs' haversine sum),
+  never appears as a step, and is counted on the result and in
+  the detail; a gap beyond the tolerance (six pixels, ~57 m)
+  does NOT bridge — its far end stays disconnected; snap is
+  multi-candidate: a query point whose nearest node is an
+  unbridged stub routes through its next candidate, and the
+  reported snap is the chosen candidate's;
 * refusals, typed: snap success inside the bound with the snap
   distance stated; snap-from / snap-to beyond it; disconnected
   graph; no road data; the corridor cap; a raster pack;
@@ -67,6 +78,8 @@ from nomorals.maps.routing import (
     REASON_NOT_VECTOR,
     REASON_SNAP_FROM,
     REASON_SNAP_TO,
+    SEAM_CLASS,
+    SEAM_JOIN_MAX_M,
     SPEED_KMH,
     Router,
 )
@@ -555,6 +568,128 @@ class TestRouting(_Tmp):
             LatLon(*C_LL))
         self.assertTrue(res.ok)
         self.assertIsNone(res.receipt)
+
+
+# ── seam bridging (the routing-design pass) ───────────────────────
+
+# Seam fixture nodes, in tile pixels (extent 4096, ≈9.54 m/px):
+# S stops ONE pixel short of the Main Street segment A—B (a
+# ~9.5 m digitization gap, inside SEAM_JOIN_MAX_M); F1 stops SIX
+# pixels short of the B—V—C segment (~57 m, beyond it).
+V = (3000, 1024)
+S = (1280, 1025)
+T = (1280, 2560)
+PJ = (1280, 1024)              # S's projection onto A—B
+F1 = (3000, 1030)
+F2 = (3000, 2560)
+
+V_LL = _latlon(*V)
+S_LL = _latlon(*S)
+T_LL = _latlon(*T)
+PJ_LL = _latlon(*PJ)
+F1_LL = _latlon(*F1)
+F2_LL = _latlon(*F2)
+
+
+def _seam_pack(root: Path):
+    """Main Street A—B—V—C; Stub Lane S—T ending one pixel
+    short of A—B; Far Lane F1—F2 ending six pixels short of the
+    main street — near enough to see, too far to bridge."""
+    b = _PackBuilder()
+    roads = "transportation"
+    b.add(roads, {"name": "Main Street", "class": "primary"}, 2,
+          _line(A, B, V, C))
+    b.add(roads, {"name": "Stub Lane", "class": "residential"}, 2,
+          _line(S, T))
+    b.add(roads, {"name": "Far Lane", "class": "minor"}, 2,
+          _line(F1, F2))
+    return b.build(root, pack_id="seam-fixture",
+                   name="Seam Fixture")
+
+
+class TestSeamBridging(_Tmp):
+    def setUp(self):
+        super().setUp()
+        self.seam_dir = self.packs / "seam"
+        self.seam_manifest = _seam_pack(self.seam_dir)
+
+    def _seam_route(self, start, end, router=None):
+        router = router or self._router()
+        return router.route(self.seam_dir, self.seam_manifest,
+                            LatLon(*start), LatLon(*end))
+
+    def test_graph_counts_the_split_and_the_seam(self):
+        stats = self._router().graph_stats(
+            self.seam_dir, self.seam_manifest, LatLon(*A_LL),
+            LatLon(*C_LL))
+        # 8 harvested nodes + the projection node on A—B
+        self.assertEqual(stats.node_count, 9)
+        # directed arcs: main 4 segments ×2 (A—B split in two)
+        # + stub 2 + far 2 + seam pair 2 = 14
+        self.assertEqual(stats.arc_count, 14)
+        self.assertEqual(stats.seam_arcs, 2)
+        self.assertLess(_hav(S_LL, PJ_LL), SEAM_JOIN_MAX_M)
+        self.assertGreater(_hav(F1_LL, V_LL), SEAM_JOIN_MAX_M)
+
+    def test_near_end_joins_and_the_seam_costs_zero(self):
+        res = self._seam_route(T_LL, C_LL)
+        self.assertTrue(res.ok, res.detail)
+        self.assertEqual(res.seam_joins, 1)
+        # distance is the REAL arcs only: T—S, then the split
+        # segment's second half P—B, then B—V and V—C.  The seam
+        # contributes exactly nothing — no gap metres invented.
+        expected = (_hav(T_LL, S_LL) + _hav(PJ_LL, B_LL)
+                    + _hav(B_LL, V_LL) + _hav(V_LL, C_LL))
+        self.assertAlmostEqual(res.distance_m, expected, delta=1.5)
+        # the seam is not a road: no step carries it, and the
+        # split segment still reads as Main Street throughout
+        self.assertEqual([s.name for s in res.steps],
+                         ["Stub Lane", "Main Street"])
+        self.assertNotIn(SEAM_CLASS,
+                         [s.road_class for s in res.steps])
+        self.assertIn("seam join", res.detail)
+        self.assertIsNotNone(res.receipt)
+        self.assertIn("seam join", res.receipt.detail)
+        self.assertGreater(res.duration_s, 0)
+
+    def test_seam_join_works_in_reverse_and_from_cache(self):
+        router = self._router()
+        first = self._seam_route(T_LL, C_LL, router=router)
+        self.assertTrue(first.ok, first.detail)
+        back = self._seam_route(C_LL, T_LL, router=router)
+        self.assertTrue(back.ok, back.detail)
+        self.assertEqual(back.seam_joins, 1)
+        self.assertAlmostEqual(back.distance_m, first.distance_m,
+                               delta=0.01)
+        stats = router.graph_stats(self.seam_dir, self.seam_manifest,
+                                   LatLon(*T_LL), LatLon(*C_LL))
+        self.assertTrue(stats.cached)
+        self.assertEqual(stats.seam_arcs, 2)   # seams survive cache
+
+    def test_gap_beyond_tolerance_stays_disconnected(self):
+        # Far Lane's end is ~57 m from the main street: no bridge
+        # (stats above pin seam_arcs at exactly the one bridge),
+        # and its far node has no other snap candidate in bounds —
+        # the pair is genuinely unconnected and says so.
+        res = self._seam_route(F2_LL, C_LL)
+        self.assertFalse(res.ok)
+        self.assertEqual(res.reason, REASON_DISCONNECTED)
+        self.assertIn("no connected path", res.detail)
+
+    def test_snap_takes_the_candidate_that_routes(self):
+        # A point 2 px from Far Lane's end F1 and 4 px from the
+        # main street's vertex V: the single nearest node (F1)
+        # sits on an unbridged stub; the route must snap to V
+        # instead and report V's snap distance, not F1's.
+        near = _latlon(3000, 1028)
+        res = self._seam_route(near, B_LL)
+        self.assertTrue(res.ok, res.detail)
+        self.assertAlmostEqual(res.from_snap_m, _hav(near, V_LL),
+                               delta=1.0)
+        self.assertGreater(res.from_snap_m, _hav(near, F1_LL))
+        self.assertAlmostEqual(res.distance_m, _hav(V_LL, B_LL),
+                               delta=1.0)
+        self.assertEqual(res.seam_joins, 0)
 
 
 # ── receipts ──────────────────────────────────────────────────────

@@ -36,22 +36,28 @@ battery is where they belong:
     fix the same scan reads 226,051 tiles, 0 corrupt, 46,477
     name rows.
 
-2.  **Routing seam fragmentation (NAMED REMAINDER, not fixed).**
-    The router joins ways only at EXACTLY equal global-pixel
-    nodes (M5's stated zero-tolerance rule) and snaps an endpoint
-    to its single nearest node.  Planetiler simplifies geometry
-    per tile, so the same road's vertices differ by metres across
-    tile seams, and a town label's nearest vertex can be an
-    isolated stub.  Measured on this corridor: the Ilawe→Ado
-    Ekiti graph holds 524 components; the two towns' components
-    pass 19.1 m apart unjoined at (7.6166, 5.1419); the Ado
-    label's nearest node is a 3-node stub 33 m away while the
-    town's main network runs 48 m off.  Label-to-label
-    Ilawe→Ado Ekiti therefore answers a TRUTHFUL "disconnected"
-    (pinned below as current honest behaviour), while routes
-    whose endpoints land on the connected network (Ireje→Erifun)
-    route fine.  A join tolerance / component-aware snap is a
-    routing-design change for a later pass — not battery scope.
+2.  **Routing seam fragmentation (RESOLVED by the
+    routing-design pass; originally a NAMED REMAINDER).**
+    The router joined ways only at EXACTLY equal global-pixel
+    nodes (M5's stated zero-tolerance rule) and snapped an
+    endpoint to its single nearest node.  Planetiler simplifies
+    geometry per tile, so the same road's vertices differ by
+    metres across tile seams, and a town label's nearest vertex
+    can be an isolated stub.  Measured on this corridor then:
+    the Ilawe→Ado Ekiti graph held 524 components; the two
+    towns' components passed 19.1 m apart unjoined at (7.6166,
+    5.1419); the Ado label's nearest node was a 3-node stub
+    33 m away while the town's main network ran 48 m off, so
+    label-to-label Ilawe→Ado Ekiti answered a truthful
+    "disconnected" — pinned at the time as honest behaviour.
+    The routing-design pass fixed the cause, not the answer:
+    seam bridging joins dangling way ends to the segment they
+    stop within 10 m of (zero-distance, labelled joins), and
+    the snap is multi-candidate, so each label anchors on a
+    node that routes.  The corridor now holds ~21 components
+    and the label-to-label route answers with a real route
+    (pinned below in its new shape); genuinely unconnected
+    pairs still answer "disconnected" (the M5 fixture pins).
 
 Bounded-extract disclosure (the brief's sanctioned shape): a
 full-pack gazetteer build over pack-a-nigeria takes ~645 s
@@ -551,12 +557,18 @@ class TestRealRouting(unittest.TestCase):
         self.assertIn(result.receipt.receipt_id,
                       [r.receipt_id for r in stored])
 
-    def test_route_ilawe_to_ado_label_anchors_is_truthfully_disconnected(self):
-        # THE NAMED REMAINDER, pinned as current honest behaviour:
-        # seam fragmentation (module docstring, finding 2) splits
-        # the label-anchored endpoints into different components,
-        # and the router says so — with its reason and a receipt —
-        # instead of inventing a path or calling a provider.
+    def test_route_ilawe_to_ado_label_anchors_now_routes(self):
+        # PIN CHANGED BY THE ROUTING-DESIGN PASS, deliberately:
+        # this test used to pin the label-to-label pair as
+        # "truthfully disconnected" (the seam-fragmentation
+        # remainder, finding 2 above).  Seam bridging +
+        # multi-candidate snap removed the cause — the corridor's
+        # components merged and each label now anchors on a node
+        # that routes — so the honest behaviour today is a real
+        # route, and this pin asserts it (distance sanity in the
+        # sibling Ireje→Erifun test's shape).  A genuinely
+        # unconnected pair still answers "disconnected": that
+        # outcome stays pinned in the M5 fixture tests.
         ilawe = _S.gaz.search("Ilawe").candidates[0]
         ado = _S.gaz.search("Ado Ekiti").candidates[0]
         router = Router(_S.root / "routing-home", store=_S.store)
@@ -565,12 +577,16 @@ class TestRealRouting(unittest.TestCase):
             _S.manifests["pack-a-nigeria"],
             LatLon(ilawe.lat, ilawe.lon), LatLon(ado.lat, ado.lon),
             from_label=ilawe.name, to_label=ado.name)
-        self.assertFalse(result.ok)
-        self.assertEqual(result.reason, "disconnected")
-        self.assertIn("no connected path", result.detail)
+        self.assertTrue(result.ok, result.detail)
+        hav = haversine_m(LatLon(ilawe.lat, ilawe.lon),
+                          LatLon(ado.lat, ado.lon))
+        self.assertGreaterEqual(result.distance_m, hav * 0.95)
+        self.assertLessEqual(result.distance_m, 2.5 * hav)
+        self.assertTrue(result.steps)
         self.assertEqual(result.provider, "local")
         self.assertIsNotNone(result.receipt)
         self.assertEqual(result.receipt.operation, "route")
+        self.assertEqual(result.receipt.outcome, "ok")
 
 
 # ── 4 · render real views ────────────────────────────────────────
