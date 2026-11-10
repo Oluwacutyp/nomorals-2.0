@@ -50,19 +50,21 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .expression import ProviderHealth
+from .expression import ProviderHealth, _sniff_animation
 
 __all__ = [
     "FUN_COMMANDS", "FUN_IMAGE_KINDS", "FUN_TEXT_KINDS",
     "FunError", "FunService", "default_fun_chains",
     "EIGHT_BALL_ANSWERS", "eight_ball_answer",
     "split_choices", "choose_pick", "parse_history_date",
+    "picture_shape",
     "JokeApiProvider", "OfficialJokeProvider", "DadJokeProvider",
     "ChuckProvider", "UselessFactsProvider", "CatFactProvider",
     "NumbersApiProvider", "AdviceSlipProvider", "DummyQuotesProvider",
     "BoredProvider",
     "WikimediaOnThisDayProvider", "MuffinLabsHistoryProvider",
     "DogCeoProvider", "TheCatApiProvider", "CataasProvider",
+    "CataasGifProvider",
     "RandomFoxProvider", "MemeApiProvider", "NasaApodProvider",
     "PokeApiProvider", "RiddlesApiProvider", "LOCAL_RIDDLES",
 ]
@@ -141,6 +143,46 @@ def _sniff_image(data: bytes) -> tuple[str, str] | None:
     if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
         return (".webp", "image/webp")
     return None
+
+
+def _webp_is_animated(data: bytes) -> bool:
+    """The VP8X animation flag: the ``VP8X`` chunk header sits
+    at offset 12 and its feature byte at offset 20 carries
+    0x02 when the WebP is animated.  A WebP without it (or
+    without a VP8X chunk at all) is a still."""
+    raw = bytes(data or b"")
+    return len(raw) > 20 and raw[12:16] == b"VP8X" \
+        and bool(raw[20] & 0x02)
+
+
+def picture_shape(data: bytes) -> tuple[str, str, str] | None:
+    """(extension, mime, send kind) for REAL picture bytes —
+    the media-kind truth the whole picture-command family
+    delivers by (the 2026-11-10 delivery fix): the BYTES
+    decide what a picture is, never the URL's claim or its
+    suffix.  Animated bytes ride as an animation, a still as
+    an image.  Animation detection is the expression family's
+    one sniffer (``_sniff_animation``, imported — never
+    copied); WebP counts as animated only when its VP8X
+    header carries the ANIM flag, so a still WebP stays a
+    still.  None when the bytes are no picture at all."""
+    anim = _sniff_animation(data)
+    if anim is not None:
+        ext, _library_kind = anim
+        if ext == ".gif":
+            return (".gif", "image/gif", "animation")
+        if ext == ".mp4":
+            return (".mp4", "video/mp4", "animation")
+        if ext == ".webm":
+            return (".webm", "video/webm", "video")
+        if ext == ".webp" and _webp_is_animated(data):
+            return (".webp", "image/webp", "animation")
+        # A still WebP falls through to the still sniff.
+    still = _sniff_image(data)
+    if still is None:
+        return None
+    ext, mime = still
+    return (ext, mime, "image")
 
 
 def _trim_caption(text: str, cap: int = 1000) -> str:
@@ -530,6 +572,30 @@ class CataasProvider:
         return {"image_url": url, "caption": "🐱 via cataas"}
 
 
+class CataasGifProvider:
+    """cataas.com GIF cats — ``/cat/gif?json=true`` answers
+    the still endpoint's row shape with a GIF's url.  The
+    animation rung of /cat: a moving cat, which the
+    kind-true send delivers AS an animation."""
+
+    name = "cataas-gif"
+
+    def __init__(self, *,
+                 fetcher: Callable[[str], Any] | None = None
+                 ) -> None:
+        self._fetch = fetcher or _http_json
+
+    def image(self, arg: str = "") -> dict[str, Any]:
+        data = self._fetch("https://cataas.com/cat/gif?json=true")
+        if not isinstance(data, dict):
+            raise FunError("cataas answered a non-object")
+        url = _need_text(data.get("url"), "url")
+        if url.startswith("/"):
+            url = "https://cataas.com" + url
+        return {"image_url": url,
+                "caption": "🐱 via cataas — a moving one"}
+
+
 class RandomFoxProvider:
     """randomfox.ca — ``{"image": <url>, "link": …}``."""
 
@@ -888,7 +954,8 @@ def default_fun_chains(*, nasa_api_key: str = "",
         "history": [WikimediaOnThisDayProvider(),
                     MuffinLabsHistoryProvider()],
         "dog": [DogCeoProvider()],
-        "cat": [TheCatApiProvider(), CataasProvider()],
+        "cat": [TheCatApiProvider(), CataasProvider(),
+                CataasGifProvider()],
         "fox": [RandomFoxProvider()],
         "meme": [MemeApiProvider()],
         "nasa": [NasaApodProvider(api_key=nasa_api_key)],
@@ -940,6 +1007,12 @@ class FunService:
             merged[kind] = list(chain)
         self.chains: dict[str, list[Any]] = merged
         self._riddles: dict[str, tuple[str, str]] = {}
+        # Per-kind rotation offset for image chains: the walk
+        # still falls through in order, but each call starts
+        # one rung later, so a multi-source kind genuinely
+        # rotates across calls (the pool family's discipline)
+        # instead of the first healthy source winning forever.
+        self._image_offsets: dict[str, int] = {}
 
     # -- the chain walk ----------------------------------------
     def _walk(self, kind: str, method: str, *args: Any
@@ -1029,7 +1102,13 @@ class FunService:
         kind = str(kind or "").strip().lower()
         try:
             last = ""
-            for provider in self.chains.get(kind) or []:
+            chain = list(self.chains.get(kind) or [])
+            if len(chain) > 1:
+                offset = self._image_offsets.get(kind, 0)
+                self._image_offsets[kind] = offset + 1
+                cut = offset % len(chain)
+                chain = chain[cut:] + chain[:cut]
+            for provider in chain:
                 source = str(getattr(provider, "name", "?"))
                 if not self.health.available(source):
                     continue
@@ -1075,7 +1154,16 @@ class FunService:
                     if self.media_dir is None:
                         return {"sent": False,
                                 "reason": "no media dir configured"}
-                    ext, mime = sniffed
+                    # The kind truth (2026-11-10): the bytes
+                    # decide the delivered kind — an animated
+                    # payload rides as an animation, never
+                    # flattened into a photo.
+                    shape = picture_shape(data)
+                    if shape is None:  # unreachable via the sniff
+                        ext, mime = sniffed
+                        send_kind = "image"
+                    else:
+                        ext, mime, send_kind = shape
                     digest = hashlib.sha256(data).hexdigest()[:16]
                     dest = self.media_dir / f"fun_{digest}{ext}"
                     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1083,7 +1171,7 @@ class FunService:
                         dest.write_bytes(data)
                     from .base import MediaRef
 
-                    ref = MediaRef(path=str(dest), kind="image",
+                    ref = MediaRef(path=str(dest), kind=send_kind,
                                    mime=mime,
                                    name=f"{kind} via {source}")
                     outcome = send(ref, caption)

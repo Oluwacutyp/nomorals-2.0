@@ -20,6 +20,7 @@ from .sources import (
     AniListClient,
     ImagePoolClient,
     JikanClient,
+    PoolHit,
     QuoteClient,
     TraceMoeClient,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "ImagePoolClient",
     "JikanClient",
     "Outcome",
+    "PoolHit",
     "QuoteClient",
     "TraceMoeClient",
 ]

@@ -31,12 +31,16 @@ from .transport import DEFAULT_TIMEOUT, Transport, TransportError
 
 __all__ = [
     "AniListClient",
+    "IMAGE_POOLS",
     "ImagePoolClient",
     "JikanClient",
+    "PoolHit",
     "QuoteClient",
     "SourceFailure",
     "TraceMoeClient",
     "TraceResult",
+    "direct_source_url",
+    "pool_classes",
 ]
 
 ANILIST_URL = "https://graphql.anilist.co"
@@ -416,103 +420,350 @@ class QuoteClient:
             character_name=str((character or {}).get("name") or ""))
 
 
-# ── Image pools (waifu.pics / nekos.best) ───────────────────────────
+# ── The unified picture pool ────────────────────────────────────
+#
+# ONE pool organ for the whole picture-command family: the
+# anime pool kinds (/waifu /neko /kitsune /husbando /charpic,
+# via AnimeService) and — by delegation from
+# social/chat/makers — the /couplepp chain.  Every endpoint's
+# URL, response shape and safety check lives in this table and
+# nowhere else; the makers providers of the same names are
+# thin adapters over this client (the duplicate-endpoint split
+# is why the 2026-11-07 diversification reached couplepp only).
+#
+# Diversity is a property of the table (owner, 2026-11-07
+# "MORE SOURCES, NOT JUST ANIME", re-reported 2026-11-10):
+# each kind's chain spans source CLASSES — anime art, real
+# photography, real animals, general GIF search (keyed), and
+# Devon's own studio.  Anime stays a kind's FIRST class (the
+# top weight in its chain) but never its only one.  Sources
+# are seeds, never a closed list: a new source is one more
+# entry, a new class one more ``source_class`` value.
+
+#: Source classes — the pool's diversity axis.
+CLASS_ANIME = "anime"
+CLASS_PHOTOGRAPHY = "photography"
+CLASS_ANIMALS = "animals"
+CLASS_GENERAL = "general"
+CLASS_STUDIO = "studio"
+
 
 @dataclass
+class PoolHit:
+    """One served picture: who served it, its source class,
+    and where it lives — ``url`` for a network source,
+    ``local_path`` when her own studio drew it (a render on
+    disk, not a link)."""
+
+    url: str = ""
+    source: str = ""
+    source_class: str = ""
+    local_path: str = ""
+
+
 class _PoolSource:
-    def __init__(self, name: str, url: str, shape: str) -> None:
+    def __init__(self, name: str, url: str, shape: str, *,
+                 source_class: str = CLASS_ANIME, weight: int = 1,
+                 animated: bool = False, key: str = "",
+                 query: str = "") -> None:
         self.name = name
         self.url = url
-        self.shape = shape  # "waifu.pics" | "nekos.best" | "nekosapi"
+        self.shape = shape
+        self.source_class = source_class
+        self.weight = max(1, int(weight))
+        self.animated = animated
+        self.key = key        # settings key that must exist ("" = keyless)
+        self.query = query    # search text for the search-shaped sources
 
 
-#: Pool chains per picture command: seeds in try order (the
-#: client shuffles per fetch, so the seeds genuinely rotate).
-#: Sources are seeds, never a closed list — a new pool is one
-#: more entry.  nekosapi enters only through its safe-rated
-#: door: the request asks for ``rating=safe`` and the
-#: extractor re-checks each row's rating in code, because the
-#: unfiltered pool serves suggestive/explicit rows.  kitsune
-#: and husbando stay nekos.best-only: no second verified SFW
-#: source carries those categories (delivery-shape pass,
-#: 2026-11-07 — an honest remainder, not a silent gap).
+_WAIFU_PICS = "https://api.waifu.pics/sfw/"
+_NEKOS_BEST = "https://nekos.best/api/v2/"
+_NEKOSAPI = ("https://api.nekosapi.com/v4/images/random"
+             "?rating=safe")
+
+
+def _anime_seed(name: str, url: str, shape: str) -> _PoolSource:
+    return _PoolSource(name, url, shape, weight=3)
+
+
+def _picsum() -> _PoolSource:
+    # picsum.photos — real photography, keyless: a seeded URL
+    # answers a redirect to one real photograph.
+    return _PoolSource(
+        "picsum", "https://picsum.photos/seed/{seed}/1200/900",
+        "picsum", source_class=CLASS_PHOTOGRAPHY, weight=1)
+
+
+def _studio() -> _PoolSource:
+    # Her own generation: resolved by the generator callable
+    # injected into the client (the runtime wires the studio);
+    # with no generator the entry never enters the walk.
+    return _PoolSource("devon-studio", "", "studio",
+                       source_class=CLASS_STUDIO, weight=1)
+
+
+def _keyed(query: str) -> list[_PoolSource]:
+    # Tenor / Giphy GIF search — a configured key is required
+    # (neither has a keyless tier); unconfigured, these entries
+    # simply never enter the walk, like expression's
+    # default_providers.  The pool is rich without them.
+    return [
+        _PoolSource("tenor", "https://tenor.googleapis.com/v2/search",
+                    "tenor", source_class=CLASS_GENERAL, weight=2,
+                    animated=True, key="tenor", query=query),
+        _PoolSource("giphy", "https://api.giphy.com/v1/gifs/search",
+                    "giphy", source_class=CLASS_GENERAL, weight=2,
+                    animated=True, key="giphy", query=query),
+    ]
+
+
+#: Pool chains per picture kind.  nekosapi enters only through
+#: its safe-rated door: the request asks for ``rating=safe``
+#: and the extractor re-checks each row's rating in code,
+#: because the unfiltered pool serves suggestive/explicit
+#: rows.  kitsune's second source is a real fox (randomfox —
+#: a kitsune IS a fox; the 2026-11-07 "no second verified SFW
+#: source" remainder closes with a verified animal source,
+#: not another anime pool).  "couplepp" is the stills pool
+#: the makers chain delegates to (the pair path itself
+#: refuses animated bytes and re-draws — a diptych needs a
+#: still).
 IMAGE_POOLS: dict[str, list[_PoolSource]] = {
     "waifu": [
-        _PoolSource("waifu.pics", "https://api.waifu.pics/sfw/waifu",
-                    "waifu.pics"),
-        _PoolSource("nekos.best", "https://nekos.best/api/v2/waifu",
-                    "nekos.best"),
-        _PoolSource("nekosapi",
-                    "https://api.nekosapi.com/v4/images/random"
-                    "?rating=safe",
-                    "nekosapi"),
+        _anime_seed("waifu.pics", _WAIFU_PICS + "waifu", "waifu.pics"),
+        _anime_seed("nekos.best", _NEKOS_BEST + "waifu", "nekos.best"),
+        _anime_seed("nekosapi", _NEKOSAPI, "nekosapi"),
+        _picsum(),
+        *_keyed("anime waifu"),
+        _studio(),
     ],
     "neko": [
-        _PoolSource("waifu.pics", "https://api.waifu.pics/sfw/neko",
-                    "waifu.pics"),
-        _PoolSource("nekos.best", "https://nekos.best/api/v2/neko",
-                    "nekos.best"),
-        _PoolSource("nekosapi",
-                    "https://api.nekosapi.com/v4/images/random"
-                    "?rating=safe",
-                    "nekosapi"),
+        _anime_seed("waifu.pics", _WAIFU_PICS + "neko", "waifu.pics"),
+        _anime_seed("nekos.best", _NEKOS_BEST + "neko", "nekos.best"),
+        _anime_seed("nekosapi", _NEKOSAPI, "nekosapi"),
+        _PoolSource("cataas", "https://cataas.com/cat?json=true",
+                    "cataas", source_class=CLASS_ANIMALS, weight=2),
+        _PoolSource("cataas-gif",
+                    "https://cataas.com/cat/gif?json=true",
+                    "cataas", source_class=CLASS_ANIMALS, weight=2,
+                    animated=True),
+        *_keyed("cute cat"),
+        _studio(),
     ],
     "kitsune": [
-        _PoolSource("nekos.best", "https://nekos.best/api/v2/kitsune",
+        _anime_seed("nekos.best", _NEKOS_BEST + "kitsune",
                     "nekos.best"),
+        _PoolSource("randomfox", "https://randomfox.ca/floof/",
+                    "randomfox", source_class=CLASS_ANIMALS,
+                    weight=2),
+        *_keyed("fox"),
+        _studio(),
     ],
     "husbando": [
-        _PoolSource("nekos.best", "https://nekos.best/api/v2/husbando",
+        _anime_seed("nekos.best", _NEKOS_BEST + "husbando",
                     "nekos.best"),
+        _picsum(),
+        *_keyed("anime husbando"),
+        _studio(),
     ],
     "charpic": [
-        _PoolSource("waifu.pics", "https://api.waifu.pics/sfw/waifu",
+        _anime_seed("waifu.pics", _WAIFU_PICS + "waifu", "waifu.pics"),
+        _anime_seed("waifu.pics", _WAIFU_PICS + "shinobu",
                     "waifu.pics"),
-        _PoolSource("waifu.pics", "https://api.waifu.pics/sfw/shinobu",
-                    "waifu.pics"),
-        _PoolSource("nekos.best", "https://nekos.best/api/v2/neko",
-                    "nekos.best"),
-        _PoolSource("nekos.best", "https://nekos.best/api/v2/waifu",
-                    "nekos.best"),
-        _PoolSource("nekosapi",
-                    "https://api.nekosapi.com/v4/images/random"
-                    "?rating=safe",
-                    "nekosapi"),
+        _anime_seed("nekos.best", _NEKOS_BEST + "neko", "nekos.best"),
+        _anime_seed("nekos.best", _NEKOS_BEST + "waifu", "nekos.best"),
+        _anime_seed("nekosapi", _NEKOSAPI, "nekosapi"),
+        _picsum(),
+        *_keyed("anime character"),
+        _studio(),
+    ],
+    "couplepp": [
+        _anime_seed("waifu.pics", _WAIFU_PICS + "waifu", "waifu.pics"),
+        _anime_seed("nekos.best", _NEKOS_BEST + "waifu", "nekos.best"),
+        _anime_seed("nekosapi", _NEKOSAPI, "nekosapi"),
+        _picsum(),
+        # Registered so the pool's class span is honest; the
+        # makers walk is URL-only (fetch_url), so this rung
+        # sits out there — MakerService keeps its own
+        # pair-shaped studio floor below the chain.
+        _studio(),
     ],
 }
 
 
+def pool_classes(pool: str) -> set[str]:
+    """The source classes a pool's chain spans, as tabled
+    (keyed and studio rungs included — what the chain CAN
+    serve when fully configured)."""
+    return {src.source_class for src in IMAGE_POOLS.get(pool) or []}
+
+
+def direct_source_url(name: str, *, rng: Any) -> str:
+    """The composed URL of a named direct source (one whose
+    seeded URL IS the picture — picsum) from the shared table.
+    The makers picsum adapter delegates here so the template
+    lives only in this table."""
+    for entries in IMAGE_POOLS.values():
+        for src in entries:
+            if src.name == name and "{seed}" in src.url:
+                return src.url.format(
+                    seed=rng.randrange(1, 10 ** 9))
+    return ""
+
+
 class ImagePoolClient:
-    """Random anime pictures from the public pool APIs."""
+    """Random pictures from the unified pool table.
 
-    def __init__(self, transport: Transport) -> None:
+    The walk is a WEIGHTED shuffle: a kind's home class
+    carries the top weight so an anime-flavoured kind stays
+    anime-first across calls, while the other classes
+    genuinely rotate in (repeated calls visibly vary — the
+    owner's monotony complaint).  A dead or shapeless source
+    is noted in the attempts trail and the walk falls
+    through in order.  Her own studio is a weighted rung of
+    the rotation AND the floor: its weight buys it a share of
+    ordinary draws, and when every network source in the walk
+    has failed, the studio entry is tried last before the
+    pool gives up — generation is never only an error path,
+    and never ahead of the network walk it floors.
+    """
+
+    def __init__(self, transport: Transport, *,
+                 pools: dict[str, list[_PoolSource]] | None = None,
+                 generator: Any = None,
+                 tenor_key: str = "", giphy_key: str = "") -> None:
         self._t = transport
+        self._pools = pools if pools is not None else IMAGE_POOLS
+        # generator: callable(pool_kind) -> local file path of a
+        # picture she rendered ("" / raise = her hand failed).
+        self._generator = generator
+        self._keys = {"tenor": str(tenor_key or ""),
+                      "giphy": str(giphy_key or "")}
 
-    def fetch_url(self, pool: str, *, rng: Any) -> tuple[str, str]:
-        """(image_url, source_name) — walks the pool's seed chain."""
-        sources = list(IMAGE_POOLS.get(pool) or [])
+    # -- introspection ------------------------------------------
+    def available_classes(self, pool: str) -> set[str]:
+        """The classes this client can actually serve for
+        ``pool`` under its own configuration: keyed rungs
+        count only with their key configured, the studio only
+        with a generator wired."""
+        out: set[str] = set()
+        for src in self._pools.get(pool) or []:
+            if src.key and not self._keys.get(src.key):
+                continue
+            if src.shape == "studio" and self._generator is None:
+                continue
+            out.add(src.source_class)
+        return out
+
+    # -- the walk -------------------------------------------------
+    def fetch_media(self, pool: str, *, rng: Any,
+                    allow_local: bool = True) -> PoolHit:
+        """One picture from ``pool`` — walks the chain and
+        returns the first source that serves, with its class.
+        Raises SourceFailure with the full attempts trail."""
+        sources = list(self._pools.get(pool) or [])
         if not sources:
             raise SourceFailure("image pools", f"unknown pool {pool!r}")
-        rng.shuffle(sources)
-        attempts: list[str] = []
+        network: list[_PoolSource] = []
+        studio: list[_PoolSource] = []
         for src in sources:
+            if src.key and not self._keys.get(src.key):
+                continue  # an unconfigured keyed rung never enters
+            if src.shape == "studio":
+                studio.append(src)
+            else:
+                network.append(src)
+        plan = self._weighted_order(network, rng)
+        if studio and self._generator is not None and allow_local:
+            total = sum(s.weight for s in network + studio)
+            share = sum(s.weight for s in studio) / max(1, total)
+            # Her hand takes this draw, or floors the walk.
+            plan = studio + plan if rng.random() < share \
+                else plan + studio
+        attempts: list[str] = []
+        for src in plan:
+            hit = self._try_source(src, pool, rng, attempts)
+            if hit is not None:
+                return hit
+        raise SourceFailure(
+            "image pools", "; ".join(attempts) or "no sources")
+
+    def fetch_url(self, pool: str, *, rng: Any) -> tuple[str, str]:
+        """(image_url, source_name) — the URL-only walk (the
+        studio rung sits out: a render is a file, not a URL)."""
+        hit = self.fetch_media(pool, rng=rng, allow_local=False)
+        return hit.url, hit.source
+
+    @staticmethod
+    def _weighted_order(sources: list[_PoolSource],
+                        rng: Any) -> list[_PoolSource]:
+        """Weighted sampling without replacement (Efraimidis–
+        Spirakis): each source draws ``random ** (1/weight)``;
+        the heaviest class tops the walk most often, every
+        source can top it sometimes."""
+        keyed = [(rng.random() ** (1.0 / src.weight), src)
+                 for src in sources]
+        keyed.sort(key=lambda pair: pair[0], reverse=True)
+        return [src for _key, src in keyed]
+
+    def _try_source(self, src: _PoolSource, pool: str, rng: Any,
+                    attempts: list[str]) -> PoolHit | None:
+        if src.shape == "studio":
             try:
-                result = self._t.request("GET", src.url,
+                path = str(self._generator(pool) or "")
+            except Exception as exc:  # noqa: BLE001 - her hand failed
+                attempts.append(f"{src.name}: render failed ({exc})")
+                return None
+            if path:
+                return PoolHit(source="her own studio",
+                               source_class=src.source_class,
+                               local_path=path)
+            attempts.append(f"{src.name}: render came back empty")
+            return None
+        url = src.url
+        params: dict[str, Any] | None = None
+        if src.shape == "picsum":
+            # The seeded URL IS the picture: compose it, then
+            # prove it live (the request follows the redirect
+            # to the real photograph) before handing it out.
+            url = src.url.format(seed=rng.randrange(1, 10 ** 9))
+            try:
+                result = self._t.request("GET", url,
                                          timeout=DEFAULT_TIMEOUT)
             except TransportError as exc:
                 attempts.append(f"{src.name}: unreachable ({exc})")
-                continue
-            if not result.ok:
-                attempts.append(f"{src.name}: HTTP {result.status}")
-                continue
-            url = self._extract(src, result.data)
-            if url:
-                return url, src.name
-            attempts.append(f"{src.name}: shape changed (no image url)")
-        raise SourceFailure("image pools", "; ".join(attempts))
+                return None
+            if result.ok and result.content:
+                return PoolHit(url=str(result.url or url),
+                               source=src.name,
+                               source_class=src.source_class)
+            attempts.append(f"{src.name}: HTTP {result.status}")
+            return None
+        if src.shape == "tenor":
+            params = {"q": src.query, "key": self._keys["tenor"],
+                      "limit": 8, "media_filter": "gif",
+                      "contentfilter": "medium"}
+        elif src.shape == "giphy":
+            params = {"api_key": self._keys["giphy"], "q": src.query,
+                      "limit": 8, "rating": "pg-13"}
+        try:
+            result = self._t.request("GET", url, params=params,
+                                     timeout=DEFAULT_TIMEOUT)
+        except TransportError as exc:
+            attempts.append(f"{src.name}: unreachable ({exc})")
+            return None
+        if not result.ok:
+            attempts.append(f"{src.name}: HTTP {result.status}")
+            return None
+        found = self._extract(src, result.data, rng)
+        if found:
+            return PoolHit(url=found, source=src.name,
+                           source_class=src.source_class)
+        attempts.append(f"{src.name}: shape changed (no image url)")
+        return None
 
     @staticmethod
-    def _extract(src: _PoolSource, data: Any) -> str:
+    def _extract(src: _PoolSource, data: Any, rng: Any) -> str:
         if src.shape == "waifu.pics":
             if isinstance(data, dict) and isinstance(data.get("url"), str):
                 return data["url"]
@@ -529,6 +780,45 @@ class ImagePoolClient:
                             and row["url"]:
                         return row["url"]
             return ""
+        if src.shape == "cataas":
+            # {"url": …} — relative on older answers, absolute
+            # on newer; both are real shapes it serves.
+            if isinstance(data, dict):
+                url = str(data.get("url") or "")
+                if url.startswith("/"):
+                    url = "https://cataas.com" + url
+                return url
+            return ""
+        if src.shape == "randomfox":
+            if isinstance(data, dict) \
+                    and isinstance(data.get("image"), str):
+                return data["image"]
+            return ""
+        if src.shape == "tenor":
+            rows = data.get("results") if isinstance(data, dict) \
+                else None
+            urls = []
+            for row in rows or []:
+                if not isinstance(row, dict):
+                    continue
+                formats = row.get("media_formats") or {}
+                pick = formats.get("gif") or formats.get("tinygif") \
+                    or {}
+                if pick.get("url"):
+                    urls.append(str(pick["url"]))
+            return rng.choice(urls) if urls else ""
+        if src.shape == "giphy":
+            rows = data.get("data") if isinstance(data, dict) \
+                else None
+            urls = []
+            for row in rows or []:
+                if not isinstance(row, dict):
+                    continue
+                images = row.get("images") or {}
+                pick = images.get("fixed_height") or {}
+                if pick.get("url"):
+                    urls.append(str(pick["url"]))
+            return rng.choice(urls) if urls else ""
         if isinstance(data, dict):
             results = data.get("results")
             if isinstance(results, list) and results and \

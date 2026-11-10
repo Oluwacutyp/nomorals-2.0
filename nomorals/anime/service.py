@@ -65,6 +65,11 @@ class Outcome:
     picks: list[tuple[str, str]] = field(default_factory=list)
     note: str = ""
     error: str = ""
+    #: A picture she rendered herself (the pool's studio rung):
+    #: a local file path, where ``image_url`` would carry a
+    #: network source's link.  The send path reads whichever
+    #: is set.
+    image_path: str = ""
 
     @classmethod
     def fail(cls, error: str, *, title: str = "") -> Outcome:
@@ -824,13 +829,18 @@ class AnimeService:
 
     def picture(self, pool: str) -> Outcome:
         try:
-            url, source = self._images.fetch_url(pool, rng=self._rng)
+            hit = self._images.fetch_media(pool, rng=self._rng)
         except SourceFailure as exc:
             return Outcome.fail(f"picture failed — {exc}")
         out = Outcome(ok=True, title="", icon="🖼️")
-        out.image_url = url
-        out.image_caption = f"via {source}"
-        out.note = f"picture via {source}"
+        if hit.local_path:
+            out.image_path = hit.local_path
+            out.image_caption = "drawn by Devon herself (her own studio)"
+            out.note = "picture via her own studio"
+            return out
+        out.image_url = hit.url
+        out.image_caption = f"via {hit.source}"
+        out.note = f"picture via {hit.source}"
         return out
 
     # ── reverse identification (/whatanime) ───────────────────────

@@ -13,6 +13,7 @@ message's media, via the expression mixin's resolver).
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 from typing import Any
 
@@ -83,16 +84,43 @@ class RuntimeAnimeMixin:
         extras = getattr(self.context, "extras", {}) or {}
         transport = extras.get("anime_transport") or core_http_transport()
         db = getattr(self.context, "db", None)
+        # The unified picture pool's configured rungs: her own
+        # studio as the generation rung, and the keyed GIF
+        # search rungs when the owner configured keys (the
+        # expression family's settings/env names — one
+        # provisioning story for both).
+        settings = getattr(self.context, "settings", None)
+        tenor = str(getattr(settings, "tenor_api_key", "")
+                    or os.environ.get("NM_TENOR_API_KEY", "") or "")
+        giphy = str(getattr(settings, "giphy_api_key", "")
+                    or os.environ.get("NM_GIPHY_API_KEY", "") or "")
         svc = AnimeService(
             anilist=AniListClient(transport),
             jikan=JikanClient(transport),
             quotes=QuoteClient(transport),
-            images=ImagePoolClient(transport),
+            images=ImagePoolClient(
+                transport, generator=self._anime_pool_generator(),
+                tenor_key=tenor, giphy_key=giphy),
             trace=TraceMoeClient(transport),
             favorites=FavoritesStore(db),
         )
         self._anime_service_obj = svc
         return svc
+
+    def _anime_pool_generator(self):  # type: ignore[no-untyped-def]
+        """Her own hand for the picture pools: the studio
+        renders the kind's mood animation into the anime
+        cache — a GIF she drew herself, served by the pool's
+        studio rung (the caption names it as hers)."""
+
+        def generate(kind: str) -> str:
+            from ...social.chat import emoji_studio
+
+            path = emoji_studio.mood_animation(
+                kind, self._anime_cache_dir(), name=f"pool_{kind}")
+            return str(path)
+
+        return generate
 
     def _anime_user_key(self, message: Any) -> str:
         """The §29 person key: one identity per person, every room."""
@@ -119,35 +147,56 @@ class RuntimeAnimeMixin:
                           buttons: Any = None,
                           label: str = "") -> str:
         """Fetch the outcome's image and send it into the chat
-        AS A PHOTO (delivery-shape law, 2026-11-07): the send
-        declares kind "image" and carries a human name, so the
-        picture lands inline — never as a hash-named document
-        attachment (the /husbando defect).  ``buttons`` ride
-        the photo on surfaces whose media sends carry them.
+        IN ITS OWN KIND (delivery-shape law, 2026-11-07; kind
+        truth, 2026-11-10): the BYTES decide what goes out —
+        sniffed by the picture family's shared ``picture_shape``
+        — so a still lands as a photo and an animated payload
+        (GIF / animated WebP / MP4) lands as an animation,
+        never flattened into a still by a URL-derived suffix.
+        The send carries a human name, so the picture lands
+        inline — never as a hash-named document attachment
+        (the /husbando defect).  ``buttons`` ride the media on
+        surfaces whose media sends carry them.  An outcome
+        whose picture she rendered herself (``image_path`` —
+        the pool's studio rung) is read from disk instead of
+        downloaded.
 
         Returns "" when the image went out (or none was offered);
         a plain-words note when it could not be delivered — the
         text answer always stands on its own."""
         url = str(getattr(outcome, "image_url", "") or "")
-        if not url or not chat_key:
+        local = str(getattr(outcome, "image_path", "") or "")
+        if not chat_key or (not url and not local):
             return ""
         chat = self._ref_from_key(chat_key)
         if chat is None or getattr(self, "gateway", None) is None:
             return ""
         try:
-            from ...anime.transport import core_http_transport
+            if local:
+                try:
+                    content = Path(local).read_bytes()
+                except OSError:
+                    return "(the picture couldn't be sent on this surface)"
+            else:
+                from ...anime.transport import core_http_transport
 
-            extras = getattr(self.context, "extras", {}) or {}
-            transport = extras.get("anime_transport") \
-                or core_http_transport()
-            result = transport.request("GET", url, timeout=15.0)
-            if not result.ok or not result.content:
-                return "(the picture itself wouldn't download)"
-            suffix = ".png" if url.lower().split("?")[0].endswith(".png") \
-                else ".jpg"
-            digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
+                extras = getattr(self.context, "extras", {}) or {}
+                transport = extras.get("anime_transport") \
+                    or core_http_transport()
+                result = transport.request("GET", url, timeout=15.0)
+                if not result.ok or not result.content:
+                    return "(the picture itself wouldn't download)"
+                content = result.content
+            from ...social.chat.fun import picture_shape
+
+            shape = picture_shape(content)
+            if shape is None:
+                return "(what came back wasn't a picture)"
+            suffix, _mime, send_kind = shape
+            digest = hashlib.sha1(
+                (url or local).encode("utf-8")).hexdigest()[:16]
             path = self._anime_cache_dir() / f"{digest}{suffix}"
-            path.write_bytes(result.content)
+            path.write_bytes(content)
             raw_label = str(label or getattr(outcome, "title", "")
                             or "").strip().lower()
             # A presented name must be a legal file name on
@@ -159,7 +208,7 @@ class RuntimeAnimeMixin:
             sent = self.gateway.send_file(
                 chat.platform, chat.key, str(path),
                 caption=str(getattr(outcome, "image_caption", "") or ""),
-                kind="image", name=f"{friendly}{suffix}",
+                kind=send_kind, name=f"{friendly}{suffix}",
                 buttons=buttons)
             if sent is not None and getattr(sent, "ok", False):
                 return ""

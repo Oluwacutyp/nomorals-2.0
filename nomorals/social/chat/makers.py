@@ -70,7 +70,7 @@ from typing import Any
 
 from .expression import ProviderHealth
 from .failures import record_failure
-from .fun import _sniff_image, _trim_caption
+from .fun import _sniff_image, _trim_caption, picture_shape
 
 __all__ = [
     "MAKER_COMMANDS", "CARD_KINDS", "CARD_STYLES",
@@ -1020,74 +1020,112 @@ class BollsProvider:
 
 
 # ── /couplepp: one artwork, a matched pair ───────────────────
+#
+# The chain's providers are DELEGATES, not implementations
+# (2026-11-10 consolidation): every endpoint's URL, response
+# shape and safety check lives in the anime organ's unified
+# pool table (nomorals.anime.sources) — the single pool organ
+# the whole picture family draws from.  These classes keep
+# the chain's contract (a name the health breaker and the
+# captions speak, an ``image_url()``) and forward to that
+# organ's client over a one-entry pool.  The duplicate
+# endpoint implementations that used to live here are gone:
+# a provider fix now lands once, for every picture command.
 
-class WaifuPoolProvider:
-    """waifu.pics SFW pool — ``{"url": …}`` (the anime
-    organ's seed of the same name)."""
+class _FetcherTransport:
+    """Adapt a makers JSON fetcher to the anime Transport
+    seam, so a delegate handed a fetcher (the test shape)
+    still speaks to the one pool client."""
+
+    def __init__(self, fetcher: Callable[[str], Any]) -> None:
+        self._fetch = fetcher
+
+    def request(self, method: str, url: str, **kw: Any) -> Any:
+        from ...anime.transport import HttpResult, TransportError
+
+        try:
+            data = self._fetch(url)
+        except Exception as exc:  # noqa: BLE001 - one seam, named
+            raise TransportError(str(exc)) from exc
+        return HttpResult(200, data=data)
+
+
+class _PoolDelegate:
+    """One named rung of the couplepp chain over the unified
+    pool client: the entry is read out of the shared table
+    (the ``waifu`` pool's entry of the same name — the /waifu
+    category, which is the category this chain has always
+    drawn)."""
+
+    name = "?"
+    _entry_name = "?"
+
+    def __init__(self, *,
+                 fetcher: Callable[[str], Any] | None = None,
+                 client: Any = None,
+                 transport: Any = None,
+                 rng: random.Random | None = None) -> None:
+        self._fetcher = fetcher
+        self._client = client
+        self._transport = transport
+        self._rng = rng or random.Random()
+
+    def _client_or_build(self) -> Any:
+        if self._client is not None:
+            return self._client
+        from ...anime.sources import IMAGE_POOLS, ImagePoolClient
+        from ...anime.transport import core_http_transport
+
+        entries = [e for e in IMAGE_POOLS["waifu"]
+                   if e.name == self._entry_name]
+        if self._transport is not None:
+            transport = self._transport
+        elif self._fetcher is not None:
+            transport = _FetcherTransport(self._fetcher)
+        else:
+            transport = core_http_transport()
+        self._client = ImagePoolClient(
+            transport, pools={"_one": entries})
+        return self._client
+
+    def image_url(self) -> str:
+        from ...anime.sources import SourceFailure
+
+        try:
+            url, _source = self._client_or_build().fetch_url(
+                "_one", rng=self._rng)
+        except SourceFailure as exc:
+            raise MakerError(str(exc)) from exc
+        return url
+
+
+class WaifuPoolProvider(_PoolDelegate):
+    """waifu.pics SFW pool — delegated to the unified pool
+    organ (its ``{"url": …}`` shape is checked there)."""
 
     name = "waifu.pics"
-
-    def __init__(self, *,
-                 fetcher: Callable[[str], Any] | None = None
-                 ) -> None:
-        self._fetch = fetcher or _http_json
-
-    def image_url(self) -> str:
-        data = self._fetch("https://api.waifu.pics/sfw/waifu")
-        if not isinstance(data, dict):
-            raise MakerError("waifu.pics answered a non-object")
-        return _need_text(data.get("url"), "url")
+    _entry_name = "waifu.pics"
 
 
-class NekosPoolProvider:
-    """nekos.best pool — ``{"results": [{"url": …}]}``."""
+class NekosPoolProvider(_PoolDelegate):
+    """nekos.best pool — delegated to the unified pool organ
+    (its ``{"results": [{"url": …}]}`` shape is checked
+    there)."""
 
     name = "nekos.best"
-
-    def __init__(self, *,
-                 fetcher: Callable[[str], Any] | None = None
-                 ) -> None:
-        self._fetch = fetcher or _http_json
-
-    def image_url(self) -> str:
-        data = self._fetch("https://nekos.best/api/v2/waifu")
-        results = data.get("results") if isinstance(data, dict) \
-            else None
-        if not results or not isinstance(results[0], dict):
-            raise MakerError("nekos.best answered no results")
-        return _need_text(results[0].get("url"), "url")
+    _entry_name = "nekos.best"
 
 
-class NekosApiPoolProvider:
-    """nekosapi.com v4 random pool — a bare JSON list of
-    ``{"url": …, "rating": …}`` rows.  The unfiltered pool
-    is NOT safe (it serves suggestive/explicit rows), so the
-    request carries ``rating=safe`` AND the pick re-checks
-    every row's rating in code: only a row the pool itself
-    rates ``safe`` can ever be returned — the filter is the
-    source's claim, the check is ours."""
+class NekosApiPoolProvider(_PoolDelegate):
+    """nekosapi.com v4 random pool — delegated to the unified
+    pool organ, whose extractor keeps the safety law: the
+    unfiltered pool is NOT safe (it serves suggestive/
+    explicit rows), so only a row the pool itself rates
+    ``safe`` can ever be returned — the filter is the
+    source's claim, the check is the pool's."""
 
     name = "nekosapi"
-
-    def __init__(self, *,
-                 fetcher: Callable[[str], Any] | None = None
-                 ) -> None:
-        self._fetch = fetcher or _http_json
-
-    def image_url(self) -> str:
-        data = self._fetch(
-            "https://api.nekosapi.com/v4/images/random"
-            "?rating=safe")
-        rows = data if isinstance(data, list) else []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            if str(row.get("rating") or "") != "safe":
-                continue
-            url = str(row.get("url") or "").strip()
-            if url:
-                return url
-        raise MakerError("nekosapi answered no safe rows")
+    _entry_name = "nekosapi"
 
 
 class PicsumPoolProvider:
@@ -1095,7 +1133,9 @@ class PicsumPoolProvider:
     pool of real photos), keyless: a seeded URL answers a
     redirect to one real photograph.  This is the chain's
     non-anime rung: a couple pair drawn from an actual photo,
-    named as such in the caption."""
+    named as such in the caption.  The seeded-URL template
+    lives in the unified pool table; this adapter only fills
+    it with its rng."""
 
     name = "picsum"
 
@@ -1104,8 +1144,9 @@ class PicsumPoolProvider:
         self._rng = rng or random.Random()
 
     def image_url(self) -> str:
-        seed = self._rng.randrange(1, 10 ** 9)
-        return f"https://picsum.photos/seed/{seed}/1200/900"
+        from ...anime.sources import direct_source_url
+
+        return direct_source_url("picsum", rng=self._rng)
 
 
 def _diptych_crops(data: bytes):
@@ -1450,33 +1491,47 @@ class MakerService:
             name = str(getattr(provider, "name", "?"))
             if not self.health.available(name):
                 continue
-            try:
-                url = provider.image_url()
-                data = self.bytes_fetcher(url)
-            except Exception as exc:  # noqa: BLE001 - shed
-                self.health.note(name, False)
-                last = str(exc)[:160]
-                continue
-            if _sniff_image(data) is None:
-                self.health.note(name, False)
-                last = f"{name} sent bytes that aren't an image"
-                continue
-            self.health.note(name, True)
-            try:
-                left, right, info = split_diptych(data)
-            except MakerError as exc:
-                return {"sent": False, "reason": str(exc)}
-            out = self._deliver_pair(
-                left, right,
-                f"💞 couple pp — one artwork via {name}, split "
-                f"into a matched pair. This is the left half — "
-                f"for one of you (1 of 2)",
-                "💞 and the right half — for the other (2 of 2). "
-                "Each half is its own picture: set it as your "
-                "profile photo just as it is",
-                send, buttons=buttons)
-            out.update({"source": name, **info})
-            return out
+            # A pair needs a STILL (a diptych is two profile
+            # pictures): the diversified pools can answer with
+            # an animation, so a provider whose draw comes
+            # back animated is re-drawn a few times before the
+            # walk sheds to the next source.  An animated draw
+            # is not a source failure — no health penalty; the
+            # source is healthy, the asset's shape is wrong
+            # for a pair.
+            for _draw in range(3):
+                try:
+                    url = provider.image_url()
+                    data = self.bytes_fetcher(url)
+                except Exception as exc:  # noqa: BLE001 - shed
+                    self.health.note(name, False)
+                    last = str(exc)[:160]
+                    break
+                if _sniff_image(data) is None:
+                    self.health.note(name, False)
+                    last = f"{name} sent bytes that aren't an image"
+                    break
+                shape = picture_shape(data)
+                if shape is not None and shape[2] != "image":
+                    last = (f"{name} sent an animation — "
+                            f"a pair needs a still")
+                    continue
+                self.health.note(name, True)
+                try:
+                    left, right, info = split_diptych(data)
+                except MakerError as exc:
+                    return {"sent": False, "reason": str(exc)}
+                out = self._deliver_pair(
+                    left, right,
+                    f"💞 couple pp — one artwork via {name}, split "
+                    f"into a matched pair. This is the left half — "
+                    f"for one of you (1 of 2)",
+                    "💞 and the right half — for the other (2 of 2). "
+                    "Each half is its own picture: set it as your "
+                    "profile photo just as it is",
+                    send, buttons=buttons)
+                out.update({"source": name, **info})
+                return out
         # Her own hand (expression completion, 2026-11-07):
         # every pool can be down — the pair still lands, drawn
         # by HER studio: one of her own artworks, split into
