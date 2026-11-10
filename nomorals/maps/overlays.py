@@ -30,12 +30,17 @@ overlays land in the runtime-created ``map_overlays`` table
 ``<home>/maps/overlays.json``, written atomically (tmp +
 replace).  Reads never raise.
 
-RENDERING HONESTY: the shipped MapOverlay seam carries markers
-and polylines — it has NO polygon fill.  A polygon feature
-therefore converts to its closed outline, and the conversion
-returns that fact as an explicit note per polygon; surfaces and
-tool results carry the note.  A polygon is never silently
-dropped and never dressed up as filled.
+RENDERING HONESTY: the MapOverlay seam carries markers,
+polylines and polygons.  A polygon feature converts to a seam
+polygon (outer ring + hole rings, carried whole from the
+GeoJSON) and renders FILLED — fill color/opacity and the ring
+stroke are the style document's overlay paint, never hardcoded
+here or in the renderer.  A polygon whose geometry cannot be
+filled honestly (a self-intersecting or degenerate ring, a
+hole outside its outer ring) converts to its closed outline
+instead, with a note naming the defect; surfaces and tool
+results carry the note.  A polygon is never silently dropped
+and never dressed up as filled when it is not.
 """
 
 from __future__ import annotations
@@ -52,7 +57,7 @@ from ..core.failures import record_failure
 from ..core.logging_setup import get_logger
 from .coords import BBox, validate_lat, validate_lon
 from .geojson import validate_geojson
-from .vector_render import MapOverlay
+from .vector_render import MapOverlay, OverlayPolygon, polygon_defects
 
 _log = get_logger(__name__)
 
@@ -88,31 +93,46 @@ class OverlayError(ValueError):
 @dataclass(frozen=True)
 class OverlayFeature:
     """One drawn thing: a marker (1 point), a polyline (>=2), or
-    a polygon ring (>=3).  ``points`` are (lat, lon) pairs."""
+    a polygon ring (>=3).  ``points`` are (lat, lon) pairs;
+    ``holes`` (polygons only) are the polygon's interior rings,
+    each a ring of (lat, lon) pairs — carried whole so the fill
+    can leave them unfilled."""
 
     kind: str
     points: tuple[tuple[float, float], ...] = ()
     label: str = ""
+    holes: tuple[tuple[tuple[float, float], ...], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
-        return {"kind": self.kind,
-                "points": [[lat, lon] for lat, lon in self.points],
-                "label": self.label}
+        data: dict[str, Any] = {
+            "kind": self.kind,
+            "points": [[lat, lon] for lat, lon in self.points],
+            "label": self.label}
+        if self.holes:
+            data["holes"] = [[[lat, lon] for lat, lon in ring]
+                             for ring in self.holes]
+        return data
 
     @classmethod
     def from_dict(cls, data: Any) -> OverlayFeature:
         if not isinstance(data, dict):
             raise OverlayError("overlay feature must be an object")
-        raw_points = data.get("points") or ()
-        points = []
-        for raw in raw_points:
-            if not isinstance(raw, (list, tuple)) or len(raw) != 2:
-                raise OverlayError(
-                    "overlay feature point must be [lat, lon]")
-            points.append((float(raw[0]), float(raw[1])))
+
+        def _ring(raw_ring: Any) -> tuple[tuple[float, float], ...]:
+            points = []
+            for raw in raw_ring or ():
+                if not isinstance(raw, (list, tuple)) \
+                        or len(raw) != 2:
+                    raise OverlayError(
+                        "overlay feature point must be [lat, lon]")
+                points.append((float(raw[0]), float(raw[1])))
+            return tuple(points)
+
         return cls(kind=str(data.get("kind", "")),
-                   points=tuple(points),
-                   label=str(data.get("label", "") or ""))
+                   points=_ring(data.get("points") or ()),
+                   label=str(data.get("label", "") or ""),
+                   holes=tuple(_ring(r) for r in data.get("holes")
+                               or ()))
 
 
 @dataclass(frozen=True)
@@ -176,6 +196,22 @@ def validate_features(features: Iterable[OverlayFeature],
             except (TypeError, ValueError) as exc:
                 errors.append(where + " point " + str(j) + ": "
                               + str(exc))
+        if feat.holes and feat.kind != KIND_POLYGON:
+            errors.append(where + ": holes belong to a polygon")
+        for k, hole in enumerate(feat.holes):
+            if len(hole) < 3:
+                errors.append(where + " hole " + str(k) + ": a "
+                              "hole ring holds at least 3 points, "
+                              "got " + str(len(hole)))
+            total += len(hole)
+            for j, (lat, lon) in enumerate(hole):
+                try:
+                    validate_lat(float(lat))
+                    validate_lon(float(lon))
+                except (TypeError, ValueError) as exc:
+                    errors.append(where + " hole " + str(k)
+                                  + " point " + str(j) + ": "
+                                  + str(exc))
     if total > MAX_OVERLAY_POINTS:
         errors.append("point count exceeds the cap of "
                       + str(MAX_OVERLAY_POINTS))
@@ -198,11 +234,17 @@ def overlay_to_map_overlay(overlay: Overlay,
     """Convert to the renderer's overlay seam, honestly.
 
     Markers ride as markers, polylines as polylines; a polygon
-    rides as its CLOSED outline and earns a note saying exactly
-    that — the seam has no fill, so the interior is not shaded.
+    rides as a seam polygon — outer ring + holes — and renders
+    filled in the style document's overlay paint.  A polygon
+    whose rings cannot be filled honestly
+    (:func:`polygon_defects`: a self-intersecting or degenerate
+    ring, a hole outside its outer ring) rides as its CLOSED
+    outline instead and earns a note naming the defect — never
+    a silent wrong fill.
     """
     markers: list[tuple[float, float]] = []
     polylines: list[tuple[tuple[float, float], ...]] = []
+    polygons: list[OverlayPolygon] = []
     notes: list[str] = []
     for feat in overlay.features:
         if feat.kind == KIND_MARKER:
@@ -210,17 +252,24 @@ def overlay_to_map_overlay(overlay: Overlay,
         elif feat.kind == KIND_POLYLINE:
             polylines.append(feat.points)
         elif feat.kind == KIND_POLYGON:
-            ring = feat.points
-            if ring and ring[0] != ring[-1]:
-                ring = ring + (ring[0],)
-            polylines.append(ring)
+            rings = (feat.points,) + tuple(feat.holes)
+            defects = polygon_defects(rings)
             label = feat.label or "unnamed"
-            notes.append(
-                "polygon " + repr(label) + " drawn as an outline "
-                "only — the overlay seam has no fill, so its "
-                "interior is not shaded")
+            if defects:
+                ring = feat.points
+                if ring and ring[0] != ring[-1]:
+                    ring = ring + (ring[0],)
+                polylines.append(ring)
+                notes.append(
+                    "polygon " + repr(label) + " drawn as an "
+                    "outline only — " + defects[0] + ", so its "
+                    "interior is not shaded")
+            else:
+                polygons.append(OverlayPolygon(
+                    rings=rings, label=feat.label))
     return (MapOverlay(polylines=tuple(polylines),
-                       markers=tuple(markers)),
+                       markers=tuple(markers),
+                       polygons=tuple(polygons)),
             tuple(notes))
 
 
@@ -232,8 +281,9 @@ def geojson_to_features(data: Any,
     The M1 validation gate runs FIRST; a refused payload is
     refused whole (OverlayError carrying the gate's named
     defects).  Convertible geometries become features (Point ->
-    marker, LineString -> polyline, Polygon -> polygon over its
-    outer ring); multi-geometries fan out; a null geometry is
+    marker, LineString -> polyline, Polygon -> polygon with its
+    outer ring as points and its inner rings carried as holes);
+    multi-geometries fan out; a null geometry is
     skipped with a note.  GeoJSON positions are [lon, lat];
     overlay points are (lat, lon) — the conversion happens here,
     once.
@@ -285,18 +335,19 @@ def geojson_to_features(data: Any,
             if rings:
                 features.append(OverlayFeature(
                     KIND_POLYGON,
-                    tuple(point(p) for p in rings[0]), label))
-            if len(rings) > 1:
-                notes.append(
-                    "a polygon's inner rings (holes) are not "
-                    "carried by overlays — the outer ring became "
-                    "the feature")
+                    tuple(point(p) for p in rings[0]), label,
+                    holes=tuple(
+                        tuple(point(p) for p in ring)
+                        for ring in rings[1:])))
         elif kind == "MultiPolygon":
             for poly in coords or ():
                 if poly:
                     features.append(OverlayFeature(
                         KIND_POLYGON,
-                        tuple(point(p) for p in poly[0]), label))
+                        tuple(point(p) for p in poly[0]), label,
+                        holes=tuple(
+                            tuple(point(p) for p in ring)
+                            for ring in poly[1:])))
             notes.append(
                 "a MultiPolygon became one polygon feature per "
                 "polygon")

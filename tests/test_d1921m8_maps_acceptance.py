@@ -628,7 +628,7 @@ class TestRealRender(unittest.TestCase):
         self.assertGreater(_nonbackground_share(result.image), 0.01)
         self.assertEqual(result.receipt.operation, "render")
 
-    def test_overlay_over_ilawe_renders_with_the_fill_honesty_note(self):
+    def test_overlay_over_ilawe_renders_filled(self):
         env = mock.patch.dict(
             os.environ,
             {"NM_MAPS_PACKS_DIR": str(_S.shelf_extract)})
@@ -653,18 +653,40 @@ class TestRealRender(unittest.TestCase):
         self.assertEqual(ticket["outcome"], "ok", ticket)
         self.assertTrue(Path(ticket["image_path"]).is_file())
         notes = " ".join(ticket["notes"])
-        self.assertIn("outline only", notes)
-        self.assertIn("no fill", notes)
+        # the polygon-fill pass closed M7's outline-only
+        # remainder (this test used to pin the "outline only /
+        # no fill" note): a fillable polygon earns NO such note
+        self.assertNotIn("outline only", notes)
+        self.assertNotIn("no fill", notes)
         # the overlay actually paints: more house-gold pixels than
         # the same view without the overlay drawn on it
         base = agent.view(bbox=BBox(**ticket["bbox"]),
                           zoom=ticket["zoom"])
         self.assertEqual(base["outcome"], "ok", base)
-        overlay_gold = _gold_pixels(
-            Path(ticket["image_path"]).read_bytes())
-        base_gold = _gold_pixels(
-            Path(base["image_path"]).read_bytes())
+        overlay_png = Path(ticket["image_path"]).read_bytes()
+        base_png = Path(base["image_path"]).read_bytes()
+        overlay_gold = _gold_pixels(overlay_png)
+        base_gold = _gold_pixels(base_png)
         self.assertGreater(overlay_gold, base_gold)
+        # and the fill is really on the real pack: a body of
+        # pixels equals the style's translucent gold blended
+        # over the base render, pixel for pixel
+        from nomorals.maps.style import DEFAULT_STYLE, parse_color
+
+        gold = parse_color(DEFAULT_STYLE.overlay.fill)
+        opacity = DEFAULT_STYLE.overlay.fill_opacity
+        _w, _h, over_rgb = decode_png(overlay_png)
+        _w2, _h2, base_rgb = decode_png(base_png)
+        blended = 0
+        for at in range(0, len(base_rgb), 3):
+            want = tuple(
+                int(gold[i] * opacity + base_rgb[at + i]
+                    * (1.0 - opacity) + 0.5)
+                for i in range(3))
+            if tuple(over_rgb[at:at + 3]) == want \
+                    and tuple(base_rgb[at:at + 3]) != want:
+                blended += 1
+        self.assertGreater(blended, 1000)
 
 
 # ── 5 · agent + tool parity on real data ─────────────────────────

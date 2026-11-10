@@ -29,11 +29,12 @@ from .coords import MAX_ZOOM
 __all__ = [
     "BACKGROUND", "BOUNDARY", "BUILDING_FILL", "BUILDING_STROKE",
     "LABEL_HALO", "LABEL_TEXT", "LANDCOVER_WOOD", "LANDUSE_RESIDENTIAL",
-    "NO_DATA", "POI_FILL", "ROAD_CASING", "ROAD_MINOR", "ROAD_MOTORWAY",
+    "NO_DATA", "OVERLAY_FILL", "OVERLAY_STROKE", "POI_FILL",
+    "ROAD_CASING", "ROAD_MINOR", "ROAD_MOTORWAY",
     "ROAD_PRIMARY", "ROAD_SECONDARY", "WATER", "WATERWAY",
     "DEFAULT_STYLE", "KIND_FILL", "KIND_LABEL", "KIND_LINE",
-    "KIND_POINT", "STYLE_FORMAT", "MapStyle", "StyleError",
-    "StyleLayer", "parse_color", "style_hash",
+    "KIND_POINT", "STYLE_FORMAT", "MapStyle", "OverlayPaint",
+    "StyleError", "StyleLayer", "parse_color", "style_hash",
 ]
 
 #: The style document's own format version.
@@ -77,6 +78,12 @@ ROAD_SECONDARY = "#8d97a5"
 ROAD_MINOR = "#5b6572"
 #: Points of interest wear the house gold too.
 POI_FILL = "#e8b34b"
+#: Overlay regions (the owner's own polygons through the M7
+#: seam): house gold again — filled translucent, so the map
+#: beneath stays legible under the region; the translucency
+#: is the contrast answer for labels drawn over a fill.
+OVERLAY_FILL = "#e8b34b"
+OVERLAY_STROKE = "#e8b34b"
 #: Place labels: near-white text on the ink as its own halo.
 LABEL_TEXT = "#e8ecf1"
 LABEL_HALO = "#0a0d13"
@@ -279,10 +286,59 @@ class StyleLayer:
 
 
 @dataclass(frozen=True)
+class OverlayPaint:
+    """How the owner's overlay polygons paint: style data.
+
+    Overlay geometry is input data (the owner's shapes), but
+    how a filled region LOOKS is the style document's
+    business, like every other plane: ``fill`` +
+    ``fill_opacity`` (the render buffer is RGB, so opacity is
+    honored as a blend over whatever is already painted) and
+    the ``stroke`` the region's rings wear over the fill.
+    Nothing in the renderer hardcodes any of it — restyling
+    overlay regions means editing this data.
+    """
+
+    fill: str = OVERLAY_FILL
+    fill_opacity: float = 0.30
+    stroke: str = OVERLAY_STROKE
+    stroke_width: float = 2.0
+
+    def __post_init__(self) -> None:
+        _check_color(self.fill, "overlay paint fill")
+        _check_color(self.stroke, "overlay paint stroke")
+        if not (0.0 <= float(self.fill_opacity) <= 1.0):
+            raise StyleError(
+                "overlay paint fill_opacity must be within "
+                "0..1: " + repr(self.fill_opacity))
+        if float(self.stroke_width) < 0:
+            raise StyleError(
+                "overlay paint stroke_width must not be negative")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"fill": self.fill,
+                "fill_opacity": float(self.fill_opacity),
+                "stroke": self.stroke,
+                "stroke_width": float(self.stroke_width)}
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> OverlayPaint:
+        data = data or {}
+        return cls(
+            fill=str(data.get("fill", OVERLAY_FILL)),
+            fill_opacity=float(data.get("fill_opacity", 0.30)),
+            stroke=str(data.get("stroke", OVERLAY_STROKE)),
+            stroke_width=float(data.get("stroke_width", 2.0)))
+
+
+@dataclass(frozen=True)
 class MapStyle:
     """A whole style document: background + ordered paint rules.
 
     Layers paint in document order — the list IS the z-order.
+    ``overlay`` is the paint for the owner's own overlay
+    polygons — part of the document, so a style that predates
+    it deserializes with the default paint.
     """
 
     name: str
@@ -290,6 +346,7 @@ class MapStyle:
     no_data: str = NO_DATA
     layers: tuple[StyleLayer, ...] = field(default_factory=tuple)
     format: int = STYLE_FORMAT
+    overlay: OverlayPaint = field(default_factory=OverlayPaint)
 
     def __post_init__(self) -> None:
         if int(self.format) != STYLE_FORMAT:
@@ -303,7 +360,8 @@ class MapStyle:
     def to_dict(self) -> dict[str, Any]:
         return {"format": int(self.format), "name": self.name,
                 "background": self.background, "no_data": self.no_data,
-                "layers": [layer.to_dict() for layer in self.layers]}
+                "layers": [layer.to_dict() for layer in self.layers],
+                "overlay": self.overlay.to_dict()}
 
     @classmethod
     def from_dict(cls, data: dict) -> MapStyle:
@@ -313,7 +371,8 @@ class MapStyle:
             no_data=str(data.get("no_data", NO_DATA)),
             layers=tuple(StyleLayer.from_dict(entry)
                          for entry in data.get("layers", ())),
-            format=int(data.get("format", STYLE_FORMAT)))
+            format=int(data.get("format", STYLE_FORMAT)),
+            overlay=OverlayPaint.from_dict(data.get("overlay")))
 
 
 def style_hash(style: MapStyle) -> str:

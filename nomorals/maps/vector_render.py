@@ -32,6 +32,21 @@ part of the map rather than a sticker on it.  The overlay is
 *input data*, not style: a route wears the house gold whatever
 the style document says.  A render without an overlay is
 byte-identical to the render before the seam existed (pinned).
+
+The polygon-fill pass closes M7's named remainder: the seam
+also carries regions (:class:`OverlayPolygon` — an outer ring
+plus hole rings), painted FILLED under their ring stroke.  How
+a fill looks is style, not input: the fill color, its opacity
+and the ring stroke all come from the style document's overlay
+paint (:class:`~nomorals.maps.style.OverlayPaint`), and the
+renderer hardcodes none of it.  Holes empty by the same
+even-odd rule the MVT fills use — each seam polygon fills in
+its own pass, so the parts of a multi-polygon never cancel
+each other.  A polygon whose geometry cannot be filled
+honestly (:func:`polygon_defects`: a self-intersecting or
+degenerate ring, a hole outside its outer ring) degrades to
+its outline with the defect named in the receipt — never a
+crash, never a silent wrong fill.
 """
 
 from __future__ import annotations
@@ -62,8 +77,8 @@ from .style import (
 )
 
 __all__ = [
-    "LabelSpec", "MapOverlay", "PilTextBackend", "TextBackend",
-    "VectorRenderer",
+    "LabelSpec", "MapOverlay", "OverlayPolygon", "PilTextBackend",
+    "TextBackend", "VectorRenderer", "polygon_defects",
 ]
 
 
@@ -87,15 +102,191 @@ class LabelSpec:
 
 
 @dataclass(frozen=True)
+class OverlayPolygon:
+    """One region for the overlay seam: rings of (lat, lon).
+
+    ``rings[0]`` is the outer ring; any further rings are holes.
+    Rings may arrive open or closed (a repeated first point is
+    ignored by the painter).  Geometric validity is NOT a
+    construction contract: a self-intersecting ring is data the
+    painter degrades honestly (outline only, the defect named
+    in the receipt), never a crash and never a silent wrong
+    fill.  Structural shape — at least one ring of at least
+    three points — IS a contract, refused here like a bad
+    color.
+    """
+
+    rings: tuple[tuple[tuple[float, float], ...], ...] = ()
+    label: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.rings:
+            raise StyleError(
+                "an overlay polygon needs at least one ring")
+        for ring in self.rings:
+            if len(ring) < 3:
+                raise StyleError(
+                    "an overlay polygon ring holds at least "
+                    "3 points, got " + str(len(ring)))
+
+
+def _ring_xy(ring: tuple[tuple[float, float], ...],
+             ) -> list[tuple[float, float]]:
+    """A ring as (x=lon, y=lat) points, closure point dropped."""
+    pts = [(float(lon), float(lat)) for lat, lon in ring]
+    if len(pts) >= 2 and pts[0] == pts[-1]:
+        pts = pts[:-1]
+    return pts
+
+
+def _orient(a: tuple[float, float], b: tuple[float, float],
+            c: tuple[float, float]) -> float:
+    return (b[0] - a[0]) * (c[1] - a[1]) \
+        - (b[1] - a[1]) * (c[0] - a[0])
+
+
+def _on_segment(a: tuple[float, float], b: tuple[float, float],
+                p: tuple[float, float]) -> bool:
+    return min(a[0], b[0]) <= p[0] <= max(a[0], b[0]) \
+        and min(a[1], b[1]) <= p[1] <= max(a[1], b[1])
+
+
+def _segments_meet(p1: tuple[float, float], p2: tuple[float, float],
+                   p3: tuple[float, float],
+                   p4: tuple[float, float]) -> bool:
+    """True when the two segments share ANY point (crossing,
+    touching, or collinear overlap) — the conservative test a
+    fill-validity check wants."""
+    o1 = _orient(p1, p2, p3)
+    o2 = _orient(p1, p2, p4)
+    o3 = _orient(p3, p4, p1)
+    o4 = _orient(p3, p4, p2)
+    if ((o1 > 0) != (o2 > 0)) and ((o3 > 0) != (o4 > 0)) \
+            and o1 != 0 and o2 != 0 and o3 != 0 and o4 != 0:
+        return True
+    if o1 == 0 and _on_segment(p1, p2, p3):
+        return True
+    if o2 == 0 and _on_segment(p1, p2, p4):
+        return True
+    if o3 == 0 and _on_segment(p3, p4, p1):
+        return True
+    return o4 == 0 and _on_segment(p3, p4, p2)
+
+
+def _ring_self_crosses(pts: list[tuple[float, float]]) -> bool:
+    n = len(pts)
+    for i in range(n):
+        a, b = pts[i], pts[(i + 1) % n]
+        for j in range(i + 1, n):
+            if j == i + 1 or (i == 0 and j == n - 1):
+                continue   # neighbours share a ring vertex
+            c, d = pts[j], pts[(j + 1) % n]
+            if _segments_meet(a, b, c, d):
+                return True
+    return False
+
+
+def _point_in_ring(pt: tuple[float, float],
+                   pts: list[tuple[float, float]]) -> bool:
+    """Even-odd ray cast: is ``pt`` inside the ring?"""
+    x, y = pt
+    inside = False
+    n = len(pts)
+    for i in range(n):
+        ax, ay = pts[i]
+        bx, by = pts[(i + 1) % n]
+        if (ay <= y < by) or (by <= y < ay):
+            cross_x = ax + (y - ay) * (bx - ax) / (by - ay)
+            if cross_x > x:
+                inside = not inside
+    return inside
+
+
+def polygon_defects(rings: tuple[tuple[tuple[float, float], ...],
+                               ...]) -> tuple[str, ...]:
+    """Why a seam polygon cannot be filled honestly — or ().
+
+    Judged in the (lon, lat) plane: every ring needs at least
+    three distinct points and non-zero area and must not cross
+    itself; each hole must lie inside the outer ring without
+    touching it, and holes must not cross each other (the
+    even-odd fill would shade nonsense otherwise).  The first
+    defect is the one surfaces name; all are returned.
+    """
+    defects: list[str] = []
+    if not rings:
+        return ("a polygon holds no rings",)
+    xy = [_ring_xy(ring) for ring in rings]
+    for pts in xy:
+        if len({p for p in pts}) < 3:
+            defects.append(
+                "a ring is degenerate (fewer than 3 distinct "
+                "points)")
+            return tuple(defects)
+        # crossing BEFORE area: a bowtie's two lobes carry
+        # opposite signed areas that cancel to zero — testing
+        # area first would misname it a degenerate ring
+        if _ring_self_crosses(pts):
+            defects.append("a ring crosses itself")
+            return tuple(defects)
+        area = 0.0
+        for i in range(len(pts)):
+            ax, ay = pts[i]
+            bx, by = pts[(i + 1) % len(pts)]
+            area += ax * by - bx * ay
+        if area == 0.0:
+            defects.append("a ring is degenerate (zero area)")
+            return tuple(defects)
+    outer = xy[0]
+    holes = xy[1:]
+    for hole in holes:
+        crossed = False
+        for i in range(len(hole)):
+            a, b = hole[i], hole[(i + 1) % len(hole)]
+            for j in range(len(outer)):
+                c, d = outer[j], outer[(j + 1) % len(outer)]
+                if _segments_meet(a, b, c, d):
+                    defects.append("a hole crosses the outer ring")
+                    crossed = True
+                    break
+            if crossed:
+                break
+        if crossed:
+            continue
+        if not _point_in_ring(hole[0], outer):
+            defects.append("a hole lies outside the outer ring")
+    for at in range(len(holes)):
+        for other in range(at + 1, len(holes)):
+            first, second = holes[at], holes[other]
+            hit = False
+            for i in range(len(first)):
+                a, b = first[i], first[(i + 1) % len(first)]
+                for j in range(len(second)):
+                    c, d = second[j], second[(j + 1) % len(second)]
+                    if _segments_meet(a, b, c, d):
+                        hit = True
+                        break
+                if hit:
+                    break
+            if hit:
+                defects.append("two holes cross each other")
+    return tuple(defects)
+
+
+@dataclass(frozen=True)
 class MapOverlay:
     """Finished geometry drawn over the styled map (M5).
 
     Input data, not style: a caller hands the renderer (lat, lon)
-    polylines and markers; the renderer projects and stamps them
-    after the style layers and before the labels.  Routes wear
-    the house gold (the style's motorway gold, :data:`ROAD_MOTORWAY`)
-    whatever the style document says; endpoint markers are gold
-    discs with an ink centre so both ends read at a glance.
+    polylines, markers and polygons; the renderer projects and
+    stamps them after the style layers and before the labels.
+    Routes wear the house gold (the style's motorway gold,
+    :data:`ROAD_MOTORWAY`) whatever the style document says;
+    endpoint markers are gold discs with an ink centre so both
+    ends read at a glance.  Polygons are the exception that
+    proves the rule: how a filled region LOOKS is the style
+    document's overlay paint (fill, opacity, ring stroke) —
+    the geometry is the caller's, the paint is the style's.
     """
 
     polylines: tuple[tuple[tuple[float, float], ...], ...] = ()
@@ -103,6 +294,7 @@ class MapOverlay:
     line_color: str = ROAD_MOTORWAY
     line_width: float = 5.0
     marker_color: str = ROAD_MOTORWAY
+    polygons: tuple[OverlayPolygon, ...] = ()
 
     def __post_init__(self) -> None:
         parse_color(self.line_color)   # a bad color is a caller
@@ -375,15 +567,21 @@ class VectorRenderer:
                         self._paint(buf, out_w, out_h, rule, feature,
                                     mvt_layer.extent, unit_x(tile),
                                     tile.y, project, zoom, labels)
+        overlay_notes: list[str] = []
         if overlay is not None:
-            self._paint_overlay(buf, out_w, out_h, overlay, bbox,
-                                zoom, project)
+            overlay_notes = self._paint_overlay(
+                buf, out_w, out_h, overlay, bbox, zoom, project)
         detail = head + " · tiles " + str(len(decoded)) + "/" \
             + str(len(tiles)) + " present"
         if overlay is not None:
             detail += "; overlay: " + str(len(overlay.polylines)) \
                 + " line(s), " + str(len(overlay.markers)) \
                 + " marker(s)"
+            if overlay.polygons:
+                detail += ", " + str(len(overlay.polygons)) \
+                    + " polygon(s)"
+            for note in overlay_notes:
+                detail += "; " + note
         if missing:
             detail += "; missing: " + ", ".join(missing[:5])
             if len(missing) > 5:
@@ -398,14 +596,18 @@ class VectorRenderer:
 
     def _paint_overlay(self, buf: bytearray, out_w: int,
                        out_h: int, overlay: MapOverlay, bbox: BBox,
-                       zoom: int, project) -> None:
-        """Stamp the overlay's polylines + markers onto the map.
+                       zoom: int, project) -> list[str]:
+        """Stamp the overlay's polygons, polylines + markers
+        onto the map; returns the honesty notes (degraded
+        polygons) for the receipt.
 
         Points arrive as (lat, lon); projection runs through the
         same unit math as the tiles, with the antimeridian wrap
         applied the same way (a wrapped point's unit-x shifts by
-        the grid width).  Markers are a gold disc ringed around an
-        ink centre — the style's background — so an endpoint
+        the grid width).  Polygons paint first — fill under its
+        ring stroke, both under the lines and markers that may
+        cross the region.  Markers are a gold disc ringed around
+        an ink centre — the style's background — so an endpoint
         reads on any road color beneath it.
         """
         n = float(1 << zoom)
@@ -418,6 +620,12 @@ class VectorRenderer:
                 ux += n
             return project(ux, lat_to_y_float(lat, zoom))
 
+        notes: list[str] = []
+        for polygon in overlay.polygons:
+            note = self._paint_polygon(buf, out_w, out_h, polygon,
+                                       to_px)
+            if note is not None:
+                notes.append(note)
         line_rgb = parse_color(overlay.line_color)
         for line in overlay.polylines:
             pts = [to_px(point) for point in line]
@@ -432,6 +640,43 @@ class VectorRenderer:
             self._stamp_disc(buf, out_w, out_h, cx, cy, 7.0,
                              marker_rgb)
             self._stamp_disc(buf, out_w, out_h, cx, cy, 3.0, ink)
+        return notes
+
+    def _paint_polygon(self, buf: bytearray, out_w: int,
+                       out_h: int, polygon: OverlayPolygon,
+                       to_px) -> str | None:
+        """One seam polygon: filled under its ring stroke — or,
+        when its geometry cannot be filled honestly, its outer
+        ring as an outline and a note naming the defect.
+
+        Fill and stroke are the style document's overlay paint;
+        the fill runs this polygon's rings through the even-odd
+        scanline alone, so holes empty and a neighbouring
+        polygon's rings never cancel this one's interior.
+        """
+        paint = self._style.overlay
+        stroke = parse_color(paint.stroke)
+        width = max(1.0, float(paint.stroke_width))
+        defects = polygon_defects(polygon.rings)
+        if defects:
+            outer = [to_px(p) for p in polygon.rings[0]]
+            if len(outer) >= 2:
+                self._stroke_path(buf, out_w, out_h, outer, stroke,
+                                  width, close=True)
+            label = polygon.label or "unnamed"
+            return ("polygon " + repr(label) + " drawn as an "
+                    "outline only — " + defects[0])
+        rings = [[to_px(p) for p in ring] for ring in polygon.rings]
+        if float(paint.fill_opacity) > 0.0:
+            self._fill_rings(buf, out_w, out_h, rings,
+                             parse_color(paint.fill),
+                             opacity=float(paint.fill_opacity))
+        if float(paint.stroke_width) > 0.0:
+            for ring in rings:
+                if len(ring) >= 2:
+                    self._stroke_path(buf, out_w, out_h, ring,
+                                      stroke, width, close=True)
+        return None
 
     def _apply_labels(self, buf: bytearray, out_w: int, out_h: int,
                       labels: list[LabelSpec]) -> str:
@@ -608,10 +853,16 @@ class VectorRenderer:
 
     def _fill_rings(self, buf: bytearray, w: int, h: int,
                     rings: list[list[tuple[float, float]]],
-                    rgb: tuple[int, int, int]) -> None:
+                    rgb: tuple[int, int, int], *,
+                    opacity: float = 1.0) -> None:
         """Even-odd scanline fill over all of a feature's rings:
         outer rings fill, inner rings (holes) empty — the rule
-        the MVT winding order implies, applied geometrically."""
+        the MVT winding order implies, applied geometrically.
+        THE fill rule of this renderer, for pack polygons and
+        overlay regions alike.  ``opacity`` < 1 blends the fill
+        over the buffer's current pixel (the RGB buffer has no
+        alpha channel; a blend is how opacity is honored), the
+        default 1.0 overwriting exactly as before."""
         edges: list[tuple[float, float, float, float]] = []
         for ring in rings:
             for at in range(len(ring)):
@@ -625,6 +876,8 @@ class VectorRenderer:
             min(min(ay, by) for _ax, ay, _bx, by in edges))))
         y_hi = min(h - 1, int(math.ceil(
             max(max(ay, by) for _ax, ay, _bx, by in edges))))
+        blend = opacity < 1.0
+        keep = 1.0 - opacity
         for y in range(y_lo, y_hi + 1):
             scan = y + 0.5
             crossings: list[float] = []
@@ -638,4 +891,15 @@ class VectorRenderer:
                 xb = min(w - 1,
                          int(math.floor(crossings[at + 1] - 0.5)))
                 for x in range(xa, xb + 1):
-                    self._set(buf, w, h, x, y, rgb)
+                    if blend:
+                        at_px = (y * w + x) * 3
+                        buf[at_px] = int(rgb[0] * opacity
+                                         + buf[at_px] * keep + 0.5)
+                        buf[at_px + 1] = int(rgb[1] * opacity
+                                             + buf[at_px + 1]
+                                             * keep + 0.5)
+                        buf[at_px + 2] = int(rgb[2] * opacity
+                                             + buf[at_px + 2]
+                                             * keep + 0.5)
+                    else:
+                        self._set(buf, w, h, x, y, rgb)

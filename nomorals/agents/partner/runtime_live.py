@@ -145,12 +145,16 @@ class RuntimeLiveMixin:
         /map overlay (M7) is the owner's own layer over those
         packs: named marker/polyline/polygon documents stored
         as data (nomorals.maps.overlays), rendered through the
-        same overlay seam routes draw through.  Polygons ride
-        as outlines — the seam has no fill — and the show
-        caption says so whenever a polygon is in the overlay,
-        never silently.  The verbs here are the chat-thin
-        paths (one-marker add); the MapAgent + map tool carry
-        the same store and renderer to the brain.
+        same overlay seam routes draw through.  Polygons fill:
+        the style document's overlay paint lays its translucent
+        fill under the ring stroke and holes stay unfilled.
+        A polygon whose geometry cannot be filled honestly
+        (a self-intersecting ring, a hole outside its outer
+        ring) degrades to its outline instead, and the show
+        caption says so, never silently.  The verbs here are
+        the chat-thin paths (one-marker add); the MapAgent +
+        map tool carry the same store and renderer to the
+        brain.
 
         /map mark (M9) saves where the owner is standing:
         /map mark <label> captures the location of that moment

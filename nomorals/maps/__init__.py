@@ -33,6 +33,13 @@ the owner's overlays (:mod:`nomorals.maps.overlays`): named
 marker/polyline/polygon documents, validated through the M1
 GeoJSON gate before decoded data becomes a layer, stored as
 data and converted onto the same overlay seam.  The
+polygon-fill pass closes M7's named remainder: overlay
+polygons render FILLED (the style document's overlay paint —
+fill, opacity, ring stroke as data; holes carried from the
+GeoJSON and left unfilled by the renderer's even-odd rule),
+and a polygon whose geometry cannot be filled honestly
+degrades to its outline with the defect named, never a
+silent wrong fill.  The
 live-location broker (M6, on ``location/``'s ConsentStore)
 builds on these contracts in its own pass.  M9 adds personal
 marks (:mod:`nomorals.maps.marks`): the owner's own saved
@@ -150,8 +157,23 @@ from .routing import (
     RouteStep,
 )
 from .settings import MapSettings, map_settings
-from .style import DEFAULT_STYLE, MapStyle, StyleError, StyleLayer, style_hash
-from .vector_render import LabelSpec, MapOverlay, PilTextBackend, TextBackend, VectorRenderer
+from .style import (
+    DEFAULT_STYLE,
+    MapStyle,
+    OverlayPaint,
+    StyleError,
+    StyleLayer,
+    style_hash,
+)
+from .vector_render import (
+    LabelSpec,
+    MapOverlay,
+    OverlayPolygon,
+    PilTextBackend,
+    TextBackend,
+    VectorRenderer,
+    polygon_defects,
+)
 
 __all__ = [
     "DEFAULT_STYLE", "FORMAT_VERSION", "GAZETTEER_MAX_ZOOM",
@@ -166,7 +188,7 @@ __all__ = [
     "FixtureRenderer", "Gazetteer", "GazetteerEntry", "GeoValidation",
     "GeocodeCandidate", "GeocodeProvider", "GeocodeResult",
     "GraphStats", "INDEX_BUILD_COMMAND", "IndexBuildResult",
-    "LabelSpec", "MapOverlay",
+    "LabelSpec", "MapOverlay", "OverlayPaint", "OverlayPolygon",
     "MapReceipt", "MapRenderer", "MapReceiptStore", "MapSettings",
     "MapSource", "MapStyle", "Mark", "MarkError", "MarkStore",
     "MvtError", "MvtFeature", "MvtLayer",
@@ -186,7 +208,7 @@ __all__ = [
     "index_status_line", "lon_to_x_float", "map_settings",
     "match_rank", "new_receipt_id",
     "normalize_label", "normalize_name", "overlay_bbox",
-    "overlay_to_map_overlay", "pending_key",
+    "overlay_to_map_overlay", "pending_key", "polygon_defects",
     "render_pack_preview", "run_build", "style_hash",
     "tile_relpath", "tile_x_to_lon", "tile_y_to_lat",
     "validate_features", "validate_geojson", "validate_lat",

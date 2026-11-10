@@ -764,8 +764,10 @@ class MapAgent:
                        zoom: int | None = None) -> dict[str, Any]:
         """Render one named overlay over the best covering pack.
 
-        The conversion's honesty notes (polygon outlines) ride
-        the ticket's ``notes`` — the caller shows them, the
+        Polygons render filled (the style document's overlay
+        paint); the conversion's honesty notes — a polygon whose
+        geometry degraded to an outline, with the defect named —
+        ride the ticket's ``notes``: the caller shows them, the
         overlay is never silently degraded."""
         store = self.overlay_store()
         overlay = store.get(name)

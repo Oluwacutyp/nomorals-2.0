@@ -26,16 +26,19 @@ Pins:
   delete is a real delete).
 * the GeoJSON gate: a valid FeatureCollection converts
   (Point/LineString/Polygon, [lon,lat] → (lat,lon), holes
-  noted); hostile GeoJSON is refused whole with the gate's
-  errors.
-* overlay → MapOverlay conversion: polygons arrive as CLOSED
-  outlines plus an explicit no-fill note — never silently
-  dropped, never pretending a fill the seam lacks.
+  carried on the feature); hostile GeoJSON is refused whole
+  with the gate's errors.
+* overlay → MapOverlay conversion: polygons arrive as seam
+  polygons (outer ring + holes) and render FILLED — the
+  polygon-fill pass closed M7's outline-only remainder; a
+  polygon whose geometry cannot be filled honestly arrives
+  as a CLOSED outline plus a note naming the defect — never
+  silently dropped, never pretending a fill it lacks.
 * /map overlay verbs end to end on the PartnerRuntime harness:
   add → list → show (a photo whose pixels carry the gold
   marker; caption carries the overlay name + the pack's
-  attribution; a polygon overlay's caption carries the outline
-  note) → drop; strangers refused owner-only.
+  attribution; a fillable polygon's caption no longer claims
+  an outline) → drop; strangers refused owner-only.
 * the agency composition resolves the map agent + a readiness
   row, and its methods return the agent results.
 
@@ -433,9 +436,14 @@ class TestGeoJsonGate:
         assert features[0].points == ((7.6211, 5.2214),)
         assert features[0].label == "Home"
         assert features[1].label == "run"
-        # the polygon carries its outer ring only, holes noted
+        # the polygon carries its outer ring as points and its
+        # inner ring as a hole (the fill pass carries holes
+        # whole; the old "holes are not carried" note is gone)
         assert len(features[2].points) == 5
-        assert any("hole" in n for n in notes)
+        assert features[2].holes == (
+            ((7.61, 5.21), (7.61, 5.22), (7.62, 5.22),
+             (7.62, 5.21), (7.61, 5.21)),)
+        assert not any("not carried" in n for n in notes)
 
     def test_multi_geometries_fan_out(self):
         doc = {"type": "Feature",
@@ -495,16 +503,20 @@ class TestOverlayConversion:
         ))
         converted, notes = overlay_to_map_overlay(overlay)
         assert converted.markers == ((7.62, 5.22),)
-        # polyline + the polygon's closed outline
-        assert len(converted.polylines) == 2
-        ring = converted.polylines[1]
-        assert ring[0] == ring[-1] == (7.60, 5.20)
-        assert len(ring) == 5
-        # the honesty note: outline only, no fill claimed
-        assert len(notes) == 1
-        assert "outline" in notes[0] and "farm" in notes[0]
+        # just the polyline: the polygon rides as a seam polygon
+        # now (filled at render) — the fill pass closed the
+        # outline-only remainder this test used to pin
+        assert len(converted.polylines) == 1
+        assert len(converted.polygons) == 1
+        assert converted.polygons[0].label == "farm"
+        assert converted.polygons[0].rings == (
+            ((7.60, 5.20), (7.64, 5.20), (7.64, 5.24),
+             (7.60, 5.24)),)
+        # a fillable polygon earns NO note: filled is the norm,
+        # only degradation is announced
+        assert notes == ()
 
-    def test_closed_polygon_not_double_closed(self):
+    def test_closed_polygon_ring_carried_verbatim(self):
         from nomorals.maps.overlays import Overlay
 
         ring = ((7.60, 5.20), (7.64, 5.20), (7.64, 5.24),
@@ -512,7 +524,9 @@ class TestOverlayConversion:
         overlay = Overlay("ov-test", "x", 0.0,
                           (OverlayFeature("polygon", ring, "x"),))
         converted, _notes = overlay_to_map_overlay(overlay)
-        assert converted.polylines[0] == ring
+        # the seam polygon carries the ring as authored (the
+        # painter ignores the repeated closure point)
+        assert converted.polygons[0].rings == (ring,)
 
 
 # ── MapAgent operations over the fixture pack ────────────────
@@ -605,7 +619,8 @@ class TestMapAgent:
         assert missing["outcome"] == "unavailable"
         assert "no overlay named" in missing["detail"]
 
-    def test_polygon_overlay_render_notes_the_outline(self, shelf):
+    def test_polygon_overlay_render_fills_no_outline_note(
+            self, shelf):
         agent = _agent(shelf)
         lat, lon = A_LL
         agent.overlay_store().create("farm plot", [
@@ -615,7 +630,9 @@ class TestMapAgent:
                 "farm")])
         ticket = agent.overlay_render("farm plot")
         assert ticket["outcome"] == "ok"
-        assert any("outline" in n for n in ticket["notes"])
+        # filled is the norm since the fill pass: no outline
+        # note rides the ticket for a fillable polygon
+        assert not any("outline" in n for n in ticket["notes"])
 
 
 # ── the map tool ─────────────────────────────────────────────
@@ -781,7 +798,7 @@ class TestMapOverlayVerbs:
                                 message=self._ref())
         assert "bad marker point" in bad
 
-    def test_polygon_show_caption_states_the_outline(self, shelf):
+    def test_polygon_show_caption_no_outline_claim(self, shelf):
         rt = self._runtime(shelf)
         lat, lon = A_LL
         # richer authoring is data-level: plant the polygon
@@ -795,7 +812,9 @@ class TestMapOverlayVerbs:
         shown = rt._control_map("overlay show farm", message=self._ref())
         assert shown == ""
         caption = rt.gateway.files[0]["caption"]
-        assert "outline" in caption
+        # the polygon fills now — the caption must not claim
+        # the old outline-only shape
+        assert "outline" not in caption
         assert "© Network Fixture contributors" in caption
 
     def test_stranger_refused(self, shelf):
