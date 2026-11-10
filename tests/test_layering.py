@@ -66,6 +66,12 @@ LAYERS: dict[str, int] = {
     # service organ at L4 beside browser/; it reaches only downward
     # (core) and the brain is injected by the layers above it.
     "computer": 4,
+    # maps/ is Devon Atlas (docs 19+21): pack manifests, receipts,
+    # coordinate/GeoJSON schemas and the renderer boundary.  A service
+    # organ at L4 beside documents/browser; it reaches only downward
+    # (core) and sideways to location/ primitives (unmapped, layer 0);
+    # agents/tools consume it from above.
+    "maps": 4,
     # triggers/ is the event-condition-action automation organ (Wave L):
     # schedule/file/price/message/webhook sources, notify/message/
     # command/mission actions.  An L5 organ beside scheduler/missions —
