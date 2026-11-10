@@ -5,8 +5,10 @@ The organ itself (``social/chat/fun.py``) is transport-free;
 this mixin owns the live wiring:
 
 - **Commands**: /joke /dadjoke /progjoke /chuck /fact /fact2
-  /catfact /numfact /advice /quote /activity /history (text
-  from health-checked source chains), /dog /cat /fox /meme
+  /catfact /numfact /advice /activity /history (text
+  from health-checked source chains), /quote (a rendered
+  PNG CARD from the makers bigquote design since 2026-11-10
+  — text only as the named degradation), /dog /cat /fox /meme
   /nasa /pokemon (the picture ATTACHED through the expression
   send path, caption riding the media message — one message,
   so success returns "" and the kinds ride
@@ -89,6 +91,8 @@ class RuntimeFunMixin:
             return f"🎯 {pick}"
         if kind == "riddle":
             return self._fun_riddle(tail, message)
+        if kind == "quote":
+            return self._fun_quote(tail, message)
         service = self._fun_service()
         if kind == "numfact" and tail and not tail.lstrip("-").isdigit():
             return (f"usage: /numfact [number] — “{tail}” isn't "
@@ -112,6 +116,38 @@ class RuntimeFunMixin:
         if out.get("ok"):
             return str(out.get("text") or "")
         return str(out.get("reason") or f"no /{kind} right now")
+
+    # ---- /quote ---------------------------------------------------
+    def _fun_quote(self, tail: str, message=None):  # type: ignore[no-untyped-def]
+        """/quote delivers a rendered PNG card (the makers
+        bigquote design) — the words set on a backdrop, sent
+        as a photo.  Text is the NAMED degradation only: when
+        the renderer itself is unavailable the words post
+        with a line saying the card couldn't be rendered;
+        when the card rendered but the send couldn't land,
+        the words post as the delivery fallback.  With no
+        chat to land in (message is None) the text path is
+        the only shape there is."""
+        service = self._fun_service()
+        if message is None:
+            out = service.text("quote", tail)
+            if out.get("ok"):
+                return str(out.get("text") or "")
+            return str(out.get("reason") or "no /quote right now")
+        out = service.quote_card(
+            tail,
+            send=lambda ref, caption: self._expression_send(
+                message, ref, caption=caption))
+        if out.get("sent"):
+            return ""
+        if out.get("card_error"):
+            words = str(out.get("text") or "").strip()
+            note = ("🖼 I couldn't render that quote as a card "
+                    "this time — here it is as words:")
+            return f"{note}\n{words}" if words else note
+        if out.get("text"):
+            return str(out["text"])
+        return str(out.get("reason") or "no /quote right now")
 
     # ---- /riddle --------------------------------------------------
     def _fun_riddle(self, tail: str, message=None):  # type: ignore[no-untyped-def]

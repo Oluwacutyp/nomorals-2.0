@@ -145,6 +145,28 @@ class RuntimeMakersMixin:
                 break
         return name, text
 
+    def _makers_avatar(self, message, *, replied: bool):  # type: ignore[no-untyped-def]
+        """Avatar bytes for a card's author, when the surface
+        stashed them in message meta (``reply_to_sender_avatar``
+        for the replied author, ``sender_avatar`` for the
+        sender — bytes or a local path).  Most surfaces stash
+        neither today; the renderer's placeholder disc is the
+        designed stand-in, never a broken box.  Fail-soft:
+        anything unreadable reads as no avatar."""
+        meta = getattr(message, "meta", None) or {}
+        keys = ("reply_to_sender_avatar", "avatar") if replied \
+            else ("sender_avatar", "avatar")
+        for key in keys:
+            val = meta.get(key)
+            if isinstance(val, (bytes, bytearray)) and val:
+                return bytes(val)
+            if isinstance(val, str) and val:
+                try:
+                    return Path(val).read_bytes()
+                except OSError:
+                    continue
+        return None
+
     def _makers_card(self, kind: str, tail: str, message) -> str:  # type: ignore[no-untyped-def]
         if message is None:
             return (f"usage: reply to a message with /{kind}, "
@@ -152,12 +174,15 @@ class RuntimeMakersMixin:
                     f"the card has somewhere to land.")
         reply_name, reply_text = self._makers_reply_context(
             message)
+        avatar = self._makers_avatar(
+            message, replied=bool(reply_text))
         service = self._makers_service()
         out = service.card(
             kind, tail, reply_name=reply_name,
             reply_text=reply_text,
             sender_name=str(getattr(message, "sender", "")
                             or ""),
+            avatars={0: avatar} if avatar is not None else None,
             send=lambda ref, caption: self._expression_send(
                 message, ref, caption=caption))
         if out.get("sent"):

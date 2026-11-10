@@ -8,9 +8,24 @@ already runs.
   polished chat-style CARD: a name, a medallion with the
   author's initial, the words.  The skins (TikTok-comment,
   SMS-chat, game-profile, meme-caption, two-person duo) are
-  STYLES of the one renderer, never parallel code.  A card is
-  openly a made card: no forged timestamps, no read ticks, no
-  screenshot chrome pretending to be a capture.
+  STYLES of the one renderer, never parallel code.
+- **Platform designs** (owner's order, 2026-11-10 — this
+  paragraph REPLACES the old "no platform chrome" law):
+  beside the legacy skins, the one renderer carries real
+  platform designs — Facebook, X, TikTok, Reddit, Instagram,
+  Mastodon, Tinder, POF — each a data spec in
+  ``PLATFORM_DESIGNS`` drawn in that platform's own visual
+  language: its chrome, avatar shape, name/handle forms,
+  action row and comment section (nested where the platform
+  nests, flat where it doesn't).  Emulating a platform's
+  layout on a generated card IS the feature the owner
+  ordered; a card is still Devon's render, produced on
+  request from words the user supplied — the designs are a
+  registry, so a new platform is a new data entry, never new
+  layout code.  The same registry carries the feature
+  designs ``bigquote`` (the /quote card) and ``motivation``
+  (the Motivation class's card): full-bleed backdrop cards
+  with typography-service faces.
 - **/removebg** rides the existing segmentation organ
   (``media_edit.segment`` — rembg, profile-aware models).  What
   this wave adds is the Devon self-provisioning rung on top
@@ -74,9 +89,10 @@ from .fun import _sniff_image, _trim_caption, picture_shape
 
 __all__ = [
     "MAKER_COMMANDS", "CARD_KINDS", "CARD_STYLES",
+    "CARD_DESIGNS", "PLATFORM_DESIGNS", "FEATURE_DESIGNS",
     "MEDIA_KINDS", "MakerError", "MakerService",
     "default_maker_chains",
-    "render_card_png", "parse_card_request",
+    "render_card_png", "parse_card_request", "card_backdrop",
     "rembg_available", "ensure_rembg", "pick_rembg_model",
     "remove_background_bytes",
     "qrcode_available", "ensure_qrcode", "make_qr_png",
@@ -190,13 +206,17 @@ _CARD_W = 920
 _PAD = 40
 
 
-def _font(size: int, *, bold: bool = False):
+def _font(size: int, *, bold: bool = False, intent: str = "text"):
     """Card faces come from the typography service (semantic
     selection over the parsed catalogue); the legacy ladder —
     DejaVu / Noto / Liberation on Linux, Arial on Windows (the
     EC2 host), Pillow's bundled default last — remains the
     fallback when the service has no face, so a card renders on
-    every profile."""
+    every profile.  ``intent`` is the typography service's own
+    vocabulary (text / display / editorial / …): designs pick
+    the intent that matches their platform's typographic feel
+    — the ONE theme system's faces, never a private font
+    hunt."""
     import os
 
     from PIL import ImageFont
@@ -204,7 +224,7 @@ def _font(size: int, *, bold: bool = False):
     try:
         from ...media.typography import get_service
         picked = get_service().pil_font(
-            "text", size, weight=700 if bold else 400)
+            intent, size, weight=700 if bold else 400)
     except Exception:  # noqa: BLE001 - legacy ladder below
         picked = None
     if picked is not None:
@@ -290,22 +310,105 @@ def _draw_medallion(draw, xy: tuple[int, int], size: int,
               label, font=font, fill=(255, 255, 255))
 
 
+def _load_avatar_image(avatar):
+    """Normalise an avatar hand-off — PIL image, raw bytes, or
+    a local file path — into a PIL image, or None when the
+    hand-off carries nothing usable.  Never raises: a bad
+    avatar degrades to the placeholder disc, never a broken
+    card."""
+    if avatar is None:
+        return None
+    try:
+        from PIL import Image
+
+        if isinstance(avatar, Image.Image):
+            return avatar
+        if isinstance(avatar, (bytes, bytearray)):
+            img = Image.open(io.BytesIO(bytes(avatar)))
+            img.load()
+            return img
+        if isinstance(avatar, (str, Path)):
+            img = Image.open(avatar)
+            img.load()
+            return img
+    except Exception:  # noqa: BLE001 - placeholder is the fallback
+        return None
+    return None
+
+
 def _paste_avatar(canvas, xy: tuple[int, int], size: int,
                   avatar) -> bool:
     """Paste a supplied avatar image into the medallion disc.
     Returns False when no avatar was supplied — the caller
-    draws the initial medallion instead.  (No chat surface
-    hands the runtime avatar bytes today; the seam exists so
-    one that does needs no renderer change.)"""
-    if avatar is None:
+    draws the initial medallion instead.  Chat surfaces hand
+    avatar bytes over through ``MakerService.card(avatars=…)``
+    (the runtime resolves them from message meta when a
+    surface stashes them); a surface with none gets the
+    placeholder disc, never a broken box."""
+    img = _load_avatar_image(avatar)
+    if img is None:
         return False
     from PIL import Image, ImageDraw
 
-    disc = avatar.convert("RGB").resize((size, size))
+    disc = img.convert("RGB").resize((size, size))
     mask = Image.new("L", (size, size), 0)
     ImageDraw.Draw(mask).ellipse([0, 0, size, size], fill=255)
     canvas.paste(disc, xy, mask)
     return True
+
+
+def _paste_avatar_shape(canvas, xy: tuple[int, int], size: int,
+                        avatar, shape: str) -> bool:
+    """The platform-design avatar paste: ``circle`` discs, or
+    ``rounded`` squares (Mastodon / POF wear rounded squares).
+    Same hand-off contract as :func:`_paste_avatar`."""
+    img = _load_avatar_image(avatar)
+    if img is None:
+        return False
+    from PIL import Image, ImageDraw
+
+    x, y = xy
+    tile = img.convert("RGB").resize((size, size))
+    mask = Image.new("L", (size, size), 0)
+    md = ImageDraw.Draw(mask)
+    if shape == "rounded":
+        md.rounded_rectangle([0, 0, size, size],
+                             radius=max(4, size // 5), fill=255)
+    else:
+        md.ellipse([0, 0, size, size], fill=255)
+    canvas.paste(tile, (x, y), mask)
+    return True
+
+
+def _draw_placeholder(draw, xy: tuple[int, int], size: int,
+                      name: str, fill, shape: str = "circle",
+                      ring=None) -> None:
+    """The no-avatar placeholder: the author's initials on a
+    disc/square in the DESIGN's own colours (never a broken
+    box, never a grey shrug).  ``ring`` draws the design's
+    avatar ring (Instagram's gradient band reads as a solid
+    warm ring at card scale)."""
+    x, y = xy
+    if ring is not None:
+        grow = max(3, size // 14)
+        box = [x - grow, y - grow, x + size + grow, y + size + grow]
+        if shape == "rounded":
+            draw.rounded_rectangle(
+                box, radius=max(4, size // 5) + grow, fill=ring)
+        else:
+            draw.ellipse(box, fill=ring)
+    if shape == "rounded":
+        draw.rounded_rectangle([x, y, x + size, y + size],
+                               radius=max(4, size // 5), fill=fill)
+    else:
+        draw.ellipse([x, y, x + size, y + size], fill=fill)
+    font = _font(int(size * 0.42), bold=True)
+    label = _initials(name)
+    box = draw.textbbox((0, 0), label, font=font)
+    tw, th = box[2] - box[0], box[3] - box[1]
+    draw.text((x + (size - tw) / 2 - box[0],
+               y + (size - th) / 2 - box[1]),
+              label, font=font, fill=(255, 255, 255))
 
 
 #: Per-style canvas grammar: (background, bubble, name colour,
@@ -331,28 +434,42 @@ _STYLE_THEMES = {
 }
 
 
-def render_card_png(style: str, entries: list[dict[str, str]], *,
-                    avatar=None) -> tuple[bytes, dict[str, Any]]:
-    """Render ONE quote card → (PNG bytes, drawn record).
+def render_card_png(style: str, entries: list[dict], *,
+                    avatar=None, backdrop=None
+                    ) -> tuple[bytes, dict[str, Any]]:
+    """Render ONE card → (PNG bytes, drawn record).
 
-    ``entries``: one ``{"name", "text"}`` for the single
-    styles, two for ``duo``.  The drawn record is the
-    renderer's own seam — what was drawn, at what size — so
-    tests assert against it instead of OCR-ing pixels.  The
-    card carries no timestamp, no ticks, no platform chrome:
-    it is a made card and reads as one.
+    ``style`` names a legacy skin (``CARD_STYLES``), a
+    platform design (``PLATFORM_DESIGNS`` — entries[0] is the
+    post, the rest its comment section) or a feature design
+    (``FEATURE_DESIGNS`` — one entry over a backdrop).
+    Entries are ``{"name", "text"}`` dicts; platform entries
+    may also carry ``handle`` / ``meta`` / ``likes`` /
+    ``depth`` (comment nesting) / ``avatar`` (image bytes or
+    a PIL image handed over by the surface).  The drawn
+    record is the renderer's own seam — what was drawn, at
+    what size, in which regions — so tests assert against it
+    instead of OCR-ing pixels.
     """
     from PIL import Image, ImageDraw
 
     style = str(style or "quote").strip().lower()
-    if style not in CARD_STYLES:
+    if style not in CARD_DESIGNS:
         raise MakerError(f"unknown card style {style!r} — "
-                         f"pick from: {', '.join(CARD_STYLES)}")
-    entries = [{"name": str(e.get("name") or "").strip()[:48],
-                "text": str(e.get("text") or "").strip()[:600]}
-               for e in entries if str(e.get("text") or "").strip()]
-    if not entries:
+                         f"pick from: {', '.join(CARD_DESIGNS)}")
+    clean = [{"name": str(e.get("name") or "").strip()[:48],
+              "text": str(e.get("text") or "").strip()[:600],
+              **{k: e[k] for k in
+                 ("handle", "meta", "likes", "depth", "avatar",
+                  "title") if k in e}}
+             for e in entries if str(e.get("text") or "").strip()]
+    if not clean:
         raise MakerError("a card needs words — nothing to draw")
+    if style in FEATURE_DESIGNS:
+        return _render_feature(style, clean, backdrop=backdrop)
+    if style in PLATFORM_DESIGNS:
+        return _render_platform(style, clean)
+    entries = clean
     if style == "duo" and len(entries) < 2:
         raise MakerError("a duo card needs two speakers")
     theme = _STYLE_THEMES[style if style != "duo" else "quote"]
@@ -437,7 +554,9 @@ def render_card_png(style: str, entries: list[dict[str, str]], *,
     draw.rounded_rectangle(
         [_PAD - 14, _PAD - 14, _CARD_W - _PAD + 14, height - _PAD + 14],
         radius=26, fill=theme["bubble"])
-    if not _paste_avatar(img, (_PAD, _PAD), med, avatar):
+    if not _paste_avatar(img, (_PAD, _PAD), med,
+                         avatar if avatar is not None
+                         else entry.get("avatar")):
         _draw_medallion(draw, (_PAD, _PAD), med, entry["name"])
     tx = _PAD + med + 28
     draw.text((tx, _PAD), entry["name"], font=name_font,
@@ -458,11 +577,583 @@ def _png_bytes(img) -> bytes:
     return buf.getvalue()
 
 
+# ── the design registry (platforms + feature cards) ──────────
+#
+# A design is DATA: colours, avatar shape, name/handle form,
+# header kind, action row (or rail), comment geometry.  The
+# renderer below is the only layout code; a new platform is a
+# new entry here.  Colour values are the platforms' own brand
+# colours as they render on their real surfaces.
+
+PLATFORM_DESIGNS: dict[str, dict[str, Any]] = {
+    "facebook": {
+        "label": "Facebook", "dark": False,
+        "bg": (0xF0, 0xF2, 0xF5), "surface": (0xFF, 0xFF, 0xFF),
+        "text": (0x05, 0x05, 0x05), "sub": (0x65, 0x76, 0x7B),
+        "accent": (0x18, 0x76, 0xF2), "divider": (0xE4, 0xE6, 0xEB),
+        "avatar_shape": "circle", "avatar_ring": None,
+        "avatar_bg": (0x18, 0x76, 0xF2),
+        "name_form": "name", "badge": (0x18, 0x76, 0xF2),
+        "header": "bar", "rail": "",
+        "actions": ("Like", "Comment", "Share"), "like_at": 0,
+        "comment_indent": 44, "comment_actions": True,
+        "thread_line": False, "font": "text",
+    },
+    "x": {
+        "label": "X", "dark": True,
+        "bg": (0x00, 0x00, 0x00), "surface": (0x00, 0x00, 0x00),
+        "text": (0xE7, 0xE9, 0xEA), "sub": (0x71, 0x72, 0x74),
+        "accent": (0x1D, 0x9B, 0xF0), "divider": (0x2F, 0x33, 0x35),
+        "avatar_shape": "circle", "avatar_ring": None,
+        "avatar_bg": (0x1D, 0x9B, 0xF0),
+        "name_form": "name_handle", "badge": (0x1D, 0x9B, 0xF0),
+        "header": "minimal", "rail": "",
+        "actions": ("Reply", "Repost", "Like", "Views"),
+        "like_at": 2,
+        "comment_indent": 0, "comment_actions": False,
+        "thread_line": True, "font": "text",
+    },
+    "tiktok": {
+        "label": "TikTok", "dark": True,
+        "bg": (0x12, 0x12, 0x12), "surface": (0x12, 0x12, 0x12),
+        "comment_surface": (0x1E, 0x1E, 0x1E),
+        "text": (0xFF, 0xFF, 0xFF), "sub": (0xA8, 0xA8, 0xA8),
+        "accent": (0xFE, 0x2C, 0x55), "divider": (0x2A, 0x2A, 0x2A),
+        "avatar_shape": "circle", "avatar_ring": None,
+        "avatar_bg": (0x25, 0xF4, 0xEE),
+        "name_form": "handle", "badge": (0xFE, 0x2C, 0x55),
+        "header": "none", "rail": "right",
+        "actions": ("Like", "Comment", "Share"), "like_at": 0,
+        "comment_indent": 0, "comment_actions": True,
+        "thread_line": False, "font": "text",
+    },
+    "reddit": {
+        "label": "Reddit", "dark": False,
+        "bg": (0xDA, 0xE0, 0xE6), "surface": (0xFF, 0xFF, 0xFF),
+        "text": (0x1A, 0x1A, 0x1B), "sub": (0x7C, 0x7C, 0x7C),
+        "accent": (0xFF, 0x45, 0x00), "divider": (0xE3, 0xE6, 0xE8),
+        "avatar_shape": "circle", "avatar_ring": None,
+        "avatar_bg": (0xFF, 0x45, 0x00),
+        "name_form": "u/name", "badge": None,
+        "header": "bar", "rail": "left-vote",
+        "actions": ("Comments", "Share", "Save"), "like_at": -1,
+        "comment_indent": 36, "comment_actions": True,
+        "thread_line": True, "font": "text",
+    },
+    "instagram": {
+        "label": "Instagram", "dark": False,
+        "bg": (0xFF, 0xFF, 0xFF), "surface": (0xFF, 0xFF, 0xFF),
+        "text": (0x26, 0x26, 0x26), "sub": (0x8E, 0x8E, 0x8E),
+        "accent": (0x00, 0x95, 0xF6), "divider": (0xDB, 0xDB, 0xDB),
+        "avatar_shape": "circle",
+        "avatar_ring": (0xF5, 0x85, 0x3C),
+        "avatar_bg": (0x8A, 0x3F, 0xC8),
+        "name_form": "name", "badge": (0x00, 0x95, 0xF6),
+        "header": "bar", "rail": "",
+        "actions": ("Like", "Comment", "Share", "Save"),
+        "like_at": 0,
+        "comment_indent": 0, "comment_actions": False,
+        "thread_line": False, "font": "text",
+    },
+    "mastodon": {
+        "label": "Mastodon", "dark": True,
+        "bg": (0x19, 0x1B, 0x22), "surface": (0x28, 0x2C, 0x37),
+        "text": (0xD9, 0xE1, 0xE8), "sub": (0x9B, 0xA8, 0xB8),
+        "accent": (0x63, 0x64, 0xFF), "divider": (0x39, 0x3E, 0x52),
+        "avatar_shape": "rounded", "avatar_ring": None,
+        "avatar_bg": (0x63, 0x64, 0xFF),
+        "name_form": "name_handle", "badge": None,
+        "header": "bar", "rail": "",
+        "actions": ("Reply", "Boost", "Favourite", "Share"),
+        "like_at": 2,
+        "comment_indent": 30, "comment_actions": True,
+        "thread_line": False, "font": "text",
+    },
+    "tinder": {
+        "label": "Tinder", "dark": False,
+        "bg": (0xFF, 0xFF, 0xFF), "surface": (0xFF, 0xFF, 0xFF),
+        "band": ((0xFD, 0x26, 0x6D), (0xFF, 0x78, 0x57)),
+        "text": (0x2B, 0x2B, 0x2B), "sub": (0x8E, 0x8E, 0x93),
+        "accent": (0xFD, 0x26, 0x6D), "divider": (0xEC, 0xEC, 0xEC),
+        "avatar_shape": "circle", "avatar_ring": None,
+        "avatar_bg": (0xFD, 0x26, 0x6D),
+        "name_form": "name", "badge": None,
+        "header": "band", "rail": "",
+        "actions": ("Pass", "Like", "Super Like"), "like_at": 1,
+        "comment_indent": 0, "comment_actions": False,
+        "thread_line": False, "comment_bubbles": True,
+        "font": "text",
+    },
+    "pof": {
+        "label": "POF", "dark": False,
+        "bg": (0xE8, 0xEE, 0xF3), "surface": (0xFF, 0xFF, 0xFF),
+        "text": (0x1F, 0x2A, 0x37), "sub": (0x5F, 0x74, 0x8A),
+        "accent": (0x00, 0x7A, 0xB8), "divider": (0xC9, 0xD6, 0xE2),
+        "avatar_shape": "rounded", "avatar_ring": None,
+        "avatar_bg": (0x00, 0x7A, 0xB8),
+        "name_form": "name", "badge": None,
+        "header": "bar", "rail": "",
+        "actions": ("Message", "Favourite", "Meet Me"),
+        "like_at": 1,
+        "comment_indent": 0, "comment_actions": True,
+        "thread_line": False, "font": "text",
+    },
+}
+
+#: The feature designs: full-bleed backdrop cards (the /quote
+#: card and the Motivation class's card).  ``gradients`` are
+#: (top, bottom) pairs drawn when no backdrop image rides;
+#: ``meta`` on the entry picks the variant (motivation:
+#: "evening" wears the night gradient, anything else dawn).
+FEATURE_DESIGNS: dict[str, dict[str, Any]] = {
+    "bigquote": {
+        "label": "Quote", "size": 1080,
+        "gradient": ((0x0B, 0x1E, 0x3A), (0x0E, 0x4D, 0x5C)),
+        "accent": (0xE8, 0xC3, 0x4A), "font": "editorial",
+    },
+    "motivation": {
+        "label": "Motivation", "size": 1080,
+        "gradient": ((0x1B, 0x1B, 0x3A), (0xB4, 0x5A, 0x1B)),
+        "gradient_evening": ((0x05, 0x08, 0x1A), (0x1D, 0x2A, 0x52)),
+        "accent": (0xF2, 0xC1, 0x4A), "font": "display",
+    },
+}
+
+#: Every style/design name the one renderer accepts: the six
+#: legacy skins + the platform designs + the feature designs.
+CARD_DESIGNS: tuple[str, ...] = (
+    CARD_STYLES + tuple(PLATFORM_DESIGNS) + tuple(FEATURE_DESIGNS))
+
+
+def _handle_of(name: str) -> str:
+    """A display name as a platform handle: lower-cased, one
+    token, platform-safe characters only."""
+    handle = re.sub(r"[^a-z0-9_.]+", "", str(name or "").lower())
+    return handle or "someone"
+
+
+def _name_line(spec: dict[str, Any], entry: dict[str, Any]) -> str:
+    name = str(entry.get("name") or "Someone")
+    form = spec.get("name_form", "name")
+    if form == "handle":
+        return "@" + _handle_of(name)
+    if form == "u/name":
+        return "u/" + _handle_of(name)
+    if form == "name_handle":
+        return f"{name}  @{_handle_of(name)}"
+    return name
+
+
+def _draw_badge(draw, xy: tuple[int, int], size: int, fill) -> None:
+    """A verified badge: a filled disc with a white check —
+    the shape every platform's badge reduces to at card
+    scale."""
+    x, y = xy
+    draw.ellipse([x, y, x + size, y + size], fill=fill)
+    s = size
+    draw.line([x + s * 0.28, y + s * 0.52, x + s * 0.44, y + s * 0.68],
+              fill=(255, 255, 255), width=max(2, s // 6))
+    draw.line([x + s * 0.44, y + s * 0.68, x + s * 0.74, y + s * 0.34],
+              fill=(255, 255, 255), width=max(2, s // 6))
+
+
+def _avatar_at(canvas, draw, xy, size, entry, spec) -> None:
+    """One entry's avatar: the handed-over image when one
+    rides the entry, else the design-coloured initials
+    placeholder."""
+    avatar = entry.get("avatar")
+    if avatar is not None and _paste_avatar_shape(
+            canvas, xy, size, avatar, spec["avatar_shape"]):
+        return
+    _draw_placeholder(draw, xy, size, str(entry.get("name") or "?"),
+                      spec["avatar_bg"], spec["avatar_shape"],
+                      ring=spec.get("avatar_ring"))
+
+
+def _render_platform(key: str, entries: list[dict[str, Any]]
+                     ) -> tuple[bytes, dict[str, Any]]:
+    """Draw one platform design: entries[0] is the post,
+    entries[1:] its comment section.  The drawn record
+    carries the layout's regions (header / post / actions /
+    comment boxes / avatar boxes) so tests assert structure,
+    not pixels alone."""
+    from PIL import Image, ImageDraw
+
+    spec = PLATFORM_DESIGNS[key]
+    post, comments = entries[0], entries[1:]
+    width = _CARD_W
+    rail_right = spec.get("rail") == "right"
+    vote_rail = spec.get("rail") == "left-vote"
+    content_x = _PAD + (64 if vote_rail else 0)
+    content_w = width - content_x - _PAD - (96 if rail_right else 0)
+    header_h = {"bar": 64, "minimal": 52, "band": 120}.get(
+        spec["header"], 0)
+    name_font = _font(32, bold=True, intent=spec["font"])
+    meta_font = _font(24, intent=spec["font"])
+    text_font = _font(36, intent=spec["font"])
+    c_name_font = _font(27, bold=True, intent=spec["font"])
+    c_text_font = _font(29, intent=spec["font"])
+    act_font = _font(25, bold=True, intent=spec["font"])
+
+    probe = ImageDraw.Draw(Image.new("RGB", (width, 100)))
+    post_lines = _wrap(probe, post["text"], text_font,
+                       content_w - 84 - 24)
+    comment_rows: list[tuple[dict[str, Any], list[str]]] = []
+    for entry in comments:
+        indent = int(entry.get("depth") or 0) * int(
+            spec["comment_indent"])
+        bubble = 26 if spec.get("comment_bubbles") else 0
+        rows = _wrap(probe, entry["text"], c_text_font,
+                     content_w - 56 - 20 - indent - bubble)
+        comment_rows.append((entry, rows))
+
+    post_h = 84 + 46 + len(post_lines) * 47 + 56
+    comments_h = 0
+    if comment_rows:
+        comments_h = 54 + sum(
+            40 + len(rows) * 38 + (30 if spec["comment_actions"]
+                                   else 8) + 18
+            for _e, rows in comment_rows)
+    height = header_h + post_h + comments_h + _PAD
+
+    img = Image.new("RGB", (width, int(height)), spec["bg"])
+    draw = ImageDraw.Draw(img)
+    regions: dict[str, Any] = {"avatars": [], "comments": []}
+    drawn: dict[str, Any] = {
+        "style": key, "design": key, "platform": spec["label"],
+        "size": (width, int(height)),
+        "names": [str(e.get("name") or "") for e in entries],
+        "texts": [str(e.get("text") or "") for e in entries],
+        "fingerprint": {
+            "bg": spec["bg"], "surface": spec["surface"],
+            "accent": spec["accent"],
+            "avatar_shape": spec["avatar_shape"],
+            "name_form": spec["name_form"],
+            "header": spec["header"], "rail": spec.get("rail", ""),
+            "actions": tuple(spec["actions"]),
+            "comment_indent": int(spec["comment_indent"]),
+        },
+        "regions": regions,
+    }
+
+    y = 0
+    if spec["header"] == "bar":
+        draw.rectangle([0, 0, width, header_h], fill=spec["surface"])
+        draw.rectangle([0, header_h - 2, width, header_h],
+                       fill=spec["divider"])
+        draw.ellipse([_PAD, 14, _PAD + 36, 50], fill=spec["accent"])
+        draw.text((_PAD + 52, 14), spec["label"],
+                  font=_font(30, bold=True, intent="display"),
+                  fill=spec["accent"])
+        regions["header"] = (0, 0, width, header_h)
+        y = header_h
+    elif spec["header"] == "minimal":
+        draw.text((_PAD, 10), "✕",
+                  font=_font(34, bold=True, intent="display"),
+                  fill=spec["text"])
+        regions["header"] = (0, 0, width, header_h)
+        y = header_h
+    elif spec["header"] == "band":
+        top, bottom = spec["band"]
+        for i in range(header_h):
+            frac = i / max(1, header_h - 1)
+            row = tuple(int(top[c] + (bottom[c] - top[c]) * frac)
+                        for c in range(3))
+            draw.line([0, i, width, i], fill=row)
+        draw.text((_PAD, 22), spec["label"],
+                  font=_font(30, bold=True, intent="display"),
+                  fill=(255, 255, 255))
+        regions["header"] = (0, 0, width, header_h)
+        y = header_h
+
+    post_y = y + 20
+    draw.rounded_rectangle(
+        [content_x - 16, post_y - 12, content_x + content_w + 16,
+         post_y + post_h - 30], radius=18, fill=spec["surface"])
+    if vote_rail:
+        vx = _PAD + 8
+        draw.polygon([(vx + 14, post_y + 2), (vx, post_y + 20),
+                      (vx + 28, post_y + 20)], fill=spec["accent"])
+        votes = str(post.get("likes") or "128")
+        draw.text((vx, post_y + 28), votes, font=meta_font,
+                  fill=spec["text"])
+        draw.polygon([(vx, post_y + 62), (vx + 28, post_y + 62),
+                      (vx + 14, post_y + 80)], fill=spec["sub"])
+        regions["vote_rail"] = (vx, post_y, 30, 84)
+    _avatar_at(img, draw, (content_x, post_y), 84, post, spec)
+    draw = ImageDraw.Draw(img)
+    regions["avatars"].append((content_x, post_y, 84, 84))
+    tx = content_x + 84 + 24
+    name = _name_line(spec, post)
+    draw.text((tx, post_y), name, font=name_font, fill=spec["text"])
+    if spec.get("badge") is not None:
+        nw = draw.textlength(name, font=name_font)
+        _draw_badge(draw, (int(tx + nw + 10), post_y + 6), 22,
+                    spec["badge"])
+    meta = str(post.get("meta") or "Just now")
+    draw.text((tx, post_y + 42), meta, font=meta_font,
+              fill=spec["sub"])
+    ty = post_y + 84 + 8
+    for line in post_lines:
+        draw.text((content_x, ty), line, font=text_font,
+                  fill=spec["text"])
+        ty += 47
+    act_y = ty + 10
+    if rail_right:
+        rail_x = width - _PAD - 64
+        ry = post_y
+        regions["rail"] = (rail_x, post_y, 64,
+                           3 * 92)
+        for i, action in enumerate(spec["actions"]):
+            cy = ry + i * 92
+            fill = spec["accent"] if i == int(spec["like_at"]) \
+                else spec["surface"]
+            if key == "tiktok":
+                fill = (0x2A, 0x2A, 0x2A) if i != int(
+                    spec["like_at"]) else spec["accent"]
+            draw.ellipse([rail_x, cy, rail_x + 64, cy + 64],
+                         fill=fill)
+            glyph = {"Like": "♥", "Comment": "…",
+                     "Share": "↗"}.get(action, "•")
+            gf = _font(30, bold=True)
+            gb = draw.textbbox((0, 0), glyph, font=gf)
+            draw.text((rail_x + (64 - (gb[2] - gb[0])) / 2 - gb[0],
+                       cy + (64 - (gb[3] - gb[1])) / 2 - gb[1]),
+                      glyph, font=gf, fill=(255, 255, 255))
+            count = str(post.get("likes") or "1.2K") if i == 0 \
+                else ""
+            if count:
+                cf = _font(20)
+                cw = draw.textlength(count, font=cf)
+                draw.text((rail_x + (64 - cw) / 2, cy + 66), count,
+                          font=cf, fill=spec["sub"])
+        regions["actions"] = regions["rail"]
+    else:
+        draw.line([content_x, act_y - 6, content_x + content_w,
+                   act_y - 6], fill=spec["divider"])
+        step = content_w // max(1, len(spec["actions"]))
+        boxes = []
+        for i, action in enumerate(spec["actions"]):
+            ax = content_x + i * step
+            fill = spec["accent"] if i == int(spec["like_at"]) \
+                else spec["sub"]
+            label = action
+            if key == "tinder":
+                draw.ellipse([ax, act_y, ax + 44, act_y + 44],
+                             fill=fill)
+                glyph = ("✕" if action == "Pass" else
+                         "♥" if action == "Like" else "★")
+                gf = _font(24, bold=True)
+                gb = draw.textbbox((0, 0), glyph, font=gf)
+                draw.text((ax + (44 - (gb[2] - gb[0])) / 2 - gb[0],
+                           act_y + (44 - (gb[3] - gb[1])) / 2 - gb[1]),
+                          glyph, font=gf, fill=(255, 255, 255))
+                boxes.append((ax, act_y, 44, 44))
+                continue
+            if i == int(spec["like_at"]):
+                label = f"♥ {action}"
+            draw.text((ax, act_y), label, font=act_font, fill=fill)
+            boxes.append((ax, act_y, step, 32))
+        regions["actions"] = boxes
+    regions["post"] = (content_x, post_y, content_w, post_h - 20)
+    y = post_y + post_h - 20
+
+    if comment_rows:
+        if "comment_surface" in spec:
+            draw.rectangle([0, y, width, int(height)],
+                           fill=spec["comment_surface"])
+        draw.text((content_x, y + 12),
+                  f"Comments · {len(comment_rows)}",
+                  font=_font(24, bold=True), fill=spec["sub"])
+        cy = y + 54
+        for entry, rows in comment_rows:
+            depth = int(entry.get("depth") or 0)
+            indent = depth * int(spec["comment_indent"])
+            cx = content_x + indent
+            if spec.get("thread_line") and depth:
+                for lvl in range(1, depth + 1):
+                    lx = content_x + (lvl - 1) * int(
+                        spec["comment_indent"]) + 18
+                    draw.line([lx, cy, lx, cy + 40 + len(rows) * 38],
+                              fill=spec["divider"], width=3)
+            _avatar_at(img, draw, (cx, cy), 56, entry, spec)
+            draw = ImageDraw.Draw(img)
+            regions["avatars"].append((cx, cy, 56, 56))
+            nx = cx + 56 + 18
+            cname = _name_line(spec, entry)
+            if spec.get("comment_bubbles"):
+                bw = content_w - indent - 30
+                bh = 40 + len(rows) * 38 + 12
+                draw.rounded_rectangle(
+                    [cx + 56 + 8, cy - 4, cx + 56 + 8 + bw,
+                     cy - 4 + bh], radius=20,
+                    fill=spec["divider"] if spec["dark"] else
+                    (0xF2, 0xF2, 0xF7))
+                nx = cx + 56 + 28
+            draw.text((nx, cy), cname, font=c_name_font,
+                      fill=spec["text"])
+            if spec.get("badge") is not None:
+                nw = draw.textlength(cname, font=c_name_font)
+                _draw_badge(draw, (int(nx + nw + 8), cy + 4), 18,
+                            spec["badge"])
+            tty = cy + 40
+            for line in rows:
+                draw.text((nx, tty), line, font=c_text_font,
+                          fill=spec["text"])
+                tty += 38
+            if spec["comment_actions"]:
+                draw.text((nx, tty + 2),
+                          "Reply · Like" + (
+                              f" · {entry['likes']}"
+                              if entry.get("likes") else ""),
+                          font=meta_font, fill=spec["sub"])
+                tty += 30
+            row_h = (tty - cy) + 18
+            regions["comments"].append((cx, cy, content_w - indent,
+                                        row_h))
+            cy += row_h
+    return _png_bytes(img), drawn
+
+
+def _render_feature(key: str, entries: list[dict[str, Any]], *,
+                    backdrop=None) -> tuple[bytes, dict[str, Any]]:
+    """Draw one feature design (bigquote / motivation): a
+    full-bleed square card — backdrop photograph or generated
+    art when one rides, else the design's gradient — with the
+    words set large in the typography service's display /
+    editorial faces."""
+    from PIL import Image, ImageDraw
+
+    spec = FEATURE_DESIGNS[key]
+    entry = entries[0]
+    size = int(spec["size"])
+    variant = str(entry.get("meta") or "").strip().lower()
+    if variant == "evening" and "gradient_evening" in spec:
+        gradient = spec["gradient_evening"]
+    else:
+        gradient = spec["gradient"]
+    bg_img = _load_avatar_image(backdrop)
+    if bg_img is not None:
+        img = bg_img.convert("RGB")
+        scale = max(size / img.width, size / img.height)
+        img = img.resize((int(img.width * scale) + 1,
+                          int(img.height * scale) + 1))
+        left = (img.width - size) // 2
+        top = (img.height - size) // 2
+        img = img.crop((left, top, left + size, top + size))
+        shade = Image.new("RGB", (size, size), (0, 0, 0))
+        img = Image.blend(img, shade, 0.45)
+        backdrop_kind = "image"
+    else:
+        img = Image.new("RGB", (size, size), gradient[0])
+        top_c, bot_c = gradient
+        for i in range(size):
+            frac = i / max(1, size - 1)
+            row = tuple(int(top_c[c] + (bot_c[c] - top_c[c]) * frac)
+                        for c in range(3))
+            ImageDraw.Draw(img).line([0, i, size, i], fill=row)
+        backdrop_kind = "gradient"
+    draw = ImageDraw.Draw(img)
+    white = (0xFF, 0xFF, 0xFF)
+    drawn: dict[str, Any] = {
+        "style": key, "design": key, "size": (size, size),
+        "names": [str(entry.get("name") or "")],
+        "texts": [str(entry.get("text") or "")],
+        "backdrop": backdrop_kind,
+        "regions": {},
+    }
+    title = str(entry.get("title") or "").strip()
+    if title:
+        tfont = _font(34, bold=True, intent="caption")
+        tw = draw.textlength(title.upper(), font=tfont)
+        draw.text(((size - tw) / 2, 84), title.upper(), font=tfont,
+                  fill=spec["accent"])
+        drawn["regions"]["title"] = (int((size - tw) / 2), 84,
+                                     int(tw), 40)
+    if key == "bigquote":
+        qfont = _font(150, bold=True, intent=spec["font"])
+        draw.text((90, 120), "“", font=qfont, fill=spec["accent"])
+    body_font = _font(58, intent=spec["font"])
+    probe = ImageDraw.Draw(Image.new("RGB", (size, 100)))
+    lines = _wrap(probe, str(entry.get("text") or ""), body_font,
+                  size - 220)
+    total_h = len(lines) * 76
+    ty = (size - total_h) // 2 + (30 if title else 0)
+    for line in lines:
+        tw = draw.textlength(line, font=body_font)
+        draw.text(((size - tw) / 2, ty), line, font=body_font,
+                  fill=white)
+        ty += 76
+    drawn["regions"]["body"] = (110, (size - total_h) // 2,
+                                size - 220, total_h)
+    author = str(entry.get("name") or "").strip()
+    if author:
+        draw.line([size // 2 - 60, size - 190, size // 2 + 60,
+                   size - 190], fill=spec["accent"], width=4)
+        afont = _font(36, bold=True, intent="caption")
+        label = author.upper()
+        tw = draw.textlength(label, font=afont)
+        draw.text(((size - tw) / 2, size - 160), label, font=afont,
+                  fill=white)
+        drawn["regions"]["author"] = (int((size - tw) / 2),
+                                      size - 160, int(tw), 44)
+    return _png_bytes(img), drawn
+
+
+def card_backdrop(*, seed: str = "",
+                  fetcher: Callable[[str], bytes] | None = None):
+    """A backdrop image for the feature designs, best-effort:
+    first a real photograph from the shipped picsum pool
+    (keyless; the same provider the couplepp chain walks),
+    then Devon's own studio art (``emoji_studio``) generated
+    from the seed words.  Returns a PIL image or None — the
+    renderer draws its gradient when both rungs miss, so a
+    card never waits on the network to exist."""
+    fetch = fetcher or (lambda url: _http_bytes(url, timeout=12.0))
+    try:
+        url = PicsumPoolProvider().image_url()
+        data = fetch(url)
+        if _sniff_image(data) is not None:
+            img = _load_avatar_image(data)
+            if img is not None:
+                return img
+    except Exception:  # noqa: BLE001 - next rung
+        pass
+    try:
+        from .emoji_studio import parse_design, render_master
+
+        spec = parse_design(
+            f"serene landscape inspired by: {seed[:80]}")
+        return render_master(spec, size=1080)
+    except Exception:  # noqa: BLE001 - gradient is the floor
+        return None
+
+
+def _parse_comment_line(spec: str, depth: int,
+                        sender_name: str) -> dict[str, Any]:
+    """One comment line's body → a comment entry.  Shapes:
+    ``Name | words``, ``Name: words``, or bare words (the
+    commenter is the sender)."""
+    spec = spec.strip()
+    if "|" in spec:
+        name, _, text = spec.partition("|")
+        name, text = name.strip(), text.strip()
+    elif ": " in spec and len(spec.split(": ", 1)[0]) <= 48:
+        name, text = (p.strip() for p in spec.split(": ", 1))
+    else:
+        name, text = "", spec
+    if not text:
+        raise MakerError(
+            "a comment line needs words — `> Name | their words`")
+    return {"name": name or sender_name or "Someone",
+            "text": text, "depth": depth}
+
+
 def parse_card_request(kind: str, tail: str, *,
                        reply_name: str = "",
                        reply_text: str = "",
                        sender_name: str = ""
-                       ) -> tuple[str, list[dict[str, str]]]:
+                       ) -> tuple[str, list[dict]]:
     """(style, entries) for a card command — or a MakerError
     carrying the usage line.  Grammar:
 
@@ -470,16 +1161,21 @@ def parse_card_request(kind: str, tail: str, *,
       (single styles only);
     - explicit single: ``<name> | <text>``; bare words with
       no ``|`` quote the SENDER (name = the sender's);
-    - /qcard and /fakemsg take a style as first word when it
-      names one (``/qcard ttc Ada | hi``);
-    - duo: ``<name> | <text> | <name> | <text>``.
+    - /qcard and /fakemsg take a style OR a platform design
+      as first word when it names one (``/qcard ttc Ada | hi``,
+      ``/qcard facebook Ada | hi``);
+    - duo: ``<name> | <text> | <name> | <text>``;
+    - comments (platform designs): each following line that
+      starts with ``>`` adds a comment — ``> Name | words``;
+      ``>>`` replies to the comment above it (nesting depth
+      1, ``>>>`` depth 2) where the platform nests.
     """
     kind = str(kind or "").strip().lower()
     style = CARD_KINDS.get(kind, "quote")
     tail = str(tail or "").strip()
     if kind in ("qcard", "fakemsg") and tail:
         first, _, rest = tail.partition(" ")
-        if first.strip().lower() in CARD_STYLES:
+        if first.strip().lower() in CARD_DESIGNS:
             style = first.strip().lower()
             tail = rest.strip()
     reply_name = str(reply_name or "").strip()
@@ -494,19 +1190,44 @@ def parse_card_request(kind: str, tail: str, *,
         raise MakerError(
             f"usage: /{kind} <name> | <text> | <name> | <text> "
             f"— a duo card carries two speakers")
+    lines = tail.split("\n") if tail else []
+    head = lines[0] if lines else ""
+    comment_specs: list[tuple[int, str]] = []
+    extra: list[str] = []
+    for raw in lines[1:]:
+        stripped = raw.strip()
+        if stripped.startswith(">"):
+            marks = len(stripped) - len(stripped.lstrip(">"))
+            comment_specs.append(
+                (min(marks - 1, 4), stripped[marks:].strip()))
+        elif stripped:
+            extra.append(stripped)
+    if extra:
+        head = (head + "\n" + "\n".join(extra)).strip()
+    if comment_specs and style not in PLATFORM_DESIGNS:
+        raise MakerError(
+            "comment sections ride the platform designs — "
+            f"pick one ({', '.join(PLATFORM_DESIGNS)}): "
+            f"/{kind} <design> <name> | <post> then one "
+            f"`> Name | comment` per line")
     if reply_text:
-        return style, [{"name": reply_name or sender_name
-                        or "Someone", "text": reply_text}]
-    if "|" in tail:
-        name, _, text = tail.partition("|")
-        if text.strip():
-            return style, [{"name": name.strip() or sender_name
-                            or "Someone", "text": text.strip()}]
+        entries: list[dict] = [{"name": reply_name or sender_name
+                                or "Someone", "text": reply_text}]
+    elif "|" in head:
+        name, _, text = head.partition("|")
+        if not text.strip():
+            raise MakerError(usage)
+        entries = [{"name": name.strip() or sender_name
+                    or "Someone", "text": text.strip()}]
+    elif head:
+        entries = [{"name": sender_name or "Someone",
+                    "text": head}]
+    else:
         raise MakerError(usage)
-    if tail:
-        return style, [{"name": sender_name or "Someone",
-                        "text": tail}]
-    raise MakerError(usage)
+    for depth, spec in comment_specs:
+        entries.append(_parse_comment_line(spec, depth,
+                                           sender_name))
+    return style, entries
 
 
 # ── self-provisioning (the ensure_ytdlp idiom) ───────────────
@@ -1313,12 +2034,28 @@ class MakerService:
     # -- cards --------------------------------------------------
     def card(self, kind: str, tail: str, *, reply_name: str = "",
              reply_text: str = "", sender_name: str = "",
+             avatars: dict[int, Any] | None = None,
+             backdrop: Any = None,
              send) -> dict[str, Any]:
+        """Render + deliver one card.  ``avatars`` maps an
+        entry index to the avatar the surface handed over
+        (bytes / PIL image / path) — the renderer pastes it,
+        else the design's placeholder disc stands in.
+        ``backdrop`` feeds the feature designs; when none
+        rides, one is resolved best-effort (photo pool, then
+        her studio, then the design's gradient)."""
         try:
             style, entries = parse_card_request(
                 kind, tail, reply_name=reply_name,
                 reply_text=reply_text, sender_name=sender_name)
-            data, drawn = render_card_png(style, entries)
+            for idx, avatar in (avatars or {}).items():
+                if 0 <= int(idx) < len(entries):
+                    entries[int(idx)]["avatar"] = avatar
+            if style in FEATURE_DESIGNS and backdrop is None:
+                backdrop = card_backdrop(
+                    seed=entries[0]["text"] if entries else "")
+            data, drawn = render_card_png(style, entries,
+                                          backdrop=backdrop)
         except MakerError as exc:
             return {"sent": False, "reason": str(exc)}
         names = drawn.get("names") or []
@@ -1327,6 +2064,12 @@ class MakerService:
                        f"{' × '.join(n for n in names if n)}")
         elif style == "meme":
             caption = "🖼 meme card"
+        elif style in PLATFORM_DESIGNS:
+            caption = (f"🖼 {PLATFORM_DESIGNS[style]['label']} "
+                       f"card — {names[0] if names else ''}")
+        elif style in FEATURE_DESIGNS:
+            caption = (f"💬 quote card — "
+                       f"{names[0] if names else ''}")
         else:
             caption = f"💬 quote card — {names[0] if names else ''}"
         out = self._deliver(data, ".png", "image/png",

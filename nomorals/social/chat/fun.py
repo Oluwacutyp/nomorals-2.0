@@ -61,6 +61,8 @@ __all__ = [
     "JokeApiProvider", "OfficialJokeProvider", "DadJokeProvider",
     "ChuckProvider", "UselessFactsProvider", "CatFactProvider",
     "NumbersApiProvider", "AdviceSlipProvider", "DummyQuotesProvider",
+    "QuotableProvider", "ZenQuotesProvider", "LocalQuotesProvider",
+    "LOCAL_QUOTES",
     "BoredProvider",
     "WikimediaOnThisDayProvider", "MuffinLabsHistoryProvider",
     "DogCeoProvider", "TheCatApiProvider", "CataasProvider",
@@ -379,8 +381,15 @@ class AdviceSlipProvider:
 
 
 class DummyQuotesProvider:
-    """dummyjson quotes — the quotable-class seed:
-    ``{"quote": …, "author": …}``."""
+    """dummyjson quotes — ``{"quote": …, "author": …}``.
+
+    Kept importable for compatibility, but NO LONGER in the
+    production /quote chain (owner's order, 2026-11-10: real
+    quote sources, plural + a curated local store — a single
+    mock-data shelf is not a quote source).  The production
+    chain is :class:`QuotableProvider` →
+    :class:`ZenQuotesProvider` → :class:`LocalQuotesProvider`.
+    """
 
     name = "dummyjson-quotes"
 
@@ -396,7 +405,128 @@ class DummyQuotesProvider:
         quote = _need_text(data.get("quote"), "quote")
         author = str(data.get("author") or "").strip()
         return {"text": f"“{quote}”" + (f"\n— {author}" if author
-                                        else "")}
+                                        else ""),
+                "quote_text": quote, "author": author}
+
+
+class QuotableProvider:
+    """quotable.io — the quotable-class primary seed:
+    ``{"content": …, "author": …}``."""
+
+    name = "quotable"
+
+    def __init__(self, *,
+                 fetcher: Callable[[str], Any] | None = None
+                 ) -> None:
+        self._fetch = fetcher or _http_json
+
+    def quote(self, arg: str = "") -> dict[str, Any]:
+        data = self._fetch("https://api.quotable.io/random")
+        if not isinstance(data, dict):
+            raise FunError("quotable answered a non-object")
+        quote = _need_text(data.get("content"), "content")
+        author = str(data.get("author") or "").strip()
+        return {"text": f"“{quote}”" + (f"\n— {author}" if author
+                                        else ""),
+                "quote_text": quote, "author": author}
+
+
+class ZenQuotesProvider:
+    """zenquotes.io — the second seed: a LIST payload
+    ``[{"q": …, "a": …}]``."""
+
+    name = "zenquotes"
+
+    def __init__(self, *,
+                 fetcher: Callable[[str], Any] | None = None
+                 ) -> None:
+        self._fetch = fetcher or _http_json
+
+    def quote(self, arg: str = "") -> dict[str, Any]:
+        data = self._fetch("https://zenquotes.io/api/random")
+        rows = data if isinstance(data, list) else []
+        row = rows[0] if rows and isinstance(rows[0], dict) \
+            else None
+        if row is None:
+            raise FunError("zenquotes answered a non-list shape")
+        quote = _need_text(row.get("q"), "q")
+        author = str(row.get("a") or "").strip()
+        return {"text": f"“{quote}”" + (f"\n— {author}" if author
+                                        else ""),
+                "quote_text": quote, "author": author}
+
+
+#: Her curated local quote store — the code rung under the
+#: network seeds (the riddle bank's precedent): real quotes,
+#: really attributed, drawn at random.  The chain's floor is
+#: content she HOLDS, never a placeholder.
+LOCAL_QUOTES: tuple[tuple[str, str], ...] = (
+    ("The impediment to action advances action. What stands "
+     "in the way becomes the way.", "Marcus Aurelius"),
+    ("We suffer more often in imagination than in reality.",
+     "Seneca"),
+    ("No man is free who is not master of himself.",
+     "Epictetus"),
+    ("The journey of a thousand miles begins with a single "
+     "step.", "Lao Tzu"),
+    ("Yesterday I was clever, so I wanted to change the "
+     "world. Today I am wise, so I am changing myself.",
+     "Rumi"),
+    ("There is no greater agony than bearing an untold story "
+     "inside you.", "Maya Angelou"),
+    ("It always seems impossible until it's done.",
+     "Nelson Mandela"),
+    ("Imagination is more important than knowledge.",
+     "Albert Einstein"),
+    ("Success is not final, failure is not fatal: it is the "
+     "courage to continue that counts.", "Winston Churchill"),
+    ("The secret of getting ahead is getting started.",
+     "Mark Twain"),
+    ("Be yourself; everyone else is already taken.",
+     "Oscar Wilde"),
+    ("Knowing yourself is the beginning of all wisdom.",
+     "Aristotle"),
+    ("It does not matter how slowly you go as long as you do "
+     "not stop.", "Confucius"),
+    ("Genius is one percent inspiration and ninety-nine "
+     "percent perspiration.", "Thomas Edison"),
+    ("The best and most beautiful things in the world cannot "
+     "be seen or even touched — they must be felt with the "
+     "heart.", "Helen Keller"),
+    ("It is not the man who has too little, but the man who "
+     "craves more, that is poor.", "Seneca"),
+    ("He who has a why to live can bear almost any how.",
+     "Friedrich Nietzsche"),
+    ("What lies in our power to do, lies in our power not to "
+     "do.", "Aristotle"),
+    ("Discipline equals freedom.", "Jocko Willink"),
+    ("A year from now you may wish you had started today.",
+     "Karen Lamb"),
+    ("The soul becomes dyed with the colour of its thoughts.",
+     "Marcus Aurelius"),
+    ("Waste no more time arguing what a good man should be. "
+     "Be one.", "Marcus Aurelius"),
+    ("If a man knows not to which port he sails, no wind is "
+     "favourable.", "Seneca"),
+    ("Luck is what happens when preparation meets "
+     "opportunity.", "Seneca"),
+)
+
+
+class LocalQuotesProvider:
+    """Her own curated store — the offline floor of the
+    /quote chain: always answers, never invents."""
+
+    name = "her quote store"
+
+    def __init__(self, *, rng: random.Random | None = None
+                 ) -> None:
+        self._rng = rng or random.Random()
+
+    def quote(self, arg: str = "") -> dict[str, Any]:
+        quote, author = self._rng.choice(LOCAL_QUOTES)
+        return {"text": f"“{quote}”\n— {author}",
+                "quote_text": quote, "author": author}
 
 
 class BoredProvider:
@@ -926,6 +1056,22 @@ def parse_history_date(text: str, today: datetime.date
     return None
 
 
+def _split_quote_text(text: str) -> tuple[str, str]:
+    """Split a chain result's display text — ``“quote”`` with
+    an optional ``\n— author`` tail — back into its parts, for
+    chains whose providers answer text-only.  Returns
+    (quote, author); author is "" when the tail is absent."""
+    body = str(text or "").strip()
+    author = ""
+    if "\n— " in body:
+        body, author = body.rsplit("\n— ", 1)
+        author = author.strip()
+    body = body.strip()
+    if body.startswith("“") and body.endswith("”"):
+        body = body[1:-1].strip()
+    return body, author
+
+
 # ── the service ──────────────────────────────────────────────────
 
 def default_fun_chains(*, nasa_api_key: str = "",
@@ -944,7 +1090,8 @@ def default_fun_chains(*, nasa_api_key: str = "",
         "catfact": [CatFactProvider()],
         "numfact": [NumbersApiProvider()],
         "advice": [AdviceSlipProvider()],
-        "quote": [DummyQuotesProvider()],
+        "quote": [QuotableProvider(), ZenQuotesProvider(),
+                  LocalQuotesProvider(rng=rng)],
         "activity": [
             BoredProvider("bored-api",
                           "https://bored-api.appbrewery.com/random"),
@@ -1064,6 +1211,82 @@ class FunService:
             return {"ok": True, "text": text, "source": source}
         except Exception as exc:  # noqa: BLE001 - never breaks its host
             return {"ok": False, "reason": f"fun error: {exc}"[:160]}
+
+    # -- the quote CARD (the /quote product since 2026-11-10) --
+    def quote_card(self, arg: str = "", *,
+                   send: Callable[[Any, str], Any],
+                   renderer: Callable[..., Any] | None = None,
+                   backdrop_fn: Callable[..., Any] | None = None
+                   ) -> dict[str, Any]:
+        """Fetch a quote → render its PNG card (the makers
+        ``bigquote`` design over a backdrop) → attach it.
+
+        The card IS the /quote product now: text remains only
+        as the named degradation — when the renderer itself
+        is unavailable the result carries ``card_error`` and
+        the caller posts the words WITH that naming, never as
+        the silent default.  ``renderer`` / ``backdrop_fn``
+        are the test seams; the real ones are the makers
+        organ's (lazy import — makers borrows this module's
+        sniffers, so the import cannot ride the top)."""
+        try:
+            result, source = self._walk("quote", "quote", arg)
+            if result is None:
+                return {"sent": False, "reason": (
+                    "every /quote source is down right now — "
+                    "try again in a bit")}
+            text = str(result.get("text") or "").strip()
+            quote_text = str(result.get("quote_text") or "").strip()
+            author = str(result.get("author") or "").strip()
+            if not quote_text:
+                quote_text, author = _split_quote_text(text)
+            if not quote_text:
+                return {"sent": False, "reason": (
+                    "every /quote source answered empty — "
+                    "try again in a bit")}
+            try:
+                if renderer is None or backdrop_fn is None:
+                    from .makers import card_backdrop, render_card_png
+
+                    renderer = renderer or render_card_png
+                    backdrop_fn = backdrop_fn or card_backdrop
+                backdrop = backdrop_fn(seed=quote_text)
+                data, drawn = renderer(
+                    "bigquote",
+                    [{"name": author or "Unknown",
+                      "text": quote_text}],
+                    backdrop=backdrop)
+            except Exception as exc:  # noqa: BLE001 - named degradation
+                return {"sent": False, "card_error": str(exc)[:160],
+                        "text": text, "source": source,
+                        "author": author}
+            if self.media_dir is None:
+                return {"sent": False,
+                        "reason": "no media dir configured",
+                        "text": text, "source": source}
+            digest = hashlib.sha256(data).hexdigest()[:16]
+            dest = self.media_dir / f"quote_{digest}.png"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if not dest.exists():
+                dest.write_bytes(data)
+            from .base import MediaRef
+
+            ref = MediaRef(path=str(dest), kind="image",
+                           mime="image/png",
+                           name="quote card.png")
+            caption = _trim_caption(
+                f"💬 “{quote_text}”"
+                + (f"\n— {author}" if author else ""))
+            outcome = send(ref, caption)
+            if not getattr(outcome, "ok", False):
+                return {"sent": False,
+                        "reason": f"send failed: "
+                                  f"{getattr(outcome, 'error', '')}",
+                        "text": text, "source": source}
+            return {"sent": True, "source": source,
+                    "author": author, "drawn": drawn}
+        except Exception as exc:  # noqa: BLE001 - never breaks its host
+            return {"sent": False, "reason": f"fun error: {exc}"[:160]}
 
     def _history(self, arg: str) -> dict[str, Any]:
         today = self.today_fn()

@@ -120,11 +120,12 @@ def test_media_kinds_ride_the_delivered_set():
     # expression kinds + wave D's image one-shots + wave E's
     # media makers + the download family (joined 2026-11-05,
     # unpinned until now) + "emoji" (creation rung, 2026-11-06:
-    # a created emoji answers by sending its sticker) —
-    # nothing more, nothing less.
+    # a created emoji answers by sending its sticker) +
+    # "quote" (2026-11-10: /quote answers by attaching its
+    # rendered PNG card) — nothing more, nothing less.
     assert frozenset({
         "steal", "sticker", "convert", "gif", "react", "emoji",
-        "dog", "cat", "fox", "meme", "nasa", "pokemon",
+        "dog", "cat", "fox", "meme", "nasa", "pokemon", "quote",
         "qcard", "canvasquote", "iqc", "wndwqute", "meme2",
         "fakemsg", "fakettc", "nokiamsg", "fakeff",
         "fakeffduo", "ffgirl", "removebg", "qr", "couplepp",

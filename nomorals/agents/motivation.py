@@ -29,6 +29,13 @@ voice, grounded in the item's passage.  Degraded path (no brain /
 offline): the passage itself is delivered as a teaching card —
 passage + provenance + one framing line.  Real material either way;
 there is no stored quote-of-the-day anywhere in this path.
+
+Presentation (2026-11-10): the piece is ALSO rendered as a PNG
+card — the makers ``motivation`` design over a backdrop — and
+delivered to the owner's chats as a photo through the gateway.
+The notifier text remains the record + fallback channel; when
+the card renderer itself is unavailable, the published words
+carry a line naming that the card couldn't be rendered.
 """
 
 from __future__ import annotations
@@ -427,6 +434,86 @@ def _piece_body(item: dict[str, Any], window: str,
     return _card(item, window)
 
 
+def _render_piece_card(context: Any, item: dict[str, Any],
+                       window: str, piece: str,
+                       title: str) -> Path:
+    """Render the piece as its PNG card (the makers
+    ``motivation`` design over a backdrop).  Raises on any
+    failure — the caller names the degradation and posts the
+    words.  The card file lives under the workspace so the
+    gateway's file send can carry it."""
+    from ..social.chat.makers import card_backdrop, render_card_png
+
+    src = item.get("source") or {}
+    label = str(src.get("label") or "").strip()
+    backdrop = card_backdrop(seed=piece)
+    data, _drawn = render_card_png(
+        "motivation",
+        [{"name": label or "Her library", "text": piece,
+          "title": title, "meta": window}],
+        backdrop=backdrop)
+    ws = getattr(getattr(context, "settings", None),
+                 "workspace_dir", "")
+    if not ws:
+        raise RuntimeError("no workspace directory for the card")
+    folder = Path(ws) / "motivation_cards"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"motivation-{window}.png"
+    path.write_bytes(data)
+    return path
+
+
+def _deliver_card(context: Any, path: Path, caption: str) -> bool:
+    """Send the card PNG to the owner's chats through the
+    gateway — the morning pulse's audio-delivery shape:
+    resolved owner targets, the per-chat proactive gate
+    obeyed, fail-soft per target.  Never raises."""
+    try:
+        from ..partner.chat_modes import proactive_allowed
+        from ..social.chat.base import ChatRef
+        from ..social.chat.gateway import resolve_owner_targets
+        from .notifier import resolve_gateway
+
+        gateway = resolve_gateway(context)
+        if gateway is None or getattr(gateway, "dry_run", False):
+            return False
+        settings = getattr(context, "settings", None)
+        partner = getattr(settings, "partner", None)
+        raw = getattr(partner, "owner_chats", "") or ""
+        try:
+            status = gateway.status() or {}
+        except Exception:  # noqa: BLE001
+            status = {}
+        registry_lookup = getattr(gateway, "platforms_for_chat_id",
+                                  None)
+        try:
+            targets = resolve_owner_targets(
+                raw, status=status, registry_lookup=registry_lookup)
+        except Exception:  # noqa: BLE001
+            return False
+        for target in targets:
+            plat, cid = target.platform, target.chat_id
+            if not (plat and cid):
+                continue
+            if not proactive_allowed(f"{plat}:{cid}"):
+                continue
+            if not status.get(plat, {}).get("running_in_session"):
+                continue
+            try:
+                result = gateway.send_file(
+                    plat, ChatRef(platform=plat, chat_id=cid),
+                    str(path), caption=caption, kind="image",
+                    name="motivation card.png")
+            except Exception:  # noqa: BLE001 - next target
+                continue
+            if getattr(result, "ok", False):
+                return True
+        return False
+    except Exception:  # noqa: BLE001
+        _log.debug("motivation: card delivery failed", exc_info=True)
+        return False
+
+
 def _send_voice(context: Any, text: str) -> bool:
     """Best-effort voice note of the piece (prefs-gated, off default).
 
@@ -537,6 +624,25 @@ def run_motivation(context: Any, window: str = "morning", *,
         if theme:
             title += f" — {theme}"
 
+        # The card is the presented product (2026-11-10): the
+        # piece rendered as a PNG card and delivered as a
+        # photo.  Text is the NAMED degradation — when the
+        # renderer itself is unavailable the published words
+        # say the card couldn't be rendered.
+        piece = synthesized or str(
+            (item.get("source") or {}).get("passage") or "")
+        card_path: Path | None = None
+        card_error = ""
+        try:
+            card_path = _render_piece_card(
+                context, item, window, piece, title)
+        except Exception as exc:  # noqa: BLE001 - named fallback
+            card_error = f"{type(exc).__name__}: {exc}"
+            _log.info("motivation: card render unavailable: %s",
+                      exc)
+            body += ("\n\n🖼 (I couldn't render today's piece "
+                     "as a card — here it is as words instead.)")
+
         delivered = False
         try:
             notifier = getattr(context, "notifier", None)
@@ -555,6 +661,13 @@ def run_motivation(context: Any, window: str = "morning", *,
         result["degraded_card"] = synthesized is None
         result["theme"] = theme
         result["source_type"] = (item.get("source") or {}).get("type")
+        result["card_rendered"] = card_path is not None
+        if card_error:
+            result["card_error"] = card_error
+        card_sent = bool(card_path is not None and delivered
+                         and _deliver_card(context, card_path,
+                                           caption=title))
+        result["card_sent"] = card_sent
 
         served = ledger.mark_served(
             item, f"motivation-{window}", body=body, kind="motivation",
@@ -564,6 +677,7 @@ def run_motivation(context: Any, window: str = "morning", *,
             "lagos_date": today, "ts": now_ts, "delivered": delivered,
             "item_id": served.get("id"), "theme": theme,
             "degraded_card": synthesized is None,
+            "card_sent": card_sent,
         })
         _ledger(context, window,
                 f"{window} motivation delivered ({theme or 'no theme'}, "

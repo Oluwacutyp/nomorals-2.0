@@ -40,6 +40,7 @@ import hashlib
 import json
 import logging
 import random
+import re
 import time
 from typing import Any
 
@@ -47,8 +48,10 @@ __all__ = [
     "ITEM_COOLDOWN_S",
     "THEME_COOLDOWN_S",
     "CANDIDATE_TTL_S",
+    "PASSAGE_LIMIT",
     "BASE_THEMES",
     "TeachingsLedger",
+    "clean_passage",
     "ensure_schema",
     "item_key",
     "theme_wheel",
@@ -131,6 +134,49 @@ def _passage_text(raw: Any) -> str:
     return ""
 
 
+#: The passage size cap (the historical 1200, now a hygiene
+#: boundary, not a slice point).
+PASSAGE_LIMIT = 1200
+
+_SENTENCE_END = re.compile(r"[.!?…][\"'”’)\]]*(?=\s|$)")
+
+
+def _ends_sentence(text: str) -> bool:
+    return bool(_SENTENCE_END.search(text[-3:])) if text else False
+
+
+def clean_passage(text: Any, *, limit: int = PASSAGE_LIMIT) -> str:
+    """Sentence-boundary hygiene for stocked passages — the
+    fix for the garbled-motivation defect (2026-11-10).
+
+    A passage is stored WHOLE whenever it fits; when it must
+    shrink to ``limit`` it is cut at the LAST SENTENCE END
+    inside the limit, never mid-sentence and never mid-word
+    (the old producers' raw ``text[:1200]`` slices are dead).
+    A text already near the cap that does not end a sentence
+    reads as an old raw slice and gets the same trim, so
+    rows stocked before this rule clean up on read.  The
+    function is idempotent: a cleaned passage passes through
+    unchanged.
+    """
+    out = " ".join(str(text or "").split())
+    if not out:
+        return ""
+    near_cap = len(out) >= limit - 100
+    if len(out) <= limit and not (near_cap
+                                  and not _ends_sentence(out)):
+        return out
+    cut = out[:limit]
+    ends = [m.end() for m in _SENTENCE_END.finditer(cut)
+            if m.end() >= limit // 2]
+    if ends:
+        return cut[:ends[-1]].strip()
+    space = cut.rfind(" ")
+    if space >= limit // 2:
+        return cut[:space].rstrip(" ,;:—-").strip()
+    return cut.strip()
+
+
 # ── producers ────────────────────────────────────────────────────────
 # Every producer returns candidate item dicts in the ledger shape and
 # NEVER raises: a dead source yields fewer candidates, not a crash.
@@ -200,7 +246,7 @@ def library_candidates(context: Any, themes: list[str]) -> list[dict[str, Any]]:
                     kind="teaching", title=title, theme=theme,
                     source_type="wisdom", source_ref=slug,
                     source_label=f"{title} — WisdomKeeper",
-                    passage=text[:1200], tradition=tradition,
+                    passage=clean_passage(text), tradition=tradition,
                     weight=1.2))
     except Exception:  # noqa: BLE001 - a thin corpus yields nothing
         _log.debug("teachings: digest producer failed", exc_info=True)
@@ -227,7 +273,7 @@ def library_candidates(context: Any, themes: list[str]) -> list[dict[str, Any]]:
                     source_type="wisdom",
                     source_ref=getattr(p, "slug", "") or work,
                     source_label=f"{label} — WisdomKeeper",
-                    passage=text[:1200],
+                    passage=clean_passage(text),
                     tradition=getattr(p, "canon_status", "") or ""))
     except Exception:  # noqa: BLE001
         _log.debug("teachings: keeper producer failed", exc_info=True)
@@ -258,7 +304,7 @@ def library_candidates(context: Any, themes: list[str]) -> list[dict[str, Any]]:
                     source_type="book",
                     source_ref=str(getattr(hit, "slug", "") or title),
                     source_label=f"{title} — her library",
-                    passage=text[:1200]))
+                    passage=clean_passage(text)))
     except Exception:  # noqa: BLE001
         _log.debug("teachings: book producer failed", exc_info=True)
     return out
@@ -319,7 +365,7 @@ def net_candidates(context: Any, themes: list[str]) -> list[dict[str, Any]]:
                 source_type="news",
                 source_ref=str(row.get("url") or row.get("id") or title),
                 source_label=label,
-                passage=(summary or title)[:1200]))
+                passage=clean_passage(summary or title)))
     except Exception:  # noqa: BLE001
         _log.debug("teachings: news producer failed", exc_info=True)
 
@@ -343,7 +389,7 @@ def net_candidates(context: Any, themes: list[str]) -> list[dict[str, Any]]:
                 kind="teaching", title=title or url, theme=theme,
                 source_type="web", source_ref=url,
                 source_label=title or url,
-                passage=snippet[:1200]))
+                passage=clean_passage(snippet)))
     return out
 
 
@@ -362,7 +408,7 @@ def memory_candidates(context: Any) -> list[dict[str, Any]]:
                 theme="from your past", source_type="memory",
                 source_ref=str(getattr(card, "memory_id", "") or text[:40]),
                 source_label="From your past — your own notes",
-                passage=text[:1200], weight=0.7))
+                passage=clean_passage(text), weight=0.7))
     except Exception:  # noqa: BLE001
         _log.debug("teachings: memory producer failed", exc_info=True)
     return out
@@ -462,22 +508,29 @@ class TeachingsLedger:
 
     # ── storage primitives ──
     def _candidate_rows(self) -> list[tuple[dict[str, Any], float]]:
+        rows: list[tuple[dict[str, Any], float]] = []
         if self.db is not None:
             try:
-                rows = self.db.query(
+                stored = self.db.query(
                     "SELECT item_json, fetched_at FROM teachings_candidates"
                 ) or []
-                out = []
-                for r in rows:
+                for r in stored:
                     try:
-                        out.append((json.loads(r["item_json"]),
-                                    float(r["fetched_at"])))
+                        rows.append((json.loads(r["item_json"]),
+                                     float(r["fetched_at"])))
                     except (TypeError, ValueError):
                         continue
-                return out
             except Exception:  # noqa: BLE001
                 return []
-        return list(self._mem_candidates.values())
+        else:
+            rows = list(self._mem_candidates.values())
+        # read-side hygiene, both stores: rows stocked before
+        # the sentence-boundary rule clean up here
+        for item, _fetched in rows:
+            src = item.get("source") or {}
+            if src.get("passage"):
+                src["passage"] = clean_passage(src["passage"])
+        return rows
 
     def _store_candidates(self, items: list[dict[str, Any]],
                           now: float) -> int:
@@ -544,7 +597,7 @@ class TeachingsLedger:
                         "source": {
                             "type": r["source_type"], "ref": r["source_ref"],
                             "label": r["source_label"],
-                            "passage": r["passage"]},
+                            "passage": clean_passage(r["passage"])},
                         "created_at": float(r["created_at"]),
                         "served": served,
                         "_key": r.get("item_key") or "",

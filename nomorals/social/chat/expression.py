@@ -1501,6 +1501,9 @@ MEDIA_DELIVERED_KINDS: frozenset[str] = frozenset(
      # /pokemon answer by attaching the picture, caption riding
      # it — the same delivery contract as the kinds above.
      "dog", "cat", "fox", "meme", "nasa", "pokemon",
+     # /quote answers by attaching its rendered PNG card
+     # (2026-11-10) — the same delivery contract again.
+     "quote",
      # the wave-E makers: the quote cards, /removebg, /qr and
      # /couplepp (+ /pp) answer by attaching their render or
      # cutout — the same delivery contract again.
