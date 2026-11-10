@@ -44,11 +44,47 @@ Rules that hold for every wired emitter:
 
 Callers classify by passing :class:`AlertHints` (or a plain dict with
 the same fields) to ``Notifier.publish(..., alert_hints=...)``.
-Alerts published *without* hints keep the historical behaviour
-exactly (delivered as before): the seam tiers classified alerts, it
-does not silently re-tier the whole product.  Thresholds are config:
-``alert_recurrence_threshold`` / ``alert_recurrence_window_s`` on the
-partner settings when present, else the defaults here.
+Thresholds are config: ``alert_recurrence_threshold`` /
+``alert_recurrence_window_s`` on the partner settings when present,
+else the defaults here.
+
+Doc 15 Pass 2 — the decision is now MANDATORY.  Every publish is
+adapted to a :class:`~.report_candidate.ReportCandidate` and decided
+exactly once: hinted publishes through :meth:`AlertPolicy.decide`
+(the classification above, byte-for-byte the historical semantics),
+unhinted publishes through :meth:`AlertPolicy.decide_candidate`,
+which applies the reportability gate to the candidate's own
+evidence:
+
+* **RULE-TICK** — a candidate asserting a standing state with no
+  transition, outcome or new evidence is an unchanged tick and is
+  SUPPRESSED (journaled, never stored, never pushed): a timer
+  firing is not news.
+* **RULE-DEDUP-SEMANTIC** — a candidate whose semantic identity
+  (:func:`~.report_candidate.semantic_identity`) matches an
+  already-paged identity is a replay of the same event and is
+  deduped on that identity, whatever its title says this time.
+* **RULE-HOLD-MATERIAL-GAPS** — a candidate that asserts a
+  reportable fact (a revision transition, an outcome, change
+  evidence, an owner-action need) but lacks evidence *material* to
+  that fact — the subject itself; ``result_refs`` for a result
+  outcome; ``next_actions`` for an action need; ``attempt`` for
+  mission/job facts; ``impact`` for trading/finance facts — is HELD
+  to the DIGEST tier with the gaps named, never paged as if
+  complete and never silently dropped.
+* **RULE-LEGACY-PASSTHROUGH** — a bare legacy publish asserting no
+  structured fact at all keeps its historical delivery.  The
+  decision still runs and is journaled (with its evidence gaps on
+  record for the migration census), and legacy ``(kind, title)``
+  dedupe still applies — the pass-7 pin: genuinely actionable
+  one-shot paths (ops findings, trial waits, research results) page
+  as before until their producers graduate to structured evidence.
+
+Every decision — hinted or not — is recorded on the candidate's row
+in the candidate journal (:data:`CANDIDATE_JOURNAL_KEY`), which is
+therefore the 100%-coverage decision journal of record; the legacy
+journal above stays the hinted-decision ledger the recurrence
+counting reads.
 """
 
 from __future__ import annotations
@@ -64,15 +100,23 @@ _log = get_logger(__name__)
 
 __all__ = [
     "TIER_PAGE", "TIER_DIGEST", "TIER_LOG",
+    "TIER_SUPPRESS", "TIER_DEDUPED",
     "AlertHints", "AlertDecision", "AlertPolicy",
     "DEFAULT_RECURRENCE_THRESHOLD", "DEFAULT_RECURRENCE_WINDOW_S",
     "JOURNAL_KEY", "CANDIDATE_JOURNAL_KEY", "CANDIDATE_JOURNAL_MAX_ROWS",
+    "MATERIAL_GAP_ORDER",
 ]
 
 #: the three paging tiers
 TIER_PAGE = "page"
 TIER_DIGEST = "digest"
 TIER_LOG = "log"
+
+#: Pass 2 verdicts beside the tiers: an unchanged tick is SUPPRESSED
+#: (doc §3's decision vocabulary — journaled, no notification row,
+#: no push), and a semantic replay is DEDUPED on its identity.
+TIER_SUPPRESS = "suppress"
+TIER_DEDUPED = "deduped"
 
 #: defaults — a subject must recur this many times inside the window
 #: before housekeeping escalates to a page.
@@ -154,6 +198,33 @@ class AlertDecision:
     #: dedupe — a persisting failure re-pages on the dedupe cadence,
     #: not once per tick.
     force: bool = False
+    #: Pass 2: the ReportCandidate's event id, when the decision was
+    #: taken on a candidate (the mandatory path).
+    candidate_id: str = ""
+    #: Pass 2: the candidate's semantic dedupe identity ("" when it
+    #: carries none — the legacy (kind, title) dedupe then governs,
+    #: recorded in ``dedupe_mode``).
+    identity: str = ""
+    #: Pass 2: "semantic" when ``identity`` governed dedupe,
+    #: "legacy-fallback" when the (kind, title) fallback did.
+    dedupe_mode: str = ""
+    #: Pass 2: True when this page is a semantic replay of an
+    #: already-paged identity — the publish returns deduped.
+    deduped: bool = False
+    #: Pass 2: the material evidence gaps that held this candidate
+    #: to the digest tier (RULE-HOLD-MATERIAL-GAPS), in canonical
+    #: order; empty for every other verdict.
+    material_gaps: tuple[str, ...] = ()
+    #: Pass 2: True when the decision line rides the delivered body:
+    #: every hinted page (the historical behaviour) and every
+    #: evidence-asserting candidate page.  A bare legacy pass-through
+    #: page keeps its historical body byte-for-byte.
+    annotate: bool = False
+
+    @property
+    def suppressed(self) -> bool:
+        """True when the verdict is RULE-TICK suppression."""
+        return self.tier == TIER_SUPPRESS
 
     def body_line(self) -> str:
         """The policy's own line, appended to paged alert bodies."""
@@ -245,19 +316,24 @@ class AlertPolicy:
                 break
         return out
 
-    # ── the candidate journal (Doc 15, Pass 1 — observe mode) ────
+    # ── the candidate journal (Doc 15 P1; decisions from P2) ────
 
     @staticmethod
     def record_candidate(db: Any, candidate: dict[str, Any],
-                         now: float | None = None) -> None:
-        """Journal one ReportCandidate (observe mode — no decision
-        is taken on it in Pass 1).  Best-effort like the decision
+                         now: float | None = None,
+                         decision: "AlertDecision | None" = None) -> None:
+        """Journal one ReportCandidate and, from Pass 2, the
+        mandatory decision taken on it — the candidate journal is
+        the 100%-coverage decision journal of record: every publish
+        (hinted or not) leaves exactly one row carrying the
+        candidate identity, the verdict and the reason in the
+        decision's own terms.  Best-effort like the decision
         journal: a journal failure never reaches the publish path."""
         if db is None:
             return
         now = time.time() if now is None else now
         rows = AlertPolicy._load_journal(db, CANDIDATE_JOURNAL_KEY)
-        rows.append({
+        row: dict[str, Any] = {
             "ts": now,
             "kind": str(candidate.get("kind") or ""),
             "subject": str(candidate.get("subject") or ""),
@@ -267,7 +343,19 @@ class AlertPolicy:
             "complete": not candidate.get("evidence_gaps"),
             "evidence_gaps": list(candidate.get("evidence_gaps") or []),
             "candidate": candidate,
-        })
+        }
+        if decision is not None:
+            row["decision"] = {
+                "tier": (TIER_DEDUPED if decision.deduped
+                         else decision.tier),
+                "reason": decision.reason,
+                "subject": decision.subject,
+                "identity": decision.identity,
+                "dedupe_mode": decision.dedupe_mode,
+                "material_gaps": list(decision.material_gaps),
+                "escalated": decision.escalated,
+            }
+        rows.append(row)
         AlertPolicy._save_journal(
             db, rows, now, DEFAULT_RECURRENCE_WINDOW_S,
             key=CANDIDATE_JOURNAL_KEY,
@@ -312,13 +400,67 @@ class AlertPolicy:
                 complete += 1
             for gap in row.get("evidence_gaps") or []:
                 gap_fields[str(gap)] = gap_fields.get(str(gap), 0) + 1
+        decisions: dict[str, int] = {}
+        legacy_fallback = 0
+        for row in rows:
+            dec = row.get("decision")
+            if not isinstance(dec, dict):
+                continue
+            verdict = str(dec.get("tier") or "")
+            if verdict:
+                decisions[verdict] = decisions.get(verdict, 0) + 1
+            if dec.get("dedupe_mode") == "legacy-fallback":
+                legacy_fallback += 1
         return {
             "candidates": len(rows),
             "complete": complete,
             "with_gaps": len(rows) - complete,
             "by_class": by_class,
             "gap_fields": gap_fields,
+            #: Pass 2: the mandatory decision's verdict counts over
+            #: the same retained rows, and how many publishes relied
+            #: on the legacy (kind, title) dedupe fallback.
+            "decisions": decisions,
+            "suppressed": decisions.get(TIER_SUPPRESS, 0),
+            "legacy_fallback": legacy_fallback,
         }
+
+    @staticmethod
+    def decision_journal(db: Any, *, limit: int = 50, kind: str = "",
+                         verdict: str = "") -> list[dict[str, Any]]:
+        """Recent mandatory decisions, newest first — one entry per
+        publish, hinted or not, each carrying the candidate identity
+        (``event_id``), the verdict and the reason.  This is the
+        100%-coverage read beside :meth:`journal` (which stays the
+        hinted-decision ledger the recurrence counting reads)."""
+        if db is None:
+            return []
+        rows = AlertPolicy._load_journal(db, CANDIDATE_JOURNAL_KEY)
+        out = []
+        for row in reversed(rows):
+            dec = row.get("decision")
+            if not isinstance(dec, dict):
+                continue
+            if kind and row.get("kind") != kind:
+                continue
+            if verdict and dec.get("tier") != verdict:
+                continue
+            out.append({
+                "ts": row.get("ts"),
+                "event_id": row.get("event_id"),
+                "kind": row.get("kind"),
+                "subject": dec.get("subject") or row.get("subject"),
+                "producer": row.get("producer"),
+                "producer_class": row.get("producer_class"),
+                "verdict": dec.get("tier"),
+                "reason": dec.get("reason"),
+                "identity": dec.get("identity"),
+                "dedupe_mode": dec.get("dedupe_mode"),
+                "material_gaps": dec.get("material_gaps") or [],
+            })
+            if len(out) >= max(1, int(limit)):
+                break
+        return out
 
     # ── the decision ─────────────────────────────────────────────────
 
@@ -420,4 +562,179 @@ class AlertPolicy:
             self._save_journal(db, rows, now, self.recurrence_window_s)
         return AlertDecision(tier=tier, reason=reason, subject=subj,
                              occurrences=occurrences, escalated=escalated,
-                             force=force)
+                             force=force,
+                             annotate=(tier == TIER_PAGE))
+
+    # ── the mandatory candidate decision (Doc 15, Pass 2) ────────
+
+    def _already_paged(self, db: Any, identity: str) -> bool:
+        """True when a retained decision record shows this semantic
+        identity already paged.  Reads the candidate journal (the
+        decision journal of record); its bounded retention (500
+        rows) is the dedupe memory's honest bound — the same class
+        of bound as the legacy 600s window, far larger."""
+        if db is None or not identity:
+            return False
+        rows = self._load_journal(db, CANDIDATE_JOURNAL_KEY)
+        for row in rows:
+            dec = row.get("decision")
+            if isinstance(dec, dict) \
+                    and dec.get("identity") == identity \
+                    and dec.get("tier") == TIER_PAGE:
+                return True
+        return False
+
+    def decide_candidate(self, db: Any, candidate: Any, *,
+                         hints: "AlertHints | None" = None,
+                         now: float | None = None) -> AlertDecision:
+        """The ONE mandatory decision for a publish (Pass 2).
+
+        ``candidate`` is a :class:`~.report_candidate.ReportCandidate`
+        (duck-typed).  Hinted publishes delegate to :meth:`decide` —
+        the historical classification, untouched — and gain only the
+        semantic-replay check on top of a PAGE verdict.  Unhinted
+        publishes are decided on the candidate's own evidence by the
+        rules named in this module's docstring.  This method does
+        NOT journal: the caller records the decision on the
+        candidate's journal row (one row per publish), except that
+        the hinted delegation journals in the legacy decision
+        journal exactly as it always has (recurrence substrate).
+        """
+        from .report_candidate import is_unchanged_tick, semantic_identity
+
+        now = time.time() if now is None else now
+        role = ("close" if hints is not None and hints.resolved
+                else "open" if hints is not None and hints.incident_key
+                else "event")
+        identity = semantic_identity(candidate, role=role)
+        dedupe_mode = "semantic" if identity else "legacy-fallback"
+        subj = (candidate.subject or candidate.source_id
+                or candidate.kind)
+
+        if hints is not None:
+            decision = self.decide(
+                db, kind=candidate.kind, subject=candidate.subject,
+                hints=hints, now=now)
+            decision.candidate_id = candidate.event_id
+            decision.identity = identity
+            decision.dedupe_mode = dedupe_mode
+            if decision.tier == TIER_PAGE and identity \
+                    and self._already_paged(db, identity):
+                decision.deduped = True
+                decision.reason = (
+                    "semantic duplicate — this transition was "
+                    f"already reported (identity: {identity}); "
+                    "the original classification stands: "
+                    + decision.reason)
+            return decision
+
+        # ── unhinted: the reportability gate on the evidence ─────
+        if is_unchanged_tick(candidate):
+            return AlertDecision(
+                tier=TIER_SUPPRESS,
+                reason=("unchanged tick — subject "
+                        f"{subj} reports revision "
+                        f"{candidate.current_revision or '—'} with no "
+                        "transition, no outcome and no new evidence; "
+                        "a timer firing is not news"),
+                subject=subj, candidate_id=candidate.event_id,
+                identity=identity, dedupe_mode=dedupe_mode)
+        if identity and self._already_paged(db, identity):
+            return AlertDecision(
+                tier=TIER_PAGE, deduped=True,
+                reason=("semantic duplicate — this transition was "
+                        f"already reported (identity: {identity})"),
+                subject=subj, candidate_id=candidate.event_id,
+                identity=identity, dedupe_mode=dedupe_mode)
+        fact = _asserted_fact(candidate)
+        if fact:
+            material = _material_gaps(candidate)
+            if material:
+                return AlertDecision(
+                    tier=TIER_DIGEST,
+                    reason=(f"held — the candidate asserts {fact} but "
+                            "material evidence is missing: "
+                            + ", ".join(material)
+                            + "; held to the digest, never paged as "
+                              "if complete"),
+                    subject=subj, candidate_id=candidate.event_id,
+                    identity=identity, dedupe_mode=dedupe_mode,
+                    material_gaps=tuple(material))
+            return AlertDecision(
+                tier=TIER_PAGE, escalated=True,
+                reason=f"reportable fact — {fact}",
+                subject=subj, candidate_id=candidate.event_id,
+                identity=identity, dedupe_mode=dedupe_mode,
+                annotate=True)
+        return AlertDecision(
+            tier=TIER_PAGE,
+            reason=("legacy notice — no structured evidence asserted; "
+                    "the decision ran and the gaps are on record "
+                    "(RULE-LEGACY-PASSTHROUGH)"),
+            subject=subj, candidate_id=candidate.event_id,
+            identity=identity, dedupe_mode=dedupe_mode)
+
+
+#: canonical order for naming material gaps (stable reasons/journals)
+MATERIAL_GAP_ORDER = ("subject", "attempt", "result_refs",
+                      "next_actions", "impact")
+
+#: outcomes that report a useful result — the result must be
+#: referenced for the page to be complete (doc §3).
+_RESULT_OUTCOMES = ("succeeded", "verified", "partial")
+
+#: producer classes whose facts are per-attempt by nature — an
+#: attempt-less mission/job fact cannot be told apart from another
+#: attempt's, so ``attempt`` is material evidence for them.
+_ATTEMPT_CLASSES = ("mission", "job")
+
+#: producer classes whose pages are only actionable with their
+#: impact stated — a market/money alert without impact is noise.
+_IMPACT_CLASSES = ("trading", "finance")
+
+
+def _asserted_fact(candidate: Any) -> str:
+    """The reportable fact a candidate asserts, in words, or "".
+
+    A fact is exactly one of the doc §3 gate's currencies: a
+    semantic transition, an outcome, canonical change evidence, or
+    an owner-action need.  Text alone is not a fact — it carries no
+    identity the decision can verify, dedupe or re-check.
+    """
+    if candidate.prev_revision and candidate.current_revision \
+            and candidate.prev_revision != candidate.current_revision:
+        return (f"a revision transition "
+                f"({candidate.prev_revision} → "
+                f"{candidate.current_revision})")
+    if candidate.outcome:
+        return f"an outcome ({candidate.outcome})"
+    if candidate.change_evidence:
+        return "change evidence"
+    if candidate.action_needed is True:
+        return "an owner-action need"
+    return ""
+
+
+def _material_gaps(candidate: Any) -> list[str]:
+    """The evidence gaps material to the fact this candidate
+    asserts (RULE-HOLD-MATERIAL-GAPS), in canonical order.
+
+    Only gaps the adapter actually marked are considered — a field
+    the producer supplied is never re-litigated here.
+    """
+    gaps = set(candidate.evidence_gaps or ())
+    material: list[str] = []
+    if "subject" in gaps:
+        material.append("subject")
+    if candidate.producer_class in _ATTEMPT_CLASSES \
+            and "attempt" in gaps:
+        material.append("attempt")
+    if candidate.outcome in _RESULT_OUTCOMES \
+            and "result_refs" in gaps:
+        material.append("result_refs")
+    if candidate.action_needed is True and "next_actions" in gaps:
+        material.append("next_actions")
+    if candidate.producer_class in _IMPACT_CLASSES \
+            and "impact" in gaps:
+        material.append("impact")
+    return [g for g in MATERIAL_GAP_ORDER if g in material]

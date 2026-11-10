@@ -10,12 +10,16 @@ producer class with its *current* AlertHints posture:
 * ``forwarding`` — the call forwards ``**kwargs``; hints reach the
   policy only when an upstream caller supplied them (the notifier's
   own plumbing and duck-typed forwarders).
-* ``unhinted`` — the call passes no hints: today it *bypasses* the
-  policy entirely (the decision runs only ``if alert_hints is not
-  None``).  These are the bypass the ReportCandidate adapter exists
-  to close: since Pass 1 they still deliver exactly as before, but
-  each one leaves a candidate record in the candidate journal with
-  its missing evidence marked (see :mod:`.report_candidate`).
+* ``unhinted`` — the call passes no hints.  In Pass 1 these
+  *bypassed* the policy entirely (the decision ran only ``if
+  alert_hints is not None``); since Pass 2 the bypass is closed —
+  the mandatory decision runs on the ReportCandidate the adapter
+  builds from the call (see :mod:`.report_candidate` and
+  :meth:`.alert_policy.AlertPolicy.decide_candidate`), and each one
+  leaves a candidate + decision record in the candidate journal
+  with its missing evidence marked.  The posture recorded here
+  still describes the call's *hints* shape only, exactly as the
+  AST derives it.
 
 Attribute calls named ``publish``/``publish_doc`` whose receiver is
 NOT the Notifier (the event bus, living-card hosts, platform

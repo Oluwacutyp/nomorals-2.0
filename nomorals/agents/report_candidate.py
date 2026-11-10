@@ -6,13 +6,17 @@ source/subject from what the call carries and **marks missing
 evidence** — they must not bypass the reportability decision merely
 by omitting AlertHints.
 
-Pass 1 lands the schema, the legacy adapter, and the journal in
+Pass 1 landed the schema, the legacy adapter, and the journal in
 OBSERVE mode: :meth:`Notifier.publish` builds a candidate for every
 call and records it in the candidate journal (see
 :mod:`.alert_policy`), while delivery behaviour is byte-identical to
-before — no gate, no re-tiering, no dedupe change.  Pass 2 flips the
-mandatory decision on top of this schema; nothing here pre-decides
-any alert's fate.
+before — no gate, no re-tiering, no dedupe change.  Pass 2 (this
+schema's consumer) makes the decision mandatory on top of it: the
+gate in :mod:`.alert_policy` reads the candidate's semantic shape —
+:func:`semantic_identity` and :func:`is_unchanged_tick` below — and
+every publish leaves a decision record in the candidate journal.
+Nothing in this module decides any alert's fate; it defines the
+identity the decision deduplicates by.
 
 Field map against the doc's required candidate fields:
 
@@ -76,6 +80,7 @@ from .notify_producers import producer_class_for_module
 
 __all__ = [
     "ReportCandidate", "build_legacy_candidate", "caller_module",
+    "semantic_identity", "is_unchanged_tick",
     "REPORT_CLASS_PROACTIVE", "URGENCY_CRITICAL",
 ]
 
@@ -164,6 +169,76 @@ class ReportCandidate:
             "evidence_gaps": list(self.evidence_gaps),
             "legacy": self.legacy,
         }
+
+
+def semantic_identity(candidate: ReportCandidate, *,
+                        role: str = "event") -> str:
+    """The dedupe identity of one candidate (Doc 15 §5, Pass 2).
+
+    ``subject (or source) + attempt + semantic transition
+    (prev_revision → current_revision) + outcome + audience +
+    logical role`` — the identity a re-publication must match to be
+    the *same* event.  Title, body, render timestamps, formatting
+    and generated phrasing are excluded by construction: the same
+    event reworded by a model keeps its identity, and two different
+    operations that happen to share a title never do.
+
+    One refinement: a candidate asserting *only* change evidence
+    (no revision, no outcome) has nothing canonical to distinguish
+    one asserted change from the next, so its identity carries the
+    evidence itself (whitespace/case-normalized).  A producer that
+    needs reword-proof dedupe for successive changes graduates to
+    revisions — the revision, when present, is the identity and the
+    evidence text is prose again.
+
+    Returns ``""`` when the candidate carries no semantic identity
+    at all — no subject/source, or nothing that distinguishes one
+    state of the subject from another (no revision, no outcome, no
+    change evidence).  The decision then falls back to the legacy
+    ``(kind, title)`` dedupe and journals the fallback as such.
+    """
+    subject = candidate.subject or candidate.source_id
+    if not subject:
+        return ""
+    if not (candidate.current_revision or candidate.outcome
+            or candidate.change_evidence):
+        return ""
+    transition = ""
+    if candidate.prev_revision or candidate.current_revision:
+        transition = (f"{candidate.prev_revision}->"
+                      f"{candidate.current_revision}")
+    evidence = ""
+    if not transition and not candidate.outcome \
+            and candidate.change_evidence:
+        evidence = "ev:" + " ".join(
+            candidate.change_evidence.split()).casefold()
+    parts = [subject, candidate.attempt, transition, candidate.outcome,
+             evidence, candidate.audience, role]
+    return "|".join(p for p in parts if p)
+
+
+def is_unchanged_tick(candidate: ReportCandidate) -> bool:
+    """True when the candidate asserts a standing state, not an event.
+
+    A tick is a poll/watch observation that found no change: it
+    names a subject at a revision and declares no transition into
+    it, no outcome, and no new evidence — either explicitly (the
+    producer reported ``prev_revision == current_revision``) or by
+    shape (a current revision with no predecessor and nothing else
+    asserted).  An owner-action need is a fact, not a tick, and an
+    outcome is an event, not a tick; either one lifts the candidate
+    out of this rule.  Urgency never does: a critical classification
+    cannot turn an unchanged event into news (doc §4).
+    """
+    if candidate.action_needed is True:
+        return False
+    if candidate.outcome:
+        return False
+    if candidate.prev_revision and candidate.current_revision:
+        return candidate.prev_revision == candidate.current_revision
+    if candidate.current_revision and not candidate.prev_revision:
+        return not candidate.change_evidence
+    return False
 
 
 def caller_module() -> str:

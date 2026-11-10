@@ -274,11 +274,13 @@ class Notifier:
         #: passed explicitly (the runtime keeps it in context.extras).
         #: None in CLI contexts (delivery = persist only).
         self.gateway = gateway if gateway is not None else resolve_gateway(context)
-        #: Doc 15 Pass 1 — OBSERVE mode: every publish builds a
-        #: ReportCandidate and journals it beside the delivery path
-        #: (see .report_candidate / .alert_policy candidate journal).
-        #: Observation only — it never alters a delivery outcome;
-        #: Pass 2 turns the record into the mandatory decision.
+        #: Doc 15 — the candidate + mandatory-decision machinery:
+        #: every publish builds a ReportCandidate, is decided exactly
+        #: once (Pass 2's reportability gate), and journals both
+        #: beside the delivery path (see .report_candidate /
+        #: .alert_policy).  Setting this False per-instance disables
+        #: the machinery wholesale — no candidate, no gate, the
+        #: historical hinted-only policy path: the rollback shape.
         self.observe_candidates = True
 
     #: identical (kind, title) within this window collapses to one alert
@@ -338,8 +340,7 @@ class Notifier:
         PAGE it as today.  A recurrence page bypasses dedupe (the
         repeat IS the signal); failure/actionable pages keep dedupe.
         Every decided page carries the policy's decision line in its
-        body, stating what escalated and naming the subject.  No
-        hints → historical behaviour, untouched.
+        body, stating what escalated and naming the subject.
 
         ``doc`` (Formatting Pass F2) is a
         :class:`~nomorals.social.chat.present.Doc` the producer built
@@ -359,13 +360,21 @@ class Notifier:
         ``doc`` is a producer bug: logged and ignored, never a lost
         alert.
 
-        Doc 15 Pass 1 (observe mode): every publish also builds a
-        :class:`~.report_candidate.ReportCandidate` from the call and
-        journals it (``candidate_journal()``), hinted or not, with
-        missing evidence marked — the record the mandatory decision
-        (Pass 2) will consume.  Observation changes no delivery
-        behaviour in this pass; disable per-instance with
-        ``observe_candidates = False``.
+        Doc 15 Pass 2 (the mandatory decision): every publish builds
+        a :class:`~.report_candidate.ReportCandidate` from the call
+        and is decided exactly once — hinted publishes through the
+        historical hints classification, unhinted ones through the
+        reportability gate on the candidate's own evidence — and the
+        decision is journaled on the candidate's row
+        (``candidate_journal()`` / ``decision_journal()``), hinted or
+        not.  The gate suppresses unchanged ticks outright (no row,
+        no push), dedupes semantic replays on their identity (never
+        on a reworded title), holds materially-gapped fact claims to
+        the digest tier with the gaps named, and passes bare legacy
+        notices through with their gaps on record
+        (RULE-LEGACY-PASSTHROUGH — the pass-7 pin).  Omitting hints
+        no longer bypasses the decision.  Disable the whole
+        machinery per-instance with ``observe_candidates = False``.
         """
         doc_json = ""
         if doc is not None:
@@ -384,43 +393,71 @@ class Notifier:
                 doc = None
             if doc is not None:
                 doc_json = self._serialize_doc(doc)
-        if self.observe_candidates and self.db is not None:
-            # Observe-mode candidate (Doc 15 P1): built from the
-            # producer's original call — before the policy block may
-            # append its decision line to the body — and journaled
-            # whatever the delivery outcome turns out to be.
-            self._observe_candidate(
+        decision = None
+        if self.db is not None and self.observe_candidates:
+            # The mandatory decision (Doc 15 P2): the candidate is
+            # built from the producer's original call — before the
+            # decision line may be appended to the body — decided
+            # exactly once, and journaled whatever the delivery
+            # outcome turns out to be.
+            decision = self._decide_publish(
                 kind=kind, title=title, body=body, force=force,
                 critical=critical, channels=channels,
                 alert_subject=alert_subject, alert_hints=alert_hints,
                 output_kind=output_kind, output_meta=output_meta)
-        decision = None
-        if alert_hints is not None and self.db is not None:
-            from .alert_policy import AlertHints, AlertPolicy, \
-                TIER_DIGEST, TIER_LOG, TIER_PAGE
+        elif alert_hints is not None and self.db is not None:
+            # Candidate machinery disabled per-instance: the
+            # historical hinted-only policy path, verbatim.
+            from .alert_policy import AlertHints, AlertPolicy
 
             hints = AlertHints.coerce(alert_hints)
             if hints is not None:
                 decision = AlertPolicy.from_context(self.context).decide(
                     self.db, kind=kind, subject=alert_subject, hints=hints)
-                if decision.tier in (TIER_LOG, TIER_DIGEST):
-                    state = (STATE_LOGGED if decision.tier == TIER_LOG
-                             else STATE_DIGEST)
-                    result = self._store(kind, title, body, delivered=0,
-                                         delivery_state=state,
-                                         doc_json=doc_json)
-                    result["attempts"] = []
-                    result["tier"] = decision.tier
-                    result["tier_reason"] = decision.reason
-                    result["subject"] = decision.subject
-                    return result
-                # TIER_PAGE: deliver as today.  Only a recurrence
-                # page forces past dedupe (the repeat IS the signal);
-                # failure/actionable pages keep dedupe, so a
-                # persisting failure re-pages on the dedupe cadence
-                # rather than once per tick.
-                if decision.force:
-                    force = True
+        if decision is not None:
+            from .alert_policy import TIER_DIGEST, TIER_LOG
+
+            if decision.suppressed:
+                # RULE-TICK: the suppression is journaled in the
+                # decision record above; no notification row (a
+                # /notify surface flooded with ticks is the failure
+                # this pass exists to end), no push.
+                return {"id": "", "kind": kind, "title": title,
+                        "delivered": False, "suppressed": True,
+                        "tier": decision.tier,
+                        "tier_reason": decision.reason,
+                        "subject": decision.subject}
+            if decision.deduped:
+                # RULE-DEDUP-SEMANTIC: the same event — reworded or
+                # not — already paged under this identity.
+                return {"id": "", "kind": kind, "title": title,
+                        "delivered": False, "deduped": True,
+                        "delivery_state": STATE_DEDUPED,
+                        "tier": decision.tier,
+                        "tier_reason": decision.reason,
+                        "subject": decision.subject,
+                        "identity": decision.identity}
+            if decision.tier in (TIER_LOG, TIER_DIGEST):
+                state = (STATE_LOGGED if decision.tier == TIER_LOG
+                         else STATE_DIGEST)
+                result = self._store(kind, title, body, delivered=0,
+                                     delivery_state=state,
+                                     doc_json=doc_json)
+                result["attempts"] = []
+                result["tier"] = decision.tier
+                result["tier_reason"] = decision.reason
+                result["subject"] = decision.subject
+                if decision.material_gaps:
+                    result["material_gaps"] = list(decision.material_gaps)
+                return result
+            # TIER_PAGE: deliver as today.  Only a recurrence
+            # page forces past dedupe (the repeat IS the signal);
+            # failure/actionable pages keep dedupe, so a
+            # persisting failure re-pages on the dedupe cadence
+            # rather than once per tick.
+            if decision.force:
+                force = True
+            if decision.annotate:
                 _line = decision.body_line()
                 body = (f"{body}\n{_line}" if body else _line)
                 if doc is not None:
@@ -436,11 +473,18 @@ class Notifier:
                     doc_json = self._serialize_doc(doc)
         if self.db is not None:
             # DEDUPE CHOKE POINT — every proactive send funnels through
-            # here, including critical ones.  The same (kind, title) inside
-            # the window collapses to one alert: a re-firing urgent alert
-            # is spam, not signal.  ``force`` is the only escape hatch
+            # here, including critical ones.  A publish carrying a
+            # semantic identity was already adjudicated by the
+            # mandatory decision (RULE-DEDUP-SEMANTIC): the legacy
+            # test must not collapse two different operations that
+            # share a title, so the same (kind, title) inside the
+            # window collapses to one alert only as the FALLBACK for
+            # identity-less publishes — a re-firing urgent alert is
+            # spam, not signal.  ``force`` is the only escape hatch
             # (explicit owner/manual sends).
-            if not force and self._is_duplicate(kind, title):
+            if decision is not None and decision.identity:
+                pass  # semantic dedupe already adjudicated above
+            elif not force and self._is_duplicate(kind, title):
                 # same alert already went out in the window — skip, don't re-spam
                 return {"id": "", "kind": kind, "title": title,
                         "delivered": False, "deduped": True,
@@ -554,22 +598,26 @@ class Notifier:
         """
         return self.publish(kind, "", "", doc=doc, **kw)
 
-    def _observe_candidate(self, *, kind: str, title: str, body: str,
-                           force: bool, critical: bool,
-                           channels: list[str] | None,
-                           alert_subject: str, alert_hints: Any,
-                           output_kind: str | None,
-                           output_meta: dict[str, Any] | None) -> None:
-        """Build + journal the ReportCandidate for one publish.
+    def _decide_publish(self, *, kind: str, title: str, body: str,
+                        force: bool, critical: bool,
+                        channels: list[str] | None,
+                        alert_subject: str, alert_hints: Any,
+                        output_kind: str | None,
+                        output_meta: dict[str, Any] | None) -> Any:
+        """Build the ReportCandidate for one publish, take the ONE
+        mandatory decision on it, and journal both (Doc 15 P2).
 
-        Observe mode (Doc 15 P1): strictly read-only over the call —
-        it mutates nothing, returns nothing the delivery path uses,
-        and never raises (``publish`` never raises).  A candidate
-        with missing evidence is the expected state for most legacy
-        producers; the marks are the measurement, not an error.
+        Returns the :class:`~.alert_policy.AlertDecision` the
+        delivery path consumes, or None when the machinery itself
+        fails — the gate must never lose an alert, so the publish
+        then follows the historical delivery path with the failure
+        recorded.  Never raises (``publish`` never raises).  A
+        candidate with missing evidence is the expected state for
+        most legacy producers; the marks are the measurement the
+        gate's rules read, not an error.
         """
         try:
-            from .alert_policy import AlertPolicy
+            from .alert_policy import AlertHints, AlertPolicy
             from .report_candidate import (
                 build_legacy_candidate,
                 caller_module,
@@ -581,9 +629,15 @@ class Notifier:
                 alert_subject=alert_subject, alert_hints=alert_hints,
                 output_kind=output_kind, output_meta=output_meta,
                 producer=caller_module())
-            AlertPolicy.record_candidate(self.db, candidate.to_dict())
-        except Exception as exc:  # noqa: BLE001 - observation never breaks delivery
-            record_failure("notifier.observe_candidate", exc)
+            hints = AlertHints.coerce(alert_hints)
+            decision = AlertPolicy.from_context(self.context) \
+                .decide_candidate(self.db, candidate, hints=hints)
+            AlertPolicy.record_candidate(
+                self.db, candidate.to_dict(), decision=decision)
+            return decision
+        except Exception as exc:  # noqa: BLE001 - the gate never loses an alert
+            record_failure("notifier.decide_publish", exc)
+            return None
 
     @staticmethod
     def _termux_attempt(title: str) -> dict[str, Any]:
@@ -1264,13 +1318,34 @@ class Notifier:
             record_failure("notifier.alert_journal", exc)
             return []
 
+    def decision_journal(self, limit: int = 50, kind: str = "",
+                         verdict: str = "") -> list[dict[str, Any]]:
+        """Recent mandatory decisions (Doc 15 P2), newest first.
+
+        One entry per publish — hinted or not — carrying the
+        candidate identity (``event_id``), the verdict and the
+        reason: the 100%-coverage answer to "why was this sent /
+        held / digested / suppressed", beside :meth:`alert_journal`
+        (the hinted-decision ledger).  Never raises."""
+        if self.db is None:
+            return []
+        try:
+            from .alert_policy import AlertPolicy
+
+            return AlertPolicy.decision_journal(
+                self.db, limit=limit, kind=kind, verdict=verdict)
+        except Exception as exc:  # noqa: BLE001
+            record_failure("notifier.decision_journal", exc)
+            return []
+
     def candidate_journal(self, limit: int = 50, kind: str = "",
                           producer_class: str = "") -> list[dict[str, Any]]:
         """Recent ReportCandidate records (Doc 15 P1), newest first.
 
         One row per publish — hinted AND unhinted — with the
-        candidate and its missing-evidence marks, beside the
-        decision-only :meth:`alert_journal`.  Never raises."""
+        candidate, its missing-evidence marks and, from Pass 2, the
+        mandatory decision taken on it, beside the decision-only
+        :meth:`alert_journal`.  Never raises."""
         if self.db is None:
             return []
         try:
