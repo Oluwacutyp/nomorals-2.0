@@ -365,6 +365,17 @@ def model_steps_to_plan(
             payload["tool"] = tool_name
         if isinstance(args, dict):
             payload["args"] = args
+        # Doc 18 G9 declarations ride along (the same whitelist the
+        # orchestrator's own plan parser applies): "writes" and
+        # "consequential" are the plan-level signals the contract
+        # seam reads when the step executes.
+        writes = raw.get("writes")
+        if isinstance(writes, list):
+            declared = [str(w).strip() for w in writes if str(w).strip()]
+            if declared:
+                payload["writes"] = declared
+        if raw.get("consequential") is True:
+            payload["consequential"] = True
         steps.append(
             PlanStep(
                 name=name,

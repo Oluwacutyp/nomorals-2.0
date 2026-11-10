@@ -40,7 +40,7 @@ from .supervisor import Supervisor
 from ..core.tasks import Task, TaskGraph, TaskKind, TaskState
 
 __all__ = ["MasterOrchestrator", "Plan", "PlanStep", "OrchestrationResult",
-           "Reevaluation"]
+           "Reevaluation", "StopDirective"]
 
 _log = get_logger(__name__)
 
@@ -103,6 +103,73 @@ class Plan:
                 if target is not None and resolved is not None and resolved.id not in target.deps:
                     target.deps.append(resolved.id)
         return graph
+
+
+@dataclass
+class StopDirective:
+    """A typed STOP at the orchestrator seam (doc 18 G8).
+
+    Two legacy producers feed this seam, and compatibility is law —
+    neither is rewritten here:
+
+    * the reasoning layer's course-correct pivot, historically a
+      ``stop: ...`` TEXT prefix parsed by a startswith check;
+    * a step result's ``{"revise_plan": {"abort": ...}}`` dict,
+      historically read as a raw mapping.
+
+    ``from_text`` / ``from_mapping`` are the ONE migration point: they
+    parse the legacy forms into this schema, and ``to_text`` renders
+    the legacy text back — for text-born directives the verbatim
+    original is kept, so consumers that still read text (the graph
+    cancel reason, the reevaluation record) see byte-identical
+    strings.
+    """
+
+    reason: str = ""
+    scope: str = "run"
+    source: str = ""
+    # The verbatim legacy rendering for text-born directives (excluded
+    # from equality: two directives with the same reason are the same
+    # directive however they were spelled).
+    text: str = field(default="", compare=False)
+
+    @classmethod
+    def from_text(cls, text: Any) -> StopDirective | None:
+        """Parse the legacy ``stop:`` text form. None when the text is
+        not a stop — the predicate is the historical one exactly
+        (stripped, case-insensitive ``startswith("stop")``), so texts
+        that fired before fire now and no others start firing."""
+        raw = str(text or "").strip()
+        if not raw.lower().startswith("stop"):
+            return None
+        body = raw[4:].lstrip()
+        if body.startswith(":"):
+            reason = body[1:].strip()
+        elif body:
+            # No colon form ("stopping the rollout"): the text itself
+            # is the reason — nothing is invented or dropped.
+            reason = raw
+        else:
+            reason = ""
+        return cls(reason=reason[:300], source="course_correct",
+                   text=raw[:300])
+
+    @classmethod
+    def from_mapping(cls, directive: Any) -> StopDirective | None:
+        """Parse a ``{"revise_plan": {...}}``-shaped directive's abort
+        into a StopDirective. None when the mapping carries no abort
+        (the historical truthiness rule exactly)."""
+        if not isinstance(directive, dict) or not directive.get("abort"):
+            return None
+        reason = str(directive["abort"])[:300] or "handler signalled abort"
+        return cls(reason=reason, source="revise_plan")
+
+    def to_text(self) -> str:
+        """The legacy text rendering: verbatim for text-born
+        directives, the canonical ``stop: <reason>`` form otherwise."""
+        if self.text:
+            return self.text
+        return f"stop: {self.reason}" if self.reason else "stop"
 
 
 @dataclass
@@ -238,7 +305,7 @@ class MasterOrchestrator:
             '"role": "research|coding|vision|data_collection|training|social|'
             'execution|memory|critic|reflection", '
             '"kind": "io|cpu|async", "depends_on": ["short_id"], '
-            '"debate": true}]}.\n'
+            '"debate": true, "writes": ["<file or resource it changes>"]}]}.\n'
             'Every step MUST name the role that will execute it — a step '
             'without a valid role is rejected, never reassigned. Match the '
             'role to the step\'s work: "research" gathers and synthesizes '
@@ -246,6 +313,9 @@ class MasterOrchestrator:
             'explicit shell command, "critic" verifies a deliverable.\n'
             'Set "debate": true only on high-stakes steps whose output must '
             'survive a critic before it counts as done.\n'
+            'List in "writes" every file or resource a step changes; a '
+            'step with writes runs under a delegation contract — its '
+            'result is independently verified before it counts.\n'
             f"Goal: {goal}"
         )
         if context_hint:
@@ -329,6 +399,9 @@ class MasterOrchestrator:
             # the mission) and "on_failure" ("fail_fast" | "continue").
             # "debate": true routes the step's output through coder→critic
             # rounds before it counts as done.
+            # Doc 18 G9 declarations ride the same way: "writes" (the
+            # files/resources the step changes) and "consequential": true
+            # are the plan-level signals the contract seam reads.
             payload: dict[str, Any] = {}
             if isinstance(entry.get("optional"), bool):
                 payload["optional"] = entry["optional"]
@@ -337,6 +410,13 @@ class MasterOrchestrator:
                 payload["on_failure"] = on_failure
             if entry.get("debate") is True:
                 payload["debate"] = True
+            writes = entry.get("writes")
+            if isinstance(writes, list):
+                declared = [str(w).strip() for w in writes if str(w).strip()]
+                if declared:
+                    payload["writes"] = declared
+            if entry.get("consequential") is True:
+                payload["consequential"] = True
             steps.append(
                 PlanStep(
                     name=name,
@@ -583,10 +663,17 @@ class MasterOrchestrator:
             chosen = role_handlers.get(task.role) or role_handlers.get(task.name) or handler
             if self.context:
                 self.context.emit("task.started", task=task.name, role=task.role, goal=goal)
+            # Doc 18 G9: a step meeting the shipped consequential rule
+            # gets its delegation contract BEFORE it executes; a
+            # creation failure fails OPEN (recorded + stamped onto the
+            # result below) and the step runs uncontracted.
+            contract, contract_error = self._open_step_contract(task)
             started = time.perf_counter()
             try:
                 result = chosen(task)
             except Exception as exc:
+                self._fail_step_contract(
+                    contract, f"step {task.name!r} raised: {exc}")
                 self._record_role(task.role, time.perf_counter() - started,
                                   ok=False, denials=0)
                 # Name the step, its role, and the handler behind the
@@ -602,12 +689,24 @@ class MasterOrchestrator:
                 # step — returning it as a success would hide the failure
                 # from the supervised retry, the mid-flight re-evaluation,
                 # and the final ok flag.  Fail fast and name it.
+                self._fail_step_contract(
+                    contract, f"step {task.name!r} reported: {reported}")
                 self._record_role(task.role, elapsed, ok=False, denials=denials)
                 raise _named_step_error(task, chosen, str(reported))
             # Opt-in quality gate: high-stakes steps survive a critic
             # before they count as done.
             if task.payload.get("debate"):
-                result = self._debate_step(task, chosen, result)
+                try:
+                    result = self._debate_step(task, chosen, result)
+                except Exception as exc:
+                    self._fail_step_contract(
+                        contract, f"step {task.name!r} debate failed: {exc}")
+                    raise
+            if contract is not None:
+                result = self._settle_step_contract(contract, task, result)
+            elif contract_error:
+                result = self._stamp_contract(
+                    result, {"error": contract_error})
             self._record_role(task.role, time.perf_counter() - started,
                               ok=True, denials=denials)
             self.blackboard.post(
@@ -617,6 +716,110 @@ class MasterOrchestrator:
             return result
 
         return dispatch
+
+    # ── planner-created contracts (doc 18 G9) ─────────────────────
+    # The reusable seam lives in agents/plan_contracts.py; these are
+    # the orchestrator's adapters over it. Contracts are keyed by the
+    # RUN id (never a mission id), so the mission DONE gate — which
+    # consults contracts under the mission's own id — is untouched.
+
+    @staticmethod
+    def _contract_step(task: Task) -> dict[str, Any]:
+        """The duck-typed step mapping the contract seam consumes."""
+        payload = task.payload if isinstance(task.payload, dict) else {}
+        return {"name": task.name, "goal": payload.get("goal", ""),
+                "role": task.role, "payload": payload,
+                "writes": payload.get("writes")}
+
+    def _step_contract_store(self) -> Any:
+        """The delegation store over the run's database, lazily built.
+
+        None when the run has no database — the contract seam is off,
+        which is exactly today's behavior, not an error: absence of
+        substrate.
+        """
+        store = getattr(self, "_plan_contract_store", None)
+        if store is not None:
+            return store
+        db = (getattr(self.context, "db", None)
+              if self.context is not None else None)
+        if db is None:
+            return None
+        from .delegation import DelegationStore
+
+        store = DelegationStore(db)
+        self._plan_contract_store = store
+        return store
+
+    def _open_step_contract(self, task: Task) -> tuple[Any, str]:
+        """(contract, "") for a consequential step; (None, "") for a
+        step below the rule or a run without substrate; (None, error)
+        when creation itself failed — the caller fails OPEN: the step
+        executes uncontracted and the error is stamped on its result.
+        """
+        from .plan_contracts import open_step_contract, step_consequentiality
+
+        step = self._contract_step(task)
+        consequential, _reasons = step_consequentiality(step)
+        if not consequential:
+            return None, ""
+        store = self._step_contract_store()
+        if store is None:
+            return None, ""
+        try:
+            contract = open_step_contract(
+                store, mission_id=self._run_id or "", step=step)
+            return contract, ""
+        except Exception as exc:  # noqa: BLE001 — fail open, recorded
+            from ..core.failures import record_failure
+
+            record_failure("agents.orchestrator.plan_contract", exc)
+            return None, f"delegation contract creation failed: {exc}"
+
+    def _settle_step_contract(self, contract: Any, task: Task,
+                              result: Any) -> Any:
+        """Flow a finished step's result through its contract and
+        stamp the outcome. Settling never breaks the step: a settle
+        failure is recorded and lands in the stamp instead."""
+        from .plan_contracts import settle_step_contract
+
+        try:
+            outcome = settle_step_contract(
+                self._step_contract_store(), contract,
+                step=self._contract_step(task), result=result,
+                mission_id=self._run_id or "")
+        except Exception as exc:  # noqa: BLE001 — recorded, stamped
+            from ..core.failures import record_failure
+
+            record_failure("agents.orchestrator.plan_contract_settle", exc)
+            outcome = {"contract_id": contract.id, "completed": False,
+                       "reasons": [f"contract settle failed: {exc}"]}
+        return self._stamp_contract(result, outcome)
+
+    def _fail_step_contract(self, contract: Any, detail: str) -> None:
+        """Record a step failure on its contract. Never raises —
+        reporting must not mask the step's real failure."""
+        if contract is None:
+            return
+        try:
+            from .plan_contracts import fail_step_contract
+
+            fail_step_contract(
+                self._step_contract_store(), contract, detail=detail)
+        except Exception as exc:  # noqa: BLE001 — recorded, swallowed
+            from ..core.failures import record_failure
+
+            record_failure("agents.orchestrator.plan_contract_fail", exc)
+
+    @staticmethod
+    def _stamp_contract(result: Any, outcome: dict[str, Any]) -> Any:
+        """Stamp a contract outcome onto a step result — the
+        _stamp_debate precedent: dicts gain the key, anything else is
+        wrapped with its value under "output"."""
+        stamp = {"delegation_contract": outcome}
+        if isinstance(result, dict):
+            return {**result, **stamp}
+        return {"output": result, **stamp}
 
     # ── per-step debate ──────────────────────────────────────────────────
     def _debate_step(self, task: Task, handler: Callable[[Task], Any],
@@ -928,8 +1131,9 @@ class MasterOrchestrator:
             directive = _revise_directive(getattr(task, "result", None))
             if not directive:
                 continue
-            if directive.get("abort"):
-                why = str(directive["abort"])[:300] or "handler signalled abort"
+            stop = StopDirective.from_mapping(directive)
+            if stop is not None:
+                why = stop.reason
                 names = [t.name for t in remaining]
                 graph.cancel(why)
                 return _finish(
@@ -1019,9 +1223,11 @@ class MasterOrchestrator:
         if not isinstance(verdict, dict) or not verdict.get("should_pivot"):
             return None
         pivot = str(verdict.get("pivot") or "").strip()
-        if pivot.lower().startswith("stop"):
-            return pivot[:300]
-        return None
+        # Doc 18 G8: the legacy text prefix parses into the typed
+        # StopDirective at this one seam; to_text() renders the
+        # verbatim legacy string back for the text consumers.
+        stop = StopDirective.from_text(pivot)
+        return stop.to_text() if stop is not None else None
 
     def _emit_reevaluation(self, evaluation: Reevaluation) -> None:
         """Make a non-``continue`` decision visible: event bus + telemetry.

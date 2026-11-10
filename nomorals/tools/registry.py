@@ -33,7 +33,8 @@ from ..core.policy import CapabilitySet
 from ..core.result import Err, Ok, Outcome
 
 __all__ = ["ToolRegistry", "ToolSpec", "ToolHealth", "OpResult",
-           "sanitize_tool_description", "annotations_for_kind"]
+           "sanitize_tool_description", "annotations_for_kind",
+           "CANCELLATION_MECHANISMS", "LISTING_GROUPS"]
 
 _log = get_logger(__name__)
 
@@ -129,6 +130,17 @@ def _normalize_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
     return flat
 
 
+#: The brain listing's availability groups (doc 18 §3), decision order.
+LISTING_GROUPS = ("available now", "requires resource/lease",
+                  "rejected unless authority", "known down")
+
+#: Cancellation mechanisms a tool may declare on its spec (doc 18 §3/G7).
+#: A spec's empty string means UNDECLARED — the honest default; the
+#: registry never guesses a mechanism for a tool that did not declare
+#: one, and the ticket/listing surfaces render it as undeclared.
+CANCELLATION_MECHANISMS = ("cooperative", "native", "none")
+
+
 @dataclass
 class ToolSpec:
     """A callable an agent may invoke."""
@@ -171,12 +183,46 @@ class ToolSpec:
     # Long string results are truncated past this many chars, with an
     # explicit notice (MCP rule: never truncate silently).
     max_result_chars: int = 200_000
+    # Doc 18 G7: how an in-flight call to this tool can be cancelled —
+    # one of CANCELLATION_MECHANISMS, or "" = UNDECLARED (the tool never
+    # said; surfaces render it as undeclared, never as a guessed
+    # "cooperative").
+    cancellation: str = ""
+    # Doc 18 G7: named resources (core.leases vocabulary — open strings,
+    # never enum-locked here) the tool must hold while it runs.
+    # None = NEVER DECLARED; () = declared none; non-empty = declared
+    # needs. The three states stay distinguishable end to end.
+    lease_needs: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         # Accept a full JSON-Schema object as `parameters` (social.py /
         # whatsapp.py historically passed one) and normalize it to the
         # flat contract, so every consumer sees real parameter names.
         self.parameters = _normalize_parameters(self.parameters)
+        # The cancellation + lease declarations are typed: malformed
+        # declarations are refused at registration, never silently
+        # coerced — a guessed mechanism would be a lie on the ticket
+        # and in the brain's listing.
+        mechanism = str(self.cancellation or "").strip().lower()
+        if mechanism and mechanism not in CANCELLATION_MECHANISMS:
+            raise ValidationError(
+                f"tool {self.name!r}: cancellation must be one of "
+                f"{CANCELLATION_MECHANISMS} or '' (undeclared); "
+                f"got {self.cancellation!r}")
+        self.cancellation = mechanism
+        if self.lease_needs is not None:
+            if isinstance(self.lease_needs, str) or not isinstance(
+                    self.lease_needs, (list, tuple)):
+                raise ValidationError(
+                    f"tool {self.name!r}: lease_needs must be a list or "
+                    f"tuple of resource names (None = undeclared); "
+                    f"got {self.lease_needs!r}")
+            needs = tuple(str(n).strip() for n in self.lease_needs)
+            if any(not n for n in needs):
+                raise ValidationError(
+                    f"tool {self.name!r}: lease_needs entries must be "
+                    f"non-empty resource names; got {self.lease_needs!r}")
+            self.lease_needs = needs
 
     def resolved_annotations(self) -> dict[str, bool]:
         """Explicit annotations merged over kind-derived defaults."""
@@ -209,6 +255,13 @@ class ToolSpec:
             "title": self.title or self.name,
             "description": self.description,
             "capability": self.capability,
+            # Doc 18 §3 row export: cancellation + lease declarations
+            # ride the schema verbatim — "" cancellation = undeclared,
+            # None lease_needs = never declared (distinct from [] =
+            # declared none).
+            "cancellation": self.cancellation,
+            "lease_needs": (list(self.lease_needs)
+                            if self.lease_needs is not None else None),
             "annotations": self.resolved_annotations(),
             "parameters": {
                 "type": "object",
@@ -416,6 +469,8 @@ class ToolRegistry:
         examples: list[str] | None = None,
         max_result_chars: int = 200_000,
         result_protocol: str = "",
+        cancellation: str = "",
+        lease_needs: list[str] | tuple[str, ...] | None = None,
     ) -> Callable[..., Any]:
         """Register a tool, usable directly or as a decorator."""
 
@@ -443,6 +498,8 @@ class ToolRegistry:
                 examples=examples or [],
                 max_result_chars=max_result_chars,
                 result_protocol=result_protocol,
+                cancellation=cancellation,
+                lease_needs=lease_needs,
             )
             self._tools[name] = spec
             return func
@@ -824,6 +881,57 @@ class ToolRegistry:
                 f"ask with 'tools_list' to see them)")
         return listing
 
+    def grouped_listing(
+        self, *, capabilities: CapabilitySet | None = None,
+    ) -> str:
+        """The brain's tool listing grouped by availability state
+        (doc 18 §3/G7).
+
+        Four groups, in decision order; every tool lands in exactly
+        one: ``known down`` (its health record says down) ·
+        ``rejected unless authority`` (it declares a capability this
+        caller is not granted) · ``requires resource/lease`` (it
+        declares lease needs) · ``available now``. Unlike schemas() —
+        which hides ungranted tools outright — the grouped listing
+        SHOWS the gated tools under their group, so the model learns
+        the tool exists and why it cannot call it instead of guessing.
+
+        A tool's line keeps the flat listing's shape; the state rides
+        the group header, not per-field noise. Two decision-changing
+        facts ride the line itself: a tool declared not cancellable
+        carries ``[cancellation: none]``, and a degraded tool carries
+        ``[health: degraded]``. Declared mechanisms and lease names
+        beyond the lease group live in schema()/describe().
+        """
+        groups: dict[str, list[str]] = {g: [] for g in LISTING_GROUPS}
+        for spec in sorted(self._tools.values(), key=lambda s: s.name):
+            if spec.deprecated:
+                continue
+            health = self._health.get(spec.name)
+            status = health.status if health is not None else "unknown"
+            line = (f"- {spec.name}({_format_params(spec.schema())}): "
+                    f"{spec.description}")
+            if spec.cancellation == "none":
+                line += " [cancellation: none]"
+            if status == "down":
+                groups["known down"].append(line)
+            elif (spec.capability and capabilities is not None
+                    and not capabilities.grants(spec.capability)):
+                groups["rejected unless authority"].append(line)
+            elif spec.lease_needs:
+                groups["requires resource/lease"].append(
+                    f"{line} [leases: {', '.join(spec.lease_needs)}]")
+            else:
+                if status == "degraded":
+                    line += " [health: degraded]"
+                groups["available now"].append(line)
+        out = ["Available tools, grouped by state:"]
+        for group in LISTING_GROUPS:
+            lines = groups[group]
+            out.append(f"## {group} ({len(lines)})")
+            out.extend(lines)
+        return "\n".join(out)
+
     def describe(self, name: str) -> dict[str, Any] | None:
         """Rich introspection for one tool: identity, source location,
         capability, lifecycle, health, and per-tool stats. Powers
@@ -846,6 +954,13 @@ class ToolRegistry:
             "description": spec.description,
             "capability": spec.capability,
             "confirm": spec.confirm,
+            # Doc 18 G7: the declarations, rendered honestly — an
+            # undeclared cancellation reads "undeclared", never a
+            # guessed mechanism; lease_needs keeps the None (never
+            # declared) vs [] (declared none) distinction.
+            "cancellation": spec.cancellation or "undeclared",
+            "lease_needs": (list(spec.lease_needs)
+                            if spec.lease_needs is not None else None),
             "kind": spec.kind,
             "annotations": spec.resolved_annotations(),
             "output_schema": spec.output_schema,

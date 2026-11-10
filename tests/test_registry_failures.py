@@ -99,9 +99,13 @@ def test_direct_import_surface_and_all_unchanged():
     assert lf.format_failures() == "no recorded registry failures"
     # Batch B (finding F08) deliberately extends the surface with
     # OpResult — the typed tool result callers consume.
+    # Doc 18 P6 (G7) deliberately extends it again with the
+    # cancellation-mechanism and listing-group vocabularies the
+    # ToolSpec fields and grouped listing are built from.
     assert reg_mod.__all__ == ["ToolRegistry", "ToolSpec", "ToolHealth",
                               "OpResult", "sanitize_tool_description",
-                              "annotations_for_kind"]
+                              "annotations_for_kind",
+                              "CANCELLATION_MECHANISMS", "LISTING_GROUPS"]
 
 
 # ── converted sites ─────────────────────────────────────────────────
