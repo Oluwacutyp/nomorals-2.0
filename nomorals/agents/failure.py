@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..llm.brain import brain_for
-from ..core.errors import categorize, failure_fingerprint  # noqa: F401 — re-exported (T1.6: defined in core.errors)
+from ..core.errors import categorize, failure_fingerprint, redact_secrets  # noqa: F401 — re-exported (T1.6: defined in core.errors)
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
 from .skills import SkillLibrary
@@ -197,9 +197,16 @@ class FailureAnalyzer:
         bookkeeping hiccup must never mask the original failure.  Returns
         ``{"id", "family", "lesson_id", "times_seen"}``.
         """
-        error = (error or "")[:2000]
+        # Doc 20 §9: no raw secret in logs — redact the free text
+        # once, here, so the ledger row, the repeat-match below and
+        # the lesson case all carry the same redacted shape.
+        # Redaction is deterministic, so fingerprint grouping and
+        # family classification are preserved (two errors differing
+        # only in a secret value now group together, which is the
+        # safer direction).
+        error = redact_secrets((error or "")[:2000])
         family = categorize(error)
-        summary = (summary or "")[:200]
+        summary = redact_secrets((summary or "")[:200])
         skill = (skill or "")[:80]
         operation = (operation or "")[:80]
         fingerprint = failure_fingerprint(source, error, operation, skill)

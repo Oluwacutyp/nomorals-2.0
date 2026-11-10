@@ -24,6 +24,7 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Any
 
+from .errors import redact_secrets
 from .logging_setup import get_logger
 
 __all__ = [
@@ -194,14 +195,19 @@ class IncidentJournal:
         sig = signature_of(exc, subsystem)
         loc = _innermost_app_frame(exc)
         now = ts if ts is not None else time.time()
-        ctx_json = json.dumps(context or {}, default=str)
+        # Doc 20 §9: no raw secret in logs — the journal is a log
+        # whose text feeds tickets and surfaces, so free text is
+        # redacted at the write seam (the signature never carried
+        # the message, so dedupe is untouched).
+        ctx_json = redact_secrets(json.dumps(context or {}, default=str))
         with self._lock:
             cur = self._db.execute(
                 "INSERT INTO incidents (signature, exc_type, subsystem, location,"
                 " message, category, severity, context_json, ts)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (sig, type(exc).__name__, subsystem or "?",
-                 loc, str(exc)[:2000], category, severity, ctx_json, now),
+                 loc, redact_secrets(str(exc))[:2000], category, severity,
+                 ctx_json, now),
             )
             self._db.commit()
             inc_id = cur.lastrowid
@@ -214,17 +220,22 @@ class IncidentJournal:
         table (mined rule 3: only verified fixes are remembered as fixes).
         """
         now = time.time()
+        # Same §9 write-seam redaction as record_incident: a
+        # recovery's detail can quote the failing call's output,
+        # and a verified detail is promoted into the fix table.
+        detail = redact_secrets(rec.detail or "")
+        verify_note = redact_secrets(rec.verify_note or "")
         with self._lock:
             cur = self._db.execute(
                 "INSERT INTO recoveries (incident_id, signature, strategy,"
                 " detail, verified, verify_note, ts)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (rec.incident_id, rec.signature, rec.strategy, rec.detail,
-                 1 if rec.verified else 0, rec.verify_note, now),
+                (rec.incident_id, rec.signature, rec.strategy, detail,
+                 1 if rec.verified else 0, verify_note, now),
             )
             rid = cur.lastrowid
             if rec.verified:
-                self._promote_fix(rec.signature, rec.strategy, rec.detail, now)
+                self._promote_fix(rec.signature, rec.strategy, detail, now)
             else:
                 # A failed fix still teaches: count it against the fix.
                 self._db.execute(

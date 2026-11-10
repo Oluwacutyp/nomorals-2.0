@@ -1452,11 +1452,19 @@ class ToolRegistry:
             except Exception as e:  # noqa: BLE001 — attribution is a bonus
                 record_failure("ToolRegistry._record_failure_ledger:fingerprint", e)
                 fingerprint = ""
+            # Doc 20 §9: no raw secret in logs — the ledger's free
+            # text feeds immune case files and surfaces, so the
+            # stored text is redacted at this write seam (the
+            # fingerprint/family above still read the raw detail
+            # in memory only; nothing raw is persisted).
+            from ..core.errors import redact_secrets
+
             db.execute(
                 "INSERT INTO failures (id, source, summary, error, family, "
                 "lesson, ts, fingerprint, skill) VALUES (?,?,?,?,?,?,?,?,?)",
                 (f"tool-{int(time.time_ns())}", "tool",
-                 f"{tool} failed {message}"[:500], detail[:500],
+                 redact_secrets(f"{tool} failed {message}")[:500],
+                 redact_secrets(detail)[:500],
                  self._failure_family(detail or message), "", time.time(),
                  fingerprint, tool))
         except Exception as e:  # noqa: BLE001 — the ledger never sinks the result

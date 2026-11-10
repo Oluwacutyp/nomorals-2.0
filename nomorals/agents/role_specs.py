@@ -21,7 +21,7 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 from ..llm.brain import brain_for
-from ..core.errors import ToolDenied, ToolNotFound
+from ..core.errors import ToolDenied, ToolNotFound, redact_secrets
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability, CapabilitySet
@@ -145,8 +145,10 @@ def record_tool_denial(context: Any, role: str, tool_name: str,
             "INSERT INTO failures (id, source, summary, error, family,"
             " lesson, ts) VALUES (?,?,?,?,?,?,?)",
             (f"deny-{int(time.time_ns())}", "role",
-             f"role {role!r} denied {tool_name!r} ({reason})"[:500],
-             (message or reason)[:500], "tool_denied", "", time.time()))
+             redact_secrets(
+                 f"role {role!r} denied {tool_name!r} ({reason})")[:500],
+             redact_secrets(message or reason)[:500],
+             "tool_denied", "", time.time()))
     except Exception:  # noqa: BLE001 - the ledger never sinks the result
         pass
 

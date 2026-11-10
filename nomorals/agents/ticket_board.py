@@ -36,6 +36,7 @@ from .run_ticket import TICKET_FIELDS, ticket_coverage, ticket_for
 
 __all__ = [
     "board_rows",
+    "health_state",
     "render_board",
     "render_ticket",
     "render_coverage",
@@ -131,17 +132,137 @@ def _row(ref: str, family: str, ticket: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def health_state(board: dict[str, Any]) -> dict[str, Any]:
+    """The five-state health of the whole board (doc 20 §7 + §9).
+
+    One word — ``healthy`` / ``degraded`` / ``contained`` /
+    ``recovering`` / ``unknown`` — derived ONLY from evidence the
+    projections themselves read: fever and drift on the immune-state
+    tickets, incident standings and their recovery records, open
+    case files, and the coverage ``unread`` lists. The derivation
+    never upgrades past its evidence: trouble that was read outranks
+    sources that could not be read, but a clean bill requires every
+    incident-bearing source to have been read — an unread journal
+    reads ``unknown``, never ``healthy`` (never fake green).
+
+    Precedence: contained (a fever is active or a case file is
+    open — the organism is actively holding something) → degraded
+    (an open incident with no recovery attempted, or drift at
+    watch/act) → recovering (open incidents remain, but every one
+    has a recovery record, or a recovery is on the board
+    unverified) → unknown (no trouble read, but a source was not)
+    → healthy (everything read, nothing open).
+    """
+    rows = board.get("rows") or []
+    heal_cov = board.get("healing") or {}
+    run_cov = board.get("run") or {}
+    unread = [str(u) for u in
+              (heal_cov.get("unread") or []) + (run_cov.get("unread")
+                                                or [])]
+    fever = False
+    drift_words: list[str] = []
+    open_cases = 0
+    open_incidents = 0
+    open_without_recovery = 0
+    live_recoveries = 0
+    undetermined = 0
+    for row in rows:
+        ticket = row.get("ticket") or {}
+        lifecycle = ticket.get("lifecycle") or {}
+        kind = row.get("kind") or ""
+        if kind == "immune_state":
+            if lifecycle.get("fever_active"):
+                fever = True
+            verdict = str(lifecycle.get("drift_verdict") or "")
+            if verdict in ("watch", "act"):
+                drift_words.append(verdict)
+        elif kind == "immune_case":
+            if str(ticket.get("status") or "") == "open":
+                open_cases += 1
+        elif kind == "incident":
+            standing = str(lifecycle.get("standing") or "")
+            if standing.startswith("undetermined"):
+                undetermined += 1
+            elif standing == "open":
+                open_incidents += 1
+                detail = ticket.get("detail") or {}
+                recoveries = detail.get("recoveries")
+                if recoveries is None:
+                    has_recovery = any(
+                        str(r).startswith("heal:")
+                        for r in ticket.get("related_refs") or [])
+                else:
+                    has_recovery = bool(recoveries)
+                if not has_recovery:
+                    open_without_recovery += 1
+        elif kind == "healing_run":
+            if row.get("live"):
+                live_recoveries += 1
+    reasons: list[str] = []
+    if fever or open_cases:
+        if fever:
+            reasons.append("a fever is active — the immune system "
+                           "is throttling its own responses while "
+                           "it contains this")
+        if open_cases:
+            reasons.append(
+                f"{open_cases} case file(s) open — evidence is "
+                "being held for review")
+        if open_incidents:
+            reasons.append(
+                f"{open_incidents} incident(s) still open")
+        return {"state": "contained", "reasons": reasons}
+    if open_without_recovery or drift_words:
+        if open_without_recovery:
+            reasons.append(
+                f"{open_without_recovery} open incident(s) with "
+                "no recovery attempted yet")
+        if drift_words:
+            reasons.append(
+                "behaviour drift at " +
+                "/".join(sorted(set(drift_words))) +
+                " — recent behaviour is moving away from baseline")
+        return {"state": "degraded", "reasons": reasons}
+    if open_incidents or live_recoveries:
+        if open_incidents:
+            reasons.append(
+                f"{open_incidents} incident(s) still open, each "
+                "with a recovery on record — work is underway")
+        if live_recoveries:
+            reasons.append(
+                f"{live_recoveries} recovery record(s) not yet "
+                "verified")
+        return {"state": "recovering", "reasons": reasons}
+    if unread or undetermined:
+        for name in unread:
+            reasons.append(f"not read: {name}")
+        if undetermined:
+            reasons.append(
+                f"{undetermined} incident(s) whose recovery "
+                "standing could not be determined from the records "
+                "read")
+        reasons.append("no trouble was read, but the all-clear "
+                       "cannot be asserted over unread sources")
+        return {"state": "unknown", "reasons": reasons}
+    return {"state": "healthy",
+            "reasons": ["every source read — no open incidents, "
+                        "no fever, no drift, no case files open"]}
+
+
 def render_board(board: dict[str, Any]) -> str:
     """The board: header counts, then one numbered line per ticket."""
     rows = board["rows"]
     run_cov = board.get("run") or {}
     heal_cov = board.get("healing") or {}
     live = sum(1 for r in rows if r["live"])
+    health = health_state(board)
     lines = [
         f"🎫 runs — {len(rows)} tickets ({live} live, "
         f"{len(rows) - live} settled): "
         f"{run_cov.get('operations', 0)} executions · "
         f"{heal_cov.get('operations', 0)} healing",
+        f"health: {health['state']} — "
+        + "; ".join(health["reasons"]),
     ]
     leases_held = int(run_cov.get("leases_held") or 0)
     if leases_held:
