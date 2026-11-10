@@ -16,8 +16,10 @@ and the failure recorded in the sweep report; (e) the no-mutation
 discipline for every new domain — monkeypatched mutators never fire
 for the observed records, and the scheduler/outbox tables are
 byte-identical after a full cycle. Domains with no durable record
-(browser, transfers, render, artifacts) are named unavailable by
-adapter_health() — never silently absent.
+(transfers, artifacts) are named unavailable by adapter_health() —
+never silently absent. (Browser + render were unavailable at P5;
+doc 18 P1 built their durable records and their adapters now read
+working — the health pins below state the current truth.)
 """
 
 from __future__ import annotations
@@ -620,15 +622,17 @@ class AdapterHealthTests(unittest.TestCase):
     def test_health_names_every_domain(self):
         health = {row["domain"]: row for row in adapter_health()}
         for domain in ("missions", "jobs", "contracts", "scheduler",
-                       "outbox"):
+                       "outbox", "browser", "render"):
             self.assertEqual(health[domain]["status"], "working",
                              domain)
-        for domain in ("browser", "transfers", "render", "artifacts"):
+            self.assertTrue(health[domain]["note"], domain)
+        for domain in ("transfers", "artifacts"):
             self.assertEqual(health[domain]["status"], "unavailable",
                              domain)
             self.assertTrue(health[domain]["note"], domain)
-        self.assertIn("no durable browser-run record",
+        self.assertIn("browser_run_records",
                       health["browser"]["note"])
+        self.assertIn("media_job_records", health["render"]["note"])
         self.assertIn("no transfer registry",
                       health["transfers"]["note"])
 

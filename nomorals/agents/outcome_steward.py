@@ -40,12 +40,15 @@ chat outbox — and wires the mission effect-outcome projection
 (:meth:`MissionStore.effect_outcome`) into the missions adapter: a
 liveness failure whose effect the mission's own records establish no
 longer opens an unknown-outcome case, and a case that does exist
-cites the projection as its evidence. Four briefed domains are
-deliberately NOT adapted — browser runs, downloads/uploads, media
-render jobs, artifacts — because none of them keeps a durable record
-an honest discovery could read; :func:`adapter_health` names each
-absence and the missing record, on the record, instead of papering
-over it with a fabricated adapter.
+cites the projection as its evidence. Four briefed domains were
+deliberately NOT adapted at P5 — browser runs, downloads/uploads,
+media render jobs, artifacts — because none of them kept a durable
+record an honest discovery could read; :func:`adapter_health` named
+each absence and the missing record, on the record, instead of
+papering over it with a fabricated adapter. Doc 18 P1 built the two
+missing records (``browser_run_records``, ``media_job_records``), so
+the browser and render adapters now work against them; transfers and
+artifacts remain unavailable for the same stated reason.
 
 Runs are deterministic by design: deterministic read-back is
 sufficient evidence for the domains covered here, and no model call
@@ -82,6 +85,8 @@ __all__ = [
     "ContractsAdapter",
     "SchedulerAdapter",
     "OutboxAdapter",
+    "BrowserAdapter",
+    "RenderAdapter",
     "OutcomeSteward",
     "adapter_health",
     "run_stewardship_cycle",
@@ -132,6 +137,14 @@ SCHED_ABANDONED_S = 3600.0
 #: An outbox send still queued — or leased with an expired lease —
 #: this long after submission was never confirmed delivered (P5).
 OUTBOX_STUCK_S = 3600.0
+#: A browser run whose durable record has not transitioned for this
+#: long is presumed abandoned by its process (doc 18 P1) — the live
+#: manager is in-memory, so a surviving run lands its terminal
+#: record; silence this long means nobody is left to land it.
+BROWSER_STUCK_S = 3600.0
+#: A media job whose durable record has not transitioned for this
+#: long is presumed abandoned by its process (doc 18 P1).
+RENDER_STUCK_S = 3600.0
 
 
 @dataclass
@@ -731,6 +744,191 @@ class OutboxAdapter:
                               establishes=establishes)]
 
 
+class BrowserAdapter:
+    """Read-only observation of durable browser-run records (doc 18
+    P1 — the ``browser_run_records`` table the BrowserJobManager now
+    writes at run start and on every transition).
+
+    Discovery: a record still in a non-terminal state whose last
+    transition is far in the past belongs to a process that died
+    mid-run (the live manager is in-memory; a surviving process would
+    have landed a terminal record). A run that never left ``queued``
+    is OVERDUE — nothing has happened yet. A run stuck at ``running``
+    / ``waiting_owner`` is UNKNOWN-OUTCOME — it may already have
+    acted on the site, which is exactly the steward's question.
+    Collection re-reads the record: ``done`` establishes
+    ``succeeded``, ``blocked`` / ``failed`` establish ``failed`` (the
+    summary names the wall outcome / stop reason), ``cancelled``
+    establishes ``stopped``. The adapter reads the table directly
+    (the scheduler precedent) and never constructs the manager —
+    building one starts from in-memory state and observation must
+    write nothing. Subjects use the record's redacted URL — never a
+    raw URL, which can carry credentials in its query.
+    """
+
+    domain = "browser"
+
+    def __init__(self, db: Any) -> None:
+        self.db = db
+
+    def _rows(self, where: str, params: tuple = (),
+              limit: int = 200) -> list[dict[str, Any]]:
+        try:
+            return [dict(r) for r in self.db.query(
+                "SELECT * FROM browser_run_records "
+                f"WHERE {where} ORDER BY created_at LIMIT ?",
+                (*params, int(limit)))]
+        except Exception:  # noqa: BLE001 - no table = no records
+            return []
+
+    @staticmethod
+    def _subject(row: dict[str, Any]) -> str:
+        host = ""
+        try:
+            from urllib.parse import urlsplit
+            host = urlsplit(str(row.get("url") or "")).hostname or ""
+        except ValueError:
+            host = ""
+        goal = str(row.get("goal") or "").strip()
+        where = host or "browser run"
+        return f"browser run: {where} — {goal[:40]}" if goal \
+            else f"browser run: {where}"
+
+    def discover(self, now: float) -> list[Candidate]:
+        out: list[Candidate] = []
+        rows = self._rows(
+            "status IN ('queued', 'running', 'waiting_owner')")
+        for row in rows:
+            updated = float(row.get("updated_at")
+                            or row.get("created_at") or now)
+            age = now - updated
+            if age <= BROWSER_STUCK_S:
+                continue
+            status = str(row.get("status") or "")
+            reason = "overdue" if status == "queued" \
+                else "unknown-outcome"
+            out.append(Candidate(
+                domain=self.domain, kind="browser run",
+                subject=self._subject(row),
+                subject_key=f"browser:{row.get('run_id')}",
+                reason=reason,
+                detail={"run_id": str(row.get("run_id") or ""),
+                        "record_status": status,
+                        "cancel_state": str(row.get("cancel_state")
+                                            or ""),
+                        "age_s": round(age, 1)}))
+        return out
+
+    def collect(self, case: OutcomeCase, now: float) -> list[EvidenceItem]:
+        run_id = str(case.detail.get("run_id") or "")
+        rows = self._rows("run_id = ?", (run_id,), limit=1)
+        if not rows:
+            return [EvidenceItem(
+                source="browser.run_records",
+                summary=("the run's durable record no longer exists "
+                         "— what the run did cannot be read back"))]
+        row = rows[0]
+        status = str(row.get("status") or "")
+        establishes = {"done": "succeeded", "blocked": "failed",
+                       "failed": "failed",
+                       "cancelled": "stopped"}.get(status, "")
+        summary = (f"run record status is {status}; "
+                   f"{int(row.get('steps') or 0)} steps; wall: "
+                   f"{str(row.get('wall_outcome') or 'no wall')}")
+        stopped = str(row.get("stopped_reason") or "").strip()
+        if stopped:
+            summary += f"; stopped: {stopped[:200]}"
+        error = str(row.get("error") or "").strip()
+        if error:
+            summary += f"; error: {error[:200]}"
+        if str(row.get("cancel_state") or "") == "unhonored":
+            summary += ("; a cancel was requested but the run ended "
+                        "without honoring it")
+        return [EvidenceItem(source="browser.run_records",
+                             summary=summary,
+                             establishes=establishes)]
+
+
+class RenderAdapter:
+    """Read-only observation of durable media job records (doc 18
+    P1 — the ``media_job_records`` table the media JobManager now
+    writes at submit and on every transition).
+
+    Discovery mirrors the browser adapter: a record stuck at
+    ``queued`` past the threshold is OVERDUE (never picked up); a
+    record stuck at ``running`` is UNKNOWN-OUTCOME — the render may
+    have partially written its output, and only the record's terminal
+    transition (which never landed) could say otherwise. Collection:
+    ``done`` establishes ``succeeded`` (the summary names the output
+    the job produced), ``failed`` establishes ``failed``,
+    ``cancelled`` establishes ``stopped``. Reads the table directly;
+    never constructs the JobManager (construction starts a worker
+    thread — observation must write nothing and start nothing).
+    """
+
+    domain = "render"
+
+    def __init__(self, db: Any) -> None:
+        self.db = db
+
+    def _rows(self, where: str, params: tuple = (),
+              limit: int = 200) -> list[dict[str, Any]]:
+        try:
+            return [dict(r) for r in self.db.query(
+                "SELECT * FROM media_job_records "
+                f"WHERE {where} ORDER BY created_at LIMIT ?",
+                (*params, int(limit)))]
+        except Exception:  # noqa: BLE001 - no table = no records
+            return []
+
+    def discover(self, now: float) -> list[Candidate]:
+        out: list[Candidate] = []
+        for row in self._rows("status IN ('queued', 'running')"):
+            updated = float(row.get("updated_at")
+                            or row.get("created_at") or now)
+            age = now - updated
+            if age <= RENDER_STUCK_S:
+                continue
+            status = str(row.get("status") or "")
+            reason = "overdue" if status == "queued" \
+                else "unknown-outcome"
+            label = str(row.get("label") or "media job").strip()
+            out.append(Candidate(
+                domain=self.domain, kind="media job",
+                subject=f"media job: {label[:40]}",
+                subject_key=f"render:{row.get('job_id')}",
+                reason=reason,
+                detail={"job_id": str(row.get("job_id") or ""),
+                        "record_status": status,
+                        "job_kind": str(row.get("kind") or ""),
+                        "age_s": round(age, 1)}))
+        return out
+
+    def collect(self, case: OutcomeCase, now: float) -> list[EvidenceItem]:
+        job_id = str(case.detail.get("job_id") or "")
+        rows = self._rows("job_id = ?", (job_id,), limit=1)
+        if not rows:
+            return [EvidenceItem(
+                source="render.job_records",
+                summary=("the job's durable record no longer exists "
+                         "— what the job produced cannot be read "
+                         "back"))]
+        row = rows[0]
+        status = str(row.get("status") or "")
+        establishes = {"done": "succeeded", "failed": "failed",
+                       "cancelled": "stopped"}.get(status, "")
+        summary = f"job record status is {status}"
+        output = str(row.get("output_ref") or "").strip()
+        if output:
+            summary += f"; output: {output[:200]}"
+        error = str(row.get("error") or "").strip()
+        if error:
+            summary += f"; error: {error[:200]}"
+        return [EvidenceItem(source="render.job_records",
+                             summary=summary,
+                             establishes=establishes)]
+
+
 #: Adapter coverage, stated on the record: the domains the steward
 #: observes, and the briefed domains it deliberately does NOT —
 #: each with the durable record whose absence makes honest discovery
@@ -744,21 +942,18 @@ _WORKING_ADAPTERS: tuple[tuple[str, str], ...] = (
     ("scheduler", "the durable scheduler's schedule_jobs / "
                   "schedule_runs records"),
     ("outbox", "chat outbox rows in the shared work_queue"),
+    ("browser", "browser_run_records — the browser job manager's "
+                "durable run records (doc 18 P1)"),
+    ("render", "media_job_records — the media job manager's durable "
+               "job records (doc 18 P1); renders run as missions stay "
+               "covered by the missions adapter"),
 )
 
 _UNAVAILABLE_ADAPTERS: tuple[tuple[str, str], ...] = (
-    ("browser", "no durable browser-run record exists — "
-                "BrowserJobManager keeps runs in memory only and "
-                "webnav journals none, so a crashed process leaves "
-                "nothing an honest discovery could read"),
     ("transfers", "no transfer registry exists — the integrity "
                   "ledger records completed downloads only, begun "
                   "transfers leave no queryable record, and uploads "
                   "keep no records at all"),
-    ("render", "no durable render-job registry exists — the media "
-               "JobManager is in-memory and render queues persist "
-               "per-caller sidecar files with no index; renders run "
-               "as missions are covered by the missions adapter"),
     ("artifacts", "artifacts carry no delivery or publication "
                   "record — nothing records whether an artifact was "
                   "ever delivered, so 'awaiting publication' cannot "
@@ -793,7 +988,8 @@ class OutcomeSteward:
         if adapters is None:
             adapters = [MissionsAdapter(db), JobsAdapter(registry),
                         ContractsAdapter(db), SchedulerAdapter(db),
-                        OutboxAdapter(db)]
+                        OutboxAdapter(db), BrowserAdapter(db),
+                        RenderAdapter(db)]
         self.adapters = {a.domain: a for a in adapters}
         self._idempotency = idempotency
 

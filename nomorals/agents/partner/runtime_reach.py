@@ -662,7 +662,9 @@ class RuntimeReachMixin:
         if mgr is None:
             from ...browser.jobs import BrowserJobManager
 
-            mgr = BrowserJobManager(notifier=self._takeover_notifier())
+            mgr = BrowserJobManager(
+                notifier=self._takeover_notifier(),
+                db=getattr(getattr(self, "context", None), "db", None))
             self._browser_run_jobs_inst = mgr
         return mgr
 

@@ -257,7 +257,7 @@ def register(registry: Any) -> None:
         if dry_run:
             return {"dry_run": True, "plan": plan.describe(),
                     "action": plan.action}
-        manager = get_manager()
+        manager = get_manager(db=getattr(context, "db", None))
         act = dict(plan.action)
 
         def _run(progress_cb: Callable[[float], None]) -> dict[str, Any]:
@@ -323,7 +323,7 @@ def register(registry: Any) -> None:
         if fmt in video_fmts:
             from ..media_edit.jobs import get_manager as _gm
             _check_video_size(src)
-            manager = _gm()
+            manager = _gm(db=getattr(context, "db", None))
 
             def _run(progress_cb: Callable[[float], None]) -> dict[str, Any]:
                 return _dispatch_video({"video_op": "transcode",

@@ -21,8 +21,25 @@ the Playwright tab and the sqlite-backed challenge memory are both
 thread-bound, so building them on the command thread and using them
 on the worker would break. The takeover manager is the exception: it
 is lock-guarded and shared (its grants must be visible to both the
-takeover verb and the loop). Jobs are in-memory only — they do not
-survive a process restart.
+takeover verb and the loop). The live job objects are in-memory only,
+but when the manager is given a database every run also lands in the
+durable ``browser_run_records`` table (:class:`BrowserRunRecordStore`,
+doc 18 P1): a snapshot is taken at run start and on every status
+transition and written in order by the manager's record-writer
+thread (a job thread never blocks on the database on its way into
+the runner), so a process that dies mid-run leaves a record stuck at
+its last state — exactly what the outcome steward's browser adapter
+reads. Record writes are evidence, never a gate: a failed write is
+recorded via :func:`record_failure` and the run proceeds unchanged.
+
+Cancellation: :meth:`BrowserJobManager.cancel` is cooperative, in
+the media jobs idiom. A queued run is stopped before its runner is
+ever invoked (confirmed). A running run only gets the request —
+runners poll :meth:`BrowserRunJob.cancel_requested` and stop
+themselves, returning a ``cancelled: …`` stopped reason; the record
+distinguishes ``requested`` from ``confirmed``, and a run that ends
+without honoring the request is recorded ``unhonored``, never as a
+clean cancel.
 """
 from __future__ import annotations
 
@@ -31,25 +48,143 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ..core.logging_setup import get_logger
+from .failures import record_failure
 
 _log = get_logger(__name__)
 
 __all__ = [
     "BrowserJobManager",
     "BrowserRunJob",
+    "BrowserRunRecordStore",
 ]
 
-#: Job statuses. Terminal: done / blocked / failed.
+#: Job statuses. Terminal: done / blocked / failed / cancelled.
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
 STATUS_WAITING_OWNER = "waiting_owner"
 STATUS_DONE = "done"
 STATUS_BLOCKED = "blocked"
 STATUS_FAILED = "failed"
+STATUS_CANCELLED = "cancelled"
 
 _ACTIVE = frozenset({STATUS_QUEUED, STATUS_RUNNING, STATUS_WAITING_OWNER})
+_TERMINAL = frozenset({STATUS_DONE, STATUS_BLOCKED, STATUS_FAILED,
+                       STATUS_CANCELLED})
+
+#: Cancel lifecycle on the durable record: "" (never requested),
+#: "requested" (asked, not yet honored), "confirmed" (the run landed
+#: cancelled), "unhonored" (the run ended on its own terms despite
+#: the request).
+CANCEL_REQUESTED = "requested"
+CANCEL_CONFIRMED = "confirmed"
+CANCEL_UNHONORED = "unhonored"
+
+#: Query parameter names whose values never reach a durable record.
+_SECRET_QUERY_KEYS = ("token", "secret", "password", "passwd", "auth",
+                      "session", "sig", "key", "api_key", "apikey",
+                      "access_token", "code")
+
+_RECORD_DDL = """
+CREATE TABLE IF NOT EXISTS browser_run_records (
+  run_id TEXT PRIMARY KEY,
+  url TEXT NOT NULL DEFAULT '',
+  goal TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT '',
+  steps INTEGER NOT NULL DEFAULT 0,
+  stopped_reason TEXT NOT NULL DEFAULT '',
+  final_url TEXT NOT NULL DEFAULT '',
+  wall_outcome TEXT NOT NULL DEFAULT '',
+  error TEXT NOT NULL DEFAULT '',
+  cancel_state TEXT NOT NULL DEFAULT '',
+  cancel_requested_at REAL NOT NULL DEFAULT 0,
+  created_at REAL NOT NULL DEFAULT 0,
+  started_at REAL NOT NULL DEFAULT 0,
+  finished_at REAL NOT NULL DEFAULT 0,
+  updated_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_browser_run_records_status
+  ON browser_run_records(status, updated_at);
+"""
+
+
+def _redact_url(url: str) -> str:
+    """A record-safe form of a URL: userinfo stripped, secret-shaped
+    query values masked. Host + path survive — the record must still
+    say WHERE the run went."""
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return text[:300]
+    netloc = parts.hostname or ""
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    query = ""
+    if parts.query:
+        pairs = []
+        for key, value in parse_qsl(parts.query, keep_blank_values=True):
+            lowered = key.lower()
+            if any(marker in lowered for marker in _SECRET_QUERY_KEYS):
+                value = "***"
+            pairs.append((key, value))
+        query = urlencode(pairs)
+    return urlunsplit((parts.scheme, netloc, parts.path, query, ""))[:300]
+
+
+class BrowserRunRecordStore:
+    """Durable per-run records for browser runs (doc 18 P1).
+
+    Runtime-created table over the shared ``Database`` (Batch B
+    pattern — DDL in code, migrations untouched). One row per run,
+    upserted at run start and on every status transition; the row is
+    a snapshot of the job's own state, redacted at the boundary.
+    """
+
+    def __init__(self, db: Any) -> None:
+        self.db = db
+        self.db.executescript(_RECORD_DDL)
+
+    def record(self, snapshot: dict[str, Any]) -> None:
+        self.db.execute(
+            "INSERT INTO browser_run_records (run_id, url, goal,"
+            " status, steps, stopped_reason, final_url, wall_outcome,"
+            " error, cancel_state, cancel_requested_at, created_at,"
+            " started_at, finished_at, updated_at) VALUES (?, ?, ?,"
+            " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(run_id) DO UPDATE SET url = excluded.url,"
+            " goal = excluded.goal, status = excluded.status,"
+            " steps = excluded.steps,"
+            " stopped_reason = excluded.stopped_reason,"
+            " final_url = excluded.final_url,"
+            " wall_outcome = excluded.wall_outcome,"
+            " error = excluded.error,"
+            " cancel_state = excluded.cancel_state,"
+            " cancel_requested_at = excluded.cancel_requested_at,"
+            " started_at = excluded.started_at,"
+            " finished_at = excluded.finished_at,"
+            " updated_at = excluded.updated_at",
+            (snapshot["run_id"], snapshot["url"], snapshot["goal"],
+             snapshot["status"], snapshot["steps"],
+             snapshot["stopped_reason"], snapshot["final_url"],
+             snapshot["wall_outcome"], snapshot["error"],
+             snapshot["cancel_state"], snapshot["cancel_requested_at"],
+             snapshot["created_at"], snapshot["started_at"],
+             snapshot["finished_at"], snapshot["updated_at"]))
+
+    def get(self, run_id: str) -> dict[str, Any] | None:
+        return self.db.query_one(
+            "SELECT * FROM browser_run_records WHERE run_id = ?",
+            (run_id,))
+
+    def recent(self, limit: int = 20) -> list[dict[str, Any]]:
+        return self.db.query(
+            "SELECT * FROM browser_run_records"
+            " ORDER BY created_at DESC LIMIT ?", (int(limit),))
 
 #: ``runner(job) -> loop result dict``. Runs on the job's thread.
 Runner = Callable[["BrowserRunJob"], dict[str, Any]]
@@ -80,13 +215,33 @@ class BrowserRunJob:
     events: list[dict[str, Any]] = field(default_factory=list)
     trace: list[dict[str, Any]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
+    started_at: float = 0.0
     finished_at: float = 0.0
     error: str = ""
+    #: Cancel lifecycle (see module docstring): "" until requested.
+    cancel_state: str = ""
+    cancel_requested_at: float = 0.0
     _lock: threading.Lock = field(default_factory=threading.Lock,
                                   repr=False, compare=False)
     _done: threading.Event = field(default_factory=threading.Event,
                                     repr=False, compare=False)
     _notify: Notifier | None = field(default=None, repr=False, compare=False)
+    _cancel_requested: threading.Event = field(
+        default_factory=threading.Event, repr=False, compare=False)
+    #: Manager-installed snapshot hook (durable record writes).
+    _on_change: Callable[[], None] | None = field(
+        default=None, repr=False, compare=False)
+
+    # -- cancellation ---------------------------------------------------------
+    def cancel_requested(self) -> bool:
+        """Runners poll this: True once a cancel has been requested."""
+        return self._cancel_requested.is_set()
+
+    def _changed(self) -> None:
+        """Notify the manager a recordable transition just landed."""
+        hook = self._on_change
+        if hook is not None:
+            hook()
 
     # -- event intake --------------------------------------------------------
     def note(self, kind: str, message: str) -> None:
@@ -95,7 +250,8 @@ class BrowserRunJob:
             self.events.append({"kind": kind, "message": message,
                                 "at": time.time()})
         if kind in ("wall_hit", "wall_escalated", "wall_cleared",
-                    "wall_blocked", "done", "blocked", "failed"):
+                    "wall_blocked", "done", "blocked", "failed",
+                    "cancelled"):
             self._send(message)
 
     def _send(self, message: str) -> None:
@@ -130,6 +286,7 @@ class BrowserRunJob:
         elif kind == "wall_escalated":
             with self._lock:
                 self.status = STATUS_WAITING_OWNER
+            self._changed()
             # The solver's own escalation message carries the link, but
             # this job-scoped ping is what the owner sees in the run's
             # context — it must be actionable on its own, not "a link
@@ -145,6 +302,7 @@ class BrowserRunJob:
                 self.status = STATUS_RUNNING
                 self.wall_outcome = f"cleared via {via}" if via \
                     else "cleared"
+            self._changed()
             self.note("wall_cleared",
                       f"✅ browser run {self.job_id}: wall cleared via "
                       f"{via or 'unknown'} — resuming.")
@@ -182,11 +340,25 @@ class BrowserRunJob:
                 self.trace = trace
             self.finished_at = time.time()
             blocked = self.stopped_reason.startswith("blocked:")
-            self.status = STATUS_BLOCKED if blocked else STATUS_DONE
+            cancelled = self._cancel_requested.is_set() \
+                and self.stopped_reason.startswith("cancelled")
+            if cancelled:
+                self.status = STATUS_CANCELLED
+            elif blocked:
+                self.status = STATUS_BLOCKED
+            else:
+                self.status = STATUS_DONE
+            if self.cancel_state == CANCEL_REQUESTED:
+                self.cancel_state = CANCEL_CONFIRMED if cancelled \
+                    else CANCEL_UNHONORED
         # Notify BEFORE signalling done: a waiter that wakes on
         # ``wait()`` must see the owner update already delivered,
         # not racing the send.
-        if blocked:
+        if self.status == STATUS_CANCELLED:
+            self.note("cancelled",
+                      f"✋ browser run {self.job_id} cancelled: "
+                      f"{self.stopped_reason}")
+        elif blocked:
             self.note("blocked",
                       f"⛔ browser run {self.job_id} stopped: "
                       f"{self.stopped_reason} — final URL: "
@@ -198,6 +370,7 @@ class BrowserRunJob:
                       f"{self.stopped_reason}, final URL: "
                       f"{self.final_url or self.url}, "
                       f"wall: {self.wall_outcome}")
+        self._changed()
         with self._lock:
             self._done.set()
 
@@ -207,9 +380,14 @@ class BrowserRunJob:
             self.stopped_reason = f"job failed: {exc}"
             self.finished_at = time.time()
             self.status = STATUS_FAILED
+            if self.cancel_state == CANCEL_REQUESTED:
+                # The run died on its own terms; the cancel never
+                # took effect, and the record must not pretend it did.
+                self.cancel_state = CANCEL_UNHONORED
         # Notify before signalling done (see finish()).
         self.note("failed",
                   f"⛔ browser run {self.job_id} failed: {exc}")
+        self._changed()
         with self._lock:
             self._done.set()
 
@@ -241,11 +419,91 @@ class BrowserRunJob:
 class BrowserJobManager:
     """Registry + threads for browser-run jobs. One per runtime."""
 
-    def __init__(self, *, notifier: Notifier | None = None) -> None:
+    def __init__(self, *, notifier: Notifier | None = None,
+                 db: Any = None) -> None:
         self._notifier = notifier
         self._lock = threading.Lock()
         self._jobs: dict[str, BrowserRunJob] = {}
         self._keys: dict[tuple[str, str], str] = {}
+        self._records: BrowserRunRecordStore | None = None
+        if db is not None:
+            try:
+                self._records = BrowserRunRecordStore(db)
+            except Exception as exc:  # noqa: BLE001 - records never gate
+                record_failure("browser.jobs.record_store", exc)
+        # Record writes run on ONE writer thread fed by a FIFO queue:
+        # snapshots are built at each transition (cheap, in-memory)
+        # and written in order, so a job thread never blocks on the
+        # database on its way into the runner, and transitions can
+        # never land out of order.
+        import queue as _queue
+
+        self._record_queue: _queue.Queue = _queue.Queue()
+        self._record_writer: threading.Thread | None = None
+        self._record_writer_lock = threading.Lock()
+
+    # -- durable records ------------------------------------------------------
+    def _record_job(self, job: BrowserRunJob) -> None:
+        """Snapshot one job for its durable record. Fail-open: the
+        record is evidence, not a gate — a failed write is recorded
+        and the run proceeds exactly as before."""
+        if self._records is None:
+            return
+        with job._lock:
+            snapshot = {
+                "run_id": job.job_id,
+                "url": _redact_url(job.url),
+                "goal": job.goal[:200],
+                "status": job.status,
+                "steps": job.steps,
+                "stopped_reason": job.stopped_reason[:300],
+                "final_url": _redact_url(job.final_url),
+                "wall_outcome": job.wall_outcome[:200],
+                "error": job.error[:300],
+                "cancel_state": job.cancel_state,
+                "cancel_requested_at": job.cancel_requested_at,
+                "created_at": job.created_at,
+                "started_at": job.started_at,
+                "finished_at": job.finished_at,
+                "updated_at": time.time(),
+            }
+        self._ensure_record_writer()
+        self._record_queue.put(snapshot)
+
+    def _ensure_record_writer(self) -> None:
+        with self._record_writer_lock:
+            if self._record_writer is None:
+                writer = threading.Thread(
+                    target=self._record_writer_loop,
+                    name="browser-run-records", daemon=True)
+                writer.start()
+                self._record_writer = writer
+
+    def _record_writer_loop(self) -> None:
+        store = self._records
+        while True:
+            item = self._record_queue.get()
+            try:
+                if isinstance(item, threading.Event):
+                    item.set()  # flush barrier
+                    continue
+                if store is not None:
+                    store.record(item)
+            except Exception as exc:  # noqa: BLE001 - fail-open
+                record_failure("browser.jobs.record", exc)
+            finally:
+                self._record_queue.task_done()
+
+    def flush_records(self, timeout: float = 5.0) -> bool:
+        """Wait until every queued record snapshot has been written
+        (tests + orderly shutdown; production never needs to wait —
+        the writer drains within milliseconds)."""
+        if self._records is None:
+            return True
+        barrier = threading.Event()
+        self._ensure_record_writer()
+        self._record_queue.put(barrier)
+        return barrier.wait(timeout)
 
     def start(self, url: str, goal: str, runner: Runner, *,
               force: bool = False) -> tuple[BrowserRunJob, bool]:
@@ -267,8 +525,10 @@ class BrowserJobManager:
                                 goal=" ".join(str(goal or "").split()),
                                 final_url=url.strip(),
                                 _notify=self._notifier)
+            job._on_change = lambda j=job: self._record_job(j)
             self._jobs[job_id] = job
             self._keys[key] = job_id
+        self._record_job(job)
         thread = threading.Thread(target=self._run, args=(job, runner),
                                   name=f"browser-run-{job_id}",
                                   daemon=True)
@@ -276,9 +536,27 @@ class BrowserJobManager:
         return job, False
 
     def _run(self, job: BrowserRunJob, runner: Runner) -> None:
+        if job.cancel_requested():
+            # Cancelled while queued: the runner is never invoked,
+            # so this confirmation is the manager's own, not a hope.
+            with job._lock:
+                job.status = STATUS_CANCELLED
+                job.stopped_reason = "cancelled before start"
+                job.finished_at = time.time()
+                if job.cancel_state == CANCEL_REQUESTED:
+                    job.cancel_state = CANCEL_CONFIRMED
+            job.note("cancelled",
+                     f"✋ browser run {job.job_id} cancelled before "
+                     "it started.")
+            job._changed()
+            with job._lock:
+                job._done.set()
+            return
         try:
             with job._lock:
                 job.status = STATUS_RUNNING
+                job.started_at = time.time()
+            job._changed()
             result = runner(job)
         except BaseException as exc:  # noqa: BLE001 - recorded, not hidden
             _log.warning("browser run job %s failed", job.job_id,
@@ -286,6 +564,39 @@ class BrowserJobManager:
             job.fail(exc)
             return
         job.finish(result)
+
+    # -- cancellation -----------------------------------------------------------
+    def cancel(self, job_id_or_prefix: str) -> dict[str, Any]:
+        """Request cancellation of a run. Typed result, never a
+        bool: ``state`` is one of ``not_found`` / ``already_terminal``
+        / ``requested``. A request is not a confirmation — for a
+        running run the durable record carries the final word
+        (``confirmed`` when the runner honored it and landed
+        cancelled, ``unhonored`` when the run ended on its own
+        terms). A queued run's request takes effect before its
+        runner is invoked."""
+        job = self.get(job_id_or_prefix)
+        if job is None:
+            return {"ok": False, "state": "not_found",
+                    "job_id": str(job_id_or_prefix or "")}
+        with job._lock:
+            status = job.status
+            if status in _TERMINAL:
+                return {"ok": True, "state": "already_terminal",
+                        "job_id": job.job_id, "status": status,
+                        "cancel_state": job.cancel_state}
+            job._cancel_requested.set()
+            if not job.cancel_state:
+                job.cancel_state = CANCEL_REQUESTED
+                job.cancel_requested_at = time.time()
+            takes_effect = ("before the run starts" if status
+                            == STATUS_QUEUED else
+                            "when the runner next notices the request")
+        job._changed()
+        return {"ok": True, "state": "requested",
+                "job_id": job.job_id, "status": status,
+                "cancel_state": job.cancel_state,
+                "takes_effect": takes_effect}
 
     def get(self, job_id_or_prefix: str) -> BrowserRunJob | None:
         """Exact id, or a unique prefix (``run status br-abc`` works)."""
