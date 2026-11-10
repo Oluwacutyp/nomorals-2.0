@@ -1,6 +1,10 @@
 """Immune system — defensive-only police for Devon, like an immune system.
 
 * Thymus: negative selection — antibodies must not fire on self.
+* Corpus: the self-corpus as versioned data — the seed exemplars
+  plus exemplars harvested from Devon's own verified fixes and
+  owner-directed police receipts, each carrying provenance; a
+  rejection cites the exemplars it matched.
 * Innate: fast pattern scanning, no learning, no model, no network.
 * Adaptive: antigen presentation + INJECTED labelling (never an LLM itself).
 * Antibodies: versioned immune memory, exportable across tissues.
@@ -41,6 +45,7 @@ from .baseline import (
 from .wiring import (
     ANTIBODY_STORE_ENV_VAR,
     BASELINE_WINDOW,
+    CORPUS_STORE_ENV_VAR,
     IMMUNE_SAMPLER_INTERVAL_S,
     IMMUNE_SAMPLER_JOB,
     IMMUNE_SAMPLER_SPEC,
@@ -49,12 +54,17 @@ from .wiring import (
     BaselineStore,
     ImmuneMonitor,
     clear_shared_antibody_store,
+    clear_shared_corpus_store,
     default_antibodies_path,
+    default_corpus_path,
+    default_journal_path,
     default_store_path,
     ensure_immune_sampler_job,
     reset_shared_antibody_stores,
+    reset_shared_corpus_stores,
     reset_shared_monitors,
     shared_antibody_store,
+    shared_corpus_store,
     shared_monitor,
     summarize_tick_event,
 )
@@ -68,6 +78,16 @@ from .antibodies import (
     promotion_policy,
 )
 from .casefile import CaseFile, build_case
+from .corpus import (
+    CORPUS_FORMAT,
+    PROVENANCES,
+    PROVENANCE_OWNER_RECEIPT,
+    PROVENANCE_SEED,
+    PROVENANCE_VERIFIED_FIX,
+    SEED_TEXTS,
+    CorpusStore,
+    normalize_text,
+)
 from .drift import BehaviourDriftMonitor, DriftReport
 from .events import EVENT_KINDS, emit_immune_event, immune_event
 from .fever import FEVER_MAX_SECONDS, Fever, FeverReport
@@ -82,7 +102,7 @@ from .police import (
     mark_tainted,
     redteam_selftest,
 )
-from .thymus import Antibody, SelfCorpus, SelfExemplar, Thymus, test_antibody
+from .thymus import Antibody, SelfCorpus, SelfExemplar, Thymus, exemplar_citation, test_antibody
 
 __all__ = [
     # thymus
@@ -90,7 +110,17 @@ __all__ = [
     "SelfExemplar",
     "SelfCorpus",
     "test_antibody",
+    "exemplar_citation",
     "Thymus",
+    # corpus (versioned self-corpus, doc 20 P4)
+    "CORPUS_FORMAT",
+    "PROVENANCES",
+    "PROVENANCE_SEED",
+    "PROVENANCE_VERIFIED_FIX",
+    "PROVENANCE_OWNER_RECEIPT",
+    "SEED_TEXTS",
+    "CorpusStore",
+    "normalize_text",
     # innate
     "BARRIERS",
     "InnateHit",
@@ -158,6 +188,13 @@ __all__ = [
     "shared_antibody_store",
     "reset_shared_antibody_stores",
     "clear_shared_antibody_store",
+    # wiring (shared versioned self-corpus store, doc 20 P4)
+    "CORPUS_STORE_ENV_VAR",
+    "default_corpus_path",
+    "default_journal_path",
+    "shared_corpus_store",
+    "reset_shared_corpus_stores",
+    "clear_shared_corpus_store",
     "ensure_immune_sampler_job",
     "summarize_tick_event",
     "IMMUNE_SAMPLER_JOB",

@@ -99,6 +99,7 @@ from .baseline import (
     sample_over_thresholds,
     sampling_availability,
 )
+from .corpus import CorpusStore
 from .fever import Fever
 
 __all__ = [
@@ -110,6 +111,12 @@ __all__ = [
     "shared_antibody_store",
     "reset_shared_antibody_stores",
     "clear_shared_antibody_store",
+    "CORPUS_STORE_ENV_VAR",
+    "default_corpus_path",
+    "default_journal_path",
+    "shared_corpus_store",
+    "reset_shared_corpus_stores",
+    "clear_shared_corpus_store",
     "IMMUNE_SAMPLER_JOB",
     "LEGACY_IMMUNE_SAMPLER_JOB",
     "IMMUNE_SAMPLER_TOOL",
@@ -243,6 +250,58 @@ def default_antibodies_path(context: Any = None) -> Path:
         except Exception:  # noqa: BLE001 - fall through to home default
             pass
     return _settings_home(settings) / "data" / "immune-antibodies.json"
+
+
+#: Env override for the self-corpus store path (same convention as
+#: STORE_ENV_VAR).
+CORPUS_STORE_ENV_VAR = "NM_IMMUNE_CORPUS_STORE"
+
+
+def default_corpus_path(context: Any = None) -> Path:
+    """Resolve the self-corpus store path (doc 20 P4).
+
+    ``NM_IMMUNE_CORPUS_STORE`` wins when set (absolute as-is,
+    relative resolved against the settings home); otherwise
+    ``<settings home>/data/immune-selfcorpus.json`` — the same
+    file from chat, CLI and scheduler, next to the baseline and
+    antibody stores. Before P4 the corpus was rebuilt in memory
+    from the seed constant on every chat-state creation, so
+    harvested immunity-of-self never accumulated at all.
+    """
+    settings = getattr(context, "settings", None) if context is not None \
+        else None
+    override = os.environ.get(CORPUS_STORE_ENV_VAR, "")
+    if override:
+        p = Path(os.path.expanduser(override))
+        if p.is_absolute():
+            return p
+        return (_settings_home(settings) / p).resolve()
+    if settings is not None:
+        try:
+            return Path(settings.resolve("data/immune-selfcorpus.json"))
+        except Exception:  # noqa: BLE001 - fall through to home default
+            pass
+    return _settings_home(settings) / "data" / "immune-selfcorpus.json"
+
+
+def default_journal_path(context: Any = None) -> Path:
+    """Resolve the incident journal's path (doc 20 P4).
+
+    The error system builds its journal at
+    ``<home>/data/error_journal.db`` (``core/error_system.py``,
+    from the settings home). This is RESOLUTION ONLY, mirroring
+    that layout the same way the other resolvers mirror theirs —
+    this module never opens the journal; the corpus harvest reads
+    it read-only from the resolved path.
+    """
+    settings = getattr(context, "settings", None) if context is not None \
+        else None
+    if settings is not None:
+        try:
+            return Path(settings.resolve("data/error_journal.db"))
+        except Exception:  # noqa: BLE001 - fall through to home default
+            pass
+    return _settings_home(settings) / "data" / "error_journal.db"
 
 
 # ── persistent store ──────────────────────────────────────────────
@@ -882,6 +941,61 @@ def clear_shared_antibody_store(path: Any = None) -> AntibodyStore:
         store = AntibodyStore()
         store.path = resolved
         _ANTIBODY_STORES[key] = store
+        store.save()
+        return store
+
+
+# ── the shared self-corpus store (doc 20 P4) ────────────────────
+
+_CORPUS_STORES: dict[str, CorpusStore] = {}
+_CORPUS_STORES_LOCK = threading.Lock()
+
+
+def shared_corpus_store(path: Any = None) -> CorpusStore:
+    """The process-wide self-corpus store for a path (one per path).
+
+    The :func:`shared_antibody_store` pattern, for the same
+    reason: every chat state's thymus tests candidates against
+    ONE grown corpus, so a harvest on any surface immediately
+    counts on every surface, and the corpus's version history
+    accumulates organism-wide across restarts through the
+    store's own atomic persistence.
+    """
+    resolved = Path(path) if path is not None else default_corpus_path()
+    key = str(resolved)
+    with _CORPUS_STORES_LOCK:
+        store = _CORPUS_STORES.get(key)
+        if store is None:
+            store = CorpusStore(resolved)
+            _CORPUS_STORES[key] = store
+        return store
+
+
+def reset_shared_corpus_stores() -> None:
+    """Drop all shared corpus stores (tests). The next
+    :func:`shared_corpus_store` call reloads from disk — this is
+    also the restart simulation: the grown corpus survives it,
+    by the store file."""
+    with _CORPUS_STORES_LOCK:
+        _CORPUS_STORES.clear()
+
+
+def clear_shared_corpus_store(path: Any = None) -> CorpusStore:
+    """Replace the shared store for ``path`` with a fresh
+    SEED-ONLY one and persist that state.
+
+    The corpus counterpart of :func:`clear_shared_antibody_store`
+    (same seam, same test/support-only contract): a reset that
+    left the grown corpus in place would not be a reset. The
+    seeds are never cleared — they are the corpus's floor, not
+    its harvest.
+    """
+    resolved = Path(path) if path is not None else default_corpus_path()
+    key = str(resolved)
+    with _CORPUS_STORES_LOCK:
+        store = CorpusStore()
+        store.path = resolved
+        _CORPUS_STORES[key] = store
         store.save()
         return store
 

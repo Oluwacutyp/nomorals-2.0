@@ -11,6 +11,12 @@ Every accepted antibody carries a ``reason`` (why it exists); every
 retired antibody carries a ``retire_reason`` (why it was retired, e.g.
 false positive / allergy). Reasonless antibodies are rejected.
 
+The corpus itself is versioned data with provenance (doc 20 P4,
+:mod:`nomorals.immune.corpus`): every exemplar names where it came
+from — a shipped seed, one of Devon's own verified fixes, an
+owner-directed police receipt — and a rejection CITES the exemplars
+it matched, so the refusal names its evidence.
+
 Standard library only. No ``nomorals.*`` imports: the thymus talks to
 plain data (regex strings, exemplar dicts/dataclasses).
 """
@@ -27,6 +33,7 @@ __all__ = [
     "Antibody",
     "SelfExemplar",
     "SelfCorpus",
+    "exemplar_citation",
     "test_antibody",
     "Thymus",
 ]
@@ -54,6 +61,31 @@ class SelfExemplar:
     text: str = ""
     tool_call: Any = None
     capability: str = ""
+    # Provenance (doc 20 P4): where this exemplar came from, so a
+    # negative-selection refusal can cite its evidence. ``provenance``
+    # is the source KIND ("seed", "verified_fix", "owner_receipt");
+    # ``source_ref`` names the source record (e.g.
+    # "verified_fix:<signature>"); ``harvested_ts`` is when a
+    # harvested exemplar was admitted (None for seeds and for
+    # exemplars built by hand); ``corpus_version`` is the corpus
+    # version that admitted it (0 = seed / pre-versioning).
+    provenance: str = ""
+    source_ref: str = ""
+    harvested_ts: float | None = None
+    corpus_version: int = 0
+
+
+def exemplar_citation(exemplar: SelfExemplar) -> str:
+    """One exemplar as a refusal cites it: id, provenance, source.
+
+    The citation is the evidence handle — a rejected candidate's
+    owner (or a later reader) can resolve exactly which record of
+    Devon's own history the pattern fired on.
+    """
+    kind = exemplar.provenance or "unprovenanced"
+    if exemplar.source_ref:
+        return f"{exemplar.id} [{kind}: {exemplar.source_ref}]"
+    return f"{exemplar.id} [{kind}]"
 
 
 class SelfCorpus:
@@ -169,10 +201,10 @@ class Thymus:
             raise ValueError("antibody requires a reason — reasonless antibodies are rejected")
         fires, matched = test_antibody(antibody.pattern, corpus or self.corpus)
         if fires:
-            ids = ", ".join(e.id for e in matched)
+            cited = "; ".join(exemplar_citation(e) for e in matched)
             raise ValueError(
                 f"antibody {antibody.id} rejected: pattern fires on self "
-                f"exemplar(s) {ids} — autoimmune, refusing to accept"
+                f"exemplar(s) {cited} — autoimmune, refusing to accept"
             )
         antibody.status = "active"
         return antibody

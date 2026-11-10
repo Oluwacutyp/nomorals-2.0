@@ -8,6 +8,7 @@ Usage:
     /immune status
     /immune scan <text>
     /immune antibodies list | add <pattern> <reason> | promote <id> | retire <id> <reason> | test <pattern>
+    /immune corpus | corpus harvest
     /immune quarantine <artifact text>
     /immune disarm <grant-id>
     /immune arrest <process-id> [system]
@@ -22,7 +23,12 @@ store (immune/wiring.py ``shared_antibody_store``) — one immune
 memory for the whole organism, durable across restarts, with the
 P3 lifecycle on every record (learned antibodies enter on
 probation, observe-only, and promote on evidence or the owner's
-verb). Police vault, fever, drift monitor, case files and
+verb). The self-corpus is shared the same way since doc 20 P4
+(immune/wiring.py ``shared_corpus_store``): versioned data —
+the seed exemplars plus exemplars harvested from Devon's own
+verified fixes and owner-directed police receipts, each with
+provenance, and negative selection cites what a candidate
+matched. Police vault, fever, drift monitor, case files and
 receipts stay per-chat in-memory. The adaptive cancer gate is
 also shared: its baseline, incident state and quarantine count
 live in the shared persisted monitor (immune/wiring.py), fed by
@@ -41,22 +47,19 @@ from typing import Any, Dict, List
 
 import logging
 
+from .corpus import SEED_TEXTS
+
 _log = logging.getLogger(__name__)
 
 __all__ = ["control_immune", "IMMUNE_USAGE", "get_immune_state", "reset_immune_state"]
 
-#: Normal owner activity — the thymus self-corpus. Antibodies whose
-#: pattern fires on any of these are rejected (autoimmune).
-_SELF_EXEMPLARS = [
-    "owner sends a message to a friend",
-    "owner plays music",
-    "owner searches the web",
-    "owner reads email",
-    "owner checks the calendar",
-    "owner sets a reminder",
-    "owner starts a game",
-    "owner opens a document",
-]
+#: Normal owner activity — the thymus self-corpus SEEDS. Antibodies
+#: whose pattern fires on any exemplar are rejected (autoimmune).
+#: Since doc 20 P4 the list is owned by immune/corpus.py (the
+#: corpus's floor); the corpus itself is versioned data that also
+#: carries exemplars harvested from Devon's own records. This name
+#: stays as the seed list's alias for existing readers.
+_SELF_EXEMPLARS = SEED_TEXTS
 
 
 def IMMUNE_USAGE() -> str:
@@ -65,6 +68,8 @@ def IMMUNE_USAGE() -> str:
         "  /immune status — antibodies, fever, drift, receipts\n"
         "  /immune scan <text> — innate scan of inbound content\n"
         "  /immune antibodies list | add <pattern> <reason> | retire <id> <reason> | test <pattern>\n"
+        "  /immune corpus — self-corpus: version + counts by provenance\n"
+        "  /immune corpus harvest — grow the self-corpus from verified fixes + owner-directed receipts\n"
         "  /immune quarantine <artifact> — vault, never delete (owner-only)\n"
         "  /immune disarm <grant-id> — revoke a capability grant (owner-only)\n"
         "  /immune arrest <process-id> [system] — system processes only (owner-only)\n"
@@ -175,13 +180,30 @@ class _ImmuneState:
         from .drift import BehaviourDriftMonitor
         from .fever import Fever
         from .police import Police
-        from .thymus import SelfCorpus, Thymus
+        from .thymus import Thymus
         from .wiring import shared_antibody_store
 
-        corpus = SelfCorpus()
-        for text in _SELF_EXEMPLARS:
-            corpus.add(text=text)
-        self.thymus = Thymus(corpus)
+        # Doc 20 P4: the self-corpus is the organism's shared,
+        # persisted, VERSIONED data (immune/corpus.py) — the seed
+        # exemplars plus whatever harvest has admitted from
+        # Devon's own verified fixes and owner-directed receipts.
+        # The thymus holds the store's live corpus object, so a
+        # harvest on any surface counts on every surface at once.
+        # A store that cannot load must not break the surface:
+        # fall back to a private in-memory seed-only store and say
+        # so in the log (same posture as the antibody store).
+        try:
+            from .wiring import shared_corpus_store
+
+            self.corpus_store = shared_corpus_store()
+        except Exception:  # noqa: BLE001 — surface never breaks
+            _log.warning("immune self-corpus store unavailable — "
+                         "falling back to in-memory seed-only",
+                         exc_info=True)
+            from .corpus import CorpusStore
+
+            self.corpus_store = CorpusStore()
+        self.thymus = Thymus(self.corpus_store.corpus())
         # Doc 20 P3: the antibody store is the organism's shared,
         # path-backed immune memory — NOT per-chat in-memory. A
         # store that cannot load must not break the surface: fall
@@ -238,6 +260,15 @@ def reset_immune_state(chat_key: str = "") -> None:
         clear_shared_antibody_store()
     except Exception:  # noqa: BLE001 — reset stays best-effort
         _log.warning("immune antibody store reset failed", exc_info=True)
+    # The self-corpus is shared organism data the same way (doc 20
+    # P4): a reset returns it to its seed-only floor.
+    try:
+        from .wiring import clear_shared_corpus_store
+
+        clear_shared_corpus_store()
+    except Exception:  # noqa: BLE001 — reset stays best-effort
+        _log.warning("immune self-corpus store reset failed",
+                     exc_info=True)
 
 
 def control_immune(tail: str, context: Any = None, chat: Any = None,
@@ -310,6 +341,8 @@ def _control_immune(tail: str, *, chat_key: str = "",
         return _scan(state, rest)
     if verb == "antibodies":
         return _antibodies(state, rest)
+    if verb == "corpus":
+        return _corpus(state, rest, context)
     if verb == "quarantine":
         return _quarantine(state, rest)
     if verb == "disarm":
@@ -347,6 +380,14 @@ def _status(state: _ImmuneState, monitor: Any = None) -> str:
         f"{len(state.events)} immune event(s) emitted",
         "  constitution: revoke-only — no grant/acquire; owner work is report-only.",
     ]
+    corpus_store = getattr(state, "corpus_store", None)
+    if corpus_store is not None:
+        counts = corpus_store.counts_by_provenance()
+        lines.append(
+            f"  self-corpus: {sum(counts.values())} exemplars "
+            f"(v{corpus_store.version} — seed {counts.get('seed', 0)} · "
+            f"verified fixes {counts.get('verified_fix', 0)} · "
+            f"owner receipts {counts.get('owner_receipt', 0)})")
     lines += _gate_status_lines(monitor)
     return "\n".join(lines)
 
@@ -724,19 +765,75 @@ def _antibodies(state: _ImmuneState, rest: str) -> str:
     if verb == "test":
         if not tail:
             return "usage: /immune antibodies test <pattern>"
-        from .thymus import test_antibody
+        from .thymus import exemplar_citation, test_antibody
 
         try:
             fires, matched = test_antibody(tail, state.thymus.corpus)
         except ValueError as exc:
             return f"invalid pattern: {exc}"
         if fires:
+            cited = "; ".join(exemplar_citation(e) for e in matched)
             return (
-                f"pattern {tail!r} FIRES on self ({len(matched)} exemplar(s)) — "
-                "would be rejected (autoimmune)."
+                f"pattern {tail!r} FIRES on self ({len(matched)} "
+                f"exemplar(s): {cited}) — would be rejected (autoimmune)."
             )
         return f"pattern {tail!r} does not fire on self — thymus would accept it."
     return IMMUNE_USAGE()
+
+
+def _corpus(state: _ImmuneState, rest: str, context: Any = None) -> str:
+    """``/immune corpus`` — the self-corpus as versioned data.
+
+    Read (no subverb): the corpus version and its exemplar counts
+    by provenance — the corpus's size is a reported fact, never a
+    silent constant. ``harvest``: one harvest rung over Devon's own
+    records (the incident journal's verified fixes, read from the
+    journal file this deployment's error system writes, plus THIS
+    surface's recorded owner-directed police receipts), admitting
+    what is new as one new corpus version. Idempotent — a second
+    harvest over the same records adds zero.
+    """
+    verb = (rest or "").strip().lower()
+    store = state.corpus_store
+    if verb in ("", "status", "show"):
+        counts = store.counts_by_provenance()
+        lines = [
+            f"🛡️ self-corpus v{store.version}: "
+            f"{sum(counts.values())} exemplars — "
+            f"seed {counts.get('seed', 0)} · "
+            f"verified fixes {counts.get('verified_fix', 0)} · "
+            f"owner receipts {counts.get('owner_receipt', 0)}",
+            f"  store: {store.path or 'in-memory only (not persisted)'}",
+            "  negative selection tests every candidate against all "
+            "of these; a match is rejected with the exemplar cited.",
+        ]
+        if store.degraded_reason:
+            lines.append(f"  ⚠ {store.degraded_reason}")
+        return "\n".join(lines)
+    if verb == "harvest":
+        from .wiring import default_journal_path
+
+        report = store.harvest(
+            journal_path=default_journal_path(context),
+            receipts=list(state.receipts))
+        lines = [
+            f"🛡️ corpus harvest: +{report['added']} exemplar(s) — "
+            f"corpus v{report['version_before']} → "
+            f"v{report['version_after']} ({report['total']} total)",
+        ]
+        labels = {
+            "verified_fix": "verified fixes (incident journal)",
+            "owner_receipt": "owner-directed receipts (this surface)",
+        }
+        for kind in ("verified_fix", "owner_receipt"):
+            source = report["sources"][kind]
+            line = (f"  {labels[kind]}: {source['found']} found, "
+                    f"+{source['added']} admitted")
+            if source["note"]:
+                line += f" — {source['note']}"
+            lines.append(line)
+        return "\n".join(lines)
+    return "usage: /immune corpus | corpus harvest"
 
 
 def _quarantine(state: _ImmuneState, artifact: str) -> str:
