@@ -170,158 +170,79 @@ def to_text(doc: Document) -> str:
     return out + "\n"
 
 
-# ── HTML themes ─────────────────────────────────────────────────────────────
+# ── HTML editions ───────────────────────────────────────────────────────────
+#
+# Since Doc 16 P3 the HTML producer is the shared branded edition
+# renderer (core.edition) over the document's manifest — this module
+# keeps the historical theme vocabulary and anchor scheme as the
+# compatibility surface.  The per-theme CSS that used to live here
+# moved into the renderer's shared tokens.
 
-_HTML_CSS = {
-    "light": """
-:root{color-scheme:light}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Georgia,serif;
-max-width:760px;margin:0 auto;padding:2.5rem 1.5rem;color:#1f2937;background:#ffffff;line-height:1.75}
-h1,h2,h3,h4,h5,h6{color:#111827;line-height:1.3;margin-top:2em}
-h1{font-size:2rem;border-bottom:2px solid #e5e7eb;padding-bottom:.4rem}
-.author{color:#6b7280;font-style:italic}
-nav.toc{background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:1rem 1.5rem;margin:1.5rem 0}
-nav.toc ul{list-style:none;padding-left:1rem}nav.toc>ul{padding-left:0}
-nav.toc a{color:#2563eb;text-decoration:none}nav.toc a:hover{text-decoration:underline}
-table{border-collapse:collapse;width:100%;margin:1.25rem 0;font-size:.95rem;display:block;overflow-x:auto}
-th,td{border:1px solid #d1d5db;padding:.55rem .8rem;text-align:left}
-th{background:#f3f4f6;font-weight:600}
-tr:nth-child(even) td{background:#f9fafb}
-pre{background:#f3f4f6;border-radius:8px;padding:1rem;overflow-x:auto}
-code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em}
-blockquote{border-left:4px solid #d1d5db;margin:1rem 0;padding:.25rem 1rem;color:#4b5563}
-""",
-    "dark": """
-:root{color-scheme:dark}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Georgia,serif;
-max-width:760px;margin:0 auto;padding:2.5rem 1.5rem;color:#e5e7eb;background:#111827;line-height:1.75}
-h1,h2,h3,h4,h5,h6{color:#f9fafb;line-height:1.3;margin-top:2em}
-h1{font-size:2rem;border-bottom:2px solid #374151;padding-bottom:.4rem}
-.author{color:#9ca3af;font-style:italic}
-nav.toc{background:#1f2937;border:1px solid #374151;border-radius:10px;padding:1rem 1.5rem;margin:1.5rem 0}
-nav.toc ul{list-style:none;padding-left:1rem}nav.toc>ul{padding-left:0}
-nav.toc a{color:#60a5fa;text-decoration:none}nav.toc a:hover{text-decoration:underline}
-table{border-collapse:collapse;width:100%;margin:1.25rem 0;font-size:.95rem;display:block;overflow-x:auto}
-th,td{border:1px solid #4b5563;padding:.55rem .8rem;text-align:left}
-th{background:#1f2937;font-weight:600}
-tr:nth-child(even) td{background:#1a2332}
-pre{background:#1f2937;border-radius:8px;padding:1rem;overflow-x:auto}
-code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em}
-blockquote{border-left:4px solid #4b5563;margin:1rem 0;padding:.25rem 1rem;color:#9ca3af}
-""",
-    "print": """
-body{font-family:Georgia,'Times New Roman',serif;max-width:700px;margin:0 auto;
-padding:1rem;color:#000;background:#fff;line-height:1.6;font-size:11pt}
-h1,h2,h3,h4,h5,h6{color:#000;line-height:1.25;margin-top:1.5em;page-break-after:avoid}
-h1{font-size:20pt;border-bottom:1pt solid #000;padding-bottom:.3rem}
-nav.toc{display:none}
-table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:10pt}
-th,td{border:1pt solid #000;padding:.4rem .6rem;text-align:left}
-th{background:#eee}
-pre,blockquote{page-break-inside:avoid}
-@media print{body{padding:0}}
-""",
-    "minimal": """
-body{font-family:system-ui,sans-serif;max-width:640px;margin:0 auto;
-padding:2rem 1rem;color:#222;background:#fff;line-height:1.7}
-h1,h2,h3,h4,h5,h6{font-weight:600;margin-top:1.75em}
-nav.toc{margin:1rem 0}nav.toc ul{list-style:none;padding-left:1rem}
-table{border-collapse:collapse;margin:1rem 0}
-th,td{border-bottom:1px solid #ddd;padding:.45rem .7rem;text-align:left}
-th{border-bottom:2px solid #999}
-""",
-}
+#: The themes to_html accepts (the historical vocabulary; the
+#: renderer adds "sepia" for its own callers).
+_HTML_THEMES = ("light", "dark", "print", "minimal")
+
+
+def _edition_resolver(doc: Document):
+    """Resolve manifest segments to edition content: a section's
+    raw text (its heading rides the segment title, exactly as the
+    historical renderer emitted it) and a table's pipe grid."""
+    sections = {f"sec-{i + 1}": s for i, s in enumerate(doc.sections)}
+    tables = {f"tbl-{i + 1}": t for i, t in enumerate(doc.tables)}
+
+    def resolve(segment) -> str | None:
+        if not segment.present:
+            return None
+        section = sections.get(segment.segment_id)
+        if section is not None:
+            return section.text
+        table = tables.get(segment.segment_id)
+        if table is not None:
+            return table.as_text()
+        return None
+
+    return resolve
 
 
 def to_html(doc: Document, *, theme: str = "light",
-            toc: bool = True) -> str:
-    """Render a Document as a styled standalone HTML page.
+            toc: bool = True, brand_policy: str = "",
+            brand_text: str = "") -> str:
+    """Render a Document as a branded, self-contained HTML edition.
 
     ``theme`` is one of ``light`` (default), ``dark``, ``print``
-    (serif, print CSS), or ``minimal``.  ``toc=False`` skips the table
-    of contents.  Everything is escaped; headings get anchor ids.
+    (serif, print CSS), or ``minimal`` — the historical vocabulary,
+    validated here; the rendering itself is the shared edition
+    renderer (core.edition) over the document's manifest, so a
+    Document edition carries the Peacethefirst brand and the
+    declared completeness/revision front matter like every other
+    edition.  ``toc=False`` skips the contents list (and the
+    heading anchors, as before).  Everything is escaped; headings
+    keep their historical slug anchors.
     """
-    if theme not in _HTML_CSS:
+    if theme not in _HTML_THEMES:
         raise DocumentError(
             f"unknown HTML theme {theme!r}: choose from "
-            f"{sorted(_HTML_CSS)}", kind="invalid_argument")
-    esc = html_module.escape
-    anchors: list[str] = []
-    for section in doc.sections:
-        base = _slugify(section.heading) if section.heading else "section"
-        anchor, counter = base, 2
-        while anchor in anchors:
-            anchor = f"{base}-{counter}"
-            counter += 1
-        anchors.append(anchor)
+            f"{sorted(_HTML_THEMES)}", kind="invalid_argument")
+    from ..core.edition import render_edition
+    from .manifest import manifest_from_document
 
-    parts = ["<!DOCTYPE html>", "<html>", "<head>",
-             "<meta charset=\"utf-8\">",
-             "<meta name=\"viewport\" "
-             "content=\"width=device-width, initial-scale=1\">",
-             f"<title>{esc(doc.title or 'Document')}</title>",
-             f"<style>{_HTML_CSS[theme]}</style>",
-             "</head>", "<body>"]
-    if doc.title:
-        parts.append(f"<h1>{esc(doc.title)}</h1>")
-    if doc.author:
-        parts.append(f"<p class=\"author\">Author: {esc(doc.author)}</p>")
+    manifest = manifest_from_document(doc)
+    anchors: dict[str, str] = {}
     if toc:
-        outline = [(s, a) for s, a in zip(doc.sections, anchors) if s.heading]
-        if outline:
-            parts.append("<nav class=\"toc\"><strong>Contents</strong><ul>")
-            for section, anchor in outline:
-                indent = "&nbsp;&nbsp;" * (min(section.level, 6) - 1)
-                parts.append(f"<li>{indent}<a href=\"#{anchor}\">"
-                             f"{esc(section.heading)}</a></li>")
-            parts.append("</ul></nav>")
-    for section, anchor in zip(doc.sections, anchors):
-        level = min(max(int(section.level), 1), 6)
-        if section.heading:
-            # The anchor lives on an empty <a> so the heading tag itself
-            # stays byte-identical (<h1>Title</h1>) for downstream
-            # consumers that match on it.
-            if toc:
-                parts.append(f"<a id=\"{anchor}\"></a>")
-            parts.append(f"<h{level}>{esc(section.heading)}</h{level}>")
-        if section.kind == "code":
-            parts.append(f"<pre><code>{esc(section.text.strip())}</code></pre>")
-        elif section.kind == "quote":
-            quoted = "<br>".join(
-                esc(ln.strip().lstrip(">").strip())
-                for ln in section.text.split("\n") if ln.strip())
-            parts.append(f"<blockquote>{quoted}</blockquote>")
-        elif section.kind == "list":
-            parts.append("<ul>")
-            for ln in section.text.split("\n"):
-                item = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s+", "",
-                              ln.strip())
-                if item:
-                    parts.append(f"<li>{esc(item)}</li>")
-            parts.append("</ul>")
-        else:
-            for para in section.text.split("\n"):
-                para = para.strip()
-                if para:
-                    parts.append(f"<p>{esc(para)}</p>")
-    for table in doc.tables:
-        if table.name:
-            parts.append(f"<h2>{esc(table.name)}</h2>")
-        if table.caption:
-            parts.append(f"<p class=\"author\">{esc(table.caption)}</p>")
-        parts.append("<table>")
-        if table.headers:
-            parts.append("<thead><tr>" + "".join(
-                f"<th>{esc(h)}</th>" for h in table.headers) + "</tr></thead>")
-        if table.rows:
-            parts.append("<tbody>")
-            for row in table.rows:
-                parts.append("<tr>" + "".join(
-                    f"<td>{esc(c)}</td>" for c in row) + "</tr>")
-            parts.append("</tbody>")
-        parts.append("</table>")
-    parts.extend(["</body>", "</html>"])
-    return "\n".join(parts) + "\n"
+        used: list[str] = []
+        for i, section in enumerate(doc.sections):
+            base = _slugify(section.heading) if section.heading \
+                else "section"
+            anchor, counter = base, 2
+            while anchor in used:
+                anchor = f"{base}-{counter}"
+                counter += 1
+            used.append(anchor)
+            anchors[f"sec-{i + 1}"] = anchor
+    return render_edition(
+        manifest, _edition_resolver(doc), theme=theme, toc=toc,
+        anchors=anchors, anchor_mode="compat",
+        brand_policy=brand_policy, brand_text=brand_text)
 
 
 def to_pdf(doc: Document) -> bytes:

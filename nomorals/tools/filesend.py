@@ -12,7 +12,6 @@ standards-compliant multi-page file rendered by
 """
 from __future__ import annotations
 
-import html
 import json
 import re
 import time
@@ -84,94 +83,32 @@ def md_to_text(md: str) -> str:
     return "\n".join(lines)
 
 
-def md_to_html(md: str, *, title: str = "Report") -> str:
-    """Minimal, honest markdown→HTML: headings, bold/italic, code, fences,
-    lists, links, blockquotes, paragraphs.  Output is a standalone doc
-    with embedded CSS — opens in any browser or phone viewer."""
-    lines = (md or "").split("\n")
-    body: list[str] = []
-    in_fence = False
-    fence_buf: list[str] = []
-    list_stack: list[str] = []  # "ul" | "ol"
+def md_to_html(md: str, *, title: str = "Report", theme: str = "light",
+               brand_policy: str = "", brand_text: str = "",
+               chrome: bool = True) -> str:
+    """Convert simple markdown to a standalone HTML page.
 
-    def close_lists() -> None:
-        while list_stack:
-            body.append(f"</{list_stack.pop()}>")
+    Since Doc 16 P3 this renders through the shared branded
+    edition renderer (core.edition) over a text manifest in
+    markdown mode, under the report treatment: a self-contained
+    edition carrying the Peacethefirst brand, the reading controls
+    and the completeness front matter like every other edition.
+    ``chrome=False`` renders the themed body only (no cover,
+    contents, brand or controls) for callers that wrap the body in
+    their own chrome.
+    """
+    from ..core.edition import render_edition
+    from ..social.chat.manifest import manifest_from_text, text_content_resolver
 
-    def inline(text: str) -> str:
-        text = html.escape(text, quote=False)
-        text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
-        text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
-        text = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<em>\1</em>", text)
-        text = re.sub(
-            r"\[([^\]]+)\]\(([^)\s]+)\)",
-            r'<a href="\2">\1</a>', text)
-        return text
-
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("```"):
-            if in_fence:
-                body.append("<pre><code>" + html.escape("\n".join(fence_buf))
-                            + "</code></pre>")
-                fence_buf = []
-                in_fence = False
-            else:
-                close_lists()
-                in_fence = True
-            continue
-        if in_fence:
-            fence_buf.append(line)
-            continue
-        if not stripped:
-            close_lists()
-            continue
-        m = re.match(r"^(#{1,6})\s+(.*)$", stripped)
-        if m:
-            close_lists()
-            level = len(m.group(1))
-            body.append(f"<h{level}>{inline(m.group(2))}</h{level}>")
-            continue
-        m = re.match(r"^[-*+]\s+(.*)$", stripped)
-        if m:
-            if not list_stack or list_stack[-1] != "ul":
-                close_lists()
-                list_stack.append("ul")
-                body.append("<ul>")
-            body.append(f"<li>{inline(m.group(1))}</li>")
-            continue
-        m = re.match(r"^\d+[.)]\s+(.*)$", stripped)
-        if m:
-            if not list_stack or list_stack[-1] != "ol":
-                close_lists()
-                list_stack.append("ol")
-                body.append("<ol>")
-            body.append(f"<li>{inline(m.group(1))}</li>")
-            continue
-        if stripped.startswith(">"):
-            close_lists()
-            body.append(f"<blockquote>{inline(stripped.lstrip('> '))}</blockquote>")
-            continue
-        body.append(f"<p>{inline(line.rstrip())}</p>")
-    if in_fence and fence_buf:
-        body.append("<pre><code>" + html.escape("\n".join(fence_buf)) + "</code></pre>")
-    close_lists()
-
-    css = (
-        "body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;"
-        "max-width:760px;margin:2rem auto;padding:0 1rem;line-height:1.55;color:#1c1e21}"
-        "h1,h2,h3{line-height:1.25}pre{background:#f6f8fa;padding:.8rem;border-radius:6px;"
-        "overflow-x:auto;font-size:.85em}code{background:#f6f8fa;padding:.1em .3em;"
-        "border-radius:4px;font-size:.9em}pre code{background:none;padding:0}"
-        "blockquote{border-left:3px solid #d0d7de;margin:0;padding:.2rem 1rem;color:#57606a}"
-        "a{color:#0969da}hr{border:none;border-top:1px solid #d0d7de;margin:1.4rem 0}"
-    )
-    return (
-        "<!doctype html>\n<html><head><meta charset=\"utf-8\">\n"
-        f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-        f"<title>{html.escape(title)}</title>\n<style>{css}</style></head>\n"
-        f"<body>\n" + "\n".join(body) + "\n</body></html>\n"
-    )
+    manifest = manifest_from_text(md or "", title=title or "Report")
+    out = render_edition(
+        manifest, text_content_resolver(md or ""), theme=theme,
+        treatment="report", content_mode="markdown",
+        brand_policy=brand_policy, brand_text=brand_text,
+        chrome=chrome)
+    # this producer's standalone pages have always opened with the
+    # lowercase doctype; keep its first bytes stable
+    return out.replace("<!DOCTYPE html>", "<!doctype html>", 1)
 
 
 # ── file creation ───────────────────────────────────────────────────────────

@@ -719,11 +719,14 @@ class BookForge:
                 "words": book.total_words,
                 "chapters_written": book.chapters_written}
 
-    def build_html(self, slug: str, *, theme: str = "light") -> dict[str, Any]:
+    def build_html(self, slug: str, *, theme: str = "light",
+                   brand_policy: str = "", brand_text: str = "",
+                   ) -> dict[str, Any]:
         """Build just the single-file HTML book."""
         book = self.load(slug)
         d = self.book_dir(slug)
-        html = html_book(book, theme=theme)
+        html = html_book(book, theme=theme, brand_policy=brand_policy,
+                         brand_text=brand_text)
         path = d / f"{slug}.html"
         path.write_text(html, encoding="utf-8")
         return {"slug": slug, "html": str(path),
@@ -1068,49 +1071,27 @@ def epub_bytes(book: Book, *, cover_path: str = "") -> bytes:
     return buf.getvalue()
 
 
-def html_book(book: Book, *, theme: str = "light") -> str:
-    """Single-file styled HTML book — great for phone reading and sharing."""
+def html_book(book: Book, *, theme: str = "light",
+              brand_policy: str = "", brand_text: str = "") -> str:
+    """Single-file branded HTML edition of the book — great for
+    phone reading and sharing.
+
+    Since Doc 16 P3 this renders through the shared edition
+    renderer (core.edition) over the book's manifest: the chapters'
+    historical ``ch<n>`` anchors are preserved, and a declared
+    chapter that is not written yet appears in the edition as
+    declared-absent instead of being silently dropped.
+    """
     written = [c for c in book.chapters
                if c.status == STATUS_WRITTEN and c.text.strip()]
     if not written:
         raise BookError(f"book {book.slug!r} has no written chapters yet")
-    dark = theme == "dark"
-    bg, fg = ("#1a1a2e", "#e8e8e8") if dark else ("#fdfbf7", "#222222")
-    css = (
-        f"body {{ font-family: Georgia, serif; line-height: 1.7; "
-        f"max-width: 42em; margin: 0 auto; padding: 2em 1.2em; "
-        f"background: {bg}; color: {fg}; }}\n"
-        f"h1 {{ text-align: center; margin: 1.5em 0 0.3em; }}\n"
-        f".cover {{ text-align: center; padding: 18vh 0; }}\n"
-        f".cover .t {{ font-size: 2.4em; font-weight: bold; }}\n"
-        f".cover .a {{ margin-top: 1em; font-size: 1.2em; opacity: .8; }}\n"
-        f".toc a {{ color: inherit; text-decoration: none; }}\n"
-        f".toc li {{ margin: .3em 0; }}\n"
-        f".chapter {{ page-break-before: always; margin-top: 3em; }}\n"
-        f"p {{ text-align: justify; }}\n")
-    toc = "".join(
-        f'<li><a href="#ch{c.number}">{_esc(c.title or f"Chapter {c.number}")}'
-        f"</a></li>\n" for c in written)
-    body = [
-        f'<div class="cover"><div class="t">{_esc(book.display_title)}</div>',
-    ]
-    if book.subtitle:
-        body.append(f"<p><em>{_esc(book.subtitle)}</em></p>")
-    if book.author:
-        body.append(f'<div class="a">{_esc(book.author)}</div>')
-    body.append("</div>")
-    body.append(f'<div class="toc"><h2>Contents</h2><ol>\n{toc}</ol></div>')
-    for c in written:
-        frag = md_to_xhtml(f"# {c.title or f'Chapter {c.number}'}\n\n"
-                           f"{c.text.strip()}")
-        # strip the xml/head wrapper, keep the body content
-        inner = frag.split("<body>", 1)[1].rsplit("</body>", 1)[0]
-        # drop the per-chapter stylesheet link already in head
-        body.append(f'<div class="chapter" id="ch{c.number}">\n{inner}\n</div>')
-    return (
-        f"<!DOCTYPE html>\n<html lang=\"{_esc(book.language or 'en')}\">\n"
-        f"<head><meta charset=\"utf-8\"/>\n"
-        f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>\n"
-        f"<title>{_esc(book.display_title)}</title>\n"
-        f"<style>\n{css}</style></head>\n<body>\n"
-        + "\n".join(body) + "\n</body>\n</html>")
+    from ..core.edition import render_edition
+    from .manifest import book_content_resolver, manifest_from_book
+
+    manifest = manifest_from_book(book)
+    anchors = {f"ch-{c.number}": f"ch{c.number}" for c in book.chapters}
+    return render_edition(
+        manifest, book_content_resolver(book), theme=theme,
+        anchors=anchors, subtitle=book.subtitle or "",
+        brand_policy=brand_policy, brand_text=brand_text)
