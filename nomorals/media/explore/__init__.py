@@ -57,6 +57,7 @@ from .engine import (
 )
 from .board import (
                     PROXY_DEPENDENCY_LINE,
+                    proxy_line,
                     render_explore_board,
                     render_explore_candidates,
                     render_explore_niches,
@@ -132,6 +133,7 @@ __all__ = [
     "NICHE_DISMISSED",
     "NICHE_PROPOSED",
     "PROXY_DEPENDENCY_LINE",
+    "proxy_line",
     "SweepEngine",
     "VideoFinderInstrument",
     "WebSearchInstrument",

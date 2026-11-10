@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from .proxylab_failures import record_failure
+
 __all__ = [
     "BUILT_IN_SOURCES",
     "DISCOVERY_SEEDS",
@@ -550,15 +552,77 @@ class SourceRegistry:
         self.cooldown_seconds = float(cooldown_hours) * 3600.0
         self.fail_threshold = int(fail_threshold)
         self._data: dict[str, dict[str, Any]] = {}
+        #: Corrupt-file recovery performed by _load (doc 17): the
+        #: preserved sibling's name + the parse error, or "" when the
+        #: file loaded clean. See _preserve_corrupt.
+        self._corrupt_backup = ""
+        self._corrupt_error = ""
+        self._corrupt_seen: bytes = b""
 
     # -- persistence ---------------------------------------------------------
     def _load(self) -> None:
         self._data = {}
+        if not self.path.exists():
+            return
         try:
-            if self.path.exists():
-                self._data = json.loads(self.path.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001 - a corrupt registry means: rebuild
-            self._data = {}
+            raw = self.path.read_bytes()
+        except OSError:
+            return  # unreadable: behave as empty; _save fails safe
+        try:
+            data = json.loads(raw.decode("utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("registry root is not a JSON object")
+        except Exception as exc:  # noqa: BLE001 - corrupt registry policy
+            self._preserve_corrupt(raw, exc)
+            return
+        self._data = data
+
+    def _preserve_corrupt(self, raw: bytes, exc: BaseException) -> None:
+        """Corrupt-registry policy (doc 17): a registry file that
+        does not parse is NEVER silently overwritten — its bytes
+        are preserved in a ``<name>.corrupt-<ts>.bak`` sibling
+        (health history included), the event is recorded in the
+        proxy-lab failure ledger, and the registry rebuilds empty.
+        Every public method loads before it saves, so preservation
+        always precedes any overwrite. Identical bytes are
+        preserved + recorded once, not on every load."""
+        if raw == self._corrupt_seen:
+            return
+        self._corrupt_seen = raw
+        self._corrupt_error = str(exc)[:200]
+        backup = ""
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            prefix = f"{self.path.name}.corrupt-"
+            for sibling in sorted(self.path.parent.glob(prefix + "*.bak")):
+                try:
+                    if sibling.read_bytes() == raw:
+                        backup = sibling.name
+                        break
+                except OSError:
+                    continue
+            if not backup:
+                candidate = self.path.parent / (
+                    f"{prefix}{int(time.time())}.bak")
+                if candidate.exists() and candidate.read_bytes() != raw:
+                    candidate = self.path.parent / (
+                        f"{prefix}{int(time.time())}-2.bak")
+                candidate.write_bytes(raw)
+                backup = candidate.name
+        except OSError:
+            backup = ""
+        self._corrupt_backup = backup
+        record_failure("proxysources._load:corrupt_registry", exc)
+
+    def corrupt_recovery(self) -> dict[str, str] | None:
+        """The corrupt-file recovery this registry performed, if
+        any: ``{backup, error}`` — the preserved sibling's file
+        name ("" when preservation itself failed) + why the file
+        was rejected. None when every load parsed clean."""
+        if not self._corrupt_backup and not self._corrupt_error:
+            return None
+        return {"backup": self._corrupt_backup,
+                "error": self._corrupt_error}
 
     def _save(self) -> None:
         try:
@@ -576,7 +640,7 @@ class SourceRegistry:
         if entry is None:
             entry = {"url": url, "kind": kind, "origin": origin,
                      "seed": "", "fails": 0, "last_ok": 0.0, "last_found": 0,
-                     "disabled_until": 0.0, "tests": 0}
+                     "disabled_until": 0.0, "tests": 0, "method": "GET"}
             self._data[name] = entry
         return entry
 
@@ -620,7 +684,8 @@ class SourceRegistry:
         self._save()
 
     def add_discovered(self, name: str, url: str, kind: str, *,
-                       seed: str = "", found: int = 0) -> dict[str, Any]:
+                       seed: str = "", found: int = 0,
+                       method: str = "GET") -> dict[str, Any]:
         """Register a source the internet taught us about.
 
         ``last_ok`` is stamped only when the discovery actually
@@ -628,10 +693,16 @@ class SourceRegistry:
         registered — never scraped — has never succeeded, and stamping
         it would report a fresh success in health/staleness views for
         an endpoint nobody has fetched yet.
+
+        ``method`` is the endpoint's fetch method, carried in the
+        record so the scraper can route non-GET sources to their
+        adapters instead of GET-ing them (doc 17: the catalogue's
+        one POST feed, proxifly-post).
         """
         self._load()
         entry = self._entry(name, url, kind, origin="discovered")
         entry["seed"] = seed
+        entry["method"] = str(method or "GET").strip().upper() or "GET"
         entry["fails"] = 0
         entry["disabled_until"] = 0.0
         if found > 0:
@@ -639,6 +710,19 @@ class SourceRegistry:
         entry["last_found"] = int(found)
         self._save()
         return entry
+
+    def methods(self) -> dict[str, str]:
+        """Per-source fetch method, ``{name: "GET" | "POST" | …}``.
+
+        The registry record is where the catalogue's method lands
+        (see add_discovered); the scraper consults this map to
+        route non-GET sources to their adapters (doc 17). Records
+        written before methods were carried read as GET.
+        """
+        self._load()
+        return {name: str(entry.get("method") or "GET").upper()
+                for name, entry in self._data.items()
+                if isinstance(entry, dict)}
 
     def forget(self, name: str) -> bool:
         self._load()

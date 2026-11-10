@@ -11,10 +11,12 @@ here comes off a stored record; a failed sweep is named failed,
 an empty field is stated, and no internal record id ever
 renders — beats, names, timestamps and counts only.
 
-The proxy line is deliberate and stays until the dependency
-lands: sweeps run direct + the existing proxy pool because the
-proxy-source catalogue refresh (``refresh_sources``, doc 17)
-has no production caller yet (census §7's named dependency).
+The proxy line renders the catalogue-activation record (doc 17
+P1 resolved census §7's named dependency): ``refresh_sources``
+now has a production caller — every proxy refresh activates the
+catalogue first — so the line states the recorded activation
+state (epoch, last merge, registry size), or, before the first
+activation has run on the host, that it has not run yet.
 Exploration degrades honestly; the board says so rather than
 letting a thin pool read as a quiet field.
 """
@@ -40,6 +42,7 @@ from .trends import current_claims, evaluate_trends
 
 __all__ = [
     "PROXY_DEPENDENCY_LINE",
+    "proxy_line",
     "render_explore_board",
     "render_explore_candidates",
     "render_explore_niches",
@@ -48,14 +51,57 @@ __all__ = [
     "render_sweep_cycle",
 ]
 
-#: The board's standing honesty line (census §7): the free pool's
-#: catalogue activation is queued work, not this system's to
-#: rebuild — until it lands, sweeps run on what the pool holds.
+#: The board's standing proxy line, pre-activation form (census
+#: §7, resolved by doc 17 P1): catalogue activation IS wired —
+#: it rides every proxy refresh — so this wording is the truth
+#: only until the first activation has run on the host; after
+#: that, :func:`proxy_line` renders the recorded state instead.
 PROXY_DEPENDENCY_LINE = (
-    "🛰 proxy: sweeps run direct + the existing proxy pool — the "
-    "proxy-source refresh (refresh_sources) has no production "
-    "caller yet (doc 17, queued), so the pool is only what it "
-    "already holds")
+    "🛰 proxy: sweeps run direct + the existing proxy pool — "
+    "catalogue activation (refresh_sources, doc 17) is wired "
+    "into every proxy refresh but has not run yet on this host, "
+    "so the pool is only what it already holds")
+
+
+def _activation_state(context: Any = None) -> dict[str, Any] | None:
+    """The host's catalogue-activation record (doc 17 P1), or
+    None when activation has never completed here. Read-only;
+    a broken read is a ledger entry + None, never a board crash.
+    The home resolves exactly as the ProxyLab resolves it —
+    the context's settings home — so board and lab read the
+    same store."""
+    try:
+        from ...tools.proxy_sources import activation_state_for_home
+
+        settings = getattr(context, "settings", None) \
+            if context is not None else None
+        home = str(getattr(settings, "home", "~/.nomorals")) \
+            if settings is not None else "~/.nomorals"
+        return activation_state_for_home(home)
+    except Exception as exc:  # noqa: BLE001 — the board never dies on it
+        record_failure("explore.board.proxy_activation_state", exc)
+        return None
+
+
+def proxy_line(context: Any = None) -> str:
+    """The board's proxy line, from the activation record:
+    before the first activation it says activation has not run
+    yet (PROXY_DEPENDENCY_LINE); after it, the recorded epoch,
+    last merge and registry size — the "has activation ever
+    run, and what did it do" answer, on the board that used to
+    name the missing caller."""
+    state = _activation_state(context)
+    if not state or not int(state.get("epoch") or 0):
+        return PROXY_DEPENDENCY_LINE
+    last = state.get("last_run") or {}
+    return (
+        "🛰 proxy: sweeps run direct + the existing proxy pool — "
+        "the source catalogue is activated (doc 17): "
+        f"epoch {int(state.get('epoch') or 0)} · last merge "
+        f"{_when(float(last.get('at') or 0))} added "
+        f"{len(last.get('added') or [])} source(s) · registry "
+        f"holds {int(last.get('registry_after') or 0)} sources · "
+        "every proxy refresh re-merges the catalogue")
 
 
 def _when(ts: float, tz: Any = None) -> str:
@@ -217,7 +263,7 @@ def render_explore_board(context: Any = None, *,
             "adoption is your act, nothing discovered goes live "
             "on its own")
     lines.append("")
-    lines.append(PROXY_DEPENDENCY_LINE)
+    lines.append(proxy_line(context))
     lines.append("")
     lines.append(
         "commands: /explore run — sweep now · /explore trends — "

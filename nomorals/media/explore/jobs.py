@@ -60,11 +60,13 @@ A sweep that dies mid-run records itself ``failed`` in the store
 (engine semantics) and the exception propagates through the tool,
 so the job run records failed — never a silent success.
 
-Named dependency (census §7): exploration rides the free proxy
-tier + direct. The free pool's catalogue activation
-(``refresh_sources``, doc 17) is QUEUED and still has no
-production caller, so sweeps run direct + whatever the pool
-already holds; the ``/explore`` board says so until that lands.
+Named dependency (census §7, resolved by doc 17 P1):
+exploration rides the free proxy tier + direct. The free pool's
+catalogue activation (``refresh_sources``, doc 17) has a
+production caller — every proxy refresh activates first — so
+sweeps run direct + whatever the pool holds, the pool grows
+from the verified catalogue on every refresh, and the
+``/explore`` board renders the recorded activation state.
 """
 
 from __future__ import annotations

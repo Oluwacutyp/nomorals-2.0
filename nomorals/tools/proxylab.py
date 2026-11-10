@@ -471,7 +471,10 @@ class ProxyScraper:
     def __init__(self, *, fetcher: Callable[[str], bytes] | None = None,
                  timeout: float = 10.0, user_agent: str = _UA,
                  sources: list[tuple[str, str, str]] | None = None,
-                 max_workers: int = 0, profile: str = "") -> None:
+                 max_workers: int = 0, profile: str = "",
+                 methods: dict[str, str] | None = None,
+                 post_fetcher: Callable[..., bytes] | None = None,
+                 ) -> None:
         self.timeout = float(timeout)
         self.user_agent = user_agent
         self.sources = list(sources or DEFAULT_SOURCES)
@@ -481,6 +484,17 @@ class ProxyScraper:
             profile_workers(profile or detect_profile(), "scrape")
         self.profile = profile or detect_profile()
         self._fetcher = fetcher or self._http_get
+        #: Per-source fetch method ({name: "POST"} for the
+        #: catalogue's one POST feed — doc 17). The registry record
+        #: is the source of this map (SourceRegistry.methods());
+        #: sources absent from it are GET. A non-GET source is
+        #: NEVER fetched through the GET fetcher — see
+        #: _fetch_non_get.
+        self.methods = {str(k): str(v).upper()
+                        for k, v in (methods or {}).items()}
+        #: Injectable POST transport for the POST adapter
+        #: (fetch_proxifly's ``post`` seam); None = its urllib POST.
+        self._post_fetcher = post_fetcher
 
     # -- transport ----------------------------------------------------------
     def _http_get(self, url: str) -> bytes:
@@ -493,6 +507,35 @@ class ProxyScraper:
         })
         with urllib.request.urlopen(request, timeout=self.timeout) as resp:
             return resp.read()
+
+    def _fetch_non_get(self, name: str,
+                       method: str) -> tuple[list[Proxy], str]:
+        """Fetch a non-GET source through its dedicated adapter.
+
+        The generic fetcher speaks GET only. A GET against a POST
+        endpoint harvests nothing — and, recorded as a fetch
+        failure, would poison the source's health record until it
+        disables a healthy source (doc 17). Non-GET sources
+        therefore ride their own adapters: Proxifly's POST feed
+        (the catalogue's only one) via
+        :func:`~.proxy_sources.fetch_proxifly`, at its catalogue
+        probe budget. A non-GET source with no adapter is
+        reported ``unsupported_kind`` and never fetched at all.
+        """
+        if name == "proxifly-post":
+            try:
+                from .proxy_sources import SOURCE_BY_NAME, fetch_proxifly
+
+                budget = int(SOURCE_BY_NAME[name].get("probe_budget")
+                             or 1)
+                proxies = fetch_proxifly(
+                    quantity=max(1, min(20, budget)), format="json",
+                    post=self._post_fetcher)
+            except Exception as exc:  # noqa: BLE001 - one dead source is fine
+                return [], str(exc)[:200]
+            return proxies, ""
+        return [], (f"unsupported_kind: {name} is a {method} source "
+                    f"with no adapter — skipped, never fetched")
 
     # -- parsing ------------------------------------------------------------
     @staticmethod
@@ -728,10 +771,21 @@ class ProxyScraper:
         seen: dict[tuple[str, int, str], Proxy] = {}
         by_source: dict[str, int] = {}
         errors: dict[str, str] = {}
+        unsupported: dict[str, str] = {}
         started = time.time()
 
         def _one(source: tuple[str, str, str]) -> tuple[str, list[Proxy], str]:
             name, url, kind = source
+            method = self.methods.get(name, "GET")
+            if method != "GET":
+                # never through the GET fetcher (doc 17): the
+                # adapter's result — or an unsupported_kind note —
+                # is this source's whole story for the round.
+                proxies, error = self._fetch_non_get(name, method)
+                for p in proxies:
+                    if not p.source:
+                        p.source = name
+                return name, proxies, error
             try:
                 raw = self._fetcher(url)
                 text = raw.decode("utf-8", "replace")
@@ -756,6 +810,16 @@ class ProxyScraper:
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=self.max_workers) as pool_ex:
             for name, proxies, error in pool_ex.map(_one, picked):
+                if error and error.startswith("unsupported_kind"):
+                    # not a failure and not a harvest: the source
+                    # was deliberately not fetched, so it lands in
+                    # neither errors nor by_source — the registry
+                    # health accounting in ProxyLab.scrape never
+                    # sees it, and its health record stays clean.
+                    unsupported[name] = error
+                    if on_source is not None:
+                        on_source(name, 0, error)
+                    continue
                 if error:
                     errors[name] = error
                     if on_source is not None:
@@ -785,6 +849,7 @@ class ProxyScraper:
             "total": len(seen),
             "by_source": by_source,
             "errors": errors,
+            "unsupported": unsupported,
             "seconds": round(time.time() - started, 1),
             "sources": len(picked),
         }
@@ -1574,6 +1639,7 @@ class ProxyLab:
             self.store.dir / "source_yield.json")
         self._profile = detect_profile(context)
         self._scraper = ProxyScraper(sources=self.registry.sources(),
+                                     methods=self.registry.methods(),
                                      profile=self._profile)
         self._tester: ProxyTester | None = None
 
@@ -1614,6 +1680,10 @@ class ProxyLab:
             skip = set(yield_quarantined)
             pool = [s for s in pool if s[0] not in skip]
         self._scraper.sources = pool
+        # the method map follows the registry too (doc 17): a
+        # source merged since this lab was built must reach the
+        # scraper with its method, or its POST endpoint is GET-ed.
+        self._scraper.methods = self.registry.methods()
         # on_source rides only when given: scraper doubles in the
         # test corpus implement the pre-hook signature, and an
         # unexpected keyword would break them — the same
@@ -1664,16 +1734,44 @@ class ProxyLab:
                 "stats": self.registry.stats(),
                 "yield": self.yield_tracker.snapshot()}
 
+    def activate_sources(self) -> dict[str, Any]:
+        """Doc 17 P1: the production caller the catalogue merge
+        never had. Merges the verified 2026 catalogue into the
+        live registry (fenced + recorded — see
+        :func:`~.proxy_sources.activate_sources`) and re-points
+        the scraper's method map at the merged registry. Runs at
+        the head of every :meth:`refresh`, so the scheduled
+        ``proxy_refresh`` job and every manual refresh activate
+        first — one seam, no parallel scheduler. Never raises: a
+        failed activation is a named result in the refresh
+        report, not a dead refresh."""
+        try:
+            from .proxy_sources import activate_sources
+
+            result = activate_sources(self.registry,
+                                      tracker=self.yield_tracker)
+        except Exception as exc:  # noqa: BLE001 - named, never fatal
+            record_failure("proxylab.activate_sources", exc)
+            return {"status": "failed", "error": str(exc)[:200],
+                    "added": []}
+        try:
+            self._scraper.methods = self.registry.methods()
+        except Exception as exc:  # noqa: BLE001
+            record_failure("proxylab.activate_sources:methods", exc)
+        return result
+
     def refresh(self, schemes: str = "http,https,socks4,socks5",
                 limit: int = 150, *, detect_country: bool = True,
                 scrape_if_empty: bool = True,
                 on_test_progress: Callable[[int, int, Any], None] | None = None,
                 on_scrape_source: Callable[[str, int, str], None] | None = None,
                 ) -> dict[str, Any]:
-        """The full cycle: candidates (stored or freshly scraped) → test →
-        store the working pool → summary. The ``on_*`` callbacks are
-        optional live-progress hooks (see ``test_many`` / ``scrape``);
-        existing callers pass none and see no behavior change."""
+        """The full cycle: catalogue activation (doc 17) → candidates
+        (stored or freshly scraped) → test → store the working pool
+        → summary. The ``on_*`` callbacks are optional live-progress
+        hooks (see ``test_many`` / ``scrape``); existing callers pass
+        none and see no behavior change."""
+        activation = self.activate_sources()
         candidates = self.store.load_candidates()
         scraped = 0
         errors: dict[str, str] = {}
@@ -1745,6 +1843,7 @@ class ProxyLab:
         # rotates through — instead of leaving it lab-side.
         pool_import = self.bridge_to_pool()
         return {
+            "activation": activation,
             "scraped": scraped,
             "candidates": len(candidates),
             "tested": len(tested),

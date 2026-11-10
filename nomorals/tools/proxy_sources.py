@@ -47,9 +47,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -70,6 +72,11 @@ __all__ = [
     "sha256_hex",
     "check_staleness",
     "refresh_sources",
+    "activate_sources",
+    "activation_record_path",
+    "activation_state_for_home",
+    "catalog_version",
+    "read_activation_record",
     "fetch_proxifly",
     "fetch_proxifly_text",
 ]
@@ -574,7 +581,8 @@ def refresh_sources(registry: SourceRegistry, *,
             continue
         registry.add_discovered(
             name, entry["url"], entry["kind"],
-            seed="proxy_sources.SOURCES_2026", found=0)
+            seed="proxy_sources.SOURCES_2026", found=0,
+            method=str(entry.get("method") or "GET"))
         added.append(name)
     # staleness from the registry's health view: health()["last_ok"] is
     # seconds-since-success (None = never OK)
@@ -598,7 +606,255 @@ def refresh_sources(registry: SourceRegistry, *,
             "skipped_unverified": skipped_unverified,
             "staleness": staleness,
             "yield_quarantined": quarantined,
+            # the catalogue's non-GET entries, method carried into
+            # their registry records above (doc 17): the scraper
+            # routes these to adapters, never to its GET fetcher.
+            "methods": {e["name"]: str(e.get("method") or "GET").upper()
+                        for e in SOURCES_2026
+                        if str(e.get("method") or "GET").upper() != "GET"},
             "registry_stats": registry.stats()}
+
+
+# ── catalogue activation (doc 17 P1) ─────────────────────────────────────
+#
+# refresh_sources() above is the merge; this section is its
+# transactional production form. Activation is FENCED (one merge
+# at a time; a second run is a named skip, a dead holder's lock is
+# stolen and the record's epoch fences its late write), RECORDED
+# (a durable record beside the registry answers "has activation
+# ever run here, and what did it do" without reading logs), and
+# HONEST ABOUT EMPTIES (a merge that leaves the registry empty is
+# a named no-route stall, never a silent no-op).
+
+#: Catalogue identity recorded at activation.
+CATALOG_NAME = "SOURCES_2026"
+#: A held activation lock older than this is presumed dead and
+#: may be stolen (the merge itself is seconds of local file I/O).
+ACTIVATION_LOCK_STALE_SECONDS = 120.0
+#: Run history retained in the activation record.
+ACTIVATION_RUNS_KEPT = 20
+
+
+def catalog_version() -> str:
+    """Content version of the shipped catalogue: a hash of its
+    canonical (name, url, kind, method, verified) rows — the
+    epoch token recorded at activation, so "which catalogue is
+    live here" is answerable from the record, not from memory."""
+    rows = sorted(
+        (str(e["name"]), str(e.get("url") or ""),
+         str(e.get("kind") or ""),
+         str(e.get("method") or "GET").upper(), bool(e.get("verified")))
+        for e in SOURCES_2026)
+    blob = json.dumps(rows, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:16]
+
+
+def activation_record_path(registry_path: str | Path) -> Path:
+    """The activation record living beside a registry file:
+    ``sources.json`` → ``sources.activation.json`` — the
+    registry's own store directory, the registry's own JSON
+    shape (the yield tracker's sibling-file pattern)."""
+    path = Path(registry_path)
+    return path.with_name(f"{path.stem}.activation.json")
+
+
+def read_activation_record(
+        registry_path: str | Path) -> dict[str, Any] | None:
+    """The recorded activation state for a registry file, or None
+    when activation has never completed there. An unreadable or
+    malformed record also reads as None — "not activated" is the
+    conservative truth for a status surface."""
+    try:
+        data = json.loads(
+            activation_record_path(registry_path).read_text(
+                encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def activation_state_for_home(
+        home: str | Path) -> dict[str, Any] | None:
+    """Activation state for a Devon home (its registry lives at
+    ``<home>/proxies/sources.json``, the ProxyLab's store)."""
+    registry_path = (Path(os.path.expanduser(str(home)))
+                     / "proxies" / "sources.json")
+    return read_activation_record(registry_path)
+
+
+def _write_activation_record(registry_path: Path,
+                             record: dict[str, Any]) -> None:
+    """Persist the activation record atomically (tmp + replace):
+    a crash mid-write leaves the previous record intact, never a
+    torn one. A failed write raises — the merge happened but is
+    unrecorded, and that must be a named failure, not silence."""
+    path = activation_record_path(registry_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(record, indent=1, sort_keys=True),
+                   encoding="utf-8")
+    os.replace(tmp, path)
+
+
+class _ActivationLock:
+    """Single-flight activation fence: an O_EXCL lock file beside
+    the registry carrying a fencing token + timestamp. A second
+    activation while the lock is fresh is a named skip; a lock
+    older than ACTIVATION_LOCK_STALE_SECONDS is stolen (its
+    holder is presumed dead) — and the record's epoch is the
+    generation fence on top: a holder whose lock was stolen
+    mid-merge sees the moved epoch before writing and stands
+    down. No new store, no daemon — the registry file's own
+    directory is the coordination point."""
+
+    def __init__(self, registry_path: Path) -> None:
+        self.path = registry_path.with_name(registry_path.name + ".lock")
+        self.token = ""
+
+    def acquire(self, *,
+                stale_after: float = ACTIVATION_LOCK_STALE_SECONDS
+                ) -> str:
+        """Take the fence; returns the fencing token, or "" when
+        another live activation owns it."""
+        for _attempt in range(2):
+            try:
+                fd = os.open(self.path,
+                             os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                if not self._is_stale(stale_after):
+                    return ""
+                try:
+                    self.path.unlink()
+                except OSError:
+                    return ""
+                continue
+            except OSError:
+                return ""
+            token = uuid.uuid4().hex
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump({"token": token, "pid": os.getpid(),
+                               "at": time.time()}, fh)
+            except OSError:
+                return ""
+            self.token = token
+            return token
+        return ""
+
+    def _is_stale(self, stale_after: float) -> bool:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            at = float(data.get("at") or 0)
+        except Exception:  # noqa: BLE001 - unreadable lock = stale
+            return True
+        return (time.time() - at) > stale_after
+
+    def release(self) -> None:
+        """Drop the fence — only if it is still OURS (a stolen
+        lock belongs to its new holder now)."""
+        if not self.token:
+            return
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            if data.get("token") == self.token:
+                self.path.unlink()
+        except OSError:
+            pass
+        self.token = ""
+
+
+def activate_sources(registry: SourceRegistry, *,
+                     tracker: SourceYieldTracker | None = None,
+                     now: float | None = None) -> dict[str, Any]:
+    """Merge the verified catalogue into ``registry`` — production
+    form (doc 17 P1): fenced, recorded, honest about empties.
+
+    The result's ``status`` is one of:
+
+    * ``activated`` — the merge added sources;
+    * ``current``   — the merge ran, nothing to add (idempotent);
+    * ``empty``     — the merge ran and the registry still holds
+      NO sources: a named no-route stall, never a silent no-op;
+    * ``skipped``   — another activation owns the fence (named in
+      ``reason``; the owner's own run records itself);
+    * ``fenced``    — this holder lost the fence mid-merge (its
+      lock went stale and was stolen and a newer activation
+      recorded first); its record write stood down.
+
+    A completed run (activated / current / empty) appends to the
+    durable activation record beside the registry file: epoch,
+    catalogue version, added names, excluded unverified entries
+    with their reason, registry size before/after, and any
+    corrupt-registry recovery the load policy performed on the
+    way in. Discovered sources and prior health/yield state are
+    merged over, never erased (refresh_sources' own discipline);
+    quarantine and cooldown stay independent of activation.
+    """
+    now = now if now is not None else time.time()
+    lock = _ActivationLock(registry.path)
+    if not lock.acquire():
+        return {"status": "skipped",
+                "reason": "activation_in_progress",
+                "added": [],
+                "catalog_version": catalog_version()}
+    try:
+        # sources() is the registry's canonical read: it
+        # materializes the built-in catalogue into the store, so
+        # the before/after sizes below describe the registry the
+        # merge actually saw (a never-touched store file would
+        # otherwise read as 0 built-ins).
+        registry.sources()
+        record = read_activation_record(registry.path) or {}
+        epoch_before = int(record.get("epoch") or 0)
+        before = registry.stats()
+        merged = refresh_sources(registry, tracker=tracker)
+        corrupt = registry.corrupt_recovery()
+        after = registry.stats()
+        if int(after.get("total") or 0) == 0:
+            status = "empty"
+        elif merged["added"]:
+            status = "activated"
+        else:
+            status = "current"
+        run: dict[str, Any] = {
+            "epoch": epoch_before + 1,
+            "at": now,
+            "status": status,
+            "added": list(merged["added"]),
+            "already_present": len(merged["already_present"]),
+            "excluded_unverified": [
+                {"name": name, "reason": "unverified_or_no_url"}
+                for name in merged["skipped_unverified"]],
+            "methods": dict(merged.get("methods") or {}),
+            "registry_before": int(before.get("total") or 0),
+            "registry_after": int(after.get("total") or 0),
+            "corrupt_recovery": corrupt or {},
+            "yield_quarantined": list(merged.get("yield_quarantined")
+                                      or []),
+        }
+        # generation fence: if the record's epoch moved while we
+        # merged, a newer activation already recorded — stand down
+        # rather than overwrite its record with our older epoch.
+        current = read_activation_record(registry.path) or {}
+        if int(current.get("epoch") or 0) != epoch_before:
+            return {"status": "fenced",
+                    "reason": "activation_epoch_moved",
+                    "catalog_version": catalog_version(), **run}
+        runs = list(record.get("runs") or [])
+        runs.append(run)
+        _write_activation_record(registry.path, {
+            "epoch": epoch_before + 1,
+            "catalog": CATALOG_NAME,
+            "catalog_version": catalog_version(),
+            "catalog_size": len(SOURCES_2026),
+            "first_activated_at": record.get("first_activated_at")
+            or now,
+            "last_run": run,
+            "runs": runs[-ACTIVATION_RUNS_KEPT:],
+        })
+        return {"catalog_version": catalog_version(), **run}
+    finally:
+        lock.release()
 
 
 # ── Proxifly POST feed ───────────────────────────────────────────────────────

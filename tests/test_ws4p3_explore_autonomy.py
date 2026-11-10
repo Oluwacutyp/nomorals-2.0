@@ -35,6 +35,7 @@ import time
 import unittest
 from datetime import datetime
 from types import SimpleNamespace
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -46,6 +47,7 @@ from nomorals.media.explore import (
     EXPLORE_SWEEP_JOBS,
     ExploreStore,
 )
+from nomorals.media.explore import board as board_mod
 from nomorals.media.explore import engine as engine_mod
 from nomorals.media.explore import jobs as jobs_mod
 from nomorals.media.explore import tool as tool_mod
@@ -371,7 +373,12 @@ def _swept_store() -> tuple[ExploreStore, float]:
 class BoardTests(unittest.TestCase):
 
     def test_empty_board_states_the_truth(self) -> None:
-        text = render_explore_board(store=ExploreStore())
+        # doc 17 P1: the board's proxy line is state-dependent now
+        # (it renders the host's activation record) — pin the
+        # not-yet-activated form by fixing the state seam to None.
+        with mock.patch.object(board_mod, "_activation_state",
+                               return_value=None):
+            text = render_explore_board(store=ExploreStore())
         self.assertIn("none yet", text)
         self.assertIn("not scheduled", text)
         self.assertIn(PROXY_DEPENDENCY_LINE, text)
@@ -381,7 +388,11 @@ class BoardTests(unittest.TestCase):
         store, _t = _swept_store()
         scheduler = Scheduler(_ctx(db=_fresh_db()))
         ensure_explore_jobs(scheduler)
-        text = render_explore_board(store=store, scheduler=scheduler)
+        # not-yet-activated form (doc 17 P1) — see above.
+        with mock.patch.object(board_mod, "_activation_state",
+                               return_value=None):
+            text = render_explore_board(store=store,
+                                        scheduler=scheduler)
         # Last sweep: beats, observations, and the failed provider
         # counted as a failure — never smoothed over.
         self.assertIn("last sweep:", text)
@@ -468,6 +479,9 @@ def test_control_explore_board_and_usage(monkeypatch):
 
     store = ExploreStore()
     monkeypatch.setattr(engine_mod, "_DEFAULT_STORE", store)
+    # doc 17 P1: the proxy line renders the host's activation
+    # record — pin the not-yet-activated form hermetically.
+    monkeypatch.setattr(board_mod, "_activation_state", lambda ctx: None)
     surface = RuntimeMediaMixin()
     surface.context = _ctx()
     surface._scheduler = None

@@ -27,9 +27,11 @@ missing, never as zero.
 Exploration reads are unauthenticated public reads (census §7):
 they ride direct connections and the free proxy tier's charter —
 these instruments attach no cookies, no credentials, no vault
-material. The named dependency stands: the proxy catalogue's
-``refresh_sources`` still has no production caller, so sweeps run
-direct + whatever the existing pool already holds.
+material. The named dependency is resolved (doc 17 P1): the
+proxy catalogue's ``refresh_sources`` has a production caller —
+every proxy refresh activates the catalogue first — so sweeps
+run direct + whatever the pool holds, and the pool now grows
+from the verified catalogue on every refresh.
 """
 
 from __future__ import annotations
