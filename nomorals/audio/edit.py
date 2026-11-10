@@ -1157,8 +1157,10 @@ _USAGE = (
     "  /audio duck <voice> <bed> — duck music under voice, podcast mix\n"
     "  /audio analyze <file> — what Devon hears (tempo, key, chord, tuning…)\n"
     "  /audio understand <file> — what the clip IS: sections, energy arc, mood\n"
-    "  /audio fingerprint <file> [title] — index into local recognition memory\n"
+    "  /audio fingerprint <file> [title] — index into local recognition memory (+ melody)\n"
     "  /audio match <file> — recognize against Devon's local library\n"
+    "  /audio melody enroll <file> [title] — enroll a work's melody for cover/hum matching\n"
+    "  /audio melody match <file> — ranked melodic hypotheses (never an identification)\n"
     "Natural: \"remove all the filler words from this voice note\" · "
     "\"tighten the silences\" · \"add reverb to this\""
 )
@@ -1252,14 +1254,51 @@ def control_audio(tail: str, *, context: Any = None,
             return "\n".join(lines)
         if verb == "fingerprint" and len(parts) >= 2:
             from .fingerprint import default_fingerprint_db
+            from .melodic import default_melody_catalog
             title = " ".join(parts[2:]) if len(parts) > 2 else ""
-            res = default_fingerprint_db().add_track(
+            db = default_fingerprint_db()
+            res = db.add_track(
                 parts[1], title=title or Path(parts[1]).stem,
                 artist="local", source="library")
             if not res.get("ok"):
                 return f"🎛️ {res.get('reason', 'failed')}"
-            return (f"🎛️ fingerprinted '{res.get('title')}' — "
-                    f"{res.get('hashes')} hashes in local memory")
+            reply = (f"🎛️ fingerprinted '{res.get('title')}' — "
+                     f"{res.get('hashes')} hashes in local memory")
+            # SR3: the same enrollment also derives the work's
+            # melody, so covers/hums of it can be hypothesized.
+            work = default_melody_catalog().enroll_fingerprint_track(
+                db, int(res.get("track_id") or 0), parts[1])
+            if work.get("ok"):
+                reply += (f"; melody enrolled for cover/hum matching "
+                          f"({work.get('notes')} notes)")
+            else:
+                reply += (f"; melody not enrolled "
+                          f"({work.get('reason', 'extraction failed')})")
+            return reply
+        if verb == "melody" and len(parts) >= 3 and parts[1] == "enroll":
+            from .melodic import enroll_work
+            title = " ".join(parts[3:]) if len(parts) > 3 else ""
+            res = enroll_work(
+                parts[2], title=title or Path(parts[2]).stem,
+                artist="local", source="library")
+            if not res.get("ok"):
+                return f"🎶 {res.get('reason', 'failed')}"
+            return (f"🎶 melody enrolled '{res.get('title')}' — "
+                    f"{res.get('notes')} notes "
+                    f"({res.get('intervals')} intervals); covers and "
+                    f"hums of it can now be hypothesized "
+                    f"(see /audio melody match)")
+        if verb == "melody" and len(parts) >= 3 and parts[1] == "match":
+            from .melodic import match_melody_db, render_hypothesis_lines
+            res = match_melody_db(parts[2])
+            if not res.get("ok"):
+                return (f"🎶 no melodic hypothesis — "
+                        f"{res.get('reason', 'no match')}")
+            lines = [f"🎶 melodic hypotheses for "
+                     f"'{Path(parts[2]).name}':"]
+            lines.extend(render_hypothesis_lines(
+                res.get("hypotheses") or []))
+            return "\n".join(lines)
         if verb == "match" and len(parts) >= 2:
             from .fingerprint import match_local_db
             res = match_local_db(parts[1])

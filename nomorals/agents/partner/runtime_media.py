@@ -3936,9 +3936,11 @@ class RuntimeMediaMixin:
 
         Reply to an audio/voice message with /sham, or send audio with
         /sham as the caption. Native-first: Devon's local fingerprint
-        memory first, AudD for the global catalogue, honest acoustic
-        description when neither can name it. The result links straight
-        into /play.
+        memory first; on a recording miss, her melody catalog offers
+        ranked hypotheses for covers and hummed voice notes (never
+        identifications); then AudD for the global catalogue, honest
+        acoustic description when neither can name it. A recording
+        identification links straight into /play.
         """
         try:
             return self._sham_identify(message)
@@ -3998,6 +4000,37 @@ class RuntimeMediaMixin:
             lines.append("other local candidates: "
                          + "; ".join(rendered))
         lines.append(f"/play {artist} {title}")
+        return "\n".join(lines)
+
+    def _sham_melodic_hypotheses(self, audio_path: str) -> str | None:
+        """SR3 melodic step: ranked hypotheses after a class-1 miss.
+
+        Voice notes are the hum intake — a hummed, sung or covered
+        query is matched by tune against the enrolled melody
+        catalog. Returns the rendered reply, or None when no
+        hypothesis clears the floor (the AudD chain then proceeds
+        exactly as before SR3). Never raises; hypotheses never
+        render as identifications and carry no /play line.
+        """
+        try:
+            from ...audio.melodic import (
+                match_melody_db,
+                render_hypothesis_lines,
+            )
+            res = match_melody_db(audio_path)
+        except Exception as exc:  # noqa: BLE001
+            record_failure(
+                "runtime_media.RuntimeMediaMixin."
+                "_sham_melodic_hypotheses", exc)
+            return None
+        hypotheses = res.get("hypotheses") or []
+        if not res.get("ok") or not hypotheses:
+            return None
+        lines = ["🎶 no recording match in my fingerprint catalog — "
+                 "but the melody itself points to enrolled work(s):"]
+        lines.extend(render_hypothesis_lines(hypotheses))
+        lines.append("AudD external catalogue was not searched "
+                     "(a local melodic hypothesis was found first).")
         return "\n".join(lines)
 
     def _sham_external_match_reply(
@@ -4069,9 +4102,13 @@ class RuntimeMediaMixin:
 
         1. **Devon's own memory** — local fingerprint match against her
            own productions + the indexed library. Zero API, zero cost.
-        2. **AudD** — the global commercial catalogue, only when a key
+        2. **Devon's melodic memory (SR3)** — when no recording match
+           lands, the melody catalog answers the different question
+           "is this that song": covers, re-performances and hummed
+           voice notes get ranked hypotheses (never identifications).
+        3. **AudD** — the global commercial catalogue, only when a key
            is configured and the local memory drew a blank.
-        3. **Honest ears** — when neither can name it, Devon says what
+        4. **Honest ears** — when neither can name it, Devon says what
            she actually hears (tempo, key, loudness) instead of
            shrugging.
         """
@@ -4088,6 +4125,9 @@ class RuntimeMediaMixin:
         local = match_local_db(audio_path)
         if local.get("ok"):
             return self._sham_local_match_reply(local)
+        melodic_reply = self._sham_melodic_hypotheses(audio_path)
+        if melodic_reply is not None:
+            return melodic_reply
         heard = describe_audio(audio_path)
         vault = None
         vault_locked = False
