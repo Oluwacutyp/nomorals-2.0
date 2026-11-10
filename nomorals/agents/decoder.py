@@ -3,8 +3,10 @@
 Wraps ``nomorals.core.decoder`` with agent orchestration:
 
 * **run** — decode a string or workspace file, and when the winning decode
-  is a BINARY (base64→PNG, hexdump→ELF, …) save it into the workspace
-  under ``decodes/`` so it can be opened, sent, or fed to vision.
+  is a BINARY (base64→PNG, hexdump→ELF, …) quarantine it in the artifact
+  store (D1): inert, provenance-recorded, unverified — the store's
+  managed copy is the only copy, and it leaves the store only through
+  an explicit owner action (a surface resolving the artifact ref).
 * **explain** — a plain-language interpretation of the report.  Model-
   sourced when a live model is answering, rule-based otherwise (never
   invents what the engine didn't find).
@@ -17,7 +19,9 @@ machine.
     from nomorals.agents.decoder import DecoderAgent
     agent = DecoderAgent(context=context)
     result = agent.run({"path": "downloads/mystery", "save": True})
-    result.output["saved_to"]   # workspace path when a binary was saved
+    result.output["saved_to"]   # artifact:// URI when a binary was quarantined
+    result.output["artifact"]   # the quarantine record (name/kind/hash)
+    result.output["limits"]     # the decoder's stated limits (D1)
 """
 
 from __future__ import annotations
@@ -47,6 +51,56 @@ _MAGIC_EXT = {
     "zstd": ".zst", "pe/dos-executable": ".bin", "script-shebang": ".sh",
     "webm/mkv": ".webm",
 }
+
+
+def _artifact_store_for(context: Any) -> Any | None:
+    """The WS1 artifact store over the context (the D1 quarantine home).
+
+    An explicitly attached store wins; otherwise the store is built
+    over the context's db exactly as the composition root and the
+    partner runtime build it (db + a BlobStore in ``blobs`` beside
+    the db file).  None when the context carries no database — the
+    caller then persists nothing, and says so on the record.
+    """
+    for attr in ("artifact_store", "artifacts"):
+        store = getattr(context, attr, None)
+        if store is not None and hasattr(store, "put"):
+            return store
+    db = getattr(context, "db", None)
+    if db is None:
+        return None
+    try:
+        from pathlib import Path
+
+        from ..storage.artifacts import ArtifactStore
+        from ..storage.blob import BlobStore
+
+        db_path = getattr(db, "path", None)
+        blob_dir = (str(Path(db_path).parent / "blobs") if db_path
+                    else "data/blobs")
+        return ArtifactStore(db, BlobStore(db, blob_dir))
+    except Exception as exc:  # noqa: BLE001 — quarantine is best-effort
+        _log.debug("decoder artifact store unavailable: %s", exc)
+        return None
+
+
+def _quarantine_record(art: Any, *, name: str,
+                       magic: str) -> dict[str, Any]:
+    """The record of one quarantined decode: name + kind + hash/size
+    facts for surfaces, the artifact id/uri for the decode RECORD's
+    linkage (chat surfaces show name/kind, never the raw id)."""
+    meta = art.metadata or {}
+    return {
+        "id": art.id,
+        "uri": art.uri,
+        "name": meta.get("filename") or name,
+        "kind": meta.get("kind") or "decoded-binary",
+        "quarantine": meta.get("quarantine") or "decoded-untrusted",
+        "magic": magic or meta.get("magic") or "",
+        "size": art.size,
+        "sha256": art.content_hash,
+        "verification_state": art.provenance.verification_state,
+    }
 
 
 def _explain_rules(report: Any) -> str:
@@ -92,16 +146,28 @@ class DecoderAgent(Agent):
         else:
             raise ToolError("decoder_agent needs data or path")
 
+        artifact = None
         saved_to = None
         best = report.best
         if best and save and isinstance(best["output"], (bytes, bytearray)):
-            saved_to = self._save_bytes(bytes(best["output"]))
-        if saved_to:
-            report_dict["saved_to"] = saved_to
+            artifact = self._quarantine_bytes(bytes(best["output"]))
+            if artifact is not None:
+                saved_to = artifact["uri"]
+                report_dict["saved_to"] = saved_to
+                report_dict["artifact"] = artifact
+            else:
+                # No store reachable: the bytes are persisted NOWHERE
+                # (never a loose file) and the record says so.
+                report_dict["storage"] = (
+                    "unavailable — no artifact store is attached, so "
+                    "the decoded binary was not persisted anywhere")
 
         explanation = self._explain(report, spec.get("explain", True))
         self._curate(report_dict, explanation, raw)
+        from ..tools.decoder import decoder_limits
+
         return {"report": report_dict, "saved_to": saved_to,
+                "artifact": artifact, "limits": decoder_limits(),
                 "explanation": explanation}
 
     def _curate(self, report: dict[str, Any], explanation: str,
@@ -145,9 +211,24 @@ class DecoderAgent(Agent):
             return dict(task_input)
         raise ToolError("task_input must be a string or a dict")
 
-    def _save_bytes(self, raw: bytes) -> str:
-        from ..tools.filesystem import safe_path
+    def _quarantine_bytes(self, raw: bytes) -> dict[str, Any] | None:
+        """Quarantine decoded binary bytes in the artifact store (D1).
 
+        The bytes land as an inert artifact — provenance-recorded as
+        decoder-produced, marked decoded-untrusted, verification
+        state ``unverified`` (nothing has scanned them; quarantine
+        is storage + provenance, not a safety claim) — and the
+        store's managed copy is the ONLY copy: no loose workspace
+        file is written, and the bytes leave only when a surface
+        explicitly resolves the artifact (an owner action).
+        Identical bytes already quarantined by the decoder reuse
+        their row (the store's content-hash dedup read).  Returns
+        the artifact record, or None when no store is reachable —
+        the decode itself never fails for want of a quarantine.
+        """
+        store = _artifact_store_for(self.context)
+        if store is None:
+            return None
         magic = ""
         try:
             from ..core.decoder import identify_magic
@@ -158,10 +239,37 @@ class DecoderAgent(Agent):
         ext = _MAGIC_EXT.get(magic, ".bin")
         stamp = time.strftime("%Y%m%d-%H%M%S")
         name = f"decoded-{stamp}{ext}"
-        target = safe_path(self.context, f"decodes/{name}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(raw)
-        return str(target)
+        try:
+            import hashlib
+
+            from ..storage.artifacts import Provenance
+
+            sha = hashlib.sha256(raw).hexdigest()
+            for art in store.find_by_content_hash(sha):
+                if (art.metadata or {}).get("quarantine") == \
+                        "decoded-untrusted":
+                    return _quarantine_record(art, name=name, magic=magic)
+            art = store.put(
+                raw, type="file", creator="decoder",
+                mime="application/octet-stream",
+                metadata={
+                    "filename": name,
+                    "kind": "decoded-binary",
+                    "quarantine": "decoded-untrusted",
+                    "inert": True,
+                    "release": "owner-action-only",
+                    "magic": magic,
+                    "sha256": sha,
+                },
+                provenance=Provenance(
+                    source_type="tool", source_id="decoder",
+                    source_timestamp=time.time(),
+                    verification_state="unverified"),
+            )
+            return _quarantine_record(art, name=name, magic=magic)
+        except Exception as exc:  # noqa: BLE001 — decode must not fail
+            _log.debug("decoder quarantine failed: %s", exc)
+            return None
 
     def _explain(self, report: Any, want: bool) -> str:
         if not want:
@@ -213,7 +321,8 @@ def register(registry: Any) -> None:
         description=(
             "Universal Decoder agent: analyze/decode a string or workspace "
             "file (all encodings, hashes, cookies, JWTs, tokens, file "
-            "forensics), SAVE binary decodes into the workspace, and return "
+            "forensics), QUARANTINE binary decodes in the artifact store "
+            "(inert, provenance-recorded, unverified), and return "
             "a plain-language explanation. task: string, 'file:<path>', or "
             "JSON {data|path, save, explain, max_depth}. "
             "action=run (default) | explain | decoders | hash."

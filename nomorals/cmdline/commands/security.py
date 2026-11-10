@@ -98,8 +98,16 @@ def _cmd_decode(args, context):
         lines.append(f"  {h.get('decoder')}: conf {h.get('confidence')}{note}")
     if out.get("explanation"):
         lines.append(f"explanation: {out['explanation']}")
-    if out.get("saved_to"):
+    art = out.get("artifact")
+    if art:
+        lines.append(f"saved: {art['name']} — artifact quarantine "
+                     f"({art['kind']}, unverified, "
+                     f"sha256 {art['sha256'][:16]}…)")
+    elif out.get("saved_to"):
         lines.append(f"saved: {out['saved_to']}")
+    limits = (out.get("limits") or {}).get("text") or ""
+    if limits:
+        lines.append(limits)
     _emit(args, out, "\n".join(lines))
     return 0
 

@@ -363,15 +363,23 @@ class DecoderAgentTests(unittest.TestCase):
         self.assertTrue(r.output["explanation"])
 
     def test_binary_save_with_magic_ext(self) -> None:
+        # D1: the loose decodes/ file is gone — a binary decode is
+        # quarantined in the artifact store, saved_to is the artifact
+        # URI, and the magic-derived extension survives on the
+        # artifact's name.  Bytes read back through the store.
         png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 40
         enc = base64.b64encode(png).decode()
         r = self.agent.run({"data": enc, "save": True})
         self.assertTrue(r.ok)
-        saved = r.output["saved_to"]
-        self.assertTrue(saved)
-        self.assertTrue(saved.endswith(".png"), saved)
-        with open(saved, "rb") as fh:
-            self.assertEqual(fh.read(), png)
+        art = r.output["artifact"]
+        self.assertIsNotNone(art)
+        self.assertEqual(r.output["saved_to"], art["uri"])
+        self.assertTrue(art["name"].endswith(".png"), art["name"])
+        from nomorals.agents.decoder import _artifact_store_for
+
+        store = _artifact_store_for(self.ctx)
+        self.assertIsNotNone(store)
+        self.assertEqual(store.read(art["id"]), png)
 
     def test_file_task(self) -> None:
         ws = os.path.join(self.tmp.name, "workspace")

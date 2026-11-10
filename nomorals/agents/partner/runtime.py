@@ -7086,7 +7086,8 @@ class PartnerRuntime(
             return self._control_wisdom(command.tail or arg, chat_key=chat_key,
                                         message=message)
         if kind == "decode":
-            return self._control_decode(command.tail or arg, chat_key=chat_key)
+            return self._control_decode(command.tail or arg, chat_key=chat_key,
+                                        message=message)
         if kind == "cookies":
             return self._control_cookies(command.tail or arg,
                                          message=message)

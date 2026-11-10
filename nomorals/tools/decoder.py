@@ -18,6 +18,7 @@ nothing is transmitted, ever.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,64 @@ from ..core.errors import ToolError
 from ..core.policy import Capability
 
 _MAX_FILE_BYTES = 2_000_000
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def auto_crack_default() -> bool:
+    """The owner's standing auto-crack setting (D1).
+
+    ``analyze`` used to attack every identified unknown hash on its
+    own — bounded, but uninvited, and nothing in the decoder was
+    owner-gated.  The attack is now opt-in: the explicit
+    ``mode="crack"`` path and an explicit ``auto_crack=True`` keep
+    exactly their old power and bounds; the DEFAULT comes from the
+    owner's ``NM_DECODER_AUTO_CRACK`` env setting and is OFF when
+    unset.
+    """
+    return _env_flag("NM_DECODER_AUTO_CRACK")
+
+
+#: The decoder's limits, stated on every surface (D1).  Every clause
+#: is a property of the code, pinned by
+#: tests/test_d1921d1_decoder_quarantine.py — if a property changes,
+#: a pin fails and this text must change with it.  No clause claims
+#: a scan: quarantine means inert + provenance-recorded +
+#: unverified, never "safe".
+_DECODER_LIMITS_TEXT = (
+    "decoder limits: decoded content is never executed or opened "
+    "— handled as inert data only · binary decodes are quarantined "
+    "in the artifact store (provenance-recorded, unscanned, "
+    "unverified — quarantine is not a safety certification) and "
+    "leave it only through an explicit owner action · input capped "
+    "at 2,000,000 bytes (truncation is reported, never silent) · "
+    "decode chains capped at depth 6 · hash auto-attack is off "
+    "unless explicitly requested (bounded at 800,000 candidates "
+    "when on); mode=crack is the explicit attack path"
+)
+
+
+def decoder_limits() -> dict[str, Any]:
+    """The limits record every decoder surface carries (D1)."""
+    return {
+        "text": _DECODER_LIMITS_TEXT,
+        "executes_decoded_content": False,
+        "binary_storage": "artifact-quarantine",
+        "scanned": False,
+        "verification_state": "unverified",
+        "max_input_bytes": _MAX_FILE_BYTES,
+        "max_chain_depth": 6,
+        "auto_crack_default": auto_crack_default(),
+        "auto_crack_max_candidates": 800_000,
+        "caller_gating": (
+            "the tool registry cannot identify the chat caller; "
+            "gating lives at the chat layer (/decode file: reads, "
+            "the decode archive and binary saves are owner-only) "
+            "and in capability grants"),
+    }
 
 
 def _summarize(report: Any) -> str:
@@ -224,14 +283,15 @@ def register(registry: Any) -> None:
             "forensics. Pass data= (string) or path= (workspace file, text "
             "or binary). mode: analyze (default) | decode | decoders | "
             "crack (digest → identify → known secrets → bounded live "
-            "crack). analyze auto-attacks identified unknown hashes "
-            "(auto_crack=False to skip)."
+            "crack). analyze never auto-attacks a hash unless "
+            "auto_crack=True is passed explicitly (owner default: "
+            "NM_DECODER_AUTO_CRACK, off when unset)."
         ),
         capability=Capability.FS_READ,
     )
     def decoder(data: str = "", *, path: str = "",
                 mode: str = "analyze", max_depth: int = 3,
-                auto_crack: bool = True, algo: str = "",
+                auto_crack: bool | None = None, algo: str = "",
                 charset: str = "", min_len: int = 1, max_len: int = 6,
                 max_candidates: int = 800_000) -> dict[str, Any]:
         if mode == "decoders":
@@ -241,19 +301,24 @@ def register(registry: Any) -> None:
                     for d in DECODERS
                 ],
                 "count": len(DECODERS),
+                "limits": decoder_limits(),
             }
         if not data and not path:
             raise ToolError("decoder needs data= (string) or path= (file)")
         max_depth = max(1, min(int(max_depth or 3), 6))
+        want_auto_crack = (auto_crack_default() if auto_crack is None
+                           else bool(auto_crack))
 
         db = getattr(context, "db", None)
         if mode == "crack":
             if not data:
                 raise ToolError("decoder crack needs the digest in data=")
-            return auto_attack(data, algo=algo, charset=charset,
-                               db=db,
-                               min_len=min_len, max_len=max_len,
-                               max_candidates=max_candidates)
+            cracked = auto_attack(data, algo=algo, charset=charset,
+                                  db=db,
+                                  min_len=min_len, max_len=max_len,
+                                  max_candidates=max_candidates)
+            cracked["limits"] = decoder_limits()
+            return cracked
 
         if path:
             from .filesystem import safe_path
@@ -274,7 +339,8 @@ def register(registry: Any) -> None:
                                 kind=mode, input_text=input_text)
 
         out: dict[str, Any] = {"report": report.to_dict(),
-                               "summary": _summarize(report)}
+                               "summary": _summarize(report),
+                               "limits": decoder_limits()}
         if report_id:
             out["report_id"] = report_id
         if mode == "decode":
@@ -298,9 +364,11 @@ def register(registry: Any) -> None:
             pass
 
         # auto-attack: an identified, unknown digest gets a bounded
-        # live-crack attempt before the report is returned
+        # live-crack attempt before the report is returned — only
+        # when explicitly requested (auto_crack=True) or the owner's
+        # NM_DECODER_AUTO_CRACK setting enables it (D1: default OFF)
         hinfo = report.hash
-        if auto_crack and hinfo and not hinfo.get("known"):
+        if want_auto_crack and hinfo and not hinfo.get("known"):
             digest = (input_text or "").strip()
             if identify_hash(digest):
                 try:

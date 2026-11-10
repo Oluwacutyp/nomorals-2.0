@@ -107,11 +107,20 @@ class RuntimeIntelMixin:
 
 
     # ── universal decoder ────────────────────────────────────────────────────
-    def _control_decode(self, tail: str, chat_key: str) -> str:
+    def _control_decode(self, tail: str, chat_key: str,
+                        message: Any = None) -> str:
         """/decode <data> | /decode file:<path> | /decode hash <digest> | decoders.
 
         Runs the Universal Decoder; if the winning decode is binary it is
-        saved and sent to the chat as a file."""
+        quarantined in the artifact store and sent to the chat as a file.
+
+        Gating (D1): inline decoding is public, but the paths that
+        touch the owner's world are owner-only — ``file:`` reads
+        workspace files, ``history``/``show`` read the owner's decode
+        archive, and a binary decode is only SAVED (quarantined) for
+        the owner.  The platform distinguishes the owner here
+        (:meth:`_is_operator`); a message-less internal call runs as
+        the owner, exactly as handle_control grants it."""
         tail = (tail or "").strip()
         if not tail:
             return ("usage: /decode <data>  |  /decode file:<path>  |  "
@@ -119,11 +128,17 @@ class RuntimeIntelMixin:
                     "/decode history [query]  |  /decode show <report-id>")
         from ..decoder import DecoderAgent
 
+        is_owner = True if message is None else self._is_operator(message)
+
         if tail == "decoders":
             from ...core.decoder import DECODERS
             names = ", ".join(d.name for d in DECODERS)
             return f"{len(DECODERS)} decoders: {names}"
         if tail.startswith("history") or tail.startswith("show "):
+            if not is_owner:
+                return ("owner-only: the decode archive is the owner's "
+                        "history. Inline decoding stays open to everyone: "
+                        "/decode <data>")
             from ...core.decoder import decode_history, get_report
 
             if tail.startswith("show "):
@@ -162,7 +177,12 @@ class RuntimeIntelMixin:
                 line += f"  ·  KNOWN: {known['algorithm']} of {known['plaintext']!r}"
             return line
 
-        spec: dict[str, Any] = {"save": True, "explain": True}
+        if tail.startswith("file:") and not is_owner:
+            return ("owner-only: /decode file: reads the owner's "
+                    "workspace files. Inline decoding stays open to "
+                    "everyone: /decode <data>")
+
+        spec: dict[str, Any] = {"save": is_owner, "explain": True}
         if tail.startswith("file:"):
             spec["path"] = tail[5:].strip()
         else:
@@ -178,25 +198,65 @@ class RuntimeIntelMixin:
         if isinstance(out, str) and out:
             snippet = truncate(out, 800)
             text += f"\ndecoded:\n{snippet}"
+        if not is_owner and isinstance(out, dict) and "hex_head" in out:
+            # A stranger's inline data decoded to binary: the decode
+            # is reported, but nothing is written to the owner's
+            # quarantine for a non-owner (save=False above).
+            text += ("\n(binary decode — quarantined copies are saved "
+                     "for the owner only; nothing was stored)")
         sent = ""
-        if v.get("saved_to"):
+        artifact = v.get("artifact")
+        if artifact:
+            # Release (D1): the quarantined bytes leave the store
+            # only through this explicit owner action — exported to
+            # a transient send file, never a loose workspace copy.
             chat = self._ref_from_key(chat_key)
+            tmp_path = ""
+            import os
+            import tempfile
+            from pathlib import Path
+
             try:
+                store = self._artifact_store()
+                art = store.resolve(artifact["uri"]) if store else None
+                if art is None:
+                    raise LookupError("quarantined artifact not resolvable")
+
+                fd, tmp_path = tempfile.mkstemp(
+                    prefix="decoded-",
+                    suffix=Path(artifact["name"]).suffix or ".bin")
+                os.close(fd)
+                store.blobs.export(art.content_hash, tmp_path)
                 res = self.gateway.send_file(
-                    chat.platform, chat, v["saved_to"],
-                    caption=f"decoded from {v['report'].get('target')!r}"
-                    f" → {best.get('output', {}).get('magic')}"
-                    if isinstance(best.get("output"), dict) else "decoded file")
+                    chat.platform, chat, tmp_path,
+                    caption=(f"decoded from {v['report'].get('target')!r}"
+                             f" → {artifact['magic'] or 'binary'}"
+                             " · quarantined artifact, unverified"),
+                    name=artifact["name"])
                 if getattr(res, "ok", False):
                     # The file landing IS the confirmation — no
                     # "(file sent)" narration appended to the report
                     # (owner no-meta-narration rule, 2026-11-01). The
-                    # failure branch below keeps its "(saved at ...)"
-                    # line: that is information, not narration.
+                    # failure branch below keeps its quarantine line:
+                    # that is information, not narration.
                     sent = ""
+                else:
+                    sent = (f" (quarantined as {artifact['name']} in the "
+                            f"artifact store — the send failed)")
             except Exception as exc:  # noqa: BLE001
                 record_failure("runtime_intel._control_decode", exc)
-                sent = f" (saved at {v['saved_to']})"
+                sent = (f" (quarantined as {artifact['name']} in the "
+                        f"artifact store)")
+            finally:
+                if tmp_path:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError as exc:  # transient send copy
+                        record_failure(
+                            "runtime_intel._control_decode.unlink", exc)
+        limits = (v.get("limits") or {}).get("text") or ""
+        if limits:
+            text += f"\n{limits}"
         return text + sent
 
     def _control_cookielab(self, tail: str) -> str:
