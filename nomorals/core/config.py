@@ -626,14 +626,23 @@ class OsintSettings:
 @dataclass
 class MindSettings:
     #: Max background jobs the Core Mind may have in flight at once
-    #: (``_send_async``). A new send that cannot acquire a slot within
-    #: ``inflight_acquire_timeout_s`` is shed: logged, counted, and the
-    #: job is marked failed with an explicit note — never silently
-    #: queued, never blocking the chat thread. Env: NM_MIND_MAX_INFLIGHT.
-    max_inflight: int = 8
-    #: Seconds a new send waits for an in-flight slot before it is shed.
-    #: Env: NM_MIND_INFLIGHT_TIMEOUT.
+    #: (``_send_async``). 0 = unset: admission derives the limit from
+    #: the shipped profile table (``core.profiles`` ``max_parallel``,
+    #: doc 18 P4); a positive value (config or env
+    #: NM_MIND_MAX_INFLIGHT) always wins. A new send that cannot
+    #: acquire a slot within ``inflight_acquire_timeout_s`` QUEUES
+    #: with a record (doc 18 P4) — never shed, never marked failed
+    #: for arriving during load, and the chat thread never blocks
+    #: past the timeout.
+    max_inflight: int = 0
+    #: Seconds a new send waits for an in-flight slot before it
+    #: joins the admission queue. Env: NM_MIND_INFLIGHT_TIMEOUT.
     inflight_acquire_timeout_s: float = 30.0
+    #: Seconds a queued send may wait for a slot before its record
+    #: reads overdue (0 = the mind's QUEUE_OVERDUE_DEFAULT_S).
+    #: Overdue is surfaced on the record, never fatal.
+    #: Env: NM_MIND_QUEUE_OVERDUE_S.
+    queue_overdue_s: float = 0.0
 
 @dataclass
 class AudioSettings:
@@ -1174,6 +1183,7 @@ _ENV_MAP: dict[str, str] = {
     "NM_PARTNER_LEXICON_SEED": "partner.lexicon_seed",
     "NM_MIND_MAX_INFLIGHT": "mind.max_inflight",
     "NM_MIND_INFLIGHT_TIMEOUT": "mind.inflight_acquire_timeout_s",
+    "NM_MIND_QUEUE_OVERDUE_S": "mind.queue_overdue_s",
     "NM_NET_ENABLED": "net.enabled",
     "NM_NET_PROXY": "net.proxy",
     "NM_NET_PROBE_TIMEOUT": "net.probe_timeout",

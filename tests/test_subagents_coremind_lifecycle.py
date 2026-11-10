@@ -9,8 +9,9 @@ subagents.py
 coremind.py
 - _dispatch leaves an async-started job "active" until the worker thread
   finalizes it (no premature "done" recorded at dispatch time).
-- a shed job stays "failed" through _dispatch (the old code flipped it
-  back to "done" because the shed note didn't start with ❌).
+- a queued job stays "queued" through _dispatch (doc 18 P4 replaced
+  the shed: saturation no longer marks the job failed at admission,
+  and _dispatch must not flip the queued record either way).
 - _send_async survives Thread.start() failure without leaking the
   semaphore slot or the in-flight gauge.
 - _dispatch retries a crashed dispatch fn exactly once, then reports the
@@ -185,7 +186,12 @@ class AsyncJobStateTest(unittest.TestCase):
             time.sleep(0.05)
         self.assertEqual(final, "done")
 
-    def test_shed_job_stays_failed_through_dispatch(self):
+    def test_queued_job_stays_queued_through_dispatch(self):
+        # Doc 18 P4: this test used to pin the shed — the job was
+        # marked FAILED at admission and _dispatch had to leave that
+        # failure alone. Saturation now queues with a record instead:
+        # the reply says queued (no ❌), the record reads "queued"
+        # through dispatch, and the job completes once the slot frees.
         mind = CoreMind(_FakeContext(mind=_mind_settings(1, 0.05)))
         hold = threading.Event()
 
@@ -204,13 +210,21 @@ class AsyncJobStateTest(unittest.TestCase):
                 lambda i, j, c, m: mind._send_async(
                     c, lambda: "x", j, "started", kind="research")):
             reply = mind._dispatch(intent, "k:console", None)
-        hold.set()
-        self.assertIn("shed", reply)
-        self.assertTrue(reply.startswith("❌") or "\n❌" in reply)
+        self.assertIn("queued", reply)
+        self.assertNotIn("❌", reply)
         job = mind._jobs[-1]
-        self.assertEqual(job["status"], "failed",
-                         "a shed job must stay failed, not flip to done")
-        self.assertIn("shed", job["note"])
+        self.assertEqual(job["status"], "queued",
+                         "a queued job must stay queued through "
+                         "dispatch, not flip to done or failed")
+        self.assertIn("queued", job["note"])
+        hold.set()
+        deadline = time.time() + 10
+        while True:
+            final = mind._jobs[-1]["status"]
+            if final != "queued" or time.time() > deadline:
+                break
+            time.sleep(0.05)
+        self.assertEqual(final, "done")
         deadline = time.time() + 10
         while mind._inflight_now and time.time() < deadline:
             time.sleep(0.05)

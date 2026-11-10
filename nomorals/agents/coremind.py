@@ -51,6 +51,7 @@ import os
 import re
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -65,7 +66,8 @@ _log = logging.getLogger("nomorals.coremind")
 
 __all__ = ["Intent", "CoreMind", "GAME_ALIASES", "game_names",
            "MODEL_CHECK_TIMEOUT_S", "CODING_JOB_TIMEOUT_S",
-           "MAX_INFLIGHT_DEFAULT", "INFLIGHT_ACQUIRE_TIMEOUT_S"]
+           "MAX_INFLIGHT_DEFAULT", "INFLIGHT_ACQUIRE_TIMEOUT_S",
+           "QUEUE_OVERDUE_DEFAULT_S"]
 
 # ── fast-path vs heavy-path budgets (explicit, not magic numbers) ───────────
 #: INTERACTIVE budget: max wall time the chat thread waits for the model in
@@ -78,14 +80,27 @@ MODEL_CHECK_TIMEOUT_S = 8.0
 #: never blocks a reply.
 CODING_JOB_TIMEOUT_S = 300.0
 
-#: BACKGROUND concurrency: max jobs ``_send_async`` may run at once.
-#: Configurable via ``mind.max_inflight`` (env NM_MIND_MAX_INFLIGHT);
-#: ``CoreMind`` clamps non-positive values to this default.
+#: BACKGROUND concurrency fallback: max jobs ``_send_async`` may run
+#: at once when neither config nor the profile table can size
+#: admission. Configurable via ``mind.max_inflight`` (env
+#: NM_MIND_MAX_INFLIGHT) — an explicit value always wins; otherwise
+#: the limit derives from the shipped profile table
+#: (``core.profiles`` ``max_parallel``, doc 18 P4) and this constant
+#: is only the never-raises fallback behind that derivation.
 MAX_INFLIGHT_DEFAULT = 8
 
-#: How long a new send waits for an in-flight slot before it is shed
-#: (``mind.inflight_acquire_timeout_s``, env NM_MIND_INFLIGHT_TIMEOUT).
+#: How long a new send waits for an in-flight slot before it joins
+#: the admission queue (``mind.inflight_acquire_timeout_s``, env
+#: NM_MIND_INFLIGHT_TIMEOUT). Queueing replaced shedding in doc 18
+#: P4: the send is held with a record, never marked failed.
 INFLIGHT_ACQUIRE_TIMEOUT_S = 30.0
+
+#: How long a queued send may wait for a slot before its record
+#: reads OVERDUE — surfaced on the job record, in ``status()`` and
+#: by the doc-18 ticket projection. Overdue is a report, never a
+#: death: the job still starts when a slot frees, however long that
+#: takes. Configurable via ``mind.queue_overdue_s``.
+QUEUE_OVERDUE_DEFAULT_S = 600.0
 
 #: How long a browse job holds a walled session for the owner's
 #: takeover (the handoff link's working window) before reporting
@@ -1347,6 +1362,28 @@ def understand(text: str, *, live_game: str | None = None) -> list[Intent]:
     return cands
 
 
+def _profile_inflight_default() -> int:
+    """Admission sizing from the shipped profile table (doc 18 P4).
+
+    ``max_parallel`` is the profile's parallel-work capacity — the
+    same value the orchestration layer reads through
+    :func:`nomorals.core.profiles.profile_value` — so coremind's
+    background bound follows the machine profile (termux 4 ·
+    laptop 8 · workstation 16) instead of being a second,
+    free-floating constant. Any failure in the profile machinery
+    falls back to MAX_INFLIGHT_DEFAULT: admission sizing must
+    never raise.
+    """
+    try:
+        from ..core.profiles import profile_value
+
+        value = int(profile_value("max_parallel", MAX_INFLIGHT_DEFAULT)
+                    or 0)
+    except Exception:  # noqa: BLE001 - best-effort sizing
+        return MAX_INFLIGHT_DEFAULT
+    return value if value > 0 else MAX_INFLIGHT_DEFAULT
+
+
 # ── the mind ─────────────────────────────────────────────────────────────────
 
 class _AsyncStarted(str):
@@ -1390,22 +1427,28 @@ class CoreMind:
         self._state = self._load_state()
         self._jobs: list[dict[str, Any]] = self._state.get("jobs", [])[-40:]
         self._lock = threading.Lock()
+        self._recover_interrupted_queue()
         self._router_calls = 0  # observability: how often the model was consulted
         self._router_timeouts = 0  # how often _model_check hit its deadline
         self._model_check_note = ""  # last model-check degradation, surfaced in status()
-        # ── bounded background sends ──────────────────────────────────
+        # ── bounded background sends: admission + queue (doc 18 P4) ────
         # _send_async spawns one thread per heavy job; the semaphore caps
-        # how many may run at once (mind.max_inflight, default 8). When
-        # the bound is hit, new sends wait up to inflight_acquire_timeout_s
-        # and are then SHED: logged, counted, and the job is marked failed
-        # with an explicit note — never silently dropped, and the chat
-        # thread never blocks on the bound.
+        # how many may run at once. The cap is ADMISSION sizing: an
+        # explicit mind.max_inflight wins; otherwise it derives from
+        # the shipped profile table (core.profiles max_parallel — the
+        # same capacity source the orchestration layer reads). When the
+        # bound is hit, new sends wait up to inflight_acquire_timeout_s
+        # and then QUEUE WITH A RECORD: never marked failed for
+        # arriving during load, started in arrival order when a running
+        # job hands its slot over, cancellable while queued. The chat
+        # thread never blocks past the acquire timeout.
         mind_cfg = getattr(getattr(self.context, "settings", None), "mind", None)
         try:
             max_inflight = int(getattr(mind_cfg, "max_inflight", 0) or 0)
         except (TypeError, ValueError):
             max_inflight = 0
-        self._max_inflight = max_inflight if max_inflight > 0 else MAX_INFLIGHT_DEFAULT
+        self._max_inflight = (max_inflight if max_inflight > 0
+                              else _profile_inflight_default())
         try:
             self._inflight_timeout = float(
                 getattr(mind_cfg, "inflight_acquire_timeout_s", 0) or 0)
@@ -1413,10 +1456,22 @@ class CoreMind:
             self._inflight_timeout = 0.0
         if self._inflight_timeout <= 0:
             self._inflight_timeout = INFLIGHT_ACQUIRE_TIMEOUT_S
+        try:
+            queue_overdue = float(
+                getattr(mind_cfg, "queue_overdue_s", 0) or 0)
+        except (TypeError, ValueError):
+            queue_overdue = 0.0
+        self._queue_overdue_s = (queue_overdue if queue_overdue > 0
+                                 else QUEUE_OVERDUE_DEFAULT_S)
         self._inflight = threading.Semaphore(self._max_inflight)
         self._inflight_now = 0  # gauge: sends currently holding a slot
         self._send_started = 0  # sends that took a slot
-        self._send_shed = 0  # sends rejected by the bound
+        self._send_shed = 0  # sends rejected by the bound — the pre-P4
+        # behavior; queueing replaced it, and the counter stays in
+        # status() as the standing proof it remains 0.
+        self._send_queued = 0  # sends held by the admission queue
+        self._queue: deque[dict[str, Any]] = deque()
+        self._queue_lock = threading.Lock()
         # ── agent loop integration ──────────────────────────────────────
         # The formal six-step loop (nomorals/agents/agent_loop.py) records
         # each decision here so verification can recover the intent kind.
@@ -1443,6 +1498,31 @@ class CoreMind:
             tmp.replace(self.state_file)
         except Exception:  # noqa: BLE001
             _log.exception("coremind state write failed")
+
+    def _recover_interrupted_queue(self) -> None:
+        """Restart honesty for the admission queue (doc 18 P4).
+
+        A queued job's work is a live closure — it cannot be replayed
+        after a restart, and leaving its row reading ``queued`` would
+        lie forever about work that will never start. Rows still
+        queued at load are closed as ``lost`` with the reason on the
+        record: never silently vanished, and never marked failed as
+        if the organ had run and failed. (Rows reading ``active`` at
+        load keep their pre-P4 meaning — untouched here.)
+        """
+        lost = 0
+        for job in self._jobs:
+            if job.get("status") == "queued":
+                job["status"] = "lost"
+                job["note"] = ("lost: still queued when the process "
+                               "restarted — the queued work was never "
+                               "started and cannot be replayed")
+                job["finished"] = time.time()
+                lost += 1
+        if lost:
+            _log.warning("coremind: %d queued job(s) lost to restart",
+                         lost)
+            self._save_state()
 
     def _remember_objective(self, intent: Intent, job_id: str) -> str:
         """Long-term continuity: the goal lives in memory, not just state."""
@@ -1524,6 +1604,111 @@ class CoreMind:
                                        "failed for %s", job_id, exc_info=True)
                     break
             self._save_state()
+
+    # ── admission queue records (doc 18 P4) ─────────────────────────────
+    def _job_row(self, job_id: str) -> dict[str, Any] | None:
+        """The live row for ``job_id`` — call with ``self._lock`` held."""
+        for job in self._jobs:
+            if job.get("id") == job_id:
+                return job
+        return None
+
+    def _job_queued(self, job_id: str, *, position: int, reason: str,
+                    queued_at: float) -> None:
+        with self._lock:
+            row = self._job_row(job_id)
+            if row is not None:
+                row["status"] = "queued"
+                row["queued_at"] = queued_at
+                row["queue_position"] = position
+                row["queue_reason"] = reason
+                row["note"] = f"queued: {reason}"
+            self._save_state()
+
+    def _job_started_from_queue(self, job_id: str) -> None:
+        now = time.time()
+        with self._lock:
+            row = self._job_row(job_id)
+            if row is not None:
+                row["status"] = "active"
+                row["started_at"] = now
+                if row.get("queued_at"):
+                    row["waited_s"] = round(
+                        now - float(row["queued_at"]), 1)
+                row["note"] = ""
+            self._save_state()
+
+    def _job_cancelled(self, job_id: str) -> None:
+        with self._lock:
+            row = self._job_row(job_id)
+            if row is not None:
+                row["status"] = "cancelled"
+                row["note"] = "cancelled while queued — never ran"
+                row["finished"] = time.time()
+            self._save_state()
+
+    # ── job observation + queued-job cancellation (doc 18 P4) ───────────
+    def job_record(self, job_id: str) -> dict[str, Any] | None:
+        """A COPY of one job's record row — the observation surface
+        the doc-18 ticket projection reads. None when unrecorded."""
+        with self._lock:
+            row = self._job_row(job_id)
+            return dict(row) if row is not None else None
+
+    def job_records(self) -> list[dict[str, Any]]:
+        """Copies of every recorded job row, oldest first."""
+        with self._lock:
+            return [dict(j) for j in self._jobs]
+
+    def queue_state(self) -> dict[str, Any]:
+        """The live admission queue: depth, the overdue bound, and
+        the queued job ids in start order (position = index + 1)."""
+        with self._queue_lock:
+            ids = [entry["job_id"] for entry in self._queue]
+        return {"depth": len(ids),
+                "overdue_after_s": self._queue_overdue_s,
+                "order": ids}
+
+    def cancel_job(self, job_id: str) -> dict[str, Any]:
+        """Cancel a background job that is still QUEUED (doc 18 P4).
+
+        Typed result, never a bare bool: a queued job is removed
+        from the queue and its record lands at ``cancelled`` — it
+        never runs. A job that already started is NOT interrupted
+        (its organ owns it; cancellation receipts for running work
+        are doc 18 P5), and a finished or unknown job answers with
+        its recorded state.
+        """
+        removed = False
+        with self._queue_lock:
+            for entry in list(self._queue):
+                if entry["job_id"] == job_id:
+                    self._queue.remove(entry)
+                    removed = True
+                    break
+        if removed:
+            self._job_cancelled(job_id)
+            return {"cancelled": True, "job_id": job_id,
+                    "state": "cancelled",
+                    "detail": "the job was queued; it has been removed "
+                              "and will never run"}
+        row = self.job_record(job_id)
+        if row is None:
+            return {"cancelled": False, "job_id": job_id,
+                    "state": "not_found",
+                    "detail": "no job with that id is recorded"}
+        status = str(row.get("status") or "")
+        if status == "active":
+            detail = ("the job already started — running work is not "
+                      "interrupted here (cancellation receipts are "
+                      "doc 18 P5)")
+        elif status == "queued":
+            detail = ("the record reads queued but no live queue "
+                      "entry holds the job in this process")
+        else:
+            detail = f"the job already finished with state {status!r}"
+        return {"cancelled": False, "job_id": job_id,
+                "state": status, "detail": detail}
 
     # ── understanding ───────────────────────────────────────────────────────
     def _tune(self) -> Any:
@@ -1933,27 +2118,91 @@ class CoreMind:
                     job_id: str, started_note: str, kind: str = "job") -> str:
         """Heavy organs run off the chat thread and report back here.
 
-        BOUNDED: at most ``mind.max_inflight`` jobs run at once (default
-        8, env NM_MIND_MAX_INFLIGHT). A send that cannot take a slot
-        within ``mind.inflight_acquire_timeout_s`` (default 30s, env
-        NM_MIND_INFLIGHT_TIMEOUT) is SHED — a warning is logged, the
-        ``shed`` counter rises (visible in ``status()`` and ``nm mind``),
-        and the job is marked failed with an explicit "shed" note so the
-        owner sees it instead of silence. The chat thread never blocks on
-        the bound: ``Semaphore.acquire`` is given the timeout, not an
+        BOUNDED + QUEUED (doc 18 P4): at most ``mind.max_inflight``
+        jobs run at once (explicit config, else the profile table's
+        ``max_parallel``). A send that cannot take a slot within
+        ``mind.inflight_acquire_timeout_s`` (default 30s, env
+        NM_MIND_INFLIGHT_TIMEOUT) is QUEUED WITH A RECORD — never
+        shed: its job row reads ``queued`` with why it waits, its
+        queue position and when it queued; it starts in arrival
+        order when a finishing job hands its slot over, and it can
+        be cancelled while queued via :meth:`cancel_job`. Before
+        doc 18 P4 such a send was marked FAILED ("shed") for the
+        crime of arriving during load; the ``shed`` counter remains
+        in ``status()`` as the standing proof it now stays 0. The
+        chat thread never blocks past the acquire timeout:
+        ``Semaphore.acquire`` is given the timeout, not an
         unbounded wait.
         """
         acquired = self._inflight.acquire(timeout=self._inflight_timeout)
         if not acquired:
-            note = (f"shed: {self._max_inflight} background jobs already "
-                    f"in flight (no slot in {self._inflight_timeout:.0f}s)")
-            _log.warning("coremind shed %s %s — %s", kind, job_id, note)
-            with self._lock:
-                self._send_shed += 1
-            self._job_done(job_id, False, note)
-            # _SendFailed: the job is already recorded failed with this
-            # note — _dispatch must not re-mark it from the reply text.
-            return _SendFailed(started_note + f"\n❌ {note}")
+            return self._enqueue(chat_key, job, job_id, started_note,
+                                 kind)
+        return self._start_run(chat_key, job, job_id, started_note,
+                               kind)
+
+    def _enqueue(self, chat_key: str, job: Callable[[], str | None],
+                 job_id: str, started_note: str, kind: str) -> str:
+        """Admission under load: hold the send in the FIFO queue with
+        its record, and answer at once — the job has NOT failed."""
+        queued_at = time.time()
+        reason = (f"{self._max_inflight} background job(s) already in "
+                  f"flight; no slot freed within "
+                  f"{self._inflight_timeout:.0f}s")
+        entry = {"job_id": job_id, "chat_key": chat_key, "job": job,
+                 "started_note": started_note, "kind": kind,
+                 "queued_at": queued_at}
+        with self._queue_lock:
+            self._queue.append(entry)
+            position = len(self._queue)
+        with self._lock:
+            self._send_queued += 1
+        self._job_queued(job_id, position=position, reason=reason,
+                         queued_at=queued_at)
+        _log.warning("coremind queued %s %s — %s (position %d)",
+                     kind, job_id, reason, position)
+        # _AsyncStarted: the queue owns this job now — _dispatch
+        # leaves its record alone and the drain finalizes it.
+        return _AsyncStarted(
+            started_note + f"\n⏳ queued at position {position}: "
+            f"{self._max_inflight} background jobs in flight — this "
+            "one starts as soon as a slot frees.")
+
+    def _release_slot(self) -> None:
+        """A finished job hands its slot to the queue head (FIFO),
+        or back to the semaphore when the queue is empty. Handoff —
+        rather than release-then-drain — is what stops a fresh send
+        from jumping ahead of jobs already waiting. This completion
+        event is the queue's only drainer: no polling thread."""
+        with self._lock:
+            self._inflight_now = max(0, self._inflight_now - 1)
+        entry = None
+        with self._queue_lock:
+            if self._queue:
+                entry = self._queue.popleft()
+        if entry is None:
+            self._inflight.release()
+            return
+        try:
+            self._job_started_from_queue(entry["job_id"])
+        except Exception as exc:  # noqa: BLE001 - never leak the slot
+            record_failure("coremind.queue_handoff", exc)
+            self._inflight.release()
+            self._job_done(entry["job_id"], False,
+                           f"queue handoff failed: {exc}")
+            return
+        # The handed-over slot now belongs to _start_run: on success
+        # the new worker owns it; on a start failure _start_run
+        # releases it and records the failure, exactly as a fresh
+        # send's start failure is handled.
+        self._start_run(entry["chat_key"], entry["job"],
+                        entry["job_id"], entry["started_note"],
+                        entry["kind"])
+
+    def _start_run(self, chat_key: str, job: Callable[[], str | None],
+                   job_id: str, started_note: str, kind: str) -> str:
+        """Spawn the worker thread for a send whose slot is HELD by
+        the caller (a fresh acquire, or a queue handoff)."""
 
         def _run() -> None:
             note = ""
@@ -1967,9 +2216,10 @@ class CoreMind:
                 _log.exception("coremind job %s failed", job_id)
                 note = str(exc)[:300]
             finally:
-                self._inflight.release()
-                with self._lock:
-                    self._inflight_now = max(0, self._inflight_now - 1)
+                # Hand the slot to the queue head (or release it):
+                # this completion event is the admission queue's
+                # only drainer — no polling thread exists.
+                self._release_slot()
                 # One-shot thread: don't leak its DB connection.
                 release_thread_connection(getattr(self.context, "db", None))
             self._job_done(job_id, ok, note)
@@ -2987,6 +3237,8 @@ class CoreMind:
         tune = self._tune()
         env = getattr(getattr(tune, "profile", None), "kind", "auto") if tune else "auto"
         active = [j for j in self._jobs if j.get("status") == "active"]
+        queued_jobs = [j for j in self._jobs
+                       if j.get("status") == "queued"]
         done = [j for j in self._jobs if j.get("status") == "done"]
         failed = [j for j in self._jobs if j.get("status") == "failed"]
         lines = ["🧠 core mind"]
@@ -2998,7 +3250,8 @@ class CoreMind:
         pend = self._state.get("pending", {})
         for chat_key, p in list(pend.items())[-3:]:
             lines.append(f"  pending question in {chat_key}: “{p.get('question', '')[:60]}”")
-        lines.append(f"  jobs: {len(active)} active · {len(done)} done · "
+        lines.append(f"  jobs: {len(active)} active · "
+                     f"{len(queued_jobs)} queued · {len(done)} done · "
                      f"{len(failed)} failed")
         for j in self._jobs[-4:]:
             lines.append(f"    [{j.get('status')}] {j.get('kind')} "
@@ -3023,7 +3276,8 @@ class CoreMind:
                      f"(timed out {self._router_timeouts}×) · profile: {env}")
         lines.append(f"  background jobs: {self._inflight_now}/{self._max_inflight} "
                      f"in flight · started {self._send_started} · "
-                     f"shed {self._send_shed} (bound: NM_MIND_MAX_INFLIGHT)")
+                     f"shed {self._send_shed} · queued {len(self._queue)} "
+                     f"(bound: NM_MIND_MAX_INFLIGHT)")
         if self._model_check_note:
             lines.append(f"  last model check: {self._model_check_note}")
         return "\n".join(lines)

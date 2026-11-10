@@ -3,9 +3,11 @@ research->partner lexicon acquisition loop, and persisted router
 telemetry for `nm mind`.
 
 (a) CoreMind._send_async is semaphore-bounded (mind.max_inflight,
-    default 8): concurrent sends never exceed the bound, and a send that
-    cannot take a slot within the acquire timeout is shed — logged,
-    counted, job marked failed with an explicit note.
+    else the profile table): concurrent sends never exceed the bound,
+    and a send that cannot take a slot within the acquire timeout is
+    QUEUED with a record (doc 18 P4 — it was "shed", marked failed,
+    until that pass; now it starts when a slot frees and the shed
+    counter stays 0).
 (b) The six former stub CLI commands are real: book (BookForge), hub
     (MediaHub), arena (Arena), trial (TrialFlow), skill (SkillLibrary),
     simulate (SandboxSimulator). No _cmd_stub remains.
@@ -127,7 +129,11 @@ class SendAsyncBoundTest(unittest.TestCase):
         self.assertEqual(mind._send_started, 6)
         self.assertEqual(mind._send_shed, 0)
 
-    def test_send_shed_when_no_slot_within_timeout(self):
+    def test_send_queues_when_no_slot_within_timeout(self):
+        # Doc 18 P4 replaced the shed this test used to pin: a send
+        # that cannot take a slot within the acquire timeout QUEUES
+        # with a record — it is not marked failed, the shed counter
+        # stays 0, and it starts when the running job frees its slot.
         mind = CoreMind(_FakeContext(mind=_mind_settings(1, 0.05)))
         release = threading.Event()
 
@@ -142,17 +148,27 @@ class SendAsyncBoundTest(unittest.TestCase):
             time.sleep(0.02)
         self.assertEqual(mind._inflight_now, 1)
 
+        ran = threading.Event()
+
+        def queued_job():
+            ran.set()
+            return "queued done"
+
         with self.assertLogs("nomorals.coremind", level="WARNING") as logs:
-            note = mind._send_async("k:console", lambda: "x", "shed1",
+            note = mind._send_async("k:console", queued_job, "queued1",
                                     "started")
+        self.assertEqual(mind._send_shed, 0)
+        self.assertIn("queued", note)
+        self.assertTrue(any("queued" in m for m in logs.output))
+        self.assertEqual(mind.queue_state()["order"], ["queued1"])
         release.set()
-        self.assertEqual(mind._send_shed, 1)
-        self.assertIn("shed", note)
-        self.assertTrue(any("shed" in m for m in logs.output))
+        self.assertTrue(ran.wait(timeout=5))
         deadline = time.time() + 5
         while mind._inflight_now and time.time() < deadline:
             time.sleep(0.05)
         self.assertEqual(mind._inflight_now, 0)
+        self.assertEqual(mind._send_started, 2)
+        self.assertEqual(mind.queue_state()["depth"], 0)
 
     def test_defaults_when_no_mind_settings(self):
         mind = CoreMind(_FakeContext())

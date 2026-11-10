@@ -29,7 +29,13 @@ Reference shapes are the steward's subject keys, adopted not
 replaced: ``contract:<id>`` · ``mission:<id>`` · ``job:<id>`` ·
 ``browser:<run_id>`` · ``render:<job_id>`` — plus ``task:<id>``
 resolved against a caller-supplied TaskGraph (task graphs are
-in-memory; there is no durable task record to read without one).
+in-memory; there is no durable task record to read without one),
+and ``mind:<job_id>`` resolved against a caller-supplied CoreMind
+instance (doc 18 P4: coremind's job records — including its
+admission queue, which queues with a record instead of shedding —
+live on the instance and its durable state file; the projection
+reads them through the mind's record accessors and constructs
+nothing).
 
 The evidence field speaks doc 24's grade vocabulary
 (:mod:`nomorals.core.proof_grade`): a contract's
@@ -107,6 +113,7 @@ _REF_KINDS = {
     "render": "media_job",
     "media": "media_job",
     "task": "task",
+    "mind": "coremind_job",
 }
 
 _LEASES_NO_DB = ("leases live in the doc 18 P3 lease authority's "
@@ -778,12 +785,115 @@ def _task_ticket(task: Any, graph: Any, now: float) -> ExecutionTicket:
     return ticket
 
 
+def _coremind_ticket(row: dict[str, Any], mind: Any,
+                     now: float) -> ExecutionTicket:
+    status = str(row.get("status") or "")
+    kind_name = str(row.get("kind") or "job")
+    target = str(row.get("target") or "")
+    label = f"coremind job: {kind_name} — {target[:40]}" if target \
+        else f"coremind job: {kind_name}"
+    ticket = ExecutionTicket(
+        ref=f"mind:{row.get('id')}", kind="coremind_job",
+        label=label, status=status, read_at=now)
+    if target:
+        ticket.fill("purpose", target, "coremind")
+    else:
+        ticket.mark_absent(
+            "purpose",
+            "the coremind job record's target is empty — its kind "
+            "names the route taken, not a goal statement")
+    ticket.mark_absent(
+        "actors", "the coremind job record names no actor")
+    _no_owner_chat(ticket, "coremind job")
+    ticket.mark_absent(
+        "capabilities",
+        "a coremind job record names its kind and route, not a "
+        "capability set — kind/route ride in detail verbatim")
+    ticket.mark_absent(
+        "fencing", "coremind jobs keep no fencing generation")
+    ticket.mark_absent(
+        "evidence",
+        "the coremind job record names no evidence requirement "
+        "for its completion")
+    ticket.mark_absent(
+        "acceptance",
+        "no acceptance predicate is recorded for a coremind job — "
+        "its outcome is the note the organ returns")
+    ticket.mark_absent(
+        "budget",
+        "a coremind job is bounded by the admission inflight cap "
+        "and the queue's overdue bound, not by a per-job budget — "
+        "both bounds ride in liveness")
+    state = mind.queue_state()
+    order = [str(job_id) for job_id in (state.get("order") or [])]
+    job_key = str(row.get("id"))
+    position = order.index(job_key) + 1 if job_key in order else None
+    queued_at = row.get("queued_at")
+    wait_s: float | None = None
+    overdue = False
+    if status == "queued" and queued_at:
+        wait_s = round(max(0.0, now - float(queued_at)), 1)
+        bound = float(state.get("overdue_after_s") or 0)
+        overdue = bool(bound) and wait_s > bound
+    ticket.fill("liveness",
+                {"status": status,
+                 "created_at": row.get("created"),
+                 "queued_at": queued_at,
+                 "started_at": row.get("started_at"),
+                 "finished_at": row.get("finished"),
+                 "age_s": _age(now, row.get("created")),
+                 "queue_position": position,
+                 "queue_depth": state.get("depth"),
+                 "wait_s": wait_s,
+                 "overdue": overdue,
+                 "overdue_after_s": state.get("overdue_after_s")},
+                "coremind")
+    if status == "cancelled":
+        ticket.fill(
+            "cancel",
+            _cancel_from_state(
+                "cancelled", row.get("finished"),
+                "cancelled while queued via CoreMind.cancel_job "
+                "(doc 18 P4): the job never ran — the record's "
+                "cancelled status is the whole record, not a typed "
+                "receipt (receipts are doc 18 P5)"),
+            "coremind")
+    elif status == "queued":
+        ticket.fill(
+            "cancel",
+            _cancel_from_state(
+                "", None,
+                "the job is queued and cancellable via "
+                "CoreMind.cancel_job — no cancellation is "
+                "recorded yet"),
+            "coremind")
+    else:
+        ticket.fill(
+            "cancel",
+            _cancel_from_state(
+                "", None,
+                "no cancellation is recorded on this job; only "
+                "queued coremind jobs are cancellable (doc 18 P4)"),
+            "coremind")
+    ticket.detail = {
+        "kind": kind_name,
+        "route": str(row.get("route") or ""),
+        "target": target,
+        "note": str(row.get("note") or ""),
+        "queue_reason": str(row.get("queue_reason") or ""),
+        "queue_position_when_queued": row.get("queue_position"),
+        "waited_s": row.get("waited_s"),
+    }
+    return ticket
+
+
 # ── the read API ──────────────────────────────────────────────────
 
 
 def ticket_for(ref: str, db: Any = None, *,
                registry: JobRegistry | None = None,
                tool_registry: Any = None, graph: Any = None,
+               coremind: Any = None,
                now: float | None = None) -> dict[str, Any]:
     """One operation's ticket, by steward-shaped reference, or a
     typed not-found dict (``{"found": False, "ref", "reason"}``).
@@ -792,7 +902,8 @@ def ticket_for(ref: str, db: Any = None, *,
     runs, media jobs). ``registry`` defaults to the shared
     JobRegistry for ``job:`` refs; ``tool_registry`` (optional)
     resolves a job's tool name to its ToolSpec; ``graph`` (a
-    TaskGraph) resolves ``task:`` refs.
+    TaskGraph) resolves ``task:`` refs; ``coremind`` (a CoreMind)
+    resolves ``mind:`` refs.
     """
     now = time.time() if now is None else now
     prefix, _, ident = str(ref or "").partition(":")
@@ -860,6 +971,18 @@ def ticket_for(ref: str, db: Any = None, *,
         ticket = _media_ticket(rows[0], now)
         _apply_leases(ticket, db, now)
         return ticket.to_dict()
+    if kind == "coremind_job":
+        if coremind is None:
+            return _not_found(ref, "coremind job records live on a "
+                                   "CoreMind instance — one must be "
+                                   "supplied to read a mind ticket")
+        row = coremind.job_record(ident)
+        if row is None:
+            return _not_found(ref, "no coremind job record with id "
+                                   f"{ident!r} exists")
+        ticket = _coremind_ticket(row, coremind, now)
+        _apply_leases(ticket, db, now)
+        return ticket.to_dict()
     # kind == "task"
     if graph is None:
         return _not_found(ref, "task graphs are in-memory — a "
@@ -876,11 +999,13 @@ def ticket_for(ref: str, db: Any = None, *,
 
 def ticket_coverage(db: Any, *, registry: JobRegistry | None = None,
                     tool_registry: Any = None, limit: int = 50,
+                    coremind: Any = None,
                     now: float | None = None) -> dict[str, Any]:
     """The §3 matrix over the live stores: every operation the
     durable organs + the job registry currently hold (up to
-    ``limit`` per organ), its ticket's absent fields counted per
-    field and per source. ``complete_tickets`` counts tickets with
+    ``limit`` per organ), plus a supplied CoreMind's job records
+    when ``coremind`` is passed. Each ticket's absent fields are
+    counted per field and per source. ``complete_tickets`` counts tickets with
     NO absent field; the number is reported, never rounded up.
     Lease coverage rides along: with a db handle, every ticket's
     leases resolve against the P3 authority and the result
@@ -903,6 +1028,9 @@ def ticket_coverage(db: Any, *, registry: JobRegistry | None = None,
     reg = registry if registry is not None else shared_registry()
     for snap in reg.list():
         tickets.append(_job_ticket(snap, tool_registry, now))
+    if coremind is not None:
+        for row in coremind.job_records():
+            tickets.append(_coremind_ticket(row, coremind, now))
     for ticket in tickets:
         _apply_leases(ticket, db, now)
     leases_held = sum(len(ticket.leases or []) for ticket in tickets)
@@ -924,15 +1052,18 @@ def ticket_coverage(db: Any, *, registry: JobRegistry | None = None,
             "ref": ticket.ref, "kind": ticket.kind,
             "absent_fields": ticket.absent_fields()})
     total = len(tickets)
-    summary = [
+    first_line = (
         f"{total} operations: contracts-backed "
         f"{by_source.get('contract', 0)} · missions "
         f"{by_source.get('mission', 0)} · registry jobs "
         f"{by_source.get('job', 0)} · browser runs "
         f"{by_source.get('browser_run', 0)} · media jobs "
         f"{by_source.get('media_job', 0)} · tasks "
-        f"{by_source.get('task', 0)}",
-    ]
+        f"{by_source.get('task', 0)}")
+    if coremind is not None:
+        first_line += (f" · coremind jobs "
+                       f"{by_source.get('coremind_job', 0)}")
+    summary = [first_line]
     for name in TICKET_FIELDS:
         count = absent_totals.get(name, 0)
         if not count:
