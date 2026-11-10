@@ -2903,6 +2903,21 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("exploration jobs not registered: %s",
                                  exc)
+                # Outcome stewardship (doc 15 P4): every 6h the
+                # steward sweeps missions + background jobs for work
+                # whose outcome is overdue, stalled, orphaned or
+                # unknown, opens a reconciliation case per operation
+                # and investigates it under a delegation contract —
+                # routine bookkeeping; cases surface through the
+                # inspection API, not job alerts. Idempotent by name.
+                try:
+                    from ..outcome_steward import (
+                        ensure_outcome_steward_job,
+                    )
+                    ensure_outcome_steward_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "outcome steward job not registered: %s", exc)
                 # Shorts publisher (WS3 P6): the contentops
                 # calendar's due posts finally fire — every 30
                 # minutes the sweep renders and delivers them

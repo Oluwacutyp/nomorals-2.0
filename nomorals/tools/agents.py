@@ -59,6 +59,7 @@ AGENT_TOOL_MODULES = (
     "osint_graph",
     "opportunities",
     "opportunity_hunt",
+    "outcome_steward",
     "planner",
     "projects",
     "pumpdesk",
