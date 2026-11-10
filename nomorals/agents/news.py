@@ -528,6 +528,37 @@ def _ensure_delivery_columns(db: Any) -> None:
         pass
 
 
+def _ensure_translations_table(db: Any) -> None:
+    """The news_translations record (docs 19+21, N1): one durable row
+    per (news item, target language) holding the translated spans the
+    digest renders, the T1 receipt ids that minted them, and the
+    gate's quality mark.  Runtime-created (Batch B) — migrations stay
+    frozen.  Best-effort like the other ensure helpers: a failure here
+    degrades re-digests to re-translation, never to broken news."""
+    if db is None:
+        return
+    try:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS news_translations ("
+            "item_ref TEXT NOT NULL, "
+            "url TEXT, "
+            "content_hash TEXT, "
+            "source_lang TEXT, "
+            "source_confidence REAL, "
+            "target_lang TEXT NOT NULL, "
+            "receipt_id TEXT, "
+            "title_receipt_id TEXT, "
+            "quality_mark TEXT, "
+            "rung TEXT, "
+            "translated INTEGER, "
+            "translated_title TEXT, "
+            "translated_summary TEXT, "
+            "created_at REAL, "
+            "PRIMARY KEY (item_ref, target_lang))")
+    except Exception as exc:  # noqa: BLE001
+        record_failure("news.ensure_translations_table", exc)
+
+
 def news_registry_for_context(context: Any = None,
                               injected: Any = None) -> Any:
     """The source registry news growth lands in, or None.
@@ -643,7 +674,11 @@ class NewsAgent:
         self._registry = news_registry_for_context(context, registry)
         _ensure_attribution_columns(self.db)
         _ensure_delivery_columns(self.db)
+        _ensure_translations_table(self.db)
         self.notifier = notifier
+        #: db-less contexts keep translation records in memory (the
+        #: _pending precedent): one instance's digests still reuse.
+        self._translations_mem: dict[tuple[str, str], dict[str, Any]] = {}
         #: db-less contexts keep the last poll's rows in memory so a
         #: poll() → brief() pair on one instance still composes.
         self._pending: list[dict[str, Any]] = []
@@ -1443,9 +1478,318 @@ class NewsAgent:
                   reverse=True)
         return rows if limit is None else rows[:limit]
 
+    # ── news translation (docs 19+21, N1) ─────────────────────────────
+    # Translate-before-summarize: when the owner's news-translation
+    # setting is ON, digest items are translated FIRST through the
+    # T1/T2 ticket path (requester "news") and _model_summaries reads
+    # the TRANSLATED text.  The span translated is exactly the span
+    # the summarizer consumes — the title plus summary[:160] (the
+    # slice _model_summaries itself reads) — never whole articles.
+    # Every translation lands in the news_translations record; renders
+    # and re-digests READ the record instead of re-translating (the
+    # T2 durable cache is the second layer, not a substitute).
+    # news_items stays canonical: nothing here ever writes to it.
+
+    @staticmethod
+    def _item_ref(row: dict[str, Any]) -> str:
+        """The store's item identity: the news_items id when the row
+        carries one, else its URL."""
+        rid = row.get("id")
+        if rid is not None and str(rid) != "":
+            return str(rid)
+        return str(row.get("url") or "")
+
+    def _interest_kv_get(self, key: str) -> str | None:
+        """One news_interest value (the profile store's dual path:
+        rowstore seam when attached, native SQL otherwise, memory
+        when db-less)."""
+        if self.db is not None:
+            try:
+                profile_t = self._profile_t()
+                if profile_t is not None:
+                    row = profile_t.get(key)
+                else:
+                    row = self.db.query_one(
+                        "SELECT value FROM news_interest WHERE key = ?",
+                        (key,))
+                value = (row or {}).get("value")
+                return None if value is None else str(value)
+            except Exception as exc:  # noqa: BLE001
+                record_failure("news.kv_get", exc)
+                return None
+        mem = getattr(self, "_kv_mem", None)
+        return mem.get(key) if isinstance(mem, dict) else None
+
+    def _interest_kv_set(self, key: str, value: str) -> None:
+        if self.db is None:
+            if not isinstance(getattr(self, "_kv_mem", None), dict):
+                self._kv_mem = {}  # type: ignore[attr-defined]
+            self._kv_mem[key] = value  # type: ignore[attr-defined]
+            return
+        try:
+            profile_t = self._profile_t()
+            if profile_t is not None:
+                profile_t.put({"key": key, "value": value})
+            else:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO news_interest (key, value) "
+                    "VALUES (?, ?)", (key, value))
+        except Exception as exc:  # noqa: BLE001
+            record_failure("news.kv_set", exc)
+
+    def news_translation(self) -> dict[str, Any]:
+        """The effective news-translation posture: the stored runtime
+        pref (set by ``/news target``) wins over the settings seed;
+        an unset target falls back to the translation organ's owner
+        language.  ``effective_target`` resolves only when enabled,
+        so an OFF digest never touches the translator."""
+        stored_on = self._interest_kv_get("translation_enabled")
+        stored_target = self._interest_kv_get("translation_target")
+        news_cfg = getattr(self.settings, "news", None)
+        if stored_on is not None:
+            enabled = stored_on == "1"
+            origin = "stored"
+        else:
+            enabled = bool(
+                getattr(news_cfg, "translation_enabled", False))
+            origin = "settings" if enabled else "default"
+        target = (stored_target
+                  or getattr(news_cfg, "translation_target", "")
+                  or "").strip().lower()
+        effective = ""
+        if enabled:
+            effective = target
+            if not effective:
+                try:
+                    from ..llm.translate import translator_for
+
+                    effective = translator_for(
+                        self.context).owner_language()
+                except Exception:  # noqa: BLE001
+                    effective = "en"
+        return {"enabled": enabled, "target": target,
+                "effective_target": effective, "source": origin}
+
+    def set_news_translation(self, *, enabled: bool | None = None,
+                             target: str | None = None
+                             ) -> dict[str, Any]:
+        """Persist the owner's news-translation posture (the runtime
+        pref /news target writes); returns the effective posture."""
+        if enabled is not None:
+            self._interest_kv_set(
+                "translation_enabled", "1" if enabled else "0")
+        if target is not None:
+            self._interest_kv_set("translation_target", target)
+        return self.news_translation()
+
+    def _translation_target(self) -> str:
+        """The digest's target language, or "" when translation is
+        OFF (the byte-identical legacy pipeline)."""
+        posture = self.news_translation()
+        return posture["effective_target"] if posture["enabled"] else ""
+
+    def _translation_record(self, item_ref: str,
+                            target: str) -> dict[str, Any] | None:
+        if self.db is not None:
+            try:
+                row = self.db.query_one(
+                    "SELECT * FROM news_translations "
+                    "WHERE item_ref = ? AND target_lang = ?",
+                    (item_ref, target))
+                return dict(row) if row else None
+            except Exception as exc:  # noqa: BLE001
+                record_failure("news.translation_record_read", exc)
+                return None
+        return self._translations_mem.get((item_ref, target))
+
+    def _save_translation_record(self, rec: dict[str, Any]) -> None:
+        if self.db is not None:
+            try:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO news_translations ("
+                    "item_ref, url, content_hash, source_lang, "
+                    "source_confidence, target_lang, receipt_id, "
+                    "title_receipt_id, quality_mark, rung, translated, "
+                    "translated_title, translated_summary, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (rec["item_ref"], rec["url"], rec["content_hash"],
+                     rec["source_lang"], rec["source_confidence"],
+                     rec["target_lang"], rec["receipt_id"],
+                     rec["title_receipt_id"], rec["quality_mark"],
+                     rec["rung"], 1 if rec["translated"] else 0,
+                     rec["translated_title"], rec["translated_summary"],
+                     rec["created_at"]))
+                return
+            except Exception as exc:  # noqa: BLE001
+                record_failure("news.translation_record_write", exc)
+        self._translations_mem[(rec["item_ref"],
+                                rec["target_lang"])] = rec
+
+    @staticmethod
+    def _span_quality(outcome: Any) -> tuple[str, str, str]:
+        """(quality mark, receipt id, rung) for one ticket outcome —
+        the T1 mark vocabulary read off the gate verdict: a failed
+        gate marks the span unverified; it never swaps or blocks."""
+        inner = outcome.outcome
+        rung = str(getattr(inner, "rung", "") or "")
+        if not getattr(inner, "translated", False):
+            return ("same-language" if rung == "same-language"
+                    else "identity"), "", rung
+        status = str((outcome.gate or {}).get("status") or "")
+        mark = {"passed": "verified",
+                "failed": "unverified"}.get(status, "not_checked")
+        receipt = outcome.receipt_id or (
+            outcome.receipt_ids[0] if outcome.receipt_ids else "")
+        return mark, receipt, rung
+
+    def _translate_span(self, translator: Any, text: str, source: str,
+                        target: str) -> dict[str, Any]:
+        """One span through the T1/T2 ticket path at fidelity
+        exactness — fidelity is what runs the quality gate, and the
+        gate's Yoruba posture is warn: the verdict lands as the
+        span's mark, never as a block."""
+        from ..llm.ticket import TranslationTicket, run_ticket
+
+        ticket = TranslationTicket(
+            text=text, target_lang=target, source_lang=source,
+            exactness="fidelity", requester="news")
+        outcome = run_ticket(translator, ticket)
+        mark, receipt, rung = self._span_quality(outcome)
+        return {"text": outcome.outcome.text,
+                "source_lang": outcome.outcome.source_lang or "",
+                "mark": mark, "receipt_id": receipt, "rung": rung,
+                "translated": bool(outcome.outcome.translated)}
+
+    def _item_translation(self, row: dict[str, Any],
+                          target: str) -> dict[str, Any] | None:
+        """The item's translation record for ``target``: read from
+        news_translations when the item's content is unchanged (the
+        reuse key is item identity + target, guarded by the content
+        hash so a re-fetched story with new text re-translates), else
+        translated now and recorded.  The source language is the
+        detector's word — undetected stays an empty source_lang on
+        the row, never a guessed language.  None = the record path
+        failed; the caller falls back to the legacy render for this
+        item.  Never raises."""
+        import hashlib
+
+        title = str(row.get("title") or "")
+        span = str(row.get("summary") or "")[:160]
+        item_ref = self._item_ref(row)
+        digest = hashlib.sha256(
+            (title + "\x00" + span).encode("utf-8")).hexdigest()
+        try:
+            existing = self._translation_record(item_ref, target)
+            if (existing is not None
+                    and existing.get("content_hash") == digest):
+                existing["translated"] = bool(existing.get("translated"))
+                return existing
+            from ..llm.languages import detect_language
+            from ..llm.translate import translator_for
+
+            translator = translator_for(self.context)
+            detected, confidence = detect_language(
+                (title + " " + span).strip())
+            rec: dict[str, Any] = {
+                "item_ref": item_ref, "url": str(row.get("url") or ""),
+                "content_hash": digest,
+                "source_lang": "" if detected == "und" else detected,
+                "source_confidence": float(confidence or 0.0),
+                "target_lang": target, "receipt_id": "",
+                "title_receipt_id": "", "quality_mark": "identity",
+                "rung": "", "translated": False,
+                "translated_title": title, "translated_summary": span,
+                "created_at": time.time(),
+            }
+            if detected == target:
+                rec["quality_mark"] = "same-language"
+                rec["rung"] = "same-language"
+                self._save_translation_record(rec)
+                return rec
+            source = "" if detected == "und" else detected
+            title_res = (self._translate_span(
+                translator, title, source, target) if title else None)
+            span_res = (self._translate_span(
+                translator, span, source, target) if span else None)
+            marks: list[str] = []
+            rungs: list[str] = []
+            for res, key in ((title_res, "translated_title"),
+                             (span_res, "translated_summary")):
+                if res is None:
+                    continue
+                rungs.append(res["rung"])
+                if res["source_lang"] and not rec["source_lang"]:
+                    rec["source_lang"] = res["source_lang"]
+                if res["translated"]:
+                    rec[key] = res["text"]
+                    marks.append(res["mark"])
+            rec["rung"] = rungs[0] if rungs else ""
+            if title_res is not None:
+                rec["title_receipt_id"] = title_res["receipt_id"]
+            if span_res is not None:
+                rec["receipt_id"] = span_res["receipt_id"]
+            if not rec["receipt_id"]:
+                rec["receipt_id"] = rec["title_receipt_id"]
+            if marks:
+                rec["translated"] = True
+                if "unverified" in marks:
+                    rec["quality_mark"] = "unverified"
+                elif all(m == "verified" for m in marks):
+                    rec["quality_mark"] = "verified"
+                else:
+                    rec["quality_mark"] = "not_checked"
+            elif "same-language" in rungs:
+                rec["quality_mark"] = "same-language"
+            self._save_translation_record(rec)
+            return rec
+        except Exception as exc:  # noqa: BLE001
+            record_failure("news.item_translation", exc)
+            return None
+
+    @staticmethod
+    def _translation_badge(rec: dict[str, Any]) -> str:
+        """The digest badge for a translated item: source→target plus
+        the gate's mark — verified wears a check, unverified is
+        spelled out so a gate-failed translation never dresses as a
+        passed one, not_checked stays plain (no quality claim).
+        Identity / same-language items carry NO badge."""
+        if not rec.get("translated") or not rec.get("source_lang"):
+            return ""
+        badge = f"🌐 {rec['source_lang']}→{rec['target_lang']}"
+        mark = str(rec.get("quality_mark") or "")
+        if mark == "verified":
+            badge += " ✓"
+        elif mark == "unverified":
+            badge += " ⚠ unverified"
+        return badge
+
     def _compose_digest(
             self, rows: list[dict[str, Any]]) -> str:
-        summaries = self._model_summaries(rows)  # type: ignore[arg-type]
+        # Docs 19+21 (N1): with news translation ON, items are
+        # translated FIRST (into news_translations records) and the
+        # summarizer reads the translated text; OFF, this method is
+        # the pre-N1 pipeline unchanged — summarize the source,
+        # localize at render.
+        target = self._translation_target()
+        records: dict[str, dict[str, Any]] = {}
+        if target:
+            for it in rows:
+                rec = self._item_translation(it, target)
+                if rec is not None:
+                    records[self._item_ref(it)] = rec
+            sum_rows: list[dict[str, Any]] = []
+            for it in rows:
+                rec = records.get(self._item_ref(it))
+                if rec is not None and rec["translated"]:
+                    shown = dict(it)
+                    shown["title"] = rec["translated_title"]
+                    shown["summary"] = rec["translated_summary"]
+                    sum_rows.append(shown)
+                else:
+                    sum_rows.append(it)
+            summaries = self._model_summaries(sum_rows)  # type: ignore[arg-type]
+        else:
+            summaries = self._model_summaries(rows)  # type: ignore[arg-type]
         lines: list[str] = []
         # Group by PUBLISHER when the item carries attribution, else by
         # carrying feed (pass #83): a Reuters story reads under
@@ -1458,7 +1802,35 @@ class NewsAgent:
             # every item is shown — no per-source slice; the digest
             # carries everything undelivered (pass #85).
             for it in items:
+                rec = records.get(self._item_ref(it))
+                if rec is not None and rec["translated"]:
+                    # Translated BEFORE summarizing: the model summary
+                    # was made from the translated text and is already
+                    # in the target language — never re-translated.
+                    # The record's span is the no-brain fallback; the
+                    # badge carries language + quality mark only.
+                    summary = (summaries.get(it["url"])
+                               or rec["translated_summary"] or "")
+                    line = f"  • {rec['translated_title']}"
+                    badge = self._translation_badge(rec)
+                    if badge:
+                        line += f" {badge}"
+                    if summary:
+                        line += f" — {_short_summary(summary)}"
+                    lines.append(line)
+                    if it["title"]:
+                        lines.append(f"    ◦ original: {it['title']}")
+                    continue
                 summary = summaries.get(it["url"]) or it.get("summary") or ""
+                if rec is not None:
+                    # Translation ON but this item was not translated
+                    # (already in the target language, undetected, or
+                    # every rung failed): it renders in its source
+                    # text, plainly — no badge, no dressing.
+                    lines.append(f"  • {it['title']}" + (
+                        f" — {_short_summary(summary)}"
+                        if summary else ""))
+                    continue
                 # Owner-language delivery (translation organ): the
                 # headline + gist arrive in the owner's language; the
                 # original headline rides as a small secondary line.
@@ -1606,6 +1978,7 @@ class NewsAgent:
             "quiet_now": self._quiet_now(),
             "beats": [b["topic"] for b in profile["beats"]],
             "pins": profile["pins"],
+            "translation": self.news_translation(),
         }
         # AA-55: the growth surface — grown feeds in rotation and
         # candidates awaiting the health loop's verdict.

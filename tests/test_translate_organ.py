@@ -483,5 +483,94 @@ class CommandTests(unittest.TestCase):
         self.assertIn("nothing to translate", reply)
 
 
+# ── Yoruba fixtures (docs 19+21, N1) ─────────────────────────────────
+# Real Yoruba — the owner's flagship pair — with hand-checked English.
+# The rungs are faked like everywhere else in this file; the language
+# data is not.  Tone marks are written the way everyday Yoruba text
+# writes them (underdots kept, tones light), which is also the shape
+# the detector's yo profile is built from.
+
+YO_GREETING = "Kaasan o, ṣe alaafia ni?"
+EN_GREETING = "Good afternoon, are you well?"
+YO_MARKET = ("Ọjà Ìláwé ti kún fun ẹ̀wà ati ìrẹsì lónìí, "
+             "awọn ènìyàn si n ra wọn ni owó rere.")
+EN_MARKET = ("Ilawe market is full of beans and rice today, "
+             "and people are buying at good prices.")
+EN_FIELD = ("The farmers brought yams and peppers to the market "
+            "this morning")
+YO_FIELD = ("Awọn agbẹ ni o mu iṣu ati ata wa si ọja "
+            "ni owurọ yii.")
+
+_PAIRS.update({
+    ("yo", "en", YO_MARKET): EN_MARKET,
+    ("yo", "en", YO_GREETING): EN_GREETING,
+    ("en", "yo", EN_FIELD): YO_FIELD,
+})
+
+
+class _YoLocalBackend(FakeLocalBackend):
+    """Local-rung fake keyed by (text, destination NLLB code)."""
+
+    def translate(self, text: str, src_nllb: str, dst_nllb: str) -> str:
+        self.seen.append((text, src_nllb, dst_nllb))
+        out = {(YO_GREETING, "eng_Latn"): EN_GREETING}.get(
+            (text, dst_nllb))
+        if out is None:
+            raise RuntimeError("fake backend: unknown text")
+        return out
+
+
+class YorubaTests(unittest.TestCase):
+    def test_detection(self):
+        code, conf = detect_language(YO_MARKET)
+        self.assertEqual(code, "yo")
+        self.assertGreater(conf, 0.5)
+        code, _ = detect_language(YO_FIELD)
+        self.assertEqual(code, "yo")
+
+    def test_normalize_and_nllb_mapping(self):
+        from nomorals.llm.languages import NLLB_CODES
+
+        self.assertEqual(normalize_code("Yoruba"), "yo")
+        self.assertEqual(NLLB_CODES["yo"], "yor_Latn")
+        self.assertEqual(NLLB_CODES["en"], "eng_Latn")
+
+    def test_local_rung_carries_yor_latn(self):
+        backend = _YoLocalBackend()
+        t = _translator(local_backend=backend)
+        out = t.translate(YO_GREETING, source="yo", target="en")
+        self.assertTrue(out.translated)
+        self.assertEqual(out.rung, "local")
+        self.assertEqual(out.text, EN_GREETING)
+        self.assertEqual(backend.seen[0][1:], ("yor_Latn", "eng_Latn"))
+
+    def test_provider_rung_yo_to_en(self):
+        t = _translator()  # context None -> providers answer
+        out = t.translate(YO_MARKET, target="en")
+        self.assertTrue(out.translated)
+        self.assertTrue(out.rung.startswith("provider:"))
+        self.assertEqual(out.source_lang, "yo")
+        self.assertEqual(out.text, EN_MARKET)
+
+    def test_provider_rung_en_to_yo(self):
+        t = _translator()
+        out = t.translate(EN_FIELD, target="yo")
+        self.assertTrue(out.translated)
+        self.assertEqual(out.target_lang, "yo")
+        self.assertEqual(out.text, YO_FIELD)
+
+    def test_ticket_path_yoruba_for_news(self):
+        from nomorals.llm.ticket import TranslationTicket, run_ticket
+
+        t = _translator()
+        outcome = run_ticket(t, TranslationTicket(
+            text=YO_MARKET, target_lang="en", exactness="gist",
+            requester="news"))
+        self.assertEqual(outcome.outcome.text, EN_MARKET)
+        self.assertTrue(outcome.outcome.translated)
+        self.assertEqual(outcome.requester, "news")
+        self.assertTrue(outcome.receipt_id.startswith("tr-"))
+
+
 if __name__ == "__main__":
     unittest.main()

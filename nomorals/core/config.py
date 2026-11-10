@@ -673,8 +673,21 @@ class SchedulerSettings:
 
 @dataclass
 class NewsSettings:
+    """News agent settings.
+
+    Translation (docs 19+21, N1): the digest's translate-before-
+    summarize posture.  ``translation_enabled`` defaults OFF — news is
+    never silently translated; the owner turns it on (here, via env,
+    or at runtime with ``/news target <code>``, whose stored pref wins
+    over this seed).  ``translation_target`` empty means the
+    translation organ's owner language.  Env:
+    NM_NEWS_TRANSLATION_ENABLED, NM_NEWS_TRANSLATION_TARGET.
+    """
+
     enabled: bool = True
     sources: list = field(default_factory=list)
+    translation_enabled: bool = False
+    translation_target: str = ""
 
 @dataclass
 class NetSettings:
@@ -1109,6 +1122,8 @@ _ENV_MAP: dict[str, str] = {
     "NM_API_HOST": "api.host",
     "NM_API_PORT": "api.port",
     "NM_API_TOKEN": "api.token",
+    "NM_NEWS_TRANSLATION_ENABLED": "news.translation_enabled",
+    "NM_NEWS_TRANSLATION_TARGET": "news.translation_target",
     "NM_TRANSLATE_OWNER_LANGUAGE": "translate.owner_language",
     "NM_TRANSLATE_MODEL": "translate.local_model",
     "NM_TRANSLATE_PROVIDERS": "translate.providers",

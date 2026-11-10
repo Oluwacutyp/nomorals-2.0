@@ -493,7 +493,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "sudoku": (0, 0), "anagram": (0, 0), "cryptogram": (0, 0),
     # wave 87: the Core Mind — manual override over natural-language routing
     "mind": (0, None),       # /mind [status|clear|<goal>] — the core mind
-    "news": (0, 2),          # /news [run|briefing|status]
+    "news": (0, 2),          # /news [run|briefing|status|target]
     "translate": (0, None),   # /translate [to <lang>] <text> | <url> | (as a reply) | lang <code> | status
     "tl": (0, None),          # alias of /translate
     "steal": (0, None),       # /steal [tags] — claim replied media into her library (§21)
@@ -2505,7 +2505,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/political", "example": "/political",
              "related": "/game list · /game leaderboard political · /game quit"},
     "news": {"what": "fetch and summarize the news feeds.",
-             "usage": "/news [run [n]|briefing|status]", "example": "/news run",
+             "usage": "/news [run [n]|briefing|status|target]", "example": "/news run",
              "related": "/research · /pulse"},
     "translate": {"what": "translate anything: text you type, a message you reply to, or a link (you get the article translated, as a gist when it's long). News and briefings already arrive in your language automatically — this is the on-demand form. The ladder: a local model when this machine carries one, then the brain, then free provider endpoints, each health-tracked; if every rung is down you get the original text, plainly marked as untranslated.",
              "usage": "/translate [to <lang>] <text> · /translate <url> · /translate (as a reply) · /translate lang <code> · /translate status", "example": "/translate Bonjour le monde",

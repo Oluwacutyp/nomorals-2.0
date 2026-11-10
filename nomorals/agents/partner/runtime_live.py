@@ -225,6 +225,14 @@ class RuntimeLiveMixin:
                     "beats: " + ", ".join(st["beats"])
                     + (f" | pins: {', '.join(st['pins'])}"
                        if st["pins"] else ""))
+                tr = st.get("translation") or {}
+                if tr.get("enabled"):
+                    lines.append(
+                        "translation: on → "
+                        f"{tr.get('effective_target') or '?'} "
+                        "(stories translated before summarizing)")
+                else:
+                    lines.append("translation: off")
             except Exception as exc:  # noqa: BLE001 - status extras are best-effort
                 record_failure("runtime_live._control_news", exc)
             return "\n".join(lines)
@@ -260,6 +268,41 @@ class RuntimeLiveMixin:
             return ("interest profile\nbeats: " + profile["beats_text"]
                     + "\npins: "
                     + (", ".join(profile["pins"]) or "(none)"))
+        if verb == "target":
+            # Docs 19+21 (N1): the digest's translation posture.
+            # /news target           → inspect
+            # /news target <code>    → on, translating into <code>
+            # /news target on|off    → flip, keeping the stored target
+            from ...llm.languages import language_name, normalize_code
+
+            sub = parts[1].strip().lower() if len(parts) > 1 else ""
+            if sub == "off":
+                agent.set_news_translation(enabled=False)
+                return ("news translation: off — digests compose from "
+                        "the source text again.")
+            if sub == "on":
+                st = agent.set_news_translation(enabled=True)
+                code = st["effective_target"]
+                return (f"news translation: on → {language_name(code)} "
+                        f"({code}) — stories are translated before "
+                        "they're summarized.")
+            if sub:
+                code = normalize_code(sub)
+                if not code:
+                    return (f"unknown language: {parts[1]} — use a code "
+                            "or name like yo, yoruba, fr or en.")
+                agent.set_news_translation(enabled=True, target=code)
+                return (f"news translation: on → {language_name(code)} "
+                        f"({code}) — stories are translated before "
+                        "they're summarized.")
+            st = agent.news_translation()
+            if not st["enabled"]:
+                return ("news translation: off — /news target <code> "
+                        "turns it on (e.g. /news target yo).")
+            code = st["effective_target"]
+            return (f"news translation: on → {language_name(code)} "
+                    f"({code}) — stories are translated before they're "
+                    "summarized. /news target off turns it off.")
         if verb == "run" or verb == "briefing":
             cap = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
             report = agent.run(cap)
@@ -283,7 +326,8 @@ class RuntimeLiveMixin:
             # FULL digest — no [:3000] cut; the gateway chunks it losslessly.
             return (f"news digest — {report['items']} new items (of {report['fresh']} fresh)\n{src_line}{stood_line}\n\n{report['digest']}")
         return ("usage: /news [run [n]|briefing|poll|brief|status|"
-                "interest|pin <topic>|unpin <topic>]")
+                "interest|pin <topic>|unpin <topic>|"
+                "target [<code>|on|off]]")
 
     # ── pulse / briefings ──────────────────────────────────────────────
     def _control_pulse(self, tail: str) -> str:
