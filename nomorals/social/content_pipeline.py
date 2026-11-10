@@ -691,8 +691,10 @@ def weekly_content(
             # measurement spine joins a measured post back to its
             # claim with — and a verified artifact citation rides
             # with it (the artifact store's own id + URI; media by
-            # citation, never copied bytes). Findings that are not
-            # claims stamp nothing extra.
+            # citation, never copied bytes). WS4 P6: the claim's
+            # beat + beat origin ride too, so a draft descending
+            # from the trading beat is identifiable as one.
+            # Findings that are not claims stamp nothing extra.
             claim_meta: dict[str, Any] = {}
             if i < len(found) and isinstance(found[i], dict):
                 src = found[i]
@@ -702,6 +704,11 @@ def weekly_content(
                         "claim_id": str(src.get("claim_id") or ""),
                         "claim_kind": str(src.get("claim_kind") or ""),
                     }
+                    if src.get("beat"):
+                        claim_meta["beat"] = str(src.get("beat") or "")
+                    if src.get("beat_origin"):
+                        claim_meta["beat_origin"] = str(
+                            src.get("beat_origin") or "")
                     if src.get("artifact_id"):
                         claim_meta["artifact_id"] = str(
                             src.get("artifact_id") or "")

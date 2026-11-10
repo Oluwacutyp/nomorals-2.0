@@ -110,19 +110,58 @@ def _last_sweep_lines(store: Any, tz: Any) -> list[str]:
     return lines
 
 
+def _fields_watched_lines(context: Any) -> list[str]:
+    """The fields a sweep would watch, grouped by origin — the
+    resolution :func:`~.beats.load_beats` itself makes, so the
+    board can never drift from the sweep. The trading pack's
+    topics are named outright: the trading field is the owner's
+    dominant watching field, and its findings must be tellable
+    from his interest beats at a glance."""
+    try:
+        from .beats import load_beats
+
+        db = getattr(context, "db", None) if context is not None \
+            else None
+        settings = getattr(context, "settings", None) \
+            if context is not None else None
+        beats = load_beats(db, settings)
+    except Exception as exc:  # noqa: BLE001 — a board never dies
+        record_failure("explore.board.fields_watched", exc)
+        return []
+    if not beats:
+        return []
+    groups: dict[str, list[str]] = {}
+    for beat in beats:
+        groups.setdefault(str(beat.get("origin") or "seed"),
+                          []).append(str(beat.get("topic") or ""))
+    parts = [f"{len(topics)} {origin}"
+             for origin, topics in groups.items()]
+    lines = [f"fields watched: {len(beats)} beat(s) — "
+             + " · ".join(parts)]
+    trading = groups.get("trading") or []
+    if trading:
+        named = ", ".join(trading[:3])
+        if len(trading) > 3:
+            named += f", +{len(trading) - 3} more"
+        lines.append(f"· trading field: {named}")
+    return lines
+
+
 def render_explore_board(context: Any = None, *,
                          store: Any = None,
                          scheduler: Any = None,
                          now: float = 0.0) -> str:
     """The bare ``/explore`` board: last sweep truth, the next
-    sweep due, current claims (fresh first), candidate standings,
-    the proxy-dependency line, and the verbs."""
+    sweep due, the fields watched by origin, current claims
+    (fresh first), candidate standings, the proxy-dependency
+    line, and the verbs."""
     now = now or time.time()
     store = resolve_store(context, store)
     _tz_name, tz = owner_tz()
     lines = ["🔭 **Exploration** — the video field Devon fetches "
              "from, watched"]
     lines.extend(_last_sweep_lines(store, tz))
+    lines.extend(_fields_watched_lines(context))
     due = next_sweep_due(scheduler)
     if due:
         slot = ("morning" if "morning" in due["name"] else "evening")

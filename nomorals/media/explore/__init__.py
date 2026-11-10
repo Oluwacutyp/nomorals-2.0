@@ -25,7 +25,12 @@ contracts are P5 (``feed.py``): current claims project into the
 content pipeline's findings shape, content consumers read the
 shared niche registry through the adapter, exemplar media is
 cited by WS1 artifact reference, and measured post outcomes are
-recorded back against the claims they descend from.
+recorded back against the claims they descend from. The trading
+beat is P6 (``beats.py``): XAUUSD/gold video topics ride the seed
+profile under their own ``trading`` origin, and the WS2 interests
+provider reads this store back — the second-lander wiring that
+closes the loop between what Devon watches and what the owner's
+interest goals report.
 
     from nomorals.media.explore import run_exploration, explore_status
     report = run_exploration(context, trigger="manual")
@@ -35,6 +40,8 @@ from __future__ import annotations
 
 from .beats import (
                     EXPLORE_SEED_BEATS,
+                    TRADING_SEED_BEATS,
+                    beat_origin,
                     beats_from_profile,
                     collect_watch_topics,
                     load_beats,
@@ -114,6 +121,7 @@ __all__ = [
     "CLAIM_TREND",
     "CLAIM_UNVERIFIED",
     "EXPLORE_SEED_BEATS",
+    "TRADING_SEED_BEATS",
     "EXPLORE_SWEEP_JOB_EVENING",
     "EXPLORE_SWEEP_JOB_MORNING",
     "EXPLORE_SWEEP_JOBS",
@@ -129,6 +137,7 @@ __all__ = [
     "WebSearchInstrument",
     "YouTubeSearchInstrument",
     "adopt_niche",
+    "beat_origin",
     "beats_from_profile",
     "claim_exemplars",
     "claim_standing",

@@ -67,6 +67,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from .beats import beat_origin
 from .niches import effective_niches, overlay_plugin
 from .store import ExploreStore
 from .trends import CLAIM_SPIKE, CLAIM_UNVERIFIED, current_claims
@@ -175,6 +176,32 @@ def _verified_citation(exemplars: list[dict[str, Any]],
     return cited, cleaned
 
 
+def _claim_beats(store: ExploreStore,
+                 claim: dict[str, Any]) -> list[str]:
+    """The beat(s) a claim's evidence came from.
+
+    A beat claim's subject IS its beat. A candidate claim reads
+    its candidate's stored beat list (the beats the candidate
+    surfaced under); the claim's ``scope`` — authored as those
+    same beats joined — is the fallback when the candidate has
+    left the pool. Claims authored before beats were recorded
+    yield an empty list: unknown, never reconstructed."""
+    if str(claim.get("subject_kind") or "") == "beat":
+        subject = str(claim.get("subject") or "").strip()
+        return [subject] if subject else []
+    backing = claim.get("backing") or {}
+    candidate_key = str(backing.get("candidate_key") or "")
+    if candidate_key:
+        candidate = store.candidate(candidate_key)
+        beats = [str(b).strip() for b in
+                 (candidate or {}).get("beats") or [] if str(b).strip()]
+        if beats:
+            return beats
+    scope = str(claim.get("scope") or "")
+    return [part.strip() for part in scope.split(",")
+            if part.strip() and part.strip() != "owner field"]
+
+
 def claim_to_finding(claim: dict[str, Any], store: ExploreStore,
                      *, artifacts: Any = None) -> dict[str, Any]:
     """Project ONE current claim into the pipeline's finding
@@ -185,7 +212,15 @@ def claim_to_finding(claim: dict[str, Any], store: ExploreStore,
     basis ride as extra keys the consumers ignore but the fan-out
     stamps onto drafts, which is what lets contract 4 join a
     measured post back to this claim. Below-trend kinds are
-    labelled in the title itself."""
+    labelled in the title itself.
+
+    The claim's beat rides too (``beat`` / ``beats``), with its
+    shipped-pack origin re-derived in ``beat_origin`` (WS4 P6):
+    claims record their beat, not the origin the beat resolved
+    under, so without this a trading-beat claim would reach a
+    draft indistinguishable from any other field's claim. An
+    origin no pack claims stays ``""`` — unlabelled, not
+    guessed."""
     kind = str(claim.get("kind") or CLAIM_UNVERIFIED)
     text = str(claim.get("text") or "").strip()
     basis = str(claim.get("confidence_basis") or "").strip()
@@ -196,6 +231,9 @@ def claim_to_finding(claim: dict[str, Any], store: ExploreStore,
     if claim.get("standing"):
         snippet += f" (standing: {claim['standing']})"
     snippet += f". {basis}" if basis else "."
+    beats = _claim_beats(store, claim)
+    origin = next((o for o in (beat_origin(b) for b in beats) if o),
+                  "")
     finding: dict[str, Any] = {
         "title": f"{prefix}{text}",
         "snippet": snippet,
@@ -208,6 +246,9 @@ def claim_to_finding(claim: dict[str, Any], store: ExploreStore,
         "confidence_basis": basis,
         "observed_at": float(claim.get("observed_at") or 0.0),
         "exemplars": exemplars,
+        "beat": beats[0] if beats else "",
+        "beats": beats,
+        "beat_origin": origin,
     }
     if cited:
         finding["artifact_id"] = cited

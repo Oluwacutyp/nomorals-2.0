@@ -76,7 +76,13 @@ the link rides the fields each store already owns:
   silently.  Creating an interests goal registers its topics as
   beats in that profile (see :func:`register_interest_beats`) —
   the census's settled behaviour change: a watch that watches
-  nothing is a label, not a class.
+  nothing is a label, not a class.  Since WS4 P6 the provider
+  also reads the VIDEO EXPLORATION store back (see
+  :func:`_exploration_findings`): exploration sweeps those same
+  topics as beats, and its current claims + watching candidates
+  on the goal's topics ride this reading's evidence — labelled
+  with their kind + standing and source "exploration", never
+  folded into the news-measured percent.
 * health: the health organ is L5 (it imports agents), above
   goals' L4, so — the interests pattern — the provider reads its
   store directly: the ``health_events`` table of the timeline
@@ -1597,6 +1603,85 @@ def _news_items(db: Any) -> list[dict[str, Any]]:
     return [r for r in (rows or []) if isinstance(r, dict)]
 
 
+def _exploration_findings(
+    db: Any, pairs: list[tuple[str, frozenset[str]]], *,
+    since: float, until: float,
+) -> dict[str, list[dict[str, Any]]]:
+    """Exploration findings on this watch (WS4 P6 read side).
+
+    The video exploration loop sweeps the very topics this
+    provider's goals file as beats (the write direction shipped
+    with WS4 P1); this is the read half, wired by whichever
+    landed second — P6. Current claims and watching candidates
+    from the explore store, matched to the goal's topics by the
+    same all-topic-words rule the news read uses, windowed to
+    the goal's life like the news read. Claims carry the kind +
+    standing the trend evaluator labelled them with — a spike
+    reads "spike", never "trend" — and only fresh-standing
+    claims surface: a stale claim is the field's past, not this
+    goal's current evidence. A topic with no findings reads as
+    no findings. Any failure — no explore store yet, an
+    unreadable payload — also reads as no findings: exploration
+    deepens this evidence, it never gates it. Never raises.
+    """
+    empty: dict[str, list[dict[str, Any]]] = {
+        "claims": [], "candidates": []}
+    try:
+        from ..media.explore.store import ExploreStore
+        from ..media.explore.trends import current_claims
+        from ..storage.kv import KVStore
+
+        store = ExploreStore()
+        store.bind_store(KVStore(db))
+
+        def _hit(text: str) -> bool:
+            folded = re.sub(r"[^a-z0-9]+", " ",
+                            str(text or "").casefold())
+            words = frozenset(folded.split())
+            return any(tw <= words for _t, tw in pairs)
+
+        claims: list[dict[str, Any]] = []
+        for claim in current_claims(store, now=until):
+            if claim.get("standing") != "fresh":
+                continue
+            observed = float(claim.get("observed_at") or 0)
+            if observed < since or observed > until:
+                continue
+            text = " ".join(str(claim.get(k) or "") for k in
+                            ("text", "subject", "scope"))
+            if not _hit(text):
+                continue
+            claims.append({
+                "kind": str(claim.get("kind") or ""),
+                "standing": str(claim.get("standing") or ""),
+                "text": str(claim.get("text") or ""),
+            })
+            if len(claims) >= 3:
+                break
+        candidates: list[dict[str, Any]] = []
+        for cand in store.candidates():
+            last_seen = float(cand.get("last_seen") or 0)
+            if last_seen < since or last_seen > until:
+                continue
+            text = " ".join(
+                [str(cand.get("name") or "")]
+                + [str(b) for b in cand.get("beats") or []])
+            if not _hit(text):
+                continue
+            candidates.append({
+                "name": str(cand.get("name") or ""),
+                "kind": str(cand.get("kind") or ""),
+                "status": str(cand.get("status") or ""),
+                "sightings": int(cand.get("sightings") or 0),
+            })
+            if len(candidates) >= 3:
+                break
+        return {"claims": claims, "candidates": candidates}
+    except Exception as exc:  # noqa: BLE001 — contained: docstring
+        _log.warning("interests exploration read failed: %s", exc)
+        return empty
+
+
 def _interests_progress(db: Any, goal: Goal, *,
                         now: float | None) -> ClassProgress | None:
     topics = interest_topics(goal)
@@ -1651,6 +1736,14 @@ def _interests_progress(db: Any, goal: Goal, *,
     }
     if unreadable:
         evidence["unreadable_item_rows"] = unreadable
+    exploration = _exploration_findings(
+        db, pairs, since=since, until=until)
+    if exploration["claims"] or exploration["candidates"]:
+        evidence["exploration"] = {
+            "source": "exploration",
+            "claims": exploration["claims"],
+            "candidates": exploration["candidates"],
+        }
     if target is not None:
         percent = delivered / target * 100.0
         evidence["link"] = "watch-target"
@@ -1669,6 +1762,17 @@ def _interests_progress(db: Any, goal: Goal, *,
         headline = (
             f"{delivered} of {flowed} findings on this watch "
             f"({shown}) reached you since this goal was filed")
+    if "exploration" in evidence:
+        bits = [
+            f"{claim['kind']} claim ({claim['standing']})"
+            for claim in exploration["claims"][:2]]
+        if exploration["candidates"]:
+            bits.append(
+                f"{len(exploration['candidates'])} candidate(s) "
+                "under watch")
+        headline = (
+            f"{headline} Exploration: {', '.join(bits)} "
+            "on this watch.")
     return ClassProgress(
         percent=percent,
         basis="measured",
