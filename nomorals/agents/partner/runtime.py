@@ -1799,6 +1799,7 @@ class PartnerRuntime(
             # text, as before.
             if message.chat.platform == "telegram-bot" and command is not None:
                 from ...social.chat.control import (
+                    GROUP_ADMIN_COMMANDS,
                     GROUP_DECISION_COMMANDS,
                     PUBLIC_COMMANDS,
                 )
@@ -1823,7 +1824,10 @@ class PartnerRuntime(
                 if bare_menu or command.kind in PUBLIC_COMMANDS \
                         or (message.chat.kind == ChatKind.GROUP
                             and command.kind
-                            in GROUP_DECISION_COMMANDS):
+                            in GROUP_DECISION_COMMANDS) \
+                        or (message.chat.kind == ChatKind.GROUP
+                            and command.kind
+                            in GROUP_ADMIN_COMMANDS):
                     self._bump("controls")
                     _log.info("public-bot command /%s from %s in %s",
                               command.kind, message.sender or "?",
@@ -1895,12 +1899,14 @@ class PartnerRuntime(
                     and message.chat.kind == ChatKind.GROUP
                     and not self._is_operator(message)):
                 from ...social.chat.control import (
+                    GROUP_ADMIN_COMMANDS,
                     GROUP_DECISION_COMMANDS,
                     PUBLIC_COMMANDS,
                 )
 
                 if (command.kind in PUBLIC_COMMANDS
                         or command.kind in GROUP_DECISION_COMMANDS
+                        or command.kind in GROUP_ADMIN_COMMANDS
                         or command.kind == "error"):
                     self._bump("controls")
                     _log.info("group command /%s from %s in %s",
@@ -5704,14 +5710,25 @@ class PartnerRuntime(
         # the admin rule — a proposal the bot itself posted in the
         # room must be decidable in the room (owner report
         # 2026-11-07: the public surface refused the very /approve
-        # its own gift proposal instructed).
-        from ...social.chat.control import GROUP_DECISION_COMMANDS
+        # its own gift proposal instructed). Group-admin commands
+        # (/vcf) pass the same way, for the same reason: the
+        # handler's admin gate is the authority in the room, and
+        # on the gated public bot nobody is an operator — without
+        # this pass the handler's admin path is unreachable there
+        # and the command is dead for admins and owner alike
+        # (owner report 2026-11-10).
+        from ...social.chat.control import GROUP_ADMIN_COMMANDS, GROUP_DECISION_COMMANDS
 
         _group_decision = (
             kind in GROUP_DECISION_COMMANDS
             and message is not None
             and self._group_key_or_none(message) is not None)
-        if not caller_may_run(kind, is_owner) and not _group_decision:
+        _group_admin = (
+            kind in GROUP_ADMIN_COMMANDS
+            and message is not None
+            and self._group_key_or_none(message) is not None)
+        if not caller_may_run(kind, is_owner) and not _group_decision \
+                and not _group_admin:
             # On the gated public surface the honest denial names the
             # surface, not the person: the owner is denied there too
             # (operator power is a surface property — see _is_operator).

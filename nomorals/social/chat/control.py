@@ -268,6 +268,22 @@ GROUP_DECISION_COMMANDS: frozenset[str] = frozenset([
 ])
 
 
+#: Group-admin commands: kinds whose handlers act on the group's
+#: own people (here: exporting their numbers as contact cards).
+#: They are NOT public commands — in a DM they stay owner-only —
+#: but inside a group chat they belong to the group's admins, and
+#: the runtime passes them to their handlers there (the handlers
+#: enforce the admin rule). The standing rule this set implements
+#: (owner report 2026-11-10): the handler's own admin gate is the
+#: authority in the room — the outer grant must not kill the
+#: command before that gate can run, or the feature is dead on
+#: every surface where operator power does not exist (the gated
+#: public bot, where nobody is an operator, owner included).
+GROUP_ADMIN_COMMANDS: frozenset[str] = frozenset([
+    "vcf",
+])
+
+
 #: Commands that require an explicit confirmation before they run.
 #: The gate lives in ``PartnerRuntime.handle_control``: a bare
 #: ``/<kind> ...`` returns a confirm prompt (with Confirm/Cancel inline
