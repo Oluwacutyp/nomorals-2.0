@@ -96,7 +96,7 @@ class RuntimeLiveMixin:
 
     def _control_map(self, tail: str, chat_key: str = "",
                      message=None) -> str:
-        """/map packs | /map view <lat,lon> [zoom] | /map view <west,south,east,north> [zoom]
+        """/map packs | /map view <lat,lon> [zoom] | /map view <west,south,east,north> [zoom] | /map find <place name> | /map near <lat,lon>
 
         Devon Atlas on chat: renders the owner's installed packs —
         Devon's own basemap data — into a photo, the attribution
@@ -111,13 +111,22 @@ class RuntimeLiveMixin:
         no installed pack covers the view, the reply names what is
         installed and what is missing — local-first is the Atlas
         doctrine (doc 21 S1), providers are owner-policy
-        federation territory (M4/M5), never a silent substitute."""
+        federation territory (M4/M5), never a silent substitute.
+
+        /map find and /map near (M4) answer from the local
+        gazetteer indexed from those same packs — the index builds
+        itself on first use and rebuilds only when a pack's digest
+        moves.  Federation (doc 21 S3) is owner policy
+        (NM_MAPS_GEOCODE_FEDERATION) and off by default: an empty
+        local answer is the final answer unless the owner turns
+        federation on and a provider is wired."""
         from ...maps.settings import map_settings
 
         tail = (tail or "").strip()
         if not tail:
             return ("usage: /map packs  |  /map view <lat,lon> [zoom]  |  "
-                    "/map view <west,south,east,north> [zoom]")
+                    "/map view <west,south,east,north> [zoom]  |  "
+                    "/map find <place name>  |  /map near <lat,lon>")
         is_owner = True if message is None else self._is_operator(message)
         if not is_owner:
             return ("owner-only: Atlas renders the owner's installed "
@@ -133,8 +142,13 @@ class RuntimeLiveMixin:
             return self._map_packs_text()
         if verb == "view":
             return self._map_view(rest.strip(), chat_key)
+        if verb == "find":
+            return self._map_find(rest.strip(), chat_key)
+        if verb == "near":
+            return self._map_near(rest.strip())
         return (f"unknown /map verb {verb!r} — /map packs | "
-                "/map view <lat,lon> [zoom]")
+                "/map view <lat,lon> [zoom] | /map find <place name> | "
+                "/map near <lat,lon>")
 
     def _map_packs_text(self) -> str:
         from ...maps.packs import verify_pack_dir
@@ -164,6 +178,135 @@ class RuntimeLiveMixin:
                 lines.append("      defective members: "
                              + ", ".join(bad[:6]))
             lines.append(f"      {manifest.attribution}")
+        return "\n".join(lines)
+
+    def _map_gazetteer(self):
+        """(gazetteer, installed) — the local geocoder (M4) over
+        the shelf, federation posture from settings."""
+        from ...maps.gazetteer import Gazetteer
+        from ...maps.settings import map_settings
+
+        gazetteer = Gazetteer(
+            self._map_packs_dir(), store=self._map_receipt_store(),
+            federation=map_settings().geocode_federation)
+        installed = [(d, m) for d, m, err in self._map_installed()
+                     if m is not None]
+        return gazetteer, installed
+
+    @staticmethod
+    def _map_find_winner(candidates):
+        """A clear winner, or None: a sole candidate found exactly
+        or by prefix, or an exact top hit the runner-up does not
+        tie.  Anything less is a list, not a verdict."""
+        if not candidates:
+            return None
+        top = candidates[0]
+        if len(candidates) == 1:
+            return top if top.matched_as in ("exact", "prefix") \
+                else None
+        if top.matched_as == "exact" \
+                and candidates[1].matched_as != "exact":
+            return top
+        return None
+
+    @staticmethod
+    def _map_find_zoom(kind: str) -> int:
+        """The view zoom a found place earns, by its kind: a
+        country is not viewed at street depth."""
+        return {"continent": 4, "country": 5, "state": 7,
+                "city": 12, "town": 13, "village": 14}.get(kind, 13)
+
+    def _map_find(self, query: str, chat_key: str = "") -> str:
+        if not query:
+            return "usage: /map find <place name>"
+        gazetteer, installed = self._map_gazetteer()
+        if not installed:
+            return ("no map packs installed — /map packs shows the "
+                    "shelf, and it is empty. The geocoder indexes "
+                    "installed packs only; there is no provider "
+                    "fallback.")
+        names = {m.pack_id: m.name for _d, m in installed}
+        lines: list[str] = []
+        built = gazetteer.ensure(installed)
+        if built.built_any:
+            lines.append(
+                f"(indexed the local gazetteer first: "
+                f"{built.total_entries} named places from "
+                f"{len(installed)} pack(s) — it rebuilds only when "
+                "a pack changes.)")
+        result = gazetteer.search(query)
+        if not result.candidates:
+            lines.append(
+                f"no place named {query!r} in the local Atlas "
+                "index — " + result.note + ".")
+            return "\n".join(lines)
+        lines.append(
+            f"🔎 {len(result.candidates)} place(s) matching "
+            f"{query!r} (local Atlas index):")
+        for cand in result.candidates:
+            lines.append(
+                f"  • {cand.name} — {cand.kind} · "
+                f"{cand.lat:.4f},{cand.lon:.4f} · "
+                + names.get(cand.pack_id, cand.pack_id))
+        winner = self._map_find_winner(result.candidates)
+        if winner is not None:
+            # A clear winner also gets its map photo; the list is
+            # the reply either way (a failed photo send never
+            # rewrites the answer into a claim).
+            self._map_view(
+                f"{winner.lat:.6f},{winner.lon:.6f} "
+                f"{self._map_find_zoom(winner.kind)}", chat_key)
+        return "\n".join(lines)
+
+    def _map_near(self, spec: str) -> str:
+        usage = "usage: /map near <lat,lon>"
+        toks = spec.split()
+        if not toks:
+            return usage
+        try:
+            nums = [float(v) for v in toks[0].split(",")]
+        except ValueError:
+            return f"couldn't parse coordinates {toks[0]!r} — " + usage
+        if len(nums) != 2:
+            return usage
+        lat, lon = nums
+        from ...maps.coords import validate_lat, validate_lon
+
+        try:
+            validate_lat(lat)
+            validate_lon(lon)
+        except ValueError as exc:
+            return f"bad point: {exc}"
+        gazetteer, installed = self._map_gazetteer()
+        if not installed:
+            return ("no map packs installed — /map packs shows the "
+                    "shelf, and it is empty. The geocoder indexes "
+                    "installed packs only; there is no provider "
+                    "fallback.")
+        names = {m.pack_id: m.name for _d, m in installed}
+        lines: list[str] = []
+        built = gazetteer.ensure(installed)
+        if built.built_any:
+            lines.append(
+                f"(indexed the local gazetteer first: "
+                f"{built.total_entries} named places from "
+                f"{len(installed)} pack(s) — it rebuilds only when "
+                "a pack changes.)")
+        result = gazetteer.reverse(lat, lon)
+        if not result.candidates:
+            lines.append(result.note + ".")
+            return "\n".join(lines)
+        lines.append(
+            f"📍 named places near {lat:.4f},{lon:.4f} "
+            "(local Atlas index):")
+        for cand in result.candidates:
+            if cand.distance_km >= 1.0:
+                dist = f"{cand.distance_km:.1f} km"
+            else:
+                dist = f"{cand.distance_km * 1000:.0f} m"
+            lines.append(
+                f"  • {cand.name} — {cand.kind} · {dist} · "
+                + names.get(cand.pack_id, cand.pack_id))
         return "\n".join(lines)
 
     @staticmethod

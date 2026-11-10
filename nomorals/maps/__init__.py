@@ -16,10 +16,13 @@ renderer boundary proven by an offline fixture renderer
 (:mod:`nomorals.maps.settings`).  M3 adds the vector plane: the
 MVT decoder (:mod:`nomorals.maps.mvt`), the Devon Style document
 (:mod:`nomorals.maps.style`) and the vector renderer behind the
-same boundary (:mod:`nomorals.maps.vector_render`).  The basemap
-pipeline (M2), geocoder (M4), routing (M5), the live-location
-broker (M6, on ``location/``'s ConsentStore) and the MapAgent
-(M7) build on these contracts in their own passes.
+same boundary (:mod:`nomorals.maps.vector_render`).  M4 adds the
+local geocoder (:mod:`nomorals.maps.gazetteer`): a gazetteer
+indexed from the packs themselves, forward/reverse queries, and
+the owner-policy federation seam.  The basemap pipeline (M2),
+routing (M5), the live-location broker (M6, on ``location/``'s
+ConsentStore) and the MapAgent (M7) build on these contracts in
+their own passes.
 """
 
 from __future__ import annotations
@@ -38,6 +41,25 @@ from .coords import (
                      tile_y_to_lat,
                      validate_lat,
                      validate_lon,
+)
+from .gazetteer import (
+    GAZETTEER_MAX_ZOOM,
+    INDEX_FILENAME,
+    KIND_WEIGHTS,
+    POSTURE_FEDERATED,
+    POSTURE_LOCAL,
+    REVERSE_LADDER_KM,
+    Gazetteer,
+    GazetteerEntry,
+    GeocodeCandidate,
+    GeocodeProvider,
+    GeocodeResult,
+    IndexBuildResult,
+    PackIndexResult,
+    ReverseCandidate,
+    ReverseResult,
+    match_rank,
+    normalize_name,
 )
 from .geojson import GeoValidation, validate_geojson
 from .manifest import (
@@ -71,17 +93,22 @@ from .style import DEFAULT_STYLE, MapStyle, StyleError, StyleLayer, style_hash
 from .vector_render import LabelSpec, PilTextBackend, TextBackend, VectorRenderer
 
 __all__ = [
-    "DEFAULT_STYLE", "FORMAT_VERSION", "MANIFEST_NAME", "MAX_ZOOM",
-    "MERCATOR_MAX_LAT", "OPERATIONS", "BBox", "FixtureRenderer",
-    "GeoValidation", "LabelSpec", "MapReceipt", "MapRenderer",
-    "MapReceiptStore", "MapSettings", "MapStyle", "MvtError",
-    "MvtFeature", "MvtLayer", "MvtPath", "MvtTile", "PackError",
-    "PackManifest", "PackMember", "PackVerification", "PilTextBackend",
-    "RenderResult", "StdlibPngBackend", "StyleError", "StyleLayer",
-    "TextBackend", "TileCoord", "VectorRenderer", "build_manifest",
-    "clamp_mercator_lat", "decode_mvt", "hash_bytes", "lat_to_tile_y",
-    "lat_to_y_float", "load_manifest", "lon_to_tile_x",
-    "lon_to_x_float", "map_settings", "new_receipt_id",
+    "DEFAULT_STYLE", "FORMAT_VERSION", "GAZETTEER_MAX_ZOOM",
+    "INDEX_FILENAME", "KIND_WEIGHTS", "MANIFEST_NAME", "MAX_ZOOM",
+    "MERCATOR_MAX_LAT", "OPERATIONS", "POSTURE_FEDERATED",
+    "POSTURE_LOCAL", "REVERSE_LADDER_KM", "BBox", "FixtureRenderer",
+    "Gazetteer", "GazetteerEntry", "GeoValidation", "GeocodeCandidate",
+    "GeocodeProvider", "GeocodeResult", "IndexBuildResult", "LabelSpec",
+    "MapReceipt", "MapRenderer", "MapReceiptStore", "MapSettings",
+    "MapStyle", "MvtError", "MvtFeature", "MvtLayer", "MvtPath",
+    "MvtTile", "PackError", "PackIndexResult", "PackManifest",
+    "PackMember", "PackVerification", "PilTextBackend", "RenderResult",
+    "ReverseCandidate", "ReverseResult", "StdlibPngBackend",
+    "StyleError", "StyleLayer", "TextBackend", "TileCoord",
+    "VectorRenderer", "build_manifest", "clamp_mercator_lat",
+    "decode_mvt", "hash_bytes", "lat_to_tile_y", "lat_to_y_float",
+    "load_manifest", "lon_to_tile_x", "lon_to_x_float", "map_settings",
+    "match_rank", "new_receipt_id", "normalize_name",
     "render_pack_preview", "style_hash", "tile_relpath",
     "tile_x_to_lon", "tile_y_to_lat", "validate_geojson",
     "validate_lat", "validate_lon", "verify_pack", "verify_pack_dir",
