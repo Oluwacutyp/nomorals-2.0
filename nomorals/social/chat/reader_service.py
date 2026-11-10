@@ -20,7 +20,18 @@ silently (new chapters become reachable; the page under the reader
 does not move).  When that segment's content changed, the session
 keeps its pinned revision and flags ``update_available`` — the
 reader is told, never yanked.  :meth:`ReaderService.switch_revision`
-adopts the newer revision explicitly, re-anchoring by segment id.
+adopts the newer revision explicitly, re-anchoring by segment id;
+a segment that vanished from the newer revision re-anchors to the
+*nearest surviving* segment and the returned view says so — a
+place is never silently relocated.
+
+A segment's production state, where its producer records one, is
+labelled from the manifest's own metadata and nothing else (Doc 16
+P6): a forge chapter still ``writing`` is a draft, a ``planned``
+chapter with no text is not yet written, a presentation section in
+any state but ``ready`` is not final.  Producers that record no
+state (stories, parsed documents, raw text) get no label — the
+reader never infers a state the source did not declare.
 
 Callbacks are short opaque tokens bound to the session and its
 navigation generation: every successful navigation rotates the
@@ -56,6 +67,7 @@ from typing import Any
 
 from ...core.longdoc import LongDocumentManifest, ManifestSegment
 from .chunking import chunk_message
+from .failures import record_failure
 
 __all__ = [
     "DEFAULT_PAGE_CHARS", "ReaderService", "ReaderSession",
@@ -80,6 +92,42 @@ _KIND_WORDS = {
 
 def _kind_word(kind: str) -> str:
     return _KIND_WORDS.get(kind or "", "part")
+
+
+def _segment_state(seg: ManifestSegment) -> str:
+    """The not-final production state a segment's manifest record
+    proves, or "" when the record declares the segment final (or
+    declares nothing about state at all).
+
+    Labels come only from metadata producers actually record — a
+    forge chapter's ``status`` (``writing`` = a draft with partial
+    text being served; ``planned`` with no text = declared but not
+    yet written) and a presentation section's ``state`` (any state
+    but ``ready`` renders its state line instead of content, so it
+    is not final).  A *present* segment whose status reads
+    ``planned`` is contradictory source data (content exists that
+    the plan never marked written) — it gets no label rather than
+    an invented reconciliation."""
+    md = seg.metadata or {}
+    status = str(md.get("status") or "").strip().lower()
+    if status == "writing":
+        return "draft — still being written"
+    if status == "planned" and not seg.present:
+        return "planned — not yet written"
+    state = str(md.get("state") or "").strip().lower()
+    if state and state != "ready":
+        return f"not final — {state}"
+    return ""
+
+
+def _segment_label(seg: ManifestSegment) -> str:
+    """An owner-worded name for a segment: its title, else its kind
+    + number.  Never a segment id."""
+    if seg.title:
+        return seg.title
+    num = _chapter_number(seg.segment_id)
+    word = _kind_word(seg.kind)
+    return f"{word} {num}" if num is not None else word
 
 
 def _session_id(reader_key: str, document_id: str) -> str:
@@ -170,6 +218,7 @@ class ContentsRow:
     present: bool
     char_count: int
     current: bool = False
+    state: str = ""  # not-final production state, manifest-proven only
 
 
 @dataclass
@@ -197,6 +246,7 @@ class PageView:
     segment_id: str = ""
     segment_title: str = ""
     segment_kind: str = ""
+    segment_state: str = ""  # not-final state, manifest-proven only
     segment_ordinal: int = 0  # 1-based among the manifest's segments
     segment_count: int = 0
     declared_total: int = 0  # segments the source declares (0 = undeclared)
@@ -284,12 +334,17 @@ class ReaderService:
             return
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001 - a corrupt store restarts
-            return  # empty rather than breaking reading itself
+        except Exception as exc:  # noqa: BLE001 - a corrupt store
+            # restarts empty rather than breaking reading itself —
+            # but the failure is NAMED in the package ledger, never
+            # silent (a vanished reading place must be explainable)
+            record_failure("reader_service.load_store", exc)
+            return
         for raw in data.get("sessions", []) or []:
             try:
                 session = ReaderSession.from_dict(raw)
-            except Exception:  # noqa: BLE001 - skip a bad row
+            except Exception as exc:  # noqa: BLE001 - skip a bad row
+                record_failure("reader_service.load_session_row", exc)
                 continue
             if session.session_id:
                 self._sessions[session.session_id] = session
@@ -416,7 +471,8 @@ class ReaderService:
                 ordinal=len(rows) + 1, segment_id=seg.segment_id,
                 kind=seg.kind, title=seg.title, present=seg.present,
                 char_count=seg.char_count,
-                current=seg.segment_id == current_segment_id))
+                current=seg.segment_id == current_segment_id,
+                state=_segment_state(seg)))
             num = _chapter_number(seg.segment_id)
             if num is not None:
                 seen_numbers.add(num)
@@ -511,7 +567,9 @@ class ReaderService:
                 manifest, seg.segment_id)
             common = dict(
                 segment_id=seg.segment_id, segment_title=seg.title,
-                segment_kind=seg.kind, segment_ordinal=ordinal,
+                segment_kind=seg.kind,
+                segment_state=_segment_state(seg),
+                segment_ordinal=ordinal,
                 has_prev_segment=prev_seg is not None,
                 has_next_segment=next_seg is not None,
                 next_segment_title=(next_seg.title if next_seg else ""),
@@ -634,29 +692,75 @@ class ReaderService:
             self._save()
             return self.view(session_id, resolver)
 
+    @staticmethod
+    def _nearest_surviving(fresh: LongDocumentManifest,
+                           old_seg: ManifestSegment | None,
+                           ) -> ManifestSegment | None:
+        """The surviving segment nearest the place a vanished
+        segment occupied: the first present segment at or after its
+        old ordinal (the one that followed it), else the last
+        present one before it.  None when the newer revision holds
+        nothing at all."""
+        present = [s for s in fresh.segments if s.present]
+        if not present:
+            return None
+        if old_seg is None:
+            return present[0]
+        after = [s for s in present if s.ordinal >= old_seg.ordinal]
+        return after[0] if after else present[-1]
+
     def switch_revision(self, session_id: str,
                         resolver: Resolver) -> PageView:
         """Adopt the flagged newer revision, re-anchoring by
         segment id where the segment survives (offset clamped into
-        the new content); a vanished segment re-anchors to the
-        first present segment.  Without a flagged revision this is
-        a no-op returning the current view."""
+        the new content).  A vanished segment re-anchors to the
+        NEAREST surviving segment — the one that followed it, else
+        the one before — and the returned view says where the
+        reader landed and why; a surviving segment's switch is
+        noted too.  A place is never silently relocated.  Without
+        a flagged revision this is a no-op returning the current
+        view."""
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
                 raise ReaderFault(f"no reader session {session_id!r}")
             if not session.latest:
                 return self.view(session_id, resolver)
+            old_seg = session.pinned().segment(session.segment_id)
             fresh = LongDocumentManifest.from_dict(session.latest)
             session.manifest = session.latest
             session.latest = None
             session.update_available = False
-            if fresh.segment(session.segment_id) is None:
-                session.segment_id = self._landing_segment(fresh, "")
+            note = ""
+            fresh_seg = fresh.segment(session.segment_id)
+            if fresh_seg is None or not fresh_seg.present:
+                old_label = (_segment_label(old_seg) if old_seg
+                             else "the part you were reading")
+                landed = self._nearest_surviving(fresh, old_seg)
+                if landed is not None:
+                    session.segment_id = landed.segment_id
+                    note = (
+                        f"{old_label} is not in the newer revision "
+                        f"— you're now at {_segment_label(landed)} "
+                        "instead, the nearest surviving place")
+                else:
+                    session.segment_id = self._landing_segment(
+                        fresh, "")
+                    note = (
+                        f"{old_label} is not in the newer revision, "
+                        "and no part of the newer revision is held "
+                        "yet")
                 session.offset = 0
+            else:
+                note = ("switched to the newer revision — same "
+                        "place, updated text")
             self._rotate(session)
             self._save()
-            return self.view(session_id, resolver)
+            view = self.view(session_id, resolver)
+            if note:
+                view.note = (note if not view.note
+                             else f"{note} ({view.note})")
+            return view
 
     # ── callback discipline ──────────────────────────────────────────
 
@@ -767,6 +871,8 @@ class ReaderService:
             lines.append(
                 f"— {word} {view.segment_ordinal} · page "
                 f"{view.page_index + 1} of {view.page_count} —")
+            if view.segment_state:
+                lines.append(f"✎ {view.segment_state}")
         if view.has_next_page:
             lines.append(
                 f"▸ next part of this {word}: {cmds['next']}")
@@ -811,15 +917,21 @@ class ReaderService:
         for row in view.rows:
             mark = "▸ " if row.current else "  "
             if row.present:
-                lines.append(
-                    f"{mark}{row.ordinal}. {row.title or row.segment_id}"
-                    f" — {row.char_count} chars")
+                line = (f"{mark}{row.ordinal}. "
+                        f"{row.title or row.segment_id}"
+                        f" — {row.char_count} chars")
+                if row.state:
+                    line += f" · {row.state}"
+                lines.append(line)
             else:
                 num = _chapter_number(row.segment_id)
                 label = row.title or (
                     f"{_kind_word(row.kind)} {num}"
                     if num is not None else row.segment_id)
-                lines.append(f"{mark}{row.ordinal}. {label} — not held")
+                line = f"{mark}{row.ordinal}. {label} — not held"
+                if row.state:
+                    line += f" · {row.state}"
+                lines.append(line)
         if view.note:
             lines.append(view.note)
         if open_hint:
