@@ -8,7 +8,9 @@ liveness + typed cancel state — an unhonored cancel reads
 unhonored; (c) media jobs likewise (cancelled → confirmed,
 timestamped request on a live job → requested); (d) fields no
 source record backs are typed-absent WITH reasons, never defaults
-— leases absent everywhere, contract cancellation absent because
+— leases resolve from the P3 lease authority when a db is
+supplied (cited, empty when none held; absent only without a db
+handle), contract cancellation absent because
 delegation has none; (e) every populated field cites its organ in
 ``sources`` and every field sits in exactly one of
 sources/absent; (f) unknown references return the typed not-found,
@@ -137,11 +139,15 @@ class ContractTicketTests(unittest.TestCase):
         self.assertEqual(ticket["budget"]["step_budget"], 10)
         _assert_partition(self, ticket)
 
-    def test_cancel_and_leases_absent_with_reasons(self):
+    def test_cancel_absent_leases_resolved_with_reasons(self):
         ticket = ticket_for(f"contract:{self.contract.id}", self.db)
         self.assertIn("no cancellation path", ticket["absent"]["cancel"])
         self.assertIn("P5", ticket["absent"]["cancel"])
-        self.assertIn("P3", ticket["absent"]["leases"])
+        # P3 flipped leases: with a db the field resolves against
+        # the lease authority — cited, empty when none are held.
+        self.assertNotIn("leases", ticket["absent"])
+        self.assertEqual(ticket["leases"], [])
+        self.assertEqual(ticket["sources"]["leases"], "core.leases")
         self.assertIn("acceptance", ticket["absent"])
         self.assertIn("owner_chat", ticket["absent"])
 
@@ -379,8 +385,12 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(coverage["by_source"]["browser_run"], 1)
         self.assertEqual(coverage["by_source"]["media_job"], 1)
         self.assertEqual(coverage["by_source"]["job"], 1)
-        # Leases are absent on every ticket — stated, not hidden.
-        self.assertEqual(coverage["fields_absent"]["leases"], 5)
+        # P3: leases resolve against the lease authority for
+        # every ticket in a db-backed coverage run — none are
+        # held in this population, and the held count is stated.
+        self.assertNotIn("leases", coverage["fields_absent"])
+        self.assertEqual(coverage["leases_held"], 0)
+        self.assertEqual(coverage["lease_holders"], 0)
         self.assertEqual(coverage["complete_tickets"], 0)
         # Cancellation is absent exactly on the delegation-backed
         # ticket (contracts are the only source with no cancel).
@@ -391,7 +401,7 @@ class CoverageTests(unittest.TestCase):
             coverage["absent_by_source"].get("browser_run", {}))
         joined = "\n".join(coverage["summary"])
         self.assertIn("5 operations", joined)
-        self.assertIn("leases: absent on all 5", joined)
+        self.assertIn("leases: 0 held by 0 of 5 operations", joined)
 
 
 if __name__ == "__main__":

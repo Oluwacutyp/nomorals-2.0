@@ -14,9 +14,13 @@ THE HONESTY RULE (binds every field): a field is either copied
 from a named source record — cited in the ticket's ``sources`` map
 (field → organ) — or it is ABSENT, named in the ``absent`` map with
 the reason it cannot be filled from any shipped record. No field
-ever receives a plausible default. Lease fields are absent on
-every ticket today because no lease authority exists yet (P3);
-a contract's cancellation is absent because delegation has no
+ever receives a plausible default. Leases resolve from the doc
+18 P3 lease authority (:mod:`nomorals.core.leases`) whenever a
+database handle is supplied — a ticket whose holder holds no
+lease carries the field as a cited EMPTY list (present-but-none
+is a fact about the store, not an absence); without a db handle
+the field stays absent, with the reason naming the unread store.
+A contract's cancellation is absent because delegation has no
 cancellation at all (P5) — the absence is stated, never dressed as
 a fabricated "not_cancellable" value. An unknown reference returns
 a typed not-found, never an empty ticket.
@@ -45,10 +49,12 @@ it counts operations per source organ and names exactly which
 ticket fields are absent where.
 
 Layer: agents (L5). Reads: delegation + missions (L5 peers, via
-their stores), core.jobs snapshots, core.proof_grade (L1), and the
-browser/media durable record tables directly by SQL (the outcome
-steward's precedent — observation constructs no manager and
-writes nothing).
+their stores), core.jobs snapshots, core.proof_grade (L1),
+core.leases live-lease reads (L1, via its module-level readers —
+no store is constructed, no DDL runs), and the browser/media
+durable record tables directly by SQL (the outcome steward's
+precedent — observation constructs no manager and writes
+nothing).
 """
 
 from __future__ import annotations
@@ -58,6 +64,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.jobs import JobRegistry, shared_registry
+from ..core.leases import live_leases_for_holder
 from ..core.proof_grade import (
     DELEGATION_KIND_MAPPINGS,
     DELEGATION_UNMAPPED_REASON,
@@ -102,9 +109,10 @@ _REF_KINDS = {
     "task": "task",
 }
 
-_NO_LEASES = ("no lease authority exists yet — named-resource "
-              "leases are doc 18 P3; no shipped record holds a "
-              "lease for any operation")
+_LEASES_NO_DB = ("leases live in the doc 18 P3 lease authority's "
+                 "store (core.leases); no database handle was "
+                 "supplied, so the store cannot be read for this "
+                 "ticket")
 
 
 @dataclass
@@ -147,8 +155,10 @@ class ExecutionTicket:
 
     def complete(self) -> bool:
         """A ticket is complete only when EVERY field resolved to
-        a source record. (Today: none is — leases are absent
-        everywhere. The count is reported, not rounded up.)"""
+        a source record. (Leases resolve since P3 wherever a db
+        handle is supplied; other fields — owner_chat on every
+        organ, acceptance/cancel on several — still keep tickets
+        incomplete. The count is reported, not rounded up.)"""
         return not self.absent
 
     def to_dict(self) -> dict[str, Any]:
@@ -167,6 +177,27 @@ class ExecutionTicket:
         for name in TICKET_FIELDS:
             out[name] = getattr(self, name)
         return out
+
+
+def _apply_leases(ticket: ExecutionTicket, db: Any,
+                  now: float) -> None:
+    """Resolve the leases field against the doc 18 P3 lease
+    authority, keyed by the ticket's own ref (leases name their
+    holder in P2's ref shapes). With a db handle the field is
+    ALWAYS cited — the live leases the holder holds, or an empty
+    list when it holds none (present-but-none is a fact about the
+    store). Without one it stays absent, with the reason."""
+    if db is None:
+        ticket.mark_absent("leases", _LEASES_NO_DB)
+        return
+    held = live_leases_for_holder(db, ticket.ref, now=now)
+    ticket.fill("leases", [
+        {"lease_id": lease["lease_id"],
+         "resource": lease["resource"],
+         "generation": lease["generation"],
+         "acquired_at": lease["acquired_at"],
+         "expires_at": lease["expires_at"]}
+        for lease in held], "core.leases")
 
 
 def _not_found(ref: str, reason: str) -> dict[str, Any]:
@@ -291,7 +322,6 @@ def _contract_ticket(contract: Any, now: float) -> ExecutionTicket:
         "completed, waived or refused; a cancel terminal + receipt "
         "is doc 18 P5, and until it lands in delegation this field "
         "stays absent rather than borrow another organ's cancel")
-    ticket.mark_absent("leases", _NO_LEASES)
     if contract.mission_id:
         ticket.related_refs.append(f"mission:{contract.mission_id}")
     ticket.detail = {
@@ -392,7 +422,6 @@ def _mission_ticket(store: MissionStore, mission: Any,
                                "this mission; missions cancel as a "
                                "durable status flip when they do"),
             "missions")
-    ticket.mark_absent("leases", _NO_LEASES)
     if mission.parent_id:
         ticket.related_refs.append(f"mission:{mission.parent_id}")
     ticket.detail = {
@@ -494,7 +523,6 @@ def _job_ticket(snap: dict[str, Any], tool_registry: Any,
             "or what state the effect was in — no receipt exists "
             "(doc 18 P5)"),
         "core.jobs")
-    ticket.mark_absent("leases", _NO_LEASES)
     ticket.detail = {
         "error": snap.get("error"),
         "collected": snap.get("collected"),
@@ -575,7 +603,6 @@ def _browser_ticket(row: dict[str, Any], now: float) -> ExecutionTicket:
             "requested is not confirmed, and a run that ended "
             "without honoring a request reads unhonored"),
         "browser")
-    ticket.mark_absent("leases", _NO_LEASES)
     ticket.detail = {
         "url": str(row.get("url") or ""),
         "final_url": str(row.get("final_url") or ""),
@@ -650,7 +677,6 @@ def _media_ticket(row: dict[str, Any], now: float) -> ExecutionTicket:
                            row.get("cancel_requested_at"),
                            cancel_detail),
         "render")
-    ticket.mark_absent("leases", _NO_LEASES)
     ticket.detail = {
         "kind": str(row.get("kind") or ""),
         "backend": str(row.get("backend") or ""),
@@ -738,7 +764,6 @@ def _task_ticket(task: Any, graph: Any, now: float) -> ExecutionTicket:
                 "no cancellation is recorded on this task; graph "
                 "cancellation is in-memory and leaves no receipt"),
             "core.tasks")
-    ticket.mark_absent("leases", _NO_LEASES)
     if task.mission_id:
         ticket.related_refs.append(f"mission:{task.mission_id}")
     ticket.detail = {
@@ -785,7 +810,9 @@ def ticket_for(ref: str, db: Any = None, *,
         if contract is None:
             return _not_found(ref, "no delegation contract record "
                                    f"with id {ident!r} exists")
-        return _contract_ticket(contract, now).to_dict()
+        ticket = _contract_ticket(contract, now)
+        _apply_leases(ticket, db, now)
+        return ticket.to_dict()
     if kind == "mission":
         if db is None:
             return _not_found(ref, "reading a mission ticket needs "
@@ -796,7 +823,9 @@ def ticket_for(ref: str, db: Any = None, *,
         except Exception:  # noqa: BLE001 - NotFound or unreadable
             return _not_found(ref, "no mission record with id "
                                    f"{ident!r} exists")
-        return _mission_ticket(store, mission, now).to_dict()
+        ticket = _mission_ticket(store, mission, now)
+        _apply_leases(ticket, db, now)
+        return ticket.to_dict()
     if kind == "job":
         reg = registry if registry is not None else shared_registry()
         job = reg.poll(ident)
@@ -804,7 +833,9 @@ def ticket_for(ref: str, db: Any = None, *,
             return _not_found(ref, "no job with that id is in the "
                                    "registry (terminal jobs are "
                                    "swept after their TTL)")
-        return _job_ticket(job.snapshot(), tool_registry, now).to_dict()
+        ticket = _job_ticket(job.snapshot(), tool_registry, now)
+        _apply_leases(ticket, db, now)
+        return ticket.to_dict()
     if kind == "browser_run":
         if db is None:
             return _not_found(ref, "reading a browser-run ticket "
@@ -814,7 +845,9 @@ def ticket_for(ref: str, db: Any = None, *,
         if not rows:
             return _not_found(ref, "no browser_run_records row "
                                    f"with run_id {ident!r} exists")
-        return _browser_ticket(rows[0], now).to_dict()
+        ticket = _browser_ticket(rows[0], now)
+        _apply_leases(ticket, db, now)
+        return ticket.to_dict()
     if kind == "media_job":
         if db is None:
             return _not_found(ref, "reading a media-job ticket "
@@ -824,7 +857,9 @@ def ticket_for(ref: str, db: Any = None, *,
         if not rows:
             return _not_found(ref, "no media_job_records row with "
                                    f"job_id {ident!r} exists")
-        return _media_ticket(rows[0], now).to_dict()
+        ticket = _media_ticket(rows[0], now)
+        _apply_leases(ticket, db, now)
+        return ticket.to_dict()
     # kind == "task"
     if graph is None:
         return _not_found(ref, "task graphs are in-memory — a "
@@ -834,7 +869,9 @@ def ticket_for(ref: str, db: Any = None, *,
     if task is None:
         return _not_found(ref, "no task with that id is in the "
                                "supplied graph")
-    return _task_ticket(task, graph, now).to_dict()
+    ticket = _task_ticket(task, graph, now)
+    _apply_leases(ticket, db, now)
+    return ticket.to_dict()
 
 
 def ticket_coverage(db: Any, *, registry: JobRegistry | None = None,
@@ -844,8 +881,10 @@ def ticket_coverage(db: Any, *, registry: JobRegistry | None = None,
     durable organs + the job registry currently hold (up to
     ``limit`` per organ), its ticket's absent fields counted per
     field and per source. ``complete_tickets`` counts tickets with
-    NO absent field — today always 0, because leases are absent
-    everywhere; the number is reported, never rounded up."""
+    NO absent field; the number is reported, never rounded up.
+    Lease coverage rides along: with a db handle, every ticket's
+    leases resolve against the P3 authority and the result
+    reports how many leases are held, by how many operations."""
     now = time.time() if now is None else now
     tickets: list[ExecutionTicket] = []
     if db is not None:
@@ -864,6 +903,10 @@ def ticket_coverage(db: Any, *, registry: JobRegistry | None = None,
     reg = registry if registry is not None else shared_registry()
     for snap in reg.list():
         tickets.append(_job_ticket(snap, tool_registry, now))
+    for ticket in tickets:
+        _apply_leases(ticket, db, now)
+    leases_held = sum(len(ticket.leases or []) for ticket in tickets)
+    lease_holders = sum(1 for ticket in tickets if ticket.leases)
     by_source: dict[str, int] = {}
     absent_totals: dict[str, int] = {}
     absent_by_source: dict[str, dict[str, int]] = {}
@@ -903,11 +946,16 @@ def ticket_coverage(db: Any, *, registry: JobRegistry | None = None,
                 if per.get(name))
             summary.append(f"{name}: absent on {count} of {total} "
                            f"({where})")
+    if db is not None:
+        summary.append(f"leases: {leases_held} held by "
+                       f"{lease_holders} of {total} operations")
     summary.append(f"complete tickets (no absent field): {complete}")
     return {
         "operations": total,
         "by_source": by_source,
         "complete_tickets": complete,
+        "leases_held": leases_held,
+        "lease_holders": lease_holders,
         "fields_absent": absent_totals,
         "absent_by_source": absent_by_source,
         "operations_detail": detail_rows,
