@@ -163,6 +163,27 @@ def _external_id(result: Any) -> str:
 
 # ── the sweep ─────────────────────────────────────────────────────────
 
+def _drafting_resolver(db: Any) -> Any:
+    """The pipeline's niche resolver, read through the shared
+    registry (WS4 P5, contract 2): floor plugins first, then the
+    owner-ADOPTED overlay's data-driven plugins, then the shipped
+    default. Built over the explore store bound to this database,
+    via the adapter (``media/explore/feed.py``) — the sweep never
+    learns how the overlay is stored, and a proposed niche is
+    invisible to it. None when resolution cannot be built (the
+    pipeline then uses its own default contract, exactly as
+    before this wire existed)."""
+    try:
+        from ..media.explore.feed import drafting_plugin_resolver
+        from ..media.explore.store import ExploreStore
+        from ..storage.kv import KVStore
+
+        return drafting_plugin_resolver(ExploreStore(KVStore(db)))
+    except Exception as exc:  # noqa: BLE001 - resolver is an enhancement
+        _log.debug("shorts niche resolver not built: %s", exc)
+        return None
+
+
 def publish_due_shorts(
     *,
     pipeline: Any = None,
@@ -185,7 +206,9 @@ def publish_due_shorts(
     if pipeline is None:
         from ..media.contentops.pipeline import ShortPipeline
 
-        pipeline = ShortPipeline()
+        pipeline = ShortPipeline(
+            get_niche=_drafting_resolver(db)) \
+            if db is not None else ShortPipeline()
     if ledger is None:
         from ..media.contentops.publish.ledger import PublishLedger
 

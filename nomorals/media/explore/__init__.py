@@ -20,7 +20,12 @@ field become niche PROPOSALS with evidence packs in the shared
 overlay beside the code registry; the effective niche set is
 floor ∪ adopted (:func:`effective_niches`), and adoption is the
 owner's act — it scaffold-generates a draft plugin that goes
-live only through human review, never by discovery.
+live only through human review, never by discovery. The WS3
+contracts are P5 (``feed.py``): current claims project into the
+content pipeline's findings shape, content consumers read the
+shared niche registry through the adapter, exemplar media is
+cited by WS1 artifact reference, and measured post outcomes are
+recorded back against the claims they descend from.
 
     from nomorals.media.explore import run_exploration, explore_status
     report = run_exploration(context, trigger="manual")
@@ -77,6 +82,16 @@ from .niches import (
                     overlay_plugin,
                     proposal_board_order,
 )
+from .feed import (
+                    claim_exemplars,
+                    claim_to_finding,
+                    claims_as_findings,
+                    drafting_niches,
+                    drafting_plugin_resolver,
+                    feed_claim_outcome,
+                    make_claims_feed,
+                    niche_drafting_context,
+)
 from .store import (
                     NICHE_ADOPTED,
                     NICHE_DISMISSED,
@@ -115,22 +130,30 @@ __all__ = [
     "YouTubeSearchInstrument",
     "adopt_niche",
     "beats_from_profile",
+    "claim_exemplars",
     "claim_standing",
+    "claim_to_finding",
+    "claims_as_findings",
     "collect_watch_topics",
     "current_claims",
     "default_explore_store",
     "default_instruments",
     "discover_niches",
     "dismiss_niche",
+    "drafting_niches",
+    "drafting_plugin_resolver",
     "drafts_dir",
     "effective_niches",
     "ensure_explore_jobs",
     "evaluate_trends",
     "explore_for_context",
     "explore_status",
+    "feed_claim_outcome",
     "floor_niches",
     "load_beats",
     "load_news_profile",
+    "make_claims_feed",
+    "niche_drafting_context",
     "note_owner_activity",
     "overlay_plugin",
     "proposal_board_order",

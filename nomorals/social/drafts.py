@@ -378,6 +378,36 @@ class DraftQueue:
             (status, int(limit))).fetchall()
         return [self.get(r["id"]) for r in rows if self.get(r["id"])]
 
+    def find_by_content(self, content: str, *,
+                        platform: str = "") -> list[Draft]:
+        """Drafts whose content matches ``content`` exactly,
+        newest first, optionally narrowed to drafts queued for
+        ``platform`` (a draft with no platform list matches any —
+        it was queued for the default set). The read seam the
+        measurement spine's outcome joins use (WS4 P5's claim
+        feed; the briefs loop keeps its own store): publishing
+        writes no draft id onto a post row, so exact content +
+        platform identity is the only deterministic link. Never
+        raises on read."""
+        try:
+            if self._port is not None:
+                rows = self._port.tables["social_drafts"].find(
+                    {"content": content})
+                rows.sort(key=lambda r: r["created_at"], reverse=True)
+                drafts = [self._to_draft(r) for r in rows]
+            else:
+                rows = self._db.execute(
+                    "SELECT * FROM social_drafts WHERE content = ?"
+                    " ORDER BY created_at DESC", (content,)).fetchall()
+                drafts = [self.get(r["id"]) for r in rows
+                          if self.get(r["id"])]
+        except Exception:  # noqa: BLE001 - a read never raises
+            return []
+        if platform:
+            drafts = [d for d in drafts
+                      if not d.platforms or platform in d.platforms]
+        return drafts
+
     def close(self) -> None:
         if self._db is None:
             return  # seam path: the store is shared, not organ-owned

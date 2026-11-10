@@ -458,6 +458,32 @@ def build_context(
     except Exception as exc:  # noqa: BLE001 — cell wiring is optional
         _log.debug("content cell not wired: %s", exc)
 
+    # Exploration findings feed (WS4 P5, contract 1): the weekly
+    # pipeline (L4) drafts from exploration's current trend claims
+    # through the same inversion — the composition root builds the
+    # feed over the context's explore store (media/explore/feed.py,
+    # L4) with the WS1 artifact store beside it so claim citations
+    # are verified against the real store, and installs it into
+    # the pipeline. Best-effort: unwired, weekly runs research and
+    # draft exactly as before.
+    try:
+        from ..media.explore.engine import explore_for_context as _explore_for_context
+        from ..media.explore.feed import make_claims_feed as _make_claims_feed
+        from ..social.content_pipeline import set_findings_feed as _set_findings_feed
+        from ..storage.artifacts import ArtifactStore as _ArtifactStore
+        from ..storage.blob import BlobStore as _BlobStore
+
+        _explore_store, _engine, _beats = _explore_for_context(context)
+        _db_path = getattr(context.db, "path", None)
+        _blob_dir = (os.path.join(os.path.dirname(_db_path), "blobs")
+                     if _db_path else "data/blobs")
+        _artifact_store = _ArtifactStore(
+            context.db, _BlobStore(context.db, _blob_dir))
+        _set_findings_feed(_make_claims_feed(
+            _explore_store, artifacts=_artifact_store))
+    except Exception as exc:  # noqa: BLE001 — feed wiring is optional
+        _log.debug("exploration findings feed not wired: %s", exc)
+
     if db_recovered:
         # Surfaced in status/diagnostics: the owner should know their data
         # was quarantined, and where the old file went.

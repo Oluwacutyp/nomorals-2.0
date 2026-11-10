@@ -1034,8 +1034,10 @@ def register(registry: Any) -> None:
             "Refresh REAL engagement metrics for already-posted social "
             "posts: re-reads each recent post's numbers from its own "
             "platform adapter and writes them back with the fetch "
-            "time, and feeds first outcomes into the briefs "
-            "calibration loop. Platforms whose adapter cannot produce "
+            "time, feeds first outcomes into the briefs "
+            "calibration loop, and records outcomes back against "
+            "the exploration claims posts descend from. Platforms "
+            "whose adapter cannot produce "
             "metrics are reported as unavailable — never zeroed. This "
             "is what the durable 'social metrics refresh' job runs "
             "every 6h; call directly only when the owner asks for "
@@ -1053,12 +1055,20 @@ def register(registry: Any) -> None:
         },
     )
     def social_metrics_refresh(limit: int = 200) -> dict[str, Any]:
+        from ..media.explore.engine import explore_for_context
+        from ..social.drafts import DraftQueue
         from ..social.manager import SocialManager
         from ..social.metrics import refresh_post_metrics
 
         context = registry.context
         manager = SocialManager(context).register_builtins()
-        return refresh_post_metrics(manager, limit=int(limit or 200))
+        # WS4 P5 (contract 4): both sides of the claim-outcome
+        # join — the review queue the pipeline drafts into, and
+        # the explore store the outcomes are recorded against.
+        explore_store, _engine, _beats = explore_for_context(context)
+        return refresh_post_metrics(
+            manager, limit=int(limit or 200),
+            draft_queue=DraftQueue(), explore_store=explore_store)
 
     @registry.register(
         "social_engagement_poll",

@@ -39,6 +39,12 @@ What is stored (payload ``media.explore.v1``, version 1):
   P1 stores and returns them verbatim; it authors none, and no
   vocabulary in this module calls anything a trend — a single
   observation in here is never promoted by storage.
+* **claim_outcomes** — P5's close of the measurement loop: when a
+  post that descends from a claim is measured by the content
+  spine, one outcome record lands here against the claim (claim
+  key, post reference, measured engagement, at). Evidence for
+  future evaluation — recording an outcome never changes any
+  claim's kind, standing or bar.
 * **niche_proposals** — P4's discovered-niche records (slug,
   thesis, member evidence pack, score with its inputs, lifecycle
   status proposed / adopted / dismissed). Discovery writes them;
@@ -98,6 +104,7 @@ _MAX_OBSERVATIONS = 500
 _MAX_CANDIDATES = 200
 _MAX_SHED = 50
 _MAX_CLAIMS = 300
+_MAX_CLAIM_OUTCOMES = 300
 _MAX_NICHE_PROPOSALS = 100
 _MAX_DELIVERY_LOG = 2000
 _MAX_EVIDENCE_PER_CANDIDATE = 10
@@ -133,6 +140,7 @@ class ExploreStore:
         self._candidates: dict[str, dict[str, Any]] = {}
         self._shed: list[dict[str, Any]] = []
         self._claims: list[dict[str, Any]] = []
+        self._claim_outcomes: list[dict[str, Any]] = []
         self._niche_proposals: list[dict[str, Any]] = []
         self._delivery_log: list[dict[str, Any]] = []
         self._sweep_seq = 0
@@ -172,6 +180,7 @@ class ExploreStore:
                 "candidates": list(self._candidates.values()),
                 "shed": self._shed,
                 "claims": self._claims,
+                "claim_outcomes": self._claim_outcomes,
                 "niche_proposals": self._niche_proposals,
                 "delivery_log": self._delivery_log,
             }
@@ -214,6 +223,14 @@ class ExploreStore:
                     if isinstance(row, dict) \
                             and row.get("claim_id") not in known_claims:
                         self._claims.append(row)
+                known_outcomes = {
+                    (o.get("claim_key"), o.get("post_ref"))
+                    for o in self._claim_outcomes}
+                for row in data.get("claim_outcomes") or []:
+                    if isinstance(row, dict) \
+                            and (row.get("claim_key"),
+                                 row.get("post_ref")) not in known_outcomes:
+                        self._claim_outcomes.append(row)
                 known_niches = {p.get("slug")
                                 for p in self._niche_proposals}
                 for row in data.get("niche_proposals") or []:
@@ -238,6 +255,9 @@ class ExploreStore:
                               if isinstance(r, dict)]
                 self._claims = [r for r in data.get("claims") or []
                                 if isinstance(r, dict)]
+                self._claim_outcomes = [
+                    r for r in data.get("claim_outcomes") or []
+                    if isinstance(r, dict)]
                 self._niche_proposals = [
                     r for r in data.get("niche_proposals") or []
                     if isinstance(r, dict) and r.get("slug")]
@@ -251,6 +271,8 @@ class ExploreStore:
             self._sweeps = self._sweeps[-_MAX_SWEEPS:]
             self._observations = self._observations[-_MAX_OBSERVATIONS:]
             self._claims = self._claims[-_MAX_CLAIMS:]
+            self._claim_outcomes = \
+                self._claim_outcomes[-_MAX_CLAIM_OUTCOMES:]
             self._niche_proposals = \
                 self._niche_proposals[-_MAX_NICHE_PROPOSALS:]
             self._delivery_log = self._delivery_log[-_MAX_DELIVERY_LOG:]
@@ -563,6 +585,48 @@ class ExploreStore:
 
     def claims(self, limit: int = 50) -> list[dict[str, Any]]:
         return [dict(r) for r in reversed(self._claims[-limit:])]
+
+    # ── claim outcomes (P5 writes; the spine measures) ───────────
+    def record_claim_outcome(self, record: dict[str, Any]) -> bool:
+        """Record one measured outcome against a claim (WS4 P5,
+        contract 4). The record is the adapter's shape: ``claim_key``,
+        ``claim_id``, ``platform``, ``post_ref`` (the post's
+        platform-side id), ``handle``, ``engagement``, ``metrics``,
+        ``at``.
+
+        Exactly-once per (claim, post): a pair already recorded is
+        refused (returns False) — the first fair-age measurement is
+        the outcome of record, mirroring the spine's briefs
+        discipline. Recording an outcome is evidence-keeping only:
+        it never touches the claim itself, its kind, its standing,
+        or any promotion bar. Never raises."""
+        try:
+            row = dict(record)
+            key = str(row.get("claim_key") or "")
+            ref = str(row.get("post_ref") or "")
+            if not key or not ref:
+                return False
+            for existing in self._claim_outcomes:
+                if existing.get("claim_key") == key \
+                        and existing.get("post_ref") == ref:
+                    return False
+            row.setdefault("recorded_at", time.time())
+            self._claim_outcomes.append(row)
+            self._claim_outcomes = \
+                self._claim_outcomes[-_MAX_CLAIM_OUTCOMES:]
+            self._persist()
+            return True
+        except Exception as e:  # noqa: BLE001
+            record_failure("ExploreStore.record_claim_outcome", e)
+            return False
+
+    def claim_outcomes(self, *, claim_key: str = "",
+                       limit: int = 100) -> list[dict[str, Any]]:
+        """Recorded claim outcomes, newest first, optionally
+        filtered to one claim key."""
+        rows = [dict(r) for r in reversed(self._claim_outcomes)
+                if not claim_key or r.get("claim_key") == claim_key]
+        return rows[: max(0, int(limit))]
 
     # ── niche proposals (P4 writes; the store keeps the record) ───
     def record_niche_proposal(self, record: dict[str, Any],

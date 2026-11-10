@@ -470,22 +470,46 @@ class WeeklyCell(ContentCell):
     """
 
     def __init__(self, contracts: Any, receipts: ReceiptStore, *,
-                 niche: str) -> None:
+                 niche: str,
+                 niche_context: dict[str, Any] | None = None) -> None:
         super().__init__(contracts, kind="weekly")
         self.receipts = receipts
         self.niche = niche
+        #: The run's niche read through the shared registry (WS4
+        #: P5, contract 2): the effective record (floor plugin or
+        #: owner-adopted overlay) when the run's niche names one,
+        #: else None. A proposed niche never resolves — drafting
+        #: context is production state, and production state is
+        #: the floor plus what the owner adopted.
+        self.niche_context = niche_context
 
     def begin(self) -> Any:
+        goal = (f"this week's content for {self.niche}: bounded"
+                " research → drafts in the owner's voice → the"
+                " review queue")
+        if self.niche_context:
+            thesis = str(self.niche_context.get("thesis") or "")
+            if thesis:
+                goal += f" — niche thesis: {thesis}"
         return self.open(
-            goal=(f"this week's content for {self.niche}: bounded"
-                  " research → drafts in the owner's voice → the"
-                  " review queue"),
+            goal=goal,
             deliverable=("per-platform drafts landed in the review"
                          " queue, each with a readable receipt"
                          " chain"),
             required_evidence=("research", "draft"))
 
     def research(self, findings: list[dict[str, Any]]) -> None:
+        if self.niche_context:
+            slug = str(self.niche_context.get("slug") or self.niche)
+            origin = str(self.niche_context.get("origin") or "")
+            self.evidence(
+                "research",
+                f"niche context: {slug}"
+                + (f" ({origin})" if origin else "")
+                + f" — {self.niche_context.get('thesis') or ''}",
+                producer=self.researcher,
+                evidence_ref=f"niche:{slug}",
+                verify=True)
         for finding in findings:
             title = str(finding.get("title") or "").strip()
             if not title:
@@ -567,10 +591,28 @@ def make_weekly_cell(db: Any, niche: str) -> WeeklyCell | None:
     """The composition factory ``social.content_pipeline`` asks
     for a cell through (installed by ``agents/context.py`` — the
     factory-inversion pattern: the L4 pipeline may not import this
-    L5 module). None when there is no database to hold contracts."""
+    L5 module). None when there is no database to hold contracts.
+
+    The cell's niche context resolves through the WS4 P5 adapter
+    (``media/explore/feed.py``) over the explore store bound to
+    this database's KV — the shared-registry read (contract 2):
+    an adopted overlay niche's thesis frames the run; a proposed
+    one is invisible. Resolution failure degrades to no context;
+    the cell runs exactly as before."""
     if db is None:
         return None
     from .delegation import DelegationStore
 
+    niche_context = None
+    try:
+        from ..media.explore.feed import niche_drafting_context
+        from ..media.explore.store import ExploreStore
+        from ..storage.kv import KVStore
+
+        niche_context = niche_drafting_context(
+            ExploreStore(KVStore(db)), niche or "")
+    except Exception as exc:  # noqa: BLE001 - context is an enhancement
+        _log.debug("weekly cell niche context unresolved: %s", exc)
     return WeeklyCell(
-        DelegationStore(db), ReceiptStore(db), niche=niche or "general")
+        DelegationStore(db), ReceiptStore(db), niche=niche or "general",
+        niche_context=niche_context)

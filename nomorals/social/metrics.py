@@ -16,7 +16,14 @@ open. This module is the one spine that closes them:
   time, via :meth:`SocialManager.update_post_metrics`;
 * on a post's first measured refresh at a fair age (>= 24h), the
   outcome is fed — once, stamped on the row — into the briefs loop
-  when the post links deterministically to exactly one brief draft.
+  when the post links deterministically to exactly one brief draft;
+* the same fair-age measurement feeds the exploration claim book
+  (WS4 P5, contract 4 — ONE spine, two outcome books): when the
+  caller hands over the review queue and the explore store, a
+  post that descends from a trend claim records its outcome
+  against that claim through the same exact content + platform
+  join, with the dedupe kept in the explore store — the post
+  row's one outcome stamp stays the briefs verdict's.
 
 Honesty rules, enforced here:
 
@@ -143,6 +150,8 @@ def refresh_post_metrics(
     window_days: int = WINDOW_DAYS,
     brief_store: Any = None,
     feed_outcomes: bool = True,
+    draft_queue: Any = None,
+    explore_store: Any = None,
 ) -> dict[str, Any]:
     """Refresh measured metrics for posted rows; feed first outcomes.
 
@@ -171,6 +180,11 @@ def refresh_post_metrics(
         "outcomes_ambiguous": 0,
         "outcomes_already_recorded": 0,
         "outcomes_failed": 0,
+        "claims_fed": 0,
+        "claims_unlinked": 0,
+        "claims_ambiguous": 0,
+        "claims_already_recorded": 0,
+        "claims_failed": 0,
         "failures": [],
     }
     rows = manager.db.query(
@@ -238,6 +252,36 @@ def refresh_post_metrics(
         manager.update_post_metrics(
             post_id, metrics=dict(measured), fetched_at=moment)
         report["refreshed"] += 1
+        # Claim-outcome feed (WS4 P5, contract 4): the same
+        # fair-age measurement, recorded back against the
+        # exploration claim this post descends from — when the
+        # caller wired both sides of the join. The adapter owns
+        # the join discipline; an ambiguous join records nothing.
+        if (feed_outcomes and draft_queue is not None
+                and explore_store is not None
+                and moment - float(row.get("posted_at") or 0.0)
+                >= outcome_min_age_s):
+            try:
+                from ..media.explore.feed import feed_claim_outcome
+
+                claim_verdict = feed_claim_outcome(
+                    explore_store, draft_queue,
+                    content=str(row.get("content") or ""),
+                    platform=platform, post_ref=external_id,
+                    handle=account.handle, measured=dict(measured),
+                    at=moment)
+            except Exception as exc:  # noqa: BLE001 - never sink the run
+                claim_verdict = "feed_failed"
+                _log.warning(
+                    "metrics spine: claim outcome feed failed for"
+                    " %s post %s: %s", platform, external_id, exc)
+            report[{
+                "fed": "claims_fed",
+                "unlinked": "claims_unlinked",
+                "ambiguous": "claims_ambiguous",
+                "already_recorded": "claims_already_recorded",
+                "feed_failed": "claims_failed",
+            }[claim_verdict]] += 1
         # First-outcome feed: once per post, at a fair age, stamped.
         if not feed_outcomes or meta.get("metrics_outcome"):
             continue

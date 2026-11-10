@@ -32,6 +32,7 @@ __all__ = [
     "optimal_windows",
     "weekly_content",
     "set_cell_factory",
+    "set_findings_feed",
     "install_weekly_content_job",
     "FALLBACK_WINDOWS",
     "CONTENT_MIX",
@@ -85,6 +86,25 @@ def set_cell_factory(factory: Callable[..., Any] | None) -> None:
     """Install (or clear, with None) the weekly run's cell factory."""
     global _CELL_FACTORY
     _CELL_FACTORY = factory
+
+
+#: The exploration findings feed (WS4 P5, contract 1). The
+#: composition root (``agents/context.py``) installs a callable
+#: built by ``media/explore/feed.py`` — an L4 peer this module
+#: still does not import — that projects exploration's current
+#: trend claims into this pipeline's finding shape. A run whose
+#: caller did not inject ``findings=`` APPENDS the feed's findings
+#: to its own research (exploration widens the evidence base; it
+#: never displaces research, and an explicit injection bypasses
+#: the feed entirely). Without an installed feed (CLI, tests) the
+#: pipeline runs exactly as before.
+_FINDINGS_FEED: Callable[..., Any] | None = None
+
+
+def set_findings_feed(feed: Callable[..., Any] | None) -> None:
+    """Install (or clear, with None) the exploration findings feed."""
+    global _FINDINGS_FEED
+    _FINDINGS_FEED = feed
 
 
 @dataclass
@@ -497,6 +517,30 @@ def weekly_content(
     if findings is None and rctx is not None:
         found = _default_research(niche, rctx, budget_usd=research_budget_usd)
 
+    # Exploration feed (WS4 P5, contract 1): the installed feed's
+    # current trend claims join the evidence base AFTER the run's
+    # own research — appended, deduplicated on (title, url), and
+    # never a reason the run fails. An explicit findings=
+    # injection is the caller's evidence base and bypasses the
+    # feed entirely.
+    if findings is None and _FINDINGS_FEED is not None:
+        try:
+            extra = list(_FINDINGS_FEED(niche) or [])
+        except Exception as exc:  # noqa: BLE001 - feed never gates
+            _log.warning("exploration findings feed failed: %s", exc)
+            extra = []
+        seen = {(str(f.get("title") or "").strip().lower(),
+                 str(f.get("url") or "")) for f in found}
+        for item in extra:
+            if not isinstance(item, dict):
+                continue
+            key = (str(item.get("title") or "").strip().lower(),
+                   str(item.get("url") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(item)
+
     # Delivery cell (WS3 P6): with a cell wired — injected here, or
     # built by the composition-installed factory when a database is
     # present — the run is a contract. Findings enter the claim
@@ -641,6 +685,28 @@ def weekly_content(
                 d.platform_texts = kept_texts
             group = "ws3fan:" + hashlib.sha256(
                 d.content.encode("utf-8")).hexdigest()[:12]
+            # WS4 P5 (contracts 1+3): when the draft's aligned
+            # finding is an exploration claim, the claim identity
+            # rides the draft's metadata — it is what the
+            # measurement spine joins a measured post back to its
+            # claim with — and a verified artifact citation rides
+            # with it (the artifact store's own id + URI; media by
+            # citation, never copied bytes). Findings that are not
+            # claims stamp nothing extra.
+            claim_meta: dict[str, Any] = {}
+            if i < len(found) and isinstance(found[i], dict):
+                src = found[i]
+                if src.get("claim_key"):
+                    claim_meta = {
+                        "claim_key": str(src.get("claim_key") or ""),
+                        "claim_id": str(src.get("claim_id") or ""),
+                        "claim_kind": str(src.get("claim_kind") or ""),
+                    }
+                    if src.get("artifact_id"):
+                        claim_meta["artifact_id"] = str(
+                            src.get("artifact_id") or "")
+                        claim_meta["artifact_uri"] = str(
+                            src.get("artifact_uri") or "")
             for p in list(d.platform_texts):
                 draft = q.create_draft(
                     d.platform_texts[p], platforms=[p],
@@ -651,7 +717,8 @@ def weekly_content(
                               "pillar": d.pillar or classify_pillar(d.content),
                               "pipeline": "weekly_content",
                               "platform": p,
-                              "fanout_group": group})
+                              "fanout_group": group,
+                              **claim_meta})
                 q.propose(draft.id)  # → pending_review: Devon asks, never auto-posts
                 d.draft_ids[p] = draft.id
                 if scheduler is not None:
