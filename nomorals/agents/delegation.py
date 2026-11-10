@@ -68,7 +68,7 @@ VERDICTS = ("supported", "contradicted", "partial", "stale",
 CONTRACT_ROLES = ("worker", "witness", "skeptic", "verifier",
                   "integration_owner", "recovery_supervisor", "arbiter")
 
-TERMINAL_STATUSES = ("completed", "waived", "refused")
+TERMINAL_STATUSES = ("completed", "waived", "refused", "cancelled")
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS delegation_contracts (
@@ -192,7 +192,8 @@ class Claim:
     contract_id: str = ""
     mission_id: str = ""
     kind: str = "evidence"       # evidence|challenge|resolution|verdict|
-    #                              completion|replan|failure|signoff
+    #                              completion|replan|failure|signoff|
+    #                              cancellation
     claim: str = ""
     scope: str = ""
     producer: str = ""
@@ -659,6 +660,17 @@ class DelegationStore:
             return CompletionDecision(ok=True, reasons=[],
                                       contract_id=contract_id,
                                       replayed=True)
+        if contract.terminal:
+            # A late completion arriving after the contract reached
+            # a terminal state (cancelled / waived / refused) must
+            # not move it: the terminal record stands, and the late
+            # result is refused with the state named.
+            return CompletionDecision(
+                ok=False,
+                reasons=[f"contract is {contract.status} (terminal) "
+                         "— a late completion cannot move a "
+                         "terminal contract"],
+                contract_id=contract_id)
         blockers = self.completion_blockers(contract)
         if blockers:
             return CompletionDecision(ok=False, reasons=blockers,
@@ -700,6 +712,55 @@ class DelegationStore:
         contract.completed_at = time.time()
         self._save_contract(contract)
         self._record(contract, kind="verdict", claim=f"waived: {reason}",
+                     producer=by, verdict="supported")
+        return contract
+
+    def cancel(self, contract_id: str, *, by: str, reason: str = "",
+               generation: int | None = None) -> WorkContract:
+        """Cancel a live contract: the ``cancelled`` terminal.
+
+        Fenced like every other write. A cancel naming a stale
+        generation is refused (:class:`StaleGenerationError` —
+        the caller is acting on a superseded contract), and a
+        terminal contract refuses with its state named. The
+        cancellation lands on the claim ledger as a ``cancellation``
+        claim that counts what it leaves open.
+
+        Claims disposition follows the ledger's standing rule: the
+        ledger is append-only history and terminal transitions
+        never rewrite claims (completion and waiver behave the
+        same way), so open skeptic challenges and unverified
+        evidence are NOT resolved or erased by the cancel — they
+        remain exactly as recorded, named in the cancellation
+        claim. The cancelled contract stops gating its mission
+        because the mission gate reads non-terminal contracts
+        only."""
+        contract = self._contract_or_raise(contract_id)
+        self._check_generation(contract, generation)
+        if contract.terminal:
+            raise DelegationError(
+                f"contract {contract.id} is already "
+                f"{contract.status} — a terminal contract cannot "
+                "be cancelled")
+        entries = self.claims(contract.id, limit=1000)
+        open_challenges = [c for c in entries
+                           if c.kind == "challenge"
+                           and c.verdict == "uncertain"]
+        unverified = [c for c in entries if c.kind == "evidence"
+                      and c.verdict == "unverified"]
+        contract.status = "cancelled"
+        contract.completed_at = time.time()
+        self._save_contract(contract)
+        text = f"cancelled by {by}"
+        if reason:
+            text += f": {reason}"
+        text += (f" — {len(open_challenges)} skeptic challenge(s) "
+                 f"and {len(unverified)} unverified evidence "
+                 "claim(s) remain on the ledger unresolved "
+                 "(append-only: terminal transitions do not "
+                 "rewrite claims; the cancelled contract no longer "
+                 "gates its mission)")
+        self._record(contract, kind="cancellation", claim=text,
                      producer=by, verdict="supported")
         return contract
 

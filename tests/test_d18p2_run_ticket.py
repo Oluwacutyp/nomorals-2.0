@@ -10,8 +10,8 @@ timestamped request on a live job → requested); (d) fields no
 source record backs are typed-absent WITH reasons, never defaults
 — leases resolve from the P3 lease authority when a db is
 supplied (cited, empty when none held; absent only without a db
-handle), contract cancellation absent because
-delegation has none; (e) every populated field cites its organ in
+handle), contract cancellation resolved since P5 (delegation's
+cancelled terminal, read from the contract record); (e) every populated field cites its organ in
 ``sources`` and every field sits in exactly one of
 sources/absent; (f) unknown references return the typed not-found,
 never an empty ticket; (g) the coverage listing counts a planted
@@ -139,10 +139,14 @@ class ContractTicketTests(unittest.TestCase):
         self.assertEqual(ticket["budget"]["step_budget"], 10)
         _assert_partition(self, ticket)
 
-    def test_cancel_absent_leases_resolved_with_reasons(self):
+    def test_cancel_filled_leases_resolved_with_reasons(self):
         ticket = ticket_for(f"contract:{self.contract.id}", self.db)
-        self.assertIn("no cancellation path", ticket["absent"]["cancel"])
-        self.assertIn("P5", ticket["absent"]["cancel"])
+        # P5 flipped cancel: delegation's cancelled terminal is a
+        # real record now, so the field is filled from it — a live
+        # contract reads state "none" with the P5 note, cited.
+        self.assertNotIn("cancel", ticket["absent"])
+        self.assertEqual(ticket["cancel"]["state"], "none")
+        self.assertEqual(ticket["sources"]["cancel"], "delegation")
         # P3 flipped leases: with a db the field resolves against
         # the lease authority — cited, empty when none are held.
         self.assertNotIn("leases", ticket["absent"])
@@ -392,10 +396,11 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(coverage["leases_held"], 0)
         self.assertEqual(coverage["lease_holders"], 0)
         self.assertEqual(coverage["complete_tickets"], 0)
-        # Cancellation is absent exactly on the delegation-backed
-        # ticket (contracts are the only source with no cancel).
-        self.assertEqual(
-            coverage["absent_by_source"]["contract"]["cancel"], 1)
+        # P5: contract cancellation resolves from delegation's
+        # record too — cancel is absent for NO source now.
+        self.assertNotIn(
+            "cancel",
+            coverage["absent_by_source"].get("contract", {}))
         self.assertNotIn(
             "cancel",
             coverage["absent_by_source"].get("browser_run", {}))

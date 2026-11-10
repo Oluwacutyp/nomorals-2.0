@@ -20,10 +20,17 @@ database handle is supplied — a ticket whose holder holds no
 lease carries the field as a cited EMPTY list (present-but-none
 is a fact about the store, not an absence); without a db handle
 the field stays absent, with the reason naming the unread store.
-A contract's cancellation is absent because delegation has no
-cancellation at all (P5) — the absence is stated, never dressed as
-a fabricated "not_cancellable" value. An unknown reference returns
-a typed not-found, never an empty ticket.
+Contract cancellation resolves since doc 18 P5: delegation has
+a ``cancelled`` terminal and the ticket reads it from the
+contract record. Cancels that went through the P5 receipt facade
+(:mod:`nomorals.core.cancellation`) carry their receipt in the
+cancel field's ``receipt`` entry — the latest receipt for the
+ref, read with that module's no-DDL readers; the other organs'
+native records stay the primary source and the receipt rides
+alongside, never instead. Help requests recorded under the P5
+help protocol (:mod:`.help_protocol`) ride in ``detail`` when any
+stand for the ref. An unknown reference returns a typed
+not-found, never an empty ticket.
 
 Reference shapes are the steward's subject keys, adopted not
 replaced: ``contract:<id>`` · ``mission:<id>`` · ``job:<id>`` ·
@@ -57,7 +64,9 @@ ticket fields are absent where.
 Layer: agents (L5). Reads: delegation + missions (L5 peers, via
 their stores), core.jobs snapshots, core.proof_grade (L1),
 core.leases live-lease reads (L1, via its module-level readers —
-no store is constructed, no DDL runs), and the browser/media
+no store is constructed, no DDL runs), core.cancellation receipt
+reads (L1, same reader discipline), the help protocol's request
+reads (L5 peer, same discipline), and the browser/media
 durable record tables directly by SQL (the outcome steward's
 precedent — observation constructs no manager and writes
 nothing).
@@ -69,6 +78,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..core.cancellation import latest_receipt_for_ref
 from ..core.jobs import JobRegistry, shared_registry
 from ..core.leases import live_leases_for_holder
 from ..core.proof_grade import (
@@ -79,6 +89,7 @@ from ..core.proof_grade import (
 )
 from ..missions.mission import MissionStore, mission_liveness
 from .delegation import DelegationStore
+from .help_protocol import help_requests_for_ref
 
 __all__ = [
     "TICKET_FIELDS",
@@ -207,6 +218,53 @@ def _apply_leases(ticket: ExecutionTicket, db: Any,
         for lease in held], "core.leases")
 
 
+def _apply_cancel_receipt(ticket: ExecutionTicket, db: Any) -> None:
+    """Ride the latest doc 18 P5 cancellation receipt for this
+    ticket's ref inside its cancel field, when one exists. The
+    organ's own record stays the field's primary source (the
+    receipt was minted from its answer); the receipt adds the
+    uniform state, who asked, and when. Per-ref detail — this
+    runs in :func:`ticket_for` only, never in coverage. Receipt
+    ids are structure keys here, never labels."""
+    if db is None:
+        return
+    receipt = latest_receipt_for_ref(db, ticket.ref)
+    if receipt is None:
+        return
+    cancel = ticket.cancel
+    if not isinstance(cancel, dict):
+        return
+    cancel["receipt"] = {
+        "receipt_id": receipt["receipt_id"],
+        "state": receipt["receipt_state"],
+        "organ": receipt["organ"],
+        "at": receipt["at"],
+        "requested_by": receipt["requested_by"],
+        "native_state": receipt["native_state"],
+        "detail": receipt["detail"],
+    }
+
+
+def _apply_help(ticket: ExecutionTicket, db: Any) -> None:
+    """Surface the ticket's help requests (doc 18 P5's help
+    protocol) in ``detail`` when any stand for the ref — open and
+    answered/withdrawn alike, so a reader sees both the ask and
+    what landed on it. Per-ref detail — :func:`ticket_for` only."""
+    if db is None:
+        return
+    rows = help_requests_for_ref(db, ticket.ref)
+    if rows:
+        ticket.detail["help_requests"] = [
+            {"request_id": row["id"], "kind": row["kind"],
+             "state": row["state"], "requester": row["requester"],
+             "helper": row["helper"], "detail": row["detail"],
+             "created_at": row["created_at"],
+             "answer": row["answer"],
+             "answered_by": row["answered_by"],
+             "answered_at": row["answered_at"]}
+            for row in rows]
+
+
 def _not_found(ref: str, reason: str) -> dict[str, Any]:
     """The typed answer for a reference no source record backs —
     distinct from a ticket, and honest about why."""
@@ -268,7 +326,10 @@ def _cancel_from_state(state: str, requested_at: Any,
     """The uniform cancel shape: the source's own state word
     (``none`` when its record carries the empty/no-request marker),
     when the request landed, and the bound on what the source can
-    prove — a requested flag is not a receipt (receipts are P5)."""
+    prove. A requested flag is not a receipt — receipts are minted
+    by the doc 18 P5 facade (:mod:`nomorals.core.cancellation`),
+    and when one exists for the ref it rides in the dict's
+    ``receipt`` entry via :func:`_apply_cancel_receipt`."""
     try:
         asked = float(requested_at or 0)
     except (TypeError, ValueError):
@@ -323,12 +384,26 @@ def _contract_ticket(contract: Any, now: float) -> ExecutionTicket:
                  "updated_at": contract.updated_at,
                  "age_s": _age(now, contract.updated_at)},
                 "delegation")
-    ticket.mark_absent(
-        "cancel",
-        "delegation has no cancellation path — contracts end as "
-        "completed, waived or refused; a cancel terminal + receipt "
-        "is doc 18 P5, and until it lands in delegation this field "
-        "stays absent rather than borrow another organ's cancel")
+    if contract.status == "cancelled":
+        ticket.fill(
+            "cancel",
+            _cancel_from_state(
+                "cancelled", contract.completed_at,
+                "the contract stands at delegation's cancelled "
+                "terminal (doc 18 P5); the cancellation claim on "
+                "its ledger names the claims the cancel left "
+                "unresolved — the ledger is append-only and "
+                "terminal transitions do not rewrite claims"),
+            "delegation")
+    else:
+        ticket.fill(
+            "cancel",
+            _cancel_from_state(
+                "", None,
+                "no cancellation is recorded on this contract; "
+                "a cancel lands in delegation as the cancelled "
+                "terminal (doc 18 P5)"),
+            "delegation")
     if contract.mission_id:
         ticket.related_refs.append(f"mission:{contract.mission_id}")
     ticket.detail = {
@@ -416,10 +491,11 @@ def _mission_ticket(store: MissionStore, mission: Any,
             "cancel",
             _cancel_from_state("cancelled", mission.finished_at,
                                "the mission record's durable "
-                               "CANCELLED status is the whole "
-                               "record — a status + optional note, "
-                               "not a typed receipt (receipts are "
-                               "doc 18 P5)"),
+                               "CANCELLED status + optional note "
+                               "is the organ's record; when the "
+                               "cancel went through the doc 18 P5 "
+                               "facade its receipt rides in this "
+                               "field's receipt entry"),
             "missions")
     else:
         ticket.fill(
@@ -525,10 +601,12 @@ def _job_ticket(snap: dict[str, Any], tool_registry: Any,
         _cancel_from_state(
             "requested" if snap.get("cancel_requested") else "",
             None,
-            "the registry's cooperative flag is the whole record: "
-            "it cannot say whether the worker honored the request "
-            "or what state the effect was in — no receipt exists "
-            "(doc 18 P5)"),
+            "the registry's cooperative flag is the organ's whole "
+            "record: it cannot say whether the worker honored the "
+            "request or what state the effect was in; a cancel "
+            "through the doc 18 P5 facade mints the durable "
+            "receipt, which rides in this field's receipt entry "
+            "when one exists"),
         "core.jobs")
     ticket.detail = {
         "error": snap.get("error"),
@@ -854,9 +932,9 @@ def _coremind_ticket(row: dict[str, Any], mind: Any,
             _cancel_from_state(
                 "cancelled", row.get("finished"),
                 "cancelled while queued via CoreMind.cancel_job "
-                "(doc 18 P4): the job never ran — the record's "
-                "cancelled status is the whole record, not a typed "
-                "receipt (receipts are doc 18 P5)"),
+                "(doc 18 P4): the job never ran; when the cancel "
+                "went through the doc 18 P5 facade its receipt "
+                "rides in this field's receipt entry"),
             "coremind")
     elif status == "queued":
         ticket.fill(
@@ -923,6 +1001,8 @@ def ticket_for(ref: str, db: Any = None, *,
                                    f"with id {ident!r} exists")
         ticket = _contract_ticket(contract, now)
         _apply_leases(ticket, db, now)
+        _apply_cancel_receipt(ticket, db)
+        _apply_help(ticket, db)
         return ticket.to_dict()
     if kind == "mission":
         if db is None:
@@ -936,6 +1016,8 @@ def ticket_for(ref: str, db: Any = None, *,
                                    f"{ident!r} exists")
         ticket = _mission_ticket(store, mission, now)
         _apply_leases(ticket, db, now)
+        _apply_cancel_receipt(ticket, db)
+        _apply_help(ticket, db)
         return ticket.to_dict()
     if kind == "job":
         reg = registry if registry is not None else shared_registry()
@@ -946,6 +1028,8 @@ def ticket_for(ref: str, db: Any = None, *,
                                    "swept after their TTL)")
         ticket = _job_ticket(job.snapshot(), tool_registry, now)
         _apply_leases(ticket, db, now)
+        _apply_cancel_receipt(ticket, db)
+        _apply_help(ticket, db)
         return ticket.to_dict()
     if kind == "browser_run":
         if db is None:
@@ -958,6 +1042,8 @@ def ticket_for(ref: str, db: Any = None, *,
                                    f"with run_id {ident!r} exists")
         ticket = _browser_ticket(rows[0], now)
         _apply_leases(ticket, db, now)
+        _apply_cancel_receipt(ticket, db)
+        _apply_help(ticket, db)
         return ticket.to_dict()
     if kind == "media_job":
         if db is None:
@@ -970,6 +1056,8 @@ def ticket_for(ref: str, db: Any = None, *,
                                    f"job_id {ident!r} exists")
         ticket = _media_ticket(rows[0], now)
         _apply_leases(ticket, db, now)
+        _apply_cancel_receipt(ticket, db)
+        _apply_help(ticket, db)
         return ticket.to_dict()
     if kind == "coremind_job":
         if coremind is None:
@@ -982,6 +1070,8 @@ def ticket_for(ref: str, db: Any = None, *,
                                    f"{ident!r} exists")
         ticket = _coremind_ticket(row, coremind, now)
         _apply_leases(ticket, db, now)
+        _apply_cancel_receipt(ticket, db)
+        _apply_help(ticket, db)
         return ticket.to_dict()
     # kind == "task"
     if graph is None:
@@ -994,6 +1084,8 @@ def ticket_for(ref: str, db: Any = None, *,
                                "supplied graph")
     ticket = _task_ticket(task, graph, now)
     _apply_leases(ticket, db, now)
+    _apply_cancel_receipt(ticket, db)
+    _apply_help(ticket, db)
     return ticket.to_dict()
 
 
