@@ -225,9 +225,11 @@ def render_explore_board(context: Any = None, *,
     if fresh:
         lines.append("moving now:")
         for claim in fresh[:5]:
+            grade = str((claim.get("proof_grade") or {}).get(
+                "grade") or "G0")
             lines.append(
                 f"· [{claim.get('kind')}] {claim.get('text')} — "
-                f"fresh, last evidence "
+                f"proof {grade}, fresh, last evidence "
                 f"{_when(claim.get('observed_at') or 0, tz)}")
         if len(fresh) > 5:
             lines.append(

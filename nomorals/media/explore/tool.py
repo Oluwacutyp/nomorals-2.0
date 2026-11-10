@@ -149,10 +149,12 @@ def _render_trends(claims: list[dict[str, Any]],
         if legs.get("single_source"):
             bits.append("single-source (seed signal only)")
         standing = claim.get("standing") or "fresh"
+        grade = str((claim.get("proof_grade") or {}).get("grade")
+                    or "G0")
         lines.append(
             f"· [{claim.get('kind')}] {claim.get('text')} — "
-            f"{'; '.join(bits)} · {standing}, last evidence "
-            f"{_when(claim.get('observed_at') or 0)}")
+            f"{'; '.join(bits)} · proof {grade} · {standing}, "
+            f"last evidence {_when(claim.get('observed_at') or 0)}")
     if report:
         verdicts = report.get("candidates") or {}
         if verdicts.get("promoted"):

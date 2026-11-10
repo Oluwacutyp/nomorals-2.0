@@ -34,6 +34,7 @@ from typing import Any
 
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
+from ..core.proof_grade import ClaimGrade, EvidenceRef
 from .kg import KnowledgeGraph
 from .research_swarm import (
     ResearchSwarm,
@@ -50,6 +51,8 @@ __all__ = [
     "ResearchClaim",
     "classify_domain",
     "claim_from_finding",
+    "claim_proof_grade",
+    "proof_grade_payload",
     "check_conflicts",
     "promotion_gate",
     "promote",
@@ -200,6 +203,12 @@ class ResearchClaim:
     target_files: list[str] = field(default_factory=list)
     failing_test: str = ""
 
+    def proof_grade(self) -> ClaimGrade:
+        """The proof grade this claim's cited evidence earns
+        (doc 24 PG3) — derived from the record's own sources by
+        :func:`claim_proof_grade`, never from ``confidence``."""
+        return claim_proof_grade(self)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -207,6 +216,7 @@ class ResearchClaim:
             "domain": self.domain,
             "angle": self.angle,
             "sources": self.sources,
+            "proof_grade": proof_grade_payload(self),
             "confidence": round(float(self.confidence), 3),
             "fetched_at": self.fetched_at,
             "query": self.query,
@@ -284,6 +294,84 @@ def claim_from_finding(finding: SwarmFinding, query: str) -> ResearchClaim:
         target_files=list(getattr(finding, "target_files", []) or []),
         failing_test=str(getattr(finding, "failing_test", "") or ""),
     )
+
+
+# ── proof grades (doc 24 PG3) ──────────────────────────────────────
+
+
+def _distinct_source_urls(claim: Any) -> list[str]:
+    """The distinct cited source URLs on a claim/finding record,
+    in citation order — the claim's empirical evidence."""
+    urls: list[str] = []
+    for source in getattr(claim, "sources", None) or []:
+        if not isinstance(source, dict):
+            continue
+        url = str(source.get("url") or "").strip()
+        if url and url not in urls:
+            urls.append(url)
+    return urls
+
+
+def claim_proof_grade(claim: Any) -> ClaimGrade:
+    """The proof grade a research claim's OWN cited evidence
+    earns (doc 24 PG3), computed by PG1's machinery
+    (:class:`~nomorals.core.proof_grade.ClaimGrade`) from the
+    record itself — never from the claim's ``confidence`` number
+    or wording (a 0.99-confidence claim with no sources grades
+    exactly like a 0.10 one with no sources).
+
+    * each distinct cited source URL is a primary empirical
+      source the swarm actually consulted → an
+      ``empirical_source`` ref naming the URL, G4 (two or more
+      distinct sources are the independent-replication shape of
+      the same rung; the refs on the record show the count);
+    * no cited sources, but the claim text itself clears the
+      promotion gate's substance floor (content words) → the
+      record passed the structural filter and nothing more: a
+      ``logical_check`` ref, G1;
+    * no sources and below the substance floor → a recorded
+      thought: a ``generative_thought`` ref, G0.
+
+    Agents is L5, core is L1: the machinery is imported, not
+    mirrored. Duck-typed over ResearchClaim and SwarmFinding —
+    both carry ``sources`` / ``claim``.
+    """
+    ident = str(getattr(claim, "id", "") or "finding")
+    urls = _distinct_source_urls(claim)
+    if urls:
+        return ClaimGrade(evidence=tuple(
+            EvidenceRef("empirical_source", url) for url in urls[:10]))
+    words = _content_words(str(getattr(claim, "claim", "") or ""))
+    if len(words) >= _MIN_CLAIM_WORDS:
+        return ClaimGrade(evidence=(
+            EvidenceRef("logical_check", f"claim:{ident}"),))
+    return ClaimGrade(evidence=(
+        EvidenceRef("generative_thought", f"claim:{ident}"),))
+
+
+def proof_grade_payload(claim: Any) -> dict[str, Any]:
+    """The durable/rendered form of a claim's proof grade: the
+    :class:`ClaimGrade` dict (derived grade + evidence refs)
+    plus ``basis`` — one line saying WHY, in evidence terms."""
+    urls = _distinct_source_urls(claim)
+    payload = claim_proof_grade(claim).to_dict()
+    if len(urls) >= 2:
+        payload["basis"] = (
+            f"{len(urls)} distinct cited sources — primary "
+            "empirical evidence, independently corroborated")
+    elif len(urls) == 1:
+        payload["basis"] = (
+            "1 cited source — primary empirical evidence, "
+            "uncorroborated by a second source")
+    elif payload["grade"] == "G1":
+        payload["basis"] = (
+            "no cited sources — the claim text alone passed the "
+            "structural substance filter")
+    else:
+        payload["basis"] = (
+            "no cited sources and below the substance floor — "
+            "a recorded thought, not evidence")
+    return payload
 
 
 # ── conflict detection against the knowledge graph ─────────────────────────
@@ -445,8 +533,9 @@ def promote(claims: list[ResearchClaim], db: Any, *,
         if not ok:
             if any(r.startswith("confidence") for r in reasons):
                 result["skipped_low_confidence"] += 1
-            result["rejected"].append({"claim_id": claim.id,
-                                       "reasons": reasons})
+            result["rejected"].append(
+                {"claim_id": claim.id, "reasons": reasons,
+                 "proof_grade": proof_grade_payload(claim)})
             _log.warning("promotion gate rejected claim %s: %s",
                          claim.id, "; ".join(reasons))
             continue
@@ -491,6 +580,7 @@ def promote(claims: list[ResearchClaim], db: Any, *,
             "claim": claim.claim,
             "domain": claim.domain,
             "angle": claim.angle,
+            "proof_grade": claim_proof_grade(claim).grade.name,
             "confidence": round(confidence, 3),
             "fetched_at": claim.fetched_at,
             "query": claim.query,
@@ -1358,7 +1448,8 @@ class ResearchDigest:
                 if sources and isinstance(sources[0], dict):
                     src = str(sources[0].get("title")
                               or sources[0].get("url") or "")[:40]
-                line = f"- [{conf:.0%}] {text[:140]}"
+                grade = claim_proof_grade(f).grade.name
+                line = f"- [{conf:.0%} · {grade}] {text[:140]}"
                 if src:
                     line += f" ({src})"
                 lines.append(line)
@@ -1392,8 +1483,9 @@ class ResearchDigest:
                     str(s.get("url", ""))
                     for s in (f.sources or [])
                     if isinstance(s, dict) and s.get("url"))
-                lines.append(f"{i}. [{float(f.confidence or 0.0):.0%}] "
-                             f"{f.claim}")
+                grade = claim_proof_grade(f).grade.name
+                lines.append(f"{i}. [{float(f.confidence or 0.0):.0%} "
+                             f"· {grade}] {f.claim}")
                 detail = f"   angle: {f.angle or '(unspecified)'}"
                 if urls:
                     detail += f" | sources: {urls}"

@@ -114,6 +114,7 @@ from .trends import (
                     claim_standing,
                     current_claims,
                     evaluate_trends,
+                    proof_grade_for_claim,
 )
 
 __all__ = [
@@ -157,6 +158,7 @@ __all__ = [
     "effective_niches",
     "ensure_explore_jobs",
     "evaluate_trends",
+    "proof_grade_for_claim",
     "explore_for_context",
     "explore_status",
     "feed_claim_outcome",

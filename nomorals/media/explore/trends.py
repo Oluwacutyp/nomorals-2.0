@@ -69,6 +69,21 @@ No manufactured certainty: a subject the evidence cannot carry
 gets NO claim, and the evaluation report's ``declined`` list says
 which subjects were declined and why. The evaluator never raises
 into a caller.
+
+Proof grades (doc 24 PG3): every claim ALSO carries a
+``proof_grade`` — a :class:`~nomorals.core.proof_grade.ClaimGrade`
+reading DERIVED from the evidence legs attached to the claim
+(:func:`proof_grade_for_claim`), never assigned from the kind
+label. The derivation agrees with PG1's kind mapping when the
+kind's defining evidence is actually attached (trend with its
+corroboration legs → G4; spike with its derivation → G2;
+unverified with its intake record → G1) — and a claim whose
+record lacks the legs grades at what its evidence earns, however
+it is labelled. Media is L4, core is L1, so the machinery is
+imported, not mirrored. The grade is stamped at authoring time,
+re-derived at read time in :func:`current_claims` (so rows stored
+before PG3 grade too), and rendered beside the kind on the board
+and the trends text.
 """
 
 from __future__ import annotations
@@ -77,6 +92,7 @@ import time
 from typing import Any
 
 from ...core.logging_setup import get_logger
+from ...core.proof_grade import ClaimGrade, EvidenceRef
 from ..failures import record_failure
 from .store import (
     CANDIDATE_PROMOTED,
@@ -98,6 +114,7 @@ __all__ = [
     "claim_standing",
     "current_claims",
     "evaluate_trends",
+    "proof_grade_for_claim",
     "source_class_of",
 ]
 
@@ -173,6 +190,72 @@ def _normalize(text: str) -> str:
     return " ".join("".join(chars).split())
 
 
+def proof_grade_for_claim(claim: dict[str, Any]) -> ClaimGrade:
+    """The proof grade a claim's ATTACHED evidence earns (doc 24
+    PG3), derived from its ``basis`` legs and ``backing`` — never
+    from its kind label or its ``confidence_basis`` wording.
+
+    The legs, weakest to strongest:
+
+    * no basis at all → the claim itself is the only provenance:
+      a ``generative_thought`` ref, G0.
+    * a structured basis + the mandatory ``confidence_basis`` →
+      the claim passed the evaluator's intake (the inexpensive
+      filter): a ``logical_check`` ref, G1. Every authored claim
+      earns at least this.
+    * a spike whose defining derivation is attached — the
+      velocity dict computed over the beat's own series, or a
+      candidate's sighting count at the spike bar — earns a
+      ``derivation`` ref, G2. Velocity on any other kind is a
+      signal named in the basis text, never a grade leg: velocity
+      does not upgrade a claim (WS4 doctrine, pinned).
+    * corroboration legs actually attached — result-bearing
+      observations across >=2 distinct sweeps, results
+      corroborated across source classes, or a single sweep whose
+      legs span >=2 source classes — earn ``empirical_source``
+      refs naming the sweeps / the candidate record the sightings
+      live on, G4.
+
+    A claim LABELLED trend whose record lacks the corroboration
+    legs therefore grades G1 (or G0 without a basis): labels do
+    not grade, evidence does (the PG2 lesson)."""
+    legs = claim.get("basis") or {}
+    key = str(claim.get("claim_key") or claim.get("claim_id") or "")
+    kind = str(claim.get("kind") or "")
+    evidence: list[EvidenceRef] = []
+    if legs and str(claim.get("confidence_basis") or "").strip():
+        evidence.append(EvidenceRef("logical_check", f"claim:{key}"))
+    if kind == CLAIM_SPIKE:
+        velocity = legs.get("velocity")
+        sightings = legs.get("sightings")
+        if velocity:
+            evidence.append(EvidenceRef(
+                "derivation", f"claim:{key}:velocity"))
+        elif sightings is not None and int(sightings or 0) >= 3:
+            evidence.append(EvidenceRef(
+                "derivation", f"claim:{key}:sightings"))
+    sweeps = [str(s) for s in (legs.get("sweeps") or []) if s]
+    classes = [str(c) for c in (legs.get("source_classes") or [])
+               if c]
+    corroborated = int(legs.get("corroborated_urls") or 0) >= 1 \
+        or int(legs.get("corroborated_sightings") or 0) >= 1
+    if len(sweeps) >= 2 or corroborated \
+            or (len(sweeps) == 1 and len(classes) >= 2):
+        for sweep_id in sweeps[:8]:
+            evidence.append(EvidenceRef(
+                "empirical_source", f"sweep:{sweep_id}"))
+        if corroborated:
+            backing = claim.get("backing") or {}
+            candidate_key = str(backing.get("candidate_key") or "")
+            ref = (f"candidate:{candidate_key}" if candidate_key
+                   else f"claim:{key}:corroboration")
+            evidence.append(EvidenceRef("empirical_source", ref))
+    if not evidence:
+        evidence.append(EvidenceRef(
+            "generative_thought", f"claim:{key}"))
+    return ClaimGrade(evidence=tuple(evidence))
+
+
 def claim_standing(claim: dict[str, Any], now: float = 0.0) -> str:
     """``fresh`` or ``stale`` at ``now``, computed from the claim's
     newest evidence time and its freshness window (digestion
@@ -208,6 +291,11 @@ def current_claims(store: ExploreStore, *,
             continue
         annotated = dict(row)
         annotated["standing"] = claim_standing(row, now)
+        # PG3: the grade is re-derived from the basis at read
+        # time — the derivation governs, so rows stored before
+        # PG3 (or with a stale stamp) read at the grade their
+        # attached evidence earns.
+        annotated["proof_grade"] = proof_grade_for_claim(row).to_dict()
         if now:
             annotated["age_s"] = max(
                 0.0, float(now) - float(row.get("observed_at") or 0))
@@ -392,7 +480,7 @@ def _claim_row(*, key_seed: str, kind: str, subject: str,
                backing: dict[str, Any],
                entities: list[str]) -> dict[str, Any]:
     claim_key = _normalize(key_seed)
-    return {
+    row = {
         "claim_id": f"claim:{claim_key.replace(' ', '-')}",
         "claim_key": claim_key,
         "kind": kind,
@@ -410,12 +498,16 @@ def _claim_row(*, key_seed: str, kind: str, subject: str,
         "entities": entities,
         "backing": backing,
     }
+    # PG3: stamp the derived grade at authoring time (the durable
+    # record carries it; reads re-derive — see current_claims).
+    row["proof_grade"] = proof_grade_for_claim(row).to_dict()
+    return row
 
 
 _MATERIAL_FIELDS = (
     "kind", "text", "confidence_basis", "basis", "freshness_s",
     "observed_at", "subject", "subject_kind", "scope", "entities",
-    "backing",
+    "backing", "proof_grade",
 )
 
 
@@ -663,6 +755,10 @@ def evaluate_trends(store: ExploreStore, *,
                 "source_classes": legs_full["source_classes"],
                 "corroborated_sightings":
                     legs_full["corroborated_sightings"],
+                # PG3: the sighting count is the candidate spike's
+                # defining evidence — it rides the basis so the
+                # grade derivation can read it back.
+                "sightings": legs_full["sightings"],
                 "velocity": None,
                 "owner_gravity": legs_full["owner_gravity"],
                 "single_source":
