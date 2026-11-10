@@ -71,6 +71,10 @@ SOURCE_NAMES: dict[str, str] = {
     "immune_police": "immune police",
     "media_delivery": "media delivery",
     "community_bill": "community bill",
+    # Stage B pilots: the record each pilot's receipt derives from.
+    "delegation_contract": "delegation contract",
+    "media_job": "media job",
+    "cbt_intervention": "CBT intervention",
 }
 
 

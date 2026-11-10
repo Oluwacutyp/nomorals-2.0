@@ -7,7 +7,7 @@ triggers: craft pack, software cooperative, delivery cell
 layer: craft
 kind: pack
 domain: build
-fixtures: tests/test_delegation.py, tests/test_d18p2_run_ticket.py, tests/test_skillbook.py
+fixtures: tests/test_delegation.py, tests/test_d18p2_run_ticket.py, tests/test_skillbook.py, tests/test_d2223_stage_b.py
 version: 1
 ---
 

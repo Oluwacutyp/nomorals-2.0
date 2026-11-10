@@ -19,6 +19,10 @@ run — no parallel systems:
 The pack form lives with the filebook it extends
 (:mod:`nomorals.skills.packs`); role contracts live with the role
 machinery they complete (:mod:`nomorals.agents.role_contracts`).
+
+Stage B adds :mod:`nomorals.craft.pilots` — the three domain
+pilots (software, visual/media, CBT) that run this foundation
+end-to-end and land receipts in the schema above.
 """
 
 from __future__ import annotations
@@ -32,6 +36,17 @@ from .levels import (
     grade_for_level,
     is_handoff_level,
     parse_level,
+)
+from .pilots import (
+    CBT_PACK_ID,
+    MEDIA_PACK_ID,
+    SOFTWARE_PACK_ID,
+    PilotError,
+    PilotRun,
+    run_cbt_pilot,
+    run_media_pilot,
+    run_pack_fixtures,
+    run_software_pilot,
 )
 from .receipts import (
     HandoffReceipt,
@@ -58,6 +73,10 @@ __all__ = [
     "adapt_bill_receipt", "render_receipt_chain",
     # seed
     "SEED_DOMAINS", "seed_domain", "seed_occupation",
+    # pilots (Stage B)
+    "PilotError", "PilotRun", "run_pack_fixtures",
+    "run_software_pilot", "run_media_pilot", "run_cbt_pilot",
+    "SOFTWARE_PACK_ID", "MEDIA_PACK_ID", "CBT_PACK_ID",
     # graph (lazy — it composes the record organs)
     "CraftGraph", "GraphNode", "GraphEdge", "project_graph",
     "NODE_KINDS",

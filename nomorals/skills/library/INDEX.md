@@ -20,7 +20,9 @@
 - `context-budgeting` — Context budgeting — the prompt is assembled, not accumulated: How working context is built: prioritized sections, honest truncation, skills loaded on demand. (topics: context, prompts, budget, tokens)
 ## craft
 
+- `cbt-wellbeing-pack` — CBT/wellbeing craft pack — structured exercises on the health shell: The CBT exercise set in pack form: thought records, activation, restructuring, routines and relapse-prevention plans as structured intervention records, run as a cell on the shipped health shell. (topics: cbt, wellbeing, exercises, health, records)
 - `software-craft-pack` — Software craft pack — the cooperative delivery cell as a pack: The software cooperative in pack form: the contract-first workflow, rubric, anti-patterns, evaluators and failure modes a delivery cell runs when it builds software. (topics: cooperative, craft, delivery cell, software engineering)
+- `visual-media-craft-pack` — Visual/media craft pack — edit graphs, rights and provenance: The visual/media cooperative in pack form: a media job as a contract, the edit graph as the work, the rights manifest and validation recorded in the deliverable's provenance. (topics: media, craft, editing, provenance, images)
 ## media
 
 - `media-delivery-shapes` — Media delivery shapes — consumable form or it didn't happen: Media must arrive in the form the chat consumes: photos inline, GIFs animated, couples as two pictures. (topics: media, delivery, photos, gifs, stickers)
