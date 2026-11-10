@@ -194,6 +194,7 @@ def download(
     cookies_file: str = "",
     progress_event: Callable[[int, int | None], None] | None = None,
     progress_segments: Callable[[int, int], None] | None = None,
+    proxy: str = "",
 ) -> dict[str, Any]:
     """Download media, preferring yt-dlp and falling back to direct HTTP.
 
@@ -208,6 +209,16 @@ def download(
     and ``progress_segments(done, total)`` for fragmented media.  The
     CLI backend runs a subprocess and cannot stream structured
     figures; it keeps the string callback only.
+
+    ``proxy`` (doc 17 P3) pins EVERY backend to one explicit proxy —
+    the route the media downloader's proxy stage decided through the
+    route authority: yt-dlp receives its own ``proxy`` option /
+    ``--proxy`` flag, the direct fallback an explicit
+    ``HttpClient(proxy_url=...)``.  It replaces the retired
+    process-wide ``*_PROXY`` env window: no Devon code mutates
+    ``os.environ`` for routing anymore.  Empty keeps each backend's
+    shipped default resolution untouched (yt-dlp's ambient-env
+    behaviour; the direct fallback's resolver → owner-default chain).
     """
     target_dir = Path(destination).expanduser()
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -218,10 +229,10 @@ def download(
 
     module = load_optional("yt_dlp")
     if module is not None:
-        return _download_python_api(module, url, target_dir, format_spec, audio_only, progress, started, cookies_file, progress_event, progress_segments)
+        return _download_python_api(module, url, target_dir, format_spec, audio_only, progress, started, cookies_file, progress_event, progress_segments, proxy=proxy)
     if which("yt-dlp"):
-        return _download_cli(url, target_dir, format_spec, audio_only, timeout, started, cookies_file)
-    return _download_direct(url, target_dir, progress, started, progress_event)
+        return _download_cli(url, target_dir, format_spec, audio_only, timeout, started, cookies_file, proxy=proxy)
+    return _download_direct(url, target_dir, progress, started, progress_event, proxy=proxy)
 
 
 def _download_python_api(
@@ -235,6 +246,7 @@ def _download_python_api(
     cookies_file: str = "",
     progress_event: Callable[[int, int | None], None] | None = None,
     progress_segments: Callable[[int, int], None] | None = None,
+    proxy: str = "",
 ) -> dict[str, Any]:
     options: dict[str, Any] = {
         "outtmpl": str(target_dir / "%(title).120B [%(id)s].%(ext)s"),
@@ -253,6 +265,11 @@ def _download_python_api(
         options.update(_cookie_opts)
         _log.debug("yt-dlp: using cookies from %s",
                    _cookie_opts.get("cookiefile", "?"))
+    if proxy:
+        # yt-dlp's own proxy option (doc 17 P3): an explicit route
+        # decision, honoured by yt-dlp itself — it replaces the
+        # retired *_PROXY env window and wins over the ambient env.
+        options["proxy"] = proxy
     if audio_only:
         options["postprocessors"] = [
             {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
@@ -360,6 +377,7 @@ def _download_cli(
     timeout: float,
     started: float,
     cookies_file: str = "",
+    proxy: str = "",
 ) -> dict[str, Any]:
     from ..media.cookies import ytdlp_cookie_args_for
     _cookie_args = (["--cookies", cookies_file] if cookies_file
@@ -369,7 +387,7 @@ def _download_cli(
     argv = [
         "yt-dlp", "-f", format_spec, "-o", str(target_dir / "%(title).120B [%(id)s].%(ext)s"),
         "--no-playlist", "--retries", "3", "--newline",
-    ] + _cookie_args + [url]
+    ] + _cookie_args + (["--proxy", proxy] if proxy else []) + [url]
     if audio_only:
         argv += ["-x", "--audio-format", "mp3"]
     if which("ffmpeg"):
@@ -467,8 +485,15 @@ def _download_direct(
     progress: Callable[[str], None] | None,
     started: float,
     progress_event: Callable[[int, int | None], None] | None = None,
+    proxy: str = "",
 ) -> dict[str, Any]:
-    """Plain HTTP download with resume — no site extraction."""
+    """Plain HTTP download with resume — no site extraction.
+
+    ``proxy`` is the caller's explicit route decision (doc 17 P3):
+    ``HttpClient``'s explicit ``proxy_url`` outranks its resolver →
+    owner-default chain, so a decided route is honoured here exactly
+    as on the yt-dlp backends.  Empty (``""`` is HttpClient's own
+    no-explicit-proxy value) leaves that chain untouched."""
     from ..core.http import HttpClient, url_filename
 
     name = _clean(url_filename(url))
@@ -486,7 +511,7 @@ def _download_direct(
 
     if _cancel_requested():
         raise MediaError(CANCELLED_MESSAGE)
-    response = HttpClient(timeout=600.0).request(
+    response = HttpClient(timeout=600.0, proxy_url=proxy).request(
         "GET", url, stream_to=target, resume=True, progress=hook)
     if not target.exists() or target.stat().st_size == 0:
         raise MediaError("direct download produced an empty file")

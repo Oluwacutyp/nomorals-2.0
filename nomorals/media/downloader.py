@@ -77,7 +77,6 @@ import re
 import sys
 import time
 import urllib.parse
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -496,28 +495,6 @@ def _embedded_media_urls(markup: str) -> list[str]:
         except Exception:  # noqa: BLE001 - hand-unescape the common case
             add(raw.replace("\\/", "/").replace("\\u0026", "&"))
     return out
-
-
-@contextmanager
-def _proxy_env(proxy_url: str):
-    """Route subprocess/yt-dlp traffic through a proxy, then restore.
-
-    yt-dlp (python API and CLI) honors ``*_PROXY`` env vars; this scopes
-    the override to the wrapped call so no global state leaks.
-    """
-    keys = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
-            "http_proxy", "https_proxy", "all_proxy")
-    saved = {k: os.environ.get(k) for k in keys}
-    try:
-        for k in keys:
-            os.environ[k] = proxy_url
-        yield
-    finally:
-        for k in keys:
-            if saved[k] is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = saved[k]
 
 
 def _accepts_progress(fn: Any) -> bool:
@@ -1294,6 +1271,103 @@ class MediaDownloader:
             _log.debug("downloader: proxy pool unavailable: %s", exc)
             return None
 
+    # ── route authority (doc 17 P2/P3) ────────────────────────────────
+
+    def _route_authority(self) -> Any | None:
+        """The one route authority (:mod:`nomorals.core.proxy_routing`),
+        journaling to ``<home>/proxies/route_receipts.jsonl`` — the same
+        journal the lab rotation manager and the browser write to.
+        Lazy + cached; None when the authority cannot be built —
+        receipts are evidence, never a gate on downloading."""
+        if getattr(self, "_authority_tried", False):
+            return self._authority_cache
+        self._authority_tried = True
+        self._authority_cache = None
+        try:
+            from ..core.proxy_routing import (
+                RouteAuthority,
+                RouteReceiptJournal,
+                default_receipts_path,
+            )
+            home = getattr(self.context, "home", None) \
+                if self.context is not None else None
+            path = default_receipts_path()
+            # A concrete str/Path home wins (production + tests point
+            # it at the real Devon home).  The check must be concrete:
+            # os.PathLike's subclasshook accepts any object sporting
+            # __fspath__ — including test doubles — and a relative
+            # "home" is never the Devon home.
+            if isinstance(home, (str, Path)):
+                candidate = Path(home).expanduser()
+                if candidate.is_absolute():
+                    path = candidate / "proxies" / "route_receipts.jsonl"
+            self._authority_cache = RouteAuthority(
+                RouteReceiptJournal(path))
+        except Exception as exc:  # noqa: BLE001 - receipts never break
+            record_failure("_route_authority", exc)
+        return self._authority_cache
+
+    def _record_route_decision(self, proxy: dict[str, Any],
+                               proxy_url: str, url: str, *,
+                               candidates: int,
+                               candidate_tiers: dict[str, int],
+                               position: int, total: int,
+                               scheme: str) -> str:
+        """Journal one proxy-stage attempt through the authority
+        (consumer ``downloader``) and return its decision_id — ``""``
+        when journaling is unavailable, so the attempt proceeds
+        unreceipted rather than failing.  The receipt is built only
+        from the proxy's public fields + a boolean ``authenticated``
+        flag: the credentialed URL is the connect string handed to
+        the fetch, never receipt material."""
+        auth = self._route_authority()
+        if auth is None:
+            return ""
+        try:
+            from ..core.proxy_routing import ROUTE_FREE, ROUTE_PAID
+            from ..core.proxy_tiers import normalize_tier
+            try:
+                tier = normalize_tier(proxy.get("tier", "free"))
+            except ValueError:
+                tier = "free"
+            receipt = auth.record(
+                consumer="downloader",
+                route=tier if tier in (ROUTE_PAID, ROUTE_FREE)
+                else ROUTE_FREE,
+                reason_code="healthy_order",
+                reason=f"healthy pool candidate {position} of {total} "
+                       f"in protocol-aware order for {scheme}",
+                host=urllib.parse.urlparse(url).hostname or "",
+                source="proxypool",
+                tier=tier,
+                proxy_id=str(proxy.get("id", "")),
+                protocol=str(proxy.get("protocol", "") or ""),
+                country=str(proxy.get("country", "") or ""),
+                candidates=candidates,
+                candidate_tiers=candidate_tiers,
+                selected_by="healthy_order",
+                authenticated=bool(
+                    urllib.parse.urlparse(proxy_url).username))
+            return receipt.decision_id
+        except Exception as exc:  # noqa: BLE001 - never break the stage
+            record_failure("_record_route_decision", exc)
+            return ""
+
+    def _record_route_outcome(self, decision_id: str, outcome: str,
+                              detail: str = "") -> None:
+        """Append the observed outcome of a journaled decision.  No
+        decision_id (journaling unavailable at decision time) → no
+        outcome is fabricated."""
+        if not decision_id:
+            return
+        auth = self._route_authority()
+        if auth is None:
+            return
+        try:
+            auth.record_outcome(decision_id, outcome, detail)
+        except Exception as exc:  # noqa: BLE001 - reporting never breaks
+            record_failure("_record_route_outcome", exc)
+
     @staticmethod
     def _socks_usable() -> bool:
         from .. import compat
@@ -1352,8 +1426,17 @@ class MediaDownloader:
             return False
         scheme = (urllib.parse.urlparse(url).scheme or "https").lower()
         ordered = self._order_proxies(proxies, scheme)[:self.max_proxies]
+        candidate_tiers: dict[str, int] = {}
+        from ..core.proxy_tiers import normalize_tier
+        for row in proxies:
+            try:
+                row_tier = normalize_tier(row.get("tier", "free"))
+            except Exception:  # noqa: BLE001 - unlabelled = free
+                row_tier = "free"
+            candidate_tiers[row_tier] = \
+                candidate_tiers.get(row_tier, 0) + 1
         socks_ok = self._socks_usable()
-        for proxy in ordered:
+        for position, proxy in enumerate(ordered, start=1):
             if time.perf_counter() > budget["deadline"]:
                 break
             proto = str(proxy.get("protocol", "http") or "http").lower()
@@ -1372,17 +1455,33 @@ class MediaDownloader:
                 or proxy.get("url", "")
             if not proxy_url:
                 continue
+            # One route decision per attempt, minted through the route
+            # authority (doc 17 P3): the journal gains the receipt and
+            # the fetch gets the proxy EXPLICITLY (tools.media's
+            # ``proxy=`` — yt-dlp's own option/flag, HttpClient's
+            # proxy_url).  The retired ``_proxy_env`` process-wide env
+            # window is gone: no *_PROXY key is written, so no
+            # unrelated in-process reader (pumpdesk, apkforge, bare
+            # urllib) can inherit this download's route.
+            decision_id = self._record_route_decision(
+                proxy, proxy_url, url, candidates=len(proxies),
+                candidate_tiers=candidate_tiers, position=position,
+                total=len(ordered), scheme=scheme)
             t0 = time.perf_counter()
             try:
-                with _proxy_env(proxy_url):
-                    result = direct_download(
-                        url, target_dir, format_spec=format_spec,
-                        audio_only=audio_only, timeout=timeout,
-                        cookies_file=self._cookies_file(url),
-                        progress=self._job_progress("proxy"),
-                        **self._progress_kwargs(self._tracker()))
+                result = direct_download(
+                    url, target_dir, format_spec=format_spec,
+                    audio_only=audio_only, timeout=timeout,
+                    cookies_file=self._cookies_file(url),
+                    progress=self._job_progress("proxy"),
+                    proxy=proxy_url,
+                    **self._progress_kwargs(self._tracker()))
             except Exception as exc:  # noqa: BLE001 — demote, don't die
                 kind = classify_failure(exc)
+                from ..core.proxy_routing import OUTCOME_FAILED
+                self._record_route_outcome(
+                    decision_id, OUTCOME_FAILED,
+                    f"{kind.value}: {_err_text(exc, 160)}")
                 lat = time.perf_counter() - t0
                 try:
                     pool.record_failure(
@@ -1404,7 +1503,13 @@ class MediaDownloader:
                 # The fetch through this proxy claimed success but
                 # landed nothing usable.  That is a content failure,
                 # not proxy ill-health: the proxy is neither credited
-                # nor demoted, and the chain tries the next one.
+                # nor demoted, and the chain tries the next one.  The
+                # route receipt likewise gets NO outcome append: the
+                # fetch completed through the route, so neither
+                # "used" (nothing landed) nor "failed" (the route
+                # carried it) is attributable — the decision row
+                # keeps outcome None rather than blaming the route
+                # for the content.
                 report.stages.append(StageLog(
                     stage="proxy", url=url, proxy=masked, latency_s=lat,
                     error_class=FailureKind.NO_MEDIA_FOUND.value,
@@ -1422,6 +1527,10 @@ class MediaDownloader:
                 pool.record_success(pid, latency_ms=lat * 1000)
             except Exception as e:  # bookkeeping only
                 record_failure("_stage_proxy.bookkeeping", e)
+            from ..core.proxy_routing import OUTCOME_USED
+            self._record_route_outcome(
+                decision_id, OUTCOME_USED,
+                f"extractor={result.get('extractor', '')}")
             report.stages.append(StageLog(
                 stage="proxy", url=url, proxy=masked, latency_s=lat,
                 size_bytes=size, ok=True,

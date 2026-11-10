@@ -248,8 +248,13 @@ class RetryTests(unittest.TestCase):
 
 
 class ProxyDemoteTests(unittest.TestCase):
-    #: Neutralize ambient proxy env vars so the fake direct stage sees
-    #: exactly what _proxy_env sets (same trick as the proxypool tests).
+    #: Neutralize ambient proxy env vars so the test can prove the
+    #: proxy stage never writes them: since doc 17 P3 the stage hands
+    #: the proxy to the fetch through the explicit ``proxy=`` argument
+    #: (the channel yt-dlp's own proxy option receives), and the fake
+    #: below reads exactly that argument — while sampling the env
+    #: mid-call to pin that the retired ``_proxy_env`` window stays
+    #: retired.
     _CLEAR_PROXY_ENV = {
         "http_proxy": "", "https_proxy": "", "HTTP_PROXY": "",
         "HTTPS_PROXY": "", "all_proxy": "", "ALL_PROXY": "",
@@ -282,10 +287,12 @@ class ProxyDemoteTests(unittest.TestCase):
         audio = os.path.join(self.tmp, "p.mp3")
         Path(audio).write_bytes(b"data")
         calls = []
+        env_during = []
 
         def direct(url, dest, **k):
-            proxy = os.environ.get("HTTPS_PROXY", "")
+            proxy = k.get("proxy", "")
             calls.append(proxy)
+            env_during.append(os.environ.get("HTTPS_PROXY", ""))
             if not proxy:
                 raise RuntimeError("connection reset by peer")  # stage 1 dies
             if "8081" in proxy:
@@ -308,7 +315,10 @@ class ProxyDemoteTests(unittest.TestCase):
         self.assertEqual(calls[0], "")
         self.assertIn("8081", calls[1])
         self.assertIn("8082", calls[2])
-        # env is restored after the stage
+        # the retired env window stays retired: the pool proxies never
+        # appeared in the process env, during or after the stage
+        for seen in env_during:
+            self.assertNotIn("10.0.0.1", seen)
         self.assertNotIn("10.0.0.1", os.environ.get("HTTPS_PROXY", ""))
 
     def test_socks_proxy_skipped_without_socks_support(self):
