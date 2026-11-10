@@ -158,13 +158,13 @@ def _feature(*, fid=None, tags=(), geom_type=0, geometry=()) -> bytes:
 def _layer(name: str, features, keys=(), values=(), extent=4096,
            version=2) -> bytes:
     body = b""
+    body += _fb(1, name.encode("utf-8"))
     for feat in features:
-        body += _fb(1, feat)
+        body += _fb(2, feat)
     for key in keys:
-        body += _fb(2, key.encode("utf-8"))
+        body += _fb(3, key.encode("utf-8"))
     for value in values:
-        body += _fb(3, value)
-    body += _fb(4, name.encode("utf-8"))
+        body += _fb(4, value)
     if extent != 4096:
         body += _fv(5, extent)
     body += _fv(15, version)

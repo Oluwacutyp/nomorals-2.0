@@ -7,7 +7,7 @@ parsing for the MVT schema (vector-tile-spec 2.1), no protobuf
 runtime, no network.  The schema, field by field:
 
 * ``Tile`` — field 3 is the repeated ``Layer``.
-* ``Layer`` — 1: features, 2: keys, 3: values, 4: name,
+* ``Layer`` — 1: name, 2: features, 3: keys, 4: values,
   5: extent (default 4096), 15: version (required by the spec).
 * ``Feature`` — 1: id, 2: tags (packed key/value index pairs),
   3: GeomType (0 unknown, 1 point, 2 linestring, 3 polygon),
@@ -388,15 +388,15 @@ def _decode_layer(body: bytes) -> MvtLayer:
     for field_no, wire, value in _read_fields(body):
         if field_no == 15:
             version = int(value)
-        elif field_no == 4:
+        elif field_no == 1:
             name = _as_text(wire, value, "layer name")
         elif field_no == 5:
             extent = int(value)
-        elif field_no == 2:
-            keys.append(_as_text(wire, value, "layer key"))
         elif field_no == 3:
+            keys.append(_as_text(wire, value, "layer key"))
+        elif field_no == 4:
             values.append(_decode_value(bytes(value)))
-        elif field_no == 1:
+        elif field_no == 2:
             if wire != 2:
                 raise MvtError("layer feature is not a message")
             feature_bodies.append(bytes(value))
