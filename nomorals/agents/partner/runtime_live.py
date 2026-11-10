@@ -140,7 +140,17 @@ class RuntimeLiveMixin:
         front, and every supplied update is evaluated — and its
         decision recorded — by the broker.  A second owner
         policy (NM_MAPS_LIVE_SHARE) gates the whole surface,
-        off by default: Atlas on is not share on."""
+        off by default: Atlas on is not share on.
+
+        /map overlay (M7) is the owner's own layer over those
+        packs: named marker/polyline/polygon documents stored
+        as data (nomorals.maps.overlays), rendered through the
+        same overlay seam routes draw through.  Polygons ride
+        as outlines — the seam has no fill — and the show
+        caption says so whenever a polygon is in the overlay,
+        never silently.  The verbs here are the chat-thin
+        paths (one-marker add); the MapAgent + map tool carry
+        the same store and renderer to the brain."""
         from ...maps.settings import map_settings
 
         tail = (tail or "").strip()
@@ -150,7 +160,10 @@ class RuntimeLiveMixin:
                     "/map find <place name>  |  /map near <lat,lon>  |  "
                     "/map route <place or lat,lon> to <place or lat,lon>  |  "
                     "/map share <chat> <minutes> [exact|neighborhood|city]  |  "
-                    "/map share stop [chat]  |  /map share status")
+                    "/map share stop [chat]  |  /map share status  |  "
+                    "/map overlay list  |  /map overlay show <name>  |  "
+                    "/map overlay add <name> <lat,lon> [label]  |  "
+                    "/map overlay drop <name>")
         is_owner = True if message is None else self._is_operator(message)
         if not is_owner:
             return ("owner-only: Atlas renders the owner's installed "
@@ -174,12 +187,17 @@ class RuntimeLiveMixin:
             return self._map_route(rest.strip(), chat_key)
         if verb == "share":
             return self._map_share(rest.strip())
+        if verb == "overlay":
+            return self._map_overlay(rest.strip(), chat_key)
         return (f"unknown /map verb {verb!r} — /map packs | "
                 "/map view <lat,lon> [zoom] | /map find <place name> | "
                 "/map near <lat,lon> | "
                 "/map route <place or lat,lon> to <place or lat,lon> | "
                 "/map share <chat> <minutes> [precision] | "
-                "/map share stop [chat] | /map share status")
+                "/map share stop [chat] | /map share status | "
+                "/map overlay list | /map overlay show <name> | "
+                "/map overlay add <name> <lat,lon> [label] | "
+                "/map overlay drop <name>")
 
     def _map_packs_text(self) -> str:
         from ...maps.packs import verify_pack_dir
@@ -233,6 +251,110 @@ class RuntimeLiveMixin:
         return Router(
             self._map_packs_dir(), store=self._map_receipt_store(),
             federation=map_settings().routing_federation)
+
+    def _map_agent(self):
+        """The MapAgent (M7) over this runtime's context — the
+        overlay verbs ride the agent, so the chat surface, the
+        tool plane and the brain share one store + renderer."""
+        from ..map import MapAgent
+
+        return MapAgent(self.context)
+
+    def _map_overlay(self, spec: str, chat_key: str = "") -> str:
+        """/map overlay list | show <name> | add <name> <lat,lon>
+        [label] | drop <name> — the owner's own layers (M7)."""
+        from ...maps.coords import validate_lat, validate_lon
+        from ...maps.overlays import OverlayError, OverlayFeature
+
+        usage = ("usage: /map overlay list  |  /map overlay "
+                 "show <name>  |  /map overlay add <name> "
+                 "<lat,lon> [label]  |  /map overlay drop <name>")
+        toks = (spec or "").split()
+        if not toks:
+            return usage
+        sub = toks[0].lower()
+        agent = self._map_agent()
+        if sub == "list":
+            rows = agent.overlays()["overlays"]
+            if not rows:
+                return ("no overlays yet — /map overlay add "
+                        "<name> <lat,lon> [label] saves a marker "
+                        "overlay; richer documents are authored "
+                        "through the MapAgent.")
+            lines = [f"🗺 {len(rows)} overlay(s):"]
+            for row in rows:
+                kinds = ", ".join(row["kinds"])
+                lines.append(
+                    f"  • {row['name']} — "
+                    f"{row['feature_count']} feature(s) ({kinds})")
+            return "\n".join(lines)
+        if sub == "add":
+            if len(toks) < 3:
+                return ("usage: /map overlay add <name> <lat,lon> "
+                        "[label]")
+            name = toks[1]
+            try:
+                nums = [float(v) for v in toks[2].split(",")]
+            except ValueError:
+                nums = []
+            if len(nums) != 2:
+                return (f"couldn't parse coordinates {toks[2]!r} "
+                        "— /map overlay add <name> <lat,lon> "
+                        "[label]")
+            lat, lon = nums
+            try:
+                validate_lat(lat)
+                validate_lon(lon)
+            except ValueError as exc:
+                return f"bad marker point: {exc}"
+            label = " ".join(toks[3:])
+            try:
+                agent.overlay_store().create(
+                    name, [OverlayFeature(
+                        "marker", ((lat, lon),), label)])
+            except OverlayError as exc:
+                return f"couldn't save overlay {name!r}: {exc}"
+            return (f"📌 overlay {name!r} saved — a marker at "
+                    f"{lat:.4f},{lon:.4f}. /map overlay show "
+                    f"{name} renders it over its pack.")
+        if sub == "show":
+            name = " ".join(toks[1:]).strip()
+            if not name:
+                return "usage: /map overlay show <name>"
+            ticket = agent.overlay_render(name)
+            if ticket["outcome"] != "ok":
+                return ("🗺 " + (ticket["detail"]
+                                 or "that overlay couldn't be "
+                                    "rendered"))
+            caption = (f"🗺 overlay {ticket['overlay']['name']} · "
+                       f"{ticket['pack_name']} · "
+                       f"z{ticket['zoom']}")
+            for note in ticket["notes"]:
+                caption += f"\n{note}"
+            caption += f"\n{ticket['attribution']}"
+            chat = self._ref_from_key(chat_key)
+            try:
+                res = self.gateway.send_file(
+                    chat.platform, chat, ticket["image_path"],
+                    caption=caption, kind="image",
+                    name=f"overlay-{ticket['overlay']['name']}.png")
+                if getattr(res, "ok", False):
+                    return ""
+            except Exception as exc:  # noqa: BLE001
+                record_failure("runtime_live._map_overlay", exc)
+            return (f"(the overlay rendered from "
+                    f"{ticket['pack_name']} but the photo "
+                    "couldn't be sent on this surface)")
+        if sub == "drop":
+            name = " ".join(toks[1:]).strip()
+            if not name:
+                return "usage: /map overlay drop <name>"
+            if agent.overlay_store().delete(name):
+                return f"overlay {name!r} dropped."
+            return f"no overlay named {name!r}."
+        return (f"unknown /map overlay verb {sub!r} — list | "
+                "show <name> | add <name> <lat,lon> [label] | "
+                "drop <name>")
 
     @staticmethod
     def _map_find_winner(candidates):

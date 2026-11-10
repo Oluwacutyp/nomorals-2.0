@@ -221,6 +221,10 @@ def compose_agency(context: Any, *, db: Any = None) -> dict[str, Any]:
         from ..agents.news import NewsAgent
         return NewsAgent(context)
 
+    def _map_agent():
+        from ..agents.map import MapAgent
+        return MapAgent(context)
+
     def _social_manager():
         from ..social.manager import SocialManager
         return SocialManager(context) if context is not None else None
@@ -358,6 +362,7 @@ def compose_agency(context: Any, *, db: Any = None) -> dict[str, Any]:
     specialists = _try(_specialists)
     skillbook = _try(_skillbook)
     delegation = _try(_delegation)
+    map_agent = _try(_map_agent)
 
     gigs_adapter = adapters.get("gigs")
     readiness = {
@@ -407,13 +412,18 @@ def compose_agency(context: Any, *, db: Any = None) -> dict[str, Any]:
         "delegation": ("ready: work contracts + claim ledger on the "
                        "agency db" if delegation is not None else
                        "unavailable: no db for the delegation store"),
+        "maps": ("ready: MapAgent over the local Atlas planes "
+                 "(packs + gazetteer + router + renderers + "
+                 "overlays) — answers from installed packs only"
+                 if map_agent is not None else
+                 "unavailable: MapAgent construction failed"),
     }
     return {"db": db, "adapters": adapters, "authority": authority,
             "gateway": gateway, "search_fn": search_fn,
             "research_organ": research_organ,
             "wisdom_organ": wisdom_organ, "impossible": impossible,
             "specialists": specialists, "skillbook": skillbook,
-            "delegation": delegation,
+            "delegation": delegation, "map_agent": map_agent,
             "readiness": readiness}
 
 

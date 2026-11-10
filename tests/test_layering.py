@@ -281,6 +281,7 @@ MODULE_PINS: dict[str, int] = {
     "nomorals.tools.code_executor": 5, # plan executor -> agents.coding
     "nomorals.tools.edit_loop": 5,     # coding edit engine (agents.coding composes it)
     "nomorals.tools.decoder_agent": 5, # tool over agents.decoder/context
+    "nomorals.tools.map": 5,         # tool surface over agents.map (Atlas)
     "nomorals.tools.weather": 5,       # tool surface over agents.weather
     "nomorals.tools.workspace": 5,     # tool surface over workspace/goals/projects
     # recurrence is a pure-math leaf (stdlib only, zero intra-project

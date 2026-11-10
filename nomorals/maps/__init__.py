@@ -28,9 +28,13 @@ the owner-policy federation seam.  M5 adds the routing plane
 extracted from a pack's own tiles, Dijkstra over it, route
 receipts, and the same federation posture for the router; the
 renderer gains the overlay seam routes draw through
-(:class:`~nomorals.maps.vector_render.MapOverlay`).  The
-live-location broker (M6, on ``location/``'s ConsentStore) and
-the MapAgent (M7) build on these contracts in their own passes.
+(:class:`~nomorals.maps.vector_render.MapOverlay`).  M7 adds
+the owner's overlays (:mod:`nomorals.maps.overlays`): named
+marker/polyline/polygon documents, validated through the M1
+GeoJSON gate before decoded data becomes a layer, stored as
+data and converted onto the same overlay seam.  The
+live-location broker (M6, on ``location/``'s ConsentStore)
+builds on these contracts in its own pass.
 """
 
 from __future__ import annotations
@@ -94,6 +98,16 @@ from .mvt import (
     MvtTile,
     decode_mvt,
 )
+from .overlays import (
+    Overlay,
+    OverlayError,
+    OverlayFeature,
+    OverlayStore,
+    geojson_to_features,
+    overlay_bbox,
+    overlay_to_map_overlay,
+    validate_features,
+)
 from .packs import render_pack_preview, verify_pack_dir
 from .pipeline import BuildReport, PipelineError, run_build
 from .receipts import OPERATIONS, MapReceipt, MapReceiptStore, new_receipt_id
@@ -119,7 +133,8 @@ __all__ = [
     "DEFAULT_STYLE", "FORMAT_VERSION", "GAZETTEER_MAX_ZOOM",
     "GRAPH_FILENAME", "INDEX_FILENAME", "KIND_WEIGHTS",
     "MANIFEST_NAME", "MAX_CORRIDOR_TILES", "MAX_ZOOM",
-    "MERCATOR_MAX_LAT", "OPERATIONS", "PACKS", "POSTURE_FEDERATED",
+    "MERCATOR_MAX_LAT", "OPERATIONS", "Overlay", "OverlayError",
+    "OverlayFeature", "OverlayStore", "PACKS", "POSTURE_FEDERATED",
     "POSTURE_LOCAL", "REVERSE_LADDER_KM", "ROUTE_ZOOM", "SOURCES",
     "BBox", "BuildReport",
     "FixtureRenderer", "Gazetteer", "GazetteerEntry", "GeoValidation",
@@ -135,13 +150,15 @@ __all__ = [
     "RouteResult", "RouteStep", "Router", "SNAP_MAX_M", "SPEED_KMH",
     "StdlibPngBackend", "StyleError", "StyleLayer", "TextBackend",
     "TileCoord", "VectorRenderer", "build_manifest",
-    "clamp_mercator_lat", "decode_mvt", "get_pack", "get_source",
-    "hash_bytes", "lat_to_tile_y",
+    "clamp_mercator_lat", "decode_mvt", "geojson_to_features",
+    "get_pack", "get_source", "hash_bytes", "lat_to_tile_y",
     "lat_to_y_float", "load_manifest", "lon_to_tile_x",
     "lon_to_x_float", "map_settings", "match_rank", "new_receipt_id",
-    "normalize_name", "render_pack_preview", "run_build",
-    "style_hash", "tile_relpath", "tile_x_to_lon", "tile_y_to_lat",
-    "validate_geojson", "validate_lat", "validate_lon",
+    "normalize_name", "overlay_bbox", "overlay_to_map_overlay",
+    "render_pack_preview", "run_build", "style_hash",
+    "tile_relpath", "tile_x_to_lon", "tile_y_to_lat",
+    "validate_features", "validate_geojson", "validate_lat",
+    "validate_lon",
     "verify_pack", "verify_pack_dir", "verify_signature",
     "write_manifest",
 ]
