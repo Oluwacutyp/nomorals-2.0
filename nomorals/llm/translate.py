@@ -34,6 +34,12 @@ written from already-translated text and TTS speaks the translation),
 and the ``/translate`` command for on-demand work.  Group rooms keep
 their own languages: nothing here translates a room unbidden — only
 owner-addressed deliveries and explicit calls.
+
+Doc 19 §4 (pass T1): every translation leaves a durable receipt
+(:mod:`nomorals.llm.receipts`), the bidirectional quality gate
+(:mod:`nomorals.llm.translation_quality`) is wired in for
+fidelity-class requests, and :mod:`nomorals.llm.ticket` is the typed
+facade callers use when the exactness class matters.
 """
 
 from __future__ import annotations
@@ -56,6 +62,8 @@ from .languages import (
     language_name,
     normalize_code,
 )
+from .receipts import TranslationReceiptStore, new_receipt_id
+from .translation_quality import translate_with_quality
 
 _log = get_logger(__name__)
 
@@ -67,7 +75,16 @@ __all__ = [
     "owner_language",
     "localize_news_rows",
     "DEFAULT_LOCAL_MODEL_REPO",
+    "EXACTNESS_CLASSES",
+    "FIDELITY_CLASSES",
 ]
+
+#: Exactness classes a caller may request (doc 19 §4).  ``gist`` is
+#: the everyday class; the fidelity classes are the ones whose
+#: results may be labelled exact — and only when the quality gate
+#: passes them (see ``Translator._gate_verdict``).
+EXACTNESS_CLASSES = ("gist", "fidelity", "legal", "code")
+FIDELITY_CLASSES = ("fidelity", "legal", "code")
 
 #: The local rung's default weights (NLLB-200 distilled 600M — the
 #: small-specialist end of the NLLB family, 200 languages).
@@ -556,12 +573,16 @@ class Translator:
     def __init__(self, context: Any = None, *, db: Any = None,
                  brain: Any = None, client: Any = None,
                  local_backend: Any = None, profile_kind: str = "",
-                 health: _ProviderHealth | None = None) -> None:
+                 health: _ProviderHealth | None = None,
+                 receipt_store: Any = None) -> None:
         self.context = context
         self.settings = getattr(context, "settings", None)
         self.db = db if db is not None else getattr(context, "db", None)
         self._mem_lang = ""
         self._cache: dict[tuple[str, str, str], TranslationOutcome] = {}
+        self._gate_cache: dict[tuple[str, str, str],
+                               dict[str, Any]] = {}
+        self._last_receipt: dict[str, Any] | None = None
         if client is None:
             tools = getattr(self.settings, "tools", None)
             client = HttpClient(
@@ -576,6 +597,8 @@ class Translator:
                      or os.environ.get("NM_TRANSLATE_MODEL", ""))
         home = (getattr(self.settings, "home", "")
                 or os.path.expanduser("~/.nomorals"))
+        self.receipts = receipt_store or TranslationReceiptStore(
+            self.db, home)
         if not profile_kind:
             profile_kind = self._detect_profile_kind()
         self.local = LocalNmtRung(model_ref=model_ref, home=home,
@@ -690,35 +713,15 @@ class Translator:
                               "plainly labelled"})
         return out
 
-    def translate(self, text: str, *, target: str = "",
-                  source: str = "") -> TranslationOutcome:
-        """Translate ``text`` down the ladder.
+    def _ladder_outcome(self, raw: str, src: str,
+                        dst: str) -> TranslationOutcome | None:
+        """The first rung that honestly answers, or None.
 
-        ``target`` defaults to the owner's language; ``source`` to
-        detection.  The result ALWAYS says what happened — which rung
-        answered, or the marked identity when none could.
+        One ladder walk, shared by ``translate()`` and by the
+        quality gate's round trip (the gate's back-translation is a
+        ladder walk in reverse — it must not mint receipts or
+        recurse into the gate, so it comes through here).
         """
-        raw = text or ""
-        dst = normalize_code(target) or self.owner_language()
-        if not raw.strip():
-            return TranslationOutcome(text=raw, target_lang=dst,
-                                      rung="identity",
-                                      note="empty text")
-        src = normalize_code(source)
-        if not src:
-            detected, _conf = detect_language(raw)
-            src = "" if detected == "und" else detected
-        if src and src == dst:
-            return TranslationOutcome(text=raw, source_lang=src,
-                                      target_lang=dst,
-                                      rung="same-language",
-                                      note="already in the target "
-                                           "language")
-        key = (raw, src, dst)
-        cached = self._cache.get(key)
-        if cached is not None:
-            return cached
-        outcome: TranslationOutcome | None = None
         for rung in self._rungs():
             ok, _reason = rung.available()
             if not ok:
@@ -729,11 +732,218 @@ class Translator:
             if (src and src != dst and out.strip() == raw.strip()
                     and _word_count(raw) >= 3):
                 continue  # an echo is not a translation, any rung
-            outcome = TranslationOutcome(
+            return TranslationOutcome(
                 text=out, source_lang=src, target_lang=dst,
                 rung=getattr(rung, "rung_label", rung.name),
                 translated=True)
-            break
+        return None
+
+    # ── quality gate + receipts (doc 19 §4, pass T1) ─────────────
+
+    @staticmethod
+    def _gate_not_run(reason: str) -> dict[str, Any]:
+        """A gate verdict for a check that honestly did not run."""
+        return {"status": "not_run", "f1": None, "quality": None,
+                "threshold": None, "judge_score": None,
+                "reason": reason}
+
+    def _gate_verdict(self, raw: str, outcome: TranslationOutcome, *,
+                      exactness: str,
+                      reverse_fn: Callable[[str, str, str], str]
+                      | None = None) -> dict[str, Any]:
+        """The bidirectional quality gate's verdict on one produced
+        translation, in ``translation_quality``'s own shape.
+
+        The gate is a MARK, not a rung selector: its shipped
+        consumer (``i18n.bridge.score_contribution``) treats
+        ``passed`` as the label a translation must earn, doc 19's
+        rule is refuse-to-label-exact on failure, and doc 21's
+        posture for weak-signal languages is warn — so a failed
+        verdict never swaps or blocks the translation; it marks it
+        unverified and (via llm.ticket) refuses the exact label.
+        The gate runs for fidelity-class requests; anything it
+        cannot honestly check is ``not_run`` with the reason, never
+        a fake pass.  ``reverse_fn`` overrides the round trip's
+        back-translation leg (a local-only ticket's gate may only
+        ride the local rung).
+        """
+        if not outcome.translated:
+            return self._gate_not_run(
+                "identity fallback — no translation was produced "
+                "to verify")
+        if exactness not in FIDELITY_CLASSES:
+            return self._gate_not_run(
+                "gist class — the gate runs for fidelity-class "
+                "requests (fidelity/legal/code)")
+        src = outcome.source_lang or ""
+        dst = outcome.target_lang or ""
+        if not src:
+            return self._gate_not_run(
+                "source language undetected — a round trip needs a "
+                "named source language")
+        if src == dst:
+            return self._gate_not_run("already in the target language")
+        forward = outcome.text
+        probe = raw.strip()
+
+        def _fn(text: str, s: str, d: str) -> str:
+            # The forward leg returns the ladder's chosen candidate
+            # verbatim (the i18n bridge's adapter shape); only the
+            # back-translation leg does new work.
+            if text == probe and s == src and d == dst:
+                return forward
+            if reverse_fn is not None:
+                return reverse_fn(text, s, d) or ""
+            back = self._ladder_outcome(text, s, d)
+            return back.text if back is not None else ""
+
+        try:
+            result = translate_with_quality(
+                raw, source_lang=src, target_lang=dst,
+                translate_fn=_fn)
+        except Exception as exc:  # noqa: BLE001 — a crashed gate verifies nothing
+            _log.warning("translate: quality gate failed to run: %s",
+                         exc)
+            return self._gate_not_run(
+                "quality gate failed to run: "
+                + type(exc).__name__)
+        reason = result.judge_reason or (
+            "round trip kept the original's content"
+            if result.passed else
+            "round trip lost too much of the original's content")
+        return {"status": "passed" if result.passed else "failed",
+                "f1": round(result.back_translation_f1, 4),
+                "quality": round(result.quality, 4),
+                "threshold": result.threshold,
+                "judge_score": result.judge_score,
+                "reason": reason}
+
+    @staticmethod
+    def _quality_mark(outcome: TranslationOutcome,
+                      gate: dict[str, Any]) -> str:
+        """The one-word quality truth a receipt carries."""
+        if outcome.rung == "same-language":
+            return "same-language"
+        if not outcome.translated:
+            return "identity"
+        status = gate.get("status")
+        if status == "passed":
+            return "verified"
+        if status == "failed":
+            return "unverified"
+        return "not_checked"
+
+    def _mint_receipt(self, outcome: TranslationOutcome, *,
+                      chars: int, cache: str, exactness: str,
+                      gate: dict[str, Any],
+                      requester: str) -> dict[str, Any]:
+        """Build + persist the receipt for one translation.
+
+        Fail-open: the store never raises, and the receipt is kept
+        as ``last_receipt`` for facades (llm.ticket) either way.
+        """
+        receipt = {
+            "receipt_id": new_receipt_id(),
+            "at": time.time(),
+            "source_lang": outcome.source_lang,
+            "target_lang": outcome.target_lang,
+            "rung": outcome.rung,
+            "chars": int(chars),
+            "translated": bool(outcome.translated),
+            "cache": cache,
+            "exactness": exactness,
+            "gate": gate,
+            "quality_mark": self._quality_mark(outcome, gate),
+            "requester": requester or "",
+        }
+        try:
+            self.receipts.append(receipt)
+        except Exception:  # noqa: BLE001 — belt + braces: receipts never gate
+            _log.debug("translate: receipt mint failed", exc_info=True)
+        self._last_receipt = receipt
+        return receipt
+
+    @property
+    def last_receipt(self) -> dict[str, Any] | None:
+        """The receipt minted by this organ's most recent
+        translation (None before the first).  Facades read the
+        receipt id + gate verdict from here."""
+        return self._last_receipt
+
+    def recent_receipts(self, *, limit: int = 50, source_lang: str = "",
+                        target_lang: str = "",
+                        rung: str = "") -> list[dict[str, Any]]:
+        """Recent translation receipts, newest first — the read API
+        T2's surfaces render from.  Fail-open: a broken store reads
+        as empty, never as an exception in a surface."""
+        try:
+            return self.receipts.recent(
+                limit=limit, source_lang=source_lang,
+                target_lang=target_lang, rung=rung)
+        except Exception:  # noqa: BLE001
+            _log.debug("translate: receipt read failed", exc_info=True)
+            return []
+
+    def translate(self, text: str, *, target: str = "",
+                  source: str = "", exactness: str = "gist",
+                  requester: str = "") -> TranslationOutcome:
+        """Translate ``text`` down the ladder.
+
+        ``target`` defaults to the owner's language; ``source`` to
+        detection.  The result ALWAYS says what happened — which rung
+        answered, or the marked identity when none could.
+        ``exactness`` is the requested class (doc 19 §4): fidelity
+        classes run the quality gate, whose verdict lands on the
+        durable receipt this call mints either way.  ``requester``
+        attributes the receipt when the call path carries one
+        (news, the URL gist); "" is the honest unattributed mark.
+        """
+        if exactness not in EXACTNESS_CLASSES:
+            exactness = "gist"
+        raw = text or ""
+        dst = normalize_code(target) or self.owner_language()
+        if not raw.strip():
+            outcome = TranslationOutcome(text=raw, target_lang=dst,
+                                         rung="identity",
+                                         note="empty text")
+            self._mint_receipt(
+                outcome, chars=0, cache="miss", exactness=exactness,
+                gate=self._gate_not_run("empty text"),
+                requester=requester)
+            return outcome
+        src = normalize_code(source)
+        if not src:
+            detected, _conf = detect_language(raw)
+            src = "" if detected == "und" else detected
+        if src and src == dst:
+            outcome = TranslationOutcome(
+                text=raw, source_lang=src, target_lang=dst,
+                rung="same-language",
+                note="already in the target language")
+            self._mint_receipt(
+                outcome, chars=len(raw), cache="miss",
+                exactness=exactness,
+                gate=self._gate_not_run(
+                    "already in the target language"),
+                requester=requester)
+            return outcome
+        key = (raw, src, dst)
+        cached = self._cache.get(key)
+        if cached is not None:
+            gate = self._gate_cache.get(key)
+            if gate is None or (
+                    gate.get("status") == "not_run"
+                    and exactness in FIDELITY_CLASSES):
+                # A fidelity request on a gist-era cache entry earns
+                # its verdict now, against the cached candidate.
+                gate = self._gate_verdict(raw, cached,
+                                          exactness=exactness)
+                self._gate_cache[key] = gate
+            self._mint_receipt(
+                cached, chars=len(raw), cache="hit",
+                exactness=exactness, gate=gate, requester=requester)
+            return cached
+        outcome = self._ladder_outcome(raw, src, dst)
         if outcome is None:
             outcome = TranslationOutcome(
                 text=raw, source_lang=src, target_lang=dst,
@@ -741,12 +951,18 @@ class Translator:
                 note="translation unavailable right now — every rung "
                      "declined or failed, so this is the ORIGINAL "
                      "text, not a translation")
+        gate = self._gate_verdict(raw, outcome, exactness=exactness)
         # Only successes are cached: a transient outage must not pin
         # a text to the identity rung for the life of the process.
         if outcome.translated:
             if len(self._cache) > 512:
                 self._cache.clear()
+                self._gate_cache.clear()
             self._cache[key] = outcome
+            self._gate_cache[key] = gate
+        self._mint_receipt(
+            outcome, chars=len(raw), cache="miss",
+            exactness=exactness, gate=gate, requester=requester)
         return outcome
 
     # ── items + rows (the delivery shapes) ───────────────────────────
@@ -764,9 +980,11 @@ class Translator:
                                    source_lang=src,
                                    rung="same-language")
         t_out = self.translate(title, target=dst,
-                               source="" if src == "und" else src)
+                               source="" if src == "und" else src,
+                               requester="news")
         s_out = (self.translate(summary, target=dst,
-                                source=t_out.source_lang or "")
+                                source=t_out.source_lang or "",
+                                requester="news")
                  if summary.strip() else None)
         translated = t_out.translated or bool(s_out and s_out.translated)
         if not translated:
@@ -837,8 +1055,9 @@ class Translator:
             # boundary so the translation never starts mid-thought.
             cut = body.rfind(". ", 0, 1500)
             chunk = body[:cut + 1] if cut > 400 else body[:1500]
-        out = self.translate(chunk, target=dst)
-        title_out = (self.translate(page_title, target=dst)
+        out = self.translate(chunk, target=dst, requester="url")
+        title_out = (self.translate(page_title, target=dst,
+                                    requester="url")
                      if page_title else None)
         return {
             "ok": True, "url": url, "full": full,
