@@ -40,6 +40,13 @@ Doc 19 §4 (pass T1): every translation leaves a durable receipt
 (:mod:`nomorals.llm.translation_quality`) is wired in for
 fidelity-class requests, and :mod:`nomorals.llm.ticket` is the typed
 facade callers use when the exactness class matters.
+
+Pass T2: the ticket path adds section-wise document translation
+(:mod:`nomorals.llm.sections`), an applied glossary store
+(:mod:`nomorals.llm.glossary`), and this organ's cache gains its
+durable layer (:mod:`nomorals.llm.cache`) under the hot dicts —
+consulted before the ladder, written on success, invalidated on
+expiry or local-model change.
 """
 
 from __future__ import annotations
@@ -56,6 +63,7 @@ from urllib.parse import quote
 
 from ..core.http import HttpClient
 from ..core.logging_setup import get_logger
+from .cache import TranslationCacheStore, cache_key_for
 from .languages import (
     NLLB_CODES,
     detect_language,
@@ -579,8 +587,13 @@ class Translator:
         self.settings = getattr(context, "settings", None)
         self.db = db if db is not None else getattr(context, "db", None)
         self._mem_lang = ""
-        self._cache: dict[tuple[str, str, str], TranslationOutcome] = {}
-        self._gate_cache: dict[tuple[str, str, str],
+        # Hot cache keys carry a caller-supplied extra ("" on the
+        # plain path): the ticket path folds its glossary/preserve
+        # fingerprint in, so differently-glossaried translations of
+        # the same text never share an entry.
+        self._cache: dict[tuple[str, str, str, str],
+                          TranslationOutcome] = {}
+        self._gate_cache: dict[tuple[str, str, str, str],
                                dict[str, Any]] = {}
         self._last_receipt: dict[str, Any] | None = None
         if client is None:
@@ -597,8 +610,14 @@ class Translator:
                      or os.environ.get("NM_TRANSLATE_MODEL", ""))
         home = (getattr(self.settings, "home", "")
                 or os.path.expanduser("~/.nomorals"))
+        self.home = home
+        self._local_model_ref = model_ref
         self.receipts = receipt_store or TranslationReceiptStore(
             self.db, home)
+        # The durable cache layer under the hot dicts (doc 19 §4,
+        # T2): consulted before the ladder, written on success —
+        # receipts distinguish hot-hit / durable-hit / miss.
+        self._durable = TranslationCacheStore(self.db)
         if not profile_kind:
             profile_kind = self._detect_profile_kind()
         self.local = LocalNmtRung(model_ref=model_ref, home=home,
@@ -884,9 +903,46 @@ class Translator:
             _log.debug("translate: receipt read failed", exc_info=True)
             return []
 
+    def _durable_lookup(self, key: tuple[str, str, str, str]
+                        ) -> TranslationOutcome | None:
+        """Promote a durable-cache entry into the hot dicts.
+
+        A ``local``-rung entry whose recorded model reference
+        differs from the configured one is invalidated (doc 19:
+        cache invalidates on model change); expiry is the store's
+        own check.  Anything unparsable reads as a miss.
+        """
+        raw, src, dst, extra = key
+        payload = self._durable.get(cache_key_for(raw, src, dst, extra))
+        if not payload:
+            return None
+        body = payload.get("outcome") or {}
+        if body.get("rung") == "local" and str(
+                payload.get("model_ref", "")) != self._local_model_ref:
+            return None
+        try:
+            outcome = TranslationOutcome(
+                text=str(body["text"]),
+                source_lang=str(body.get("source_lang", src)),
+                target_lang=str(body.get("target_lang", dst)),
+                rung=str(body.get("rung", "identity")),
+                translated=bool(body.get("translated", False)),
+                note=str(body.get("note", "")))
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not outcome.translated:
+            return None  # successes only — a stored failure is a miss
+        self._cache[key] = outcome
+        gate = payload.get("gate")
+        self._gate_cache[key] = (gate if isinstance(gate, dict)
+                                 else self._gate_not_run(
+                                     "no verdict rode the cache entry"))
+        return outcome
+
     def translate(self, text: str, *, target: str = "",
                   source: str = "", exactness: str = "gist",
-                  requester: str = "") -> TranslationOutcome:
+                  requester: str = "",
+                  cache_key_extra: str = "") -> TranslationOutcome:
         """Translate ``text`` down the ladder.
 
         ``target`` defaults to the owner's language; ``source`` to
@@ -897,6 +953,9 @@ class Translator:
         durable receipt this call mints either way.  ``requester``
         attributes the receipt when the call path carries one
         (news, the URL gist); "" is the honest unattributed mark.
+        ``cache_key_extra`` separates cache entries that differ by
+        more than text + pair (the ticket path's glossary/preserve
+        fingerprint); "" keeps the plain organ key.
         """
         if exactness not in EXACTNESS_CLASSES:
             exactness = "gist"
@@ -927,8 +986,12 @@ class Translator:
                     "already in the target language"),
                 requester=requester)
             return outcome
-        key = (raw, src, dst)
+        key = (raw, src, dst, cache_key_extra)
         cached = self._cache.get(key)
+        cache_label = "hit"
+        if cached is None:
+            cached = self._durable_lookup(key)
+            cache_label = "durable-hit"
         if cached is not None:
             gate = self._gate_cache.get(key)
             if gate is None or (
@@ -940,7 +1003,7 @@ class Translator:
                                           exactness=exactness)
                 self._gate_cache[key] = gate
             self._mint_receipt(
-                cached, chars=len(raw), cache="hit",
+                cached, chars=len(raw), cache=cache_label,
                 exactness=exactness, gate=gate, requester=requester)
             return cached
         outcome = self._ladder_outcome(raw, src, dst)
@@ -960,6 +1023,11 @@ class Translator:
                 self._gate_cache.clear()
             self._cache[key] = outcome
             self._gate_cache[key] = gate
+            self._durable.put(
+                cache_key_for(raw, src, dst, cache_key_extra),
+                source_lang=src, target_lang=dst, rung=outcome.rung,
+                payload={"outcome": outcome.to_dict(), "gate": gate,
+                         "model_ref": self._local_model_ref})
         self._mint_receipt(
             outcome, chars=len(raw), cache="miss",
             exactness=exactness, gate=gate, requester=requester)

@@ -537,7 +537,7 @@ class ToolRegistry:
             "music", "studio",
             "network", "osint", "osint_people", "parsers",
             "proxy", "proxylab", "pytest_runner", "sandbox_code", "scriptgen",
-            "sceneintel", "directed", "seer", "shell", "side_chats", "ssh_socks", "traindata", "vision", "web", "weather",
+            "sceneintel", "directed", "seer", "shell", "side_chats", "ssh_socks", "traindata", "translate", "vision", "web", "weather",
             "security",
             "wisdom", "social", "whatsapp",
             "services",  # 28 service connectors bridged to the spine
