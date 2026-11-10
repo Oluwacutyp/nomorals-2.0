@@ -52,6 +52,8 @@ from .coverage import (
     CoverageReport,
     DomainCoverage,
     coverage_report,
+    render_board,
+    render_capability_status,
     render_coverage,
     render_intake,
 )
@@ -129,6 +131,8 @@ __all__ = [
     # coverage + intake (Stage C P10)
     "DomainCoverage", "CoverageReport", "coverage_report",
     "render_coverage", "render_intake",
+    # board + status renders (the /craft chat surface's pages)
+    "render_board", "render_capability_status",
     # graph (lazy — it composes the record organs)
     "CraftGraph", "GraphNode", "GraphEdge", "project_graph",
     "NODE_KINDS",

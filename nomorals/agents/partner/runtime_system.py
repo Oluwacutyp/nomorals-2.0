@@ -2773,6 +2773,166 @@ class RuntimeSystemMixin:
         return ("usage: /runs [list] | <n> | stop <n> [reason] | "
                 "coverage — <n> is the number from /runs")
 
+    # ── craft cooperative: /craft ────────────────────────────────────
+    def _craft_stores(self) -> tuple[Any, Any]:
+        """The craft surface's stores: the filebook library and
+        the competence-grant store, at their shipped default
+        homes. Built per call, so a pack or grant recorded since
+        the last call is read fresh (tests inject seeded ones)."""
+        from ...craft.temporary import CompetenceGrantStore
+        from ...skills.filebook import FileSkillLibrary
+
+        library = getattr(self, "_craft_library", None)
+        if library is None:
+            library = FileSkillLibrary()
+        grants = getattr(self, "_craft_grants", None)
+        if grants is None:
+            grants = CompetenceGrantStore()
+        return library, grants
+
+    def _control_craft(self, tail: str) -> str:
+        """/craft — the craft cooperative board (docs 22+23, the
+        chat surface over the shipped craft machinery).
+
+        /craft                — the board: every known domain with
+                                the capability level its records
+                                DERIVE (levels are computed at read
+                                from packs, contracts and receipts
+                                — never assigned, never read from a
+                                stored token), the facts that earn
+                                it, pack states, open items, and
+                                absences named in words (a domain
+                                known only to the taxonomy seed
+                                reads greenfield)
+        /craft coverage       — the full measured coverage detail
+                                behind the board
+        /craft intake <goal>  — a READ-ONLY hire preview: the plan
+                                the composer assembles for the goal
+                                (the pipeline pattern, or a leading
+                                preset name: "intake studio …"),
+                                its decomposition, its team (role
+                                contracts), the shipped
+                                consequential rule's verdict per
+                                step IN THE SEAM'S OWN WORDS, risks
+                                and cost. It opens nothing, settles
+                                nothing and runs nothing — execution
+                                stays with the surfaces that run work
+        /craft status <field> — one field's capability claim, read
+                                from records now: carried by a live
+                                pack, carried temporarily by a
+                                recorded grant (its expiry and the
+                                benchmark it cites named), or unmade
+                                with the reason
+
+        Owner-only via CONTROL_COMMANDS (never PUBLIC_COMMANDS).
+        Internal ids never print — domains, packs and ordinals
+        only. Every render is the craft machinery's own; this
+        handler composes the stores and routes the verbs, nothing
+        more.
+        """
+        from ...craft import (
+            capability_status,
+            coverage_report,
+            render_board,
+            render_capability_status,
+            render_coverage,
+        )
+
+        text = (tail or "").strip()
+        parts = text.split(None, 1)
+        verb = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        library, grants = self._craft_stores()
+        db = getattr(self.context, "db", None)
+        if verb in ("", "board", "list"):
+            return render_board(coverage_report(
+                db, library=library, grants=grants))
+        if verb == "coverage":
+            return render_coverage(coverage_report(
+                db, library=library, grants=grants))
+        if verb == "status":
+            if not rest:
+                return ("usage: /craft status <field> — one "
+                        "field's capability claim, read from its "
+                        "records: a live pack, a temporary grant, "
+                        "or unmade with the reason named")
+            return render_capability_status(capability_status(
+                library, rest, grants=grants))
+        if verb == "intake":
+            if not rest:
+                return ("usage: /craft intake <goal> — a "
+                        "read-only preview of the plan the "
+                        "composer assembles for the goal: its "
+                        "steps, its team, the gate's verdict per "
+                        "step, risks and cost. Nothing is opened "
+                        "or run")
+            return self._craft_intake(rest, library=library,
+                                      grants=grants)
+        return (f"unknown /craft verb {verb!r} — usage: /craft "
+                "[board] | coverage | intake <goal> | "
+                "status <field>")
+
+    def _craft_intake(self, goal_text: str, *, library: Any,
+                      grants: Any) -> str:
+        """Compose (never open) the intake preview for one goal.
+
+        The domain is read off the goal's own words against the
+        coverage board's domains; a pack recorded for that domain
+        governs the composition and must validate — the composer
+        refuses in the schema's own words, carried verbatim. The
+        preview composes and renders only: no contract is opened,
+        nothing settles, no handler runs."""
+        import re as _re
+
+        from ...craft import (
+            ComposerError,
+            compose_plan,
+            coverage_report,
+            preset_names,
+            render_intake,
+        )
+        from ...skills.packs import load_pack, pack_docs
+
+        def _slug(value: str) -> str:
+            return _re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+
+        goal = goal_text.strip()
+        preset = "pipeline"
+        head, sep, tail = goal.partition(" ")
+        if sep and head.rstrip(":").lower() in preset_names():
+            preset = head.rstrip(":").lower()
+            goal = tail.strip()
+        db = getattr(self.context, "db", None)
+        report = coverage_report(db, library=library, grants=grants)
+        tokens = set(_re.findall(r"[a-z0-9]+", goal.lower()))
+        row = None
+        for candidate in report.domains:
+            names = set(candidate.domain.split("-"))
+            names |= {w for w in _re.findall(
+                r"[a-z0-9]+", candidate.title.lower())
+                if len(w) >= 4}
+            if names & tokens:
+                row = candidate
+                break
+        pack = None
+        if row is not None:
+            for doc in pack_docs(library):
+                if _slug(str(doc.domain or "")) == row.domain:
+                    pack = load_pack(library, doc.id)
+                    break
+        try:
+            plan = compose_plan(
+                goal, preset=preset, pack=pack,
+                domain=row.domain if row is not None else "")
+        except ComposerError as exc:
+            return str(exc)
+        text = render_intake(plan, row, pack=pack)
+        return (text + "\npreview only — this composed the plan "
+                "and read the gate's verdicts; it opened no "
+                "contract, settled nothing and ran nothing. "
+                "Execution stays with the surfaces that run work "
+                "(/mission, /delegate).")
+
     def _desk_bundle_hook(self) -> Any:
         """The gateway's inbound-artifact hook (WS3 P7): when a
         file Devon just stored is a GoldenSwing desk bundle, land

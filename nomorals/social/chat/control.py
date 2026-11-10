@@ -877,6 +877,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "engage": (0, None),      # /engage [list] | show <n> | reply <n> | ignore <n> | done <n> — replies & comments on his posts, read back and triaged (owner-only)
     "cases": (0, None),       # /cases [list] | <n> | verify <n> | ack <n> — outcome cases for forgotten work, with their evidence trails (owner-only)
     "runs": (0, None),        # /runs [list] | <n> | stop <n> [reason] | coverage — the live-work ticket board: execution tickets (delegations, missions, jobs, browser/media runs) + healing tickets (incidents, cases, antibodies); stops route through the one cancellation facade and mint a receipt (owner-only)
+    "craft": (0, None),       # /craft [board] | coverage | intake <goal> | status <field> — the craft cooperative board: capability levels derived from records at read (never assigned, never a stored token), pack states, open items, absences named in words; intake is a read-only plan preview — the composer's plan + the shipped consequential rule's verdicts in the seam's own words, opening nothing and running nothing; status reads one field's claim: live pack, temporary grant (expiry + benchmark citation), or unmade with the reason (owner-only)
     "read": (0, None),        # /read [list] | open <n> | go <token> <verb> | get <token> <html|txt> — routed long outputs in the reader, editions + raw downloads (owner-only)
     "insights": (0, None),    # /insights [days] — native money analytics
     "predict": (0, 3),       # /predict <stake> <over|under> <1-99> — prediction pit (progression-unlocked)
@@ -3399,6 +3400,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/runs [list] | <n> | stop <n> [reason] | coverage",
              "example": "/runs stop 2",
              "related": "/cases /mission /delegate"},
+    "craft": {"what": ("the craft cooperative board: every domain Devon works in, with the capability level its own records earn — levels are derived at read from packs, delegation contracts and delivery receipts, never assigned and never read from a stored token, so the board moves only when the underlying work moves. Each domain shows the facts that earn its level, its packs and their states, its open items, and whatever is absent, named in words — a domain known only to the taxonomy reads greenfield, not as a quiet zero. Coverage is the full measured detail behind the board. Intake composes the plan the team composer assembles for a goal — its steps, the role contract behind each step, the shipped consequential rule's verdict per step in the seam's own words, the governing pack's recorded failure modes, coverage gaps and contract budgets — as a read-only preview: it opens no contract, settles nothing and runs nothing, and execution stays with the surfaces that run work. Status reads one field's capability claim from its records: a live pack carries it; a temporary competence grant carries it until its recorded expiry, on the strength of the benchmark it cites; anything else is unmade, with the reason named."),
+              "usage": "/craft [board] | coverage | intake <goal> | status <field>",
+              "example": "/craft intake ship the weekly digest",
+              "related": "/runs /delegate /skills"},
     "read": {"what": ("the reading desk for long outputs: when a report, research result or other long output runs past one message, the output router sends it here instead of a wall of chunks — the full text is preserved in a reading session with working controls (next/previous page, contents, jump), and the longest outputs also offer a branded HTML edition and the raw original as downloads. Nothing is truncated: what the reader holds is the whole output, and every route records why the output arrived the way it did."),
               "usage": "/read [list] | open <n> | go <token> <n|p|c|jN|u> | get <token> <html|txt>",
               "example": "/read open 1",
@@ -4372,7 +4377,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
                            "exness", "stripe", "content", "drafts", "day",
-                           "calendar", "repurpose", "engage", "cases", "runs", "read",
+                           "calendar", "repurpose", "engage", "cases", "runs", "craft", "read",
                            "tempmail", "checkmail", "vnumber", "checksms",
                            "browser", "paper", "backup"]),
     ("platform control", ["start", "stop", "profile", "chatmode", "style",
@@ -4691,7 +4696,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion", "gcal", "trello", "exness", "stripe",
-      "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage", "cases", "runs", "read",
+      "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage", "cases", "runs", "craft", "read",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
     ("platform control — updates & restarts",
      ["update", "pull", "deploy", "restart"]),
@@ -5067,6 +5072,7 @@ LIST_ONELINERS: dict[str, str] = {
     "engage": "replies & comments on your posts, read back and triaged: what needs you, reply drafts through /drafts",
     "cases": "outcome cases for forgotten work — evidence trails, re-checks, acknowledgements",
     "runs": "the live-work ticket board: delegations, missions, jobs, browser/media runs + healing tickets — full detail, field coverage, receipted stops",
+    "craft": "the craft cooperative board: capability levels derived from records, pack states, open items — coverage detail, read-only intake previews, per-field claim status",
     "read": "long outputs in the reader: page through them, contents, the HTML edition and the raw download — nothing truncated",
     "api": "external API connectors (weather, fx, github, …)",
     "connectors": "manage the service connectors: list, status, connect",

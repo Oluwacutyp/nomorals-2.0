@@ -1,6 +1,6 @@
 """Intake & coverage (L5) — docs 22+23, Stage C P10.
 
-Two renders over the cooperative's records, and nothing else:
+Renders over the cooperative's records, and nothing else:
 
 * **Coverage** — for every domain the system knows (the goals
   registry, the taxonomy seed, the packs' declared domains, the
@@ -24,6 +24,12 @@ Two renders over the cooperative's records, and nothing else:
   is a render over Stage A–C records; the intake opens nothing
   and claims nothing the records do not carry.
 
+The chat surface's board (``render_board`` — the at-a-glance
+page over the same report) and one-field claim page
+(``render_capability_status``, over
+:func:`nomorals.craft.temporary.capability_status`) live here
+too: same records, same derivation, thinner pages.
+
 Contract-to-domain links are read from the records themselves,
 three honest ties and no invented ones: a contract's declared
 scope names the domain (the CBT pilot's shape), the contract's
@@ -36,6 +42,7 @@ and coverage says so by omission rather than by guessing.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -53,6 +60,8 @@ __all__ = [
     "DomainCoverage",
     "CoverageReport",
     "coverage_report",
+    "render_board",
+    "render_capability_status",
     "render_coverage",
     "render_intake",
 ]
@@ -301,6 +310,112 @@ def coverage_report(db: Any = None, *,
 
 
 # ── renders: ordinals and subjects, no internal ids ──────────────
+
+
+def render_board(report: CoverageReport) -> str:
+    """The cooperative board as chat text — the /craft page: every
+    known domain with the level its records derive and the facts
+    that earn it, its pack states, its open items, and its
+    absences named in words.  The full audit detail (source
+    notes, the whole contract ledger) is render_coverage's page;
+    this is the page the owner reads first."""
+    lines = ["craft — the cooperative board (every level below is "
+             "derived from records at read; nothing on this page "
+             "is assigned)"]
+    if report.source_notes:
+        for note in report.source_notes:
+            lines.append(f"note: {note}")
+    if not report.domains:
+        lines.append("the board is empty: no domain is known to "
+                     "any record — no goals class, no taxonomy "
+                     "seed entry, no pack and no role contract "
+                     "names one")
+        return "\n".join(lines)
+    open_total = 0
+    for idx, row in enumerate(report.domains, 1):
+        if row.level:
+            level_line = (f"level {row.level} "
+                          f"({LEVEL_INFO[row.level]['name']})")
+        else:
+            level_line = "no level claimed"
+        lines.append(f"{idx}. {row.title} — {level_line}")
+        for basis in row.basis:
+            lines.append(f"   · {basis}")
+        for note in row.notes:
+            lines.append(f"   · {note}")
+        if row.packs:
+            rendered = ", ".join(
+                f"{pack['id']} ({pack['status']}"
+                + (", valid" if pack["valid"] else
+                   f", {pack['problems']} schema problem(s)")
+                + ")"
+                for pack in row.packs)
+            lines.append(f"   packs: {rendered}")
+        counts = row.contracts
+        if counts.get("linked"):
+            open_total += int(counts.get("open", 0))
+            lines.append(
+                f"   open items: {counts['open']} contract(s) "
+                f"still open · {counts['completed']} completed · "
+                f"{counts['failed']} failed")
+        if row.deliveries:
+            lines.append(
+                f"   deliveries: {row.deliveries} on record under "
+                "grant")
+        for name, why in row.absent.items():
+            lines.append(f"   absent — {name}: {why}")
+    lines.append(
+        f"open items across the board: {open_total} contract(s)")
+    lines.append("/craft coverage — the full measured detail · "
+                 "/craft intake <goal> — a read-only plan preview "
+                 "· /craft status <field> — one field's claim")
+    return "\n".join(lines)
+
+
+def render_capability_status(status: dict[str, Any]) -> str:
+    """One field's capability claim as chat text — the /craft
+    status render over capability_status's derived read: a live
+    pack's claim, a temporary grant's claim with its expiry and
+    the benchmark citation its basis carries, or the claim unmade
+    with its reason.  The dict this renders was itself derived at
+    read; no stored standing token is consulted here either."""
+    domain = str(status.get("domain") or "")
+    lines = [f"craft status — {domain}"]
+    if not status.get("claimed"):
+        lines.append("no claim stands for this field")
+        reason = str(status.get("reason") or "").strip()
+        if reason:
+            lines.append(f"why: {reason}")
+        return "\n".join(lines)
+    level = str(status.get("level") or "")
+    level_name = LEVEL_INFO.get(level, {}).get("name", "")
+    grade = str(status.get("grade") or "")
+    pack_id = str(status.get("pack_id") or "")
+    if status.get("temporary"):
+        expires = status.get("grant_expires_at")
+        when = (time.strftime("%Y-%m-%d %H:%M",
+                              time.localtime(float(expires)))
+                if expires else "an unrecorded time")
+        lines.append(
+            f"claimed temporarily — level {level} "
+            f"({level_name}), grade {grade} (the grade the "
+            "level's evidence caps the claim at)")
+        lines.append(
+            f"the claim stands on a recorded competence grant "
+            f"over the draft pack {pack_id}; it lapses at {when} "
+            "— after that the field reads unmade unless the pack "
+            "has proved itself durable")
+    else:
+        lines.append(
+            f"claimed from a live pack — level {level} "
+            f"({level_name}), grade {grade} (the grade the "
+            "level's evidence caps the claim at)")
+        lines.append(
+            f"pack {pack_id} is live in the filebook and carries "
+            "this field's routed knowledge")
+    for basis in status.get("basis") or ():
+        lines.append(f"· {basis}")
+    return "\n".join(lines)
 
 
 def render_coverage(report: CoverageReport) -> str:
