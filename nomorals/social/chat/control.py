@@ -878,6 +878,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "cases": (0, None),       # /cases [list] | <n> | verify <n> | ack <n> — outcome cases for forgotten work, with their evidence trails (owner-only)
     "runs": (0, None),        # /runs [list] | <n> | stop <n> [reason] | coverage — the live-work ticket board: execution tickets (delegations, missions, jobs, browser/media runs) + healing tickets (incidents, cases, antibodies); stops route through the one cancellation facade and mint a receipt (owner-only)
     "craft": (0, None),       # /craft [board] | coverage | intake <goal> | status <field> — the craft cooperative board: capability levels derived from records at read (never assigned, never a stored token), pack states, open items, absences named in words; intake is a read-only plan preview — the composer's plan + the shipped consequential rule's verdicts in the seam's own words, opening nothing and running nothing; status reads one field's claim: live pack, temporary grant (expiry + benchmark citation), or unmade with the reason (owner-only)
+    "worldmodel": (0, None),  # /worldmodel [topic] — the world model board: provenance-tagged, versioned facts about codebase, runtime and work state, fed at the plan seam as work settles; stale facts labelled, absent areas never rendered as claims (owner-only)
     "glossary": (0, None),    # /glossary [list [glossary] [scope]] | set <glossary> <scope> <term> = <translation> | del <glossary> [scope] <term> — the translation glossary board: every named glossary in the shipped store with its per-scope counts (owner/domain/global, empty scopes named), the entries themselves, and add/replace/remove through the store's own write path; an edit changes the glossary's fingerprint, so translations cached under the old fingerprint stop matching (owner-only)
     "read": (0, None),        # /read [list] | open <n> | go <token> <verb> | get <token> <html|txt> — routed long outputs in the reader, editions + raw downloads (owner-only)
     "insights": (0, None),    # /insights [days] — native money analytics
@@ -3405,6 +3406,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/craft [board] | coverage | intake <goal> | status <field>",
               "example": "/craft intake ship the weekly digest",
               "related": "/runs /delegate /skills"},
+    "worldmodel": {"what": ("the world model board: the versioned map of facts Devon holds about her codebase, runtime and work state, where every assertion is tagged observed, inferred, proposed or unverified and linked to its source. Work lands here as it settles: each plan step's contract outcome is recorded as an observed fact with the gate's reasons in the seam's own words, and a step failure is recorded the same way. The board renders only what the model actually holds — each fact with its kind, its source, its version and its age; a fact not re-asserted within a day reads stale; an invalidated fact shows its tombstone and reason. An area with no facts does not appear, and an empty map says so in words: an absence of record is never rendered as a claim about the world. A topic shows every fact under one name in full, with its version history depth. Not to be confused with /world, the town game."),
+              "usage": "/worldmodel [topic]",
+              "example": "/worldmodel plan-step",
+              "related": "/runs /craft /delegate"},
     "glossary": {"what": ("the translation glossary board: the named glossaries the translator enforces, held in the shipped glossary store. A glossary is a named set of terms; inside it each term sits at one scope — owner, domain or global — and when two rows name the same term for a language pair, owner beats domain beats global. The board shows every glossary with its entry count per scope (an empty scope is named empty, never a quiet zero) and where the entries live. List shows the entries themselves, term to translation, grouped by glossary and scope. Set adds or replaces one entry through the store's own write path and says what changed; del removes one and answers in words when there is nothing to remove. Entries written here apply to any language pair. Every edit changes the glossary's fingerprint, and the fingerprint rides the translation cache key — so translations cached under the old fingerprint stop matching and are translated fresh, never served stale."),
               "usage": "/glossary [list [glossary] [scope]] | set <glossary> <scope> <term> = <translation> | del <glossary> [scope] <term>",
               "example": "/glossary set legal owner bank = Banco Central",
@@ -4701,7 +4706,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion", "gcal", "trello", "exness", "stripe",
-      "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage", "cases", "runs", "craft", "glossary", "read",
+      "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage", "cases", "runs", "craft", "worldmodel", "glossary", "read",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
     ("platform control — updates & restarts",
      ["update", "pull", "deploy", "restart"]),
@@ -5078,6 +5083,7 @@ LIST_ONELINERS: dict[str, str] = {
     "cases": "outcome cases for forgotten work — evidence trails, re-checks, acknowledgements",
     "runs": "the live-work ticket board: delegations, missions, jobs, browser/media runs + healing tickets — full detail, field coverage, receipted stops",
     "craft": "the craft cooperative board: capability levels derived from records, pack states, open items — coverage detail, read-only intake previews, per-field claim status",
+    "worldmodel": "the world model board: versioned facts with provenance (observed / inferred / proposed / unverified), fed as work settles — stale facts labelled, empty areas never claimed",
     "glossary": "translation glossaries: every named glossary with per-scope counts, the entries, and add/replace/remove through the store",
     "read": "long outputs in the reader: page through them, contents, the HTML edition and the raw download — nothing truncated",
     "api": "external API connectors (weather, fx, github, …)",

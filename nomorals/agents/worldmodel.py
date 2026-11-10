@@ -21,7 +21,10 @@ questions, while full values live on the current entry.
 
 from __future__ import annotations
 
+import os
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .blackboard import Blackboard
@@ -34,6 +37,11 @@ __all__ = [
     "KIND_PROPOSED",
     "KIND_UNVERIFIED",
     "FACT_KINDS",
+    "PersistentWorldModel",
+    "WORLDMODEL_BOARD_ENV",
+    "default_board_path",
+    "default_world",
+    "plan_event_sink",
 ]
 
 KIND_OBSERVED = "observed"      # directly seen: tool result, file read
@@ -158,3 +166,138 @@ class WorldModel:
         """Version provenance for one fact, oldest first: every audit
         record the board kept (version, author, when, value preview)."""
         return self.board.history(_PREFIX + key, limit=200)
+
+
+# ---------------------------------------------------------------------
+# The production home (2026-11-10 — the readers pass).
+#
+# Until this pass the world model existed only in tests: no production
+# code constructed one, nothing fed it, nothing read it, and the
+# blackboards production builds are per-run scratch that dies with the
+# run.  The home below is the board's own persistence idiom
+# (Blackboard.save/load, which never raises) at the settings-home data
+# layout every other durable store uses:
+# ``<home>/data/worldmodel-board.json``.
+
+#: Env override for the board path (absolute as-is, relative resolved
+#: against the settings home) — the same shape as the immune stores'.
+WORLDMODEL_BOARD_ENV = "NM_WORLDMODEL_BOARD"
+
+
+def _settings_home(settings: Any = None) -> Path:
+    """The settings data dir, never the cwd (mirrors immune wiring)."""
+    if settings is not None:
+        try:
+            return Path(settings.home_path)
+        except Exception:  # noqa: BLE001 - duck-typed settings
+            pass
+    return Path.home() / ".nomorals"
+
+
+def default_board_path(context: Any = None) -> Path:
+    """Resolve the world-model board path: env override, then the
+    context's settings, then the home default — the same file from
+    chat, CLI and scheduler, next to the other durable stores."""
+    settings = getattr(context, "settings", None) if context is not None \
+        else None
+    override = os.environ.get(WORLDMODEL_BOARD_ENV, "")
+    if override:
+        p = Path(os.path.expanduser(override))
+        if p.is_absolute():
+            return p
+        return (_settings_home(settings) / p).resolve()
+    if settings is not None:
+        try:
+            return Path(settings.resolve("data/worldmodel-board.json"))
+        except Exception:  # noqa: BLE001 - fall through to home default
+            pass
+    return _settings_home(settings) / "data" / "worldmodel-board.json"
+
+
+class PersistentWorldModel(WorldModel):
+    """A WorldModel whose every write persists its board.
+
+    Persistence is the board's own save (atomic tmp-replace, never
+    raises), so a failed save degrades to in-memory state with the
+    save's own warning logged — a write never breaks its caller.
+    """
+
+    def __init__(self, board: Blackboard, path: Path, *,
+                 author: str = "worldmodel") -> None:
+        super().__init__(board, author=author)
+        self.path = Path(path)
+
+    def assert_fact(self, key: str, value: Any, *, kind: str,
+                    source: str, author: str = "") -> FactSnapshot:
+        snap = super().assert_fact(key, value, kind=kind, source=source,
+                                   author=author)
+        self.board.save(self.path)
+        return snap
+
+    def invalidate(self, key: str, *, reason: str, by: str = ""
+                   ) -> FactSnapshot | None:
+        snap = super().invalidate(key, reason=reason, by=by)
+        if snap is not None:
+            self.board.save(self.path)
+        return snap
+
+
+_world_cache: dict[str, WorldModel] = {}
+
+
+def default_world(context: Any = None, *, path: Any = None) -> WorldModel:
+    """The shared production world model at its resolved board path.
+
+    Cached per path: the chat runtime, the CLI and the scheduler in
+    one process share one model over one board file; a board file
+    that already exists is loaded (a restore is state recovery — the
+    board's load never raises, and a missing/corrupt file simply
+    starts an empty map)."""
+    target = Path(path) if path is not None else default_board_path(context)
+    cache_key = str(target)
+    cached = _world_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    board = Blackboard()
+    if target.exists():
+        board.load(target)
+    world = PersistentWorldModel(board, target)
+    _world_cache[cache_key] = world
+    return world
+
+
+def plan_event_sink(world: WorldModel) -> Callable[[Mapping[str, Any]], None]:
+    """The feeder sink the plan-contract seam reports into.
+
+    One observed fact per settled/failed plan step, keyed the way the
+    substrate already names the step's evidence
+    (``plan-step:<run>/<step>``), carrying the fields an owner reads:
+    the goal, the step, who worked it, the outcome, and the gate's
+    reasons in the seam's own words.  The fact IS the record the
+    settlement produced — kind OBSERVED, source named — never a
+    summary invented after the fact."""
+
+    def _sink(event: Mapping[str, Any]) -> None:
+        mission = str(event.get("mission_id") or "run")
+        step = str(event.get("step") or "step")
+        outcome = str(event.get("outcome") or "")
+        value: dict[str, Any] = {
+            "goal": str(event.get("goal") or ""),
+            "step": step,
+            "worker": str(event.get("worker") or ""),
+            "outcome": outcome,
+        }
+        reasons = [str(r) for r in (event.get("reasons") or ())]
+        if reasons:
+            value["reasons"] = reasons
+        detail = str(event.get("detail") or "")
+        if detail:
+            value["detail"] = detail
+        source = ("plan step failure (delegation contract)"
+                  if outcome == "failed"
+                  else "plan step settlement (delegation contract)")
+        key = str(event.get("fact_key") or f"plan-step:{mission}/{step}")
+        world.assert_fact(key, value, kind=KIND_OBSERVED, source=source,
+                          author="plan_contracts")
+
+    return _sink

@@ -2773,6 +2773,37 @@ class RuntimeSystemMixin:
         return ("usage: /runs [list] | <n> | stop <n> [reason] | "
                 "coverage — <n> is the number from /runs")
 
+    # ── world model: /worldmodel ─────────────────────────────────────
+    def _control_worldmodel(self, tail: str) -> str:
+        """/worldmodel — the world model board, owner surface (the
+        readers pass, 2026-11-10): the provenance-tagged, versioned
+        facts the system holds about its codebase, runtime and work
+        state (agents/worldmodel.py, Doc 5 §4), fed at the plan
+        seam as work settles and read here from the model's own
+        persistent board.  (The bare name /world belongs to the
+        town game; this board takes /worldmodel.)
+
+        /worldmodel          — the whole map: per-area facts with
+                          their kind, source, version and age; a
+                          fact unrefreshed for a day reads (stale);
+                          an area with no facts does not appear —
+                          an absence of record is never rendered as
+                          a claim about the world
+        /worldmodel <topic>  — every fact under one key prefix, in
+                          full, with its version history depth
+
+        Owner-only via CONTROL_COMMANDS (never PUBLIC_COMMANDS).
+        Internal ids never print — work facts render by the goal
+        and step their values carry."""
+        from ..world_board import render_topic, render_world
+        from ..worldmodel import default_world
+
+        world = default_world(self.context)
+        topic = (tail or "").strip()
+        if topic:
+            return render_topic(world, topic)
+        return render_world(world)
+
     # ── craft cooperative: /craft ────────────────────────────────────
     def _craft_stores(self) -> tuple[Any, Any]:
         """The craft surface's stores: the filebook library and

@@ -51,6 +51,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .delegation import DelegationStore, WorkContract, contract_for_step
+from .failures import record_failure
 
 __all__ = [
     "VERIFIER",
@@ -61,7 +62,47 @@ __all__ = [
     "open_step_contract",
     "settle_step_contract",
     "fail_step_contract",
+    "install_world_sink",
+    "clear_world_sink",
 ]
+
+# -- the world-model feed (2026-11-10) ----------------------------------
+# The seam's outcomes are exactly the work-state facts the world model
+# (agents/worldmodel.py, Doc 5 §4) was built to hold — its own test
+# suite asserts facts beside delegation contracts.  The feed is an
+# INJECTED sink, installed by the partner runtime with a persistent
+# world: uninjected, this module behaves byte-for-byte as it always
+# has (every existing caller and test untouched).  Feeding is
+# fail-open by the module's own discipline: a sink that raises is
+# recorded and the settlement's outcome is exactly what it would have
+# been without the feed — the world model observes the seam, it never
+# gates it.
+
+_world_sink: Any = None
+
+
+def install_world_sink(sink: Any) -> None:
+    """Install the world-model sink (a callable taking one event
+    mapping).  Called once by the production runtime; tests install
+    their own or none."""
+    global _world_sink
+    _world_sink = sink
+
+
+def clear_world_sink() -> None:
+    """Remove the installed sink (test hygiene / shutdown)."""
+    global _world_sink
+    _world_sink = None
+
+
+def _feed_world(event: dict[str, Any]) -> None:
+    sink = _world_sink
+    if sink is None:
+        return
+    try:
+        sink(event)
+    except Exception as exc:  # noqa: BLE001 - the feed never gates the seam
+        record_failure("plan_contracts.world_feed", exc)
 
 #: Role holders for planner-created contracts. The worker is derived
 #: by contract_for_step from the step's role + specialist class
@@ -204,6 +245,14 @@ def settle_step_contract(
         store.sign_off(contract.id, verifier=VERIFIER,
                        note=f"plan step {step_name!r} verified")
     decision = store.complete(contract.id, by=STEWARD)
+    _feed_world({
+        "mission_id": mission_id,
+        "step": step_name,
+        "goal": contract.goal,
+        "worker": contract.worker,
+        "outcome": "completed" if decision.ok else "refused",
+        "reasons": list(decision.reasons),
+    })
     return {
         "contract_id": contract.id,
         "completed": bool(decision.ok),
@@ -219,3 +268,10 @@ def fail_step_contract(
     report_failure: the contract stays open, the failure is on the
     ledger, a retry cuts a fresh contract)."""
     store.report_failure(contract.id, by=SUPERVISOR, detail=detail)
+    _feed_world({
+        "fact_key": f"plan-failure:{contract.id}",
+        "goal": contract.goal,
+        "worker": contract.worker,
+        "outcome": "failed",
+        "detail": detail,
+    })

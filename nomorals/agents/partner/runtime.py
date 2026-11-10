@@ -412,6 +412,19 @@ class PartnerRuntime(
             self.brain._owner_reply_ledger_obj = self._owner_reply_ledger()
         except Exception as exc:  # noqa: BLE001 - the brain forms its own ledger then
             record_failure("runtime.PartnerRuntime.brain_ledger", exc)
+        # World model feed (2026-11-10): the plan seam's settlements
+        # and failures land as observed facts on the shared world
+        # model at its persistent board.  Injection, not coupling:
+        # plan_contracts behaves byte-for-byte as before wherever no
+        # sink is installed, and the feed itself is fail-open.
+        try:
+            from ..plan_contracts import install_world_sink
+            from ..worldmodel import default_world, plan_event_sink
+
+            install_world_sink(
+                plan_event_sink(default_world(context)))
+        except Exception as exc:  # noqa: BLE001 - the seam runs unsunk
+            record_failure("runtime.PartnerRuntime.world_sink", exc)
         #: Two-tier memory (build-map #36): lazy, opt-in via
         #: memory.two_tier_enabled. None until the first observed exchange.
         self._two_tier: Any = None
@@ -7780,6 +7793,8 @@ class PartnerRuntime(
             return self._control_cases(command.tail or arg)
         if kind == "runs":
             return self._control_runs(command.tail or arg)
+        if kind == "worldmodel":
+            return self._control_worldmodel(command.tail or arg)
         if kind == "craft":
             return self._control_craft(command.tail or arg)
         if kind == "glossary":
