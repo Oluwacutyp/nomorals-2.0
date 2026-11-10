@@ -1059,3 +1059,39 @@ def register(registry: Any) -> None:
         context = registry.context
         manager = SocialManager(context).register_builtins()
         return refresh_post_metrics(manager, limit=int(limit or 200))
+
+    @registry.register(
+        "social_engagement_poll",
+        description=(
+            "Read back ENGAGEMENT on already-posted social posts: "
+            "the replies and comments each post drew, from the "
+            "platform adapters that can genuinely read them "
+            "(Mastodon, X), stored deduped for the /engage triage "
+            "board. Platforms that cannot read engagement are "
+            "reported as unavailable by name — never as zero — and "
+            "personal surfaces under the owner's stop are recorded "
+            "as gated without being asked. Per-post engagement "
+            "volume feeds the briefs calibration loop once, at a "
+            "fair age, through the same exact join the metrics "
+            "spine uses. This is what the durable 'social "
+            "engagement poll' job runs every 6h; call directly "
+            "only when the owner asks what people said back, now. "
+            "Args: limit (optional, max posts per run)."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer",
+                          "description": "Max posted rows to poll "
+                                         "in this run (default 200)"},
+            },
+        },
+    )
+    def social_engagement_poll(limit: int = 200) -> dict[str, Any]:
+        from ..social.engagement import poll_engagement
+        from ..social.manager import SocialManager
+
+        context = registry.context
+        manager = SocialManager(context).register_builtins()
+        return poll_engagement(manager, limit=int(limit or 200))

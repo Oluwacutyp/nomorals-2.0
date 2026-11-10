@@ -171,6 +171,21 @@ class _PersonalAdapter(PlatformAdapter):
                 seconds=time.perf_counter() - started)
         return surface, chat, None
 
+    def engagement_gate(self) -> str:
+        """The live gate's verdict for an engagement READ (WS3 P8).
+
+        Returns ``""`` when a read may proceed, else the refusal in
+        words — the same ordered checks :meth:`_gate` runs for a
+        post (live surface → registry readable → account paired →
+        owner's sticky stop). The engagement poll consults this
+        BEFORE any read attempt on a personal surface: a stopped
+        platform is never even asked. Reads are observation, so the
+        degraded-brain observe-only rule does not block them; the
+        sticky stop does, exactly as it blocks sends.
+        """
+        _surface, _chat, refusal = self._gate(time.perf_counter())
+        return refusal.error if refusal is not None else ""
+
     def health(self, account: Account) -> bool:
         try:
             surface = self._surface_or_default()

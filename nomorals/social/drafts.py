@@ -582,14 +582,52 @@ def execute_post(
         except Exception:  # noqa: BLE001 — fall through without token
             _log.warning("could not mint confirmation for explicit post",
                          exc_info=True)
+    # A reply draft (WS3 P8) carries its thread link in metadata:
+    # ``reply_to`` is set ONLY for platforms whose adapter threads
+    # natively, and publish() already accepts it — thread it
+    # through so an approved reply lands ON the post it answers.
+    draft = None
+    reply_to = ""
+    if draft_id and queue is not None:
+        try:
+            draft = queue.get(draft_id)
+        except Exception:  # noqa: BLE001 — posting must not hinge on it
+            draft = None
+        if draft is not None:
+            reply_to = str((draft.metadata or {}).get("reply_to") or "")
+    # Passed only when a reply draft actually carries a link, so
+    # every other publish call keeps its exact pre-P8 shape.
+    extra = {"reply_to": reply_to} if reply_to else {}
     outcome = manager.publish(content, platforms=platforms or None,
-                              actor=actor, confirmation=confirmation)
+                              actor=actor, confirmation=confirmation,
+                              **extra)
     if draft_id and queue is not None:
         try:
             queue.mark_posted(draft_id)
         except Exception:  # noqa: BLE001 — posting already happened
             _log.warning("could not mark draft %s posted", draft_id,
                          exc_info=True)
+        # Close the engagement loop: a posted reply draft flips
+        # its item to ``replied`` — only when THIS item's platform
+        # actually posted (a fan-out partial failure elsewhere
+        # must not close it).
+        if draft is not None and (draft.metadata or {}).get(
+                "engagement_item"):
+            try:
+                from .engagement import EngagementStore, mark_reply_posted
+
+                posted = {r.platform: r for r in
+                          (getattr(outcome, "posted", []) or [])}
+                target = posted.get(
+                    str((draft.metadata or {}).get("platform") or ""))
+                if target is not None:
+                    mark_reply_posted(
+                        EngagementStore(manager.db), draft,
+                        external_id=str(target.external_id or ""))
+            except Exception:  # noqa: BLE001 — the post already happened
+                _log.warning(
+                    "could not close engagement item for draft %s",
+                    draft_id, exc_info=True)
     _log.info("explicit-post executed (%d platforms, no reconfirmation)",
               len(getattr(outcome, "results", []) or []))
     return outcome

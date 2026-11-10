@@ -857,6 +857,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "explore": (0, None),     # /explore [run | trends | candidates] — the video-exploration board: sweeps, trend claims with their basis, candidate standings (owner-only)
     "calendar": (0, None),    # /calendar [list] | series [<name>] | new <name> [| <objective>] | add <series> draft|short|post <n> — unified content calendar + series (owner-only)
     "repurpose": (0, None),   # /repurpose [list] | post <n> short|thread | short <n> post | day [YYYY-MM-DD] short|thread|post — one asset, other forms, through the content cell (owner-only)
+    "engage": (0, None),      # /engage [list] | show <n> | reply <n> | ignore <n> | done <n> — replies & comments on his posts, read back and triaged (owner-only)
     "insights": (0, None),    # /insights [days] — native money analytics
     "predict": (0, 3),       # /predict <stake> <over|under> <1-99> — prediction pit (progression-unlocked)
     "menu": (0, 2),          # alias of /list ([group] [page] ride the same grammar)
@@ -3355,6 +3356,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/repurpose [list] | post <n> short|thread | short <n> post | day [YYYY-MM-DD] short|thread|post",
               "example": "/repurpose post 1 thread",
               "related": "/drafts /day /calendar /shorts"},
+    "engage": {"what": "the engagement loop: replies and comments on your posts, read back from the platforms that genuinely expose them (Mastodon and X today) by the 6h engagement poll and triaged here — what needs you first, oldest first. Platforms whose replies cannot be read (LinkedIn, WhatsApp status, Telegram channel) are named unavailable on the board, never silently absent. A reply is drafted onto /drafts and posts only on your approval there — on Mastodon and X it threads onto the original post; where a platform has no threaded reply, the draft says so and posts standalone. Board numbers (#n) are the handles — internal ids never print.",
+              "usage": "/engage [list] | show <n> | reply <n> | ignore <n> | done <n>",
+              "example": "/engage reply 1",
+              "related": "/drafts /content"},
     "api": {"what": "external API connectors: weather, fx, github, …",
             "usage": "/api list | <connector> [json]", "example": "/api weather city=Lagos",
             "related": ""},
@@ -4312,7 +4317,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
                            "exness", "stripe", "content", "drafts", "day",
-                           "calendar", "repurpose",
+                           "calendar", "repurpose", "engage",
                            "tempmail", "checkmail", "vnumber", "checksms",
                            "browser", "paper", "backup"]),
     ("platform control", ["start", "stop", "profile", "chatmode", "style",
@@ -4631,7 +4636,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion", "gcal", "trello", "exness", "stripe",
-      "guardrails", "content", "drafts", "day", "calendar", "repurpose",
+      "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
     ("platform control — updates & restarts",
      ["update", "pull", "deploy", "restart"]),
@@ -5003,6 +5008,7 @@ LIST_ONELINERS: dict[str, str] = {
     "explore": "video exploration: the field she fetches from, watched — sweeps, trend claims with their basis, candidate standings",
     "calendar": "the unified content calendar: drafts waiting, what's due, and your series in order",
     "repurpose": "one asset, other forms: posted drafts, day records and shorts re-drafted through the cell",
+    "engage": "replies & comments on your posts, read back and triaged: what needs you, reply drafts through /drafts",
     "api": "external API connectors (weather, fx, github, …)",
     "connectors": "manage the service connectors: list, status, connect",
     "shorts": "short-form content empire: make, queue, post vertical videos",

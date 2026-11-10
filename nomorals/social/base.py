@@ -210,6 +210,13 @@ class PlatformAdapter(ABC):
     max_chars: int = 500
     supports_media: bool = False
     supports_thread: bool = False
+    #: True when :meth:`post` threads a real in-reply-to linkage from
+    #: the ``reply_to`` kwarg (an external post id) — Mastodon's
+    #: ``in_reply_to_id``, X's ``reply.in_reply_to_tweet_id``. The
+    #: engagement loop (WS3 P8) reads this structurally: a platform
+    #: without it gets reply drafts that post standalone and SAY so,
+    #: never a pretend thread.
+    supports_reply: bool = False
 
     @abstractmethod
     def post(self, account: Account, content: str, **kwargs: Any) -> PostResult:
@@ -221,6 +228,28 @@ class PlatformAdapter(ABC):
     def metrics(self, account: Account, external_id: str) -> dict[str, Any]:
         """Engagement counts. Optional: not every platform exposes them."""
         return {}
+
+    def read_engagement(
+        self, account: Account, external_id: str
+    ) -> list[dict[str, Any]]:
+        """Replies/comments ON one of the owner's posts (WS3 P8).
+
+        Optional capability, detected structurally exactly like
+        :meth:`metrics` — an adapter that does not override this
+        cannot produce engagement, and the engagement poll NAMES its
+        platform unavailable rather than treating silence as zero.
+
+        Each item is a plain dict: ``item_id`` (the platform's own
+        id for the reply/comment — the poll dedups on it),
+        ``author`` (display name or handle, surface-safe), ``text``,
+        ``kind`` (``"reply"`` | ``"comment"`` | ``"mention"``) and
+        ``created_at`` (epoch float, 0 when the platform gives none).
+
+        Contract: RAISE on a failed read. ``[]`` means the read
+        succeeded and there is genuinely nothing — a transport or
+        tier failure must never masquerade as an empty thread.
+        """
+        return []
 
     def validate(self, content: str) -> str:
         """Reject content this platform cannot accept, before spending a request."""

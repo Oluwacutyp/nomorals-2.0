@@ -2195,6 +2195,123 @@ class RuntimeSystemMixin:
         finally:
             queue.close()
 
+    def _control_engage(self, tail: str, chat_key: str = "") -> Any:
+        """/engage — replies & comments on his posts (WS3 P8).
+
+        /engage                — the board: what needs him first
+                                 (new items, oldest first), then
+                                 what he has in hand; platforms
+                                 whose replies cannot be read are
+                                 NAMED unavailable, never silent
+        /engage show <n>       — one item in full (marks it seen)
+        /engage reply <n>      — draft a reply onto /drafts at
+                                 pending_review — it posts only on
+                                 his approval there (#43, unchanged)
+        /engage ignore <n>     — dismiss the item
+        /engage done <n>       — he handled it himself
+
+        <n> is the number from the board — the one ordering
+        board_items() defines, shared with the morning briefing.
+        Owner-only via CONTROL_COMMANDS (never PUBLIC_COMMANDS).
+        The poll that fills this board is the durable 'social
+        engagement poll' job; this surface reads the store and
+        reconciles replied state from the queue's own truth.
+        """
+        from ...social.engagement import (
+            STATE_DONE,
+            STATE_IGNORED,
+            STATE_NEW,
+            STATE_TRIAGED,
+            EngagementStore,
+            board_items,
+            draft_reply,
+            platform_truth,
+            reconcile_replied,
+            render_board,
+            render_item,
+        )
+        from ..dayrecord import brain_llm_fn
+
+        db = self.context.db
+        store = EngagementStore(db)
+        queue = self._draft_queue()
+        try:
+            reconcile_replied(store, queue)
+            items = board_items(store)
+            parts = (tail or "").split(None, 1)
+            verb = parts[0].lower() if parts else "list"
+            rest = parts[1].strip() if len(parts) > 1 else ""
+
+            if verb in ("list", ""):
+                truth = None
+                try:
+                    from ...social.manager import SocialManager
+
+                    manager = SocialManager(self.context)
+                    manager.register_builtins()
+                    truth = platform_truth(manager.adapters)
+                except Exception:  # noqa: BLE001 - board stands alone
+                    truth = None
+                return render_board(store, truth=truth)
+
+            if verb in ("show", "reply", "ignore", "done"):
+                if not rest:
+                    return (f"usage: /engage {verb} <n> — the "
+                            "number from /engage")
+                token = rest.split()[0]
+                probe = token[1:] if token.startswith("#") else token
+                if not probe.isdigit():
+                    return (f"usage: /engage {verb} <n> — the "
+                            "number from /engage")
+                idx = int(probe)
+                if not 1 <= idx <= len(items):
+                    if not items:
+                        return ("💬 nothing is waiting on you — "
+                                "/engage shows the board.")
+                    return (f"no item {token} on the board — "
+                            f"{len(items)} waiting; /engage lists "
+                            "them.")
+                item = items[idx - 1]
+                if verb == "show":
+                    if item["state"] == STATE_NEW:
+                        store.set_state(item["id"], STATE_TRIAGED)
+                        item = store.get(item["id"]) or item
+                    return render_item(item, idx)
+                if verb == "ignore":
+                    store.set_state(item["id"], STATE_IGNORED)
+                    author = item.get("author") or "that item"
+                    return (f"ignored — {author} won't come back "
+                            "to the board.")
+                if verb == "done":
+                    store.set_state(item["id"], STATE_DONE)
+                    return ("done — marked as handled by you. It "
+                            "leaves the board.")
+                # reply: draft through the queue; the review flow
+                # on /drafts owns every outward step from here.
+                from ...social.manager import SocialManager
+
+                manager = SocialManager(self.context)
+                manager.register_builtins()
+                result = draft_reply(
+                    store, queue, item["id"],
+                    llm_fn=brain_llm_fn(self.context),
+                    adapters=manager.adapters)
+                if not result.get("ok"):
+                    return f"couldn't draft that reply: "\
+                           f"{result.get('error') or 'unknown error'}"
+                note = ("threads onto the original post"
+                        if result["reply_native"] else
+                        "posts as a standalone post — that "
+                        "platform has no threaded reply")
+                return (f"✍️ reply drafted ({result['drafter']} "
+                        f"rung; {note}) — waiting on /drafts for "
+                        f"your review:\n{result['text']}")
+            return ("usage: /engage [list] | show <n> | reply <n> "
+                    "| ignore <n> | done <n> — <n> is the number "
+                    "from /engage")
+        finally:
+            queue.close()
+
     def _desk_bundle_hook(self) -> Any:
         """The gateway's inbound-artifact hook (WS3 P7): when a
         file Devon just stored is a GoldenSwing desk bundle, land

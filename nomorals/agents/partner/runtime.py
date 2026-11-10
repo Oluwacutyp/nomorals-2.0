@@ -2867,6 +2867,18 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("social metrics job not registered: %s",
                                  exc)
+                # Social engagement loop (WS3 P8): replies/comments
+                # on his posts are read back every 6h into the
+                # /engage board — routine bookkeeping; what needs
+                # him reaches him through the board and the
+                # morning briefing, not job alerts. Idempotent.
+                try:
+                    from ...social.jobs import ensure_social_engagement_jobs
+                    ensure_social_engagement_jobs(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "social engagement job not registered: %s",
+                        exc)
                 # Day derivation (WS3 P4): at 19:00 owner-local the
                 # day record turns itself into review drafts —
                 # drafts only, the review queue owns every outward
@@ -7579,6 +7591,9 @@ class PartnerRuntime(
         if kind == "repurpose":
             return self._control_repurpose(command.tail or arg,
                                            chat_key=chat_key)
+        if kind == "engage":
+            return self._control_engage(command.tail or arg,
+                                        chat_key=chat_key)
         if kind == "api":
             return self._control_api(command.tail or arg)
         if kind == "connectors":

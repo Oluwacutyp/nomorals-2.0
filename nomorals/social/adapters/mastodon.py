@@ -25,6 +25,7 @@ class Adapter(PlatformAdapter):
     max_chars = 500
     supports_media = True
     supports_thread = True
+    supports_reply = True  # post() threads in_reply_to_id (see below)
 
     def __init__(self, *, timeout: float = 30.0) -> None:
         self.timeout = timeout
@@ -94,6 +95,54 @@ class Adapter(PlatformAdapter):
             seconds=time.perf_counter() - started,
         )
 
+    def read_engagement(
+        self, account: Account, external_id: str
+    ) -> list[dict[str, Any]]:
+        """Replies to one post, via the status context endpoint.
+
+        ``GET /api/v1/statuses/{id}/context`` returns the post's
+        descendants — every reply in its thread, each carrying its
+        author and its own id. The owner's own follow-ups in the
+        thread are his, not engagement, and are skipped. Unlike
+        :meth:`metrics` (best-effort counts), a failed read RAISES:
+        the engagement poll must record the failure, never read it
+        as an empty thread.
+        """
+        from ..base import SocialError
+
+        base = self._base(account)
+        response = self._client(account).get(
+            f"{base}/api/v1/statuses/{external_id}/context")
+        if not response.ok:
+            raise SocialError(
+                f"mastodon engagement read failed for post "
+                f"{external_id}: HTTP {response.status} "
+                f"{(response.text or '')[:200]}")
+        try:
+            data = json.loads(response.text or "{}")
+        except json.JSONDecodeError as exc:
+            raise SocialError(
+                f"mastodon engagement read for post {external_id} "
+                f"returned unparseable JSON") from exc
+        own = (account.handle or "").split("@")[0].strip().lower()
+        items: list[dict[str, Any]] = []
+        for status in data.get("descendants") or []:
+            if not isinstance(status, dict):
+                continue
+            acct = status.get("account") or {}
+            author_acct = str(acct.get("acct") or "")
+            if own and author_acct.split("@")[0].lower() == own:
+                continue  # his own thread follow-ups are not engagement
+            items.append({
+                "item_id": str(status.get("id") or ""),
+                "author": str(acct.get("display_name") or author_acct),
+                "text": _plain_text(str(status.get("content") or "")),
+                "kind": "reply",
+                "created_at": _parse_reset(
+                    str(status.get("created_at") or "")) or 0.0,
+            })
+        return [i for i in items if i["item_id"]]
+
     def metrics(self, account: Account, external_id: str) -> dict[str, Any]:
         try:
             response = self._client(account).get(
@@ -116,6 +165,17 @@ class Adapter(PlatformAdapter):
             return response.ok
         except Exception:  # noqa: BLE001 - unreachable is not healthy
             return False
+
+
+def _plain_text(html_text: str) -> str:
+    """Mastodon status content is HTML; engagement items are text."""
+    import html as _html
+    import re as _re
+
+    text = _re.sub(r"<br\s*/?>", "\n", html_text or "")
+    text = _re.sub(r"</p>\s*<p>", "\n\n", text)
+    text = _re.sub(r"<[^>]+>", "", text)
+    return " ".join(_html.unescape(text).split())
 
 
 def _int_header(headers: dict[str, str], name: str) -> int | None:

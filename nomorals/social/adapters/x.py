@@ -62,6 +62,7 @@ class XAdapter(PlatformAdapter):
     max_chars = 280
     supports_media = False  # media upload lives in the video publisher
     supports_thread = True
+    supports_reply = True  # post() threads reply.in_reply_to_tweet_id
 
     def __init__(self, http: HttpClient | None = None) -> None:
         self._http = http
@@ -130,6 +131,83 @@ class XAdapter(PlatformAdapter):
             status_code=int(resp.status or 0),
             seconds=time.perf_counter() - started)
 
+    def read_engagement(
+        self, account: Account, external_id: str
+    ) -> list[dict[str, Any]]:
+        """Replies/quotes on one post, via conversation search.
+
+        X has no per-tweet replies endpoint; the documented read is
+        recent search over the post's conversation
+        (``GET /2/tweets/search/recent?query=conversation_id:{id}``)
+        with author expansions — the same token and transport as
+        :meth:`metrics`. Pure retweets carry no words of their own
+        and are skipped, as are the owner's own thread follow-ups.
+        Unlike metrics, a failed read RAISES (with the tier hint on
+        a 403): the engagement poll records failures by name, and a
+        dead read must never read as an empty thread.
+        """
+        from ..base import SocialError
+
+        token = account.resolve_token()
+        if not token:
+            raise SocialError(
+                "x: no X user access token — the account isn't "
+                f"connected\nManual step: {_MANUAL_STEP}")
+        resp = self._client().request(
+            "GET", f"{_API}/tweets/search/recent",
+            headers={"Authorization": f"Bearer {token}"},
+            params={
+                "query": f"conversation_id:{external_id}",
+                "tweet.fields": "created_at,referenced_tweets",
+                "expansions": "author_id",
+                "user.fields": "name,username",
+                "max_results": "100",
+            })
+        if not resp.ok:
+            message = (f"x engagement read failed for post "
+                       f"{external_id}: {self._api_error(resp)}")
+            if resp.status == 403:
+                message += f"\n{_TIER_HINT}"
+            raise SocialError(message)
+        payload = self._payload(resp)
+        users: dict[str, dict[str, Any]] = {}
+        includes = payload.get("includes")
+        if isinstance(includes, dict):
+            for user in includes.get("users") or []:
+                if isinstance(user, dict) and user.get("id"):
+                    users[str(user["id"])] = user
+        own = (account.handle or "").lstrip("@").strip().lower()
+        items: list[dict[str, Any]] = []
+        for tweet in payload.get("data") or []:
+            if not isinstance(tweet, dict):
+                continue
+            tweet_id = str(tweet.get("id") or "")
+            if not tweet_id or tweet_id == str(external_id):
+                continue  # the post itself is not engagement on it
+            refs = [r for r in (tweet.get("referenced_tweets") or [])
+                    if isinstance(r, dict)]
+            ref_types = {str(r.get("type") or "") for r in refs}
+            if ref_types == {"retweeted"}:
+                continue  # a bare repost has no words to answer
+            user = users.get(str(tweet.get("author_id") or ""), {})
+            username = str(user.get("username") or "")
+            if own and username.lower() == own:
+                continue  # his own thread follow-ups are not engagement
+            if "replied_to" in ref_types:
+                kind = "reply"
+            elif "quoted" in ref_types:
+                kind = "comment"
+            else:
+                kind = "reply"
+            items.append({
+                "item_id": tweet_id,
+                "author": str(user.get("name") or username),
+                "text": str(tweet.get("text") or ""),
+                "kind": kind,
+                "created_at": _parse_ts(tweet.get("created_at")),
+            })
+        return items
+
     def metrics(self, account: Account, external_id: str) -> dict[str, Any]:
         """Real engagement read via ``public_metrics`` (best-effort)."""
         token = account.resolve_token()
@@ -162,3 +240,16 @@ class XAdapter(PlatformAdapter):
 
     def health(self, account: Account) -> bool:
         return bool(account.resolve_token())
+
+
+def _parse_ts(raw: Any) -> float:
+    """ISO-8601 → epoch float; 0.0 when the platform gave nothing."""
+    if not raw:
+        return 0.0
+    try:
+        import datetime
+
+        return datetime.datetime.fromisoformat(
+            str(raw).replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return 0.0

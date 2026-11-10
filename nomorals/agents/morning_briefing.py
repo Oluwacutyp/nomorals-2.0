@@ -1372,6 +1372,57 @@ class DraftReviewProvider(_Provider):
             source="draft-queue", items=items, lines=lines)
 
 
+class EngagementProvider(_Provider):
+    """Post engagement (WS3 P8): replies/comments on his posts
+    that are still waiting on HIM — new items, plus the escalated
+    ones Devon cannot route. Renders ONLY when something needs
+    him; a quiet thread is not news. The board's own ordering
+    (/engage) names the numbers, so the briefing shows the same
+    first items the board does. Never raises."""
+    name = "engagement"
+    title = "💬 Replies waiting on you"
+    priority = 24  # after draft review (23), before the day bookend (25)
+
+    def collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        try:
+            return self._collect(ctx)
+        except Exception as exc:  # noqa: BLE001 — never sinks a briefing
+            _log.debug("engagement provider skipped: %s", exc)
+            return None
+
+    def _collect(self, ctx: Any) -> BriefingSection | None:
+        from ..social.engagement import (
+            STATE_NEEDS_OWNER,
+            STATE_NEW,
+            EngagementStore,
+        )
+
+        db = getattr(ctx, "db", None)
+        if db is None:
+            return None
+        store = EngagementStore(db)
+        fresh = store.items(states=(STATE_NEW,))
+        escalated = store.items(states=(STATE_NEEDS_OWNER,))
+        waiting = fresh + escalated
+        if not waiting:
+            return None
+        lines: list[str] = []
+        for item in waiting[:3]:
+            author = str(item.get("author") or "someone")
+            platform = str(item.get("platform") or "")
+            text = " ".join(str(item.get("text") or "").split())[:80]
+            mark = "⚠️ " if item["state"] == STATE_NEEDS_OWNER else ""
+            lines.append(f"• {mark}{author} · {platform}: {text}")
+        if len(waiting) > 3:
+            lines.append(f"• …and {len(waiting) - 3} more waiting")
+        lines.append("• answer: /engage — the board, oldest first")
+        items = [{"id": f"engagement-{i}", "title": ln[2:],
+                  "body": ln[2:]} for i, ln in enumerate(lines)]
+        return BriefingSection(
+            name=self.name, title=self.title, priority=self.priority,
+            source="engagement-store", items=items, lines=lines)
+
+
 def _explore_claim_line(claim: dict[str, Any]) -> str:
     """One briefing line for a trend claim: its text + its basis
     in plain words, built from the claim's STRUCTURED basis (P2's
@@ -1514,6 +1565,7 @@ class BriefingComposer:
             GoalsProvider(),
             GoalClassesProvider(),
             DraftReviewProvider(),
+            EngagementProvider(),
             ExploreTrendsProvider(),
             CalendarProvider(),
             PeopleProvider(),
