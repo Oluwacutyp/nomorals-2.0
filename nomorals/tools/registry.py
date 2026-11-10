@@ -1179,7 +1179,7 @@ class ToolRegistry:
             )
 
         try:
-            result = spec.fn(**kwargs) if kwargs else spec.fn()
+            result = self._invoke_tool_fn(spec, name, actor, kwargs)
         except Exception as exc:  # noqa: BLE001 - tool failures are results
             elapsed = time.perf_counter() - started
             error = classify(exc)
@@ -1207,6 +1207,86 @@ class ToolRegistry:
             _log.debug("tool %s reported failure: %s", name, error.message)
             self._record_failure_ledger(name, error.message, error.message)
         return outcome
+
+    def _invoke_tool_fn(self, spec: ToolSpec, name: str, actor: str,
+                        kwargs: dict[str, Any]) -> Any:
+        """Run the tool's callable — through the self-healing
+        executor when an error system is wired (doc 20 P2).
+
+        Every production tool call funnels through here (via
+        :meth:`_call_inner`, under :meth:`call`). Until boot wires
+        an error system this is the plain call, exactly as before.
+        Once wired, the call runs under the subsystem's
+        :class:`~nomorals.core.selfheal.SelfHealingExecutor`: the
+        executor journals the incident, attempts recovery for the
+        failure classes it handles (a verified recovery is promoted
+        to the journal's known-fix table by the journal itself),
+        and returns the recovered result. When recovery does not
+        produce a result, the tool's OWN exception is re-raised so
+        the caller's error path (classify → audit → ledger → Err)
+        sees precisely the failure it would have seen unwired.
+
+        Fail-open for the host: if the healing machinery itself
+        raises, the failure is recorded (failure ledger + a journal
+        incident attempt) and the invocation falls back to whatever
+        the callable itself did — its result if it produced one,
+        its exception if it raised one, a direct call if it never
+        ran. The healer can never take the tool call down with it.
+        """
+
+        def _raw() -> Any:
+            return spec.fn(**kwargs) if kwargs else spec.fn()
+
+        try:
+            from ..core.error_system import get_error_system
+
+            es = get_error_system()
+        except Exception:  # noqa: BLE001 - unwired is a normal state
+            es = None
+        if es is None:
+            return _raw()
+
+        captured: dict[str, Any] = {}
+
+        def _tracked() -> Any:
+            try:
+                value = _raw()
+            except Exception as exc:  # noqa: BLE001 - captured verbatim
+                captured["exc"] = exc
+                raise
+            captured["value"] = value
+            return value
+
+        try:
+            outcome = es.healer_for(f"tools/{name}").execute(
+                _tracked,
+                context={"operation": name, "tool": name,
+                         "actor": actor},
+            )
+        except Exception as heal_exc:  # noqa: BLE001 - fail-open, above
+            record_failure("ToolRegistry._invoke_tool_fn:healer",
+                           heal_exc)
+            try:
+                es.journal.record_incident(
+                    heal_exc, subsystem=f"tools/{name}",
+                    context={"operation": name,
+                             "healing_failure": True})
+            except Exception as journal_exc:  # noqa: BLE001 - journal may be the break
+                record_failure("ToolRegistry._invoke_tool_fn:journal",
+                               journal_exc)
+            if "value" in captured:
+                return captured["value"]
+            if "exc" in captured:
+                raise captured["exc"] from heal_exc
+            return _raw()
+        if outcome is not None and getattr(outcome, "ok", False):
+            return outcome.result
+        if "exc" in captured:
+            raise captured["exc"]
+        # The healer declined without the callable ever raising
+        # (e.g. an open circuit breaker fast-path): the caller's
+        # error must be the tool's own, so invoke it directly.
+        return _raw()
 
     def _translate_result(self, spec: ToolSpec,
                           result: Any) -> Outcome[Any]:

@@ -641,7 +641,13 @@ def _disarm(state: _ImmuneState, grant_id: str) -> str:
         return "usage: /immune disarm <grant-id>"
     receipt = state.police.disarm(grant_id.strip())
     state._record(receipt)
-    return f"disarmed: grant {grant_id.strip()} revoked (receipt {receipt.id[:8]})."
+    # The reply follows the receipt's recorded effect — never the
+    # success wording for an effect that was not performed.
+    if receipt.details.get("effect") == "performed":
+        return (f"disarmed: grant {grant_id.strip()} revoked "
+                f"(receipt {receipt.id[:8]}).")
+    return (f"disarm NOT performed: {receipt.reason} "
+            f"(receipt {receipt.id[:8]}).")
 
 
 def _arrest(state: _ImmuneState, rest: str) -> str:

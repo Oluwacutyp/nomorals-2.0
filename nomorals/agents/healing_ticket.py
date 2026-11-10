@@ -60,10 +60,19 @@ effect it does not evidence — the evaluation's sharpest finding:
 the police disarm receipt reads "capability grant revoked" even
 when no revoke function was wired — grades at what its cited
 evidence earns (nothing attached → G0), with the reason named.
-The receipt texts themselves are NOT edited here; fixing their
-semantics is doc 20 P2's work. This envelope's deliverable is
-that the claim can no longer travel at a grade its evidence
-hasn't earned *through the ticket*.
+
+Doc 20 P2 has since fixed the police receipts' semantics: they
+now record the effect outcome on the record itself
+(``details.effect`` / ``details.effect_outcomes`` — whether the
+performing function was wired, and what it returned or raised).
+The projection reads that record first: a receipt that records
+its effect as not performed (or failed) carries NO claim — the
+absence is the honest projection; a receipt that records a
+performed effect grades its claim on that outcome record (an
+operation pass, cited as this receipt). Receipts written before
+P2 carry no effect record; they are graded exactly as P1 graded
+them — on the artifacts they cite, never on their wording — so a
+bare legacy success claim still earns G0 here.
 
 Reference shapes are the organs' own keys: ``incident:<id>`` ·
 ``heal:<recovery row id>`` (both incident-journal keys) ·
@@ -659,6 +668,90 @@ def _antibody_ticket(record: Any, store: Any,
     return ticket
 
 
+def _settle_claim_from_effect(ticket: HealingTicket, receipt: Any,
+                              action: str, reason_text: str,
+                              details: dict) -> bool:
+    """Settle a police receipt's claim from its doc 20 P2 effect
+    record (``details.effect`` / ``details.effect_outcomes``).
+
+    Returns True when the effect record settled the claim field:
+
+    * ``not_performed`` / ``failed`` — the record itself states no
+      effect was taken, so the claim is ABSENT, with the recorded
+      cause named. There is nothing to grade.
+    * ``performed`` / ``partial`` (non-casefile) — the claim grades
+      on the outcome record: the performing function ran during
+      this action and its return (or the partial truth) is carried
+      on this very receipt, cited as the claim's evidence — an
+      operation pass, G5's evidence type. The claim text is the
+      receipt's own reason, which under P2 states exactly what
+      was and was not performed.
+
+    Returns False when the receipt carries no effect record (a
+    pre-P2 record) or is a casefile (whose claim grades on the
+    case artifact it cites) — the caller then applies the legacy
+    cited-evidence grading.
+    """
+    effect = details.get("effect")
+    if effect not in ("performed", "partial", "not_performed", "failed"):
+        return False
+    if action == "casefile" and effect in ("performed", "partial"):
+        return False  # grades on the cited case artifact, below
+    outcomes = details.get("effect_outcomes") or []
+    causes: list[str] = []
+    for outcome in outcomes:
+        if not isinstance(outcome, dict):
+            continue
+        fn_name = str(outcome.get("fn") or "the effect function")
+        if not outcome.get("wired"):
+            causes.append(f"{fn_name} was not wired")
+        elif not outcome.get("ok"):
+            causes.append(
+                f"{fn_name} raised {outcome.get('error') or 'an error'}")
+    cause_text = "; ".join(causes)
+    if effect == "not_performed":
+        ticket.mark_absent(
+            "claim",
+            "the receipt itself records that NO effect was "
+            "performed"
+            + (f" — {cause_text}" if cause_text else "")
+            + "; there is no effect claim to grade")
+        return True
+    if effect == "failed":
+        ticket.mark_absent(
+            "claim",
+            "the receipt itself records that the attempted effect "
+            "FAILED"
+            + (f" — {cause_text}" if cause_text else "")
+            + "; no effect was taken, so there is no effect claim "
+              "to grade")
+        return True
+    ident = str(_get(receipt, "id", ""))
+    if effect == "partial":
+        grade_reason = (
+            "the receipt records the effect as PARTIAL in its "
+            "doc 20 P2 effect record (details.effect_outcomes): "
+            "the claim text states which part was not performed, "
+            "and the performed part grades on the recorded outcome "
+            "— this receipt is the operation's outcome record, "
+            "cited as the claim's evidence (an operation pass)")
+    else:
+        grade_reason = (
+            "the receipt records the effect as PERFORMED in its "
+            "doc 20 P2 effect record (details.effect_outcomes): "
+            "the performing function ran during this action and "
+            "its outcome is carried on the record — this receipt "
+            "is the operation's outcome record, cited as the "
+            "claim's evidence (an operation pass)")
+    ticket.fill(
+        "claim",
+        _claim(reason_text,
+               [EvidenceRef("artifact_pass", f"receipt:{ident}")],
+               grade_reason),
+        "immune.police")
+    return True
+
+
 def _receipt_ticket(receipt: Any, now: float) -> HealingTicket:
     ident = str(_get(receipt, "id", ""))
     rung = _get(receipt, "rung", 0)
@@ -694,6 +787,9 @@ def _receipt_ticket(receipt: Any, now: float) -> HealingTicket:
             "claim",
             "an observation asserts no effect — it records that "
             "an event was seen")
+    elif _settle_claim_from_effect(ticket, receipt, action,
+                                   reason_text, details):
+        pass  # the doc 20 P2 effect record settled the claim field
     else:
         evidence_refs: list[EvidenceRef] = []
         case_id = details.get("case_id")

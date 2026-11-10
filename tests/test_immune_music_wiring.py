@@ -63,7 +63,11 @@ def test_immune_quarantine_disarm_arrest_fever_drift_casefile():
     reset_immune_state("t3")
     q = control_immune("quarantine suspicious payload", chat_key="t3")
     assert "quarantined" in q and "nothing deleted" in q
-    assert "disarmed" in control_immune("disarm grant-1", chat_key="t3")
+    # Doc 20 P2: no revoke function is wired in chat, so the reply
+    # must state the disarm was NOT performed — never "disarmed".
+    disarm_out = control_immune("disarm grant-1", chat_key="t3")
+    assert "NOT performed" in disarm_out
+    assert "no revocation performed" in disarm_out
     # arrest without system -> report-only refusal
     refused = control_immune("arrest proc-1", chat_key="t3")
     assert "refused" in refused and "report-only" in refused.lower()

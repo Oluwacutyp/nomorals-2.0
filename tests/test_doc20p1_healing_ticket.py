@@ -245,38 +245,49 @@ class HealingRunTicketTests(HealingTicketBase):
 class PoliceReceiptTicketTests(HealingTicketBase):
 
     def test_disarm_claim_grades_on_cited_evidence_not_wording(self) -> None:
-        """THE disarm pin (doc 20's sharpest finding): the receipt
-        text claims the grant was revoked, but no revoke function
-        was wired — the truth is in what the record cites, and
-        the grade follows the evidence, never the wording."""
+        """THE disarm pin (doc 20's sharpest finding), after P2:
+        with no revoke function wired, the receipt itself now
+        records that NO revocation was performed — so the ticket
+        carries no claim at all. (In P1 the same unwired disarm
+        worded a bare "revoked" claim and graded G0; P2 fixed the
+        receipt semantics, and a legacy receipt of that shape
+        still grades G0 — pinned in the P2 suite.)"""
         receipt = self.plant_disarm_receipt()
-        self.assertEqual(receipt.reason,
-                         "capability grant grant-1 revoked")
+        self.assertEqual(
+            receipt.reason,
+            "no revocation performed — revoke function not wired; "
+            "grant grant-1 left in force")
         ticket = healing_ticket_for(
             f"receipt:{receipt.id}",
             immune_states={self.CHAT_KEY: self.state})
         self.assertTrue(ticket["found"])
         self.assert_partition(ticket)
-        self.assertEqual(ticket["claim"]["text"],
-                         "capability grant grant-1 revoked")
-        self.assertEqual(ticket["claim"]["grade"], "G0")
-        self.assertEqual(ticket["claim"]["evidence"], [])
-        self.assertIn("revoke function was wired",
-                      ticket["claim"]["grade_reason"])
+        self.assertIn("claim", ticket["absent"])
+        self.assertIn("NO effect was performed",
+                      ticket["absent"]["claim"])
+        self.assertIn("revoke_fn was not wired",
+                      ticket["absent"]["claim"])
         self.assertIn("evidence", ticket["absent"])
         self.assertEqual(ticket["actors"]["actor"], "immune.police")
         self.assertEqual(ticket["purpose"]["rung_name"], "Disarm")
 
-    def test_disarm_still_g0_when_revoke_fn_wired_but_unrecorded(self) -> None:
-        """Even with a working revoke_fn, the RECEIPT records
-        neither the wiring nor the return value — the record is
-        all the ticket may grade."""
+    def test_disarm_wired_and_recorded_grades_on_the_outcome(self) -> None:
+        """With a working revoke_fn, P2's receipt records the call
+        and its return — the claim now grades on that outcome
+        record (an operation pass), strictly above the G0 a bare
+        unrecorded claim earns."""
         receipt = self.plant_disarm_receipt(
             revoke_fn=lambda grant_id: True)
         ticket = healing_ticket_for(
             f"receipt:{receipt.id}",
             immune_states={self.CHAT_KEY: self.state})
-        self.assertEqual(ticket["claim"]["grade"], "G0")
+        self.assertEqual(ticket["claim"]["text"],
+                         "capability grant grant-1 revoked")
+        self.assertEqual(ticket["claim"]["grade"], "G5")
+        self.assertEqual(ticket["claim"]["evidence"],
+                         [{"kind": "artifact_pass",
+                           "ref": f"receipt:{receipt.id}"}])
+        self.assertIn("PERFORMED", ticket["claim"]["grade_reason"])
 
     def test_casefile_receipt_with_built_case_grades_g5(self) -> None:
         receipt, case = self.plant_case_receipt(wired=True)
@@ -291,14 +302,19 @@ class PoliceReceiptTicketTests(HealingTicketBase):
         self.assertEqual(ticket["evidence"]["cited_refs"],
                          [f"case:{case.id}"])
 
-    def test_casefile_receipt_without_case_grades_g0(self) -> None:
+    def test_casefile_receipt_without_case_has_no_claim(self) -> None:
+        """After P2, an unwired build_case records that no case
+        file was built — the ticket carries no claim. (A legacy
+        receipt wording the bare claim with no case id still
+        grades G0 — pinned in the P2 suite.)"""
         receipt, case = self.plant_case_receipt(wired=False)
         self.assertIsNone(case)
         ticket = healing_ticket_for(
             f"receipt:{receipt.id}",
             immune_states={self.CHAT_KEY: self.state})
-        self.assertEqual(ticket["claim"]["grade"], "G0")
-        self.assertIn("no case id", ticket["claim"]["grade_reason"])
+        self.assertIn("claim", ticket["absent"])
+        self.assertIn("casefile_fn was not wired",
+                      ticket["absent"]["claim"])
 
     def test_report_only_receipt_has_no_claim(self) -> None:
         receipt = self.state.police.respond(
@@ -438,9 +454,13 @@ class CoverageTests(HealingTicketBase):
         # so NO ticket is complete — the count is never inflated.
         self.assertEqual(coverage["complete_tickets"], 0)
         self.assertEqual(coverage["fields_absent"]["steward"], 8)
-        # Claim grades discriminate across the population.
+        # Claim grades discriminate across the population. After
+        # doc 20 P2 the planted (unwired) disarm records that no
+        # effect was performed, so it carries NO claim and drops
+        # out of the tally entirely (was G0 in P1, when the receipt
+        # still worded a bare "revoked" claim).
         self.assertEqual(coverage["claim_grades"].get("G5"), 2)
-        self.assertEqual(coverage["claim_grades"].get("G0"), 3)
+        self.assertEqual(coverage["claim_grades"].get("G0"), 2)
         self.assertEqual(coverage["unread"], [])
         self.assertTrue(any("complete tickets" in line
                             for line in coverage["summary"]))

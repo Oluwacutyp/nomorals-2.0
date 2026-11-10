@@ -256,7 +256,13 @@ def heartbeat(subsystem: str, ok: bool) -> None:
 
 def record_error(subsystem: str, exc: BaseException,
                  context: dict[str, Any] | None = None) -> None:
-    """Record an incident + feed the healer. No-op until boot wires it."""
+    """Record an incident. No-op until boot wires it.
+
+    Recording only: this entry point carries no callable, so there
+    is nothing for a healer to re-run. Healing happens where the
+    failing operation itself is invoked — tool calls route through
+    :meth:`ErrorSystem.healer_for` in the tool registry (doc 20 P2).
+    """
     es = get_error_system()
     if es is None:
         return
