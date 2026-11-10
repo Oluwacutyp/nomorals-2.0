@@ -102,6 +102,61 @@ _MAX_HASHES = 4000
 #: Local-match acceptance threshold (coherent-offset fraction).
 MATCH_THRESHOLD = 0.12
 
+#: Distinct-landmark support floors for accepting a local match
+#: (doc 24 SR2 §9 benchmark, 2026-11-10). A winner must clear the
+#: coherent-offset threshold AND at least one breadth test:
+#: ``support_fraction`` (distinct landmark types in the winning bin ÷
+#: all query hashes) ≥ 0.05, or ``type_recall`` (distinct types in
+#: the bin ÷ distinct types in the query) ≥ 0.25. Repetition is not
+#: breadth — on the benchmark (12-track synthesized catalog, 322
+#: accepted candidates) every false accept failed BOTH tests
+#: (support ≤ 0.049, recall ≤ 0.104) while every correct accept
+#: passed at least one (support ≥ 0.057, or recall ≈ 1.0 for
+#: simple few-tone recordings whose whole vocabulary is small).
+MIN_SUPPORT_FRACTION = 0.05
+MIN_TYPE_RECALL = 0.25
+
+#: Playback-rate corrections retried when direct voting accepts
+#: nothing. A coupled speed/pitch edit (sped-up social clip, DJ
+#: pitch-up) scales landmark frequencies by the rate and pair deltas
+#: by its inverse, so unscaled voting finds ~nothing (benchmark:
+#: 0.000 accepted-correct at every rate ±3–10% before this retry).
+_RATE_RETRY_GRID = (0.90, 0.92, 0.94, 0.96, 0.98,
+                    1.02, 1.04, 1.06, 1.08, 1.10)
+
+#: Measured calibration of the local matcher (doc 24 SR2, §9
+#: benchmark run 2026-11-10, schema songrecon.bench/v1, harness
+#: ``nomorals.audio.songrecon_bench``). The claim carries its
+#: evidence: on that run every accepted positive named the correct
+#: track (359 of 359; the one unaccepted query ranked correctly but
+#: scored under the threshold) and no non-catalog negative was
+#: accepted (0 of 48). The per-score calibration the same run
+#: measured for the unscaled top-1 ranking is weaker and stays
+#: named in the benchmark report: fraction bin 0.12–0.20 was
+#: correct only 0.1765 of the time (n=17), 0.20–0.35 was 0.9649
+#: (n=57), and every bin at/over 0.35 was 1.0 (n=241). The scope
+#: is the synthesized fixture catalog — never read this as
+#: real-library accuracy.
+MEASURED_CALIBRATION: dict[str, Any] = {
+    "benchmark": "songrecon.bench/v1",
+    "measured_on": "2026-11-10",
+    "catalog_tracks": 12,
+    "positives": 360,
+    "accepted": 359,
+    "accepted_correct": 359,
+    "negatives": 48,
+    "negatives_accepted": 0,
+    "speed_conditions": (
+        "playback-rate corrections 0.94-1.10: 60 of 60 positive "
+        "queries accepted with the correct track"
+    ),
+    "fixture_scope": (
+        "synthesized fixture catalog (12 generated tracks, "
+        "doc-24 section 9 degradation conditions) - measured on "
+        "generated fixtures, not a real music library"
+    ),
+}
+
 #: SongRecon receipt schema emitted by local and external recognition.
 RECEIPT_SCHEMA = "songrecon.receipt/v1"
 #: The shipped landmark engine solves exact / near-exact recordings.
@@ -224,6 +279,7 @@ def _match_strength(value: float, votes: int,
         "unit": SCORE_UNIT,
         "basis": SCORE_BASIS,
         "calibration": "uncalibrated — not a probability",
+        "measured_calibration": MEASURED_CALIBRATION,
     }
 
 
@@ -603,24 +659,18 @@ def _hash_pair(f1: float, f2: float, dt: float) -> int:
     return (q1 << 20) | (q2 << 10) | qd
 
 
-def fingerprint(path: str | os.PathLike[str], *,
-                max_hashes: int = _MAX_HASHES,
-                max_seconds: float = FINGERPRINT_WINDOW_SECONDS,
-                peak_mode: str = "bands",
-                ) -> list[tuple[int, float]]:
-    """Extract Shazam-style constellation hashes from ``path``.
+def _hashes_from_samples(samples: Sequence[float], sr: int, *,
+                         max_hashes: int = _MAX_HASHES,
+                         peak_mode: str = "bands"
+                         ) -> list[tuple[int, float]]:
+    """Constellation hashes from decoded mono samples.
 
-    ``peak_mode="bands"`` (default) takes the strongest local maximum in
-    each log-spaced frequency band per frame; ``peak_mode="localmax"``
-    uses a true freq×time local-maximum filter (the Wang 2003 pattern —
-    more faithful, needs numpy, falls back to bands without it).
-
-    Returns ``[(hash, offset_seconds), ...]`` — Devon's own fingerprint,
-    extracted locally. Raises :class:`AudioReadError` when the file
-    cannot be decoded.
+    The sample-domain half of :func:`fingerprint`, split out so the
+    matcher's rate retry can re-extract landmarks from a
+    rate-corrected waveform (re-picking peaks on the corrected
+    spectrum — rescaling packed hash ints instead loses most
+    landmarks to quantization error, measured in SR2).
     """
-    samples, sr = read_mono(path, target_sr=_FP_SR,
-                            max_seconds=max_seconds)
     frames = _frames(samples, sr)
     if (peak_mode or "bands").lower() == "localmax":
         peaks = _localmax_peaks(frames, sr, with_magnitude=True)
@@ -649,6 +699,28 @@ def fingerprint(path: str | os.PathLike[str], *,
             if len(hashes) >= max_hashes:
                 return hashes
     return hashes
+
+
+def fingerprint(path: str | os.PathLike[str], *,
+                max_hashes: int = _MAX_HASHES,
+                max_seconds: float = FINGERPRINT_WINDOW_SECONDS,
+                peak_mode: str = "bands",
+                ) -> list[tuple[int, float]]:
+    """Extract Shazam-style constellation hashes from ``path``.
+
+    ``peak_mode="bands"`` (default) takes the strongest local maximum in
+    each log-spaced frequency band per frame; ``peak_mode="localmax"``
+    uses a true freq×time local-maximum filter (the Wang 2003 pattern —
+    more faithful, needs numpy, falls back to bands without it).
+
+    Returns ``[(hash, offset_seconds), ...]`` — Devon's own fingerprint,
+    extracted locally. Raises :class:`AudioReadError` when the file
+    cannot be decoded.
+    """
+    samples, sr = read_mono(path, target_sr=_FP_SR,
+                            max_seconds=max_seconds)
+    return _hashes_from_samples(samples, sr, max_hashes=max_hashes,
+                                peak_mode=peak_mode)
 
 
 # ---------------------------------------------------------------------------
@@ -936,6 +1008,261 @@ class FingerprintDB:
             reason=reason,
         ).to_dict()
 
+    def _rank_locked(self, conn: sqlite3.Connection,
+                     hashes: Sequence[tuple[int, float]]
+                     ) -> list[dict[str, Any]]:
+        """Rank catalog candidates for one query fingerprint.
+
+        Caller must hold ``_lock``. Coherent-offset voting: each
+        candidate's score is its largest set of landmark hashes
+        agreeing on one 50 ms reference-offset bin, divided by the
+        number of query hashes. Returns every candidate that shared
+        at least one hash, best first. Total.
+        """
+        query_types = len({h for h, _t in hashes})
+        cand: dict[int, list[tuple[int, int, int, int]]] = {}
+        for h, t in hashes:
+            rows = conn.execute(
+                "SELECT track_id, offset_ms FROM hashes "
+                "WHERE hash = ?", (h,)).fetchall()
+            q_ms = int(t * 1000)
+            for tid, off in rows:
+                cand.setdefault(tid, []).append(
+                    (int(off) - q_ms, q_ms, int(off), int(h)))
+        ranked: list[dict[str, Any]] = []
+
+        def distinct_votes(
+                values: list[tuple[int, int, int, int]]) -> int:
+            # A query landmark votes ONCE per bin, however many
+            # reference copies of its hash agree there: the score
+            # is a fraction of query landmark hashes, so its
+            # numerator counts distinct (hash, query-time) pairs.
+            # Raw entry counting let repetitive material print
+            # fractions over 1.0 (measured 1.024, SR2 benchmark).
+            return len({(v[3], v[1]) for v in values})
+
+        for tid, evidence in cand.items():
+            # Coherent-offset histogram (50 ms bins).
+            bins: dict[int, list[tuple[int, int, int, int]]] = {}
+            for item in evidence:
+                bins.setdefault(int(item[0] // 50),
+                                []).append(item)
+            if not bins:
+                continue
+            coherent = max(
+                bins.values(),
+                key=lambda values: (distinct_votes(values),
+                                    -abs(values[0][0])))
+            votes = distinct_votes(coherent)
+            distinct_types = len({item[3] for item in coherent})
+            score = votes / max(1, len(hashes))
+            row = conn.execute(
+                "SELECT title, artist, source FROM tracks "
+                "WHERE id = ?", (tid,)).fetchone()
+            if not row:
+                continue
+            deltas = sorted(item[0] for item in coherent)
+            offset_ms = deltas[len(deltas) // 2]
+            query_times = [item[1] for item in coherent]
+            reference_times = [item[2] for item in coherent]
+            window = {
+                "query_start_s": round(min(query_times) / 1000, 3),
+                "query_end_s": round(max(query_times) / 1000, 3),
+                "reference_start_s": round(
+                    min(reference_times) / 1000, 3),
+                "reference_end_s": round(
+                    max(reference_times) / 1000, 3),
+                "coherent_votes": votes,
+            }
+            offset_map = {
+                "reference_minus_query_ms": int(offset_ms),
+                "query_start_s": window["query_start_s"],
+                "reference_start_s": window["reference_start_s"],
+            }
+            ranked.append({
+                "track_id": tid,
+                "recording_id": f"local:{tid}",
+                "title": row[0],
+                "artist": row[1],
+                "source": row[2],
+                "score": round(score, 3),
+                "match_strength": _match_strength(
+                    score, votes, len(hashes)),
+                "coherent_votes": votes,
+                "distinct_types": distinct_types,
+                "support_fraction": round(
+                    distinct_types / max(1, len(hashes)), 4),
+                "type_recall": round(
+                    distinct_types / max(1, query_types), 4),
+                "offset_ms": int(offset_ms),
+                "evidence_windows": [window],
+                "alignment": {
+                    "method": "Wang-2003 constellation "
+                              "landmark offset voting",
+                    "bin_width_ms": 50,
+                    "coherent_votes": votes,
+                    "offset_ms": int(offset_ms),
+                },
+                "offset_map": offset_map,
+            })
+        ranked.sort(
+            key=lambda item: (
+                -float(item["score"]),
+                -int(item["coherent_votes"]),
+                str(item.get("title") or "").casefold()))
+        return ranked
+
+    @staticmethod
+    def _clears_acceptance(ranked: list[dict[str, Any]],
+                           threshold: float) -> bool:
+        """The acceptance tests: coherent-offset fraction at or over
+        ``threshold`` AND at least one distinct-landmark breadth test
+        (:data:`MIN_SUPPORT_FRACTION` support, or
+        :data:`MIN_TYPE_RECALL` of the query's own landmark
+        vocabulary explained by the winner)."""
+        if not ranked:
+            return False
+        top = ranked[0]
+        if float(top["score"]) < threshold:
+            return False
+        return (float(top.get("support_fraction") or 0.0)
+                >= MIN_SUPPORT_FRACTION
+                or float(top.get("type_recall") or 0.0)
+                >= MIN_TYPE_RECALL)
+
+    def _rate_retry_locked(self, conn: sqlite3.Connection,
+                           path: str | os.PathLike[str],
+                           threshold: float
+                           ) -> tuple[list[dict[str, Any]], float] | None:
+        """Retry voting under playback-rate corrections.
+
+        Caller must hold ``_lock``. For each candidate rate the query
+        waveform is resampled back toward reference speed and its
+        landmarks re-extracted from the corrected spectrum (rescaling
+        packed hash ints instead loses most landmarks to quantization
+        error — measured in SR2: 0.035 fraction at the exact rate).
+        Tries the coarse ±10% grid, then refines ±0.01 around every
+        coarse rate — together the two passes probe every hundredth
+        from 0.89 to 1.11.
+        Returns ``(ranked, rate)`` for the best
+        correction that clears strict acceptance, else None. Costs extra
+        extraction+voting passes, so it runs only when direct voting
+        accepted nothing.
+        """
+        try:
+            samples, sr = read_mono(path)
+        except AudioReadError:
+            return None
+        if len(samples) < sr:
+            return None
+        # Retry acceptance is stricter than direct: the hypothesis
+        # space was searched across rates, so a corrected winner must
+        # clear the threshold AND both breadth legs. (Measured: a
+        # whole-tone-transposed three-tone chord otherwise "matches"
+        # at fraction 1.000 under a rate hypothesis while resting on
+        # 42 distinct landmarks — support 0.035. Genuine corrected
+        # winners on the benchmark sit at support ≥ 0.12, recall
+        # ≥ 0.28.)
+        def clears_strict(ranked: list[dict[str, Any]]) -> bool:
+            if not ranked:
+                return False
+            top = ranked[0]
+            return (float(top["score"]) >= threshold
+                    and float(top.get("support_fraction") or 0.0)
+                    >= MIN_SUPPORT_FRACTION
+                    and float(top.get("type_recall") or 0.0)
+                    >= MIN_TYPE_RECALL)
+
+        best: tuple[float, float, list[dict[str, Any]]] | None = None
+
+        def consider(rate: float) -> None:
+            nonlocal best
+            corrected = _resample_linear(
+                samples, sr, max(1, int(round(sr * rate))))
+            hashes = _hashes_from_samples(corrected, _FP_SR)
+            if not hashes:
+                return
+            ranked = self._rank_locked(conn, hashes)
+            if not ranked:
+                return
+            score = float(ranked[0]["score"])
+            if clears_strict(ranked) and (
+                    best is None or score > best[0]):
+                best = (score, rate, ranked)
+
+        for grid_rate in _RATE_RETRY_GRID:
+            consider(grid_rate)
+        # Refine ±0.01 around EVERY coarse rate. An earlier design
+        # refined only around the ≤4 loudest coarse rates at/over
+        # the threshold; the SR2 benchmark's final 3 speed misses
+        # indicted exactly that gate+cap — each query cleared strict
+        # acceptance at its applied rate (scores 0.371–0.493,
+        # support 0.126–0.244, recall 0.293–0.657) but the applied
+        # rate is an odd hundredth whose even neighbours either
+        # heard nothing at/over the threshold or were crowded out
+        # of the loudest-4 by chance maxima on wrong tracks. The
+        # correct peak is sharp (±0.01 away loses nearly all
+        # landmarks), so every hundredth in range gets probed; the
+        # cost is bounded extra passes on a path that runs only
+        # when direct voting already accepted nothing, and strict
+        # acceptance — not the search width — is what guards
+        # against false accepts (benchmark negatives verify).
+        for centre in _RATE_RETRY_GRID:
+            for refine in (centre - 0.01, centre + 0.01):
+                rate = round(refine, 2)
+                if 0.88 <= rate <= 1.12 and rate not in _RATE_RETRY_GRID:
+                    consider(rate)
+        if best is not None:
+            return best[2], best[1]
+        return None
+
+    @staticmethod
+    def _apply_rate_to_winner(winner: dict[str, Any],
+                              rate: float) -> dict[str, Any]:
+        """Annotate a rate-corrected winner: query-side times back in
+        query-file seconds, correction named on the alignment (and so
+        on the receipt that carries it). Mutates and returns it."""
+        for window in winner.get("evidence_windows") or ():
+            window["query_start_s"] = round(
+                float(window["query_start_s"]) / rate, 3)
+            window["query_end_s"] = round(
+                float(window["query_end_s"]) / rate, 3)
+        offset_map = winner.get("offset_map") or {}
+        if offset_map:
+            offset_map["query_start_s"] = round(
+                float(offset_map["query_start_s"]) / rate, 3)
+            offset_map["reference_minus_query_ms"] = int(
+                int(offset_map["reference_minus_query_ms"]) / rate)
+            offset_map["rate_correction"] = rate
+        alignment = winner.get("alignment") or {}
+        if alignment:
+            alignment["offset_ms"] = int(
+                int(alignment["offset_ms"]) / rate)
+            alignment["rate_correction"] = rate
+        winner["offset_ms"] = int(int(winner["offset_ms"]) / rate)
+        winner["rate_correction"] = rate
+        return winner
+
+    def rank_candidates(self, path: str | os.PathLike[str], *,
+                        limit: int = 5) -> list[dict[str, Any]]:
+        """Ranked catalog candidates for ``path``, best first.
+
+        The measurement view over the same voting :meth:`match`
+        performs — no threshold applied, so callers (the §9
+        benchmark, diagnostics) can see top-5 behaviour and near
+        misses. Never raises; returns [] when nothing can be said.
+        """
+        try:
+            hashes = fingerprint(path)
+            if not hashes:
+                return []
+            with self._lock:
+                conn = self._connect()
+                return self._rank_locked(conn, hashes)[:limit]
+        except Exception:  # noqa: BLE001
+            _log.debug("rank_candidates failed", exc_info=True)
+            return []
+
     def match(self, path: str | os.PathLike[str], *,
               threshold: float = MATCH_THRESHOLD
               ) -> dict[str, Any]:
@@ -948,6 +1275,15 @@ class FingerprintDB:
         numerator, denominator, unit, and uncalibrated basis. A
         no-match or failure result also carries a receipt stating what
         was searched and why no recording was accepted.
+
+        Acceptance (SR2): the fraction must clear ``threshold`` AND
+        the winner must pass a distinct-landmark breadth test —
+        support ≥ :data:`MIN_SUPPORT_FRACTION` of the query's hashes,
+        or type recall ≥ :data:`MIN_TYPE_RECALL` of the query's own
+        landmark vocabulary. When direct voting accepts nothing, voting is
+        retried under playback-rate corrections (coupled speed/pitch
+        edits); a winner found that way carries ``rate_correction``
+        on the result and on the receipt's alignment.
         """
         query_hash = ""
         query_count = 0
@@ -968,87 +1304,27 @@ class FingerprintDB:
                 # Pull candidate evidence per hash. Keeping the query
                 # and reference times lets the receipt name the actual
                 # windows that voted for the winning offset.
-                cand: dict[int, list[tuple[int, int, int]]] = {}
-                for h, t in hashes:
-                    rows = conn.execute(
-                        "SELECT track_id, offset_ms FROM hashes "
-                        "WHERE hash = ?", (h,)).fetchall()
-                    q_ms = int(t * 1000)
-                    for tid, off in rows:
-                        cand.setdefault(tid, []).append(
-                            (int(off) - q_ms, q_ms, int(off)))
-                ranked: list[dict[str, Any]] = []
-                for tid, evidence in cand.items():
-                    # Coherent-offset histogram (50 ms bins).
-                    bins: dict[int, list[tuple[int, int, int]]] = {}
-                    for item in evidence:
-                        bins.setdefault(int(item[0] // 50),
-                                        []).append(item)
-                    if not bins:
-                        continue
-                    coherent = max(
-                        bins.values(),
-                        key=lambda values: (len(values),
-                                            -abs(values[0][0])))
-                    votes = len(coherent)
-                    score = votes / max(1, len(hashes))
-                    row = conn.execute(
-                        "SELECT title, artist, source FROM tracks "
-                        "WHERE id = ?", (tid,)).fetchone()
-                    if not row:
-                        continue
-                    deltas = sorted(item[0] for item in coherent)
-                    offset_ms = deltas[len(deltas) // 2]
-                    query_times = [item[1] for item in coherent]
-                    reference_times = [item[2] for item in coherent]
-                    window = {
-                        "query_start_s": round(min(query_times) / 1000, 3),
-                        "query_end_s": round(max(query_times) / 1000, 3),
-                        "reference_start_s": round(
-                            min(reference_times) / 1000, 3),
-                        "reference_end_s": round(
-                            max(reference_times) / 1000, 3),
-                        "coherent_votes": votes,
-                    }
-                    offset_map = {
-                        "reference_minus_query_ms": int(offset_ms),
-                        "query_start_s": window["query_start_s"],
-                        "reference_start_s": window["reference_start_s"],
-                    }
-                    ranked.append({
-                        "track_id": tid,
-                        "recording_id": f"local:{tid}",
-                        "title": row[0],
-                        "artist": row[1],
-                        "source": row[2],
-                        "score": round(score, 3),
-                        "match_strength": _match_strength(
-                            score, votes, len(hashes)),
-                        "coherent_votes": votes,
-                        "offset_ms": int(offset_ms),
-                        "evidence_windows": [window],
-                        "alignment": {
-                            "method": "Wang-2003 constellation "
-                                      "landmark offset voting",
-                            "bin_width_ms": 50,
-                            "coherent_votes": votes,
-                            "offset_ms": int(offset_ms),
-                        },
-                        "offset_map": offset_map,
-                    })
-                ranked.sort(
-                    key=lambda item: (
-                        -float(item["score"]),
-                        -int(item["coherent_votes"]),
-                        str(item.get("title") or "").casefold()))
+                ranked = self._rank_locked(conn, hashes)
+                rate_used: float | None = None
+                if not self._clears_acceptance(ranked, threshold):
+                    # Coupled speed/pitch edits defeat unscaled
+                    # voting by construction; retry rate-corrected
+                    # before answering no-match (SR2 hardening).
+                    retry = self._rate_retry_locked(
+                        conn, path, threshold)
+                    if retry is not None:
+                        ranked, rate_used = retry
                 catalog = self._catalog_snapshot_locked(conn)
-                if ranked and float(ranked[0]["score"]) >= threshold:
+                if self._clears_acceptance(ranked, threshold):
                     winner = ranked[0]
+                    if rate_used is not None:
+                        winner = self._apply_rate_to_winner(
+                            winner, rate_used)
                     receipt = self._receipt_locked(
                         conn, status="matched", query_hash=query_hash,
                         query_count=query_count, winner=winner,
                         alternatives=ranked[1:4], catalog=catalog)
-                    return {
+                    result = {
                         "ok": True,
                         "track_id": winner["track_id"],
                         "recording_id": winner["recording_id"],
@@ -1066,13 +1342,32 @@ class FingerprintDB:
                         "query_fingerprint_count": query_count,
                         "receipt": receipt,
                     }
+                    if rate_used is not None:
+                        result["rate_correction"] = rate_used
+                    return result
                 if ranked:
                     best_score = float(ranked[0]["score"])
-                    reason = (
-                        "no reliable match in local library "
-                        f"(searched {int(catalog['tracks'])} indexed "
-                        "track(s); strongest coherent-offset fraction "
-                        f"{best_score:.3f} < {threshold:.3f})")
+                    support = float(
+                        ranked[0].get("support_fraction") or 0.0)
+                    recall = float(
+                        ranked[0].get("type_recall") or 0.0)
+                    if best_score >= threshold:
+                        reason = (
+                            "no reliable match in local library "
+                            f"(searched {int(catalog['tracks'])} indexed "
+                            "track(s); strongest coherent-offset fraction "
+                            f"{best_score:.3f} rests on too few distinct "
+                            "landmarks — support "
+                            f"{support:.3f} < {MIN_SUPPORT_FRACTION:.3f} "
+                            f"and type recall {recall:.3f} < "
+                            f"{MIN_TYPE_RECALL:.3f}; repeated landmarks "
+                            "are not independent evidence)")
+                    else:
+                        reason = (
+                            "no reliable match in local library "
+                            f"(searched {int(catalog['tracks'])} indexed "
+                            "track(s); strongest coherent-offset fraction "
+                            f"{best_score:.3f} < {threshold:.3f})")
                     best_candidate = ranked[0]
                 else:
                     best_score = 0.0
