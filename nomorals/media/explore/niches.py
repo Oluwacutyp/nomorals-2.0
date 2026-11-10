@@ -18,6 +18,11 @@ changes are his call:
   distance with the why-not-existing note). A cluster the evidence
   cannot carry produces NO proposal, and the discovery report's
   ``declined`` list names it with the reason — P2's discipline.
+  Doc 24 PG4: the decline is ALSO preserved in the store as an
+  eliminated branch (the report is per-run; the branch is the
+  durable loser record — the cluster, its evidence snapshot, the
+  reason, and the existing niche/proposal that superseded it
+  where one did), graded from the cluster's OWN evidence.
 * **The overlay** is the persisted proposal set in the
   ExploreStore beside the code registry (census §4): the seven
   hand-written plugins in ``media/contentops/niches/`` are the
@@ -73,13 +78,19 @@ from typing import Any
 from ...core.logging_setup import get_logger
 from ..failures import record_failure
 from .store import (
+    BRANCH_NICHE_CLUSTER,
     CANDIDATE_PROMOTED,
+    ELIM_DECLINED,
     NICHE_ADOPTED,
     NICHE_DISMISSED,
     NICHE_PROPOSED,
     ExploreStore,
 )
-from .trends import current_claims, source_class_of
+from .trends import (
+    current_claims,
+    proof_grade_for_branch,
+    source_class_of,
+)
 
 _log = get_logger(__name__)
 
@@ -251,6 +262,32 @@ def _cluster_claims(claims: list[dict[str, Any]],
     return out
 
 
+def _cluster_evidence_refs(*, backing: list[dict[str, Any]],
+                           sweeps: list[str], sightings: int,
+                           slug: str) -> list[dict[str, str]]:
+    """The PG1 evidence refs a niche cluster's OWN record earns
+    (doc 24 PG4 — the refs an eliminated branch is graded from):
+    backing trend claims are empirical sources; member sightings
+    spread across two or more sweeps are empirical sources; any
+    other evaluated cluster carries the evaluation itself — the
+    inexpensive filter — as a logical check. A raw sighting COUNT
+    is never a ref: a large single-sweep burst is weaker evidence
+    than a small corroborated one, and the refs say so."""
+    refs: list[dict[str, str]] = []
+    for claim in backing or []:
+        key = claim.get("claim_key") or ""
+        if key:
+            refs.append({"kind": "empirical_source",
+                         "ref": f"claim:{key}"})
+    if not refs and len(sweeps or []) >= 2:
+        refs = [{"kind": "empirical_source", "ref": f"sweep:{s}"}
+                for s in list(sweeps)[:8]]
+    if not refs:
+        refs = [{"kind": "logical_check",
+                 "ref": f"niche-cluster:{slug}"}]
+    return refs
+
+
 def _nearest_existing(slug: str,
                       existing: list[dict[str, Any]],
                       ) -> tuple[str, float]:
@@ -335,7 +372,12 @@ def discover_niches(store: ExploreStore, *,
                              for s in (m.get("sweeps") or []) if s})
 
             def decline(reason: str, _slug: str = slug,
-                        _members: list = members) -> None:
+                        _members: list = members,
+                        _member_keys: set = member_keys,
+                        _sightings: int = sightings,
+                        _sweeps: list = sweeps,
+                        _backing: list = backing,
+                        superseded_by: Any = None) -> None:
                 report["declined"].append({
                     "subject": _slug,
                     "subject_kind": "niche_cluster",
@@ -343,6 +385,43 @@ def discover_niches(store: ExploreStore, *,
                                 for m in _members],
                     "reason": reason,
                 })
+                # PG4: preserve the losing branch durably — the
+                # report above is per-run and vanishes; the store
+                # record keeps the cluster, its evidence snapshot,
+                # its own derived grade, the reason, and the
+                # winner that superseded it where one did.
+                branch: dict[str, Any] = {
+                    "branch_kind": BRANCH_NICHE_CLUSTER,
+                    "subject": _slug,
+                    "subject_key": _slug,
+                    "subject_kind": "niche_cluster",
+                    "kind": "niche_cluster",
+                    "text": (f"niche cluster {_slug} — "
+                             f"{len(_members)} member(s)"),
+                    "members": [
+                        {"key": m.get("key") or "",
+                         "name": m.get("name") or ""}
+                        for m in _members],
+                    "member_keys": sorted(_member_keys),
+                    "evidence": {
+                        "sightings": _sightings,
+                        "sweeps": list(_sweeps),
+                        "backing_claims": [
+                            c.get("claim_key") or ""
+                            for c in _backing],
+                    },
+                    "evidence_refs": _cluster_evidence_refs(
+                        backing=_backing, sweeps=_sweeps,
+                        sightings=_sightings, slug=_slug),
+                    "outcome": ELIM_DECLINED,
+                    "reason": reason,
+                    "superseded_by": superseded_by,
+                    "eliminated_at": now,
+                    "source": "explore-niches",
+                }
+                branch["proof_grade"] = \
+                    proof_grade_for_branch(branch).to_dict()
+                store.record_eliminated_branch(branch)
 
             if len(members) < MIN_MEMBERS:
                 decline(
@@ -369,13 +448,19 @@ def discover_niches(store: ExploreStore, *,
             if slug in existing_slugs:
                 decline(
                     f"already covered by the existing niche "
-                    f"{slug} — a finding about it, not a new niche")
+                    f"{slug} — a finding about it, not a new niche",
+                    superseded_by={
+                        "ref": slug, "kind": "niche",
+                        "text": f"the existing niche {slug}"})
                 continue
             if distance >= COVERED_JACCARD:
                 decline(
                     f"too close to the existing niche {nearest} "
                     f"(name-token overlap {distance}) — a finding "
-                    "about it, not a new niche")
+                    "about it, not a new niche",
+                    superseded_by={
+                        "ref": nearest, "kind": "niche",
+                        "text": f"the existing niche {nearest}"})
                 continue
             prior = store.niche_proposal(slug)
             if prior is not None \
@@ -386,7 +471,10 @@ def discover_niches(store: ExploreStore, *,
                 decline(
                     f"the name {slug} is already a different "
                     "cluster's proposal — rename the field before "
-                    "this one can be proposed")
+                    "this one can be proposed",
+                    superseded_by={
+                        "ref": slug, "kind": "niche_proposal",
+                        "text": f"the existing proposal {slug}"})
                 continue
             if prior is not None \
                     and prior.get("status") == NICHE_ADOPTED:

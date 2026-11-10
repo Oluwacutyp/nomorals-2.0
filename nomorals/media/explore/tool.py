@@ -40,16 +40,20 @@ from typing import Any
 from ...core.errors import ToolError
 from ...core.policy import Capability
 from .engine import explore_for_context, explore_status, run_exploration
-from .trends import current_claims, evaluate_trends
+from .trends import current_claims, eliminated_branches, evaluate_trends
 
 __all__ = ["register", "render_claims_text", "render_run_text"]
 
 
 def render_claims_text(claims: list[dict[str, Any]],
-                       report: dict[str, Any] | None) -> str:
+                       report: dict[str, Any] | None,
+                       eliminated: list[dict[str, Any]] | None = None,
+                       ) -> str:
     """The claims render (P2's seam, made public for P3's board):
-    kind, basis in plain words, freshness — no internal ids."""
-    return _render_trends(claims, report)
+    kind, basis in plain words, freshness — no internal ids.
+    PG4: preserved eliminated branches render after the live
+    claims, in their own labelled section — never among them."""
+    return _render_trends(claims, report, eliminated)
 
 
 def render_run_text(report: dict[str, Any]) -> str:
@@ -123,7 +127,9 @@ def _render_run(report: dict[str, Any], beats: list[dict[str, Any]]) -> str:
 
 
 def _render_trends(claims: list[dict[str, Any]],
-                   report: dict[str, Any] | None) -> str:
+                   report: dict[str, Any] | None,
+                   eliminated: list[dict[str, Any]] | None = None,
+                   ) -> str:
     lines = ["🔭 **Exploration trends**"]
     if not claims:
         lines.append("no claims yet — run a sweep (action=run), then "
@@ -155,6 +161,26 @@ def _render_trends(claims: list[dict[str, Any]],
             f"· [{claim.get('kind')}] {claim.get('text')} — "
             f"{'; '.join(bits)} · proof {grade} · {standing}, "
             f"last evidence {_when(claim.get('observed_at') or 0)}")
+    if eliminated:
+        lines.append(
+            "\neliminated branches (preserved — eliminated, "
+            "not live claims):")
+        for branch in eliminated[:10]:
+            grade = str((branch.get("proof_grade") or {}).get(
+                "grade") or "G0")
+            line = (
+                f"· [{branch.get('kind')}] {branch.get('text')} "
+                f"— eliminated: {branch.get('reason')} · proof "
+                f"{grade} (its own evidence) · "
+                f"{_when(branch.get('eliminated_at') or 0)}")
+            winner = branch.get("superseded_by") or {}
+            if winner.get("text"):
+                line += f" · superseded by: {winner['text']}"
+            lines.append(line)
+        if len(eliminated) > 10:
+            lines.append(
+                f"· … and {len(eliminated) - 10} more preserved "
+                "in the store")
     if report:
         verdicts = report.get("candidates") or {}
         if verdicts.get("promoted"):
@@ -171,6 +197,10 @@ def _render_trends(claims: list[dict[str, Any]],
             for row in declined:
                 lines.append(
                     f"· {row.get('subject')} — {row.get('reason')}")
+        if report.get("eliminated_preserved"):
+            lines.append(
+                f"eliminated branches preserved this evaluation: "
+                f"{report['eliminated_preserved']}")
     return "\n".join(lines)
 
 
@@ -237,9 +267,11 @@ def register(registry: Any) -> None:
             now = time.time()
             report = evaluate_trends(store, now=now) if refresh else None
             claims = current_claims(store, now=now)
+            eliminated = eliminated_branches(store)
             return {"claims": claims, "count": len(claims),
                     "evaluation": report,
-                    "text": _render_trends(claims, report)}
+                    "eliminated": eliminated,
+                    "text": _render_trends(claims, report, eliminated)}
         if action == "niches":
             from .board import render_explore_niches
             from .niches import effective_niches

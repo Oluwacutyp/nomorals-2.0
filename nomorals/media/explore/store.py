@@ -50,6 +50,14 @@ What is stored (payload ``media.explore.v1``, version 1):
   status proposed / adopted / dismissed). Discovery writes them;
   only the owner's act changes the status — the store keeps the
   record and renders no verdict on it.
+* **eliminated_branches** — doc 24 PG4's preservation records:
+  when a claim is superseded by re-evaluation, when a claim's
+  candidate is shed, or when a niche-discovery cluster is
+  declined, the losing branch is preserved here — its claim /
+  evidence snapshot, the reason it was eliminated, and what
+  superseded it. Preservation is not resurrection: these records
+  are read only by the eliminated-branch views; they never enter
+  the current claim set, any feed, or any decision path.
 * **delivery_log** — per-beat delivery counts (§3.4 contract 4): a
   delivery is a finding RECORDED into this store for a beat during a
   sweep. The WS2 interests ``watch_coverage`` provider measures
@@ -99,6 +107,18 @@ NICHE_PROPOSED = "proposed"
 NICHE_ADOPTED = "adopted"
 NICHE_DISMISSED = "dismissed"
 
+#: Eliminated-branch vocabulary (doc 24 PG4): what kind of branch
+#: was preserved, and how it left the live set. ``superseded`` —
+#: a re-evaluation wrote a materially different claim over it;
+#: ``shed`` — its candidate left the pool on an absence verdict;
+#: ``declined`` — a niche-discovery cluster the evidence bar
+#: could not carry (the fan-out's losing branches).
+BRANCH_CLAIM = "claim"
+BRANCH_NICHE_CLUSTER = "niche_cluster"
+ELIM_SUPERSEDED = "superseded"
+ELIM_SHED = "shed"
+ELIM_DECLINED = "declined"
+
 _MAX_SWEEPS = 60
 _MAX_OBSERVATIONS = 500
 _MAX_CANDIDATES = 200
@@ -106,6 +126,7 @@ _MAX_SHED = 50
 _MAX_CLAIMS = 300
 _MAX_CLAIM_OUTCOMES = 300
 _MAX_NICHE_PROPOSALS = 100
+_MAX_ELIMINATED_BRANCHES = 300
 _MAX_DELIVERY_LOG = 2000
 _MAX_EVIDENCE_PER_CANDIDATE = 10
 #: A shed candidate is not re-intaken for a week — no flap loop
@@ -142,9 +163,11 @@ class ExploreStore:
         self._claims: list[dict[str, Any]] = []
         self._claim_outcomes: list[dict[str, Any]] = []
         self._niche_proposals: list[dict[str, Any]] = []
+        self._eliminated: list[dict[str, Any]] = []
         self._delivery_log: list[dict[str, Any]] = []
         self._sweep_seq = 0
         self._obs_seq = 0
+        self._elim_seq = 0
         if store is not None:
             self._load_persisted()
 
@@ -175,6 +198,7 @@ class ExploreStore:
                 "version": 1,
                 "sweep_seq": self._sweep_seq,
                 "obs_seq": self._obs_seq,
+                "elim_seq": self._elim_seq,
                 "sweeps": self._sweeps,
                 "observations": self._observations,
                 "candidates": list(self._candidates.values()),
@@ -182,6 +206,7 @@ class ExploreStore:
                 "claims": self._claims,
                 "claim_outcomes": self._claim_outcomes,
                 "niche_proposals": self._niche_proposals,
+                "eliminated_branches": self._eliminated,
                 "delivery_log": self._delivery_log,
             }
             raw = json.dumps(payload, ensure_ascii=False)
@@ -237,6 +262,12 @@ class ExploreStore:
                     if isinstance(row, dict) \
                             and row.get("slug") not in known_niches:
                         self._niche_proposals.append(row)
+                known_elim = {b.get("branch_id")
+                              for b in self._eliminated}
+                for row in data.get("eliminated_branches") or []:
+                    if isinstance(row, dict) \
+                            and row.get("branch_id") not in known_elim:
+                        self._eliminated.append(row)
                 self._shed = (list(data.get("shed") or [])
                               + [s for s in self._shed
                                  if s not in (data.get("shed") or [])])
@@ -261,6 +292,9 @@ class ExploreStore:
                 self._niche_proposals = [
                     r for r in data.get("niche_proposals") or []
                     if isinstance(r, dict) and r.get("slug")]
+                self._eliminated = [
+                    r for r in data.get("eliminated_branches") or []
+                    if isinstance(r, dict)]
                 self._delivery_log = [
                     r for r in data.get("delivery_log") or []
                     if isinstance(r, dict)]
@@ -268,6 +302,8 @@ class ExploreStore:
                                   int(data.get("sweep_seq") or 0))
             self._obs_seq = max(self._obs_seq,
                                 int(data.get("obs_seq") or 0))
+            self._elim_seq = max(self._elim_seq,
+                                 int(data.get("elim_seq") or 0))
             self._sweeps = self._sweeps[-_MAX_SWEEPS:]
             self._observations = self._observations[-_MAX_OBSERVATIONS:]
             self._claims = self._claims[-_MAX_CLAIMS:]
@@ -275,6 +311,8 @@ class ExploreStore:
                 self._claim_outcomes[-_MAX_CLAIM_OUTCOMES:]
             self._niche_proposals = \
                 self._niche_proposals[-_MAX_NICHE_PROPOSALS:]
+            self._eliminated = \
+                self._eliminated[-_MAX_ELIMINATED_BRANCHES:]
             self._delivery_log = self._delivery_log[-_MAX_DELIVERY_LOG:]
             self._shed = self._shed[-_MAX_SHED:]
         except Exception:  # noqa: BLE001
@@ -697,6 +735,87 @@ class ExploreStore:
                 "ExploreStore.set_niche_proposal_status", e)
             return False
 
+    # ── eliminated branches (doc 24 PG4: preservation) ─────────
+    @staticmethod
+    def _branch_identity(row: dict[str, Any]) -> tuple:
+        """What makes one preserved branch THE same branch when a
+        writer re-presents it: kind + subject + outcome + reason +
+        what superseded it, plus the preserved snapshot's own
+        stamp (a claim version's ``recorded_at``) or the cluster's
+        member set. A re-evaluation that changes none of these has
+        nothing new to preserve."""
+        base = (
+            str(row.get("branch_kind") or ""),
+            str(row.get("subject_key") or ""),
+            str(row.get("outcome") or ""),
+            str(row.get("reason") or ""),
+            str((row.get("superseded_by") or {}).get("ref") or ""),
+        )
+        claim = row.get("claim") or {}
+        if claim:
+            return base + (str(claim.get("recorded_at") or ""),)
+        members = row.get("member_keys") or []
+        return base + (",".join(sorted(str(m) for m in members)),)
+
+    def record_eliminated_branch(self,
+                                 record: dict[str, Any],
+                                 ) -> dict[str, Any] | None:
+        """Preserve one eliminated branch (doc 24 PG4). The record
+        is the writer's shape: ``branch_kind``, ``subject`` /
+        ``subject_key`` / ``subject_kind``, the preserved ``claim``
+        snapshot (claim branches) or ``members`` + ``evidence``
+        snapshot (niche clusters), ``evidence_refs`` (the branch's
+        OWN PG1 evidence — its grade is derived from these, never
+        inherited from whatever replaced it), ``outcome``,
+        ``reason``, ``superseded_by`` (the winner's ref/kind/text,
+        or None when the evidence bar — not a winner — eliminated
+        it) and ``eliminated_at``.
+
+        Idempotent on identity: re-presenting the same branch
+        refreshes its ``eliminated_at`` and returns the existing
+        record, so a re-run of the evaluator or of niche discovery
+        over unchanged evidence never duplicates a preservation.
+        Never raises."""
+        try:
+            row = dict(record)
+            if not row.get("branch_kind") \
+                    or not row.get("subject_key"):
+                return None
+            identity = self._branch_identity(row)
+            for existing in self._eliminated:
+                if self._branch_identity(existing) == identity:
+                    existing["eliminated_at"] = float(
+                        row.get("eliminated_at")
+                        or existing.get("eliminated_at") or 0)
+                    self._persist()
+                    return dict(existing)
+            self._elim_seq += 1
+            row["branch_id"] = f"elim-{self._elim_seq}"
+            row.setdefault("eliminated_at", time.time())
+            self._eliminated.append(row)
+            self._eliminated = \
+                self._eliminated[-_MAX_ELIMINATED_BRANCHES:]
+            self._persist()
+            return dict(row)
+        except Exception as e:  # noqa: BLE001
+            record_failure(
+                "ExploreStore.record_eliminated_branch", e)
+            return None
+
+    def eliminated_branches(self, *, branch_kind: str = "",
+                            subject_key: str = "",
+                            limit: int = 100,
+                            ) -> list[dict[str, Any]]:
+        """Preserved eliminated branches, newest first, optionally
+        filtered. These records are an audit trail: no live path
+        reads them as claims."""
+        rows = [dict(r) for r in reversed(self._eliminated)
+                if (not branch_kind
+                    or r.get("branch_kind") == branch_kind)
+                and (not subject_key
+                     or r.get("subject_key") == subject_key)]
+        return rows[: max(0, int(limit))]
+
     # ── delivery log (§3.4 contract: per-beat deliveries) ──────────
     def record_delivery(self, beat: str, *, sweep_id: str = "",
                         at: float = 0.0, delivered: int = 0,
@@ -727,6 +846,7 @@ class ExploreStore:
             "candidates": len(self._candidates),
             "candidates_watching": watching,
             "claims": len(self._claims),
+            "eliminated_branches": len(self._eliminated),
             "deliveries": len(self._delivery_log),
             "latest_sweep": latest,
         }

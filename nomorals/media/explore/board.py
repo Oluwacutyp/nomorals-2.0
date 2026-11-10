@@ -31,6 +31,7 @@ from ..failures import record_failure
 from .engine import default_explore_store
 from .jobs import next_sweep_due, owner_tz
 from .store import (
+    BRANCH_NICHE_CLUSTER,
     CANDIDATE_PROMOTED,
     CANDIDATE_WATCHING,
     NICHE_ADOPTED,
@@ -38,7 +39,7 @@ from .store import (
     NICHE_PROPOSED,
 )
 from .tool import render_claims_text, render_run_text
-from .trends import current_claims, evaluate_trends
+from .trends import current_claims, eliminated_branches, evaluate_trends
 
 __all__ = [
     "PROXY_DEPENDENCY_LINE",
@@ -243,6 +244,12 @@ def render_explore_board(context: Any = None, *,
         lines.append(
             "claims: none yet — one sweep alone can only ever be "
             "a spike or unverified, never a trend")
+    preserved = eliminated_branches(store, limit=1000)
+    if preserved:
+        lines.append(
+            f"eliminated branches: {len(preserved)} preserved "
+            "(superseded / shed / declined — labelled on "
+            "/explore trends, never live claims)")
     pool = store.candidates()
     watching = [c for c in pool if c.get("status") == CANDIDATE_WATCHING]
     promoted = [c for c in pool if c.get("status") == CANDIDATE_PROMOTED]
@@ -287,7 +294,8 @@ def render_explore_trends(context: Any = None, *,
     store = resolve_store(context, store)
     report = evaluate_trends(store, now=now) if evaluate else None
     claims = current_claims(store, now=now)
-    return render_claims_text(claims, report)
+    return render_claims_text(
+        claims, report, eliminated_branches(store))
 
 
 def render_explore_candidates(context: Any = None, *,
@@ -400,6 +408,19 @@ def render_explore_niches(context: Any = None, *,
         lines.append(
             f"\ndismissed: {len(dismissed)} — the same evidence "
             "won't re-propose them; new sightings can")
+    declined = eliminated_branches(
+        store, branch_kind=BRANCH_NICHE_CLUSTER, limit=5)
+    if declined:
+        lines.append(
+            "\ndeclined clusters (preserved as eliminated "
+            "branches — not proposals):")
+        for branch in declined:
+            grade = str((branch.get("proof_grade") or {}).get(
+                "grade") or "G0")
+            lines.append(
+                f"· {branch.get('subject')} — "
+                f"{branch.get('reason')} · proof {grade} "
+                "(its own evidence)")
     effective = effective_niches(store)
     lines.append(
         f"\neffective niche set (floor ∪ adopted): "

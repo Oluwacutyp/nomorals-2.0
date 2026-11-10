@@ -84,6 +84,24 @@ imported, not mirrored. The grade is stamped at authoring time,
 re-derived at read time in :func:`current_claims` (so rows stored
 before PG3 grade too), and rendered beside the kind on the board
 and the trends text.
+
+Eliminated-branch preservation (doc 24 PG4): supersede-by-key
+used to leave the prior version as an unmarked row in the claim
+history — present in storage, invisible as what it was. Now,
+when a re-evaluation writes a materially different claim over a
+prior version, the prior version is PRESERVED as an eliminated
+branch in the store (its full claim snapshot, the evidence refs
+its grade derives from, the reason — which material fields
+changed — and the claim that superseded it). A claim whose
+candidate is shed is preserved the same way, with the shed
+verdict's reason. Preservation is not resurrection: branches
+live in their own store section, are read only through
+:func:`eliminated_branches`, never enter :func:`current_claims`,
+any feed, or any decision path, and render labelled eliminated.
+A branch's grade derives from ITS OWN attached evidence at read
+(:func:`proof_grade_for_branch`) — it never inherits the
+winner's grade, and a stored grade token on a branch record is
+checked against its evidence exactly like PG1's rule.
 """
 
 from __future__ import annotations
@@ -95,9 +113,12 @@ from ...core.logging_setup import get_logger
 from ...core.proof_grade import ClaimGrade, EvidenceRef
 from ..failures import record_failure
 from .store import (
+    BRANCH_CLAIM,
     CANDIDATE_PROMOTED,
     CANDIDATE_SHED,
     CANDIDATE_WATCHING,
+    ELIM_SHED,
+    ELIM_SUPERSEDED,
     OBS_FAILED,
     ExploreStore,
 )
@@ -113,7 +134,9 @@ __all__ = [
     "FRESHNESS_S",
     "claim_standing",
     "current_claims",
+    "eliminated_branches",
     "evaluate_trends",
+    "proof_grade_for_branch",
     "proof_grade_for_claim",
     "source_class_of",
 ]
@@ -301,6 +324,46 @@ def current_claims(store: ExploreStore, *,
                 0.0, float(now) - float(row.get("observed_at") or 0))
         out.append(annotated)
     out.sort(key=lambda r: -float(r.get("observed_at") or 0))
+    return out
+
+
+def proof_grade_for_branch(branch: dict[str, Any]) -> ClaimGrade:
+    """The proof grade an eliminated branch's OWN attached
+    evidence earns (doc 24 PG4), derived from its stored
+    ``evidence_refs`` at read — never from a stored grade token
+    (a token above the evidence is simply not read; PG1's rule is
+    that the evidence is the record), and never from the grade of
+    whatever superseded it. Malformed refs are skipped, not
+    interpreted: ungradeable material is not evidence."""
+    refs: list[EvidenceRef] = []
+    for entry in branch.get("evidence_refs") or []:
+        try:
+            refs.append(EvidenceRef.from_dict(entry))
+        except Exception:  # noqa: BLE001 — a bad ref earns nothing
+            continue
+    return ClaimGrade(evidence=tuple(refs))
+
+
+def eliminated_branches(store: ExploreStore, *,
+                        branch_kind: str = "",
+                        limit: int = 100,
+                        ) -> list[dict[str, Any]]:
+    """The preserved eliminated branches, newest first, each
+    annotated with its re-derived ``proof_grade`` and labelled
+    ``eliminated`` — the read side of PG4 preservation. This is
+    the ONLY reader of the store's eliminated section; nothing on
+    a live path (current claims, feeds, niche discovery) calls
+    it, which is what keeps preservation from becoming
+    resurrection."""
+    out: list[dict[str, Any]] = []
+    for row in store.eliminated_branches(
+            branch_kind=branch_kind, limit=limit):
+        annotated = dict(row)
+        annotated["eliminated"] = True
+        annotated["standing"] = "eliminated"
+        annotated["proof_grade"] = \
+            proof_grade_for_branch(row).to_dict()
+        out.append(annotated)
     return out
 
 
@@ -511,16 +574,89 @@ _MATERIAL_FIELDS = (
 )
 
 
+def _supersede_reason(prior: dict[str, Any],
+                      authored: dict[str, Any]) -> str:
+    """Why the prior version was eliminated, named from the
+    material fields that actually changed — never a generic
+    'updated'. The changed set is exactly the supersede test's
+    field list, so the reason and the write decision can never
+    disagree."""
+    parts: list[str] = []
+    if prior.get("kind") != authored.get("kind"):
+        parts.append(
+            f"kind changed {prior.get('kind')} → "
+            f"{authored.get('kind')}")
+    if prior.get("basis") != authored.get("basis") \
+            or prior.get("confidence_basis") \
+            != authored.get("confidence_basis"):
+        parts.append("the evidence basis changed")
+    if prior.get("text") != authored.get("text"):
+        parts.append("the claim text changed")
+    if float(prior.get("observed_at") or 0) \
+            != float(authored.get("observed_at") or 0):
+        parts.append("newer evidence arrived")
+    if prior.get("scope") != authored.get("scope") \
+            or prior.get("subject") != authored.get("subject") \
+            or prior.get("entities") != authored.get("entities"):
+        parts.append("the claim's scope changed")
+    detail = "; ".join(parts) if parts else "the record changed"
+    return f"superseded by re-evaluation — {detail}"
+
+
+def _preserve_claim_branch(store: ExploreStore,
+                           prior: dict[str, Any], *,
+                           outcome: str, reason: str,
+                           superseded_by: dict[str, Any] | None,
+                           now: float) -> None:
+    """Preserve one claim version as an eliminated branch (PG4):
+    the full claim snapshot, the evidence refs its grade derives
+    from (captured from the claim's own basis via the PG3
+    derivation), the elimination reason, and what superseded it
+    (None when a verdict — the shed — eliminated it, not a
+    winner)."""
+    grade = proof_grade_for_claim(prior)
+    store.record_eliminated_branch({
+        "branch_kind": BRANCH_CLAIM,
+        "subject": prior.get("subject") or "",
+        "subject_key": prior.get("claim_key") or "",
+        "subject_kind": prior.get("subject_kind") or "",
+        "kind": prior.get("kind") or "",
+        "text": prior.get("text") or "",
+        "claim": dict(prior),
+        "evidence_refs": [e.to_dict() for e in grade.evidence],
+        "proof_grade": grade.to_dict(),
+        "outcome": outcome,
+        "reason": reason,
+        "superseded_by": superseded_by,
+        "eliminated_at": now or time.time(),
+        "source": "explore-trends",
+    })
+
+
 def _write_claim(store: ExploreStore, authored: dict[str, Any],
-                 latest_by_key: dict[str, dict[str, Any]]) -> bool:
+                 latest_by_key: dict[str, dict[str, Any]],
+                 now: float = 0.0) -> bool:
     """Supersede-by-key write: store the authored claim only when
     it materially differs from the latest stored row for its key.
-    Returns True when a row was written."""
+    When it does differ, the prior version is first preserved as
+    an eliminated branch (PG4) — supersede replaces the LIVE
+    claim, never the record of what it replaced. Returns True
+    when a row was written."""
     prior = latest_by_key.get(authored["claim_key"])
     if prior is not None and all(
             prior.get(field) == authored.get(field)
             for field in _MATERIAL_FIELDS):
         return False
+    if prior is not None:
+        _preserve_claim_branch(
+            store, prior, outcome=ELIM_SUPERSEDED,
+            reason=_supersede_reason(prior, authored),
+            superseded_by={
+                "ref": authored.get("claim_id") or "",
+                "kind": authored.get("kind") or "",
+                "text": authored.get("text") or "",
+            },
+            now=now)
     store.record_claim(authored)
     latest_by_key[authored["claim_key"]] = authored
     return True
@@ -601,7 +737,8 @@ def _candidate_verdicts(store: ExploreStore,
     promotion on an evidence threshold, shed after
     CANDIDATE_ABSENCE_SHED_AFTER consecutive misses."""
     summary: dict[str, Any] = {
-        "promoted": [], "shed": [], "watching": 0, "standing": {}}
+        "promoted": [], "shed": [], "watching": 0, "standing": {},
+        "shed_reasons": {}}
     legs_by_key: dict[str, Any] = {}
     for candidate in store.candidates():
         key = candidate.get("key") or ""
@@ -632,6 +769,7 @@ def _candidate_verdicts(store: ExploreStore,
                     key, status=CANDIDATE_SHED, reason=reason,
                     standing=standing, now=now):
                 summary["shed"].append(key)
+                summary["shed_reasons"][key] = reason
             continue
         new_status = status
         if status == CANDIDATE_WATCHING and legs["trend_bar"]:
@@ -665,8 +803,11 @@ def evaluate_trends(store: ExploreStore, *,
         "claims_current": [],
         "declined": [],
         "candidates": {"promoted": [], "shed": [], "watching": 0},
+        "eliminated_preserved": 0,
     }
     try:
+        eliminated_before = len(
+            store.eliminated_branches(limit=100000))
         sweep_times = _sweep_times(store)
         latest_by_key: dict[str, dict[str, Any]] = {}
         for row in store.claims(limit=10000):
@@ -681,6 +822,23 @@ def evaluate_trends(store: ExploreStore, *,
             "shed": verdicts["shed"],
             "watching": verdicts["watching"],
         }
+
+        # PG4: a shed candidate's claim is eliminated by the
+        # verdict, not by a winning claim — preserve it as an
+        # eliminated branch carrying the shed reason, so what the
+        # claim said (and the grade its evidence earned) stays
+        # readable after it leaves the live set.
+        shed_reasons = verdicts.get("shed_reasons") or {}
+        for key in verdicts["shed"]:
+            prior = latest_by_key.get(
+                _normalize(f"explore candidate {key}"))
+            if prior is None or prior.get("subject") != key:
+                continue
+            _preserve_claim_branch(
+                store, prior, outcome=ELIM_SHED,
+                reason="candidate shed — " + shed_reasons.get(
+                    key, "absent past the absence threshold"),
+                superseded_by=None, now=now)
 
         # ── beat claims ──
         for beat, entry in _beat_evidence(store, sweep_times).items():
@@ -738,7 +896,7 @@ def evaluate_trends(store: ExploreStore, *,
                 backing={"observations": entry["obs_ids"],
                          "candidate_key": ""},
                 entities=[beat])
-            if _write_claim(store, authored, latest_by_key):
+            if _write_claim(store, authored, latest_by_key, now):
                 report["claims_written"] += 1
 
         # ── candidate claims (survivors of the verdicts) ──
@@ -787,9 +945,12 @@ def evaluate_trends(store: ExploreStore, *,
                 backing={"observations": [],
                          "candidate_key": key},
                 entities=[name])
-            if _write_claim(store, authored, latest_by_key):
+            if _write_claim(store, authored, latest_by_key, now):
                 report["claims_written"] += 1
 
+        report["eliminated_preserved"] = len(
+            store.eliminated_branches(limit=100000)) \
+            - eliminated_before
         report["claims_current"] = current_claims(store, now=now)
     except Exception as exc:  # noqa: BLE001 — the evaluator reports
         record_failure("explore.evaluate_trends", exc)

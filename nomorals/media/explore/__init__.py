@@ -113,7 +113,9 @@ from .trends import (
                     CLAIM_UNVERIFIED,
                     claim_standing,
                     current_claims,
+                    eliminated_branches,
                     evaluate_trends,
+                    proof_grade_for_branch,
                     proof_grade_for_claim,
 )
 
@@ -157,7 +159,9 @@ __all__ = [
     "drafts_dir",
     "effective_niches",
     "ensure_explore_jobs",
+    "eliminated_branches",
     "evaluate_trends",
+    "proof_grade_for_branch",
     "proof_grade_for_claim",
     "explore_for_context",
     "explore_status",
