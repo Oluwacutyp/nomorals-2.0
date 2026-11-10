@@ -9,6 +9,8 @@ Usage:
     /immune scan <text>
     /immune antibodies list | add <pattern> <reason> | promote <id> | retire <id> <reason> | test <pattern>
     /immune corpus | corpus harvest
+    /immune feeds
+    /immune mark-fp <antibody-id> [reason]
     /immune quarantine <artifact text>
     /immune disarm <grant-id>
     /immune arrest <process-id> [system]
@@ -28,7 +30,13 @@ verb). The self-corpus is shared the same way since doc 20 P4
 the seed exemplars plus exemplars harvested from Devon's own
 verified fixes and owner-directed police receipts, each with
 provenance, and negative selection cites what a candidate
-matched. Police vault, fever, drift monitor, case files and
+matched. Since doc 20 P5 the drift/fever/false-positive
+observation record is shared and durable the same way (the
+append-only journal in immune/feeds.py, wiring-shared): what
+those organs observe survives restart, and the tool failure
+ledger's recurrences arrive as case files through the failure
+feed, evaluated lazily on the status / casefile / feeds reads.
+Police vault, fever, drift monitor, case files and
 receipts stay per-chat in-memory. The adaptive cancer gate is
 also shared: its baseline, incident state and quarantine count
 live in the shared persisted monitor (immune/wiring.py), fed by
@@ -70,6 +78,8 @@ def IMMUNE_USAGE() -> str:
         "  /immune antibodies list | add <pattern> <reason> | retire <id> <reason> | test <pattern>\n"
         "  /immune corpus — self-corpus: version + counts by provenance\n"
         "  /immune corpus harvest — grow the self-corpus from verified fixes + owner-directed receipts\n"
+        "  /immune feeds — sensor feeds: failure-ledger recurrences + the observation journal\n"
+        "  /immune mark-fp <antibody-id> [reason] — owner false-positive verdict on an antibody (owner-only)\n"
         "  /immune quarantine <artifact> — vault, never delete (owner-only)\n"
         "  /immune disarm <grant-id> — revoke a capability grant (owner-only)\n"
         "  /immune arrest <process-id> [system] — system processes only (owner-only)\n"
@@ -218,6 +228,23 @@ class _ImmuneState:
             from .antibodies import AntibodyStore
 
             self.store = AntibodyStore()
+        # Doc 20 P5: the observation journal is the organism's
+        # shared, durable record of what the drift and fever
+        # organs observed and what false-positive verdicts landed
+        # (immune/feeds.py ObservationLog, wiring-shared). Same
+        # fallback posture as the stores: a journal that cannot
+        # load must not break the surface — fall back to a private
+        # in-memory log and say so in the log.
+        try:
+            from .wiring import shared_observation_log
+
+            self.observations = shared_observation_log()
+        except Exception:  # noqa: BLE001 — surface never breaks
+            _log.warning("immune observation log unavailable — "
+                         "falling back to in-memory", exc_info=True)
+            from .feeds import ObservationLog
+
+            self.observations = ObservationLog()
         self.vault: List[Any] = []
         self.police = Police(vault_fn=self.vault.append)
         self.fever = Fever()
@@ -268,6 +295,15 @@ def reset_immune_state(chat_key: str = "") -> None:
         clear_shared_corpus_store()
     except Exception:  # noqa: BLE001 — reset stays best-effort
         _log.warning("immune self-corpus store reset failed",
+                     exc_info=True)
+    # The observation journal is shared organism data the same
+    # way (doc 20 P5): a reset empties it.
+    try:
+        from .wiring import clear_shared_observation_log
+
+        clear_shared_observation_log()
+    except Exception:  # noqa: BLE001 — reset stays best-effort
+        _log.warning("immune observation log reset failed",
                      exc_info=True)
 
 
@@ -336,13 +372,17 @@ def _control_immune(tail: str, *, chat_key: str = "",
     verb = verb.lower()
     rest = rest.strip()
     if verb == "status":
-        return _status(state, monitor)
+        return _status(state, monitor, context)
     if verb == "scan":
         return _scan(state, rest)
     if verb == "antibodies":
         return _antibodies(state, rest)
     if verb == "corpus":
         return _corpus(state, rest, context)
+    if verb == "feeds":
+        return _feeds(state, context)
+    if verb == "mark-fp":
+        return _mark_fp(state, rest)
     if verb == "quarantine":
         return _quarantine(state, rest)
     if verb == "disarm":
@@ -354,13 +394,38 @@ def _control_immune(tail: str, *, chat_key: str = "",
     if verb == "drift":
         return _drift(state, rest)
     if verb == "casefile":
-        return _casefile(state, rest)
+        return _casefile(state, rest, context)
     if verb == "gate":
         return _gate(state, monitor, rest)
     return IMMUNE_USAGE()
 
 
-def _status(state: _ImmuneState, monitor: Any = None) -> str:
+def _evaluate_feeds(state: _ImmuneState, context: Any = None,
+                    ) -> dict[str, Any] | None:
+    """One lazy failure-feed evaluation over this state's case
+    files (doc 20 P5).
+
+    Runs on the status / casefile / feeds reads — the surfaces
+    where a human is looking at immune state. The sampler tick
+    cannot carry it (its context has no db and no case
+    collection), and no thread is started for it. Returns the
+    feed's report, or None when evaluation itself failed — the
+    failure is logged, never surfaced as a crash.
+    """
+    from .feeds import evaluate_failure_feed
+
+    db = getattr(context, "db", None) if context is not None else None
+    try:
+        return evaluate_failure_feed(db, state.casefiles)
+    except Exception:  # noqa: BLE001 — a feed never breaks a surface
+        _log.warning("immune failure-feed evaluation failed",
+                     exc_info=True)
+        return None
+
+
+def _status(state: _ImmuneState, monitor: Any = None,
+            context: Any = None) -> str:
+    _evaluate_feeds(state, context)
     active = state.store.list_active()
     probation = state.store.list_probation()
     antibody_line = f"  antibodies: {len(active)} active"
@@ -915,11 +980,22 @@ def _fever(state: _ImmuneState, rest: str) -> str:
             )
         except ValueError as exc:
             return f"fever not started: {exc}"
+        # Doc 20 P5: the fever window lands in the durable
+        # observation journal, start and end alike.
+        state.observations.append("fever_started", {
+            "reason": reason, "max_seconds": seconds,
+        })
         return f"🌡️ {message}"
     if verb == "end":
         if not state.fever.active:
             return "no fever active."
+        fever_reason = state.fever.reason
         report = state.fever.end()
+        state.observations.append("fever_ended", {
+            "reason": fever_reason, "resolved": report.resolved,
+            "actions_throttled": report.actions_throttled,
+            "note": report.note,
+        })
         return (
             f"fever ended: {report.note or 'throttled, did not diagnose or fix'} "
             f"(throttled {report.actions_throttled}, resolved={report.resolved})"
@@ -939,11 +1015,19 @@ def _drift(state: _ImmuneState, rest: str) -> str:
             tokens, spawned, grants, errors = (float(p) for p in parts)
         except ValueError:
             return "usage: /immune drift add <tokens> <spawned> <grants> <errors> (numbers)"
-        report = state.drift.add_day(
-            time.strftime("%Y-%m-%d"),
-            {"tokens": tokens, "processes_spawned": spawned,
-             "grants_held": grants, "errors": errors},
-        )
+        day = time.strftime("%Y-%m-%d")
+        metrics = {"tokens": tokens, "processes_spawned": spawned,
+                   "grants_held": grants, "errors": errors}
+        report = state.drift.add_day(day, metrics)
+        # Doc 20 P5: the day lands in the durable observation
+        # journal — the drift monitor itself stays per-chat
+        # in-memory, but what it observed no longer dies with it.
+        state.observations.append("drift_day", {
+            "date": day, "metrics": metrics,
+            "verdict": report.verdict,
+            "signals": list(report.signals),
+            "days_considered": report.days_considered,
+        })
         return f"drift day recorded: verdict={report.verdict} signals={report.signals or 'none'}"
     if verb == "report" or not verb:
         report = state.drift.current_report()
@@ -953,11 +1037,109 @@ def _drift(state: _ImmuneState, rest: str) -> str:
     return IMMUNE_USAGE()
 
 
-def _casefile(state: _ImmuneState, rest: str) -> str:
+def _feeds(state: _ImmuneState, context: Any = None) -> str:
+    """``/immune feeds`` — the sensor feeds' read surface.
+
+    The failure ledger's real counts (or UNAVAILABLE with its
+    reason — an unreadable ledger opens zero cases and says so),
+    what this read opened or extended, and the observation
+    journal's state. Reading this surface IS an evaluation point
+    (doc 20 P5's lazy cadence), so the counts are this moment's.
+    """
+    report = _evaluate_feeds(state, context)
+    lines = ["🛡️ immune sensor feeds"]
+    if report is None:
+        lines.append(
+            "  failure ledger: UNAVAILABLE — feed evaluation "
+            "failed; no feed cases opened from it")
+    elif not report["available"]:
+        lines.append(
+            f"  failure ledger: UNAVAILABLE — {report['reason']}; "
+            "no feed cases opened from it")
+    else:
+        lines.append(
+            f"  failure ledger: {report['rows']} tool failure "
+            f"row(s) in the last {report['window_s']:.0f}s · "
+            f"{report['groups_over_threshold']} recurrence "
+            f"group(s) at >={report['min_failures']} · "
+            f"opened {len(report['opened'])} case(s), "
+            f"extended {len(report['extended'])} on this read")
+    feed_cases = sum(
+        1 for case in state.casefiles
+        if isinstance(case.event, dict)
+        and case.event.get("kind") == "tool_failure_recurrence")
+    lines.append(
+        f"  feed cases: {feed_cases} case file(s) from the "
+        "failure-ledger feed")
+    observations = state.observations
+    lines.append(
+        f"  observations: {observations.count()} record(s) — "
+        f"{observations.path or 'in-memory only (not persisted)'}")
+    if observations.degraded_reason:
+        lines.append(f"  ⚠ {observations.degraded_reason}")
+    return "\n".join(lines)
+
+
+def _mark_fp(state: _ImmuneState, rest: str) -> str:
+    """``/immune mark-fp <antibody-id> [reason]`` — the owner's
+    false-positive verdict (doc 20 P5).
+
+    The FP signal path's seat: no shipped organ produces a match
+    verdict automatically (the retire verdict was the only
+    production caller of ``record_false_positive``), so the
+    verdict is the owner's to give — and it lands on the
+    antibody's own record through P3's machinery: an ACTIVE
+    antibody demotes to probation, a probation antibody's stint
+    restarts, and the verdict journals as an observation.
+    """
+    ab_id, _, reason = rest.partition(" ")
+    ab_id = ab_id.strip()
+    reason = reason.strip()
+    if not ab_id:
+        return "usage: /immune mark-fp <antibody-id> [reason]"
+    entry = state.store.get(ab_id)
+    if entry is None:
+        # prefix match on the short id shown by list
+        for candidate in state.store.all():
+            if str(candidate.get("id", "")).startswith(ab_id):
+                entry = candidate
+                break
+    if entry is None:
+        return f"no antibody {ab_id!r}."
+    verdict_reason = reason or (
+        "owner false-positive verdict via /immune mark-fp")
+    before = str(entry.get("status", ""))
+    record = state.store.record_false_positive(
+        str(entry.get("id", "")), reason=verdict_reason)
+    if record is None:
+        return f"no antibody {ab_id!r}."
+    state.observations.append("false_positive", {
+        "antibody_id": str(entry.get("id", "")),
+        "reason": verdict_reason,
+        "status_before": before,
+        "status": str(record.get("status", "")),
+    })
+    after = str(record.get("status", ""))
+    if before == "active" and after == "probation":
+        outcome = ("demoted to probation — it must re-earn "
+                   "promotion over a clean window")
+    elif before == "probation" and after == "probation":
+        outcome = ("probation stint restarted — the clean window "
+                   "begins again")
+    else:
+        outcome = f"verdict recorded (standing: {after})"
+    return (
+        f"false positive recorded on antibody "
+        f"{str(entry.get('id', ''))[:8]}: {outcome}.")
+
+
+def _casefile(state: _ImmuneState, rest: str,
+              context: Any = None) -> str:
     verb, _, tail = rest.partition(" ")
     verb = verb.lower()
     tail = tail.strip()
     if verb == "list" or not verb:
+        _evaluate_feeds(state, context)
         if not state.casefiles:
             return "case files: none."
         lines = ["case files:"]

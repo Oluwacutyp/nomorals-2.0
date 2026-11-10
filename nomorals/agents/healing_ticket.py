@@ -920,6 +920,23 @@ def _state_ticket(key: str, state: Any, baseline: Any,
             "the chat immune state carries no adaptive baseline — "
             "it lives on wiring's ImmuneMonitor (persisted to "
             "data/immune-baseline.json); supply it to read it")
+    observations = getattr(state, "observations", None)
+    if observations is not None:
+        # Doc 20 P5: the observation journal (drift days, fever
+        # windows, false-positive verdicts) is durable evidence
+        # the state carries — its size and location ride the
+        # already-sourced evidence field, so the field partition
+        # (sources ∪ absent) is untouched.
+        try:
+            obs_records: Any = observations.count()
+        except Exception:  # noqa: BLE001 — a read must not sink
+            obs_records = None  # the ticket it rides on
+        obs_path = getattr(observations, "path", None)
+        evidence["observations"] = {
+            "records": obs_records,
+            "log": str(obs_path) if obs_path else
+                   "in-memory only (not persisted)",
+        }
     ticket.fill("evidence", evidence, "immune.chat")
     fever = getattr(state, "fever", None)
     drift = getattr(state, "drift", None)

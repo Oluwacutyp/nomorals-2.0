@@ -22,6 +22,7 @@ def _cmd_immune(args: Any, context: Any) -> int:
               "       nm immune drift add <tokens> <spawned> <grants> <errors> | report\n"
               "       nm immune casefile list | add <text> | seal <id-prefix>\n"
               "       nm immune corpus | corpus harvest\n"
+              "       nm immune feeds | mark-fp <antibody-id> [reason]\n"
               "       nm immune gate [spawned growth]",
               file=sys.stderr)
         return 2

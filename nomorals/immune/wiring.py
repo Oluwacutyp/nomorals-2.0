@@ -100,6 +100,7 @@ from .baseline import (
     sampling_availability,
 )
 from .corpus import CorpusStore
+from .feeds import ObservationLog
 from .fever import Fever
 
 __all__ = [
@@ -117,6 +118,11 @@ __all__ = [
     "shared_corpus_store",
     "reset_shared_corpus_stores",
     "clear_shared_corpus_store",
+    "OBSERVATIONS_LOG_ENV_VAR",
+    "default_observations_path",
+    "shared_observation_log",
+    "reset_shared_observation_logs",
+    "clear_shared_observation_log",
     "IMMUNE_SAMPLER_JOB",
     "LEGACY_IMMUNE_SAMPLER_JOB",
     "IMMUNE_SAMPLER_TOOL",
@@ -282,6 +288,39 @@ def default_corpus_path(context: Any = None) -> Path:
         except Exception:  # noqa: BLE001 - fall through to home default
             pass
     return _settings_home(settings) / "data" / "immune-selfcorpus.json"
+
+
+#: Env override for the observation journal path (same convention
+#: as STORE_ENV_VAR).
+OBSERVATIONS_LOG_ENV_VAR = "NM_IMMUNE_OBSERVATIONS_LOG"
+
+
+def default_observations_path(context: Any = None) -> Path:
+    """Resolve the observation journal path (doc 20 P5).
+
+    ``NM_IMMUNE_OBSERVATIONS_LOG`` wins when set (absolute as-is,
+    relative resolved against the settings home); otherwise
+    ``<settings home>/data/immune-observations.jsonl`` via the
+    context's settings when one is supplied, else the home
+    default — the same file from chat, CLI and scheduler, next
+    to the baseline, antibody and corpus stores. Before P5 the
+    drift/fever observation record was per-chat in-memory state,
+    so everything those organs observed died at restart.
+    """
+    settings = getattr(context, "settings", None) if context is not None \
+        else None
+    override = os.environ.get(OBSERVATIONS_LOG_ENV_VAR, "")
+    if override:
+        p = Path(os.path.expanduser(override))
+        if p.is_absolute():
+            return p
+        return (_settings_home(settings) / p).resolve()
+    if settings is not None:
+        try:
+            return Path(settings.resolve("data/immune-observations.jsonl"))
+        except Exception:  # noqa: BLE001 - fall through to home default
+            pass
+    return _settings_home(settings) / "data" / "immune-observations.jsonl"
 
 
 def default_journal_path(context: Any = None) -> Path:
@@ -998,6 +1037,57 @@ def clear_shared_corpus_store(path: Any = None) -> CorpusStore:
         _CORPUS_STORES[key] = store
         store.save()
         return store
+
+
+# ── the shared observation journal (doc 20 P5) ─────────────────
+
+_OBSERVATION_LOGS: dict[str, ObservationLog] = {}
+_OBSERVATION_LOGS_LOCK = threading.Lock()
+
+
+def shared_observation_log(path: Any = None) -> ObservationLog:
+    """The process-wide observation journal for a path (one per
+    path).
+
+    The :func:`shared_corpus_store` pattern, for the same reason:
+    every chat state appends its drift/fever/false-positive
+    observations to ONE journal, so the record of what the immune
+    organs observed accumulates organism-wide and survives restart
+    through the journal's own append-only file.
+    """
+    resolved = Path(path) if path is not None else default_observations_path()
+    key = str(resolved)
+    with _OBSERVATION_LOGS_LOCK:
+        log = _OBSERVATION_LOGS.get(key)
+        if log is None:
+            log = ObservationLog(resolved)
+            _OBSERVATION_LOGS[key] = log
+        return log
+
+
+def reset_shared_observation_logs() -> None:
+    """Drop all shared observation journals (tests). The next
+    :func:`shared_observation_log` call re-opens the same file —
+    the records survive it, by the file itself."""
+    with _OBSERVATION_LOGS_LOCK:
+        _OBSERVATION_LOGS.clear()
+
+
+def clear_shared_observation_log(path: Any = None) -> ObservationLog:
+    """Replace the shared journal for ``path`` with a fresh EMPTY
+    one and clear the file.
+
+    The journal counterpart of :func:`clear_shared_corpus_store`
+    (same seam, same test/support-only contract): a reset that
+    left the observation history in place would not be a reset.
+    """
+    resolved = Path(path) if path is not None else default_observations_path()
+    key = str(resolved)
+    with _OBSERVATION_LOGS_LOCK:
+        log = ObservationLog(resolved)
+        _OBSERVATION_LOGS[key] = log
+        log.clear()
+        return log
 
 
 # ── scheduler registration ────────────────────────────────────────

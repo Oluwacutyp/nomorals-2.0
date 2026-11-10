@@ -632,7 +632,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "review": (0, 1),       # /review [days] — "how did I do?" representation review
     "tutor": (0, None),       # /tutor [guide me] <topic> | answer <text> | hint | stop | status
     "learn": (0, None),        # /learn tutor|quiz|flashcards|mastery|waec|jamb — one front door over learn/
-    "immune": (0, None),      # /immune status|scan|antibodies|corpus|quarantine|disarm|arrest|fever|drift|casefile — defensive immune system (owner-only)
+    "immune": (0, None),      # /immune status|scan|antibodies|corpus|feeds|mark-fp|quarantine|disarm|arrest|fever|drift|casefile — defensive immune system (owner-only)
     "impossible": (0, None),  # /impossible solve <problem> | status | attempt | dossier | queue | charter | lattice | examples — always-on conceive-and-solve (owner-only)
     "tour": (0, 1),         # /tour — smoke-test every command; /tour <cmd> deep-probes one
     "heal": (0, 1),         # /heal [--dry] | /heal <cmd> — self-healing loop: diagnose + auto-fix broken commands
@@ -2163,7 +2163,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "example": "/legal contract review tenancy <paste agreement>",
                 "related": "/contract /contracts /regwatch /learn"},
     "immune": {"what": "defensive immune system — thymus negative selection, innate scan, antibody memory, seven-rung revoke-only police, fever, drift, case files. Owner only. Never acquires capability; owner work is report-only.",
-                "usage": "/immune status | scan <text> | antibodies list | add <pattern> <reason> | retire <id> <reason> | test <pattern> | corpus | corpus harvest | quarantine <artifact> | disarm <grant-id> | arrest <process-id> [system] | fever status | start <reason> <seconds> | end | drift add <tokens> <spawned> <grants> <errors> | report | casefile list | add <text> | seal <id-prefix>",
+                "usage": "/immune status | scan <text> | antibodies list | add <pattern> <reason> | retire <id> <reason> | test <pattern> | corpus | corpus harvest | feeds | mark-fp <antibody-id> [reason] | quarantine <artifact> | disarm <grant-id> | arrest <process-id> [system] | fever status | start <reason> <seconds> | end | drift add <tokens> <spawned> <grants> <errors> | report | casefile list | add <text> | seal <id-prefix>",
                 "example": "/immune status",
                 "related": "/heal /review"},
     "impossible": {"what": "Impossible Made Possible — always-on cross-domain conceive-and-solve: formulate, classify, prior art, TRIZ transfer, feasibility gate, falsifier, attempt. Hardware gets a specification; software gets a build brief. Owner only.",
@@ -5156,7 +5156,7 @@ LIST_ONELINERS: dict[str, str] = {
     "aio": "all-in-one downloader — any supported link, routed by platform: /aio <url> [audio]",
     "exness": "Exness trading: /exness balance|positions|price|buy|sell|close",
     "heal": "self-healing loop: /heal [--dry] | /heal <cmd> — diagnose + auto-fix broken commands",
-    "immune": "defensive immune system: /immune status|scan|antibodies|corpus|quarantine|disarm|arrest|fever|drift|casefile",
+    "immune": "defensive immune system: /immune status|scan|antibodies|corpus|feeds|mark-fp|quarantine|disarm|arrest|fever|drift|casefile",
     "impossible": "Impossible Made Possible: /impossible solve <problem> | status | attempt | dossier | queue | charter | lattice | examples",
     "like": "last production was good: /like [notes…]",
     "novel": "webnovel tracker: /novel follow <url|title> | list | read <slug> [ch] | continue <slug> [n]",

@@ -14,6 +14,11 @@
 * Fever: bounded, announced self-throttle.
 * Case file: append-only evidence, sealable.
 * Drift: 3-day behaviour watch — suggestions, never actions.
+* Feeds: sensor feeds (doc 20 P5) — the tool failure ledger's
+  recurrences become case files citing their source rows, and
+  the drift/fever/false-positive observation record is a
+  durable append-only journal. Feeds observe and case-build
+  only: no antibodies, no enforcement.
 * Pathogens / red-team: the pathogen vocabulary and the immune-evasion
   attack class, as data.
 * Events: organ-bus event kinds + injected-sink emit.
@@ -51,21 +56,26 @@ from .wiring import (
     IMMUNE_SAMPLER_SPEC,
     IMMUNE_SAMPLER_TOOL,
     LEGACY_IMMUNE_SAMPLER_JOB,
+    OBSERVATIONS_LOG_ENV_VAR,
     BaselineStore,
     ImmuneMonitor,
     clear_shared_antibody_store,
     clear_shared_corpus_store,
+    clear_shared_observation_log,
     default_antibodies_path,
     default_corpus_path,
     default_journal_path,
+    default_observations_path,
     default_store_path,
     ensure_immune_sampler_job,
     reset_shared_antibody_stores,
     reset_shared_corpus_stores,
     reset_shared_monitors,
+    reset_shared_observation_logs,
     shared_antibody_store,
     shared_corpus_store,
     shared_monitor,
+    shared_observation_log,
     summarize_tick_event,
 )
 from .antibodies import (
@@ -90,6 +100,14 @@ from .corpus import (
 )
 from .drift import BehaviourDriftMonitor, DriftReport
 from .events import EVENT_KINDS, emit_immune_event, immune_event
+from .feeds import (
+    FEED_MIN_FAILURES,
+    FEED_WINDOW_S,
+    OBSERVATION_KINDS,
+    ObservationLog,
+    evaluate_failure_feed,
+    feed_policy,
+)
 from .fever import FEVER_MAX_SECONDS, Fever, FeverReport
 from .innate import BARRIERS, InnateHit, evaluate_live, scan_content
 from .pathogens import ATTACK_SCENARIOS, PATHOGEN_CLASSES, REDTEAM_IMMUNE_CLASS
@@ -158,6 +176,13 @@ __all__ = [
     # drift
     "BehaviourDriftMonitor",
     "DriftReport",
+    # feeds (sensor feeds + observation journal, doc 20 P5)
+    "ObservationLog",
+    "OBSERVATION_KINDS",
+    "evaluate_failure_feed",
+    "feed_policy",
+    "FEED_MIN_FAILURES",
+    "FEED_WINDOW_S",
     # pathogens / redteam
     "PATHOGEN_CLASSES",
     "REDTEAM_IMMUNE_CLASS",
@@ -195,6 +220,11 @@ __all__ = [
     "shared_corpus_store",
     "reset_shared_corpus_stores",
     "clear_shared_corpus_store",
+    "OBSERVATIONS_LOG_ENV_VAR",
+    "default_observations_path",
+    "shared_observation_log",
+    "reset_shared_observation_logs",
+    "clear_shared_observation_log",
     "ensure_immune_sampler_job",
     "summarize_tick_event",
     "IMMUNE_SAMPLER_JOB",
