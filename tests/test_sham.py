@@ -96,6 +96,8 @@ class AudDConnectorTests(unittest.TestCase):
         self.assertEqual(res["artist"], "Ayo Maff")
         self.assertEqual(res["title"], "Lifestyle (YA MAN)")
         self.assertEqual(res["album"], "Lifestyle")
+        self.assertEqual(res["label"], "Test Label")
+        self.assertEqual(res["timecode"], "00:12")
         # multipart went to the right endpoint with the token + return
         call = http.calls[0]
         self.assertEqual(call["url"], "https://api.audd.io/")

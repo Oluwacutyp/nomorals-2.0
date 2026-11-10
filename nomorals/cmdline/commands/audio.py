@@ -134,6 +134,16 @@ def _audio_match(args: argparse.Namespace) -> int:
     if not res.get("ok"):
         print(f"no match: {res.get('reason')}", file=sys.stderr)
         return 1
+    strength = res.get("match_strength") or {}
+    numerator = strength.get("numerator")
+    denominator = strength.get("denominator")
+    if numerator is not None and denominator is not None:
+        measure = (f"coherent-offset fraction {res.get('score')} — "
+                   f"{numerator} of {denominator} query landmark hashes "
+                   "aligned at one reference offset; uncalibrated, "
+                   "not a probability")
+    else:
+        measure = f"coherent-offset fraction {res.get('score')}"
     print(f"🎵 {res.get('artist')} — {res.get('title')} "
-          f"(local match, confidence {res.get('score')})")
+          f"(local match; {measure})")
     return 0

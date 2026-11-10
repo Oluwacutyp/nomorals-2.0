@@ -1265,9 +1265,20 @@ def control_audio(tail: str, *, context: Any = None,
             res = match_local_db(parts[1])
             if not res.get("ok"):
                 return f"🎛️ {res.get('reason')}"
+            strength = res.get("match_strength") or {}
+            numerator = strength.get("numerator")
+            denominator = strength.get("denominator")
+            if numerator is not None and denominator is not None:
+                measure = (f"coherent-offset fraction "
+                           f"{res.get('score')} — {numerator} of "
+                           f"{denominator} query landmark hashes aligned "
+                           "at one reference offset; uncalibrated, "
+                           "not a probability")
+            else:
+                measure = (f"coherent-offset fraction "
+                           f"{res.get('score')}")
             return (f"🎵 I know this one — {res.get('artist')} — "
-                    f"{res.get('title')} (local match, "
-                    f"confidence {res.get('score')})")
+                    f"{res.get('title')} (local match; {measure})")
         return _USAGE
     except Exception as exc:  # noqa: BLE001
         return f"🎙️ audio edit failed: {exc}"

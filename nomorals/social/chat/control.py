@@ -4308,7 +4308,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/cookies [check] · /cookies import (attach the bundle file, or reply to the message holding it) · /cookies status · /cookies clear <domain|all>",
                 "example": "/cookies import",
                 "related": "/webshot · /play"},
-    "sham": {"what": "Identify the song in a voice note or audio — reply to it with /sham, or send audio with /sham as the caption.",
+    "sham": {"what": "Identify the song in a voice note or audio — reply to it with /sham, or send audio with /sham as the caption. Devon's local fingerprint catalog is searched first; a local hit reports its coherent-offset fraction (query landmark hashes aligned at one reference offset — an uncalibrated alignment measure, not a probability). AudD is the labelled external fallback.",
                 "usage": "/sham",
                 "example": "/sham (reply to a voice note)",
                 "related": "/play"},

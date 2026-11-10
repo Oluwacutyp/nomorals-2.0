@@ -3945,6 +3945,123 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 - never raises
             return f"couldn't identify that audio ({exc})"
 
+    @staticmethod
+    def _sham_receipt(local: dict[str, Any]) -> dict[str, Any]:
+        receipt = (local or {}).get("receipt")
+        return receipt if isinstance(receipt, dict) else {}
+
+    def _sham_local_match_reply(self, local: dict[str, Any]) -> str:
+        """Render a local hit from its SongRecon receipt."""
+        receipt = self._sham_receipt(local)
+        artist = receipt.get("artist") or local.get("artist") \
+            or "unknown artist"
+        title = receipt.get("title") or local.get("title") \
+            or "unknown title"
+        strength = receipt.get("match_strength") \
+            or local.get("match_strength") or {}
+        value = strength.get("value", local.get("score", 0))
+        numerator = strength.get("numerator")
+        denominator = strength.get("denominator")
+        if numerator is not None and denominator is not None:
+            measure = (f"coherent-offset fraction {value} — "
+                       f"{numerator} of {denominator} query landmark "
+                       "hashes aligned at one reference offset "
+                       "(uncalibrated; not a probability)")
+        else:
+            measure = (f"coherent-offset fraction {value} — query "
+                       "landmark hashes aligned at one reference "
+                       "offset (uncalibrated; not a probability)")
+        lines = [f"🎵 I know this one — {artist} — {title}",
+                 f"(recognized from my own library; {measure})"]
+        windows = receipt.get("evidence_windows") \
+            or local.get("evidence_windows") or []
+        if windows:
+            window = windows[0]
+            lines.append(
+                "evidence window: query "
+                f"{window.get('query_start_s')}–"
+                f"{window.get('query_end_s')}s ↔ recording "
+                f"{window.get('reference_start_s')}–"
+                f"{window.get('reference_end_s')}s")
+        alternatives = receipt.get("alternatives") \
+            or local.get("alternatives") or []
+        if alternatives:
+            rendered = []
+            for alt in alternatives[:3]:
+                alt_strength = alt.get("match_strength") or {}
+                alt_value = alt_strength.get(
+                    "value", alt.get("score", ""))
+                rendered.append(
+                    f"{alt.get('artist') or 'unknown artist'} — "
+                    f"{alt.get('title') or 'unknown title'} "
+                    f"(coherent-offset fraction {alt_value})")
+            lines.append("other local candidates: "
+                         + "; ".join(rendered))
+        lines.append(f"/play {artist} {title}")
+        return "\n".join(lines)
+
+    def _sham_external_match_reply(
+            self, res: dict[str, Any],
+            local: dict[str, Any]) -> str:
+        """Render an AudD hit, explicitly labelled as fallback."""
+        from ...audio.fingerprint import external_recognition_receipt
+
+        receipt = external_recognition_receipt(
+            res, local_receipt=self._sham_receipt(local))
+        artist = receipt.get("artist") or "Unknown artist"
+        title = receipt.get("title") or "Unknown title"
+        lines = [f"🎵 {artist} — {title}",
+                 "Identified by AudD — external catalogue fallback "
+                 "(not Devon's local fingerprint catalog)."]
+        windows = receipt.get("evidence_windows") or []
+        if windows and windows[0].get("provider_timecode"):
+            lines.append(
+                f"AudD timecode: {windows[0]['provider_timecode']}")
+        album = receipt.get("album") or ""
+        release = receipt.get("release_date") or ""
+        if album:
+            detail = album
+            if release:
+                detail += f" ({release[:4]})"
+            lines.append(f"💿 {detail}")
+        if receipt.get("song_link"):
+            lines.append(f"🔗 {receipt['song_link']}")
+        lines.append(f"/play {artist} {title}")
+        return "\n".join(lines)
+
+    def _sham_unmatched_reply(
+            self, local: dict[str, Any], *, lead: str, reason: str,
+            external_status: str, heard: str,
+            external_searched: bool = False) -> str:
+        """Render an honest non-match with the actual search scope."""
+        from ...audio.fingerprint import no_match_receipt
+
+        receipt = self._sham_receipt(local)
+        final_receipt = no_match_receipt(
+            receipt, reason=reason,
+            attempted_sources=(
+                ["devon_local_fingerprint"]
+                + (["audd"] if external_searched else [])))
+        tracks = final_receipt.get("catalog_track_count")
+        if tracks is None:
+            catalog = local.get("catalog") or {}
+            tracks = catalog.get("tracks", "unknown number of")
+        if receipt.get("status") == "unavailable":
+            local_reason = receipt.get("reason") \
+                or local.get("reason") or "local matching unavailable"
+            search_line = (
+                "Devon's local fingerprint catalog was not searched "
+                f"({local_reason}); {external_status}.")
+        else:
+            search_line = (
+                "Searched Devon's local fingerprint catalog "
+                f"({tracks} indexed track(s)); {external_status}.")
+        lines = [lead, search_line]
+        if reason:
+            lines.append(reason)
+        lines.append(f"👂 but here's what I hear: {heard}")
+        return "\n".join(lines)
+
     def _sham_identify(self, message: Any) -> str:
         """Core /sham logic. Returns the reply text. Never raises.
 
@@ -3970,13 +4087,7 @@ class RuntimeMediaMixin:
             )
         local = match_local_db(audio_path)
         if local.get("ok"):
-            artist = local.get("artist") or "unknown artist"
-            title = local.get("title") or "unknown title"
-            score = local.get("score", 0)
-            return (f"🎵 I know this one — {artist} — {title}\n"
-                    f"(recognized from my own library, "
-                    f"confidence {score})\n"
-                    f"/play {artist} {title}")
+            return self._sham_local_match_reply(local)
         heard = describe_audio(audio_path)
         vault = None
         vault_locked = False
@@ -3994,16 +4105,22 @@ class RuntimeMediaMixin:
                 audd = None
         if audd is None:
             if vault_locked:
-                return (
-                    "couldn't name that track — the credential vault "
-                    "is locked, so I can't reach the AudD key, and it's "
-                    "not in my local library.\n"
-                    f"👂 but here's what I hear: {heard}")
-            return (
-                "couldn't name that track — music recognition isn't set "
-                "up (it's one free AudD API key away), and it's not in "
-                "my local library.\n"
-                f"👂 but here's what I hear: {heard}")
+                return self._sham_unmatched_reply(
+                    local,
+                    lead="couldn't name that track",
+                    reason=("the credential vault is locked, so AudD "
+                            "could not be searched"),
+                    external_status=("AudD external catalogue was not "
+                                     "searched"),
+                    heard=heard)
+            return self._sham_unmatched_reply(
+                local,
+                lead="couldn't name that track",
+                reason=("music recognition isn't set up (it's one free "
+                        "AudD API key away)"),
+                external_status=("AudD external catalogue was not "
+                                 "searched"),
+                heard=heard)
         res = audd.recognize(audio_path)
         if not res.get("ok"):
             if res.get("needs_key"):
@@ -4011,33 +4128,33 @@ class RuntimeMediaMixin:
                 # free-API setup guidance (dashboard URL, 300 free
                 # requests). A bare "no key configured" strands the user.
                 reason = str(res.get("reason") or "no AudD key configured")
-                return (
-                    f"couldn't name that track — {reason}\n"
-                    f"it's not in my local library either.\n"
-                    f"👂 but here's what I hear: {heard}")
-            return (f"{res.get('reason') or 'could not identify that audio'}\n"
-                    f"👂 what I hear: {heard}")
-        artist = res.get("artist", "Unknown artist")
-        title = res.get("title", "Unknown title")
-        album = res.get("album", "")
-        release = res.get("release_date", "")
-        song_link = res.get("song_link", "")
-        lines = [f"🎵 {artist} — {title}"]
-        if album:
-            detail = album
-            if release:
-                detail += f" ({release[:4]})"
-            lines.append(f"💿 {detail}")
-        spotify = res.get("spotify") or {}
-        sp_url = ""
-        if isinstance(spotify, dict):
-            sp_url = str(
-                (spotify.get("external_urls") or {}).get("spotify") or "")
-        if song_link:
-            lines.append(f"🔗 {song_link}")
-        # One tap into /play: the resolver's strategy chain takes it.
-        lines.append(f"/play {artist} {title}")
-        return "\n".join(lines)
+                return self._sham_unmatched_reply(
+                    local,
+                    lead="couldn't name that track",
+                    reason=reason,
+                    external_status=("AudD external catalogue was not "
+                                     "searched"),
+                    heard=heard)
+            reason = str(res.get("reason")
+                         or "could not identify that audio")
+            if "no match in AudD" in reason:
+                return self._sham_unmatched_reply(
+                    local,
+                    lead="no reliable match found",
+                    reason=("neither catalog accepted a recording "
+                            "match for this clip"),
+                    external_status=("AudD external catalogue was "
+                                     "searched"),
+                    external_searched=True,
+                    heard=heard)
+            return self._sham_unmatched_reply(
+                local,
+                lead="couldn't complete recognition",
+                reason=reason,
+                external_status="AudD external catalogue was searched",
+                external_searched=True,
+                heard=heard)
+        return self._sham_external_match_reply(res, local)
 
     def _sham_find_audio(self, message: Any) -> str:
         """Locate the audio file for /sham. Returns a local path or "".

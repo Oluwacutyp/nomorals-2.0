@@ -213,10 +213,10 @@ class AudDConnector(Connector):
         """Identify the song in an audio file.
 
         Returns ``{"ok": True, "artist", "title", "album",
-        "release_date", "song_link", "spotify": {...} | None,
-        "apple_music": {...} | None}`` on a match, or
-        ``{"ok": False, "reason": ...}`` on no-match / problems.
-        Never raises.
+        "release_date", "label", "timecode", "song_link",
+        "spotify": {...} | None, "apple_music": {...} | None}`` on a
+        match, or ``{"ok": False, "reason": ...}`` on no-match /
+        problems. Never raises.
         """
         try:
             return self._recognize(audio_path)
@@ -279,6 +279,8 @@ class AudDConnector(Connector):
             "title": str(result.get("title") or "Unknown title"),
             "album": str(result.get("album") or ""),
             "release_date": str(result.get("release_date") or ""),
+            "label": str(result.get("label") or ""),
+            "timecode": str(result.get("timecode") or ""),
             "song_link": str(result.get("song_link") or ""),
             "spotify": result.get("spotify") or None,
             "apple_music": result.get("apple_music") or None,

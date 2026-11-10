@@ -33,6 +33,7 @@ profile-gating, not a silent downgrade).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import os
@@ -55,6 +56,9 @@ _log = logging.getLogger(__name__)
 __all__ = [
     "AudioReadError",
     "AudioAnalysis",
+    "RecognitionReceipt",
+    "external_recognition_receipt",
+    "no_match_receipt",
     "read_mono",
     "has_numpy",
     "fingerprint",
@@ -95,8 +99,198 @@ _FANOUT = 15
 _MAX_DT = 3.0
 #: Cap on stored hashes per file.
 _MAX_HASHES = 4000
-#: Local-match confidence threshold (coherent-offset fraction).
+#: Local-match acceptance threshold (coherent-offset fraction).
 MATCH_THRESHOLD = 0.12
+
+#: SongRecon receipt schema emitted by local and external recognition.
+RECEIPT_SCHEMA = "songrecon.receipt/v1"
+#: The shipped landmark engine solves exact / near-exact recordings.
+MATCH_CLASS_EXACT_RECORDING = "class_1_exact_or_near_exact_recording"
+#: What the local ``score`` actually measures. It is the fraction of
+#: query landmark hashes whose reference offsets agree on one 50 ms
+#: bin. It is not a calibrated probability.
+SCORE_NAME = "coherent_offset_fraction"
+SCORE_UNIT = "coherent landmark-hash votes per query landmark hash"
+SCORE_BASIS = (
+    "largest set of query landmark hashes agreeing on one 50 ms "
+    "reference-offset bin, divided by all query landmark hashes"
+)
+LOCAL_RIGHTS_NOTE = (
+    "Local catalog scope: Devon's own productions and tracks indexed "
+    "from the owner's library."
+)
+AUDD_RIGHTS_NOTE = (
+    "External catalog scope: AudD's provider-managed catalogue, used "
+    "only as a fallback; its catalog version is not exposed to Devon."
+)
+
+
+@dataclass(frozen=True)
+class RecognitionReceipt:
+    """Typed evidence record for one SongRecon answer.
+
+    A local score is carried only as ``match_strength`` with its
+    measured name, numerator, denominator, unit, and basis. No field
+    upgrades that offset-alignment fraction into a probability.
+    """
+
+    status: str
+    source: str
+    source_label: str
+    match_class: str
+    schema: str = RECEIPT_SCHEMA
+    artist: str = ""
+    title: str = ""
+    album: str = ""
+    release_date: str = ""
+    song_link: str = ""
+    song_id: str = ""
+    recording_id: str = ""
+    work_id: str = ""
+    catalog_version: str = ""
+    catalog_track_count: int | None = None
+    catalog_hash_count: int | None = None
+    query_hash: str = ""
+    query_fingerprint_count: int = 0
+    match_strength: dict[str, Any] = field(default_factory=dict)
+    evidence_windows: tuple[dict[str, Any], ...] = ()
+    alignment: dict[str, Any] = field(default_factory=dict)
+    offset_map: dict[str, Any] = field(default_factory=dict)
+    feature_sources: tuple[str, ...] = ()
+    alternatives: tuple[dict[str, Any], ...] = ()
+    attempted_sources: tuple[str, ...] = ()
+    local_search: dict[str, Any] = field(default_factory=dict)
+    best_candidate: dict[str, Any] = field(default_factory=dict)
+    rights_note: str = ""
+    no_match_reason: str = ""
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly copy of the receipt."""
+        return {
+            "schema": self.schema,
+            "status": self.status,
+            "source": self.source,
+            "source_label": self.source_label,
+            "match_class": self.match_class,
+            "artist": self.artist,
+            "title": self.title,
+            "album": self.album,
+            "release_date": self.release_date,
+            "song_link": self.song_link,
+            "song_id": self.song_id,
+            "recording_id": self.recording_id,
+            "work_id": self.work_id,
+            "catalog_version": self.catalog_version,
+            "catalog_track_count": self.catalog_track_count,
+            "catalog_hash_count": self.catalog_hash_count,
+            "query_hash": self.query_hash,
+            "query_fingerprint_count": self.query_fingerprint_count,
+            "match_strength": dict(self.match_strength),
+            "evidence_windows": [dict(w) for w in self.evidence_windows],
+            "alignment": dict(self.alignment),
+            "offset_map": dict(self.offset_map),
+            "feature_sources": list(self.feature_sources),
+            "alternatives": [dict(a) for a in self.alternatives],
+            "attempted_sources": list(self.attempted_sources),
+            "local_search": dict(self.local_search),
+            "best_candidate": dict(self.best_candidate),
+            "rights_note": self.rights_note,
+            "no_match_reason": self.no_match_reason,
+            "reason": self.reason,
+        }
+
+
+def _query_fingerprint_hash(
+        hashes: Sequence[tuple[int, float]]) -> str:
+    """Stable hash of the query fingerprint, not of the raw audio."""
+    if not hashes:
+        return ""
+    canonical = "\n".join(
+        f"{int(h)}:{int(round(float(t) * 1000))}"
+        for h, t in sorted(hashes, key=lambda item: (int(item[0]),
+                                                     float(item[1]))))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _match_strength(value: float, votes: int,
+                    query_count: int) -> dict[str, Any]:
+    """Name the local score by the quantity the matcher computed."""
+    return {
+        "name": SCORE_NAME,
+        "value": round(float(value), 3),
+        "numerator": int(votes),
+        "denominator": int(query_count),
+        "unit": SCORE_UNIT,
+        "basis": SCORE_BASIS,
+        "calibration": "uncalibrated — not a probability",
+    }
+
+
+def external_recognition_receipt(
+        result: dict[str, Any], *,
+        local_receipt: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build the SongRecon receipt for an AudD fallback match.
+
+    AudD does not expose a Devon-computed offset score through this
+    connector, so the receipt deliberately leaves ``match_strength``
+    empty instead of borrowing the local score or inventing one.
+    """
+    local = dict(local_receipt or {})
+    timecode = str(result.get("timecode") or "").strip()
+    windows: tuple[dict[str, Any], ...] = ()
+    if timecode:
+        windows = ({"provider_timecode": timecode},)
+    local_search = {
+        "status": str(local.get("status") or "not_run"),
+        "reason": str(local.get("no_match_reason")
+                      or local.get("reason") or ""),
+        "catalog_version": str(local.get("catalog_version") or ""),
+        "catalog_track_count": local.get("catalog_track_count"),
+        "catalog_hash_count": local.get("catalog_hash_count"),
+    }
+    return RecognitionReceipt(
+        status="matched",
+        source="audd",
+        source_label="AudD external catalogue (fallback)",
+        match_class=MATCH_CLASS_EXACT_RECORDING,
+        artist=str(result.get("artist") or "Unknown artist"),
+        title=str(result.get("title") or "Unknown title"),
+        album=str(result.get("album") or ""),
+        release_date=str(result.get("release_date") or ""),
+        song_link=str(result.get("song_link") or ""),
+        catalog_version="audd:provider-managed (version not exposed)",
+        query_hash=str(local.get("query_hash") or ""),
+        query_fingerprint_count=int(
+            local.get("query_fingerprint_count") or 0),
+        evidence_windows=windows,
+        alignment={"method": "AudD provider recognition",
+                   "provider_timecode": timecode,
+                   "provider_label": str(result.get("label") or "")},
+        offset_map={"provider_timecode": timecode} if timecode else {},
+        feature_sources=("audd_recognition_api",),
+        attempted_sources=("devon_local_fingerprint", "audd"),
+        local_search=local_search,
+        rights_note=AUDD_RIGHTS_NOTE,
+    ).to_dict()
+
+
+def no_match_receipt(local_receipt: dict[str, Any] | None, *,
+                     reason: str,
+                     attempted_sources: Sequence[str]) -> dict[str, Any]:
+    """Return the final no-match receipt after every attempted source."""
+    receipt = dict(local_receipt or {})
+    receipt.update({
+        "schema": str(receipt.get("schema") or RECEIPT_SCHEMA),
+        "status": "no_match",
+        "source": "none",
+        "source_label": "No recognition source named the track",
+        "match_class": "no_reliable_match",
+        "attempted_sources": list(attempted_sources),
+        "no_match_reason": reason,
+        "reason": reason,
+    })
+    return receipt
 
 _LOCK = threading.Lock()
 
@@ -634,63 +828,289 @@ class FingerprintDB:
             record_failure("fingerprint.stats", exc)
             return {"ok": False, "tracks": 0, "hashes": 0}
 
+    def _catalog_snapshot_locked(
+            self, conn: sqlite3.Connection) -> dict[str, Any]:
+        """Catalog stamp for a receipt; caller must hold ``_lock``."""
+        rows = conn.execute(
+            "SELECT id, title, artist, source, duration, created "
+            "FROM tracks ORDER BY id").fetchall()
+        hash_count = conn.execute(
+            "SELECT COUNT(*) FROM hashes").fetchone()[0]
+        canonical = "\n".join(
+            "|".join("" if value is None else str(value)
+                     for value in row)
+            for row in rows)
+        canonical += f"\nhashes:{int(hash_count)}"
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return {
+            "version": f"local-fingerprint-v1:sha256:{digest}",
+            "tracks": len(rows),
+            "hashes": int(hash_count),
+        }
+
+    def catalog_snapshot(self) -> dict[str, Any]:
+        """Current local catalog size and version stamp. Never raises."""
+        try:
+            with self._lock:
+                return self._catalog_snapshot_locked(self._connect())
+        except Exception as exc:  # noqa: BLE001
+            record_failure("fingerprint.catalog_snapshot", exc)
+            return {"version": "", "tracks": 0, "hashes": 0}
+
+    def _receipt_locked(
+            self, conn: sqlite3.Connection, *,
+            status: str,
+            query_hash: str,
+            query_count: int,
+            reason: str = "",
+            winner: dict[str, Any] | None = None,
+            alternatives: Sequence[dict[str, Any]] = (),
+            best_candidate: dict[str, Any] | None = None,
+            catalog: dict[str, Any] | None = None,
+            ) -> dict[str, Any]:
+        """Assemble a local receipt; caller must hold ``_lock``."""
+        catalog = catalog or self._catalog_snapshot_locked(conn)
+        if winner is not None:
+            return RecognitionReceipt(
+                status="matched",
+                source="devon_local_fingerprint",
+                source_label="Devon's local fingerprint catalog",
+                match_class=MATCH_CLASS_EXACT_RECORDING,
+                artist=str(winner.get("artist") or ""),
+                title=str(winner.get("title") or ""),
+                recording_id=str(winner.get("recording_id") or ""),
+                catalog_version=str(catalog["version"]),
+                catalog_track_count=int(catalog["tracks"]),
+                catalog_hash_count=int(catalog["hashes"]),
+                query_hash=query_hash,
+                query_fingerprint_count=int(query_count),
+                match_strength=dict(winner.get("match_strength") or {}),
+                evidence_windows=tuple(
+                    winner.get("evidence_windows") or ()),
+                alignment=dict(winner.get("alignment") or {}),
+                offset_map=dict(winner.get("offset_map") or {}),
+                feature_sources=("wang_2003_constellation_landmarks",),
+                alternatives=tuple(alternatives),
+                attempted_sources=("devon_local_fingerprint",),
+                rights_note=LOCAL_RIGHTS_NOTE,
+            ).to_dict()
+        return RecognitionReceipt(
+            status=status,
+            source="devon_local_fingerprint",
+            source_label="Devon's local fingerprint catalog",
+            match_class=("no_reliable_match" if status == "no_match"
+                         else "unavailable"),
+            catalog_version=str(catalog["version"]),
+            catalog_track_count=int(catalog["tracks"]),
+            catalog_hash_count=int(catalog["hashes"]),
+            query_hash=query_hash,
+            query_fingerprint_count=int(query_count),
+            feature_sources=("wang_2003_constellation_landmarks",),
+            attempted_sources=("devon_local_fingerprint",),
+            best_candidate=dict(best_candidate or {}),
+            rights_note=LOCAL_RIGHTS_NOTE,
+            no_match_reason=reason if status == "no_match" else "",
+            reason=reason,
+        ).to_dict()
+
+    def _unavailable_receipt(self, *, status: str, reason: str,
+                             query_hash: str = "",
+                             query_count: int = 0) -> dict[str, Any]:
+        """Receipt for a local failure before candidate matching."""
+        catalog = self.catalog_snapshot()
+        return RecognitionReceipt(
+            status=status,
+            source="devon_local_fingerprint",
+            source_label="Devon's local fingerprint catalog",
+            match_class=("no_reliable_match" if status == "no_match"
+                         else "unavailable"),
+            catalog_version=str(catalog.get("version") or ""),
+            catalog_track_count=int(catalog.get("tracks") or 0),
+            catalog_hash_count=int(catalog.get("hashes") or 0),
+            query_hash=query_hash,
+            query_fingerprint_count=int(query_count),
+            feature_sources=("wang_2003_constellation_landmarks",),
+            attempted_sources=("devon_local_fingerprint",),
+            rights_note=LOCAL_RIGHTS_NOTE,
+            no_match_reason=reason if status == "no_match" else "",
+            reason=reason,
+        ).to_dict()
+
     def match(self, path: str | os.PathLike[str], *,
               threshold: float = MATCH_THRESHOLD
               ) -> dict[str, Any]:
         """Identify ``path`` against the local database. Never raises.
 
-        Returns ``{"ok": True, "title", "artist", "score", "track_id"}``
-        on a confident match, else ``{"ok": False, "reason"}``.
+        On an accepted match, returns the backwards-compatible
+        ``{"ok", "title", "artist", "score", "track_id"}`` fields plus
+        a typed ``receipt``. ``score`` remains as the machine-readable
+        coherent-offset fraction; the receipt gives it its full name,
+        numerator, denominator, unit, and uncalibrated basis. A
+        no-match or failure result also carries a receipt stating what
+        was searched and why no recording was accepted.
         """
+        query_hash = ""
+        query_count = 0
         try:
             hashes = fingerprint(path)
+            query_count = len(hashes)
+            query_hash = _query_fingerprint_hash(hashes)
             if not hashes:
-                return {"ok": False,
-                        "reason": "no fingerprints extracted — "
-                                  "audio too quiet or too short"}
+                reason = ("no fingerprints extracted — audio too quiet "
+                          "or too short")
+                return {"ok": False, "reason": reason,
+                        "receipt": self._unavailable_receipt(
+                            status="no_match", reason=reason,
+                            query_hash=query_hash,
+                            query_count=query_count)}
             with self._lock:
                 conn = self._connect()
-                # pull candidate (track_id, offset_ms) rows per hash
-                cand: dict[int, list[int]] = {}
+                # Pull candidate evidence per hash. Keeping the query
+                # and reference times lets the receipt name the actual
+                # windows that voted for the winning offset.
+                cand: dict[int, list[tuple[int, int, int]]] = {}
                 for h, t in hashes:
                     rows = conn.execute(
                         "SELECT track_id, offset_ms FROM hashes "
                         "WHERE hash = ?", (h,)).fetchall()
                     q_ms = int(t * 1000)
                     for tid, off in rows:
-                        cand.setdefault(tid, []).append(off - q_ms)
-                best: dict[str, Any] = {"ok": False,
-                                       "reason": "no match in local library"}
-                best_score = 0.0
-                for tid, deltas in cand.items():
-                    # coherent-offset histogram (50 ms bins)
-                    bins: dict[int, int] = {}
-                    for d in deltas:
-                        b = int(d // 50)
-                        bins[b] = bins.get(b, 0) + 1
+                        cand.setdefault(tid, []).append(
+                            (int(off) - q_ms, q_ms, int(off)))
+                ranked: list[dict[str, Any]] = []
+                for tid, evidence in cand.items():
+                    # Coherent-offset histogram (50 ms bins).
+                    bins: dict[int, list[tuple[int, int, int]]] = {}
+                    for item in evidence:
+                        bins.setdefault(int(item[0] // 50),
+                                        []).append(item)
                     if not bins:
                         continue
-                    score = max(bins.values()) / max(1, len(hashes))
-                    if score > best_score:
-                        best_score = score
-                        row = conn.execute(
-                            "SELECT title, artist, source FROM tracks "
-                            "WHERE id = ?", (tid,)).fetchone()
-                        if row:
-                            best = {"ok": True, "track_id": tid,
-                                    "title": row[0], "artist": row[1],
-                                    "source": row[2], "score": round(score, 3)}
-                if best.get("ok") and best_score >= threshold:
-                    return best
-                return {"ok": False,
-                        "reason": "no confident match in local library "
-                                  f"(best score {best_score:.2f} < "
-                                  f"{threshold:.2f})"}
+                    coherent = max(
+                        bins.values(),
+                        key=lambda values: (len(values),
+                                            -abs(values[0][0])))
+                    votes = len(coherent)
+                    score = votes / max(1, len(hashes))
+                    row = conn.execute(
+                        "SELECT title, artist, source FROM tracks "
+                        "WHERE id = ?", (tid,)).fetchone()
+                    if not row:
+                        continue
+                    deltas = sorted(item[0] for item in coherent)
+                    offset_ms = deltas[len(deltas) // 2]
+                    query_times = [item[1] for item in coherent]
+                    reference_times = [item[2] for item in coherent]
+                    window = {
+                        "query_start_s": round(min(query_times) / 1000, 3),
+                        "query_end_s": round(max(query_times) / 1000, 3),
+                        "reference_start_s": round(
+                            min(reference_times) / 1000, 3),
+                        "reference_end_s": round(
+                            max(reference_times) / 1000, 3),
+                        "coherent_votes": votes,
+                    }
+                    offset_map = {
+                        "reference_minus_query_ms": int(offset_ms),
+                        "query_start_s": window["query_start_s"],
+                        "reference_start_s": window["reference_start_s"],
+                    }
+                    ranked.append({
+                        "track_id": tid,
+                        "recording_id": f"local:{tid}",
+                        "title": row[0],
+                        "artist": row[1],
+                        "source": row[2],
+                        "score": round(score, 3),
+                        "match_strength": _match_strength(
+                            score, votes, len(hashes)),
+                        "coherent_votes": votes,
+                        "offset_ms": int(offset_ms),
+                        "evidence_windows": [window],
+                        "alignment": {
+                            "method": "Wang-2003 constellation "
+                                      "landmark offset voting",
+                            "bin_width_ms": 50,
+                            "coherent_votes": votes,
+                            "offset_ms": int(offset_ms),
+                        },
+                        "offset_map": offset_map,
+                    })
+                ranked.sort(
+                    key=lambda item: (
+                        -float(item["score"]),
+                        -int(item["coherent_votes"]),
+                        str(item.get("title") or "").casefold()))
+                catalog = self._catalog_snapshot_locked(conn)
+                if ranked and float(ranked[0]["score"]) >= threshold:
+                    winner = ranked[0]
+                    receipt = self._receipt_locked(
+                        conn, status="matched", query_hash=query_hash,
+                        query_count=query_count, winner=winner,
+                        alternatives=ranked[1:4], catalog=catalog)
+                    return {
+                        "ok": True,
+                        "track_id": winner["track_id"],
+                        "recording_id": winner["recording_id"],
+                        "title": winner["title"],
+                        "artist": winner["artist"],
+                        "source": winner["source"],
+                        "score": winner["score"],
+                        "match_strength": winner["match_strength"],
+                        "evidence_windows": winner["evidence_windows"],
+                        "offset_map": winner["offset_map"],
+                        "alternatives": ranked[1:4],
+                        "catalog": catalog,
+                        "catalog_version": catalog["version"],
+                        "query_hash": query_hash,
+                        "query_fingerprint_count": query_count,
+                        "receipt": receipt,
+                    }
+                if ranked:
+                    best_score = float(ranked[0]["score"])
+                    reason = (
+                        "no reliable match in local library "
+                        f"(searched {int(catalog['tracks'])} indexed "
+                        "track(s); strongest coherent-offset fraction "
+                        f"{best_score:.3f} < {threshold:.3f})")
+                    best_candidate = ranked[0]
+                else:
+                    best_score = 0.0
+                    reason = (
+                        "no reliable match in local library "
+                        f"(searched {int(catalog['tracks'])} indexed "
+                        "track(s); strongest coherent-offset fraction "
+                        "0.000 — no candidate shared a coherent "
+                        "landmark-offset pattern)")
+                    best_candidate = None
+                receipt = self._receipt_locked(
+                    conn, status="no_match", query_hash=query_hash,
+                    query_count=query_count, reason=reason,
+                    best_candidate=best_candidate, catalog=catalog)
+                return {
+                    "ok": False,
+                    "reason": reason,
+                    "best_score": round(best_score, 3),
+                    "best_candidate": best_candidate,
+                    "catalog": catalog,
+                    "catalog_version": catalog["version"],
+                    "query_hash": query_hash,
+                    "query_fingerprint_count": query_count,
+                    "receipt": receipt,
+                }
         except AudioReadError as exc:
-            return {"ok": False, "reason": str(exc)}
+            reason = str(exc)
+            return {"ok": False, "reason": reason,
+                    "receipt": self._unavailable_receipt(
+                        status="unavailable", reason=reason,
+                        query_hash=query_hash, query_count=query_count)}
         except Exception as exc:  # noqa: BLE001
             _log.debug("match failed", exc_info=True)
-            return {"ok": False, "reason": f"local match failed: {exc}"}
+            reason = f"local match failed: {exc}"
+            return {"ok": False, "reason": reason,
+                    "receipt": self._unavailable_receipt(
+                        status="unavailable", reason=reason,
+                        query_hash=query_hash, query_count=query_count)}
 
     def list_tracks(self) -> list[dict[str, Any]]:
         """Everything Devon can recognize locally. Never raises."""
@@ -752,13 +1172,28 @@ def index_own(path: str | os.PathLike[str], title: str = "",
         return {"ok": False, "reason": f"index_own failed: {exc}"}
 
 
+def _failed_local_result(reason: str) -> dict[str, Any]:
+    """A receipt-carrying local failure result. Never raises."""
+    receipt = RecognitionReceipt(
+        status="unavailable",
+        source="devon_local_fingerprint",
+        source_label="Devon's local fingerprint catalog",
+        match_class="unavailable",
+        feature_sources=("wang_2003_constellation_landmarks",),
+        attempted_sources=("devon_local_fingerprint",),
+        rights_note=LOCAL_RIGHTS_NOTE,
+        reason=reason,
+    ).to_dict()
+    return {"ok": False, "reason": reason, "receipt": receipt}
+
+
 def match_local_db(path: str | os.PathLike[str], *,
                    db: FingerprintDB | None = None) -> dict[str, Any]:
     """Match against Devon's local recognition memory. Never raises."""
     try:
         return (db or default_fingerprint_db()).match(path)
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "reason": f"local match failed: {exc}"}
+        return _failed_local_result(f"local match failed: {exc}")
 
 
 #: Backwards-friendly alias.
@@ -768,12 +1203,15 @@ match_local = match_local_db
 def identify(path: str | os.PathLike[str], *,
              db: FingerprintDB | None = None,
              threshold: float = MATCH_THRESHOLD) -> dict[str, Any]:
-    """One call: "what is this audio?" → match result dict. Never raises."""
+    """One call: "what is this audio?" → receipt-carrying result.
+
+    Never raises.
+    """
     try:
         return (db or default_fingerprint_db()).match(
             path, threshold=threshold)
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "reason": f"identify failed: {exc}"}
+        return _failed_local_result(f"identify failed: {exc}")
 
 
 def match_batch(paths: Sequence[str | os.PathLike[str]], *,
@@ -791,8 +1229,9 @@ def match_batch(paths: Sequence[str | os.PathLike[str]], *,
             out.append(res)
         return out
     except Exception as exc:  # noqa: BLE001
-        return [{"ok": False, "reason": f"batch match failed: {exc}",
-                 "path": str(p)} for p in (paths or [])]
+        return [{**_failed_local_result(
+            f"batch match failed: {exc}"), "path": str(p)}
+            for p in (paths or [])]
 
 
 # ---------------------------------------------------------------------------
