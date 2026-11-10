@@ -859,6 +859,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "repurpose": (0, None),   # /repurpose [list] | post <n> short|thread | short <n> post | day [YYYY-MM-DD] short|thread|post — one asset, other forms, through the content cell (owner-only)
     "engage": (0, None),      # /engage [list] | show <n> | reply <n> | ignore <n> | done <n> — replies & comments on his posts, read back and triaged (owner-only)
     "cases": (0, None),       # /cases [list] | <n> | verify <n> | ack <n> — outcome cases for forgotten work, with their evidence trails (owner-only)
+    "read": (0, None),        # /read [list] | open <n> | go <token> <verb> | get <token> <html|txt> — routed long outputs in the reader, editions + raw downloads (owner-only)
     "insights": (0, None),    # /insights [days] — native money analytics
     "predict": (0, 3),       # /predict <stake> <over|under> <1-99> — prediction pit (progression-unlocked)
     "menu": (0, 2),          # alias of /list ([group] [page] ride the same grammar)
@@ -3365,6 +3366,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/cases [list] | <n> | verify <n> | ack <n>",
               "example": "/cases verify 1",
               "related": "/notify /mission"},
+    "read": {"what": ("the reading desk for long outputs: when a report, research result or other long output runs past one message, the output router sends it here instead of a wall of chunks — the full text is preserved in a reading session with working controls (next/previous page, contents, jump), and the longest outputs also offer a branded HTML edition and the raw original as downloads. Nothing is truncated: what the reader holds is the whole output, and every route records why the output arrived the way it did."),
+              "usage": "/read [list] | open <n> | go <token> <n|p|c|jN|u> | get <token> <html|txt>",
+              "example": "/read open 1",
+              "related": "/books /notify"},
     "api": {"what": "external API connectors: weather, fx, github, …",
             "usage": "/api list | <connector> [json]", "example": "/api weather city=Lagos",
             "related": ""},
@@ -4330,7 +4335,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
                            "exness", "stripe", "content", "drafts", "day",
-                           "calendar", "repurpose", "engage", "cases",
+                           "calendar", "repurpose", "engage", "cases", "read",
                            "tempmail", "checkmail", "vnumber", "checksms",
                            "browser", "paper", "backup"]),
     ("platform control", ["start", "stop", "profile", "chatmode", "style",
@@ -4649,7 +4654,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion", "gcal", "trello", "exness", "stripe",
-      "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage", "cases",
+      "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage", "cases", "read",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
     ("platform control — updates & restarts",
      ["update", "pull", "deploy", "restart"]),
@@ -5023,6 +5028,7 @@ LIST_ONELINERS: dict[str, str] = {
     "repurpose": "one asset, other forms: posted drafts, day records and shorts re-drafted through the cell",
     "engage": "replies & comments on your posts, read back and triaged: what needs you, reply drafts through /drafts",
     "cases": "outcome cases for forgotten work — evidence trails, re-checks, acknowledgements",
+    "read": "long outputs in the reader: page through them, contents, the HTML edition and the raw download — nothing truncated",
     "api": "external API connectors (weather, fx, github, …)",
     "connectors": "manage the service connectors: list, status, connect",
     "shorts": "short-form content empire: make, queue, post vertical videos",

@@ -7716,6 +7716,8 @@ class PartnerRuntime(
             return self._control_proactive(arg)
         if kind == "cases":
             return self._control_cases(command.tail or arg)
+        if kind == "read":
+            return self._control_read(command.tail or arg, chat_key=chat_key)
         if kind == "mission":
             return self._control_mission(command.tail or arg, chat_key=chat_key)
         if kind == "image":
@@ -8009,19 +8011,99 @@ class PartnerRuntime(
         return sent
 
     def _send_long_checked(self, platform: str, chat, text: str,
-                           limit: int = 3800) -> str:
+                           limit: int = 3800, *, intent: str = "",
+                           kind: str = "", title: str = "") -> str:
         """Send a long text; ``""`` when delivered, an honest failure note
         when NOTHING got through.
 
         Callers that used to do ``self._send_long(...); return ""`` ("report
         already delivered in chunks") must use this: a total send failure
         used to vanish silently, leaving the owner with no reply at all.
+
+        Doc 16 P4: before the chunk dump, the output goes through
+        the output router (social/chat/output_router.py) — medium
+        and long outputs arrive as a reader introduction with
+        working controls (and, for the longest, HTML/raw file
+        actions), and exact content lands as the raw original.
+        Short outputs keep the exact legacy chunk path, and ANY
+        router-side failure falls back to it: the routed path is an
+        upgrade, never a new way to lose a reply.  ``intent="inline"``
+        is the caller's explicit ask for inline text and skips the
+        router entirely; ``kind`` declares exact content
+        ("code"/"data"); ``title`` names the output for its reader
+        introduction and file names.
         """
+        if (text or "").strip() and intent != "inline" and \
+                self._send_long_routed(platform, chat, text,
+                                       limit=limit, kind=kind,
+                                       title=title):
+            return ""
         sent = self._send_long(platform, chat, text, limit=limit)
         if sent == 0 and (text or "").strip():
             return ("⚠️ delivery failed — I couldn't send that message "
                     "(gateway down?). Nothing was delivered; check the logs.")
         return ""
+
+    def _send_long_routed(self, platform: str, chat, text: str, *,
+                          limit: int = 3800, kind: str = "",
+                          title: str = "") -> bool:
+        """Try the Doc 16 output router for one long output.
+
+        True means the output was DELIVERED by its route (reader
+        introduction sent, or the raw document sent); False means
+        the caller falls back to the legacy chunked send — for
+        chunk-routed outputs, for transports that cannot hold the
+        richer routes, and for ANY router failure (no context on a
+        bare runtime, a store error, a failed send).  Never raises.
+        """
+        try:
+            from ...social.chat.output_router import OutputRouter
+
+            router = OutputRouter.for_context(self.context)
+            chat_key = str(getattr(chat, "key", "") or platform)
+            plan = router.plan(
+                text, platform=platform, reader_key=f"chat:{chat_key}",
+                limit=limit, kind=kind, title=title)
+            _log.info(
+                "output route %s (%s) — %d chars via _send_long_checked",
+                plan.decision.kind, plan.decision.reason, len(text))
+            if plan.decision.kind == "chunks":
+                return False
+            delivered = False
+            if plan.decision.kind == "document":
+                import os
+                import tempfile
+                from contextlib import suppress
+
+                fd, path = tempfile.mkstemp(
+                    prefix="devon-output-", suffix=".txt")
+                try:
+                    with os.fdopen(fd, "wb") as fh:
+                        fh.write(plan.file_bytes)
+                    result = self.gateway.send_file(
+                        platform, chat, path, caption=plan.caption,
+                        name=plan.file_name)
+                finally:
+                    with suppress(OSError):
+                        os.unlink(path)
+                delivered = bool(getattr(result, "ok", False))
+            else:
+                result = self.gateway.send(
+                    platform, chat, plan.intro_text,
+                    buttons=plan.buttons)
+                delivered = bool(getattr(result, "ok", False))
+            if delivered:
+                # Same delivery accounting _send_long performs, so
+                # handle_control's no-empty law sees the routed send
+                # exactly like a chunked one.
+                try:
+                    _control_deliveries.set(_control_deliveries.get() + 1)
+                except Exception as exc:  # noqa: BLE001 - marking only
+                    _log.debug("control delivery mark failed: %s", exc)
+            return delivered
+        except Exception as exc:  # noqa: BLE001 — fall back, never lose
+            record_failure("runtime._send_long_routed", exc)
+            return False
 
     def _notify(self, chat: Any, text: str) -> None:
         """Best-effort chat notification (background book pipeline)."""

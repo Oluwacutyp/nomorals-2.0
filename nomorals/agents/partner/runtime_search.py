@@ -584,6 +584,125 @@ class RuntimeSearchMixin:
 
         return ReaderService.for_context(self.context)
 
+    def _control_read(self, tail: str, chat_key: str) -> str:
+        """``/read`` — the routed long outputs' desk (Doc 16 P4).
+
+        Long outputs the router sent to the reader (or offered as
+        files) live here: the list reopens them, ``go`` actuates a
+        reading token (the reader's own grammar), ``get`` delivers
+        the branded HTML edition or the raw original as a file.
+        Owner-only by absence from PUBLIC_COMMANDS, exactly like
+        /cases.
+        """
+        from ...social.chat.output_router import OutputRouter
+
+        parts = (tail or "").strip().split()
+        verb = parts[0].lower() if parts else "list"
+        try:
+            router = OutputRouter.for_context(self.context)
+        except Exception as exc:  # noqa: BLE001 - chat surface
+            record_failure("runtime_search._control_read.router", exc)
+            return ("reading is unavailable right now — the output "
+                    "store failed to open")
+        reader_key = f"chat:{chat_key}"
+        svc = router.reader
+        try:
+            if verb == "go":
+                # /read go <token> <verb> — the reader's callback
+                # grammar, on routed outputs (text: documents);
+                # story tokens answer to /books go, as story
+                # controls answer in reverse there.
+                if len(parts) < 3:
+                    return "usage: /read go <token> <n|p|c|jN|u>"
+                session = svc.session_by_token(parts[1])
+                if session is None:
+                    return ("that reading control has expired — "
+                            "/read lists what this chat has open")
+                if not session.document_id.startswith("text:"):
+                    return ("that reading control belongs to a "
+                            "different document — story controls "
+                            "answer to /books go")
+                result = svc.act(parts[1], parts[2],
+                                 router.resolver())
+                if result.status != "ok":
+                    return result.note
+                if result.contents is not None:
+                    return svc.render_contents_text(
+                        result.contents,
+                        open_hint=f"open one: /read go "
+                                  f"{session.token} j<line number>")
+                return svc.render_text(result.view)
+            if verb == "get":
+                # /read get <token> <html|txt> — the file actions:
+                # the branded HTML edition, or the raw original,
+                # delivered as a document through the gateway.
+                if len(parts) < 3 or \
+                        parts[2].lower() not in ("html", "txt"):
+                    return "usage: /read get <token> <html|txt>"
+                session = svc.session_by_token(parts[1])
+                if session is None:
+                    return ("that file control has expired — /read "
+                            "lists what this chat has open")
+                if not session.document_id.startswith("text:"):
+                    return ("that file control belongs to a "
+                            "different document")
+                found = router.file_for(
+                    session.document_id, parts[2].lower())
+                if found is None:
+                    return ("that output is no longer in the store "
+                            "— nothing to send")
+                path, name = found
+                chat = self._ref_from_key(chat_key)
+                caption = (
+                    "🌐 the branded HTML edition — complete, with "
+                    "its completeness stated on the cover"
+                    if parts[2].lower() == "html" else
+                    "⬇ the original output, byte for byte")
+                result = self.gateway.send_file(
+                    chat.platform, chat, str(path), caption=caption,
+                    name=name)
+                if not getattr(result, "ok", False):
+                    return ("⚠️ the file send failed — the gateway "
+                            "rejected it; the output itself is "
+                            "still in the reader (/read)")
+                return f"📄 sent above — {name}"
+            if verb == "open":
+                # /read open <n> — reopen a routed output from the
+                # list, at the reader's current page for it.
+                rows = router.recent(reader_key)
+                if len(parts) < 2 or not parts[1].isdigit() or \
+                        not 1 <= int(parts[1]) <= len(rows):
+                    return ("usage: /read open <n> — n from the "
+                            "/read list")
+                row = rows[int(parts[1]) - 1]
+                session = svc.session_for(
+                    reader_key, row.get("document_id", ""))
+                if session is None:
+                    return ("that output's reading session is "
+                            "gone — its text is still in the store")
+                view = svc.view(session.session_id,
+                                router.resolver())
+                return svc.render_text(view)
+            # bare / /read list — this chat's routed outputs.
+            rows = router.recent(reader_key)
+            if not rows:
+                return ("no routed long outputs in this chat yet — "
+                        "when a report or result runs long, it "
+                        "lands here with reading controls instead "
+                        "of a wall of chunks")
+            lines = ["📚 routed outputs in this chat (newest first):"]
+            for i, row in enumerate(rows, start=1):
+                title = row.get("title") or "long output"
+                chars = row.get("chars", 0)
+                lines.append(
+                    f"{i}. {title} — {chars:,} chars "
+                    f"· {row.get('route', '')}")
+                lines.append(f"   open: /read open {i}")
+            return "\n".join(lines)
+        except Exception as exc:  # noqa: BLE001 - chat surface
+            record_failure("runtime_search._control_read", exc)
+            return f"read failed: {exc}"
+
     def _record_story_position(self, reader, slug: str, chapter: int,
                                page: int, chat_key: str):
         """Mirror a story read into the generalized reader's
