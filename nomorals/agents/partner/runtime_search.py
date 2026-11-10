@@ -267,6 +267,8 @@ class RuntimeSearchMixin:
                         f"{s['licence']}"
                         + (" (needs API key)" if s["requires_key"] else ""))
                 lines.append("\n/books read <url|slug> [n] follows + reads; "
+                             "/books part <slug> turns the page where buttons can't; "
+                             "/books contents <slug> lists chapters; "
                              "/books continue <slug> [n] continues in its voice")
                 return "\n".join(lines)
 
@@ -297,12 +299,24 @@ class RuntimeSearchMixin:
                     result = reader.read(slug, chapter=chapter)
                 except Exception as exc:  # noqa: BLE001 - chat surface
                     return f"read failed: {exc}"
-                text = result.get("text", "")
-                shown = text[:3500]
-                suffix = "\n…(truncated — /books read %s %s for the next part)" % (
-                    slug, int(result.get("chapter", chapter or 1)) + 1) if len(text) > 3500 else ""
-                return (f"📖 {result.get('title', slug)} — chapter "
-                        f"{result.get('chapter', chapter)}\n\n{shown}{suffix}")
+                # No-pager surfaces read through the generalized
+                # reader (Doc 16 P2): the chapter's FULL text, one
+                # part at a time, this chat's session holding the
+                # place, the continuation pointer naming the next
+                # part of THIS chapter (the next chapter only once
+                # this one ends).  The old render sliced read()'s
+                # 12000-char preview to 3500 chars and pointed at
+                # the NEXT CHAPTER as the "next part" — stranding
+                # chars 3500→end of the current chapter entirely.
+                slug = result["slug"]
+                chapter_no = int(result.get("chapter", chapter or 1))
+                view = self._record_story_position(
+                    reader, slug, chapter_no, 1, chat_key)
+                if view is None:
+                    return self._novel_chapter_reply(
+                        reader, slug, chapter_no, chat_key,
+                        kind="books", session="books")
+                return self._story_part_render(view, slug)
 
             if verb == "page":
                 # Pager continuation for /books read renders:
@@ -319,6 +333,120 @@ class RuntimeSearchMixin:
                         kind="books", session="books")
                 except Exception as exc:  # noqa: BLE001 - chat surface
                     return f"read failed: {exc}"
+
+            if verb == "part":
+                # /books part <slug> [back] — the plain-transport
+                # continuation (Doc 16 P2): move this chat's reader
+                # session one page, crossing into the next chapter
+                # at a chapter's end (fetching it first — read() is
+                # the fetch, as it is everywhere on this surface).
+                from ...books.manifest import story_content_resolver
+                from ...books.reader import StoryReader
+                if len(parts) < 2:
+                    return "usage: /books part <slug> [back]"
+                try:
+                    reader = StoryReader(self.context)
+                    slug = reader.resolve_slug(parts[1])
+                    svc = self._reader_service()
+                    session = svc.session_for(
+                        f"chat:{chat_key}", f"story:{slug}")
+                    if session is None:
+                        return (f"no reading in progress for {slug} "
+                                f"— /books read {slug} opens it")
+                    resolver = story_content_resolver(reader)
+                    back = len(parts) > 2 and \
+                        parts[2].lower() == "back"
+                    if not back:
+                        view = svc.view(session.session_id, resolver)
+                        seg = session.segment_id
+                        number = int(seg[3:]) if seg.startswith("ch-") \
+                            and seg[3:].isdigit() else 0
+                        if view.status == "ok" and \
+                                not view.has_next_page and number:
+                            # the next chapter may exist unheld —
+                            # fetch it so it becomes a segment, then
+                            # let the navigation cross into it; a
+                            # source with no such chapter answers
+                            # through the navigation's end note
+                            try:
+                                reader.read(slug, chapter=number + 1)
+                                from ...books.manifest import (
+                                    manifest_from_story)
+                                session = svc.open(
+                                    f"chat:{chat_key}",
+                                    manifest_from_story(reader, slug),
+                                    command_prefix="books go")
+                            except Exception:  # noqa: BLE001
+                                pass  # navigate answers honestly
+                    view = svc.navigate(
+                        session.session_id, resolver,
+                        "prev" if back else "next")
+                    return self._story_part_render(view, slug)
+                except Exception as exc:  # noqa: BLE001 - chat surface
+                    return f"read failed: {exc}"
+
+            if verb == "contents":
+                # /books contents <slug> — the story's contents from
+                # its manifest: held chapters with sizes, declared
+                # chapters not yet held named as not held.
+                from ...books.manifest import manifest_from_story
+                from ...books.reader import StoryReader
+                if len(parts) < 2:
+                    return "usage: /books contents <slug>"
+                try:
+                    reader = StoryReader(self.context)
+                    slug = reader.resolve_slug(parts[1])
+                    svc = self._reader_service()
+                    session = svc.session_for(
+                        f"chat:{chat_key}", f"story:{slug}")
+                    view = svc.contents_view(
+                        manifest_from_story(reader, slug),
+                        current_segment_id=(
+                            session.segment_id if session else ""))
+                    return svc.render_contents_text(
+                        view,
+                        open_hint=f"open one: /books read {slug} "
+                                  "<chapter> (an unheld chapter is "
+                                  "fetched on read)")
+                except Exception as exc:  # noqa: BLE001 - chat surface
+                    return f"read failed: {exc}"
+
+            if verb == "go":
+                # /books go <token> <verb> — actuate a reader-session
+                # token (the generalized reader's callback grammar:
+                # n/p = next/prev page, c = contents, j<row> = jump
+                # to a contents row, u = switch to the newer
+                # revision).  Stale tokens answer stale, in words,
+                # and never move the reader.
+                from ...books.manifest import story_content_resolver
+                from ...books.reader import StoryReader
+                if len(parts) < 3:
+                    return "usage: /books go <token> <n|p|c|jN|u>"
+                svc = self._reader_service()
+                session = svc.session_by_token(parts[1])
+                if session is None:
+                    return ("that reading control has expired — "
+                            "/books read <slug> opens the story again")
+                if not session.document_id.startswith("story:"):
+                    return ("that reading control belongs to a "
+                            "different document")
+                slug = session.document_id[len("story:"):]
+                try:
+                    reader = StoryReader(self.context)
+                    result = svc.act(
+                        parts[1], parts[2],
+                        story_content_resolver(reader))
+                except Exception as exc:  # noqa: BLE001 - chat surface
+                    return f"read failed: {exc}"
+                if result.status != "ok":
+                    return result.note
+                if result.contents is not None:
+                    return svc.render_contents_text(
+                        result.contents,
+                        open_hint=f"open one: /books read {slug} "
+                                  "<chapter> (an unheld chapter is "
+                                  "fetched on read)")
+                return self._story_part_render(result.view, slug)
 
             if verb == "continue":
                 # /books continue <slug> [n] — continue past the ending
@@ -448,6 +576,90 @@ class RuntimeSearchMixin:
         except Exception as exc:  # noqa: BLE001 - the reply still goes out
             record_failure("runtime_search._ensure_story_engine", exc)
 
+    def _reader_service(self):
+        """The generalized long-document reader (Doc 16 P2), bound
+        to this runtime's context — per-reader reading sessions over
+        P1 manifests, persisted under the workspace."""
+        from ...social.chat.reader_service import ReaderService
+
+        return ReaderService.for_context(self.context)
+
+    def _record_story_position(self, reader, slug: str, chapter: int,
+                               page: int, chat_key: str):
+        """Mirror a story read into the generalized reader's
+        per-reader session: this chat's place in the story
+        (segment = chapter, page within it), keyed to the story
+        manifest's revision.  The manifest is derived when the
+        session is created or the chapter is new to it; page moves
+        on an existing session are position-only.  Best-effort —
+        a session-store failure never breaks the render.  Returns
+        the positioned page view, or None when recording failed."""
+        try:
+            from ...books.manifest import (
+                manifest_from_story,
+                story_content_resolver,
+            )
+
+            svc = self._reader_service()
+            reader_key = f"chat:{chat_key}"
+            segment_id = f"ch-{chapter}"
+            session = svc.session_for(reader_key, f"story:{slug}")
+            if session is None or \
+                    session.pinned().segment(segment_id) is None:
+                session = svc.open(
+                    reader_key, manifest_from_story(reader, slug),
+                    command_prefix="books go")
+            return svc.goto(
+                session.session_id, story_content_resolver(reader),
+                segment_id=segment_id, page_index=max(0, page - 1))
+        except Exception as exc:  # noqa: BLE001 - best-effort mirror
+            record_failure("runtime_search._record_story_position", exc)
+            return None
+
+    def _story_part_render(self, view, slug: str) -> str:
+        """One page of a story chapter as plain text (the no-pager
+        reading render): header, the page body, and continuation
+        pointers that name what they point at — the next part of
+        THIS chapter reads differently from the next chapter, and
+        the next chapter is named only once this one has ended."""
+        seg = view.segment_id or ""
+        number = int(seg[3:]) if seg.startswith("ch-") \
+            and seg[3:].isdigit() else view.segment_ordinal
+        head = f"📖 {view.title or slug} — chapter {number}"
+        if view.segment_title and \
+                view.segment_title != f"Chapter {number}":
+            head += f" · {view.segment_title}"
+        if view.status != "ok":
+            lines = [head, "", f"⚠️ {view.note}"]
+            lines.append(f"📑 contents: /books contents {slug}")
+            return "\n".join(lines)
+        lines = [head, "", view.body, "",
+                 f"— part {view.page_index + 1} of {view.page_count}"
+                 f" · chapter {number} —"]
+        if view.has_next_page:
+            lines.append(
+                f"▸ next part of this chapter: /books part {slug}")
+        elif view.has_next_segment or view.declared_total > number:
+            lines.append(
+                f"▸ end of chapter {number} — next chapter: "
+                f"/books read {slug} {number + 1}")
+        else:
+            lines.append(
+                f"▸ end of chapter {number} — no further chapters "
+                f"held · /books contents {slug} shows what is held")
+        if view.has_prev_page:
+            lines.append(f"◂ previous part: /books part {slug} back")
+        elif view.has_prev_segment and number > 1:
+            lines.append(
+                f"◂ previous chapter: /books read {slug} {number - 1}")
+        lines.append(f"📑 contents: /books contents {slug}")
+        if view.update_available:
+            lines.append(
+                "✦ this story changed since you opened it — "
+                f"/books go {view.token} u switches to the new "
+                "revision (your place is kept)")
+        return "\n".join(lines)
+
     def _novel_chapter_reply(self, reader, slug: str, chapter: int,
                              chat_key: str, *, page: int = 1,
                              edit: bool = False, kind: str = "novel",
@@ -456,25 +668,30 @@ class RuntimeSearchMixin:
         reading pager where the surface holds it (one message,
         Next/Prev, edited in place), else the chunked send — the
         honest degradation.  Reading updates the owner's progress
-        (reader.read), and the pager body is the chapter's FULL
-        text (chapter_text), not read()'s 12000-char preview."""
+        (reader.read), and the body is the chapter's FULL text
+        (chapter_text) on BOTH paths — never read()'s 12000-char
+        preview, which the old fallback sent as if it were the
+        chapter, stranding everything past it.  The read also
+        records this chat's place in the generalized reader's
+        per-reader session (Doc 16 P2)."""
         from ...books.reader import ReaderError
 
         data = reader.read(slug, chapter)
         slug = data["slug"]
-        if not _reading_pager_ok(chat_key):
-            chat = self._ref_from_key(chat_key)
-            return self._send_long_checked(
-                chat.platform, chat,
-                f"📖 {data.get('title', slug)} — chapter "
-                f"{data.get('chapter', chapter)}\n\n"
-                f"{data.get('text', '')}")
         try:
             full = reader.chapter_text(slug, int(data["chapter"]))
         except ReaderError:
             full = data.get("text", "")
         if full.startswith("# "):
             full = full.split("\n", 1)[1].lstrip("\n")
+        self._record_story_position(
+            reader, slug, int(data["chapter"]), page, chat_key)
+        if not _reading_pager_ok(chat_key):
+            chat = self._ref_from_key(chat_key)
+            return self._send_long_checked(
+                chat.platform, chat,
+                f"📖 {data.get('title', slug)} — chapter "
+                f"{data.get('chapter', chapter)}\n\n{full}")
         story = reader._load(slug)
         return _chapter_actionable(
             kind=kind, slug=slug, title=data.get("title", slug),

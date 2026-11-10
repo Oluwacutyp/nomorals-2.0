@@ -30,7 +30,8 @@ from ..core.longdoc import (
 from .model import Document, Section, Table
 
 __all__ = ["manifest_from_document", "document_revision_ref",
-           "section_content", "table_content"]
+           "section_content", "table_content",
+           "document_content_resolver"]
 
 
 def _canonical(payload: dict[str, Any]) -> str:
@@ -93,3 +94,31 @@ def manifest_from_document(doc: Document, *,
         created_by=created_by,
         metadata={"format": doc.format, "source": doc.source},
     )
+
+
+def document_content_resolver(doc: Document):
+    """Resolve document manifest segments to readable content for
+    the generalized reader (Doc 16 P2): a section reads as its
+    heading over its text; a table reads as its caption/name over
+    the pipe-separated grid (:meth:`Table.as_text`).  The manifest
+    hash covers the canonical JSON form; the reader serves the
+    human form of the same section/table — same source, two
+    projections, neither inventing content."""
+    sections = {f"sec-{i + 1}": s for i, s in enumerate(doc.sections)}
+    tables = {f"tbl-{i + 1}": t for i, t in enumerate(doc.tables)}
+
+    def resolve(segment) -> str | None:
+        if not segment.present:
+            return None
+        section = sections.get(segment.segment_id)
+        if section is not None:
+            if section.heading:
+                return f"{section.heading}\n\n{section.text}"
+            return section.text
+        table = tables.get(segment.segment_id)
+        if table is not None:
+            label = table.caption or table.name
+            grid = table.as_text()
+            return f"{label}\n\n{grid}" if label else grid
+        return None
+    return resolve

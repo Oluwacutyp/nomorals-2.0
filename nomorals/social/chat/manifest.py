@@ -31,7 +31,8 @@ from ...core.longdoc import (
 )
 from .present import Doc, doc_to_json
 
-__all__ = ["manifest_from_doc", "manifest_from_text"]
+__all__ = ["manifest_from_doc", "manifest_from_text",
+           "doc_content_resolver", "text_content_resolver"]
 
 
 def _canonical(payload: dict) -> str:
@@ -100,3 +101,55 @@ def manifest_from_text(text: str, *, title: str = "",
             note="raw text: the full original, one segment"),
         created_by=created_by,
     )
+
+
+# ── content resolvers (Doc 16 P2) ────────────────────────────────────
+#
+# The reader service (social.chat.reader_service) resolves a manifest
+# segment back to readable content through an injected resolver;
+# these are the presentation-side resolvers.  They serve every field
+# a section carries — rows, prose lines, pre blocks, quotes — so
+# reading a Doc through the reader loses nothing the Doc holds; a
+# section in a declared non-ready state serves its own state line,
+# exactly as the present renderers serve it in place of content.
+
+
+def _section_text(section) -> str:
+    from .present import state_line
+
+    if section.state != "ready":
+        return state_line(section.state, section.state_detail)
+    parts: list[str] = []
+    if section.title:
+        parts.append(section.title)
+    parts.extend(f"{row.label}: {row.value}" for row in section.rows)
+    parts.extend(section.lines)
+    parts.extend(section.pre)
+    parts.extend(section.quote)
+    return "\n".join(parts)
+
+
+def doc_content_resolver(doc: Doc):
+    """Resolve present-Doc manifest segments from the Doc itself."""
+    by_id: dict[str, str] = {}
+    if doc.summary:
+        by_id["summary"] = doc.summary
+    for i, section in enumerate(doc.sections):
+        by_id[f"sec-{i + 1}"] = _section_text(section)
+    if doc.overflow_text:
+        by_id["overflow"] = doc.overflow_text
+
+    def resolve(segment) -> str | None:
+        if not segment.present:
+            return None
+        return by_id.get(segment.segment_id)
+    return resolve
+
+
+def text_content_resolver(text: str):
+    """Resolve a raw-text manifest's single segment: the text."""
+    def resolve(segment) -> str | None:
+        if not segment.present:
+            return None
+        return text
+    return resolve

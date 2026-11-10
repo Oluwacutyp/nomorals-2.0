@@ -40,7 +40,8 @@ if TYPE_CHECKING:  # annotations only — no runtime import cycle
     from .model import Book
     from .reader import StoryReader
 
-__all__ = ["manifest_from_book", "manifest_from_story"]
+__all__ = ["manifest_from_book", "manifest_from_story",
+           "book_content_resolver", "story_content_resolver"]
 
 
 def manifest_from_book(book: Book, *,
@@ -135,3 +136,55 @@ def manifest_from_story(reader: StoryReader, slug: str, *,
                   "story_status": story.status,
                   "genres": list(story.genres)},
     )
+
+
+# ── content resolvers (Doc 16 P2) ────────────────────────────────────
+#
+# The reader service (social.chat.reader_service) resolves a manifest
+# segment back to its canonical readable content through an injected
+# resolver; these are the books-side resolvers.  They serve exactly
+# the bytes the manifest hashes — a story segment is ``Chapter.text``
+# (the prose body; the title rides the segment metadata), a book
+# segment is the chapter's written text.  Neither resolver fetches:
+# a chapter the library does not hold resolves to None and the
+# reader answers *unavailable* honestly.  Fetching stays where it
+# has always lived — ``StoryReader.read`` — and the chat surface
+# calls it before opening a session on an unheld chapter.
+
+
+def _chapter_number(segment_id: str) -> int | None:
+    if segment_id.startswith("ch-") and segment_id[3:].isdigit():
+        return int(segment_id[3:])
+    return None
+
+
+def story_content_resolver(reader: StoryReader):
+    """Resolve story manifest segments from the reader's local
+    library cache (disk truth; never the network)."""
+    def resolve(segment) -> str | None:
+        if not segment.present:
+            return None
+        number = _chapter_number(segment.segment_id)
+        if number is None:
+            return None
+        slug = segment.content_ref.split("#", 1)[0]
+        slug = slug[len("story:"):] if slug.startswith("story:") else slug
+        chapter = reader._cached_chapter(slug, number)
+        return chapter.text if chapter is not None else None
+    return resolve
+
+
+def book_content_resolver(book: Book):
+    """Resolve forge-book manifest segments from the Book itself:
+    a written chapter's text; an unwritten one resolves to None."""
+    by_number = {ch.number: ch for ch in book.chapters}
+
+    def resolve(segment) -> str | None:
+        if not segment.present:
+            return None
+        number = _chapter_number(segment.segment_id)
+        chapter = by_number.get(number) if number is not None else None
+        if chapter is None or not chapter.text:
+            return None
+        return chapter.text
+    return resolve
