@@ -123,6 +123,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "legal": [],
     "immune": [],
     "impossible": [],
+    "repair": [],
 
     # Shell completion scripts generated from the live parser.
     "completion": ["complete"],
@@ -4108,6 +4109,26 @@ def _parser() -> argparse.ArgumentParser:
     )
     immune.add_argument("task", nargs="*", default=[], help="verb and arguments")
     immune.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # Repair pipeline (doc 20 rungs 7–10): candidate patch → sandbox
+    # suite → canary → policy/owner-gated promotion with rollback.
+    repair = sub.add_parser("repair", aliases=CLI_ALIASES["repair"],
+        help="repair pipeline: sandbox-tested, canaried, gated patch promotion",
+        description=("nm repair run --incident <id> --patch <file.diff> [--probe \"<cmd>\"] [--producer <name>]\n"
+                     "nm repair approve <run-id> | reject <run-id> [reason] | rollback <run-id> [reason]\n"
+                     "nm repair runs [--incident <id>]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    repair.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    repair.add_argument("--incident", type=int, default=None,
+                        help="incident id the repair answers (run / runs)")
+    repair.add_argument("--patch", default="", help="candidate unified-diff file (run)")
+    repair.add_argument("--probe", action="append", default=[],
+                        help="canary reproduction command (run; repeatable)")
+    repair.add_argument("--producer", default="", help="who authored the candidate (run)")
+    repair.add_argument("--repo", default="", help="repository tree (default: NM_REPO_DIR or the install tree)")
+    repair.add_argument("--config", default=None, help="config file for snapshot state")
+    repair.add_argument("--json", action="store_true", help="Output as JSON")
 
     # Impossible wiring: CLI mirror of the /impossible chat command.
     impossible = sub.add_parser("impossible", aliases=CLI_ALIASES["impossible"],

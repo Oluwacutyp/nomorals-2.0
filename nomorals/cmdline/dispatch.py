@@ -18,6 +18,7 @@ from .commands.bet import _cmd_bet
 from .commands.braineval import _cmd_braineval
 from .commands.apk import _cmd_apk
 from .commands.re import _cmd_re
+from .commands.repair import _cmd_repair
 from .commands.desk import _cmd_desk
 from .commands.pump import _cmd_pump
 from .commands.book import _cmd_book
@@ -301,6 +302,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "snapshot": _CommandSpec(_cmd_snapshot, needs_context=False),
     "recover": _CommandSpec(_cmd_recover, needs_context=False),
     "update": _CommandSpec(_cmd_update, needs_context=False),
+    "repair": _CommandSpec(_cmd_repair, needs_context=False),
     "config": _CommandSpec(_cmd_config, needs_context=False),
     "completion": _CommandSpec(_cmd_completion, needs_context=False),
     "consent": _CommandSpec(_cmd_consent, needs_context=False),
