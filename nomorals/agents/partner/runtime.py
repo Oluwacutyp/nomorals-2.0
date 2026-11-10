@@ -1580,14 +1580,21 @@ class PartnerRuntime(
                 _log.info("games-only: dropped non-game message in %s",
                           message.chat.key)
                 return
-        # Live location share (M6): a location the OWNER supplied
-        # (a share/pin in chat, surfaced in meta by the adapters)
-        # is evaluated by the LiveLocationBroker against any live
-        # share sessions — forwarded to the session recipients or
-        # withheld, the decision recorded either way.  Passive and
-        # fail-open: the broker never replies here, and a failure
-        # in it never eats the message.
+        # Inbound locations (M9 + M6): a location the OWNER
+        # supplied (a share/pin in chat, surfaced in meta by the
+        # adapters) is checked FIRST against his armed pending
+        # marks — an armed /map mark is explicit intent and
+        # completes before anything else reads the share — and
+        # THEN evaluated by the LiveLocationBroker against any
+        # live share sessions, forwarded to the session
+        # recipients or withheld, the decision recorded either
+        # way.  Both hooks are passive and fail-open: a failure
+        # in either never eats the message.
         if message.incoming and (message.meta or {}).get("location"):
+            try:
+                self._maybe_pending_mark_update(message)
+            except Exception:  # noqa: BLE001 - a mark never eats chat
+                _log.exception("pending-mark hook failed")
             try:
                 self._maybe_live_share_update(message)
             except Exception:  # noqa: BLE001 - the broker never eats chat

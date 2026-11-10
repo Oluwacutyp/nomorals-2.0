@@ -34,7 +34,13 @@ marker/polyline/polygon documents, validated through the M1
 GeoJSON gate before decoded data becomes a layer, stored as
 data and converted onto the same overlay seam.  The
 live-location broker (M6, on ``location/``'s ConsentStore)
-builds on these contracts in its own pass.
+builds on these contracts in its own pass.  M9 adds personal
+marks (:mod:`nomorals.maps.marks`): the owner's own saved
+places, captured only through an armed ``/map mark`` (the
+command message's location, or the pin that completes a durable
+pending mark), stored beside the overlays in the same idiom,
+and resolved ahead of the gazetteer everywhere places are
+looked up.
 """
 
 from __future__ import annotations
@@ -90,6 +96,18 @@ from .manifest import (
                      verify_signature,
                      write_manifest,
 )
+from .marks import (
+    MAX_LABEL_CHARS,
+    METHOD_MESSAGE,
+    METHOD_PENDING,
+    PENDING_TTL_S,
+    Mark,
+    MarkError,
+    MarkStore,
+    PendingMark,
+    normalize_label,
+    pending_key,
+)
 from .mvt import (
     MvtError,
     MvtFeature,
@@ -132,19 +150,23 @@ from .vector_render import LabelSpec, MapOverlay, PilTextBackend, TextBackend, V
 __all__ = [
     "DEFAULT_STYLE", "FORMAT_VERSION", "GAZETTEER_MAX_ZOOM",
     "GRAPH_FILENAME", "INDEX_FILENAME", "KIND_WEIGHTS",
-    "MANIFEST_NAME", "MAX_CORRIDOR_TILES", "MAX_ZOOM",
+    "MANIFEST_NAME", "MAX_CORRIDOR_TILES", "MAX_LABEL_CHARS",
+    "MAX_ZOOM", "METHOD_MESSAGE", "METHOD_PENDING",
     "MERCATOR_MAX_LAT", "OPERATIONS", "Overlay", "OverlayError",
-    "OverlayFeature", "OverlayStore", "PACKS", "POSTURE_FEDERATED",
-    "POSTURE_LOCAL", "REVERSE_LADDER_KM", "ROUTE_ZOOM", "SOURCES",
+    "OverlayFeature", "OverlayStore", "PACKS", "PENDING_TTL_S",
+    "POSTURE_FEDERATED", "POSTURE_LOCAL", "REVERSE_LADDER_KM",
+    "ROUTE_ZOOM", "SOURCES",
     "BBox", "BuildReport",
     "FixtureRenderer", "Gazetteer", "GazetteerEntry", "GeoValidation",
     "GeocodeCandidate", "GeocodeProvider", "GeocodeResult",
     "GraphStats", "IndexBuildResult", "LabelSpec", "MapOverlay",
     "MapReceipt", "MapRenderer", "MapReceiptStore", "MapSettings",
-    "MapSource", "MapStyle", "MvtError", "MvtFeature", "MvtLayer",
+    "MapSource", "MapStyle", "Mark", "MarkError", "MarkStore",
+    "MvtError", "MvtFeature", "MvtLayer",
     "MvtPath", "MvtTile", "PackDefinition", "PackError",
     "PackIndexResult", "PackManifest", "PackMember",
-    "PackVerification", "PilTextBackend", "PipelineError",
+    "PackVerification", "PendingMark", "PilTextBackend",
+    "PipelineError",
     "ReleaseEntry", "ReleaseRegistry", "RenderResult",
     "ReverseCandidate", "ReverseResult", "RouteProvider",
     "RouteResult", "RouteStep", "Router", "SNAP_MAX_M", "SPEED_KMH",
@@ -154,7 +176,8 @@ __all__ = [
     "get_pack", "get_source", "hash_bytes", "lat_to_tile_y",
     "lat_to_y_float", "load_manifest", "lon_to_tile_x",
     "lon_to_x_float", "map_settings", "match_rank", "new_receipt_id",
-    "normalize_name", "overlay_bbox", "overlay_to_map_overlay",
+    "normalize_label", "normalize_name", "overlay_bbox",
+    "overlay_to_map_overlay", "pending_key",
     "render_pack_preview", "run_build", "style_hash",
     "tile_relpath", "tile_x_to_lon", "tile_y_to_lat",
     "validate_features", "validate_geojson", "validate_lat",

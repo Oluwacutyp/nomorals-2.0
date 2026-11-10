@@ -22,15 +22,18 @@ Operations: ``packs`` (the verified shelf) · ``find`` /
 owner policy and off by default) · ``route`` (the local road
 graph; a no-route answers with its reason) · ``view`` (a static
 map rendered from a local pack, answered with the PNG's file
-path) · ``overlays`` (the owner's saved overlay documents) ·
-``overlay`` (render one named overlay over its pack).
+path; with ``query=`` naming one of the owner's marks and no
+``point=``, the mark's view — the basemap centered on it, its
+marker drawn) · ``overlays`` (the owner's saved overlay
+documents) · ``overlay`` (render one named overlay over its
+pack) · ``marks`` (the owner's personal marks, M9).
 
-Read-only over map data: an operation mutates nothing in the
-packs or overlays; its only writes are Atlas's own records (the
-receipts every Atlas operation mints, and the rendered PNG a
-``view``/``overlay`` answers with).  The M6 live-share verbs are
-NOT tool operations — brokering the owner's location stays a
-chat-owner surface, never an agent-callable one.
+M9: the owner's marks are first-class places on this plane —
+``find`` resolves a mark ahead of the gazetteer, ``route``
+accepts a mark label as either endpoint, and ``marks`` lists
+them.  Mark CAPTURE is not a tool operation: it is the armed
+``/map mark`` chat flow (the M6 posture — the owner's location
+moves only through chat-owner surfaces, never agent calls).
 """
 
 from __future__ import annotations
@@ -41,7 +44,7 @@ from ..core.errors import ToolError
 from ..core.policy import Capability
 
 _OPERATIONS = ("packs", "find", "near", "route", "view",
-               "overlays", "overlay")
+               "overlays", "overlay", "marks")
 
 
 def _point(point: str, op: str) -> tuple[float, float]:
@@ -72,10 +75,14 @@ def register(registry: Any) -> None:
             "place names or lat,lon -> distance, duration "
             "estimate, steps, geometry, over the local road "
             "graph) | view (point -> a rendered PNG, answered "
-            "with its file path) | overlays (the owner's "
+            "with its file path; query= may name one of the "
+            "owner's marks instead) | overlays (the owner's "
             "saved overlay documents) | overlay (overlay= "
             "name -> that overlay rendered over its pack as a "
-            "PNG). Everything is local: no provider is ever "
+            "PNG) | marks (the owner's personal marks). Find "
+            "resolves the owner's marks first and route accepts "
+            "a mark label as an endpoint. Everything is local: "
+            "no provider is ever "
             "consulted silently, and an empty local answer is "
             "returned as outcome 'unavailable' with its reason."
         ),
@@ -120,9 +127,15 @@ def register(registry: Any) -> None:
                         "end= (place names or lat,lon)")
                 return agent.route(start, end)
             if op == "view":
+                if not (point or "").strip() \
+                        and (query or "").strip():
+                    return agent.view_mark(
+                        query, zoom=int(zoom) or None)
                 lat, lon = _point(point, op)
                 return agent.view(lat, lon,
                                   zoom=int(zoom) or None)
+            if op == "marks":
+                return agent.marks()
             if op == "overlays":
                 return agent.overlays()
             # op == "overlay"

@@ -22,6 +22,12 @@ M6 adds the live-share posture: ``NM_MAPS_LIVE_SHARE`` — OFF by
 default; the LiveLocationBroker's verbs and its inbound supplied-
 update hook stay dark until the owner turns it on, on top of Atlas
 itself being enabled and a live ConsentStore grant per share.
+
+M9 personal marks ride the master ``enabled`` posture — marks
+are part of the shipped /map surface, not a second gate.  Their
+pending arms are durable in the marks store (never in-memory),
+so an armed mark survives a runtime restart between the arm and
+the completing pin; expiry is lazy at the store, not a timer.
 """
 
 from __future__ import annotations

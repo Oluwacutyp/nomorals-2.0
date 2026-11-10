@@ -150,7 +150,21 @@ class RuntimeLiveMixin:
         caption says so whenever a polygon is in the overlay,
         never silently.  The verbs here are the chat-thin
         paths (one-marker add); the MapAgent + map tool carry
-        the same store and renderer to the brain."""
+        the same store and renderer to the brain.
+
+        /map mark (M9) saves where the owner is standing:
+        /map mark <label> captures the location of that moment
+        — the command message's own location meta when it
+        carries one, else a durable pending mark arms (per
+        platform+chat+sender, ten minutes) and his next
+        location pin in that chat completes it through
+        :meth:`_maybe_pending_mark_update`, which runs ahead of
+        the broker hook on the same inbound seam.  Marks are
+        his personal gazetteer: find resolves them first, view
+        renders them, route accepts them as endpoints, and
+        re-marking a label moves the mark.  Capture is armed
+        intent only — a location share never creates a mark
+        unarmed."""
         from ...maps.settings import map_settings
 
         tail = (tail or "").strip()
@@ -163,7 +177,9 @@ class RuntimeLiveMixin:
                     "/map share stop [chat]  |  /map share status  |  "
                     "/map overlay list  |  /map overlay show <name>  |  "
                     "/map overlay add <name> <lat,lon> [label]  |  "
-                    "/map overlay drop <name>")
+                    "/map overlay drop <name>  |  "
+                    "/map mark <label>  |  /map marks  |  "
+                    "/map unmark <label>")
         is_owner = True if message is None else self._is_operator(message)
         if not is_owner:
             return ("owner-only: Atlas renders the owner's installed "
@@ -189,6 +205,12 @@ class RuntimeLiveMixin:
             return self._map_share(rest.strip())
         if verb == "overlay":
             return self._map_overlay(rest.strip(), chat_key)
+        if verb == "mark":
+            return self._map_mark(rest.strip(), chat_key, message)
+        if verb == "marks":
+            return self._map_marks()
+        if verb == "unmark":
+            return self._map_unmark(rest.strip())
         return (f"unknown /map verb {verb!r} — /map packs | "
                 "/map view <lat,lon> [zoom] | /map find <place name> | "
                 "/map near <lat,lon> | "
@@ -197,7 +219,8 @@ class RuntimeLiveMixin:
                 "/map share stop [chat] | /map share status | "
                 "/map overlay list | /map overlay show <name> | "
                 "/map overlay add <name> <lat,lon> [label] | "
-                "/map overlay drop <name>")
+                "/map overlay drop <name> | /map mark <label> | "
+                "/map marks | /map unmark <label>")
 
     def _map_packs_text(self) -> str:
         from ...maps.packs import verify_pack_dir
@@ -356,6 +379,220 @@ class RuntimeLiveMixin:
                 "show <name> | add <name> <lat,lon> [label] | "
                 "drop <name>")
 
+    # ── personal marks (M9) ──────────────────────────────────
+
+    @staticmethod
+    def _message_location(message):
+        """(lat, lon, accuracy|None) from a message's location
+        meta — the inbound shape M6 built (an adapter surfaces a
+        pin/venue as meta["location"] = {"lat", "lon", ...}) —
+        or None when the message carries no usable location."""
+        if message is None:
+            return None
+        meta = getattr(message, "meta", None)
+        if not isinstance(meta, dict):
+            return None
+        supplied = meta.get("location")
+        if not isinstance(supplied, dict):
+            return None
+        try:
+            lat = float(supplied.get("lat"))
+            lon = float(supplied.get("lon"))
+        except (TypeError, ValueError):
+            return None
+        from ...maps.coords import validate_lat, validate_lon
+
+        try:
+            validate_lat(lat)
+            validate_lon(lon)
+        except ValueError:
+            return None
+        accuracy = supplied.get("accuracy")
+        if accuracy is None:
+            accuracy = supplied.get("horizontal_accuracy")
+        return lat, lon, accuracy
+
+    @staticmethod
+    def _map_age_text(ts: float, now: float) -> str:
+        secs = max(0, int(now - ts))
+        if secs < 60:
+            return "just now"
+        if secs < 3600:
+            return f"{secs // 60} min ago"
+        if secs < 86400:
+            return f"{secs // 3600} h ago"
+        return f"{secs // 86400} d ago"
+
+    @staticmethod
+    def _map_mark_confirmation(mark, moved: bool) -> str:
+        if mark.place_hint:
+            where = (f"near {mark.place_hint} "
+                     f"({mark.lat:.4f},{mark.lon:.4f})")
+        else:
+            where = f"{mark.lat:.4f},{mark.lon:.4f}"
+        if moved:
+            head = f"📌 moved your {mark.label!r} mark — now {where}."
+        else:
+            head = f"📌 {mark.label!r} marked — {where}."
+        return (head + f" Saved: /map marks lists it, /map view "
+                f"{mark.label} shows it, and /map route can use "
+                "it as an end.")
+
+    def _map_mark_line(self, mark) -> str:
+        """One mark as a find/list line: label, place, age."""
+        import time as _time
+
+        where = (f"near {mark.place_hint}" if mark.place_hint
+                 else f"{mark.lat:.4f},{mark.lon:.4f}")
+        via = f" · via {mark.platform}" if mark.platform else ""
+        return (f"📌 your mark {mark.label!r} — {where} · "
+                f"{mark.lat:.4f},{mark.lon:.4f} · marked "
+                + self._map_age_text(mark.updated_at, _time.time())
+                + via)
+
+    def _map_mark(self, label: str, chat_key: str = "",
+                  message=None) -> str:
+        """/map mark <label> — save where you're standing (M9).
+
+        Flow A (immediate): the command message itself carries
+        location meta (the owner sent it with a pin/venue
+        attached on a surface that surfaces one) — the mark
+        completes on the spot.  Flow B (pending): no location
+        attached — a durable pending mark arms for
+        platform+chat+sender and his next location pin in this
+        chat completes it (see _maybe_pending_mark_update).
+        Re-marking an existing label MOVES the mark."""
+        from ...maps.marks import (
+            METHOD_MESSAGE,
+            MarkError,
+            pending_key,
+        )
+
+        usage = ("usage: /map mark <label> — send it standing "
+                 "where you want saved (with your location "
+                 "attached, or drop your location pin right "
+                 "after when asked)")
+        label = " ".join((label or "").split())
+        if not label:
+            return usage
+        agent = self._map_agent()
+        store = agent.mark_store()
+        key = chat_key or ""
+        if not key and message is not None:
+            chat = getattr(message, "chat", None)
+            key = str(getattr(chat, "key", "") or "")
+        platform = key.partition(":")[0] if key else ""
+        supplied = self._message_location(message)
+        if supplied is not None:
+            lat, lon, accuracy = supplied
+            hint = agent.place_hint(lat, lon)
+            try:
+                mark, moved = store.save(
+                    label, lat, lon, platform=platform,
+                    method=METHOD_MESSAGE, accuracy=accuracy,
+                    place_hint=hint)
+            except MarkError as exc:
+                return f"couldn't save that mark: {exc}"
+            return self._map_mark_confirmation(mark, moved)
+        sender_id = ""
+        if message is not None:
+            sender_id = str(getattr(message, "sender_id", "") or "")
+        if not key:
+            return ("marking needs the place itself: send /map "
+                    "mark <label> from the chat you're standing "
+                    "in — with your location attached, or drop "
+                    "the pin when asked.")
+        try:
+            store.arm(pending_key(platform, key, sender_id), label,
+                      platform=platform, chat_key=key,
+                      sender_id=sender_id)
+        except MarkError as exc:
+            return f"couldn't arm that mark: {exc}"
+        return (f"📌 marking {label!r} — drop your location pin "
+                "here in this chat (attach → Location) within "
+                f"the next 10 minutes and I'll save that spot "
+                f"as {label!r}. It stays armed only for you, "
+                "only in this chat; if no pin lands in time it "
+                "lapses and nothing is saved.")
+
+    def _map_marks(self) -> str:
+        """/map marks — the owner's saved places, plus any
+        pending arm still waiting for his pin (and any that just
+        lapsed, said honestly)."""
+        agent = self._map_agent()
+        store = agent.mark_store()
+        lapsed = store.lapsed()
+        rows = agent.marks()["marks"]
+        live = store.pendings()
+        if not rows and not live and not lapsed:
+            return ("no marks yet — stand somewhere and send "
+                    "/map mark <label>; it saves the spot under "
+                    "your name for later.")
+        import time as _time
+
+        now = _time.time()
+        lines: list[str] = []
+        if rows:
+            lines.append(f"📌 your marks ({len(rows)}):")
+            for row in rows:
+                where = (f"near {row['place_hint']}"
+                         if row["place_hint"]
+                         else f"{row['lat']:.4f},{row['lon']:.4f}")
+                via = (f" · via {row['platform']}"
+                       if row["platform"] else "")
+                lines.append(
+                    f"  • {row['label']} — {where} · "
+                    + self._map_age_text(row["updated_at"], now)
+                    + via)
+        for pend in live:
+            left = max(1, int((pend.expires_at - now + 59) // 60))
+            lines.append(
+                f"  ⏳ waiting for your location pin for "
+                f"{pend.label!r} in {pend.chat_key} — about "
+                f"{left} min left")
+        for pend in lapsed:
+            lines.append(
+                f"  ⌛ a pending mark for {pend.label!r} lapsed "
+                "unused — /map mark it again when you're there")
+        return "\n".join(lines)
+
+    def _map_unmark(self, label: str) -> str:
+        label = " ".join((label or "").split())
+        if not label:
+            return "usage: /map unmark <label>"
+        if self._map_agent().mark_store().delete(label):
+            return f"mark {label!r} removed."
+        return f"no mark named {label!r}."
+
+    def _map_view_mark(self, label: str, chat_key: str,
+                       zoom: int | None = None) -> str:
+        """Send the mark's map photo (the agent's view_mark
+        ticket) — the overlay-show send idiom."""
+        ticket = self._map_agent().view_mark(label, zoom=zoom)
+        if ticket["outcome"] != "ok":
+            return ("🗺 " + (ticket["detail"]
+                             or "that mark couldn't be rendered"))
+        mark = ticket["mark"]
+        caption = (f"📌 mark {mark['label']} · "
+                   f"{ticket['pack_name']} · z{ticket['zoom']}")
+        if mark["place_hint"]:
+            caption += f"\nnear {mark['place_hint']}"
+        for note in ticket["notes"]:
+            caption += f"\n{note}"
+        caption += f"\n{ticket['attribution']}"
+        chat = self._ref_from_key(chat_key)
+        try:
+            res = self.gateway.send_file(
+                chat.platform, chat, ticket["image_path"],
+                caption=caption, kind="image",
+                name=f"mark-{mark['label']}.png")
+            if getattr(res, "ok", False):
+                return ""
+        except Exception as exc:  # noqa: BLE001
+            record_failure("runtime_live._map_view_mark", exc)
+        return (f"(the mark rendered from {ticket['pack_name']} "
+                "but the photo couldn't be sent on this surface)")
+
     @staticmethod
     def _map_find_winner(candidates):
         """A clear winner, or None: a sole candidate found exactly
@@ -382,8 +619,17 @@ class RuntimeLiveMixin:
     def _map_find(self, query: str, chat_key: str = "") -> str:
         if not query:
             return "usage: /map find <place name>"
+        # M9: the owner's own marks resolve FIRST — find("hostel")
+        # is his saved place before it is any indexed name, and a
+        # mark answers even on an empty shelf.
+        mark = self._map_agent().mark_for(query)
         gazetteer, installed = self._map_gazetteer()
         if not installed:
+            if mark is not None:
+                return (self._map_mark_line(mark)
+                        + "\n(no map packs are installed, so there "
+                          "is no gazetteer answer beneath it — "
+                          "your mark stands on its own.)")
             return ("no map packs installed — /map packs shows the "
                     "shelf, and it is empty. The geocoder indexes "
                     "installed packs only; there is no provider "
@@ -399,10 +645,14 @@ class RuntimeLiveMixin:
                 "a pack changes.)")
         result = gazetteer.search(query)
         if not result.candidates:
+            if mark is not None:
+                lines.append(self._map_mark_line(mark))
             lines.append(
                 f"no place named {query!r} in the local Atlas "
                 "index — " + result.note + ".")
             return "\n".join(lines)
+        if mark is not None:
+            lines.append(self._map_mark_line(mark))
         lines.append(
             f"🔎 {len(result.candidates)} place(s) matching "
             f"{query!r} (local Atlas index):")
@@ -411,14 +661,19 @@ class RuntimeLiveMixin:
                 f"  • {cand.name} — {cand.kind} · "
                 f"{cand.lat:.4f},{cand.lon:.4f} · "
                 + names.get(cand.pack_id, cand.pack_id))
-        winner = self._map_find_winner(result.candidates)
-        if winner is not None:
-            # A clear winner also gets its map photo; the list is
-            # the reply either way (a failed photo send never
-            # rewrites the answer into a claim).
-            self._map_view(
-                f"{winner.lat:.6f},{winner.lon:.6f} "
-                f"{self._map_find_zoom(winner.kind)}", chat_key)
+        if mark is not None:
+            # His own place is the winner when he named it: its
+            # photo is the mark's view, not a gazetteer hit's.
+            self._map_view_mark(mark.label, chat_key)
+        else:
+            winner = self._map_find_winner(result.candidates)
+            if winner is not None:
+                # A clear winner also gets its map photo; the list is
+                # the reply either way (a failed photo send never
+                # rewrites the answer into a claim).
+                self._map_view(
+                    f"{winner.lat:.6f},{winner.lon:.6f} "
+                    f"{self._map_find_zoom(winner.kind)}", chat_key)
         return "\n".join(lines)
 
     def _map_near(self, spec: str) -> str:
@@ -491,9 +746,9 @@ class RuntimeLiveMixin:
 
     def _map_route_endpoint(self, text, gazetteer):
         """One route end as ``(point, label)`` — or ``(None,
-        error)``.  Raw "lat,lon" wins first; otherwise the
-        gazetteer's top hit, its display name the label the
-        summary answers with."""
+        error)``.  Raw "lat,lon" wins first; then the OWNER'S
+        MARKS by label (M9); otherwise the gazetteer's top hit,
+        its display name the label the summary answers with."""
         from ...location.primitives import LatLon
         from ...maps.coords import validate_lat, validate_lon
 
@@ -511,6 +766,9 @@ class RuntimeLiveMixin:
             except ValueError as exc:
                 return None, f"bad point {raw!r}: {exc}"
             return LatLon(lat, lon), f"{lat:.4f},{lon:.4f}"
+        mark = self._map_agent().mark_store().get(raw)
+        if mark is not None:
+            return LatLon(mark.lat, mark.lon), mark.label
         result = gazetteer.search(raw)
         if not result.candidates:
             return None, (f"no place named {raw!r} in the local "
@@ -926,6 +1184,68 @@ class RuntimeLiveMixin:
             "owner", loc, ts=float(getattr(message, "ts", 0.0) or 0.0)
             or None, source=platform)
 
+    def _maybe_pending_mark_update(self, message) -> None:
+        """Pending-mark intake for one inbound location (M9).
+
+        The pipeline calls this BEFORE the broker hook: an armed
+        /map mark is explicit intent and completes FIRST; the
+        broker still evaluates the same share afterwards, exactly
+        as shipped (M6 behavior untouched).  Runs when Atlas is
+        enabled (marks ride the master /map gate — they are NOT
+        gated on NM_MAPS_LIVE_SHARE; a mark is not a share) and
+        the sender is the operator: the pending lookup is keyed
+        by platform+chat+sender, so a stranger's location can
+        never complete — or consume — the owner's pending mark,
+        and a location with no pending armed marks nothing.
+        Fail-open by contract: never replies except the one
+        completion confirmation, never raises (the caller also
+        guards it)."""
+        from ...maps.marks import METHOD_PENDING, MarkError, pending_key
+        from ...maps.settings import map_settings
+
+        try:
+            if not map_settings().enabled:
+                return
+            if not self._is_operator(message):
+                return
+            supplied = self._message_location(message)
+            if supplied is None:
+                return
+            lat, lon, accuracy = supplied
+            chat = getattr(message, "chat", None)
+            key = str(getattr(chat, "key", "") or "")
+            if not key:
+                return
+            platform = key.partition(":")[0]
+            sender_id = str(getattr(message, "sender_id", "") or "")
+            agent = self._map_agent()
+            store = agent.mark_store()
+            pkey = pending_key(platform, key, sender_id)
+            pending = store.pending(pkey)
+            if pending is None:
+                return
+            hint = agent.place_hint(lat, lon)
+            try:
+                mark, moved = store.save(
+                    pending.label, lat, lon, platform=platform,
+                    method=METHOD_PENDING, accuracy=accuracy,
+                    place_hint=hint)
+            except MarkError as exc:
+                record_failure("runtime_live.pending_mark_save", exc)
+                return  # the arm survives a failed save; TTL rules
+            store.clear(pkey)
+            try:
+                adapter = self._adapter_for(platform)
+                if adapter is not None:
+                    adapter.send(
+                        self._ref_from_key(key),
+                        self._map_mark_confirmation(mark, moved))
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                record_failure("runtime_live.pending_mark_confirm",
+                               exc)
+        except Exception as exc:  # noqa: BLE001 - never eat chat
+            record_failure("runtime_live.pending_mark_hook", exc)
+
     @staticmethod
     def _map_zoom_for(bbox) -> int:
         """The deepest zoom whose tile count for ``bbox`` stays
@@ -961,15 +1281,39 @@ class RuntimeLiveMixin:
         from ...maps.vector_render import VectorRenderer
 
         usage = ("usage: /map view <lat,lon> [zoom]  |  "
-                 "/map view <west,south,east,north> [zoom]")
+                 "/map view <west,south,east,north> [zoom]  |  "
+                 "/map view <mark label> [zoom]")
         toks = spec.split()
         if not toks:
             return usage
         try:
             nums = [float(v) for v in toks[0].split(",")]
         except ValueError:
+            nums = []
+        if not nums:
+            # Not coordinates: a mark label is the other viewable
+            # thing (M9) — "/map view hostel" shows his own mark,
+            # rendered through the agent's overlay seam.
+            store = self._map_agent().mark_store()
+            label = spec.strip()
+            mark_zoom = None
+            if store.get(label) is None and len(toks) > 1:
+                try:
+                    mark_zoom = int(toks[-1])
+                except ValueError:
+                    mark_zoom = None
+                if mark_zoom is not None:
+                    head = " ".join(toks[:-1])
+                    if store.get(head) is not None:
+                        label = head
+                    else:
+                        mark_zoom = None
+            if store.get(label) is not None:
+                return self._map_view_mark(label, chat_key,
+                                           zoom=mark_zoom)
             return (f"couldn't parse coordinates {toks[0]!r} — "
-                    + usage)
+                    + usage + " (and no mark by that name: "
+                    "/map marks lists yours)")
         zoom = None
         if len(toks) > 1:
             try:

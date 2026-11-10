@@ -25,11 +25,21 @@ Receipt ids ride the ticket because the agent layer is where
 evidence is cited (the translate tool's precedent); chat
 surfaces, which never print internal ids, render their own text
 from the same cores.
+
+M9 adds the owner's personal marks
+(:mod:`nomorals.maps.marks`) to the same plane: find resolves
+his marks FIRST (a mark is his own named place — it outranks
+any gazetteer hit of the same name), route endpoints accept a
+mark by label, and a mark renders as a gold marker through the
+shipped overlay seam.  Capture itself is a chat-surface act
+(the armed /map mark flow), never a tool operation — the same
+posture as M6's live share.
 """
 
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -43,8 +53,11 @@ from ..maps.coords import (
     validate_lon,
 )
 from ..maps.manifest import PackError, load_manifest
+from ..maps.marks import Mark, MarkStore
 from ..maps.overlays import (
+    KIND_MARKER,
     Overlay,
+    OverlayFeature,
     OverlayStore,
     overlay_bbox,
     overlay_to_map_overlay,
@@ -85,6 +98,10 @@ class MapAgent:
 
     def overlay_store(self) -> OverlayStore:
         return OverlayStore(
+            db=getattr(self.context, "db", None), home=self._home())
+
+    def mark_store(self) -> MarkStore:
+        return MarkStore(
             db=getattr(self.context, "db", None), home=self._home())
 
     def _installed(self):
@@ -168,16 +185,144 @@ class MapAgent:
                     "mismatched": list(verdict.mismatched)}})
         return ticket
 
+    # ── personal marks (M9) ──────────────────────────────────
+
+    def place_hint(self, lat: float, lon: float) -> str:
+        """The gazetteer's name for a spot, when it has one.
+
+        Reads an EXISTING index only: a mark capture must never
+        trigger the (potentially minutes-long) index build, so
+        when no index file exists the hint is honestly empty and
+        the coordinates are the answer.  Garnish: never raises.
+        """
+        try:
+            gazetteer = self._gazetteer()
+            if not gazetteer.index_path.is_file():
+                return ""
+            result = gazetteer.reverse(float(lat), float(lon),
+                                       quiet=True, limit=1)
+            if result.candidates:
+                return result.candidates[0].name
+        except Exception:  # noqa: BLE001 - a hint is garnish
+            return ""
+        return ""
+
+    def _fill_hint(self, mark: Mark) -> Mark:
+        """A mark with its place hint filled in, when the local
+        gazetteer covers the spot (lazily, at read — capture
+        never blocked on it).  The fill persists best-effort."""
+        if mark.place_hint:
+            return mark
+        hint = self.place_hint(mark.lat, mark.lon)
+        if not hint:
+            return mark
+        self.mark_store().set_hint(mark.mark_id, hint)
+        return replace(mark, place_hint=hint)
+
+    def mark_for(self, label: str) -> Mark | None:
+        """The owner's mark under ``label`` (hint filled), or
+        None.  The one lookup every surface shares."""
+        mark = self.mark_store().get(label)
+        return self._fill_hint(mark) if mark is not None else None
+
+    @staticmethod
+    def _mark_candidate(mark: Mark) -> dict[str, Any]:
+        return {"name": mark.label, "kind": "mark",
+                "lat": mark.lat, "lon": mark.lon, "pack_id": "",
+                "score": None, "matched_as": "mark",
+                "place_hint": mark.place_hint,
+                "platform": mark.platform,
+                "marked_at": mark.updated_at}
+
+    def marks(self) -> dict[str, Any]:
+        """The owner's marks, as rows (hints filled lazily)."""
+        rows = []
+        for mark in self.mark_store().list():
+            mark = self._fill_hint(mark)
+            rows.append({
+                "label": mark.label, "lat": mark.lat,
+                "lon": mark.lon, "place_hint": mark.place_hint,
+                "platform": mark.platform, "method": mark.method,
+                "accuracy": mark.accuracy,
+                "created_at": mark.created_at,
+                "updated_at": mark.updated_at})
+        return {"operation": "marks", "outcome": "ok",
+                "marks": rows}
+
+    def view_mark(self, label: str, *,
+                  zoom: int | None = None) -> dict[str, Any]:
+        """Render the basemap centered on one of the owner's
+        marks, the mark drawn as a gold marker through the
+        shipped MapOverlay seam — a transient one-marker overlay
+        over ``view``'s ±1-tile box."""
+        store = self.mark_store()
+        ticket: dict[str, Any] = {
+            "operation": "view", "outcome": "unavailable",
+            "mark": None, "image_path": "", "notes": [],
+            "receipt_id": "", "detail": ""}
+        mark = store.get(label)
+        if mark is None:
+            existing = [m.label for m in store.list()]
+            ticket["detail"] = (
+                "no mark named " + repr(label) + " — your marks: "
+                + (", ".join(existing) if existing else "none yet"))
+            return ticket
+        mark = self._fill_hint(mark)
+        if zoom is None:
+            ceilings = []
+            for _entry, manifest in self._shelf():
+                box = manifest.bbox
+                if box.crosses_antimeridian:
+                    continue
+                if box.south <= mark.lat <= box.north \
+                        and box.west <= mark.lon <= box.east:
+                    ceilings.append(manifest.zoom_max)
+            zoom = min(15, max(ceilings)) if ceilings else 15
+        zoom = int(zoom)
+        tile = TileCoord.from_latlon(mark.lat, mark.lon, zoom)
+        n = 1 << zoom
+        x0, x1 = max(0, tile.x - 1), min(n - 1, tile.x + 1)
+        y0, y1 = max(0, tile.y - 1), min(n - 1, tile.y + 1)
+        bbox = BBox(west=tile_x_to_lon(x0, zoom),
+                    south=tile_y_to_lat(y1 + 1, zoom),
+                    east=tile_x_to_lon(x1 + 1, zoom),
+                    north=tile_y_to_lat(y0, zoom))
+        overlay = Overlay(
+            overlay_id="mark-" + mark.mark_id, name=mark.label,
+            created_at=mark.updated_at,
+            features=(OverlayFeature(
+                KIND_MARKER, ((mark.lat, mark.lon),), mark.label),))
+        rendered = self._render(bbox, zoom, overlay=overlay)
+        rendered["operation"] = "view"
+        rendered["mark"] = {
+            "label": mark.label, "lat": mark.lat, "lon": mark.lon,
+            "place_hint": mark.place_hint,
+            "platform": mark.platform, "method": mark.method,
+            "marked_at": mark.updated_at}
+        return rendered
+
     # ── geocoder ─────────────────────────────────────────────
 
     def find(self, query: str, limit: int = 8) -> dict[str, Any]:
         """Forward geocode over the local gazetteer (M4).  The
-        index builds itself on first use, like the surface."""
+        index builds itself on first use, like the surface.
+
+        M9: the OWNER'S MARKS resolve FIRST — a mark with this
+        label is prepended (kind ``"mark"``) ahead of any
+        gazetteer hit, and answers even on an empty shelf: his
+        own saved place needs no pack to be found again."""
         query = (query or "").strip()
         if not query:
             raise ValueError("find needs a place name")
+        mark = self.mark_for(query)
         shelf = self._shelf()
         if not shelf:
+            if mark is not None:
+                return {"operation": "find", "outcome": "ok",
+                        "query": query,
+                        "candidates": [self._mark_candidate(mark)],
+                        "posture": "local", "provider": "",
+                        "note": "", "receipt_id": ""}
             return {"operation": "find", "outcome": "unavailable",
                     "query": query, "candidates": [],
                     "receipt_id": "",
@@ -187,15 +332,18 @@ class MapAgent:
         gazetteer = self._gazetteer()
         built = gazetteer.ensure(shelf)
         result = gazetteer.search(query, limit=int(limit))
+        candidates = [
+            {"name": c.name, "kind": c.kind, "lat": c.lat,
+             "lon": c.lon, "pack_id": c.pack_id,
+             "score": c.score, "matched_as": c.matched_as}
+            for c in result.candidates]
+        if mark is not None:
+            candidates.insert(0, self._mark_candidate(mark))
         ticket: dict[str, Any] = {
             "operation": "find",
-            "outcome": "ok" if result.candidates else "unavailable",
+            "outcome": "ok" if candidates else "unavailable",
             "query": query,
-            "candidates": [
-                {"name": c.name, "kind": c.kind, "lat": c.lat,
-                 "lon": c.lon, "pack_id": c.pack_id,
-                 "score": c.score, "matched_as": c.matched_as}
-                for c in result.candidates],
+            "candidates": candidates,
             "posture": result.posture, "provider": result.provider,
             "note": result.note,
             "receipt_id": (result.receipt.receipt_id
@@ -204,7 +352,7 @@ class MapAgent:
             ticket["indexed"] = {
                 "entries": built.total_entries,
                 "packs": len(shelf)}
-        if not result.candidates:
+        if not candidates:
             ticket["detail"] = (
                 "no place named " + repr(query) + " in the local "
                 "Atlas index — " + result.note)
@@ -254,8 +402,10 @@ class MapAgent:
 
     def _resolve_endpoint(self, text: str, gazetteer):
         """One route end as ``(LatLon, label)`` — or ``(None,
-        error)``.  Raw "lat,lon" wins first; otherwise the
-        gazetteer's top hit (the surface's rule, shared)."""
+        error)``.  Raw "lat,lon" wins first; then the OWNER'S
+        MARKS by label (M9 — his own named places outrank the
+        index, as in find); otherwise the gazetteer's top hit
+        (the surface's rule, shared)."""
         raw = (text or "").strip()
         nums: list[float] = []
         try:
@@ -270,6 +420,9 @@ class MapAgent:
             except ValueError as exc:
                 return None, "bad point " + repr(raw) + ": " + str(exc)
             return LatLon(lat, lon), f"{lat:.4f},{lon:.4f}"
+        mark = self.mark_store().get(raw)
+        if mark is not None:
+            return LatLon(mark.lat, mark.lon), mark.label
         result = gazetteer.search(raw)
         if not result.candidates:
             return None, ("no place named " + repr(raw) + " in the "
