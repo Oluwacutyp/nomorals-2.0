@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any
 from .failures import record_failure
 
@@ -200,6 +201,130 @@ class RuntimeSystemMixin:
                      "pause|resume <vcpu> · add <io|cpu|balanced> · remove <vcpu>")
         return "\n".join(lines)
 
+    def _proxy_home(self) -> str:
+        """The Devon home, resolved exactly as the ProxyLab
+        resolves it — so the surface reads the lab's own stores."""
+        settings = getattr(self.context, "settings", None)
+        if settings is not None:
+            return str(getattr(settings, "home", "~/.nomorals"))
+        return "~/.nomorals"
+
+    def _proxy_activation_lines(self) -> list[str]:
+        """Doc 17 P4 — the activation truth block for /proxy
+        status, read from P1's durable record (never from logs):
+        epoch, last merge, registry size, corrupt-recovery note.
+        The states stay distinguishable: never-activated differs
+        from a failed attempt (the lab's failure ledger is the
+        record of attempts that never completed a run) and from a
+        current record. Fail-soft: any read error drops the block
+        and is ledger-recorded."""
+        try:
+            from ...tools.proxy_sources import activation_state_for_home
+            from ...tools.proxylab_failures import recent_failures
+
+            record = activation_state_for_home(self._proxy_home())
+            failures = [f for f in recent_failures(50)
+                        if f.site == "proxylab.activate_sources"]
+            latest_fail = failures[0] if failures else None
+
+            def _fail_line() -> str:
+                when = time.strftime("%Y-%m-%d %H:%M",
+                                     time.localtime(latest_fail.ts))
+                return (f"  ⚠ the latest activation attempt failed: "
+                        f"{latest_fail.message} ({when})")
+
+            if not record or not int(record.get("epoch") or 0):
+                lines = [
+                    "🧬 catalogue activation: not yet activated on "
+                    "this host — the next /proxy refresh merges the "
+                    "verified catalogue (or run: nm proxy sources "
+                    "sync)"]
+                if latest_fail is not None:
+                    lines.append(_fail_line())
+                return lines
+            last = record.get("last_run") or {}
+            head = (f"🧬 catalogue activation: epoch "
+                    f"{int(record.get('epoch') or 0)}")
+            if last.get("registry_after") is not None:
+                head += (f" · registry holds "
+                         f"{int(last.get('registry_after') or 0)} "
+                         f"sources")
+            lines = [head]
+            if last:
+                when = (time.strftime("%Y-%m-%d %H:%M",
+                                      time.localtime(
+                                          float(last.get("at"))))
+                        if last.get("at") else "never")
+                lines.append(
+                    f"  last merge {when}: "
+                    f"+{len(last.get('added') or [])} added · "
+                    f"{int(last.get('already_present') or 0)} already "
+                    f"present · "
+                    f"{len(last.get('excluded_unverified') or [])} "
+                    f"excluded (unverified / no URL)")
+                if str(last.get("status") or "") == "empty":
+                    lines.append(
+                        "  ⚠ that merge left the registry EMPTY — "
+                        "no sources to scrape (a named stall, not a "
+                        "silent no-op)")
+                recovery = last.get("corrupt_recovery") or {}
+                if recovery:
+                    lines.append(
+                        "  ♻ a corrupt registry was recovered on the "
+                        "way in — the original bytes are preserved "
+                        f"as {recovery.get('backup', '?')}")
+            if latest_fail is not None and float(latest_fail.ts) > \
+                    float(last.get("at") or 0):
+                lines.append(_fail_line())
+            return lines
+        except Exception as exc:  # noqa: BLE001 - block never breaks status
+            record_failure("runtime_system._proxy_activation_lines", exc)
+            return []
+
+    def _proxy_receipt_lines(self, limit: int = 5) -> list[str]:
+        """Doc 17 P4 — the receipts truth block for /proxy status:
+        the newest route decisions from P2's journal (outcomes
+        folded), bounded to the surface's message discipline —
+        a fixed short list plus a pointer at the full journal,
+        never a paged dump. Hosts, consumers, reasons and outcomes
+        only: no internal decision ids. Fail-soft like the
+        activation block."""
+        try:
+            from ...core.proxy_routing import RouteReceiptJournal
+
+            journal = RouteReceiptJournal(os.path.join(
+                os.path.expanduser(self._proxy_home()), "proxies",
+                "route_receipts.jsonl"))
+            rows = journal.recent(500)
+            if not rows:
+                return ["🧾 route receipts: none recorded yet — "
+                        "decisions land here as traffic routes"]
+            shown = list(reversed(rows[-limit:]))
+            lines = [f"🧾 route receipts — latest {len(shown)} of "
+                     f"{len(rows)} decision(s):"]
+            for row in shown:
+                route = str(row.get("route") or "")
+                label = "NO ROUTE" if route == "none" else route
+                host = str(row.get("host") or "")[:48] or "—"
+                when = (time.strftime("%Y-%m-%d %H:%M",
+                                      time.localtime(
+                                          float(row.get("at"))))
+                        if row.get("at") else "?")
+                line = (f"  {when} {row.get('consumer') or ''} → "
+                        f"{label} {host} · "
+                        f"{row.get('reason_code') or ''}")
+                if row.get("outcome"):
+                    line += f" · outcome: {row['outcome']}"
+                lines.append(line)
+            if len(rows) > len(shown):
+                lines.append(
+                    f"  … {len(rows) - len(shown)} earlier decision(s) "
+                    f"in the journal — nm proxy receipts")
+            return lines
+        except Exception as exc:  # noqa: BLE001 - block never breaks status
+            record_failure("runtime_system._proxy_receipt_lines", exc)
+            return []
+
     def _control_proxy(self, tail: str, chat_key: str = "") -> str:
         parts = (tail or "").split()
         verb = parts[0].lower() if parts else "status"
@@ -213,8 +338,16 @@ class RuntimeSystemMixin:
                 else ("socks needs PySocks (pip install pysocks)"
                       if v["active"].lower().startswith(("socks5", "socks5h"))
                       else "http proxies route urllib traffic too")
-            return (f"outbound: {v['active']}\nknown: {known}\n"
-                    f"{raw} — all clients covered")
+            lines = [f"outbound: {v['active']}", f"known: {known}",
+                     f"{raw} — all clients covered"]
+            # doc 17 P4: the two truth blocks the surface was
+            # missing — catalogue activation state (P1's record)
+            # and the latest route receipts (P2's journal). Each
+            # block is fail-soft: a broken read drops the block,
+            # never the status reply.
+            lines += self._proxy_activation_lines()
+            lines += self._proxy_receipt_lines()
+            return "\n".join(lines)
         if verb == "list":
             outcome = self.context.tools.call("proxy_list")
             if not outcome.ok:

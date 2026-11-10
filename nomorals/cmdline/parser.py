@@ -19,6 +19,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "models": ["mod"],
     "memory": ["mem"],
     "power": ["pw"],
+    "proxy": [],
     "pulse": [],
     "run": ["r"],
     "ask": ["a"],
@@ -3208,6 +3209,26 @@ def _parser() -> argparse.ArgumentParser:
     t_ex = t_exness_sub.add_parser("risk", help="show the risk policy + daily P&L")
     t_ex.add_argument("--mode", default="paper", help="paper|live")
     t_ex.add_argument("--json", action="store_true", help="Output as JSON")
+
+    proxy = sub.add_parser("proxy", aliases=CLI_ALIASES["proxy"],
+        help="proxy sources + route receipts: sync the verified source catalogue into the live registry; read the route-decision journal",
+        description=("nm proxy sources sync\n"
+                     "nm proxy receipts [--limit N] [--consumer NAME] [--source NAME]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    proxy_sub = proxy.add_subparsers(dest="proxy_action", required=True)
+    p_sources = proxy_sub.add_parser("sources", help="the verified source catalogue (doc 17)")
+    p_sources_sub = p_sources.add_subparsers(dest="proxy_sources_action", required=True)
+    p_sync = p_sources_sub.add_parser("sync", help="activate the catalogue into the live registry on demand (the same fenced, recorded merge every proxy refresh runs first) and print the run's truth")
+    p_sync.add_argument("--json", action="store_true", help="Output as JSON")
+    p_receipts = proxy_sub.add_parser("receipts", help="recent route decisions from the receipt journal (outcomes folded; hosts/reasons/times only — never credentials or internal ids)")
+    p_receipts.add_argument("--limit", type=int, default=10,
+                            help="how many decisions to show (default 10, max 500)")
+    p_receipts.add_argument("--consumer", default="",
+                            help="only this consumer (e.g. core_http, downloader, browser, proxy_pick)")
+    p_receipts.add_argument("--source", default="",
+                            help="only this source (e.g. proxypool, proxylab)")
+    p_receipts.add_argument("--json", action="store_true", help="Output as JSON")
 
     swarm = sub.add_parser("swarm", aliases=CLI_ALIASES["swarm"],
         help="Agent swarm: specialist roles, debate, fan-out/fan-in",

@@ -68,6 +68,7 @@ from .commands.native import _cmd_native
 from .commands.owner import _cmd_owner
 from .commands.partner import _cmd_reason, _cmd_workspace
 from .commands.power import _cmd_power
+from .commands.proxy import _cmd_proxy
 from .commands.project import _cmd_project
 from .commands.pulse import _cmd_pulse
 from .commands.plugin import _cmd_plugin
@@ -314,6 +315,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "memory": _CommandSpec(_cmd_memory),
     "owner": _CommandSpec(_cmd_owner),
     "power": _CommandSpec(_cmd_power),
+    "proxy": _CommandSpec(_cmd_proxy),
     "pulse": _CommandSpec(_cmd_pulse),
     "run": _CommandSpec(_cmd_run),
     "ask": _CommandSpec(_cmd_ask),
