@@ -17,6 +17,15 @@ elements, and LangChain ``Document``):
 * :class:`Document` offers structure-aware :meth:`chunks` (the
   HierarchicalChunker idea: section boundaries respected, heading context
   inherited), :meth:`content_hash` for dedup, and an :meth:`outline` TOC.
+* :class:`Document` carries the Doc-16 **revision contract**: a monotonic
+  ``revision`` (genesis = :data:`GENESIS_REVISION`) plus ``revision_hash``,
+  the *exact* content hash as of that revision.  :meth:`exact_content_hash`
+  is byte-exact (unlike the lossy normalized :meth:`content_hash` used for
+  dedup), so any content mutation is detectable: call
+  :meth:`refresh_revision` after mutating and the revision bumps;
+  :meth:`revision_drifted` exposes a mutation nobody refreshed, and
+  :meth:`edition_ref` is the record a derivative stores to prove which
+  revision it was made from.
 """
 
 from __future__ import annotations
@@ -29,11 +38,12 @@ from typing import Any, Iterator
 
 from ..core.ids import ulid_now
 from ..core.logging_setup import get_logger
+from ..core.longdoc import GENESIS_REVISION, hash_text
 
 _log = get_logger(__name__)
 
 __all__ = ["Document", "Section", "Table", "full_text", "new_document",
-           "SECTION_KINDS"]
+           "SECTION_KINDS", "GENESIS_REVISION"]
 
 #: Known section kinds.  Parsers set these; anything else stays "text".
 SECTION_KINDS = frozenset({
@@ -232,6 +242,13 @@ class Document:
     sections: list[Section] = field(default_factory=list)
     tables: list[Table] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: Revision contract (Doc 16 P1): monotonic content revision and
+    #: the exact content hash as of that revision.  ``revision_hash``
+    #: is "" until the genesis content is sealed by the first
+    #: :meth:`refresh_revision` call.  Payloads written before the
+    #: contract existed load at the genesis revision, unsealed.
+    revision: int = GENESIS_REVISION
+    revision_hash: str = ""
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -259,6 +276,9 @@ class Document:
                 sections=[Section.from_dict(s) for s in data.get("sections", [])],
                 tables=[Table.from_dict(t) for t in data.get("tables", [])],
                 metadata=dict(data.get("metadata", {})),
+                revision=int(data.get("revision", GENESIS_REVISION)
+                             or GENESIS_REVISION),
+                revision_hash=str(data.get("revision_hash", "") or ""),
             )
         except (TypeError, ValueError, AttributeError) as exc:
             raise ValueError(f"bad Document payload: {exc}") from exc
@@ -303,6 +323,57 @@ class Document:
         dedup and change detection (DeepHash idea, stdlib edition)."""
         normalized = " ".join(full_text(self).split()).lower()
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    # ── revision contract (Doc 16 P1) ────────────────────────────────
+    def exact_content_hash(self) -> str:
+        """SHA-256 over the document's exact content — title, sections
+        and tables in canonical JSON form.  Byte-exact by design (no
+        lowercasing, no whitespace collapsing): any content change,
+        however small, changes this hash.  Authorship/provenance
+        fields (author, source, format, created_at) and ``metadata``
+        are NOT content and never move the revision."""
+        payload = {
+            "title": self.title,
+            "sections": [s.to_dict() for s in self.sections],
+            "tables": [t.to_dict() for t in self.tables],
+        }
+        return hash_text(json.dumps(payload, sort_keys=True,
+                                    ensure_ascii=False,
+                                    separators=(",", ":")))
+
+    def refresh_revision(self) -> bool:
+        """Seal the current content into the revision contract.
+
+        Call after mutating content.  The first call seals the genesis
+        revision (sets ``revision_hash``, no bump).  A later call whose
+        content differs from the sealed hash bumps ``revision`` by one
+        and reseals.  Returns True iff the revision bumped."""
+        current = self.exact_content_hash()
+        if not self.revision_hash:
+            self.revision_hash = current
+            return False
+        if current == self.revision_hash:
+            return False
+        self.revision += 1
+        self.revision_hash = current
+        return True
+
+    def revision_drifted(self) -> bool:
+        """True when the content no longer matches the sealed revision
+        hash — a mutation nobody refreshed.  Drift is *detectable*,
+        never silent; an unsealed (genesis) document cannot drift."""
+        return bool(self.revision_hash) \
+            and self.exact_content_hash() != self.revision_hash
+
+    def edition_ref(self) -> dict[str, Any]:
+        """The provenance record a derivative/edition stores: this
+        document's id, current revision counter, and the *live* exact
+        content hash.  Compared later against the source's then-current
+        values (see :class:`nomorals.core.longdoc.RevisionRef`), a
+        source that has since moved on reads as provably stale."""
+        return {"source_kind": "document", "document_id": self.id,
+                "revision": self.revision,
+                "content_hash": self.exact_content_hash()}
 
     def chunks(self, max_words: int = 300) -> list[dict[str, Any]]:
         """Structure-aware chunks for retrieval (docling HierarchicalChunker
