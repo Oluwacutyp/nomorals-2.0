@@ -455,20 +455,41 @@ class ToolCallingLoop:
         """Tool list for the prompt, filtered to what the actor may use.
 
         Ranked by relevance to the query (top 40) instead of dumping all
-        400+ tools — saves ~20k tokens per turn. Falls back to the full
-        listing when ranking is unavailable.
+        400+ tools — saves ~20k tokens per turn. The full-set view (no
+        query, or ranking unavailable/empty) comes from the registry's
+        grouped_listing (doc 18 P6; consumed since public-surface
+        fix 5): tools grouped by actual state — known down · rejected
+        unless authority · requires a resource/lease · available now —
+        with each ToolSpec's cancellation mechanism and lease
+        declarations on the line, so what a spec declares is what the
+        brain sees. Falls back to the flat listing when grouping is
+        unavailable.
         """
+        if query:
+            try:
+                ranked = self.registry.ranked_listing(
+                    query, capabilities=capabilities, limit=40)
+                if ranked.strip():
+                    return ranked
+            except (AttributeError, TypeError) as e:
+                record_failure("tool_loop.ToolCallingLoop._tool_listing", e)
+        listing = ""
         try:
-            ranked = self.registry.ranked_listing(
-                query, capabilities=capabilities, limit=40)
-            if ranked.strip():
-                return ranked
-        except (AttributeError, TypeError) as e:
-            record_failure("tool_loop.ToolCallingLoop._tool_listing", e)
-        try:
-            listing = self.registry.prompt_listing(capabilities=capabilities)
+            listing = self.registry.grouped_listing(
+                capabilities=capabilities)
         except TypeError:
-            listing = self.registry.prompt_listing()
+            try:
+                listing = self.registry.grouped_listing()
+            except Exception:  # noqa: BLE001 - fall to the flat listing
+                listing = ""
+        except AttributeError as e:
+            record_failure("tool_loop.ToolCallingLoop._tool_listing", e)
+        if not listing.strip():
+            try:
+                listing = self.registry.prompt_listing(
+                    capabilities=capabilities)
+            except TypeError:
+                listing = self.registry.prompt_listing()
         if not listing.strip():
             return "(no tools available to you in this context)"
         return listing

@@ -876,6 +876,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "repurpose": (0, None),   # /repurpose [list] | post <n> short|thread | short <n> post | day [YYYY-MM-DD] short|thread|post — one asset, other forms, through the content cell (owner-only)
     "engage": (0, None),      # /engage [list] | show <n> | reply <n> | ignore <n> | done <n> — replies & comments on his posts, read back and triaged (owner-only)
     "cases": (0, None),       # /cases [list] | <n> | verify <n> | ack <n> — outcome cases for forgotten work, with their evidence trails (owner-only)
+    "runs": (0, None),        # /runs [list] | <n> | stop <n> [reason] | coverage — the live-work ticket board: execution tickets (delegations, missions, jobs, browser/media runs) + healing tickets (incidents, cases, antibodies); stops route through the one cancellation facade and mint a receipt (owner-only)
     "read": (0, None),        # /read [list] | open <n> | go <token> <verb> | get <token> <html|txt> — routed long outputs in the reader, editions + raw downloads (owner-only)
     "insights": (0, None),    # /insights [days] — native money analytics
     "predict": (0, 3),       # /predict <stake> <over|under> <1-99> — prediction pit (progression-unlocked)
@@ -3394,6 +3395,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/cases [list] | <n> | verify <n> | ack <n>",
               "example": "/cases verify 1",
               "related": "/notify /mission"},
+    "runs": {"what": ("the live-work ticket board: every piece of work Devon is running or healing, projected from the organs' own records — delegation contracts, missions, background jobs, browser runs, media jobs and the CoreMind queue as execution tickets; incidents, recoveries, fever cases, antibodies and chat immune state as healing tickets. Each ticket shows the fields its records actually carry, and any field the records do not carry is shown as not recorded, with the reason — never filled in by guesswork. Stopping a ticket runs the organ's own native cancel through the one cancellation facade, and the cancel receipt lands on the ticket. The coverage view rolls up, per field and per source, what the records can and cannot say."),
+             "usage": "/runs [list] | <n> | stop <n> [reason] | coverage",
+             "example": "/runs stop 2",
+             "related": "/cases /mission /delegate"},
     "read": {"what": ("the reading desk for long outputs: when a report, research result or other long output runs past one message, the output router sends it here instead of a wall of chunks — the full text is preserved in a reading session with working controls (next/previous page, contents, jump), and the longest outputs also offer a branded HTML edition and the raw original as downloads. Nothing is truncated: what the reader holds is the whole output, and every route records why the output arrived the way it did."),
               "usage": "/read [list] | open <n> | go <token> <n|p|c|jN|u> | get <token> <html|txt>",
               "example": "/read open 1",
@@ -4367,7 +4372,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
                            "exness", "stripe", "content", "drafts", "day",
-                           "calendar", "repurpose", "engage", "cases", "read",
+                           "calendar", "repurpose", "engage", "cases", "runs", "read",
                            "tempmail", "checkmail", "vnumber", "checksms",
                            "browser", "paper", "backup"]),
     ("platform control", ["start", "stop", "profile", "chatmode", "style",
@@ -4686,7 +4691,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion", "gcal", "trello", "exness", "stripe",
-      "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage", "cases", "read",
+      "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage", "cases", "runs", "read",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
     ("platform control — updates & restarts",
      ["update", "pull", "deploy", "restart"]),
@@ -5061,6 +5066,7 @@ LIST_ONELINERS: dict[str, str] = {
     "repurpose": "one asset, other forms: posted drafts, day records and shorts re-drafted through the cell",
     "engage": "replies & comments on your posts, read back and triaged: what needs you, reply drafts through /drafts",
     "cases": "outcome cases for forgotten work — evidence trails, re-checks, acknowledgements",
+    "runs": "the live-work ticket board: delegations, missions, jobs, browser/media runs + healing tickets — full detail, field coverage, receipted stops",
     "read": "long outputs in the reader: page through them, contents, the HTML edition and the raw download — nothing truncated",
     "api": "external API connectors (weather, fx, github, …)",
     "connectors": "manage the service connectors: list, status, connect",

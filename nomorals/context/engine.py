@@ -676,7 +676,18 @@ class ContextEngine:
 
     def _tools_section(self, tools: Any) -> Section:
         content = ""
-        if hasattr(tools, "prompt_listing"):
+        # The grouped listing first (doc 18 P6; consumed since
+        # public-surface fix 5): the context's tool view groups the
+        # registry by actual state and carries each ToolSpec's
+        # cancellation mechanism + lease declarations — the flat
+        # prompt listing remains the fallback for registries
+        # without grouping.
+        if hasattr(tools, "grouped_listing"):
+            try:
+                content = str(tools.grouped_listing())
+            except Exception:  # noqa: BLE001 - fall back below
+                content = ""
+        if not content and hasattr(tools, "prompt_listing"):
             try:
                 content = str(tools.prompt_listing())
             except Exception:  # noqa: BLE001 - fall back to schemas below

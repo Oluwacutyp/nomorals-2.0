@@ -13,6 +13,51 @@ class _ConnectorsChatError(Exception):
     """User-facing /connectors failure (never a traceback in chat)."""
 
 
+def _render_runs_stop(row: dict[str, Any], result: dict[str, Any]) -> str:
+    """Render one facade stop for /runs (public-surface fix 5).
+
+    The facade's doctrine, in the owner's words: the organ's native
+    mechanism ran first; the receipt (when one could be minted)
+    records its answer. A stop that landed natively but could not
+    be receipted says exactly that — the receipt never pretends to
+    be the cancel, and its absence never hides one.
+    """
+    label = row["label"]
+    receipt = result.get("receipt")
+    receipt_error = result.get("receipt_error") or ""
+    word = result.get("native_state") or ""
+    if receipt is not None:
+        state = receipt.get("receipt_state") or ""
+        if state == "confirmed":
+            return (f"⏹ stopped — {label}: the cancel landed and "
+                    "stands on the organ's own record. Receipt: "
+                    "confirmed — it rides the ticket now (the "
+                    "ticket's cancel field shows it).")
+        if state == "requested":
+            return (f"⏹ stop requested — {label}: the organ took "
+                    "the request; the work's own record carries "
+                    "the final word. Receipt: requested.")
+        if state == "not_found":
+            return (f"{label}: nothing to stop — the organ has "
+                    "no live record of it (already gone or never "
+                    "started). Receipt: not_found.")
+        if state == "unhonored":
+            return (f"{label}: a stop was requested before, but "
+                    "the work ended on its own terms anyway. "
+                    "Receipt: unhonored.")
+        return (f"{label}: the stop was NOT honored (receipt: "
+                f"{state or 'refused'}) — "
+                f"{receipt.get('detail') or 'the organ declined the cancel'}")
+    landed = (word == "cancelled" or word.endswith("->cancelled")
+              or word in ("cancelled_queued", "cancelled_running",
+                          "requested"))
+    if landed:
+        return (f"⏹ stopped — {label}: the cancel landed natively, "
+                f"but no receipt could be minted: {receipt_error}")
+    return (f"{label}: nothing was cancelled — "
+            f"{receipt_error or 'the facade returned no answer'}")
+
+
 class RuntimeSystemMixin:
     """RuntimeSystemMixin for :class:`PartnerRuntime`."""
 
@@ -2553,6 +2598,180 @@ class RuntimeSystemMixin:
                     "not resolve it.")
         return ("usage: /cases [list] | <n> | verify <n> | ack <n> "
                 "— <n> is the number from /cases")
+
+    def _runs_board(self) -> dict[str, Any]:
+        """Compose the ticket board from the live stores (fix 5).
+
+        Every input is one the projections were built to read: the
+        durable records on the context db, the shared job registry
+        (the projections' own default), this runtime's tool registry
+        and CoreMind when present, the error system's incident
+        journal at its production path, the live per-chat immune
+        states, and the shared antibody store. A source that cannot
+        be built degrades to the projection's own honesty (an
+        unread source is NAMED by the coverage, never faked).
+        """
+        from ..ticket_board import board_rows
+
+        db = self.context.db
+        journal = None
+        try:
+            from ...core.incidents import IncidentJournal
+            from ...immune.wiring import default_journal_path
+
+            journal = IncidentJournal(
+                path=str(default_journal_path(self.context)))
+        except Exception:  # noqa: BLE001 - healing reads degrade named
+            journal = None
+        immune_states = None
+        try:
+            from ...immune import chat as _immune_chat
+
+            immune_states = list(_immune_chat._STATES.values())
+        except Exception:  # noqa: BLE001 - states stay unread, named
+            immune_states = None
+        # The healing projection reads an ITERABLE of antibody
+        # stores: each live chat state's own store, plus the shared
+        # organism store (usually the same object — deduped).
+        antibody_stores: list[Any] = []
+        seen_stores: set[int] = set()
+        for state in immune_states or []:
+            store = getattr(state, "store", None)
+            if store is not None and id(store) not in seen_stores:
+                seen_stores.add(id(store))
+                antibody_stores.append(store)
+        try:
+            from ...immune.wiring import shared_antibody_store
+
+            shared = shared_antibody_store()
+            if id(shared) not in seen_stores:
+                antibody_stores.append(shared)
+        except Exception:  # noqa: BLE001 - store stays unread, named
+            pass
+        return board_rows(
+            db,
+            tool_registry=getattr(self, "tools", None),
+            coremind=getattr(self, "mind", None),
+            journal=journal, immune_states=immune_states,
+            antibody_stores=antibody_stores)
+
+    def _control_runs(self, tail: str) -> str:
+        """/runs — the live-work ticket board, owner surface
+        (public-surface fix 5; doc 18 P2 + doc 20 P1 projections,
+        composed by agents/ticket_board.py).
+
+        /runs               — the board: every execution ticket
+                              (delegations, missions, registry jobs,
+                              browser runs, media jobs, mind queue)
+                              and healing ticket (incidents, heals,
+                              fever cases, antibodies, receipts,
+                              chat state) over the live stores —
+                              live work first, settled work after
+        /runs <n>           — one ticket in full: every field the
+                              projection computed, and every absent
+                              field WITH its reason (the honesty
+                              design — never papered over)
+        /runs stop <n> [why] — stop ticket <n> through the ONE
+                              cancellation facade (doc 18 P5): the
+                              organ's native mechanism runs first
+                              and a CancelReceipt is minted from its
+                              answer. Healing tickets are not
+                              stoppable work — they close through
+                              the immune loop, and the surface says
+                              so rather than inventing a cancel
+        /runs coverage      — the projections' own field-coverage
+                              rollup: what the records can and
+                              cannot say, per field and source
+
+        Owner-only via CONTROL_COMMANDS (never PUBLIC_COMMANDS).
+        Internal ids never print — board ordinals only.
+        """
+        from ...core.cancellation import cancel_with_receipt
+        from ..ticket_board import (
+            render_board,
+            render_coverage,
+            render_ticket,
+        )
+
+        db = self.context.db
+        board = self._runs_board()
+        rows = board["rows"]
+        parts = (tail or "").split(None, 1)
+        verb = parts[0].lower() if parts else "list"
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        def resolve_ordinal(word: str):
+            if not word.isdigit():
+                return None, ("usage: /runs [list] | <n> | stop <n> "
+                              "[reason] | coverage — <n> is the "
+                              "number from /runs")
+            n = int(word)
+            if not 1 <= n <= len(rows):
+                return None, (f"ticket #{n} isn't on the board — "
+                              f"{len(rows)} ticket(s) listed")
+            return rows[n - 1], ""
+
+        if verb in ("list", ""):
+            return render_board(board)
+        if verb == "coverage":
+            return render_coverage(board)
+        if verb == "show" or verb.isdigit():
+            row, err = resolve_ordinal(rest if verb == "show" else verb)
+            if row is None:
+                return err
+            return render_ticket(row)
+        if verb == "stop":
+            sub = rest.split(None, 1)
+            row, err = resolve_ordinal(sub[0] if sub else "")
+            if row is None:
+                return err
+            if row["family"] != "run":
+                return (f"{row['label']} is a healing ticket — "
+                        "incidents and cases aren't stoppable work; "
+                        "they close through the immune loop "
+                        "(/immune). Nothing was cancelled.")
+            reason = sub[1].strip() if len(sub) > 1 else ""
+            browser_manager = None
+            jobs_fn = getattr(self, "_browser_run_jobs", None)
+            if jobs_fn is not None:
+                try:
+                    browser_manager = jobs_fn()
+                except Exception:  # noqa: BLE001 - facade answers honestly
+                    browser_manager = None
+            media_manager = None
+            try:
+                from ...media_edit.jobs import get_manager
+
+                media_manager = get_manager(db)
+            except Exception:  # noqa: BLE001 - facade answers honestly
+                media_manager = None
+            from ...core.jobs import shared_registry
+            from ...missions import MissionStore
+            from ..delegation import DelegationStore
+
+            try:
+                result = cancel_with_receipt(
+                    db, row["ref"], requested_by="owner",
+                    reason=reason or "stopped from /runs",
+                    delegation=DelegationStore(db),
+                    missions=MissionStore(db),
+                    registry=shared_registry(),
+                    browser_manager=browser_manager,
+                    media_manager=media_manager,
+                    coremind=getattr(self, "mind", None))
+            except Exception as exc:  # noqa: BLE001 - the facade
+                # receipts a classifiable organ refusal and then
+                # re-raises the organ's own exception unchanged
+                # (its doctrine) — the surface renders the organ's
+                # words; the receipt, when one was minted, is
+                # already durable and rides the ticket.
+                return (f"{row['label']}: the organ answered the "
+                        f"stop in its own words: {exc} — where the "
+                        "refusal could be classified, its receipt "
+                        "is on the ticket.")
+            return _render_runs_stop(row, result)
+        return ("usage: /runs [list] | <n> | stop <n> [reason] | "
+                "coverage — <n> is the number from /runs")
 
     def _desk_bundle_hook(self) -> Any:
         """The gateway's inbound-artifact hook (WS3 P7): when a

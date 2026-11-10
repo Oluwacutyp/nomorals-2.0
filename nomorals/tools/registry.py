@@ -38,6 +38,13 @@ __all__ = ["ToolRegistry", "ToolSpec", "ToolHealth", "OpResult",
 
 _log = get_logger(__name__)
 
+#: Crash bound for a tool call's declared leases (doc 18 P3, seated
+#: by public-surface fix 5): a call releases its leases when it
+#: returns, so the TTL only matters when the process dies mid-call —
+#: long enough that no honest call outlives it, short enough that a
+#: dead holder's resource frees itself the same day.
+_TOOL_LEASE_TTL_S = 1800.0
+
 
 #: sentence-level patterns for instruction-like text smuggled into tool
 #: descriptions. Tool metadata is shown to the model, so it is an
@@ -1178,35 +1185,129 @@ class ToolRegistry:
                 )
             )
 
+        # Doc 18 P3 leases, exercised (public-surface fix 5): a spec
+        # that DECLARES lease_needs fences its declared resources for
+        # the duration of the call — acquired here, at the one
+        # dispatch funnel every production call passes, and released
+        # in the finally below. Contention is the designed typed
+        # refusal (never a silent wait, never a steal); lease
+        # machinery failure fails OPEN with the failure recorded — a
+        # broken lease store must not take tool calls down (the
+        # doc-20 P2 healer's posture at this same funnel).
+        lease_holds, contention = self._acquire_declared_leases(spec)
+        if contention is not None:
+            self._audit(name, actor, spec.capability, "deny", kwargs,
+                        0.0, error=contention)
+            self._bump_stats(denied=1)
+            return Err(ToolError(contention))
         try:
-            result = self._invoke_tool_fn(spec, name, actor, kwargs)
-        except Exception as exc:  # noqa: BLE001 - tool failures are results
-            elapsed = time.perf_counter() - started
-            error = classify(exc)
-            self._audit(name, actor, spec.capability, "allow", kwargs, elapsed, error=error.message)
-            self._bump_stats(errors=1, calls=1, seconds=elapsed)
-            _log.debug("tool %s failed: %s", name, error.message)
-            self._record_failure_ledger(name, error.message, str(exc))
-            return Err(error)
+            try:
+                result = self._invoke_tool_fn(spec, name, actor, kwargs)
+            except Exception as exc:  # noqa: BLE001 - tool failures are results
+                elapsed = time.perf_counter() - started
+                error = classify(exc)
+                self._audit(name, actor, spec.capability, "allow", kwargs, elapsed, error=error.message)
+                self._bump_stats(errors=1, calls=1, seconds=elapsed)
+                _log.debug("tool %s failed: %s", name, error.message)
+                self._record_failure_ledger(name, error.message, str(exc))
+                return Err(error)
 
-        elapsed = time.perf_counter() - started
-        outcome = self._translate_result(spec, result)
-        if outcome.ok:
-            self._audit(name, actor, spec.capability, "allow", kwargs,
-                        elapsed, ok=True)
-            self._bump_stats(calls=1, seconds=elapsed)
-        else:
-            # A domain failure reported in-band (typed result or the
-            # legacy dict protocol) is a failure for events, stats,
-            # and the failure ledger exactly like a raised one — F08:
-            # it must not flow down the successful-call path.
-            error = outcome.error
-            self._audit(name, actor, spec.capability, "allow", kwargs,
-                        elapsed, error=error.message)
-            self._bump_stats(errors=1, calls=1, seconds=elapsed)
-            _log.debug("tool %s reported failure: %s", name, error.message)
-            self._record_failure_ledger(name, error.message, error.message)
-        return outcome
+            elapsed = time.perf_counter() - started
+            outcome = self._translate_result(spec, result)
+            if outcome.ok:
+                self._audit(name, actor, spec.capability, "allow", kwargs,
+                            elapsed, ok=True)
+                self._bump_stats(calls=1, seconds=elapsed)
+            else:
+                # A domain failure reported in-band (typed result or the
+                # legacy dict protocol) is a failure for events, stats,
+                # and the failure ledger exactly like a raised one — F08:
+                # it must not flow down the successful-call path.
+                error = outcome.error
+                self._audit(name, actor, spec.capability, "allow", kwargs,
+                            elapsed, error=error.message)
+                self._bump_stats(errors=1, calls=1, seconds=elapsed)
+                _log.debug("tool %s reported failure: %s", name, error.message)
+                self._record_failure_ledger(name, error.message, error.message)
+            return outcome
+        finally:
+            self._release_declared_leases(lease_holds)
+
+    # ── doc 18 P3 lease seat (public-surface fix 5) ──────────────
+
+    def _lease_store(self) -> Any:
+        """The lease authority over the context's db, or None when
+        this registry's context carries no database (declarations
+        then stay declared-but-unfenced in this process — the
+        listing still shows them; production contexts carry a db)."""
+        db = getattr(self.context, "db", None) if self.context else None
+        if db is None:
+            return None
+        from ..core.leases import LeaseStore
+
+        return LeaseStore(db)
+
+    def _acquire_declared_leases(
+            self, spec: ToolSpec,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Acquire every resource ``spec.lease_needs`` declares.
+
+        Returns ``(holds, contention)``: holds are the leases THIS
+        call newly took (an idempotent same-holder re-acquire is not
+        this frame's to release — the outer frame owns it);
+        contention is the designed refusal text when another holder
+        fences a declared resource. Any machinery failure fails
+        open: the failure is recorded and the call proceeds
+        unfenced.
+        """
+        if not spec.lease_needs:
+            return [], None
+        try:
+            store = self._lease_store()
+            if store is None:
+                return [], None
+            holder = f"tool:{spec.name}"
+            holds: list[dict[str, Any]] = []
+            for resource in spec.lease_needs:
+                res = store.acquire(resource, holder,
+                                    ttl_s=_TOOL_LEASE_TTL_S)
+                if not res.get("granted"):
+                    self._release_declared_leases(holds, store=store)
+                    holder_now = res.get("holder_ref") or "another holder"
+                    return [], (
+                        f"tool {spec.name!r} needs resource "
+                        f"{resource!r}, held by {holder_now} (lease "
+                        f"generation {res.get('generation')}) — the "
+                        "call was not run; retry once the holder "
+                        "releases it")
+                if not res.get("already_held"):
+                    holds.append(res["lease"])
+            return holds, None
+        except Exception as exc:  # noqa: BLE001 - fail open, recorded
+            record_failure(
+                "tools.registry.ToolRegistry._acquire_declared_leases",
+                exc)
+            return [], None
+
+    def _release_declared_leases(self, holds: list[dict[str, Any]],
+                                 *, store: Any = None) -> None:
+        """Release the leases one call took. Never raises: a refused
+        release (the TTL lapsed mid-call and a newer generation owns
+        the resource now) is the fencing working as designed — the
+        stale release is refused and that lease stands on its own
+        schedule."""
+        if not holds:
+            return
+        try:
+            store = store or self._lease_store()
+            if store is None:
+                return
+            for lease in holds:
+                store.release(lease["lease_id"], lease["generation"])
+        except Exception as exc:  # noqa: BLE001 - release never breaks a call
+            record_failure(
+                "tools.registry.ToolRegistry._release_declared_leases",
+                exc)
 
     def _invoke_tool_fn(self, spec: ToolSpec, name: str, actor: str,
                         kwargs: dict[str, Any]) -> Any:

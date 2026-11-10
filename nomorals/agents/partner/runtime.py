@@ -7756,6 +7756,8 @@ class PartnerRuntime(
             return self._control_proactive(arg)
         if kind == "cases":
             return self._control_cases(command.tail or arg)
+        if kind == "runs":
+            return self._control_runs(command.tail or arg)
         if kind == "read":
             return self._control_read(command.tail or arg, chat_key=chat_key)
         if kind == "mission":
