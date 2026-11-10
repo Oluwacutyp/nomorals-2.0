@@ -96,7 +96,7 @@ class RuntimeLiveMixin:
 
     def _control_map(self, tail: str, chat_key: str = "",
                      message=None) -> str:
-        """/map packs | /map view <lat,lon> [zoom] | /map view <west,south,east,north> [zoom] | /map find <place name> | /map near <lat,lon>
+        """/map packs | /map view <lat,lon> [zoom] | /map view <west,south,east,north> [zoom] | /map find <place name> | /map near <lat,lon> | /map route <place or lat,lon> to <place or lat,lon>
 
         Devon Atlas on chat: renders the owner's installed packs —
         Devon's own basemap data — into a photo, the attribution
@@ -119,14 +119,25 @@ class RuntimeLiveMixin:
         moves.  Federation (doc 21 S3) is owner policy
         (NM_MAPS_GEOCODE_FEDERATION) and off by default: an empty
         local answer is the final answer unless the owner turns
-        federation on and a provider is wired."""
+        federation on and a provider is wired.
+
+        /map route (M5) routes over a road graph extracted from
+        one installed vector pack's own tiles — endpoints resolve
+        through the gazetteer (or raw coordinates), the answer is
+        a text summary plus the route drawn gold on the pack's
+        map as a photo, and a no-route is answered honestly with
+        its reason (snap failure, disconnected graph, corridor
+        bound) — never a provider substitute; routing federation
+        is the same owner policy (NM_MAPS_ROUTING_FEDERATION),
+        off by default, and no provider ships."""
         from ...maps.settings import map_settings
 
         tail = (tail or "").strip()
         if not tail:
             return ("usage: /map packs  |  /map view <lat,lon> [zoom]  |  "
                     "/map view <west,south,east,north> [zoom]  |  "
-                    "/map find <place name>  |  /map near <lat,lon>")
+                    "/map find <place name>  |  /map near <lat,lon>  |  "
+                    "/map route <place or lat,lon> to <place or lat,lon>")
         is_owner = True if message is None else self._is_operator(message)
         if not is_owner:
             return ("owner-only: Atlas renders the owner's installed "
@@ -146,9 +157,12 @@ class RuntimeLiveMixin:
             return self._map_find(rest.strip(), chat_key)
         if verb == "near":
             return self._map_near(rest.strip())
+        if verb == "route":
+            return self._map_route(rest.strip(), chat_key)
         return (f"unknown /map verb {verb!r} — /map packs | "
                 "/map view <lat,lon> [zoom] | /map find <place name> | "
-                "/map near <lat,lon>")
+                "/map near <lat,lon> | "
+                "/map route <place or lat,lon> to <place or lat,lon>")
 
     def _map_packs_text(self) -> str:
         from ...maps.packs import verify_pack_dir
@@ -192,6 +206,16 @@ class RuntimeLiveMixin:
         installed = [(d, m) for d, m, err in self._map_installed()
                      if m is not None]
         return gazetteer, installed
+
+    def _map_router(self):
+        """The local router (M5) over the shelf, federation
+        posture from settings."""
+        from ...maps.routing import Router
+        from ...maps.settings import map_settings
+
+        return Router(
+            self._map_packs_dir(), store=self._map_receipt_store(),
+            federation=map_settings().routing_federation)
 
     @staticmethod
     def _map_find_winner(candidates):
@@ -308,6 +332,225 @@ class RuntimeLiveMixin:
                 f"  • {cand.name} — {cand.kind} · {dist} · "
                 + names.get(cand.pack_id, cand.pack_id))
         return "\n".join(lines)
+
+    @staticmethod
+    def _map_distance_text(meters: float) -> str:
+        if meters >= 1000:
+            return f"{meters / 1000:.1f} km"
+        return f"{meters:.0f} m"
+
+    @staticmethod
+    def _map_duration_text(seconds: float) -> str:
+        """A duration as an estimate reads: "~35 min"."""
+        total = int(round(seconds))
+        if total < 60:
+            return f"~{total} sec"
+        minutes = (total + 30) // 60
+        if minutes < 60:
+            return f"~{minutes} min"
+        return f"~{minutes // 60} h {minutes % 60:02d} min"
+
+    def _map_route_endpoint(self, text, gazetteer):
+        """One route end as ``(point, label)`` — or ``(None,
+        error)``.  Raw "lat,lon" wins first; otherwise the
+        gazetteer's top hit, its display name the label the
+        summary answers with."""
+        from ...location.primitives import LatLon
+        from ...maps.coords import validate_lat, validate_lon
+
+        raw = (text or "").strip()
+        nums: list[float] = []
+        try:
+            nums = [float(v) for v in raw.split(",")]
+        except ValueError:
+            nums = []
+        if len(nums) == 2:
+            lat, lon = nums
+            try:
+                validate_lat(lat)
+                validate_lon(lon)
+            except ValueError as exc:
+                return None, f"bad point {raw!r}: {exc}"
+            return LatLon(lat, lon), f"{lat:.4f},{lon:.4f}"
+        result = gazetteer.search(raw)
+        if not result.candidates:
+            return None, (f"no place named {raw!r} in the local "
+                          "Atlas index — " + result.note)
+        top = result.candidates[0]
+        return LatLon(top.lat, top.lon), top.name
+
+    def _map_route(self, spec: str, chat_key: str = "") -> str:
+        import re
+
+        usage = ("usage: /map route <place or lat,lon> to "
+                 "<place or lat,lon>")
+        parts = re.split(r"\s+to\s+", (spec or "").strip(),
+                         flags=re.IGNORECASE)
+        if len(parts) < 2 or not parts[0].strip() \
+                or not parts[-1].strip():
+            return usage
+        from_text = parts[0].strip()
+        to_text = " to ".join(parts[1:]).strip()
+        gazetteer, installed = self._map_gazetteer()
+        if not installed:
+            return ("no map packs installed — /map packs shows the "
+                    "shelf, and it is empty. Routing runs on "
+                    "installed packs only; there is no provider "
+                    "fallback.")
+        lines: list[str] = []
+        built = gazetteer.ensure(installed)
+        if built.built_any:
+            lines.append(
+                f"(indexed the local gazetteer first: "
+                f"{built.total_entries} named places from "
+                f"{len(installed)} pack(s) — it rebuilds only when "
+                "a pack changes.)")
+        start, from_label = self._map_route_endpoint(
+            from_text, gazetteer)
+        if start is None:
+            lines.append(from_label + ".")
+            return "\n".join(lines)
+        end, to_label = self._map_route_endpoint(to_text, gazetteer)
+        if end is None:
+            lines.append(to_label + ".")
+            return "\n".join(lines)
+
+        def _covers(manifest, point) -> bool:
+            box = manifest.bbox
+            if box.crosses_antimeridian:
+                return False
+            return (box.south <= point.lat <= box.north
+                    and box.west <= point.lon <= box.east)
+
+        vector = [(d, m) for d, m in installed
+                  if m.tile_format == "mvt"]
+        both = [(d, m) for d, m in vector
+                if _covers(m, start) and _covers(m, end)]
+        if not both:
+            if not vector:
+                lines.append(
+                    "routing needs a vector (mvt) pack — the "
+                    "installed packs are raster, which carry no "
+                    "road graph. Nothing was fetched from a "
+                    "provider.")
+            else:
+                covering = [m.name for _d, m in vector
+                            if _covers(m, start) or _covers(m, end)]
+                if covering:
+                    lines.append(
+                        "no single installed vector pack covers "
+                        "both ends — " + ", ".join(covering)
+                        + " cover one end only. Routing is per-pack "
+                        "and local; nothing was fetched from a "
+                        "provider.")
+                else:
+                    lines.append(
+                        "no installed vector pack covers both ends "
+                        "of this route. Routing is per-pack and "
+                        "local; nothing was fetched from a provider.")
+            return "\n".join(lines)
+        entry, manifest = sorted(
+            both, key=lambda dm: (-dm[1].zoom_max, dm[1].name))[0]
+        result = self._map_router().route(
+            entry, manifest, start, end,
+            from_label=from_label, to_label=to_label)
+        if not result.ok:
+            lines.append(
+                f"🧭 no route {from_label} → {to_label} — "
+                + result.detail)
+            return "\n".join(lines)
+        lines.append(
+            f"🧭 {from_label} → {to_label} — "
+            f"{self._map_distance_text(result.distance_m)} · "
+            f"{self._map_duration_text(result.duration_s)} by road "
+            f"(local Atlas routing · {manifest.name})")
+        for step in result.steps:
+            lines.append(
+                f"  • {step.name} — "
+                f"{self._map_distance_text(step.length_m)}")
+        snaps = []
+        if result.from_snap_m is not None \
+                and result.from_snap_m >= 10:
+            snaps.append(
+                f"starts {result.from_snap_m:.0f} m from the "
+                "nearest road")
+        if result.to_snap_m is not None and result.to_snap_m >= 10:
+            snaps.append(
+                f"ends {result.to_snap_m:.0f} m from the nearest "
+                "road")
+        if snaps:
+            lines.append("  (" + "; ".join(snaps) + ")")
+        if not self._map_route_photo(entry, manifest, result,
+                                     chat_key):
+            lines.append(
+                "(route found; its map photo couldn't be rendered "
+                "or sent on this surface.)")
+        return "\n".join(lines)
+
+    def _map_route_photo(self, entry, manifest, result,
+                         chat_key) -> bool:
+        """Send the route drawn over the pack as a photo.
+
+        A side effect in the /map find winner's shape: the text
+        summary is the answer either way — a photo that cannot
+        render or send changes nothing but its own presence (the
+        caller notes it, in one line)."""
+        import os
+        import tempfile
+        from pathlib import Path
+
+        from ...maps.coords import BBox
+        from ...maps.vector_render import MapOverlay, VectorRenderer
+
+        if not result.geometry:
+            return False
+        lats = [p[0] for p in result.geometry]
+        lons = [p[1] for p in result.geometry]
+        pad_lat = max(0.01, 0.15 * (max(lats) - min(lats)))
+        pad_lon = max(0.01, 0.15 * (max(lons) - min(lons)))
+        try:
+            bbox = BBox(west=max(-180.0, min(lons) - pad_lon),
+                        south=max(-85.0, min(lats) - pad_lat),
+                        east=min(180.0, max(lons) + pad_lon),
+                        north=min(85.0, max(lats) + pad_lat))
+        except ValueError:
+            return False
+        zoom = max(manifest.zoom_min,
+                   min(manifest.zoom_max, self._map_zoom_for(bbox)))
+        overlay = MapOverlay(
+            polylines=(tuple(result.geometry),),
+            markers=(result.geometry[0], result.geometry[-1]))
+        renderer = VectorRenderer(
+            entry, manifest, store=self._map_receipt_store())
+        rendered = renderer.render(bbox, zoom, size=(768, 768),
+                                   overlay=overlay)
+        if rendered.image is None:
+            return False
+        caption = (f"🧭 {result.from_label} → {result.to_label} · "
+                   f"{self._map_distance_text(result.distance_m)} · "
+                   f"{self._map_duration_text(result.duration_s)}\n"
+                   f"{manifest.attribution}")
+        chat = self._ref_from_key(chat_key)
+        tmp_path = ""
+        try:
+            fd, tmp_path = tempfile.mkstemp(prefix="atlas-route-",
+                                            suffix=".png")
+            os.close(fd)
+            Path(tmp_path).write_bytes(rendered.image)
+            res = self.gateway.send_file(
+                chat.platform, chat, tmp_path, caption=caption,
+                kind="image", name=f"{manifest.pack_id}-route.png")
+            return bool(getattr(res, "ok", False))
+        except Exception as exc:  # noqa: BLE001
+            record_failure("runtime_live._map_route_photo", exc)
+            return False
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError as exc:  # transient send copy
+                    record_failure(
+                        "runtime_live._map_route_photo.unlink", exc)
 
     @staticmethod
     def _map_zoom_for(bbox) -> int:

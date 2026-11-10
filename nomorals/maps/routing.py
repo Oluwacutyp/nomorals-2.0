@@ -1,0 +1,857 @@
+"""The routing plane: a local road graph + Dijkstra, over packs.
+
+Doc 21 S3 superseded doc 19's hosted-router posture the same way
+it superseded the hosted geocoder (M4): the router is **local
+first** — a graph Devon extracts from the packs she already
+holds — and federation to an outside routing provider happens
+only when owner policy permits (``MapSettings.routing_federation``,
+default OFF).  No provider ships in this pass; the seam, the
+setting, and the honest "no provider configured" answer are the
+deliverable, exactly as the geocoder's federation landed in M4.
+
+**The graph.**  A pack's vector tiles carry the road network in
+the ``transportation`` layer (the style's own vocabulary, aliases
+``road``/``roads``): each feature is one road's geometry with its
+``class``, its ``name`` when the mappers recorded one, and a
+``oneway`` tag when travel is restricted.  The graph's nodes are
+the geometry *vertices*, identified by their exact integer
+coordinates in global pixel space (``tile_x * extent + px``,
+``tile_y * extent + py``) — the join tolerance is therefore
+zero, stated plainly: two vertices are the same node iff the
+source data quantized them to the same pixel.  That is the
+honest join for OSM-derived tiles: ways that meet at a real
+junction share a node in the source, so both geometries carry
+the identical vertex — across a tile boundary as much as inside
+one tile, because the boundary vertex has one global pixel
+coordinate whichever tile's copy is read.  A crossing with no
+shared vertex (a bridge over a road) has no node in the source
+either, and correctly does not connect.  Edges join consecutive
+vertices along a feature; an edge's length is the haversine
+along that segment; a ``oneway`` edge arcs in its permitted
+direction only (digitized direction for ``1``/``yes``, against
+it for ``-1``), and an untagged edge arcs both ways.
+
+**Corridor discipline (the gazetteer's zoom-band lesson).**  A
+country graph is never materialized: the graph builds for one
+route's *corridor* — the endpoints' bounding box padded by
+:data:`CORRIDOR_PAD_FRACTION` of its span (at least
+:data:`CORRIDOR_PAD_MIN_DEG`) — at zoom :data:`ROUTE_ZOOM` (or
+the pack's own ceiling, when the pack is shallower), capped at
+:data:`MAX_CORRIDOR_TILES` tiles.  A corridor over the cap is a
+typed refusal naming the bound, never an out-of-memory death.
+The built graph is cached in a sqlite store beside the
+gazetteer, keyed by (pack digest, zoom, corridor): an unchanged
+pack re-routes from the cache, a changed pack rebuilds, and
+stale graphs of superseded pack digests are dropped at build
+time.  The cache is derived data, rebuildable at any time.
+
+**Routing.**  Dijkstra over distance — exact, and the corridor
+cap keeps the graph small enough that A*'s bookkeeping buys
+nothing; duration is then a stated *estimate*: each arc's length
+over the speed its road class carries in :data:`SPEED_KMH`
+(defaults in km/h, data in this module, not measurements of any
+real road).  Endpoints snap to their nearest graph node; the
+snap distances ride the result, and an endpoint whose nearest
+node lies beyond :data:`SNAP_MAX_M` is a typed no-route naming
+the snap failure — never a silent teleport.  A disconnected
+graph answers "disconnected" just as plainly.  Every attempt —
+success and no-route alike — mints an ``OP_ROUTE`` MapReceipt:
+``ok`` when the plane answered (a route, or the truthful
+"disconnected"), ``unavailable`` when the plane could not serve
+the request at all (snap, no road data, corridor cap, raster
+pack, unwired federation).  The package stays network-free —
+the no-network AST pin covers this module.
+"""
+
+from __future__ import annotations
+
+import gzip
+import hashlib
+import heapq
+import json
+import math
+import sqlite3
+import time
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Protocol
+
+from ..core.failures import record_failure
+from ..location.primitives import LatLon, haversine_m
+from .coords import BBox
+from .gazetteer import POSTURE_FEDERATED, POSTURE_LOCAL
+from .manifest import PackManifest, tile_relpath
+from .mvt import GEOM_LINESTRING, MvtError, decode_mvt
+from .receipts import (
+    OP_ROUTE,
+    OUTCOME_OK,
+    OUTCOME_UNAVAILABLE,
+    POSTURE_OFFLINE,
+    POSTURE_ONLINE,
+    MapReceipt,
+    MapReceiptStore,
+)
+
+__all__ = [
+    "CORRIDOR_PAD_FRACTION", "CORRIDOR_PAD_MIN_DEG",
+    "DEFAULT_SPEED_KMH", "GRAPH_FILENAME", "MAX_CORRIDOR_TILES",
+    "NON_ROAD_CLASSES", "REASON_CORRIDOR_TOO_LARGE",
+    "REASON_DISCONNECTED", "REASON_NO_ROAD_DATA",
+    "REASON_NOT_VECTOR", "REASON_SNAP_FROM", "REASON_SNAP_TO",
+    "ROUTE_ZOOM", "SNAP_MAX_M", "SPEED_KMH", "TRANSPORT_LAYERS",
+    "GraphStats", "RouteProvider", "RouteResult", "RouteStep",
+    "Router",
+]
+
+#: The graph store's filename inside the packs directory.
+GRAPH_FILENAME = "routing.sqlite3"
+
+#: The zoom road detail is read at (the pack's own ceiling when
+#: the pack is shallower — generalized roads still route).
+ROUTE_ZOOM = 14
+
+#: One corridor never spans more tiles than this at the graph
+#: zoom.  The bound is the memory contract: a route that needs
+#: more is refused by name, not attempted into an OOM.
+MAX_CORRIDOR_TILES = 1024
+
+#: Corridor padding: this fraction of the endpoints' span, each
+#: side, with a floor so a short hop still gets breathing room.
+CORRIDOR_PAD_FRACTION = 0.30
+CORRIDOR_PAD_MIN_DEG = 0.01
+
+#: An endpoint farther than this from the nearest road node is
+#: not snapped — the route refuses, naming the distance.
+SNAP_MAX_M = 500.0
+
+#: Source layers the graph reads: the style's transportation
+#: vocabulary and its aliases.
+TRANSPORT_LAYERS = ("transportation", "road", "roads")
+
+#: Classes in the transportation layer that are not roads a
+#: route may travel: rails and guideways carry their own planes.
+NON_ROAD_CLASSES = ("rail", "transit", "aerialway")
+
+#: Travel speeds by road class, km/h — ESTIMATES, data in this
+#: module: planning defaults over the class vocabulary the packs
+#: carry, not measurements and never presented as live speeds.
+SPEED_KMH = {
+    "motorway": 100.0, "trunk": 80.0, "primary": 60.0,
+    "secondary": 50.0, "tertiary": 40.0, "minor": 30.0,
+    "residential": 30.0, "unclassified": 30.0, "service": 15.0,
+    "track": 15.0, "cycleway": 15.0, "ferry": 20.0,
+    "path": 5.0, "pedestrian": 5.0, "footway": 5.0,
+}
+
+#: The speed an unlisted road class is estimated at, km/h.
+DEFAULT_SPEED_KMH = 25.0
+
+#: No-route reason classes — the receipt vocabulary.
+REASON_SNAP_FROM = "snap-from"
+REASON_SNAP_TO = "snap-to"
+REASON_DISCONNECTED = "disconnected"
+REASON_NO_ROAD_DATA = "no-road-data"
+REASON_CORRIDOR_TOO_LARGE = "corridor-too-large"
+REASON_NOT_VECTOR = "pack-not-vector"
+
+_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS routing_graphs ("
+    " cache_key TEXT PRIMARY KEY, pack_id TEXT NOT NULL,"
+    " digest TEXT NOT NULL, zoom INTEGER NOT NULL,"
+    " corridor TEXT NOT NULL, built_at REAL NOT NULL,"
+    " nodes INTEGER NOT NULL, arcs INTEGER NOT NULL,"
+    " tiles_present INTEGER NOT NULL,"
+    " corrupt_tiles INTEGER NOT NULL);"
+    "CREATE TABLE IF NOT EXISTS routing_nodes ("
+    " cache_key TEXT NOT NULL, node TEXT NOT NULL,"
+    " lat REAL NOT NULL, lon REAL NOT NULL,"
+    " PRIMARY KEY (cache_key, node));"
+    "CREATE TABLE IF NOT EXISTS routing_arcs ("
+    " cache_key TEXT NOT NULL, a TEXT NOT NULL, b TEXT NOT NULL,"
+    " road_class TEXT NOT NULL, name TEXT NOT NULL,"
+    " length_m REAL NOT NULL,"
+    " PRIMARY KEY (cache_key, a, b, road_class, name));"
+    "CREATE INDEX IF NOT EXISTS routing_arcs_cache_idx"
+    " ON routing_arcs(cache_key);"
+    "CREATE INDEX IF NOT EXISTS routing_nodes_cache_idx"
+    " ON routing_nodes(cache_key);"
+)
+
+
+# ── typed values ──────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class RouteStep:
+    """One leg of a route: consecutive same-road arcs, merged."""
+
+    name: str            # display: the road's name, else its class
+    road_class: str
+    length_m: float
+    named: bool          # the name came from a tag (else the class)
+
+
+@dataclass(frozen=True)
+class RouteResult:
+    """A route attempt's whole answer: the route, or the refusal.
+
+    ``ok`` distinguishes the two; on a refusal ``reason`` is one
+    of the REASON_* classes and ``detail`` says it in words.
+    Snap distances are the endpoint→node gaps the route actually
+    bridged (None when no snap happened); ``distance_m`` is road
+    distance only — snap legs are reported, never folded in.
+    """
+
+    ok: bool
+    from_label: str = ""
+    to_label: str = ""
+    from_point: tuple[float, float] | None = None
+    to_point: tuple[float, float] | None = None
+    geometry: tuple[tuple[float, float], ...] = ()
+    distance_m: float = 0.0
+    duration_s: float = 0.0
+    steps: tuple[RouteStep, ...] = ()
+    from_snap_m: float | None = None
+    to_snap_m: float | None = None
+    reason: str = ""
+    detail: str = ""
+    pack_id: str = ""
+    posture: str = POSTURE_LOCAL
+    provider: str = "local"
+    receipt: MapReceipt | None = None
+
+
+@dataclass(frozen=True)
+class GraphStats:
+    """What one corridor graph is: the build/introspection view."""
+
+    zoom: int
+    node_count: int
+    arc_count: int
+    tiles_present: int
+    corrupt_tiles: int
+    cached: bool
+
+
+class RouteProvider(Protocol):
+    """The federation seam (doc 21 S3): an outside router.
+
+    Implementations answer with a :class:`RouteResult` of their
+    own (its receipt left None — the Router mints the receipt for
+    whichever plane answered).  No provider ships in this pass.
+    """
+
+    name: str
+
+    def route(self, start: LatLon,
+              end: LatLon) -> RouteResult | None:
+        ...
+
+
+@dataclass
+class _Graph:
+    """One built corridor graph, in memory."""
+
+    nodes: dict[str, tuple[float, float]] = field(default_factory=dict)
+    adj: dict[str, list[tuple[str, float, str, str]]] = field(
+        default_factory=dict)
+    tiles_present: int = 0
+    corrupt_tiles: int = 0
+    cached: bool = False
+
+
+# ── geometry helpers ──────────────────────────────────────────────
+
+
+def _global_px_to_latlon(gx: float, gy: float, zoom: int,
+                         extent: int) -> tuple[float, float]:
+    """Global extent-pixel coordinates → (lat, lon), normalized."""
+    world = float(extent) * (1 << zoom)
+    lon = gx / world * 360.0 - 180.0
+    lon = (lon + 180.0) % 360.0 - 180.0
+    lat = math.degrees(
+        math.atan(math.sinh(math.pi * (1.0 - 2.0 * gy / world))))
+    return lat, lon
+
+
+def _corridor(start: LatLon, end: LatLon) -> BBox:
+    """The route corridor: the endpoints' box, padded.
+
+    Longitude is computed in whichever frame (direct or wrapped)
+    is shorter, so a route across the antimeridian gets the
+    corridor it actually travels; latitudes clamp to the
+    Mercator band the tiles cover.
+    """
+    lat_lo = min(start.lat, end.lat)
+    lat_hi = max(start.lat, end.lat)
+    pad_lat = max(CORRIDOR_PAD_MIN_DEG,
+                  CORRIDOR_PAD_FRACTION * (lat_hi - lat_lo))
+    south = max(-85.05112878, lat_lo - pad_lat)
+    north = min(85.05112878, lat_hi + pad_lat)
+    lon_a, lon_b = start.lon, end.lon
+    if lon_b - lon_a > 180.0:
+        lon_a += 360.0
+    elif lon_a - lon_b > 180.0:
+        lon_b += 360.0
+    lon_lo = min(lon_a, lon_b)
+    lon_hi = max(lon_a, lon_b)
+    pad_lon = max(CORRIDOR_PAD_MIN_DEG,
+                  CORRIDOR_PAD_FRACTION * (lon_hi - lon_lo))
+    west_raw = lon_lo - pad_lon
+    east_raw = lon_hi + pad_lon
+    if east_raw - west_raw >= 360.0:
+        return BBox(west=-180.0, south=south, east=180.0, north=north)
+    west = (west_raw + 180.0) % 360.0 - 180.0
+    east = (east_raw + 180.0) % 360.0 - 180.0
+    return BBox(west=west, south=south, east=east, north=north)
+
+
+def _graph_zoom(manifest: PackManifest) -> int:
+    """The zoom the graph reads: ROUTE_ZOOM, inside the pack."""
+    return max(manifest.zoom_min,
+               min(ROUTE_ZOOM, manifest.zoom_max))
+
+
+def _oneway(tags: dict) -> int:
+    """A feature's travel restriction: 1 forward-only (along the
+    digitized direction), -1 reverse-only, 0 two-way (the absent
+    tag's stated meaning)."""
+    raw = tags.get("oneway")
+    if raw is None:
+        return 0
+    if isinstance(raw, bool):
+        return 1 if raw else 0
+    if isinstance(raw, (int, float)):
+        if raw > 0:
+            return 1
+        if raw < 0:
+            return -1
+        return 0
+    text = str(raw).strip().lower()
+    if text in ("yes", "true", "1"):
+        return 1
+    if text in ("-1", "reverse"):
+        return -1
+    return 0
+
+
+def _speed_ms(road_class: str) -> float:
+    """The class's estimated speed in m/s (SPEED_KMH as data)."""
+    return SPEED_KMH.get(road_class, DEFAULT_SPEED_KMH) / 3.6
+
+
+# ── the router ────────────────────────────────────────────────────
+
+
+class Router:
+    """Local-first routing over the packs in one packs directory."""
+
+    def __init__(self, packs_dir: Path | str, *,
+                 store: MapReceiptStore | None = None,
+                 provider: RouteProvider | None = None,
+                 federation: bool = False) -> None:
+        self._root = Path(packs_dir)
+        self._store = store
+        self._provider = provider
+        self._federation = bool(federation)
+
+    @property
+    def graph_path(self) -> Path:
+        return self._root / GRAPH_FILENAME
+
+    # ── sqlite plumbing ─────────────────────────────────────────
+
+    def _connect(self, *, create: bool) -> sqlite3.Connection | None:
+        """Open the graph store, or None when read-only and absent.
+
+        A corrupt store file is deleted and rebuilt: the graphs
+        are derived data and a fresh build is always their true
+        state (the gazetteer's discipline).
+        """
+        if not create and not self.graph_path.is_file():
+            return None
+        self._root.mkdir(parents=True, exist_ok=True)
+        try:
+            conn = sqlite3.connect(str(self.graph_path))
+            conn.executescript(_SCHEMA)
+            conn.commit()
+            return conn
+        except sqlite3.DatabaseError:
+            try:
+                self.graph_path.unlink()
+            except OSError as exc:
+                record_failure("maps.routing_store_reset", exc)
+            conn = sqlite3.connect(str(self.graph_path))
+            conn.executescript(_SCHEMA)
+            conn.commit()
+            return conn
+
+    # ── graph build / cache ─────────────────────────────────────
+
+    @staticmethod
+    def _cache_key(manifest: PackManifest, zoom: int,
+                   corridor: BBox) -> str:
+        payload = "|".join((
+            manifest.pack_id, manifest.digest, str(int(zoom)),
+            format(corridor.west, ".6f"), format(corridor.south, ".6f"),
+            format(corridor.east, ".6f"), format(corridor.north, ".6f")))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+    def _load_cached(self, cache_key: str,
+                     manifest: PackManifest) -> _Graph | None:
+        conn = self._connect(create=False)
+        if conn is None:
+            return None
+        try:
+            row = conn.execute(
+                "SELECT digest, tiles_present, corrupt_tiles"
+                " FROM routing_graphs WHERE cache_key = ?",
+                (cache_key,)).fetchone()
+            if row is None or str(row[0]) != manifest.digest:
+                return None
+            graph = _Graph(tiles_present=int(row[1]),
+                           corrupt_tiles=int(row[2]), cached=True)
+            for node, lat, lon in conn.execute(
+                    "SELECT node, lat, lon FROM routing_nodes"
+                    " WHERE cache_key = ?", (cache_key,)):
+                graph.nodes[str(node)] = (float(lat), float(lon))
+            for a, b, klass, name, length in conn.execute(
+                    "SELECT a, b, road_class, name, length_m"
+                    " FROM routing_arcs WHERE cache_key = ?",
+                    (cache_key,)):
+                graph.adj.setdefault(str(a), []).append(
+                    (str(b), float(length), str(klass), str(name)))
+            return graph
+        finally:
+            conn.close()
+
+    def _persist(self, cache_key: str, manifest: PackManifest,
+                 zoom: int, corridor: BBox, graph: _Graph) -> None:
+        conn = self._connect(create=True)
+        assert conn is not None  # create=True always yields a conn
+        try:
+            # Stale graphs of superseded digests of this pack go:
+            # a changed pack never leaves its old roads behind.
+            stale = [str(r[0]) for r in conn.execute(
+                "SELECT cache_key FROM routing_graphs"
+                " WHERE pack_id = ? AND digest != ?",
+                (manifest.pack_id, manifest.digest)).fetchall()]
+            for key in stale:
+                conn.execute(
+                    "DELETE FROM routing_nodes WHERE cache_key = ?",
+                    (key,))
+                conn.execute(
+                    "DELETE FROM routing_arcs WHERE cache_key = ?",
+                    (key,))
+                conn.execute(
+                    "DELETE FROM routing_graphs WHERE cache_key = ?",
+                    (key,))
+            conn.execute(
+                "DELETE FROM routing_nodes WHERE cache_key = ?",
+                (cache_key,))
+            conn.execute(
+                "DELETE FROM routing_arcs WHERE cache_key = ?",
+                (cache_key,))
+            conn.execute(
+                "INSERT OR REPLACE INTO routing_graphs"
+                " (cache_key, pack_id, digest, zoom, corridor,"
+                " built_at, nodes, arcs, tiles_present, corrupt_tiles)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (cache_key, manifest.pack_id, manifest.digest,
+                 int(zoom),
+                 json.dumps([corridor.west, corridor.south,
+                             corridor.east, corridor.north]),
+                 time.time(), len(graph.nodes),
+                 sum(len(v) for v in graph.adj.values()),
+                 graph.tiles_present, graph.corrupt_tiles))
+            conn.executemany(
+                "INSERT OR REPLACE INTO routing_nodes"
+                " (cache_key, node, lat, lon) VALUES (?, ?, ?, ?)",
+                [(cache_key, node, lat, lon)
+                 for node, (lat, lon) in graph.nodes.items()])
+            conn.executemany(
+                "INSERT OR REPLACE INTO routing_arcs"
+                " (cache_key, a, b, road_class, name, length_m)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                [(cache_key, a, b, klass, name, length)
+                 for a, arcs in graph.adj.items()
+                 for (b, length, klass, name) in arcs])
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _build_graph(self, pack_dir: Path, manifest: PackManifest,
+                     corridor: BBox, zoom: int) -> _Graph:
+        graph = _Graph()
+        tiles = corridor.tiles(zoom)
+        n = 1 << zoom
+        first_x = tiles[0].x if tiles else 0
+        crosses = corridor.crosses_antimeridian
+        arcs: dict[tuple, float] = {}
+        for tile in tiles:
+            rel = tile_relpath(tile.z, tile.x, tile.y,
+                               manifest.tile_format)
+            path = pack_dir / rel
+            if not path.is_file():
+                continue
+            graph.tiles_present += 1
+            raw = path.read_bytes()
+            if raw[:2] == b"\x1f\x8b":
+                try:
+                    raw = gzip.decompress(raw)
+                except OSError:
+                    graph.corrupt_tiles += 1
+                    continue
+            try:
+                mvt_tile = decode_mvt(raw)
+            except MvtError:
+                graph.corrupt_tiles += 1
+                continue
+            unit_x = tile.x + n if (crosses and tile.x < first_x) \
+                else tile.x
+            for layer in mvt_tile.layers:
+                if layer.name not in TRANSPORT_LAYERS:
+                    continue
+                for feature in layer.features:
+                    self._harvest(graph, arcs, feature, layer.extent,
+                                  zoom, unit_x, tile.y)
+        for (a, b, klass, name), length in arcs.items():
+            graph.adj.setdefault(a, []).append((b, length, klass, name))
+        return graph
+
+    def _harvest(self, graph: _Graph, arcs: dict, feature,
+                 extent: int, zoom: int, unit_x: int,
+                 tile_y: int) -> None:
+        """One transportation feature → nodes and arcs."""
+        if feature.geom_type != GEOM_LINESTRING:
+            return
+        klass = str(feature.tags.get("class")
+                    or feature.tags.get("subclass") or "")
+        if klass in NON_ROAD_CLASSES:
+            return
+        name = str(feature.tags.get("name") or "")
+        oneway = _oneway(feature.tags)
+        for path in feature.paths:
+            keys: list[str] = []
+            for px, py in path.points:
+                gx = unit_x * extent + px
+                gy = tile_y * extent + py
+                key = str(gx) + "," + str(gy)
+                if key not in graph.nodes:
+                    graph.nodes[key] = _global_px_to_latlon(
+                        gx, gy, zoom, extent)
+                keys.append(key)
+            for at in range(len(keys) - 1):
+                a, b = keys[at], keys[at + 1]
+                if a == b:
+                    continue
+                length = haversine_m(
+                    LatLon(*graph.nodes[a]), LatLon(*graph.nodes[b]))
+                if length <= 0.0:
+                    continue
+                if oneway >= 0:
+                    self._arc(arcs, a, b, klass, name, length)
+                if oneway <= 0:
+                    self._arc(arcs, b, a, klass, name, length)
+
+    @staticmethod
+    def _arc(arcs: dict, a: str, b: str, klass: str, name: str,
+             length: float) -> None:
+        """One directed arc; a duplicated arc (tile overlap) keeps
+        the shorter reading of the same segment."""
+        key = (a, b, klass, name)
+        if key not in arcs or length < arcs[key]:
+            arcs[key] = length
+
+    def _graph(self, pack_dir: Path, manifest: PackManifest,
+               corridor: BBox, zoom: int) -> _Graph:
+        cache_key = self._cache_key(manifest, zoom, corridor)
+        cached = self._load_cached(cache_key, manifest)
+        if cached is not None:
+            return cached
+        graph = self._build_graph(pack_dir, manifest, corridor, zoom)
+        self._persist(cache_key, manifest, zoom, corridor, graph)
+        return graph
+
+    def graph_stats(self, pack_dir: Path | str,
+                    manifest: PackManifest, start: LatLon,
+                    end: LatLon) -> GraphStats:
+        """The corridor graph for a would-be route, as statistics.
+
+        Raises ValueError naming the bound when the corridor
+        spans more tiles than the cap — the same refusal
+        :meth:`route` returns as a typed result.
+        """
+        corridor = _corridor(start, end)
+        zoom = _graph_zoom(manifest)
+        count = len(corridor.tiles(zoom))
+        if count > MAX_CORRIDOR_TILES:
+            raise ValueError(
+                "corridor spans " + str(count) + " tiles at z"
+                + str(zoom) + ", over the " + str(MAX_CORRIDOR_TILES)
+                + "-tile corridor bound")
+        graph = self._graph(Path(pack_dir), manifest, corridor, zoom)
+        return GraphStats(
+            zoom=zoom, node_count=len(graph.nodes),
+            arc_count=sum(len(v) for v in graph.adj.values()),
+            tiles_present=graph.tiles_present,
+            corrupt_tiles=graph.corrupt_tiles, cached=graph.cached)
+
+    # ── routing ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _nearest(graph: _Graph, point: LatLon) -> tuple[str, float]:
+        """The nearest node key and its distance in metres."""
+        best_key = ""
+        best = math.inf
+        for key, (lat, lon) in graph.nodes.items():
+            dist = haversine_m(point, LatLon(lat=lat, lon=lon))
+            if dist < best:
+                best = dist
+                best_key = key
+        return best_key, best
+
+    @staticmethod
+    def _dijkstra(graph: _Graph, start_key: str, goal_key: str):
+        """Shortest path by road distance: (node keys, arcs) or
+        None when the goal is unreachable.  Arcs ride along as
+        (length, class, name) triples parallel to the node list's
+        steps."""
+        dist: dict[str, float] = {start_key: 0.0}
+        prev: dict[str, tuple[str, float, str, str]] = {}
+        heap: list[tuple[float, str]] = [(0.0, start_key)]
+        settled: set[str] = set()
+        while heap:
+            at_dist, node = heapq.heappop(heap)
+            if node in settled:
+                continue
+            settled.add(node)
+            if node == goal_key:
+                break
+            for nxt, length, klass, name in graph.adj.get(node, ()):
+                cand = at_dist + length
+                if cand < dist.get(nxt, math.inf):
+                    dist[nxt] = cand
+                    prev[nxt] = (node, length, klass, name)
+                    heapq.heappush(heap, (cand, nxt))
+        if goal_key not in dist:
+            return None
+        keys = [goal_key]
+        arcs: list[tuple[float, str, str]] = []
+        node = goal_key
+        while node != start_key:
+            prior, length, klass, name = prev[node]
+            arcs.append((length, klass, name))
+            keys.append(prior)
+            node = prior
+        keys.reverse()
+        arcs.reverse()
+        return keys, arcs
+
+    @staticmethod
+    def _steps(arcs: list[tuple[float, str, str]]) -> tuple[RouteStep, ...]:
+        """Merge consecutive arcs of the same road into steps."""
+        merged: list[list] = []
+        for length, klass, name in arcs:
+            if merged and merged[-1][0] == name \
+                    and merged[-1][1] == klass:
+                merged[-1][2] += length
+            else:
+                merged.append([name, klass, length])
+        return tuple(
+            RouteStep(name=name or klass or "road", road_class=klass,
+                      length_m=length, named=bool(name))
+            for name, klass, length in merged)
+
+    # ── the route operation ─────────────────────────────────────
+
+    def route(self, pack_dir: Path | str, manifest: PackManifest,
+              start: LatLon, end: LatLon, *,
+              from_label: str = "", to_label: str = "",
+              ) -> RouteResult:
+        """Route ``start`` → ``end`` over one pack's road graph.
+
+        Local first (doc 21 S3): the local answer — a route or a
+        named no-route — is final unless federation is on, in
+        which case a local no-route may fall to the wired
+        provider (none ships; the fall is named when unwired).
+        Every attempt mints its OP_ROUTE receipt when a store is
+        attached.
+        """
+        pack_dir = Path(pack_dir)
+        base = RouteResult(
+            ok=False, from_label=from_label, to_label=to_label,
+            from_point=(start.lat, start.lon),
+            to_point=(end.lat, end.lon), pack_id=manifest.pack_id)
+        if manifest.tile_format != "mvt":
+            return self._no_route(
+                base, manifest, REASON_NOT_VECTOR,
+                "pack " + manifest.name + " is a "
+                + manifest.tile_format + " pack — raster tiles"
+                " carry no road graph to route over",
+                OUTCOME_UNAVAILABLE)
+        corridor = _corridor(start, end)
+        zoom = _graph_zoom(manifest)
+        tile_count = len(corridor.tiles(zoom))
+        if tile_count > MAX_CORRIDOR_TILES:
+            return self._no_route(
+                base, manifest, REASON_CORRIDOR_TOO_LARGE,
+                "the route corridor spans " + str(tile_count)
+                + " tiles at z" + str(zoom) + ", over the "
+                + str(MAX_CORRIDOR_TILES) + "-tile corridor bound"
+                " — route in legs, or install a deeper pack",
+                OUTCOME_UNAVAILABLE)
+        graph = self._graph(pack_dir, manifest, corridor, zoom)
+        if graph.tiles_present == 0:
+            return self._no_route(
+                base, manifest, REASON_NO_ROAD_DATA,
+                "pack " + manifest.name + " holds no tiles for"
+                " the route corridor — no road data there",
+                OUTCOME_UNAVAILABLE)
+        if not graph.nodes:
+            return self._no_route(
+                base, manifest, REASON_NO_ROAD_DATA,
+                "no roads in the route corridor of pack "
+                + manifest.name, OUTCOME_UNAVAILABLE)
+        from_key, from_snap = self._nearest(graph, start)
+        if from_snap > SNAP_MAX_M:
+            return self._no_route(
+                base, manifest, REASON_SNAP_FROM,
+                "the start point cannot snap to the road network:"
+                " its nearest road node is "
+                + format(from_snap, ",.0f") + " m away, beyond the "
+                + format(SNAP_MAX_M, ",.0f") + " m snap bound",
+                OUTCOME_UNAVAILABLE)
+        to_key, to_snap = self._nearest(graph, end)
+        if to_snap > SNAP_MAX_M:
+            return self._no_route(
+                base, manifest, REASON_SNAP_TO,
+                "the end point cannot snap to the road network:"
+                " its nearest road node is "
+                + format(to_snap, ",.0f") + " m away, beyond the "
+                + format(SNAP_MAX_M, ",.0f") + " m snap bound",
+                OUTCOME_UNAVAILABLE)
+        found = self._dijkstra(graph, from_key, to_key)
+        if found is None:
+            return self._no_route(
+                base, manifest, REASON_DISCONNECTED,
+                "the road graph has no connected path between the"
+                " two points — the roads near each end do not"
+                " meet in pack " + manifest.name,
+                OUTCOME_OK, from_snap=from_snap, to_snap=to_snap)
+        keys, arcs = found
+        distance = sum(length for length, _k, _n in arcs)
+        duration = sum(
+            length / _speed_ms(klass) for length, klass, _n in arcs)
+        points: list[tuple[float, float]] = [(start.lat, start.lon)]
+        points.extend(graph.nodes[key] for key in keys)
+        points.append((end.lat, end.lon))
+        geometry = tuple(
+            point for at, point in enumerate(points)
+            if at == 0 or point != points[at - 1])
+        result = replace(
+            base, ok=True, geometry=geometry, distance_m=distance,
+            duration_s=duration, steps=self._steps(arcs),
+            from_snap_m=from_snap, to_snap_m=to_snap,
+            detail=("route over pack " + manifest.name + ": "
+                    + format(distance, ",.0f") + " m by road, ~"
+                    + str(int(round(duration)))
+                    + " s at class speeds (estimates)"))
+        receipt = self._mint(manifest, OUTCOME_OK, POSTURE_LOCAL,
+                             "local", result.detail)
+        return replace(result, receipt=receipt)
+
+    def _no_route(self, base: RouteResult, manifest: PackManifest,
+                  reason: str, detail: str, outcome: str, *,
+                  from_snap: float | None = None,
+                  to_snap: float | None = None) -> RouteResult:
+        """A local no-route, with the federation posture applied.
+
+        Federation off → the local answer is final, and says so.
+        Federation on, nothing wired → the fall is named, the
+        local answer stands.  A wired provider that answers ok
+        takes the result (its own receipt is minted here); a
+        provider that fails or has no route is named, and the
+        local answer stands behind it.
+        """
+        result = replace(
+            base, reason=reason, detail=detail,
+            from_snap_m=from_snap, to_snap_m=to_snap)
+        if not self._federation:
+            return replace(
+                result,
+                detail=detail + " Local-first (federation off):"
+                " nothing was fetched from a provider.",
+                receipt=self._mint(manifest, outcome, POSTURE_LOCAL,
+                                   "local",
+                                   reason + ": " + detail))
+        if self._provider is None:
+            note = ("federation is on but no route provider is"
+                    " configured — the local answer stands")
+            return replace(
+                result, posture=POSTURE_FEDERATED, provider="none",
+                detail=detail + " " + note + ".",
+                receipt=self._mint(
+                    manifest, outcome, POSTURE_FEDERATED, "none",
+                    reason + ": " + detail + " · " + note))
+        try:
+            found = self._provider.route(
+                LatLon(*base.from_point), LatLon(*base.to_point))
+        except Exception as exc:  # noqa: BLE001 — a provider's
+            # failure is an answer about the provider, not a crash
+            note = ("provider " + str(self._provider.name)
+                    + " failed (" + type(exc).__name__
+                    + ") — the local answer stands")
+            return replace(
+                result, posture=POSTURE_FEDERATED,
+                provider=str(self._provider.name),
+                detail=detail + " " + note + ".",
+                receipt=self._mint(
+                    manifest, outcome, POSTURE_FEDERATED,
+                    str(self._provider.name),
+                    reason + ": " + detail + " · " + note))
+        if found is not None and found.ok:
+            note = ("answered by provider "
+                    + str(self._provider.name)
+                    + " after the local graph had no route")
+            adopted = replace(
+                found, from_label=base.from_label,
+                to_label=base.to_label,
+                from_point=base.from_point, to_point=base.to_point,
+                pack_id=manifest.pack_id,
+                posture=POSTURE_FEDERATED,
+                provider=str(self._provider.name),
+                detail=found.detail + " " + note + ".")
+            return replace(
+                adopted,
+                receipt=self._mint(
+                    manifest, OUTCOME_OK, POSTURE_FEDERATED,
+                    str(self._provider.name),
+                    "route via provider " + str(self._provider.name)
+                    + ": " + format(found.distance_m, ",.0f")
+                    + " m"))
+        note = ("provider " + str(self._provider.name)
+                + " had no route either — the local answer stands")
+        return replace(
+            result, posture=POSTURE_FEDERATED,
+            provider=str(self._provider.name),
+            detail=detail + " " + note + ".",
+            receipt=self._mint(
+                manifest, outcome, POSTURE_FEDERATED,
+                str(self._provider.name),
+                reason + ": " + detail + " · " + note))
+
+    def _mint(self, manifest: PackManifest, outcome: str,
+              posture: str, provider: str,
+              detail: str) -> MapReceipt | None:
+        """Mint + store the OP_ROUTE receipt, when a store rides."""
+        if self._store is None:
+            return None
+        receipt = MapReceipt.mint(
+            OP_ROUTE, outcome,
+            posture=(POSTURE_ONLINE if posture == POSTURE_FEDERATED
+                     else POSTURE_OFFLINE),
+            provider=provider, pack_refs=(manifest.pack_id,),
+            pack_digests=(manifest.digest,), detail=detail)
+        self._store.append(receipt)
+        return receipt

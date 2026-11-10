@@ -23,6 +23,15 @@ match M1 exactly: missing or corrupt tiles render as the style's
 no-data color and are named in the receipt; a view the pack holds
 nothing for, a zoom outside the pack, an oversize view — all are
 typed unavailable receipts, never a blank image.
+
+M5 adds one input to the boundary: an optional
+:class:`MapOverlay` of finished (lat, lon) geometry — a route
+polyline plus its endpoint markers — painted after the style
+layers and before the labels, so the caller's geometry reads as
+part of the map rather than a sticker on it.  The overlay is
+*input data*, not style: a route wears the house gold whatever
+the style document says.  A render without an overlay is
+byte-identical to the render before the seam existed (pinned).
 """
 
 from __future__ import annotations
@@ -44,14 +53,17 @@ from .style import (
     KIND_LABEL,
     KIND_LINE,
     KIND_POINT,
+    ROAD_MOTORWAY,
     MapStyle,
+    StyleError,
     StyleLayer,
     parse_color,
     style_hash,
 )
 
 __all__ = [
-    "LabelSpec", "PilTextBackend", "TextBackend", "VectorRenderer",
+    "LabelSpec", "MapOverlay", "PilTextBackend", "TextBackend",
+    "VectorRenderer",
 ]
 
 
@@ -69,6 +81,34 @@ class LabelSpec:
     color: tuple[int, int, int]
     halo: tuple[int, int, int] | None = None
     halo_width: int = 2
+
+
+# ── the overlay seam (M5) ─────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class MapOverlay:
+    """Finished geometry drawn over the styled map (M5).
+
+    Input data, not style: a caller hands the renderer (lat, lon)
+    polylines and markers; the renderer projects and stamps them
+    after the style layers and before the labels.  Routes wear
+    the house gold (the style's motorway gold, :data:`ROAD_MOTORWAY`)
+    whatever the style document says; endpoint markers are gold
+    discs with an ink centre so both ends read at a glance.
+    """
+
+    polylines: tuple[tuple[tuple[float, float], ...], ...] = ()
+    markers: tuple[tuple[float, float], ...] = ()
+    line_color: str = ROAD_MOTORWAY
+    line_width: float = 5.0
+    marker_color: str = ROAD_MOTORWAY
+
+    def __post_init__(self) -> None:
+        parse_color(self.line_color)   # a bad color is a caller
+        parse_color(self.marker_color)  # error, raised here
+        if self.line_width <= 0:
+            raise StyleError("overlay line_width must be positive")
 
 
 @runtime_checkable
@@ -231,7 +271,8 @@ class VectorRenderer:
     # ── the render ────────────────────────────────────────────────
 
     def render(self, bbox: BBox, zoom: int,
-               size: tuple[int, int] = (512, 512)) -> RenderResult:
+               size: tuple[int, int] = (512, 512), *,
+               overlay: MapOverlay | None = None) -> RenderResult:
         manifest = self._manifest
         style = self._style
         out_w, out_h = int(size[0]), int(size[1])
@@ -261,7 +302,8 @@ class VectorRenderer:
                 + " tiles, over the " + str(MAX_RENDER_TILES)
                 + "-tile render bound")
         try:
-            return self._draw(bbox, int(zoom), tiles, out_w, out_h)
+            return self._draw(bbox, int(zoom), tiles, out_w, out_h,
+                              overlay)
         except Exception as exc:  # noqa: BLE001 — a drawing defect is
             # an incapacity answer here, never a crash through the seam
             return self._finish(
@@ -270,7 +312,8 @@ class VectorRenderer:
                 + ": " + str(exc))
 
     def _draw(self, bbox: BBox, zoom: int, tiles: tuple,
-              out_w: int, out_h: int) -> RenderResult:
+              out_w: int, out_h: int,
+              overlay: MapOverlay | None = None) -> RenderResult:
         style = self._style
         head = "style " + style.name + " (" \
             + style_hash(style)[:12] + ")"
@@ -332,8 +375,15 @@ class VectorRenderer:
                         self._paint(buf, out_w, out_h, rule, feature,
                                     mvt_layer.extent, unit_x(tile),
                                     tile.y, project, zoom, labels)
+        if overlay is not None:
+            self._paint_overlay(buf, out_w, out_h, overlay, bbox,
+                                zoom, project)
         detail = head + " · tiles " + str(len(decoded)) + "/" \
             + str(len(tiles)) + " present"
+        if overlay is not None:
+            detail += "; overlay: " + str(len(overlay.polylines)) \
+                + " line(s), " + str(len(overlay.markers)) \
+                + " marker(s)"
         if missing:
             detail += "; missing: " + ", ".join(missing[:5])
             if len(missing) > 5:
@@ -345,6 +395,43 @@ class VectorRenderer:
         return self._finish(OUTCOME_OK, detail, image=image,
                             width=out_w, height=out_h,
                             missing=tuple(absent))
+
+    def _paint_overlay(self, buf: bytearray, out_w: int,
+                       out_h: int, overlay: MapOverlay, bbox: BBox,
+                       zoom: int, project) -> None:
+        """Stamp the overlay's polylines + markers onto the map.
+
+        Points arrive as (lat, lon); projection runs through the
+        same unit math as the tiles, with the antimeridian wrap
+        applied the same way (a wrapped point's unit-x shifts by
+        the grid width).  Markers are a gold disc ringed around an
+        ink centre — the style's background — so an endpoint
+        reads on any road color beneath it.
+        """
+        n = float(1 << zoom)
+        west_f = lon_to_x_float(bbox.west, zoom)
+
+        def to_px(point: tuple[float, float]) -> tuple[float, float]:
+            lat, lon = point
+            ux = lon_to_x_float(lon, zoom)
+            if bbox.crosses_antimeridian and ux < west_f:
+                ux += n
+            return project(ux, lat_to_y_float(lat, zoom))
+
+        line_rgb = parse_color(overlay.line_color)
+        for line in overlay.polylines:
+            pts = [to_px(point) for point in line]
+            if len(pts) >= 2:
+                self._stroke_path(buf, out_w, out_h, pts, line_rgb,
+                                  float(overlay.line_width),
+                                  close=False)
+        marker_rgb = parse_color(overlay.marker_color)
+        ink = parse_color(self._style.background)
+        for marker in overlay.markers:
+            cx, cy = to_px(marker)
+            self._stamp_disc(buf, out_w, out_h, cx, cy, 7.0,
+                             marker_rgb)
+            self._stamp_disc(buf, out_w, out_h, cx, cy, 3.0, ink)
 
     def _apply_labels(self, buf: bytearray, out_w: int, out_h: int,
                       labels: list[LabelSpec]) -> str:

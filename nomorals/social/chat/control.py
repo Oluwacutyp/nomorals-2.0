@@ -823,7 +823,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "finance": (0, None),    # /finance quote|analyze|signal|idea|backtest|strategies|compare|watch|doctor
     "weather": (0, None),    # /weather [place] — live conditions + forecast + alerts
     "tz": (0, None),         # /tz [time] — timezone conversion, labeled in owner tz
-    "map": (0, None),        # /map packs | /map view <lat,lon> [zoom] | /map view <w,s,e,n> [zoom] | /map find <name> | /map near <lat,lon> — Devon Atlas: renders the owner's installed packs as photos; find/near answer from the local gazetteer (owner-only)
+    "map": (0, None),        # /map packs | /map view <lat,lon> [zoom] | /map view <w,s,e,n> [zoom] | /map find <name> | /map near <lat,lon> | /map route <from> to <to> — Devon Atlas: renders the owner's installed packs as photos; find/near answer from the local gazetteer; route runs the local road graph (owner-only)
     "task": (1, None),       # /task add <instruction>|run [id]|list
     "notify": (0, None),     # /notify [n] | decisions [n] | why [<n>|decision <n>] | coverage — recent alerts + the decision chain behind them
     "proactive": (0, 0),     # /proactive — push-send switches + delivery states
@@ -1000,6 +1000,7 @@ _HELP_TEXT = "\n".join(
         "  /map view <west,south,east,north> [zoom] render a boxed view as a photo",
         "  /map find <place name>                    find a place in the local gazetteer",
         "  /map near <lat,lon>                      named places near a point, with distances",
+        "  /map route <from> to <to>                 route between two places on the local road graph",
         "  — she speaks first (owner DMs only, never anyone else) —",
         "  /proactive                            push-send switches + delivery states",
         "  /notify [n]                           recent alerts with delivery states",
@@ -3860,8 +3861,8 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
            "usage": "/tz | /tz 2026-10-02 14:00 [from-zone] [to-zone]",
            "example": "/tz 2026-10-02 14:00 America/New_York Africa/Lagos",
            "related": "/weather /briefing"},
-    "map": {"what": "Devon Atlas: Devon's own basemap — renders installed, hash-pinned map packs (Devon-built releases, never a provider's tiles) as photos in the Devon style, attribution riding the caption. /map find and /map near answer from the local gazetteer indexed from those packs (M4): local first, federation only under owner policy.",
-            "usage": "/map packs | /map view <lat,lon> [zoom] | /map view <west,south,east,north> [zoom] | /map find <place name> | /map near <lat,lon>",
+    "map": {"what": "Devon Atlas: Devon's own basemap — renders installed, hash-pinned map packs (Devon-built releases, never a provider's tiles) as photos in the Devon style, attribution riding the caption. /map find and /map near answer from the local gazetteer indexed from those packs (M4): local first, federation only under owner policy. /map route (M5) routes over a road graph extracted from a pack's own tiles — distance, a duration estimate from class speeds, merged steps, and the route drawn gold on the map photo; a no-route is answered with its reason, never a provider substitute.",
+            "usage": "/map packs | /map view <lat,lon> [zoom] | /map view <west,south,east,north> [zoom] | /map find <place name> | /map near <lat,lon> | /map route <place or lat,lon> to <place or lat,lon>",
             "example": "/map view 7.6211,5.2214 12",
             "related": "/weather /sendloc"},
     "notify": {"what": ("recent alerts, with delivery states — plus the "
@@ -5021,7 +5022,7 @@ LIST_ONELINERS: dict[str, str] = {
     "pump": "pump.fun intelligence desk: dossiers, de-rug gate, self-graded signal calls",
     "weather": "live weather, alerts, USA situations overview",
     "tz": "timezone conversion + your labeled local time",
-    "map": "Devon Atlas: render installed map packs as photos, find places locally — /map packs | /map find <name> | /map view <lat,lon> [zoom]",
+    "map": "Devon Atlas: render installed map packs as photos, find places locally, route on the local road graph — /map packs | /map find <name> | /map view <lat,lon> [zoom] | /map route <from> to <to>",
     "stt": "transcribe an audio file",
     "look": "screen-reader analysis of a screenshot (sees pixels)",
     "imggen": "Devon's own image studio: native diffusion, upscale, training",
